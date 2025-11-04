@@ -268,7 +268,9 @@ def my_matmul(
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
         fifo_depth_out = 1
+        # Set the type for accumulation
         C_l1_ty_internal = np.ndarray[(m, n), np.dtype[dtype_out_internal]]
+        # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
         convert_copy_kernel = Kernel(
             f"convert_copy_f32_to_bf16",
             f"gemm_{m}x{k}x{n}_archive.a",
@@ -287,6 +289,8 @@ def my_matmul(
             [A_l1_ty, B_l1_ty, C_l1_ty_internal],
         )
     else:
+        # No need to use separate buffers for accumulation and transfer to L2, so
+        # we only need the zero and matmul kernels
         fifo_depth_out = fifo_depth
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_{dtype_out_str}",
@@ -470,6 +474,8 @@ def my_matmul(
     # tb = transfer block; block of transfers before sync call
     tb_max_n_rows = 4
     tb_n_rows = tb_max_n_rows // 2
+
+    # Calculate RTP values for the reduction loop and total C tiles
     K_div_k = K // k
     n_c_col_tiles_per_core = N // mem_tile_n
     n_c_row_tiles_per_core = M // mem_tile_m_C
