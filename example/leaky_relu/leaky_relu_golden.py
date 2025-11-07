@@ -52,7 +52,10 @@ def main():
 
     # Generate golden inputs
     val_range = 4
-    A = torch.rand(args.input_length, dtype=torch_dtype_map[args.dtype]) * val_range - val_range / 2  # Range from -2 to 2
+    A = (
+        torch.rand(args.input_length, dtype=torch_dtype_map[args.dtype]) * val_range
+        - val_range / 2
+    )  # Range from -2 to 2
 
     # Generate golden outputs using Leaky ReLU
     B = torch.nn.functional.leaky_relu(A, negative_slope=args.alpha)
@@ -66,4 +69,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
