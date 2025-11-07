@@ -8,7 +8,10 @@
 
 using namespace aie;
 
-void leaky_relu_vectorized_bf16(bfloat16 *restrict a, bfloat16 *restrict c, const int32_t vector_size, const bfloat16 alpha)
+void leaky_relu_vectorized_bf16(bfloat16 *restrict a,
+                                bfloat16 *restrict c,
+                                const int32_t vector_size,
+                                const bfloat16 alpha)
 {
     event0();
 
@@ -43,4 +46,3 @@ void leaky_relu_bf16(bfloat16 *restrict input, bfloat16 *restrict output, int in
 }
 
 } // extern "C"
-
