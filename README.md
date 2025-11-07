@@ -52,7 +52,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Reduction]() | Reduction | bfloat16 | 🟡 |  |
 | [Dequant](./aie_kernels/aie2/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | 🟢 | [example/dequant/](./example/dequant/) |
 | [RELU](./aie_kernels/aie2p/relu.cc) | RELU | bfloat16 | 🟢 | [example/relu/](./example/relu/) |
-| [Leaky RELU]() | Leaky RELU | bfloat16 | ⚪ |  |
+| [Leaky RELU](./aie_kernels/aie2p/leaky_relu.cc) | Leaky RELU kernel | bfloat16 | 🟢 | [example/leaky_relu/](./example/leaky_relu/) |
 | [GELU](./aie_kernels/aie2p/gelu.cc) | GELU | bfloat16 | 🟢 | [example/gelu/](./example/gelu/) |
 | [LayerNorm](./aie_kernels/aie2p/layer_norm.cc) | LayerNorm | bfloat16 | 🟢 | [example/layer_norm/](./example/layer_norm/) |
 | [Convolution]() | Convolution | bfloat16 | 🟡 |  |
