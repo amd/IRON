@@ -4,7 +4,7 @@
 function(add_aie_leaky_relu_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
 
     set(EXAMPLE "leaky_relu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/example/leaky_relu/golden_${EXAMPLE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/examples/leaky_relu/golden_${EXAMPLE}")
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
@@ -45,19 +45,21 @@ if(EXTENSIVE_TESTING)
     list(APPEND INPUT_LENGTHS 8192)
 endif()
 
-foreach(INPUT_LENGTH IN LISTS INPUT_LENGTHS)
-    foreach(NUM_COLUMNS RANGE 1 ${MAX_COLUMNS})
-        # Only 1 input, so simple distribution across columns
-        math(EXPR TILE_SIZE "${INPUT_LENGTH} / ${NUM_COLUMNS}")
-        # Cap tile_size at 4096 if it's greater
-        if(TILE_SIZE GREATER 4096)
-            set(TILE_SIZE 4096)
-        endif()
-        # Only proceed if TILE_SIZE * NUM_COLUMNS == INPUT_LENGTH (i.e., division is exact)
-        math(EXPR CHECK_LENGTH "${TILE_SIZE} * ${NUM_COLUMNS}")
-        if(CHECK_LENGTH EQUAL ${INPUT_LENGTH})
-            add_aie_leaky_relu_design(${INPUT_LENGTH} ${NUM_COLUMNS} ${NUM_CHANNELS} ${TILE_SIZE} ${TRACE_SIZE})
-        endif()
+if(BUILD_LEAKY_RELU)
+    foreach(INPUT_LENGTH IN LISTS INPUT_LENGTHS)
+        foreach(NUM_COLUMNS RANGE 1 ${MAX_COLUMNS})
+            # Only 1 input, so simple distribution across columns
+            math(EXPR TILE_SIZE "${INPUT_LENGTH} / ${NUM_COLUMNS}")
+            # Cap tile_size at 4096 if it's greater
+            if(TILE_SIZE GREATER 4096)
+                set(TILE_SIZE 4096)
+            endif()
+            # Only proceed if TILE_SIZE * NUM_COLUMNS == INPUT_LENGTH (i.e., division is exact)
+            math(EXPR CHECK_LENGTH "${TILE_SIZE} * ${NUM_COLUMNS}")
+            if(CHECK_LENGTH EQUAL ${INPUT_LENGTH})
+                add_aie_leaky_relu_design(${INPUT_LENGTH} ${NUM_COLUMNS} ${NUM_CHANNELS} ${TILE_SIZE} ${TRACE_SIZE})
+            endif()
+        endforeach()
     endforeach()
-endforeach()
+endif()
 
