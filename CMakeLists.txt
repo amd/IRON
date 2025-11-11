@@ -60,8 +60,8 @@ endif()
 set(IRONCLAD_MLIR_AIE_RUNTIME_DIR "${IRONCLAD_MLIR_AIE_DIR}/runtime_lib/x86_64/test_lib/" CACHE PATH "Path to built/installed test_lib from MLIR_AIE")
 
 # More Options
-option(BUILD_EXAMPLES "Build examples" ON)
-option(EXTENSIVE_TESTING "Generate a larger number of examples and tests" OFF)
+option(BUILD_OPERATORS "Build operators" ON)
+option(EXTENSIVE_TESTING "Generate a larger number of operators and tests" OFF)
 
 message(STATUS "IRONCLAD_PEANO_DIR: ${IRONCLAD_PEANO_DIR}")
 message(STATUS "IRONCLAD_MLIR_AIE_DIR: ${IRONCLAD_MLIR_AIE_DIR}")
@@ -92,11 +92,11 @@ ironclad_compiler_warnings(ironclad)
 # Add kernels
 add_subdirectory(aie_kernels)
 
-# Add examples
+# Add operators
 # Pass the architecure to support aie2p
-if (BUILD_EXAMPLES)
+if (BUILD_OPERATORS)
     include(cmake/IroncladExamples.cmake)
-    add_subdirectory(example)
+    add_subdirectory(operators)
 endif()
 
 generate_aie_ci_test_list("ci_tests.py")
