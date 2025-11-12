@@ -61,6 +61,7 @@ set(IRONCLAD_MLIR_AIE_RUNTIME_DIR "${IRONCLAD_MLIR_AIE_DIR}/runtime_lib/x86_64/t
 
 # More Options
 option(BUILD_OPERATORS "Build operators" ON)
+option(BUILD_EXAMPLES "Build example applications" ON)
 option(EXTENSIVE_TESTING "Generate a larger number of operators and tests" OFF)
 
 message(STATUS "IRONCLAD_PEANO_DIR: ${IRONCLAD_PEANO_DIR}")
@@ -96,6 +97,11 @@ add_subdirectory(aie_kernels)
 # Pass the architecure to support aie2p
 if (BUILD_OPERATORS)
     add_subdirectory(operators)
+endif()
+
+# Add example applications
+if (BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 generate_aie_ci_test_list("ci_tests.py")
