@@ -4,10 +4,12 @@
 name: Extensive Benchmark/Test Suite
 
 on:
-  pull_request: 
   workflow_dispatch:
   schedule:
    - cron:  '0 9 * * *'  # 2 AM MT
+  push:
+     branches:
+       - main
 
 # VJUNG: Introduce concurrency groups named with branch refs.
 # VJUNG: If one pushes 5 times on its branch only the most recent commit will trigger CI.
