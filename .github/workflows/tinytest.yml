@@ -3,27 +3,18 @@
 
 name: Test Pushing from a GitHub Action
 
-on:
-  pull_request: 
-  workflow_dispatch:
-permissions:
-  contents: write
-
+on: push
 jobs:
-  Test:
-    runs-on: [self-hosted, docker]
-    permissions:
-      contents: write
+  build:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: |
-          set -x
-          echo "Pulled the latest code."
+          date > generated.txt
+          # Note: the following account information will not work on GHES
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b testbranch-actions
-          touch test.txt
-          git add test.txt
-          git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
-          git remote -vvv
-          git push -u origin testbranch-actions
+          git checkout -B hello
+          git add .
+          git commit -m "generated"
+          git push -u origin hello
