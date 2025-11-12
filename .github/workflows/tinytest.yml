@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test Pushing from a GitHub Action
+
+on:
+  pull_request: 
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  Test:
+    runs-on: [self-hosted, docker]
+    steps:
+      - name: Pull
+        uses: actions/checkout@v4
+        run: |
+          set -x
+          echo "Pulled the latest code."
+          git push origin HEAD:refs/heads/testbranch-actions
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tourch test.txt
+          git add test.txt
+          git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
+          git push origin testbranch-actions
+
+
+  
