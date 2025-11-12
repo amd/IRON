@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Install IRONCLAD Prerequisites"
+
+inputs:
+  env_name:
+    required: false
+    default: "ci_env"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Prerequisites
+      env:
+        HOME: /workspace
+      shell: bash
+      run: |
+        set -euxo pipefail
+        python3 -m venv ${{ inputs.env_name }}
+        source ${{ inputs.env_name }}/bin/activate
+        pip install --upgrade pip
+        env MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3" HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie" pip install -r requirements.txt
+        echo "Prerequisites installed into ${{ inputs.env_name }}"

@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Run test suite"
+
+inputs:
+  test_flags:
+    required: false
+    default: "--log tests.log --csv-latest tests_latest.csv"
+  env_name:
+    required: false
+    default: "ci_env"
+  build_dir:
+    required: false
+    default: "build"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Test
+      env:
+        HOME: /workspace
+      shell: "bash"
+      run: |
+        source ./scripts/env_setup.sh --env ${{ inputs.env_name }}
+        ./scripts/run_tests.py ${{ inputs.test_flags }} ${{ inputs.build_dir }}

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[Unit]
+Description=Docker CI VM Loop for IRONCLAD
+After=network.target
+
+[Service]
+Type=Simple
+User=ci
+WorkingDirectory=/home/ci/ironclad/ci/docker-based
+ExecStart=/home/ci/ironclad/ci/docker-based/loop_docker_ci.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
