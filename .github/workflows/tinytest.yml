@@ -17,13 +17,13 @@ jobs:
       - run: |
           set -x
           echo "Pulled the latest code."
-          git push origin HEAD:refs/heads/testbranch-actions
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          tourch test.txt
+          git checkout -b testbranch-actions
+          touch test.txt
           git add test.txt
           git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
-          git push origin testbranch-actions
+          git push -u origin testbranch-actions
 
 
   
