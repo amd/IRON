@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 import logging
 from ml_dtypes import bfloat16
 
+import aie.utils.config
 from .. import compilation as comp
 from ..aie_device_manager import AIEDeviceManager, pyxrt
 from ..utils import numpy_to_torch, torch_to_numpy
@@ -23,8 +24,8 @@ class AIEOperatorBase(ABC):
     llama_dir = Path(__file__).parent.parent.parent
     base_dir = llama_dir.parent.parent # IRON base dir
     build_dir = llama_dir / "build"
-    mlir_aie_dir = Path(os.environ["MLIR_AIE_INSTALL_DIR"])
-    peano_dir = Path(os.environ["PEANO_INSTALL_DIR"])
+    mlir_aie_dir = Path(aie.utils.config.root_path())
+    peano_dir = Path(aie.utils.config.peano_install_dir())
 
     @classmethod
     def compile_all_operators(cls):
