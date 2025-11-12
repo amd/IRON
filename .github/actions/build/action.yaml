@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build IRONCLAD (assumes prerequisites installed)"
+
+inputs:
+  rebuild_flags:
+    required: false
+    default: ""
+  env_name:
+    required: false
+    default: "ci_env"
+  cmake_extra_flags:
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build
+      env:
+        HOME: /workspace
+      shell: bash
+      run: |
+        source ./scripts/env_setup.sh --env ${{ inputs.env_name }}
+        set -euxo pipefail
+        if [ -n "${{ inputs.cmake_extra_flags }}" ]; then
+          echo "Using extra CMake flags: ${{ inputs.cmake_extra_flags }}"
+        fi
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DIRONCLAD_AIE_TARGET=aie2p ${{ inputs.cmake_extra_flags }}
+        cmake --build build -- -j1 VERBOSE=1
