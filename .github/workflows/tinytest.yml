@@ -3,13 +3,12 @@
 
 name: Test Pushing from a GitHub Action
 
-permissions:
-  contents: write
-
 on: push
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
     - name: Check token permissions
       run: |
