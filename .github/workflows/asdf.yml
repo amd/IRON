@@ -7,15 +7,34 @@ on:
  push:
  pull_request:
   workflow_dispatch:
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check token permissions
+      - name: Comment results on PR
+        if: ${{ startsWith(github.event_name, 'pull_request') }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const body = `
+              Testing
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Check full API response
         run: |
-          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/ | jq .permissions
+          curl -i -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}
       - name: checkout
         uses: actions/checkout@v5
       - name: test
