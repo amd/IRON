@@ -1,0 +1,36 @@
+{
+  "model_config": {
+    "vocab_size": 128256,
+    "context_length": 131072,
+    "emb_dim": 2048,
+    "n_heads": 32,
+    "n_layers": 16,
+    "hidden_dim": 8192,
+    "n_kv_groups": 8,
+    "use_kv_cache": true,
+    "use_aie_gemv": false,
+    "rope_base": 500000.0,
+    "dtype": "bfloat16",
+    "use_aie_final_norm": false,
+    "use_aie_ffn_gemm": false,
+    "use_aie_ffn_silu": false,
+    "use_aie_ffn_mul": false,
+    "use_aie_attn_projection_gemm": false,
+    "use_aie_rope": false,
+    "use_aie_norm1": false,
+    "use_aie_norm2": false,
+    "use_aie_residual": false,
+    "use_aie_regular_mha": false,
+    "use_aie_fused_mha": false,
+    "use_aie_final_gemm": false,
+    "rope_freq": {
+      "factor": 32.0,
+      "low_freq_factor": 1.0,
+      "high_freq_factor": 4.0,
+      "original_context_length": 8192
+    }
+  },
+  "aie_config": {
+    "device": "npu2"
+  }
+}
