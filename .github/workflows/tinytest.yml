@@ -24,6 +24,3 @@ jobs:
           git add test.txt
           git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
           git push -u origin testbranch-actions
-
-
-  
