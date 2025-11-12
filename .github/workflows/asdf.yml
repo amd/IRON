@@ -7,43 +7,16 @@ on:
  push:
  pull_request:
   workflow_dispatch:
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Comment results on PR
-        if: ${{ startsWith(github.event_name, 'pull_request') }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const body = `
-              Testing
-            `;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-
-      - name: Check full API response
-        run: |
-          curl -i -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}
-      - name: checkout
-        uses: actions/checkout@v5
-      - name: test
-        run: |
-          date > generated.txt
-          # Note: the following account information will not work on GHES
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B hello
-          git add .
-          git commit -m "generated"
-          git push -u origin hello
+    - name: Create some artifacts for testing
+      run: |
+        mkdir -p path/to/artifact/
+        echo "This is a test artifact." > path/to/artifact/test_artifact.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: my-artifact
+        path: path/to/artifact/ # or path/to/artifact
