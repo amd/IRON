@@ -12,6 +12,8 @@ permissions:
 jobs:
   Test:
     runs-on: [self-hosted, docker]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - run: |
