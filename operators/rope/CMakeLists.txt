@@ -3,25 +3,25 @@
 
 function(add_aie_rope_design INPUT_LENGTH TILE_SIZE NUM_COLUMNS NUM_CHANNELS TRACE_SIZE METHOD_TYPE)
 
-    set(EXAMPLE "rope_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}_${METHOD_TYPE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/rope/golden_${EXAMPLE}")
+    set(OPERATOR "rope_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}_${METHOD_TYPE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/rope/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
     # Calculate matrix dimensions
     math(EXPR ROWS "${INPUT_LENGTH} / ${TILE_SIZE}")
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
                        HOST rope.cpp
                        HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
                        PYTHON rope.py
-                       PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} -tr ${TRACE_SIZE} -mt ${METHOD_TYPE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+                       PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} -tr ${TRACE_SIZE} -mt ${METHOD_TYPE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
                        AIE_CORE_KERNELS "rope_${METHOD_TYPE}.o"
                        OUTPUT_HOST ROPE_HOST
                        OUTPUT_XCLBIN ROPE_XCLBIN
                        OUTPUT_INSTS ROPE_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/rope_golden.py
         ${GOLDEN_VALUES_PATH}
         --rows ${ROWS}
@@ -29,9 +29,9 @@ function(add_aie_rope_design INPUT_LENGTH TILE_SIZE NUM_COLUMNS NUM_CHANNELS TRA
         --method_type ${METHOD_TYPE}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${ROPE_HOST} -k ${EXAMPLE} -x ${ROPE_XCLBIN} -i ${ROPE_INSTS} -l ${INPUT_LENGTH} -r ${ROWS} -c ${TILE_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+                        "${ROPE_HOST} -k ${OPERATOR} -x ${ROPE_XCLBIN} -i ${ROPE_INSTS} -l ${INPUT_LENGTH} -r ${ROWS} -c ${TILE_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK
                         "PASS!"
                     METRICS

@@ -3,31 +3,31 @@
 
 function(add_aie_leaky_relu_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
 
-    set(EXAMPLE "leaky_relu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/example/leaky_relu/golden_${EXAMPLE}")
+    set(OPERATOR "leaky_relu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/leaky_relu/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
         HOST leaky_relu.cpp
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
         PYTHON leaky_relu.py
-        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --trace-size ${TRACE_SIZE} --alpha 0.01 --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --trace-size ${TRACE_SIZE} --alpha 0.01 --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
         AIE_CORE_KERNELS "leaky_relu.o"
         OUTPUT_HOST LEAKY_RELU_HOST
         OUTPUT_XCLBIN LEAKY_RELU_XCLBIN
         OUTPUT_INSTS LEAKY_RELU_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/leaky_relu_golden.py
         ${GOLDEN_VALUES_PATH}
         --input_length ${INPUT_LENGTH}
         --alpha 0.01
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${LEAKY_RELU_HOST} -k ${EXAMPLE} -x ${LEAKY_RELU_XCLBIN} -i ${LEAKY_RELU_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin --alpha 0.01"
+                        "${LEAKY_RELU_HOST} -k ${OPERATOR} -x ${LEAKY_RELU_XCLBIN} -i ${LEAKY_RELU_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin --alpha 0.01"
                     CHECK
                         "PASS!"
                     METRICS

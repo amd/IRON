@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 function(add_aie_layer_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
-    set(EXAMPLE "layer_norm_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/layer_norm/golden_${EXAMPLE}")
+    set(OPERATOR "layer_norm_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/layer_norm/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_PYTHON bf16)
     set(OUTPUT_DATA_TYPE_PYTHON bf16)
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
@@ -12,18 +12,18 @@ function(add_aie_layer_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SI
     # Calculate matrix dimensions
     math(EXPR ROWS "${INPUT_LENGTH} / ${TILE_SIZE}")
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
         HOST layer_norm.cpp
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
         PYTHON layer_norm.py
-        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
         AIE_CORE_KERNELS "layer_norm.o"
         OUTPUT_HOST LAYER_NORM_HOST
         OUTPUT_XCLBIN LAYER_NORM_XCLBIN
         OUTPUT_INSTS LAYER_NORM_INSTS
     )
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm_golden.py
         ${GOLDEN_VALUES_PATH}
         --rows ${ROWS}
@@ -31,9 +31,9 @@ function(add_aie_layer_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SI
         --dtype ${INPUT_DATA_TYPE_PYTHON}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
         RUN
-            "${LAYER_NORM_HOST} -k ${EXAMPLE} -x ${LAYER_NORM_XCLBIN} -i ${LAYER_NORM_INSTS} -l ${INPUT_LENGTH} -r ${ROWS} -c ${TILE_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+            "${LAYER_NORM_HOST} -k ${OPERATOR} -x ${LAYER_NORM_XCLBIN} -i ${LAYER_NORM_INSTS} -l ${INPUT_LENGTH} -r ${ROWS} -c ${TILE_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
         CHECK
             "PASS!"
         METRICS

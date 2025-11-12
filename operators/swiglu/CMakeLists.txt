@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-set(EXAMPLE "swiglu")
+set(OPERATOR "swiglu")
 set(INPUT_DATA_TYPE_PYTHON bf16)
 set(OUTPUT_DATA_TYPE_PYTHON bf16)
 set(INPUT_DATA_TYPE_CPP bfloat16_t)
@@ -39,16 +39,16 @@ add_dependencies(swiglu_eltwise_mul_insts swiglu_silu_xclbin)
 # make sure to use different --xclbin-instance-name, --xclbin-kernel-id and --xclbin-kernel-name arguments to aiecc.py when chaining like this
 set(SWIGLU_COMBINED_XCLBIN ${SWIGLU_ELTWISE_MUL_XCLBIN})
 
-add_aie_host(${EXAMPLE} HOST swiglu.cpp OUTPUT_HOST SWIGLU_HOST)
+add_aie_host(${OPERATOR} HOST swiglu.cpp OUTPUT_HOST SWIGLU_HOST)
 add_dependencies(
-    ${EXAMPLE}
+    ${OPERATOR}
     swiglu_eltwise_mul_xclbin # ${SWIGLU_ELTWISE_MUL_XCLBIN}
     swiglu_eltwise_mul_insts # ${SWIGLU_ELTWISE_MUL_INSTS}
 )
 
-set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/swiglu/golden_${EXAMPLE}")
+set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/swiglu/golden_${OPERATOR}")
 
-add_aie_ci_test(${EXAMPLE}
+add_aie_ci_test(${OPERATOR}
                 RUN
                     "${SWIGLU_HOST} \
                         --dim 2048 \
@@ -64,7 +64,7 @@ add_aie_ci_test(${EXAMPLE}
                 METRICS
                     "Latency" [=[Elapsed time \(μs\): (?P<metric>\d+)]=])
 
-add_golden_reference_generator(${EXAMPLE}
+add_golden_reference_generator(${OPERATOR}
     ${CMAKE_CURRENT_SOURCE_DIR}/swiglu_golden.py
     ${GOLDEN_VALUES_PATH}
     --dim 2048
