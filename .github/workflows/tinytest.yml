@@ -16,7 +16,7 @@ jobs:
         curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
           https://api.github.com/repos/${{ github.repository }}/ | jq .permissions
     - uses: actions/checkout@v5
-      run: |
+    - run: |
         date > generated.txt
         # Note: the following account information will not work on GHES
         git config user.name "github-actions[bot]"
