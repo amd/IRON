@@ -1,0 +1,36 @@
+name: "Test committing to private repo"
+
+on: push
+
+jobs:
+  upload_results:
+    runs-on: ubuntu-latest
+    environment: IRON
+
+    steps:
+      - name: Obtain existing results
+        uses: actions/checkout@v4
+        with:
+          repository: andrej/iron-ci
+          token: ${{ secrets.IRON_CI_PUSH_PAT }}
+          path: results-repo
+
+      - name: Merge with existing results and calculate trends
+        id: commit_main
+        env:
+          HOME: /workspace
+        shell: bash
+        run: |
+
+
+      - name: Commit back results
+        #if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          cd results-repo
+          touch all.csv
+          git add -f all.csv 
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "test" || echo "No changes to commit"
+          git push -u origin ${{ inputs.branch }}
+          RESULTS_COMMIT=$(git -C ../results rev-parse HEAD)
