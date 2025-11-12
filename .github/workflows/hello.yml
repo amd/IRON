@@ -18,14 +18,6 @@ jobs:
           token: ${{ secrets.IRON_CI_PUSH_PAT }}
           path: results-repo
 
-      - name: Merge with existing results and calculate trends
-        id: commit_main
-        env:
-          HOME: /workspace
-        shell: bash
-        run: |
-
-
       - name: Commit back results
         #if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
