@@ -22,7 +22,7 @@ runs:
         HOME: /workspace
       shell: bash
       run: |
-        source ./scripts/env_setup.sh --env ${{ inputs.env_name }}
+        source ${{ inputs.env_name }}/bin/activate
         set -euxo pipefail
         if [ -n "${{ inputs.cmake_extra_flags }}" ]; then
           echo "Using extra CMake flags: ${{ inputs.cmake_extra_flags }}"

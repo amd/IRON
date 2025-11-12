@@ -22,5 +22,5 @@ runs:
         HOME: /workspace
       shell: "bash"
       run: |
-        source ./scripts/env_setup.sh --env ${{ inputs.env_name }}
+        source ${{ inputs.env_name }}/bin/activate
         ./scripts/run_tests.py ${{ inputs.test_flags }} ${{ inputs.build_dir }}
