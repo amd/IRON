@@ -52,7 +52,7 @@ configure_runner() {
       --work _work \
       --unattended \
       --ephemeral \
-      --labels chroot
+      --labels docker
 }
 
 install_runner

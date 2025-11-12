@@ -18,7 +18,9 @@ concurrency:
 
 jobs:
   Test:
-    runs-on: [self-hosted, chroot]
+    runs-on: [self-hosted, docker]
+    permissions:
+      contents: write
     steps:
       - name: Pull
         uses: actions/checkout@v4
