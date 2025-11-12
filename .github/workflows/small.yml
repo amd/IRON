@@ -9,6 +9,8 @@ on:
   push:
      branches:
        - main
+permissions:
+  contents: write
 
 # VJUNG: Introduce concurrency groups named with branch refs.
 # VJUNG: If one pushes 5 times on its branch only the most recent commit will trigger CI.
@@ -19,11 +21,11 @@ concurrency:
 jobs:
   Test:
     runs-on: [self-hosted, docker]
-    permissions:
-      contents: write
     steps:
       - name: Pull
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
         env:
           HOME: /workspace
 

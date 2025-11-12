@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Pull
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
         env:
           HOME: /workspace
 
