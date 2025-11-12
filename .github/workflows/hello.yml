@@ -8,7 +8,6 @@ on:
 jobs:
   upload_results:
     runs-on: ubuntu-latest
-    environment: IRON
 
     steps:
       - name: test
