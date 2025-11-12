@@ -11,6 +11,14 @@ jobs:
     environment: IRON
 
     steps:
+      - name: test
+        env:
+          PAT: ${{ secrets.IRON_CI_PUSH_PAT }}
+        run: |
+          echo ...
+          echo $PAT
+          echo ???
+
       - name: Obtain existing results
         uses: actions/checkout@v4
         with:
