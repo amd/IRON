@@ -46,18 +46,18 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Commit test results to branch `ci-small`
+      - name: Format, upload and commit back results 
         env:
           HOME: /workspace
         uses: ./.github/actions/commit_results
         with:
           branch: ci-small
 
-      - name: Upload test logs
+      - name: Upload results logs
         uses: actions/upload-artifact@v4
         with:
-          name: tests-log
-          path: tests.log
+          name: results
+          path: results/
           retention-days: 7
 
       - name: Mark workflow as failed if tests failed

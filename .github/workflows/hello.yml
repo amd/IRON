@@ -1,6 +1,9 @@
 name: "Test committing to private repo"
 
-on: push
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   upload_results:
