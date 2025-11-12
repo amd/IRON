@@ -16,7 +16,7 @@ runs:
   steps:
     - name: Commit Test Results to a Branch (Main branch pushes)
       id: commit_main
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      #if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       env:
         HOME: /workspace
       shell: bash
