@@ -4,7 +4,7 @@
 function(add_aie_leaky_relu_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
 
     set(EXAMPLE "leaky_relu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/examples/leaky_relu/golden_${EXAMPLE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/example/leaky_relu/golden_${EXAMPLE}")
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
