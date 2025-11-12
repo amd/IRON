@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test Example Applications
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples-test:
+    runs-on: [self-hosted, chroot]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        env:
+          HOME: /workspace
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Install examples extra requirements
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          set -euxo pipefail
+          source ci_env/bin/activate
+          pip install -r requirements_examples.txt
+
+      - name: Build (with TEST_examples=On only to generate llama tests)
+        uses: ./.github/actions/build
+        with:
+          env_name: ci_env
+          cmake_extra_flags: "-DBUILD_EXAMPLES=ON -DBUILD_OPERATORS=OFF"
+
+      - name: Run only examples_3.2_1b test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+          test_flags: "--log tests.log --csv-latest tests_latest.csv"
+
+      - name: Commit examples test results to branch `ci-examples`
+        uses: ./.github/actions/commit_results
+        with:
+          branch: ci-examples
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md ./tests_latest.csv"
+
+      - name: Fail workflow if examples failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
