@@ -14,12 +14,19 @@ jobs:
         env:
           PAT: ${{ secrets.IRON_CI_PUSH_PAT }}
         run: |
-            if [ -z "$PAT" ]; then
-              echo "PAT is empty"
-              exit 1
-            else
-              echo "PAT is set and non-empty"
-            fi
+          echo ${{ secrets.IRON_CI_PUSH_PAT }}
+          if [ -z "$PAT" ]; then
+            echo "PAT is empty"
+            exit 1
+          else
+            echo "PAT is set and non-empty"
+          fi
+          if [ -z "${{ secrets.IRON_CI_PUSH_PAT }}" ]; then
+            echo "PAT is empty"
+            exit 1
+          else
+            echo "PAT is set and non-empty"
+          fi
 
       - name: Obtain existing results
         uses: actions/checkout@v4
