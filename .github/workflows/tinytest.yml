@@ -13,9 +13,8 @@ jobs:
   Test:
     runs-on: [self-hosted, docker]
     steps:
-      - name: Pull
-        uses: actions/checkout@v4
-        run: |
+      - uses: actions/checkout@v4
+      - run: |
           set -x
           echo "Pulled the latest code."
           git push origin HEAD:refs/heads/testbranch-actions
