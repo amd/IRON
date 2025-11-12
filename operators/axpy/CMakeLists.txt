@@ -2,23 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 function(add_aie_axpy_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE SCALAR_FACTOR)
-    set(EXAMPLE "axpy_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}_${SCALAR_FACTOR}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/axpy/golden_${EXAMPLE}")
+    set(OPERATOR "axpy_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}_${SCALAR_FACTOR}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/axpy/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_PYTHON bf16)
     set(OUTPUT_DATA_TYPE_PYTHON bf16)
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
                            HOST axpy.cpp
                            HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP} TILE_SIZE=${TILE_SIZE}
                            PYTHON axpy.py
-                           PYTHON_FLAGS -d ${DEVICE} -l ${INPUT_LENGTH} -co ${NUM_COLUMNS} -ch ${NUM_CHANNELS} -ts ${TILE_SIZE} -t ${TRACE_SIZE} -s ${SCALAR_FACTOR} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+                           PYTHON_FLAGS -d ${DEVICE} -l ${INPUT_LENGTH} -co ${NUM_COLUMNS} -ch ${NUM_CHANNELS} -ts ${TILE_SIZE} -t ${TRACE_SIZE} -s ${SCALAR_FACTOR} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
                            AIE_CORE_KERNELS "axpy.o"
                            OUTPUT_HOST AXPY_HOST
                            OUTPUT_XCLBIN AXPY_XCLBIN
                            OUTPUT_INSTS AXPY_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/axpy_golden.py
         ${GOLDEN_VALUES_PATH}
         --input_length ${INPUT_LENGTH}
@@ -26,9 +26,9 @@ function(add_aie_axpy_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRA
         --scalar_factor ${SCALAR_FACTOR}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${AXPY_HOST} -k ${EXAMPLE} -x ${AXPY_XCLBIN} -i ${AXPY_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+                        "${AXPY_HOST} -k ${OPERATOR} -x ${AXPY_XCLBIN} -i ${AXPY_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK
                         "PASS!"
                     METRICS
