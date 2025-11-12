@@ -95,7 +95,6 @@ add_subdirectory(aie_kernels)
 # Add operators
 # Pass the architecure to support aie2p
 if (BUILD_OPERATORS)
-    include(cmake/IroncladExamples.cmake)
     add_subdirectory(operators)
 endif()
 

@@ -3,30 +3,30 @@
 
 function(add_aie_silu_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
 
-    set(EXAMPLE "silu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/silu/golden_${EXAMPLE}")
+    set(OPERATOR "silu_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/silu/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
         HOST silu.cpp
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
         PYTHON silu.py
-        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --trace-size ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --trace-size ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
         AIE_CORE_KERNELS "silu.o"
         OUTPUT_HOST SILU_HOST
         OUTPUT_XCLBIN SILU_XCLBIN
         OUTPUT_INSTS SILU_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/silu_golden.py
         ${GOLDEN_VALUES_PATH}
         --input_length ${INPUT_LENGTH}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${SILU_HOST} -k ${EXAMPLE} -x ${SILU_XCLBIN} -i ${SILU_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+                        "${SILU_HOST} -k ${OPERATOR} -x ${SILU_XCLBIN} -i ${SILU_INSTS} -l ${INPUT_LENGTH} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK
                         "PASS!"
                     METRICS

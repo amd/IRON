@@ -3,28 +3,28 @@
 
 function(add_aie_matrix_vector_mul_design NUM_COLUMNS M K m)
 
-    set(EXAMPLE "matrix_vector_mul_${M}x${K}_${m}_${NUM_COLUMNS}col")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/matrix_vector_mul/golden_${EXAMPLE}")
+    set(OPERATOR "matrix_vector_mul_${M}x${K}_${m}_${NUM_COLUMNS}col")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/matrix_vector_mul/golden_${OPERATOR}")
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
                        HOST matrix_vector_mul.cpp
                        PYTHON matrix_vector_mul.py
-                       PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -m ${m} --cols ${NUM_COLUMNS} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+                       PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -m ${m} --cols ${NUM_COLUMNS} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
                        AIE_CORE_KERNELS mv.o
                        OUTPUT_HOST MATRIX_VECTOR_MUL_HOST
                        OUTPUT_XCLBIN MATRIX_VECTOR_MUL_XCLBIN
                        OUTPUT_INSTS MATRIX_VECTOR_MUL_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/matrix_vector_mul_golden.py
         ${GOLDEN_VALUES_PATH}
         -M ${M}
         -K ${K}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${MATRIX_VECTOR_MUL_HOST} -k ${EXAMPLE} -x ${MATRIX_VECTOR_MUL_XCLBIN} -i ${MATRIX_VECTOR_MUL_INSTS} -M ${M} -K ${K} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+                        "${MATRIX_VECTOR_MUL_HOST} -k ${OPERATOR} -x ${MATRIX_VECTOR_MUL_XCLBIN} -i ${MATRIX_VECTOR_MUL_INSTS} -M ${M} -K ${K} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK
                         "PASS!"
                     METRICS

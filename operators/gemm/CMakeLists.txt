@@ -27,32 +27,32 @@ function(add_aie_gemm_xclbin m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_SIZE AR
 endfunction()
 
 function(add_aie_gemm_design M K N m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_SIZE ARCHIVE_NAME)
-    set(EXAMPLE "gemm_${M}x${K}x${N}_${m}x${k}x${n}_${NUM_COLUMNS}_cols_${B_COL_MAJ}_bcolmaj_${C_COL_MAJ}_ccolmaj_${TRACE_SIZE}")
+    set(OPERATOR "gemm_${M}x${K}x${N}_${m}x${k}x${n}_${NUM_COLUMNS}_cols_${B_COL_MAJ}_bcolmaj_${C_COL_MAJ}_ccolmaj_${TRACE_SIZE}")
     set(XCLBIN_NAME "gemm_${m}x${k}x${n}_${NUM_COLUMNS}_cols_${B_COL_MAJ}_bcolmaj_${C_COL_MAJ}_ccolmaj_${TRACE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/gemm/golden_${EXAMPLE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/gemm/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_PYTHON bf16)
     set(OUTPUT_DATA_TYPE_PYTHON bf16)
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
     # Generate instructions only (reuse xclbin from add_aie_gemm_xclbin)
-    add_aie_host(${EXAMPLE}
+    add_aie_host(${OPERATOR}
                  HOST gemm.cpp
                  HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
                  OUTPUT_HOST GEMM_HOST)
-    add_aie_design(${EXAMPLE}
+    add_aie_design(${OPERATOR}
                    INSTS_ONLY
                    PYTHON gemm.py
-                   PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -N ${N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} --prio-accuracy --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+                   PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -N ${N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} --prio-accuracy --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
                    EXTRA_AIECC_FLAGS --dynamic-objFifos
                    OUTPUT_INSTS GEMM_INSTS)
 
-    add_dependencies(${EXAMPLE} ${XCLBIN_NAME}_xclbin)
-    add_dependencies(${EXAMPLE} ${EXAMPLE}_insts)
+    add_dependencies(${OPERATOR} ${XCLBIN_NAME}_xclbin)
+    add_dependencies(${OPERATOR} ${OPERATOR}_insts)
 
     set(GEMM_XCLBIN ${GEMM_XCLBIN_${XCLBIN_NAME}})
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/gemm_golden.py
         ${GOLDEN_VALUES_PATH}
         -M ${M}
@@ -62,7 +62,7 @@ function(add_aie_gemm_design M K N m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_S
         -c-col-maj ${C_COL_MAJ}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
                         "${GEMM_HOST} -k ${XCLBIN_NAME} -x ${GEMM_XCLBIN} -i ${GEMM_INSTS} --rows ${M} --inner ${K} --columns ${N} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK

@@ -3,8 +3,8 @@
 
 function(add_aie_dequant_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE GROUP_SIZE TRACE_SIZE)
 
-    set(EXAMPLE "dequant_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/dequant/golden_${EXAMPLE}")
+    set(OPERATOR "dequant_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_tile_${TILE_SIZE}")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/dequant/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_PYTHON ui8)
     set(OUTPUT_DATA_TYPE_PYTHON bf16)
     set(INPUT_DATA_TYPE_CPP uint8_t)
@@ -13,17 +13,17 @@ function(add_aie_dequant_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE 
     # Calculate matrix dimensions
     math(EXPR OUT_SIZE "${INPUT_LENGTH} * 2")
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
         HOST dequant.cpp
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
         PYTHON dequant.py
-        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --group_size ${GROUP_SIZE} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+        PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} --tile-size ${TILE_SIZE} --group_size ${GROUP_SIZE} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
         AIE_CORE_KERNELS "expand_aie2_${TILE_SIZE}.o"
         OUTPUT_HOST DEQUANT_HOST
         OUTPUT_XCLBIN DEQUANT_XCLBIN
         OUTPUT_INSTS DEQUANT_INSTS)
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/dequant_golden.py
         ${GOLDEN_VALUES_PATH}
         --input_length ${INPUT_LENGTH}
@@ -33,9 +33,9 @@ function(add_aie_dequant_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE 
         --out_dtype ${OUTPUT_DATA_TYPE_PYTHON}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
                     RUN
-                        "${DEQUANT_HOST} -k ${EXAMPLE} -x ${DEQUANT_XCLBIN} -i ${DEQUANT_INSTS} -l ${INPUT_LENGTH} -t ${TILE_SIZE} -b ${GROUP_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+                        "${DEQUANT_HOST} -k ${OPERATOR} -x ${DEQUANT_XCLBIN} -i ${DEQUANT_INSTS} -l ${INPUT_LENGTH} -t ${TILE_SIZE} -b ${GROUP_SIZE} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
                     CHECK
                         "PASS!"
                     METRICS

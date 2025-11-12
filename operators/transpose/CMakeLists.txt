@@ -2,25 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 function(add_aie_transpose_design M N NUM_COLUMNS NUM_CHANNELS m n s TRACE_SIZE)
-    set(EXAMPLE "transpose_${M}_M_${N}_N_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${m}_m_${n}_n_${s}_s")
-    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/transpose/golden_${EXAMPLE}")
+    set(OPERATOR "transpose_${M}_M_${N}_N_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${m}_m_${n}_n_${s}_s")
+    set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/transpose/golden_${OPERATOR}")
     set(INPUT_DATA_TYPE_PYTHON bf16)
     set(OUTPUT_DATA_TYPE_PYTHON bf16)
     set(INPUT_DATA_TYPE_CPP bfloat16_t)
     set(OUTPUT_DATA_TYPE_CPP bfloat16_t)
 
-    add_aie_executable(${EXAMPLE}
+    add_aie_executable(${OPERATOR}
         HOST transpose.cpp
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP}
         PYTHON transpose.py
-        PYTHON_FLAGS --dev ${DEVICE} -M ${M} -N ${N} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} -m ${m} -n ${n} -s ${s} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+        PYTHON_FLAGS --dev ${DEVICE} -M ${M} -N ${N} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} -m ${m} -n ${n} -s ${s} -tr ${TRACE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
         AIE_CORE_KERNELS transpose.o
         OUTPUT_HOST TRANSPOSE_HOST
         OUTPUT_XCLBIN TRANSPOSE_XCLBIN
         OUTPUT_INSTS TRANSPOSE_INSTS
     )
 
-    add_golden_reference_generator(${EXAMPLE}
+    add_golden_reference_generator(${OPERATOR}
         ${CMAKE_CURRENT_SOURCE_DIR}/transpose_golden.py
         ${GOLDEN_VALUES_PATH}
         --rows ${M}
@@ -28,9 +28,9 @@ function(add_aie_transpose_design M N NUM_COLUMNS NUM_CHANNELS m n s TRACE_SIZE)
         --dtype ${OUTPUT_DATA_TYPE_PYTHON}
     )
 
-    add_aie_ci_test(${EXAMPLE}
+    add_aie_ci_test(${OPERATOR}
         RUN
-            "${TRANSPOSE_HOST} -k ${EXAMPLE} -x ${TRANSPOSE_XCLBIN} -i ${TRANSPOSE_INSTS} --rows ${M} --columns ${N} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+            "${TRANSPOSE_HOST} -k ${OPERATOR} -x ${TRANSPOSE_XCLBIN} -i ${TRANSPOSE_INSTS} --rows ${M} --columns ${N} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
         CHECK
             "PASS!"
         METRICS
