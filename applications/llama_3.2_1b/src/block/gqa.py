@@ -19,6 +19,8 @@ from src.operator.aie_gemv import AIEGEMV
 
 from torchtune.modules import KVCache
 
+from ..utils import assign
+
 
 class GroupedQueryAttention(nn.Module):
     def __init__(
@@ -121,6 +123,7 @@ class GroupedQueryAttention(nn.Module):
             aie_gemv_config = {
                 "num_columns": 1,
                 "is_mv": False,
+                "use_static_weight": True,
             }
             self.aie_query_gemv = AIEGEMV(M=d_out, K=d_in, **aie_gemv_config)
             kv_out_dim = num_kv_groups * self.head_dim
@@ -163,15 +166,15 @@ class GroupedQueryAttention(nn.Module):
             x_flat = x.reshape(1, -1)  # Shape: (1, d_in)
             input_dtype = x.dtype
 
-            queries_flat = self.aie_query_gemv(self.W_query.weight.T, x_flat)
+            queries_flat = self.aie_query_gemv(None, x_flat)
             queries = queries_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
 
-            keys_flat = self.aie_key_gemv(self.W_key.weight.T, x_flat)
+            keys_flat = self.aie_key_gemv(None, x_flat)
             keys = keys_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
 
-            values_flat = self.aie_value_gemv(self.W_value.weight.T, x_flat)
+            values_flat = self.aie_value_gemv(None, x_flat)
             values = values_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
@@ -381,9 +384,7 @@ class GroupedQueryAttention(nn.Module):
         # Choose output projection based on phase
         if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gemv"]:
             context_vec_flat = context_vec.reshape(1, -1)
-            output_flat = self.aie_out_proj_gemv(
-                self.out_proj.weight.T, context_vec_flat
-            )
+            output_flat = self.aie_out_proj_gemv(None, context_vec_flat)
             context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
         elif self.cfg["use_aie_attn_projection_gemm"]:
             context_vec_flat = context_vec.reshape(-1, self.d_out)
@@ -393,3 +394,31 @@ class GroupedQueryAttention(nn.Module):
             context_vec = self.out_proj(context_vec)
 
         return context_vec
+
+    def assign_weights(self, l, w_query, w_key, w_value, w_out_proj):
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+            self.aie_query_gemv.weight = w_query
+            self.aie_key_gemv.weight = w_key
+            self.aie_value_gemv.weight = w_value
+            self.aie_out_proj_gemv.weight = w_out_proj
+
+        self.W_query.weight = assign(
+            self.W_query.weight,
+            w_query,
+            f"model.layers.{l}.self_attn.q_proj.weight",
+        )
+        self.W_key.weight = assign(
+            self.W_key.weight,
+            w_key,
+            f"model.layers.{l}.self_attn.k_proj.weight",
+        )
+        self.W_value.weight = assign(
+            self.W_value.weight,
+            w_value,
+            f"model.layers.{l}.self_attn.v_proj.weight",
+        )
+        self.out_proj.weight = assign(
+            self.out_proj.weight,
+            w_out_proj,
+            f"model.layers.{l}.self_attn.o_proj.weight",
+        )

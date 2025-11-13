@@ -138,12 +138,6 @@ def inference(
     )
     logging.info("Model and tokenizer loaded.")
 
-    logging.info("Preparing AIE operators...")
-    # At this point the model is fully described (operators and their dimensions and how to compile them)
-    AIEOperatorBase.compile_all_operators()
-    AIEOperatorBase.prepare_runtime()
-    logging.info("AIE operator preparation completed.")
-
     hook_handles = []
     if save_outputs:
         if os.path.exists(output_data_path):
@@ -195,6 +189,11 @@ def inference(
     model.to(device)
     del combined_weights
 
+    logging.info("Preparing AIE operators...")
+    # At this point the model is fully described (operators and their dimensions and how to compile them)
+    AIEOperatorBase.compile_all_operators()
+    AIEOperatorBase.prepare_runtime()
+    logging.info("AIE operator preparation completed.")
     print(f"Starting text generation...")
     print(f"Generating {num_tokens} tokens...")
     print("=" * 55)

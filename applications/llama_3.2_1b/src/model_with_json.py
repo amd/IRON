@@ -37,6 +37,7 @@ config_options = {
     "use_aie_ffn_gemm":             (bool,              False,         "[FFN] GEMM"),
     "use_aie_ffn_mul":              (bool,              False,         "[FFN] Elementwise Mul"),
     "use_aie_ffn_silu":             (bool,              False,         "[FFN] SiLU"),
+    "use_aie_ffn_swiglu":           (bool,              False,         "[FFN] Runlist-based SwiGLU"),
     "use_aie_residual":             (bool,              False,         "[Transformer] Residual Addition"),
     "use_aie_norm1":                (bool,              False,         "[Transformer] Pre Norm"),
     "use_aie_norm2":                (bool,              False,         "[Transformer] Post Norm"),
@@ -184,10 +185,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
         for block in self.trf_blocks:
             x = block(x, mask, self.angles, input_pos)
 
-        if self.cfg.get("use_aie_final_norm", False):
-            x = self.final_norm(x, self.final_norm.weight)
-        else:
-            x = self.final_norm(x)
+        x = self.final_norm(x)
 
         logits = self.out_head(x.to(self.cfg["dtype"]))
 
