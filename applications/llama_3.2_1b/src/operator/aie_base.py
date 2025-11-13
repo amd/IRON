@@ -18,6 +18,7 @@ class AIEOperatorBase(ABC):
     """Base class for AIE-accelerated operations"""
 
     registered_operators = []
+    static_data_pool = {}  # Map bytes -> number of users
 
     # Global configuration
     device_manager = AIEDeviceManager()
@@ -44,16 +45,31 @@ class AIEOperatorBase(ABC):
         page_sz = 4096
         get_pool_sz = lambda x: (x + page_sz - 1) // page_sz * page_sz
 
+        # Allocate static buffers first
+        for buffer_data in cls.static_data_pool:
+            logging.debug(
+                f"Allocating static buffer with size {len(buffer_data)} bytes."
+            )
+            bo = pyxrt.bo(
+                cls.device_manager.device,
+                len(buffer_data),
+                pyxrt.bo.host_only,
+                0x10000,
+            )
+            bo.write(np.frombuffer(buffer_data, dtype=np.uint8), 0)
+            cls.static_data_pool[buffer_data] = bo
+
         for op in cls.registered_operators:
             logging.info(f"Preparing runtime for AIE operator: {op.__class__.__name__}")
 
+            # Set up for each kernel
             for kernel_name, (xclbin, xclbin_kernel_name, insts) in op.kernels.items():
                 context, xrt_kernel = cls.device_manager.get_context_and_kernel(
                     str(xclbin.path), xclbin_kernel_name
                 )
                 with open(str(insts.path), "rb") as f:
                     instructions = np.frombuffer(f.read(), dtype=np.uint32)
-                logging.info(
+                logging.debug(
                     f"Allocating instruction buffer for {len(instructions)} instructions."
                 )
                 insts_bo = pyxrt.bo(
@@ -75,6 +91,9 @@ class AIEOperatorBase(ABC):
             conflicting_buffers = {}  # map buffer -> {set of conflicting buffers}
             for kernel, *args in op.runlist:
                 for arg in args:
+                    if arg in op.buffer_static_data:
+                        # Static buffers never conflict
+                        continue
                     # Conflict only exists if buffers are in the same size pool
                     pool_sz = get_pool_sz(op.buffers[arg])
                     conflicting_args = {
@@ -86,6 +105,11 @@ class AIEOperatorBase(ABC):
 
             buffer_allocations = {}  # map buffer -> (key into bo_pools, list index)
             for buffer_name, buffer_min_size in op.buffers.items():
+                if buffer_name in op.buffer_static_data:
+                    # Static buffers are allocated separately
+                    static_data = op.buffer_static_data[buffer_name]
+                    op.buffer_bos[buffer_name] = cls.static_data_pool[static_data]
+                    continue
                 alloc_pool = get_pool_sz(buffer_min_size)
                 alloc_idx = 0
                 for conflict in conflicting_buffers.get(buffer_name, set()):
@@ -107,10 +131,35 @@ class AIEOperatorBase(ABC):
                 buffer_allocations[buffer_name] = (alloc_pool, alloc_idx)
                 op.buffer_bos[buffer_name] = bo_pools[alloc_pool][alloc_idx]
 
+            # Runlist setup
+            _, (first_xclbin, first_xclbin_kernel_name, _) = next(
+                iter(op.kernels.items())
+            )
+            context, _ = cls.device_manager.get_context_and_kernel(
+                str(first_xclbin.path), first_xclbin_kernel_name
+            )
+            op.xrt_runlist = pyxrt.runlist(context)
+            for i, (kernel_name, *buffer_args) in enumerate(op.runlist):
+                this_context, xrt_kernel, insts_bo, insts_len = op.xrt_kernels[
+                    kernel_name
+                ]
+                assert this_context == context
+                opcode = 3
+                run = pyxrt.run(xrt_kernel)
+                run.set_arg(0, opcode)
+                run.set_arg(1, insts_bo)
+                run.set_arg(2, insts_len)
+                for j, buffer_arg in enumerate(buffer_args):
+                    run.set_arg(j + 3, op.buffer_bos[buffer_arg])
+                op.xrt_runlist.add(run)
+
         bo_count = sum(len(pool) for pool in bo_pools.values())
         bo_footprint = sum(len(pool) * pool_sz for pool_sz, pool in bo_pools.items())
         logging.info(
-            f"Allocated {bo_count} total buffer objects with a total memory footprint of {bo_footprint} bytes."
+            f"Allocated {bo_count} total buffer objects with a total memory footprint of {bo_footprint//1024//1024} MiB."
+        )
+        logging.info(
+            f"Allocated {len(cls.static_data_pool)} static buffers with a total memory footprint of {sum(len(data) for data in cls.static_data_pool)//1024//1024} MiB."
         )
 
     def __init__(self):
@@ -119,6 +168,7 @@ class AIEOperatorBase(ABC):
         )  # CompilationArtifact objects are globally uniqued, so any overlapping elements of this list will be shared with other operators and will be cached.
         self.kernels = {}  # Name -> (xclbin_path, xclbin_kernel_name, insts_path)
         self.buffers = {}  # Name -> required buffer size in bytes
+        self.buffer_static_data = {}
         self.runlist = (
             []
         )  # List of (kernel_name, buffers_name, buffer_name...), will be executed in sequence
@@ -127,7 +177,8 @@ class AIEOperatorBase(ABC):
         self.buffer_bos = {}  # Buffer name -> buffer object
         self.xrt_kernels = (
             {}
-        )  # Kernel name -> (XRT kernel object, instruction sequence, instruction buffer object, instruction length)
+        )  # Kernel name -> (XRT context, XRT kernel object, instruction buffer object, instruction length)
+        self.xrt_runlist = None
 
         self.registered_operators.append(self)
 
@@ -144,9 +195,21 @@ class AIEOperatorBase(ABC):
         assert name not in self.kernels
         self.kernels[name] = (xclbin_artifact, xclbin_kernel_name, insts_artifact)
 
-    def add_buffer(self, name, count, dtype=bfloat16):
+    def add_buffer(self, name, count, dtype=bfloat16, static_data=None):
         assert name not in self.buffers
         self.buffers[name] = count * np.dtype(dtype).itemsize
+        if static_data is not None:
+            assert (
+                static_data.nbytes <= self.buffers[name]
+            ), f"Static data for buffer {name} exceeds allocated size."
+            static_data_bytes = static_data.flatten().view(np.uint8).tobytes()
+            if static_data_bytes not in self.static_data_pool:
+                self.static_data_pool[static_data_bytes] = None
+            # The actual key in self.static_data_pool may be a different object than static_data_bytes (even if they compare equal).
+            # Since these may be large buffers, we want to reuse a reference to the key rather than recreate the object in self.buffer_static_data.
+            self.buffer_static_data[name] = next(
+                k for k, v in self.static_data_pool.items() if k == static_data_bytes
+            )
 
     def add_to_runlist(self, kernel_name, *args):
         if kernel_name not in self.kernels:
@@ -171,6 +234,8 @@ class AIEOperatorBase(ABC):
 
     def write_buffer(self, buffer_name, numpy_array):
         """Write buffer from a numpy array into a XRT buffer object"""
+        if buffer_name in self.buffer_static_data:
+            raise RuntimeError(f"Cannot write to static buffer: {buffer_name}")
         self.get_bo(buffer_name).write(numpy_array.flatten().view(np.uint8), 0)
 
     @abstractmethod
@@ -198,9 +263,10 @@ class AIEOperatorBase(ABC):
                 self.build_dir, self.peano_dir, self.mlir_aie_dir
             ),
         ]
-        logging.info(
-            f"Compiling AIE operator {self.__class__.__name__} with {len(work_list)} artifacts: {', '.join(str(artifact.path.name) for artifact in work_list)}"
-        )
+        if work_list:
+            logging.info(
+                f"Compiling {len(work_list)} new artifacts for AIE operator {self.__class__.__name__}: {', '.join(str(artifact.path.name) for artifact in work_list)}"
+            )
         comp.compile(compilation_rules, work_list)
 
     def add_artifacts(self, artifacts):
@@ -219,21 +285,20 @@ class AIEOperatorBase(ABC):
             todo.extend(artifact.depends)
 
     def run_runlist(self):
-        for i, (kernel_name, *buffer_args) in enumerate(self.runlist):
-            context, xrt_kernel, insts_bo, insts_len = self.xrt_kernels[kernel_name]
-            insts_bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
-            bos = [self.buffer_bos[buffer_arg] for buffer_arg in buffer_args]
-            for bo in bos:
-                bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
-            opcode = 3
-            run = xrt_kernel(opcode, insts_bo, insts_len, *bos)
-            result = run.wait()
-            if result != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-                raise RuntimeError(
-                    f"Kernel {kernel_name} did not complete correctly: {result}"
-                )
-            for bo in bos:
-                bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+        bos = set(
+            self.buffer_bos[buffer_arg]
+            for _, *buffer_args in self.runlist
+            for buffer_arg in buffer_args
+        )
+        insts_bos = set(
+            self.xrt_kernels[kernel_name][2] for (kernel_name, *_) in self.runlist
+        )
+        for bo in bos | insts_bos:
+            bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+        self.xrt_runlist.execute()
+        self.xrt_runlist.wait()
+        for bo in bos:
+            bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
 
 
 class AIEOperatorConstraintError(RuntimeError):
