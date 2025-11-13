@@ -173,12 +173,13 @@ def main():
 
     for test in sorted(by_test.keys()):
         test_rows = by_test[test]
-        metrics = {
+        metrics = [
             k
             for k in field_order
             if k not in exclude_cols
             and any(try_parse_float(r.get(k)) is not None for r in test_rows)
-        }
+        ]
+        metrics.sort()
         section = build_table_for_test(
             test_name=test,
             rows=test_rows,
