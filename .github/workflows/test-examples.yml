@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   examples-test:
-    runs-on: [self-hosted, chroot]
+    runs-on: [self-hosted, docker]
     permissions:
       contents: write
     steps:
@@ -30,7 +30,7 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Install examples extra requirements
+      - name: Install additional requirements for examples
         shell: bash
         env:
           HOME: /workspace
@@ -39,13 +39,13 @@ jobs:
           source ci_env/bin/activate
           pip install -r requirements_examples.txt
 
-      - name: Build (with TEST_examples=On only to generate llama tests)
+      - name: Build examples
         uses: ./.github/actions/build
         with:
           env_name: ci_env
           cmake_extra_flags: "-DBUILD_EXAMPLES=ON -DBUILD_OPERATORS=OFF"
 
-      - name: Run only examples_3.2_1b test
+      - name: Run examples
         id: test
         continue-on-error: true
         uses: ./.github/actions/test
@@ -53,11 +53,18 @@ jobs:
           env_name: ci_env
           test_flags: "--log tests.log --csv-latest tests_latest.csv"
 
-      - name: Commit examples test results to branch `ci-examples`
+      - name: Commit example test results
         uses: ./.github/actions/commit_results
         with:
-          branch: ci-examples
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md ./tests_latest.csv"
+          dir: examples
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-examples
+          path: ../results/examples/
+          retention-days: 14
 
       - name: Fail workflow if examples failed
         if: steps.test.outcome == 'failure'
