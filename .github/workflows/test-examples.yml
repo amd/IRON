@@ -63,7 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: results-examples
-          path: ../results/examples/
+          path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 14
 
       - name: Fail workflow if examples failed
