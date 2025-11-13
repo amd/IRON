@@ -114,5 +114,5 @@ runs:
         git add ${{ inputs.dir }}/all.csv ${{ inputs.dir }}/latest.csv ${{ inputs.dir }}/readme.md ${{ inputs.dir }}/trends.md
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
+        git commit -m "Add test results testing commit \`${{ steps.merge_results.outputs.commit_sha }}\` at ${{ steps.merge_results.outputs.date }}" || echo "No changes to commit"
         git push origin ${{ inputs.branch }}
