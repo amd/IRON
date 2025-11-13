@@ -61,7 +61,7 @@ set(IRONCLAD_MLIR_AIE_RUNTIME_DIR "${IRONCLAD_MLIR_AIE_DIR}/runtime_lib/x86_64/t
 
 # More Options
 option(BUILD_OPERATORS "Build operators" ON)
-option(BUILD_EXAMPLES "Build example applications" ON)
+option(BUILD_EXAMPLES "Build example applications" OFF)
 option(EXTENSIVE_TESTING "Generate a larger number of operators and tests" OFF)
 
 message(STATUS "IRONCLAD_PEANO_DIR: ${IRONCLAD_PEANO_DIR}")
