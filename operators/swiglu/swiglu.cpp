@@ -90,13 +90,12 @@ int main(int argc, const char *argv[])
         {"W2", dim * dim, KernelBufferInfo::Direction::IN, ref.get<std::bfloat16_t>("W2")->data()},
         {"left", dim, KernelBufferInfo::Direction::OUT, ref.get<std::bfloat16_t>("left")->data()},
         {"right", dim, KernelBufferInfo::Direction::OUT, ref.get<std::bfloat16_t>("right")->data()},
-        {"dummy", 1, KernelBufferInfo::Direction::IN, nullptr},
         {"left_swished", dim, KernelBufferInfo::Direction::OUT, ref.get<std::bfloat16_t>("left_swished")->data()},
         {"result", dim, KernelBufferInfo::Direction::OUT, ref.get<std::bfloat16_t>("result")->data()}};
 
     std::vector<KernelInvocationInfo> runlist = {{"mv", {"W1", "inp", "left"}},
                                                  {"mv", {"W2", "inp", "right"}},
-                                                 {"silu", {"left", "dummy", "left_swished"}},
+                                                 {"silu", {"left", "left_swished"}},
                                                  {"eltwise_mul", {"left_swished", "right", "result"}}};
 
     InvocationPlanInfo plan_info = {.xclbin = xclbin_path, .kernels = kernels, .buffers = buffers, .runlist = runlist};

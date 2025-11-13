@@ -88,10 +88,8 @@ def my_silu(dev, size, num_columns, num_channels, tile_size, trace_size):
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
-    dummy_type = transfer_type  # Define dummy type same as transfer type
-    with rt.sequence(transfer_type, dummy_type, transfer_type) as (
+    with rt.sequence(transfer_type, transfer_type) as (
         a_in,
-        a_dummy,
         b_out,
     ):
         rt.start(*my_workers)

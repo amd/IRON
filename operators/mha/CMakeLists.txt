@@ -69,7 +69,7 @@ set(mlir_target "${build_dir}/aie_${target_suffix}.mlir")
 set(xclbin_target "${build_dir}/mha.xclbin")
 set(insts_target "${build_dir}/mha.bin")
 
-set(kernels_archive "${build_dir}/kernels.a")
+set(kernels_archive "${build_dir}/mha_kernels.a")
 
 ### Kernel compilation ###
 add_aie_kernel(${mm_kernel} SOURCES ${kernels_dir}/mm.cc DEFINES
@@ -133,7 +133,7 @@ add_custom_command(
         COMMENT "Creating kernels archive"
 )
 
-add_custom_target("kernels.a" DEPENDS ${kernels_archive})
+add_custom_target("mha_kernels.a" DEPENDS ${kernels_archive})
 
 add_aie_executable(${currentDesignTarget}
     HOST test.cpp
@@ -146,7 +146,7 @@ add_aie_executable(${currentDesignTarget}
         --num_KV_heads ${num_KV_heads}
         --trace_size 0 ${verbose_string}
         --output-file-path ${build_dir}/${currentDesignTarget}.mlir
-    AIE_CORE_KERNELS "kernels.a"
+    AIE_CORE_KERNELS "mha_kernels.a"
     EXTRA_AIECC_FLAGS --dynamic-objFifos --profile
     OUTPUT_HOST MHA_HOST
     OUTPUT_XCLBIN MHA_XCLBIN
