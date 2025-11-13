@@ -8,8 +8,8 @@ After=network.target
 [Service]
 Type=Simple
 User=ci
-WorkingDirectory=/home/ci/ironclad/ci/docker-based
-ExecStart=/home/ci/ironclad/ci/docker-based/loop_docker_ci.sh
+WorkingDirectory=/home/ci/iron/ci/docker-based
+ExecStart=/home/ci/iron/ci/docker-based/loop_docker_ci.sh
 Restart=on-failure
 
 [Install]
