@@ -4,45 +4,23 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: write
 
 jobs:
   upload_results:
     runs-on: ubuntu-latest
 
     steps:
-      - name: test
-        env:
-          PAT: ${{ secrets.IRON_CI_PUSH_PAT }}
-        run: |
-          echo ${{ secrets.IRON_CI_PUSH_PAT }}
-          if [ -z "$PAT" ]; then
-            echo "PAT is empty"
-            exit 1
-          else
-            echo "PAT is set and non-empty"
-          fi
-          if [ -z "${{ secrets.IRON_CI_PUSH_PAT }}" ]; then
-            echo "PAT is empty"
-            exit 1
-          else
-            echo "PAT is set and non-empty"
-          fi
-
       - name: Obtain existing results
         uses: actions/checkout@v4
-        with:
-          repository: andrej/iron-ci
-          token: ${{ secrets.IRON_CI_PUSH_PAT }}
-          path: results-repo
 
       - name: Commit back results
         #if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
-          cd results-repo
-          touch all.csv
-          git add -f all.csv 
+          touch test
+          git add -f test
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "test" || echo "No changes to commit"
-          git push -u origin ${{ inputs.branch }}
-          RESULTS_COMMIT=$(git -C ../results rev-parse HEAD)
+          git push -u origin hallihallo
