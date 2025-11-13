@@ -121,7 +121,6 @@ int main(int argc, const char *argv[])
 
     auto bo_instr = xrt::bo(device, instr_v.size() * sizeof(int), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
     auto bo_inA = xrt::bo(device, N * sizeof(std::bfloat16_t), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
-    auto bo_dummy = xrt::bo(device, 1 * sizeof(int), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
     auto bo_out = xrt::bo(device, N * sizeof(std::bfloat16_t), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
 
     if (verbosity >= 1)
@@ -135,17 +134,16 @@ int main(int argc, const char *argv[])
 
     bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     bo_inA.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-    bo_dummy.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
     if (verbosity >= 1)
         std::cout << "Running Kernel." << std::endl;
     unsigned int opcode = 3;
     // Setup run to configure
-    auto cfg_run = kernel(opcode, bo_instr, instr_v.size(), bo_inA, bo_dummy, bo_out);
+    auto cfg_run = kernel(opcode, bo_instr, instr_v.size(), bo_inA, bo_out);
     cfg_run.wait();
     auto start = std::chrono::high_resolution_clock::now();
     // Test run
-    auto run = kernel(opcode, bo_instr, instr_v.size(), bo_inA, bo_dummy, bo_out);
+    auto run = kernel(opcode, bo_instr, instr_v.size(), bo_inA, bo_out);
     ert_cmd_state r = run.wait();
     auto stop = std::chrono::high_resolution_clock::now();
     if (r != ERT_CMD_STATE_COMPLETED) {

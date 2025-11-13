@@ -80,7 +80,7 @@ def main():
 
     args = argparser.parse_args()
 
-    maybe_module = batched_matmul_single_core(
+    maybe_module = fused_mha(
         heads=args.heads,
         S_q=args.S_q,
         S_kv=args.S_kv,
@@ -103,7 +103,7 @@ def main():
         print(f"MLIR module written to {output_file_path}")
 
 
-def batched_matmul_single_core(
+def fused_mha(
     heads: int,
     S_q: int,
     S_kv: int,
@@ -199,7 +199,7 @@ def batched_matmul_single_core(
 
     # AIE kernel declarations
     func_type = "" if vectorized else "_scalar"
-    bin_name = "kernels.a"
+    bin_name = "mha_kernels.a"
 
     zero_kernel = Kernel(f"zero_{dtype_str}", bin_name, [qk_ty])
 

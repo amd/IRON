@@ -64,10 +64,9 @@ int main(int argc, const char *argv[])
         std::cout << "Sequence instr count: " << instr_v.size() << std::endl;
 
     int N = vm["length"].as<int>();
-    if ((N % 1024)) {
-        std::cerr << "Length must be a multiple of 1024." << std::endl;
-        return 1;
-    }
+    // Extend the buffer by a small amount to check whether the NPU writes
+    // outside of the actual buffer used during execution
+    const int PAD_VERIF_SZ = 2;
 
     // Start the XRT test code
     // Get a device handle
@@ -81,16 +80,7 @@ int main(int argc, const char *argv[])
 
     if (verbosity >= 1)
         std::cout << "Kernel opcode: " << vm["kernel"].as<std::string>() << std::endl;
-    std::string Node = vm["kernel"].as<std::string>();
-
-    // Get the kernel from the xclbin
-    auto xkernels = xclbin.get_kernels();
-    auto xkernel = *std::find_if(xkernels.begin(), xkernels.end(), [Node](xrt::xclbin::kernel &k) {
-        auto name = k.get_name();
-        std::cout << "Name: " << name << std::endl;
-        return name.rfind(Node, 0) == 0;
-    });
-    auto kernelName = xkernel.get_name();
+    std::string kernelName = vm["kernel"].as<std::string>();
 
     if (verbosity >= 1)
         std::cout << "Registering xclbin: " << vm["xclbin"].as<std::string>() << "\n";
@@ -109,7 +99,11 @@ int main(int argc, const char *argv[])
 
     auto bo_instr = xrt::bo(device, instr_v.size() * sizeof(int), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
     auto bo_inA = xrt::bo(device, N * sizeof(std::bfloat16_t), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
-    auto bo_out = xrt::bo(device, N * sizeof(std::bfloat16_t), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
+    // For the output buffer, insert an addition 2 elements at the end to check
+    // later whether those elements stay 0. If not, then the NPU is writing to
+    // a part of main memory it shouldn't be.
+    auto bo_out =
+        xrt::bo(device, (N + PAD_VERIF_SZ) * sizeof(std::bfloat16_t), XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
 
     if (verbosity >= 1)
         std::cout << "Writing data into buffer objects." << std::endl;
@@ -120,8 +114,13 @@ int main(int argc, const char *argv[])
     void *bufInstr = bo_instr.map<void *>();
     memcpy(bufInstr, instr_v.data(), instr_v.size() * sizeof(int));
 
+    // Initialize outputs to 0
+    std::bfloat16_t *bufOut = bo_out.map<std::bfloat16_t *>();
+    memset(bufOut, 0, (N + PAD_VERIF_SZ) * sizeof(std::bfloat16_t));
+
     bo_instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     bo_inA.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+    bo_out.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
     if (verbosity >= 1)
         std::cout << "Running Kernel." << std::endl;
@@ -149,8 +148,6 @@ int main(int argc, const char *argv[])
     double bandwidth_GBps = (total_bytes / (1024 * 1024 * 1024)) / (npu_time * 1e-6);
     std::cout << "Effective Bandwidth: " << bandwidth_GBps << " GB/s" << std::endl;
 
-    std::bfloat16_t *bufOut = bo_out.map<std::bfloat16_t *>();
-
     int errors = 0;
     auto ref_B = ref.get<std::bfloat16_t>("B");
 
@@ -159,7 +156,19 @@ int main(int argc, const char *argv[])
         // if (i < 10){
         //   std::cout << "Index " << i << ": Computed=" << *(bufOut + i) << ", Reference=" << ref_val << std::endl;
         // }
-        if (!test_utils::nearly_equal(*(bufOut + i), ref_val, 0.04, 1e-6)) {
+        if (!test_utils::nearly_equal(*(bufOut + i), ref_val, 0.001, 1e-6)) {
+            errors++;
+            // Print the first 100 mismatches
+            if (errors <= 100) {
+                std::cout << "Mismatch at index " << i << ": " << "Expected: " << ref_val << ", "
+                          << "Got: " << *(bufOut + i) << std::endl;
+            }
+        }
+    }
+
+    for (int i = 0; i < PAD_VERIF_SZ; i++) {
+        std::bfloat16_t ref_val = 0;
+        if (!test_utils::nearly_equal(*(bufOut + N + i), ref_val, 0.001, 1e-6)) {
             errors++;
             // Print the first 100 mismatches
             if (errors <= 100) {

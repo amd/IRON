@@ -87,8 +87,7 @@ def softmax(dev, num_elements, num_columns, num_channels, trace_size, tile_size)
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
-    dummy_ty = tensor_ty
-    with rt.sequence(tensor_ty, dummy_ty, tensor_ty) as (A, dummy, C):
+    with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
