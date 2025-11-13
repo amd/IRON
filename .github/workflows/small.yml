@@ -53,8 +53,9 @@ jobs:
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.commit_results.outputs.results_dir }}
-          retention-days: 14
+          name: results-small
+          path: ${{ steps.commit_results.outputs.results_dir }}
+          retention-days: 7
 
       - name: Mark workflow as failed if tests failed
         if: steps.test.outcome == 'failure'
