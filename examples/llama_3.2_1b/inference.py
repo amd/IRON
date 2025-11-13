@@ -30,6 +30,99 @@ from src.utils import (
 )
 
 
+# Global dictionary to track function call times
+_function_call_stack = []
+_profile_logger = None
+
+
+def profile_function_calls(frame, event, arg):
+    """
+    Profile function that logs start and end times of every function call.
+
+    Args:
+        frame: The current stack frame
+        event: The event type ('call', 'return', 'c_call', 'c_return', 'c_exception')
+        arg: Event-specific argument
+    """
+    global _profile_logger
+
+    if _profile_logger is None:
+        return
+
+    func_name = frame.f_code.co_name
+    filename = frame.f_code.co_filename
+    line_no = frame.f_lineno
+
+    # Create a readable function identifier
+    func_identifier = f"{filename}:{func_name}:{line_no}"
+
+    if event == "call":
+        # Function is being called
+        timestamp = time.perf_counter()
+        _function_call_stack.append({"name": func_identifier, "start_time": timestamp})
+        _profile_logger.debug(f"[CALL] {func_identifier} started at {timestamp:.9f}")
+
+    elif event == "return":
+        # Function is returning
+        timestamp = time.perf_counter()
+        if _function_call_stack:
+            call_info = _function_call_stack.pop()
+            duration = timestamp - call_info["start_time"]
+            _profile_logger.debug(
+                f"[RETURN] {call_info['name']} ended at {timestamp:.9f} "
+                f"(duration: {duration:.9f}s)"
+            )
+        else:
+            _profile_logger.debug(
+                f"[RETURN] {func_identifier} ended at {timestamp:.9f}"
+            )
+
+    return profile_function_calls
+
+
+def enable_profiling(logs_dir_name):
+    """Enable function call profiling using sys.setprofile."""
+    global _profile_logger
+
+    # Create a dedicated logger for profiling
+    _profile_logger = logging.getLogger("function_profiler")
+    _profile_logger.setLevel(logging.DEBUG)
+    # Prevent propagation to root logger to avoid console output
+    _profile_logger.propagate = False
+
+    # Create log file for profiling data
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        logs_dir_name,
+        f"profile_{timestamp}.log",
+    )
+
+    # Add file handler for profiling (only file, no console output)
+    profile_handler = logging.FileHandler(log_path)
+    profile_handler.setLevel(logging.DEBUG)
+    profile_formatter = logging.Formatter("%(asctime)s - %(message)s")
+    profile_handler.setFormatter(profile_formatter)
+    _profile_logger.addHandler(profile_handler)
+
+    # Set the profile function
+    sys.setprofile(profile_function_calls)
+    _profile_logger.info("Function profiling enabled")
+
+
+def disable_profiling():
+    """Disable function call profiling."""
+    global _profile_logger
+
+    sys.setprofile(None)
+    if _profile_logger:
+        _profile_logger.info("Function profiling disabled")
+        # Close all handlers
+        for handler in _profile_logger.handlers[:]:
+            handler.close()
+            _profile_logger.removeHandler(handler)
+
+
 _iron_chat = r"""
            _____ _____   ____  _   _     _____ _           _            
           |_   _|  __ \ / __ \| \ | |   / ____| |         | |           
@@ -48,8 +141,14 @@ _iron_chat = r"""
 
 def setup_logging(verbosity):
     """Set up logging based on verbosity level."""
+
+    # Ensure the logs directory is created in case of profiling
+    logs_dir_name = "logs"
+    if not os.path.exists(logs_dir_name):
+        os.makedirs(logs_dir_name)
+
     if verbosity == 0:
-        return
+        return logs_dir_name
 
     levels = {
         4: logging.DEBUG,
@@ -58,11 +157,13 @@ def setup_logging(verbosity):
         # 1: log everything (DEBUG) to a file
     }
 
-    # Create log file
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
+    # Create log file for profiling data
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = f"logs/inference_{timestamp}.log"
+    log_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        logs_dir_name,
+        f"inference_{timestamp}.log",
+    )
 
     handlers = [logging.FileHandler(log_file)]
     if verbosity > 0:
@@ -76,6 +177,8 @@ def setup_logging(verbosity):
         handlers=handlers,
         force=True,  # Override any existing configuration
     )
+
+    return logs_dir_name
 
 
 def save_layer_data(module, input, output, name, input_data_path, output_data_path):
@@ -296,27 +399,41 @@ if __name__ == "__main__":
         default=0,
         help="Increase verbosity level (use -v (logs to file), -vv, -vvv, or -vvvv)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Use a custom profiler for performance measurements",
+    )
     args = parser.parse_args()
 
     # Set up logging
-    setup_logging(args.v)
+    logs_dir_name = setup_logging(args.v)
 
-    prompt = args.prompt
-    if not prompt:
-        # Default prompt is text from Shakespeare's King Lear: https://shakespeare.mit.edu/lear/lear.1.1.html
-        prompt_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "prompt.txt"
+    # Enable function profiling
+    if args.profile:
+        enable_profiling(logs_dir_name)
+
+    try:
+        prompt = args.prompt
+        if not prompt:
+            # Default prompt is text from Shakespeare's King Lear: https://shakespeare.mit.edu/lear/lear.1.1.html
+            prompt_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "prompt.txt"
+            )
+            with open(prompt_path, "r", encoding="utf-8") as file:
+                prompt = file.read().strip()
+
+        inference(
+            args.weights_file_path,
+            args.tokenizer_file_path,
+            args.num_tokens,
+            prompt,
+            args.use_prompt_template,
+            args.save_outputs,
+            args.chat,
+            args.prompt_len,
         )
-        with open(prompt_path, "r", encoding="utf-8") as file:
-            prompt = file.read().strip()
-
-    inference(
-        args.weights_file_path,
-        args.tokenizer_file_path,
-        args.num_tokens,
-        prompt,
-        args.use_prompt_template,
-        args.save_outputs,
-        args.chat,
-        args.prompt_len,
-    )
+    finally:
+        if args.profile:
+            # Disable profiling when done
+            disable_profiling()
