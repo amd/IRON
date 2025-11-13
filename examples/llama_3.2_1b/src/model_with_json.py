@@ -114,22 +114,37 @@ class Llama3ModelWithJSONConfig(nn.Module):
             ]
         )
 
+        self.final_norm = nn.RMSNorm(
+            self.cfg["emb_dim"], eps=1e-5, dtype=self.cfg["dtype"]
+        )
         # Create final norm - either AIE or PyTorch
         if self.cfg.get("use_aie_final_norm", False):
             from src.operator.aie_rms_norm import AIERMSNorm
 
-            self.final_norm = AIERMSNorm(
-                emb_dim=self.cfg["emb_dim"],
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.cfg["emb_dim"]
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.cfg["emb_dim"]
+            self.aie_final_norm_prefill = AIERMSNorm(
+                size=max_prefill_size,
                 eps=1e-5,
                 num_columns=8,
                 num_channels=2,
                 tile_size=self.cfg["emb_dim"],
             )
-            # TODO: Add logging
-        else:
-            self.final_norm = nn.RMSNorm(
-                self.cfg["emb_dim"], eps=1e-5, dtype=self.cfg["dtype"]
-            )
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.cfg["emb_dim"]  # 1 token * emb_dim
+                self.aie_final_norm_decode = AIERMSNorm(
+                    size=decode_size,
+                    eps=1e-5,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.cfg["emb_dim"],
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_final_norm_decode = self.aie_final_norm_prefill
 
         # Depedns on use_aie_final_gemm
         self.out_head = nn.Linear(
@@ -172,8 +187,22 @@ class Llama3ModelWithJSONConfig(nn.Module):
         for block in self.trf_blocks:
             x = block(x, mask, self.angles, input_pos)
 
+        # (batch, sequence, embedding) where sequence=1 indicates decode
+        if len(x.shape) == 3:
+            is_decode_with_kv = (x.shape[1] == 1) and self.cfg.get(
+                "use_kv_cache", False
+            )
+        elif len(x.shape) == 2:
+            is_decode_with_kv = (x.shape[0] == 1) and self.cfg.get(
+                "use_kv_cache", False
+            )
+        else:
+            is_decode_with_kv = False
         if self.cfg.get("use_aie_final_norm", False):
-            x = self.final_norm(x, self.final_norm.weight)
+            if is_decode_with_kv:
+                x = self.aie_final_norm_decode(x, self.final_norm.weight)
+            else:
+                x = self.aie_final_norm_prefill(x, self.final_norm.weight)
         else:
             x = self.final_norm(x)
 
