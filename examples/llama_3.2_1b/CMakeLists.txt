@@ -7,8 +7,6 @@ add_aie_ci_test(llama_3.2_1b
                 CHECK
                     "PASS!"
                 METRICS 
-                    "Latency" [=[Latency \(us\): (?P<metric>\d+)]=]
-                    "Bandwidth" [=[Effective Bandwidth: (?P<metric>[\d\.e\+-]+) GB/s]=]
                     "Total" [=[  Total time: (?P<metric>[\d\.e\+-]+) seconds]=]
                     "TTFT" [=[  Prefill time: (?P<metric>[\d\.e\+-]+) seconds]=]
                     "TPS" [=[  Tokens per second: (?P<metric>[\d\.e\+-]+)]=]
