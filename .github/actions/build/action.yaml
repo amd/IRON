@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: "Build IRONCLAD (assumes prerequisites installed)"
+name: "Build IRON"
 
 inputs:
   rebuild_flags:
