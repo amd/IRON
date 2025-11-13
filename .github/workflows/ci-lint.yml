@@ -28,6 +28,7 @@ jobs:
         if: success() || failure()
         shell: bash
         run: |
+          reuse download --all
           reuse lint
 
       - name: Format Python
