@@ -12,33 +12,27 @@ To download the necessary files for the model, please follow the links below:
 - **Model File**: [model.safetensors](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
 - **Tokenizer File**: [tokenizer.model](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
 
-Make sure to place these files in the appropriate directory for your project.
+The CI tests expect these files to be placed in the directory `/srv/llama3.2-1b`;
+when calling `inference.py`, you will supply the paths to those two files on the command line, so you can place them anywhere.
 
 ## Installation Instructions
 
 Before running `inference.py`, ensure you have the proper environment. To build the environment from scratch, follow the instructions below:
 
-1. Create and activate a Python virtual environment:
-     ```bash
-     python3 -m venv ironenv
-     source ironenv/bin/activate
-     python3 -m pip install --upgrade pip
-     ```
+1. Follow the IRON installation instructions in the repository root fist.
+   After this, you should have an `ironenv` environment set up and activated.
 
-2. Install prerequisites:
-     ```bash
-     MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3" HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie" python3 -m pip install -r requirements.txt
-     python3 -m pip install -r requirements_examples.txt
-     ```
-
-You can skip passing the `--env` option if you named your virtual environment `ironenv`.
+2. Install the following additional requirements:
+   ```
+   python3 -m pip install -r requirements_examples.txt
+   ```
 
 ## Running Inference
 
 Inference with Llama-3.2-1B can be run by specifying a number of tokens to generate based on a prompt. This is done with `inference.py`:  
 ```bash  
 cd golden_model
-python inference.py model.safetensors tokenizer.model --num_tokens <NUM_TOKENS> --prompt <PROMPT>
+python inference.py /path/to/model.safetensors /path/to/tokenizer.model --num_tokens <NUM_TOKENS> --prompt <PROMPT>
 ```
 
 `inference.py` has the following command format:  
