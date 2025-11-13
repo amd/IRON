@@ -44,19 +44,19 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Commit test results to branch `ci-extensive`
+      - name: Commit test results
         env:
           HOME: /workspace
         uses: ./.github/actions/commit_results
         with:
-          branch: ci-extensive
+          dir: extensive
 
-      - name: Upload test logs
+      - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: tests-log
-          path: tests.log
-          retention-days: 7
+          name: results-extensive
+          path: ../results/extensive/
+          retention-days: 14
 
       - name: Mark workflow as failed if tests failed
         if: steps.test.outcome == 'failure'

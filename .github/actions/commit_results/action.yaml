@@ -6,17 +6,21 @@ name: "Commit Test Results to a Branch"
 inputs:
   pretty_flags:
     required: false
-    default: "--metric='Latency (mean)' --metric='Bandwidth (mean)' --metric='GFLOP/s (mean)' -o pretty.md ./tests_latest.csv"
+    default: "--metric='Latency (mean)' --metric='Bandwidth (mean)' --metric='GFLOP/s (mean)' -o pretty.md"
+  input_csv:
+    required: false
+    default: "tests_latest.csv"
   branch:
     required: false
     default: "ci"
+  dir:
+    required: true
 
 runs:
   using: "composite"
   steps:
-    - name: Commit Test Results to a Branch (Main branch pushes)
-      id: commit_main
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    - name: Format results and receive previous results from branch
+      id: merge_results
       env:
         HOME: /workspace
       shell: bash
@@ -24,83 +28,38 @@ runs:
         export DATE=$(printf '%(%Y_%m_%d_%H_%M_%S)T')
         export COMMIT_SHA=$(git rev-parse --short HEAD)
 
-        ./ci/scripts/pretty.py --date=${DATE} --commit=${COMMIT_SHA} ${{ inputs.pretty_flags }}
+        ./ci/scripts/pretty.py --date=${DATE} --commit=${COMMIT_SHA} ${{ inputs.pretty_flags }} ${{ inputs.input_csv }}
 
-        # Ensure remote branch exists; if not, create it from HEAD, then fetch it locally
-        if [ -z "$(git ls-remote --heads origin "${{ inputs.branch }}")" ]; then
-          git push origin HEAD:refs/heads/${{ inputs.branch }}
-        fi
         git fetch origin ${{ inputs.branch }}:${{ inputs.branch }}
         git worktree add ../results ${{ inputs.branch }}
-        cp tests_latest.csv ../results/latest.csv
-        cp pretty.md ../results/readme.md
 
-        touch ../results/all.csv
-        ./ci/scripts/merge_all.py --all ../results/all.csv --latest ../results/latest.csv
-        ./ci/scripts/pretty_trends.py ../results/all.csv -o ../results/trends.md
+        mkdir -p ../results/${{ inputs.dir }}
+        cp ${{ inputs.input_csv }} ../results/${{ inputs.dir }}/latest.csv
+        cp pretty.md ../results/${{ inputs.dir }}/readme.md
+        touch ../results/${{ inputs.dir }}/all.csv
 
-        cd ../results
-        git add -f all.csv latest.csv readme.md trends.md
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
-        git push origin ${{ inputs.branch }}
-        RESULTS_COMMIT=$(git -C ../results rev-parse HEAD)
-        echo "results_commit=$RESULTS_COMMIT" >> "$GITHUB_OUTPUT"
-        echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+        ./ci/scripts/merge_all.py --all ../results/${{ inputs.dir }}/all.csv --latest ../results/${{ inputs.dir }}/latest.csv
+        ./ci/scripts/pretty_trends.py ../results/${{ inputs.dir }}/all.csv -o ../results/${{ inputs.dir }}/trends.md
 
-    - name: Generate Test Results for PR Comment
-      id: commit_pr
-      if: ${{ startsWith(github.event_name, 'pull_request') }}
-      env:
-        HOME: /workspace
-      shell: bash
-      run: |
-        export DATE=$(printf '%(%Y_%m_%d_%H_%M_%S)T')
-        export COMMIT_SHA=$(git rev-parse --short HEAD)
-
-        ./ci/scripts/pretty.py --date=${DATE} --commit=${COMMIT_SHA} ${{ inputs.pretty_flags }}
-
-        # For PR runs, we don't commit all.csv, but we fetch the main branch all.csv for trends comparison
-        # Ensure remote branch exists and fetch it
-        if [ -z "$(git ls-remote --heads origin "${{ inputs.branch }}")" ]; then
-          echo "Results branch ${{ inputs.branch }} does not exist. Creating empty trends.md"
-          echo "No baseline data available for comparison." > trends.md
-        else
-          git fetch origin ${{ inputs.branch }}:${{ inputs.branch }}
-          git worktree add ../results ${{ inputs.branch }}
-          
-          # Copy the main branch all.csv as baseline for comparison
-          if [ -f "../results/all.csv" ]; then
-            cp ../results/all.csv ./main_all.csv
-            # Merge current test results with main branch baseline for trends
-            ./ci/scripts/merge_all.py --all ./main_all.csv --limit 2 --latest ./tests_latest.csv
-            ./ci/scripts/pretty_trends.py ./main_all.csv -o ./trends.md
-          else
-            echo "No baseline data available for comparison." > trends.md
-          fi
-        fi
-
-        # Store outputs for PR comment
-        echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
-        echo "date=$DATE" >> "$GITHUB_OUTPUT"
+        echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+        echo "date=${DATE}" >> $GITHUB_OUTPUT
 
     - name: Comment results on PR
       if: ${{ startsWith(github.event_name, 'pull_request') }}
+      continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
       uses: actions/github-script@v7
       with:
         github-token: ${{ github.token }}
         script: |
           const fs = require('fs');
-          const commitSha = '${{ steps.commit_pr.outputs.commit_sha }}';
-          const date = '${{ steps.commit_pr.outputs.date }}';
+          const commitSha = '${{ steps.merge_results.outputs.commit_sha }}';
+          const date = '${{ steps.merge_results.outputs.date }}';
           const server = '${{ github.server_url }}';
           const repo = '${{ github.repository }}';
           
-          // Read the pretty.md content
           let prettyContent = '';
           try {
-            prettyContent = fs.readFileSync('pretty.md', 'utf8');
+            prettyContent = fs.readFileSync(`../results/${{ inputs.dir }}/readme.md`, 'utf8');
           } catch (error) {
             prettyContent = 'Pretty output not available.';
           }
@@ -108,7 +67,7 @@ runs:
           // Read the trends.md content
           let trendsContent = '';
           try {
-            trendsContent = fs.readFileSync('trends.md', 'utf8');
+            trendsContent = fs.readFileSync(`../results/${{ inputs.dir }}/trends.md`, 'utf8');
           } catch (error) {
             trendsContent = 'Trends not available.';
           }
@@ -116,9 +75,7 @@ runs:
           const body = `<details>
           <summary>📊 Test Results for ${process.env.GITHUB_WORKFLOW}</summary>
 
-          **Source commit:** [${commitSha}](${server}/${repo}/commit/${commitSha})
-
-          **Test date:** ${date}
+          [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
           
           ${prettyContent}
           
@@ -127,9 +84,7 @@ runs:
           <details>
           <summary>📈 Trends (vs main branch) for ${process.env.GITHUB_WORKFLOW}</summary>
 
-          **Source commit:** [${commitSha}](${server}/${repo}/commit/${commitSha})
-
-          **Test date:** ${date}
+          [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
 
           ${trendsContent}
           
@@ -141,3 +96,15 @@ runs:
             repo: context.repo.repo,
             body: body
           });
+
+    - name: Push new test results to branch
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
+      shell: bash
+      run: |
+        cd ../results
+        git add ${{ inputs.dir }}/all.csv ${{ inputs.dir }}/latest.csv ${{ inputs.dir }}/readme.md ${{ inputs.dir }}/trends.md
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -m "Add test results testing commit \`${COMMIT_SHA}\` at ${DATE}" || echo "No changes to commit"
+        git push origin ${{ inputs.branch }}
