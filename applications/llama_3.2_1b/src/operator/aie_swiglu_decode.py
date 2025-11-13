@@ -38,10 +38,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         # ---
         artifacts = []
         device_str = self.device_manager.device_str()
-        gemv_config = {
-            "num_columns": 1,
-            "tile_size": 1
-        }
+        gemv_config = {"num_columns": 1, "tile_size": 1}
 
         gemv_1_xclbin, gemv_1_insts = get_gemv_artifacts(
             self.base_dir,
@@ -168,7 +165,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.run_runlist()
         result = self.read_buffer_as_torch(
             "output",
-            (self.embedding_dim, ),
+            (self.embedding_dim,),
         ).view_as(x)
 
         return result
