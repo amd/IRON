@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+tiktoken
+safetensors
+blobfile
+packaging
+torchtune==0.6.1
+torchao==0.13.0
