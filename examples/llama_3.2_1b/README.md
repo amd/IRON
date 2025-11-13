@@ -27,9 +27,8 @@ Before running `inference.py`, ensure you have the proper environment. To build 
 
 2. Install prerequisites:
      ```bash
-     source ./scripts/install_prereqs.sh --env <name of your virtual env>
-     source ./script/env_setup.sh --env <name of your virtual env>
-     python3 -m pip install -r requirements_llama.txt
+     MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3" HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie" python3 -m pip install -r requirements.txt
+     python3 -m pip install -r requirements_examples.txt
      ```
 
 You can skip passing the `--env` option if you named your virtual environment `ironenv`.
