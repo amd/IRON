@@ -166,15 +166,15 @@ class GroupedQueryAttention(nn.Module):
             x_flat = x.reshape(1, -1)  # Shape: (1, d_in)
             input_dtype = x.dtype
 
-            queries_flat = self.aie_query_gemv(None, x_flat)
+            queries_flat = self.aie_query_gemv(x_flat)
             queries = queries_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
 
-            keys_flat = self.aie_key_gemv(None, x_flat)
+            keys_flat = self.aie_key_gemv(x_flat)
             keys = keys_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
 
-            values_flat = self.aie_value_gemv(None, x_flat)
+            values_flat = self.aie_value_gemv(x_flat)
             values = values_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
@@ -384,7 +384,7 @@ class GroupedQueryAttention(nn.Module):
         # Choose output projection based on phase
         if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gemv"]:
             context_vec_flat = context_vec.reshape(1, -1)
-            output_flat = self.aie_out_proj_gemv(None, context_vec_flat)
+            output_flat = self.aie_out_proj_gemv(context_vec_flat)
             context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
         elif self.cfg["use_aie_attn_projection_gemm"]:
             context_vec_flat = context_vec.reshape(-1, self.d_out)

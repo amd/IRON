@@ -25,10 +25,6 @@ class FeedForward(nn.Module):
         super().__init__()
         self.cfg = cfg.copy()
 
-        assert cfg["use_aie_ffn_swiglu"] != (
-            cfg["use_aie_ffn_silu"] or cfg["use_aie_ffn_gemm"] or cfg["use_aie_ffn_mul"]
-        ), "Cannot mix fused SwiGLU with individual AIE operators."
-
         self.emb_dim = cfg["emb_dim"]
         self.hidden_dim = cfg["hidden_dim"]
 
@@ -106,8 +102,8 @@ class FeedForward(nn.Module):
         is_prefill = not is_vector or not self.cfg["use_kv_cache"]
 
         if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            x_fc1 = self.aie_fc1_gemv(None, x)
-            x_fc2 = self.aie_fc2_gemv(None, x)
+            x_fc1 = self.aie_fc1_gemv(x)
+            x_fc2 = self.aie_fc2_gemv(x)
         else:
             x_fc1 = self.fc1(x)
             x_fc2 = self.fc2(x)
@@ -120,7 +116,7 @@ class FeedForward(nn.Module):
             x = x_fc1_silu * x_fc2
 
         if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            result = self.aie_fc3_gemv(None, x)
+            result = self.aie_fc3_gemv(x)
             return result.view(original_shape)
         else:
             return self.fc3(x).view(original_shape)
