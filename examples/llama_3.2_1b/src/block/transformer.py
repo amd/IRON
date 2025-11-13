@@ -37,31 +37,64 @@ class TransformerBlock(nn.Module):
             num_tokens=num_tokens,
         )
 
+        self.norm1 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
+        self.norm2 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
+
         if self.cfg["use_aie_norm1"]:
             from src.operator.aie_rms_norm import AIERMSNorm
 
-            self.norm1 = AIERMSNorm(
-                emb_dim=cfg["emb_dim"],
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.cfg["emb_dim"]
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.cfg["emb_dim"]
+            self.aie_norm1_prefill = AIERMSNorm(
+                size=max_prefill_size,
                 eps=1e-5,
                 num_columns=8,
                 num_channels=2,
-                tile_size=cfg["emb_dim"],
+                tile_size=self.cfg["emb_dim"],
             )
-        else:
-            self.norm1 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.cfg["emb_dim"]  # 1 token * emb_dim
+                self.aie_norm1_decode = AIERMSNorm(
+                    size=decode_size,
+                    eps=1e-5,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.cfg["emb_dim"],
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_norm1_decode = self.aie_norm1_prefill
 
         if self.cfg["use_aie_norm2"]:
             from src.operator.aie_rms_norm import AIERMSNorm
 
-            self.norm2 = AIERMSNorm(
-                emb_dim=cfg["emb_dim"],
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.cfg["emb_dim"]
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.cfg["emb_dim"]
+            self.aie_norm2_prefill = AIERMSNorm(
+                size=max_prefill_size,
                 eps=1e-5,
                 num_columns=8,
                 num_channels=2,
-                tile_size=cfg["emb_dim"],
+                tile_size=self.cfg["emb_dim"],
             )
-        else:
-            self.norm2 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.cfg["emb_dim"]  # 1 token * emb_dim
+                self.aie_norm2_decode = AIERMSNorm(
+                    size=decode_size,
+                    eps=1e-5,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.cfg["emb_dim"],
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_norm2_decode = self.aie_norm2_prefill
 
         if self.cfg["use_aie_residual"]:
             from src.operator.aie_elementwise_add import AIEElementwiseAdd
@@ -104,7 +137,10 @@ class TransformerBlock(nn.Module):
 
         shortcut = x
         if self.cfg["use_aie_norm1"]:
-            x = self.norm1(x, self.norm1.weight)
+            if is_decode_with_kv:
+                x = self.aie_norm1_decode(x, self.norm1.weight)
+            else:
+                x = self.aie_norm1_prefill(x, self.norm1.weight)
         else:
             x = self.norm1(x)
 
@@ -121,7 +157,10 @@ class TransformerBlock(nn.Module):
         # Shortcut connection for feed-forward block
         shortcut = x
         if self.cfg["use_aie_norm2"]:
-            x = self.norm2(x, self.norm2.weight)
+            if is_decode_with_kv:
+                x = self.aie_norm2_decode(x, self.norm2.weight)
+            else:
+                x = self.aie_norm2_prefill(x, self.norm2.weight)
         else:
             x = self.norm2(x)
 

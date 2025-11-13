@@ -39,7 +39,7 @@ function(add_aie_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE
     )
 endfunction()
 
-function(add_aie_weighted_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
+function(add_aie_weighted_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE ARCHIVE_NAME)
     set(OPERATOR "weighted_rms_norm_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_weights_${TILE_SIZE}")
         set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/operators/rms_norm/golden_${OPERATOR}")
 
@@ -50,7 +50,7 @@ function(add_aie_weighted_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS 
         HOST_FLAGS DTYPE_IN=${INPUT_DATA_TYPE_CPP} DTYPE_OUT=${OUTPUT_DATA_TYPE_CPP} TILE_SIZE=${TILE_SIZE}
         PYTHON weighted_rms_norm.py
         PYTHON_FLAGS --dev ${DEVICE} -l ${INPUT_LENGTH} --co ${NUM_COLUMNS} --chan ${NUM_CHANNELS} -ts ${TRACE_SIZE} -wl ${TILE_SIZE} --output-file-path ${CMAKE_BINARY_DIR}/aie/${OPERATOR}.mlir
-        AIE_CORE_KERNELS "rms_norm.o"
+        AIE_CORE_KERNELS ${ARCHIVE_NAME}
         OUTPUT_HOST WEIGHTED_RMS_NORM_HOST
         OUTPUT_XCLBIN WEIGHTED_RMS_NORM_XCLBIN
         OUTPUT_INSTS WEIGHTED_RMS_NORM_INSTS
@@ -84,6 +84,20 @@ if(EXTENSIVE_TESTING)
     list(APPEND INPUT_LENGTHS 8192)
 endif()
 
+add_aie_kernel("rms_norm" SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/aie2p/rms_norm.cc OUTPUT_OBJECT RMS_NORM_OBJ)
+add_aie_kernel("mul" SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/generic/mul.cc OUTPUT_OBJECT MUL_OBJ)
+
+set(KERNEL_OBJ_LIST
+    ${RMS_NORM_OBJ}
+    ${MUL_OBJ}
+)
+
+set(ARCHIVE_NAME "rms_norm_archive.a")
+add_aie_archive(${ARCHIVE_NAME}
+    OBJECT_FILES ${KERNEL_OBJ_LIST}
+    OUTPUT_OBJECT ${ARCHIVE_PATH}
+)
+
 foreach(INPUT_LENGTH IN LISTS INPUT_LENGTHS)
     # Normal RMS norm: 1 input, channels can be 1 or 2
     foreach(NUM_COLUMNS RANGE 1 ${MAX_COLUMNS})
@@ -114,7 +128,7 @@ foreach(INPUT_LENGTH IN LISTS INPUT_LENGTHS)
         # Only proceed if TILE_SIZE * NUM_COLUMNS == INPUT_LENGTH (i.e., division is exact)
         math(EXPR CHECK_LENGTH "${TILE_SIZE} * ${NUM_COLUMNS}")
         if(CHECK_LENGTH EQUAL ${INPUT_LENGTH})
-            add_aie_weighted_rms_norm_design(${INPUT_LENGTH} ${NUM_COLUMNS} ${NUM_CHANNELS} ${TILE_SIZE} ${TRACE_SIZE})
+            add_aie_weighted_rms_norm_design(${INPUT_LENGTH} ${NUM_COLUMNS} ${NUM_CHANNELS} ${TILE_SIZE} ${TRACE_SIZE} ${ARCHIVE_NAME})
         endif()
     endforeach()
 endforeach()
