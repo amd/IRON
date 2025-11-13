@@ -22,7 +22,7 @@ class AIEOperatorBase(ABC):
     # Global configuration
     device_manager = AIEDeviceManager()
     llama_dir = Path(__file__).parent.parent.parent
-    base_dir = llama_dir.parent.parent # IRON base dir
+    base_dir = llama_dir.parent.parent  # IRON base dir
     build_dir = llama_dir / "build"
     mlir_aie_dir = Path(aie.utils.config.root_path())
     peano_dir = Path(aie.utils.config.peano_install_dir())

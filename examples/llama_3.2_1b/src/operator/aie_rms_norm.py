@@ -49,7 +49,10 @@ class AIERMSNorm(AIEOperatorBase):
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
-            import_path=self.base_dir / "operators" / "rms_norm" / "weighted_rms_norm.py",
+            import_path=self.base_dir
+            / "operators"
+            / "rms_norm"
+            / "weighted_rms_norm.py",
             callback_fn="my_weighted_rms_norm",
             callback_args=[
                 self.device_manager.device_type,
