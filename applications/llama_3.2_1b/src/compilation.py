@@ -113,10 +113,13 @@ class SourceArtifact(CompilationArtifact):
 
 
 class XclbinArtifact(CompilationArtifact):
-    def __init__(self, path, depends, kernel_name="MLIR_AIE", extra_flags=None):
+    def __init__(
+        self, path, depends, kernel_name="MLIR_AIE", extra_flags=None, xclbin_input=None
+    ):
         super().__init__(path, depends)
         self.kernel_name = kernel_name
         self.extra_flags = extra_flags if extra_flags is not None else []
+        self.xclbin_input = xclbin_input
 
 
 class InstsBinArtifact(CompilationArtifact):
@@ -295,6 +298,10 @@ class AieccCompilationRule(CompilationRule):
                     "--xclbin-name=" + str(first_xclbin.path),
                     "--xclbin-kernel-name=" + first_xclbin.kernel_name,
                 ]
+                if first_xclbin.xclbin_input is not None:
+                    compile_cmd += [
+                        "--xclbin-input=" + str(first_xclbin.xclbin_input.path)
+                    ]
             if do_compile_insts_bin:
                 first_insts_bin = mlir_sources_to_insts_bins[mlir_source][
                     0
@@ -414,7 +421,7 @@ class PeanoCompilationRule(CompilationRule):
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0:
-            logging.info(f"Successfully renamed symbols in: {artifact.path.name}")
+            logging.debug(f"Successfully renamed symbols in: {artifact.path.name}")
         else:
             raise RuntimeError(f"Symbol renaming failed: {result.stderr}")
 

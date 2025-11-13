@@ -18,6 +18,108 @@ from ..compilation import (
 from ..utils import torch_to_numpy, numpy_to_torch
 
 
+# Factoring out the GEMM artifact definition because it is reused as a component of other operators (SwiGLU)
+def get_gemm_artifacts(
+    base_dir,
+    device_str,
+    M,
+    K,
+    N,
+    tile_m=64,
+    tile_k=64,
+    tile_n=64,
+    prefix="gemm_",
+    num_columns=8,
+    b_col_maj=False,
+    c_col_maj=False,
+    dtype_in="bf16",
+    dtype_out="bf16",
+    emulate_bf16_mmul_with_bfp16=False,
+    prio_accuracy=True,
+    use_scalar=False,
+    bf16_f32_only=True,
+    round_conv_even=True,
+):
+    file_name_tile_base = f"{prefix}{tile_m}x{tile_k}x{tile_n}"
+    file_name_total_base = f"{prefix}{M}x{K}x{N}_{tile_m}x{tile_k}x{tile_n}"
+    xclbin_kernel_name = f"gemm_{file_name_tile_base}"
+    kernel_flags = [
+        f"-DDIM_M={tile_m}",
+        f"-DDIM_K={tile_k}",
+        f"-DDIM_N={tile_n}",
+    ]
+    if bf16_f32_only:
+        kernel_flags.append("-Dbf16_f32_ONLY")
+    if round_conv_even:
+        kernel_flags.append("-DROUND_CONV_EVEN")
+    # FIXME: I believe the emulate_bf16_mmul_with_bfp16 flag should be added to the kernel flags here as well
+
+    mlir_artifact = PythonGeneratedMLIRArtifact.new(
+        f"{file_name_total_base}.mlir",
+        import_path=base_dir / "example" / "gemm" / "gemm.py",
+        callback_fn="my_matmul",
+        callback_kwargs={
+            "dev": device_str,
+            "M": M,
+            "K": K,
+            "N": N,
+            "m": tile_m,
+            "k": tile_k,
+            "n": tile_n,
+            "n_aie_cols": num_columns,
+            "dtype_in_str": dtype_in,
+            "dtype_out_str": dtype_out,
+            "b_col_maj": b_col_maj,
+            "c_col_maj": c_col_maj,
+            "use_scalar": use_scalar,
+            "emulate_bf16_mmul_with_bfp16": emulate_bf16_mmul_with_bfp16,
+            "prio_accuracy": prio_accuracy,
+            "trace_size": 0,
+            "generate_taps": False,
+        },
+        requires_context=True,
+    )
+
+
+    # FIXME: We should be able to reuse the same xclbin for same tile
+    # sizes, only swapping out the instruction sequence for different
+    # problem sizes. However, there seem to be cases where this does
+    # not work and the GEMM appears to be misconfigured for the wrong
+    # size (resulting in a timeout when trying to run it). Perhaps
+    # XRT is caching something, or something is wrong with the run-
+    # time parameter (synchronization)? For now, create separate
+    # xclbins for each problem size.
+    xclbin_artifact = XclbinArtifact.new(
+        f"{file_name_total_base}.xclbin",
+        depends=[
+            mlir_artifact,
+            KernelArchiveArtifact.new(
+                f"{file_name_tile_base}_archive.a",
+                depends=[
+                    KernelObjectArtifact.new(
+                        f"{file_name_tile_base}.o",
+                        extra_flags=kernel_flags,
+                        depends=[SourceArtifact.new("aie_kernels/aie2p/mm.cc")],
+                    ),
+                    KernelObjectArtifact.new(
+                        "convert_copy.o",
+                        [SourceArtifact.new("aie_kernels/generic/convert_copy.cc")],
+                    ),
+                ],
+            ),
+        ],
+        extra_flags=["--dynamic-objFifos"],
+    )
+
+    insts_artifact = InstsBinArtifact.new(
+        f"{file_name_total_base}.bin",
+        depends=[mlir_artifact],
+        extra_flags=["--dynamic-objFifos"],
+    )
+
+    return (xclbin_artifact, insts_artifact)
+
+
 class AIEGEMM(AIEOperatorBase):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
 
@@ -27,19 +129,11 @@ class AIEGEMM(AIEOperatorBase):
         K,
         N,
         use_static_weight=False,
-        num_columns=8,
         tile_m=64,
         tile_k=64,
         tile_n=64,
-        b_col_maj=False,
-        c_col_maj=False,
-        dtype_in="bf16",
-        dtype_out="bf16",
-        emulate_bf16_mmul_with_bfp16=False,
-        prio_accuracy=True,
-        use_scalar=False,
-        bf16_f32_only=True,
-        round_conv_even=True,
+        num_columns=8,
+        **gemm_kwargs,
     ):
 
         min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
@@ -52,17 +146,14 @@ class AIEGEMM(AIEOperatorBase):
         self.tile_m = tile_m
         self.tile_k = tile_k
         self.tile_n = tile_n
-        self.dtype_in = dtype_in
-        self.dtype_out = dtype_out
-        self.b_col_maj = b_col_maj
-        self.c_col_maj = c_col_maj
-        self.emulate_bf16_mmul_with_bfp16 = emulate_bf16_mmul_with_bfp16
-        self.prio_accuracy = prio_accuracy
-        self.use_scalar = use_scalar
-        self.bf16_f32_only = bf16_f32_only
-        self.round_conv_even = round_conv_even
-        self.n_aie_rows = 4
         self.num_columns = num_columns
+        self.n_aie_rows = 4
+        self.gemm_args = gemm_kwargs
+        self.weight = (
+            None
+            if not use_static_weight
+            else torch.zeros((K, N), dtype=torch.bfloat16).T
+        )
         self.weight = (
             None
             if not use_static_weight
@@ -82,86 +173,20 @@ class AIEGEMM(AIEOperatorBase):
 
     def set_up(self):
         # Describe required artifacts (xclbin, insts.bin)
-        file_name_tile_base = f"{self.tile_m}x{self.tile_k}x{self.tile_n}"
-        file_name_total_base = (
-            f"{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}"
-        )
-        xclbin_kernel_name = f"gemm_{file_name_tile_base}"
-        kernel_flags = [
-            f"-DDIM_M={self.tile_m}",
-            f"-DDIM_K={self.tile_k}",
-            f"-DDIM_N={self.tile_n}",
-        ]
-        if self.bf16_f32_only:
-            kernel_flags.append("-Dbf16_f32_ONLY")
-        if self.round_conv_even:
-            kernel_flags.append("-DROUND_CONV_EVEN")
         device_str = self.device_manager.device_str()
-
-        mlir_artifact = PythonGeneratedMLIRArtifact.new(
-            f"gemm_{file_name_total_base}.mlir",
-            import_path=self.base_dir / "example" / "gemm" / "gemm.py",
-            callback_fn="my_matmul",
-            callback_kwargs={
-                "dev": device_str,
-                "M": self.M,
-                "K": self.K,
-                "N": self.N,
-                "m": self.tile_m,
-                "k": self.tile_k,
-                "n": self.tile_n,
-                "n_aie_cols": self.num_columns,
-                "dtype_in_str": self.dtype_in,
-                "dtype_out_str": self.dtype_out,
-                "b_col_maj": self.b_col_maj,
-                "c_col_maj": self.c_col_maj,
-                "use_scalar": self.use_scalar,
-                "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
-                "prio_accuracy": self.prio_accuracy,
-                "trace_size": 0,
-                "generate_taps": False,
-            },
-            requires_context=True,
+        xclbin_artifact, insts_artifact = get_gemm_artifacts(
+            self.base_dir,
+            device_str,
+            self.M,
+            self.K,
+            self.N,
+            self.tile_m,
+            self.tile_k,
+            self.tile_n,
+            num_columns=self.num_columns,
+            **self.gemm_args,
         )
-
-        # FIXME: We should be able to reuse the same xclbin for same tile
-        # sizes, only swapping out the instruction sequence for different
-        # problem sizes. However, there seem to be cases where this does
-        # not work and the GEMM appears to be misconfigured for the wrong
-        # size (resulting in a timeout when trying to run it). Perhaps
-        # XRT is caching something, or something is wrong with the run-
-        # time parameter (synchronization)? For now, create separate
-        # xclbins for each problem size.
-        xclbin_artifact = XclbinArtifact.new(
-            f"gemm_{file_name_total_base}.xclbin",
-            depends=[
-                mlir_artifact,
-                KernelArchiveArtifact.new(
-                    f"gemm_{file_name_tile_base}_archive.a",
-                    depends=[
-                        KernelObjectArtifact.new(
-                            f"gemm_{file_name_tile_base}.o",
-                            extra_flags=kernel_flags,
-                            depends=[SourceArtifact.new("aie_kernels/aie2p/mm.cc")],
-                        ),
-                        KernelObjectArtifact.new(
-                            "convert_copy.o",
-                            [SourceArtifact.new("aie_kernels/generic/convert_copy.cc")],
-                        ),
-                    ],
-                ),
-            ],
-            extra_flags=["--dynamic-objFifos"],
-        )
-
-        insts_artifact = InstsBinArtifact.new(
-            f"gemm_{file_name_total_base}.bin",
-            depends=[mlir_artifact],
-            extra_flags=["--dynamic-objFifos"],
-        )
-
-        artifacts = [xclbin_artifact, insts_artifact]
-        self.add_artifacts(artifacts)
+        self.add_artifacts([xclbin_artifact, insts_artifact])
 
         # Describe runtime components
         # The static weights might not yet be loaded upon initialization; therefore, the provided self.static_weights field is a callback that provides the weights at set-up time.

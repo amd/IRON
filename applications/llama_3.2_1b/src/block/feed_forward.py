@@ -6,6 +6,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import torch
 import torch.nn as nn
 from ..utils import torch_to_numpy, assign
@@ -13,6 +14,9 @@ from src.operator.aie_elementwise_mul import AIEElementwiseMul
 from src.operator.aie_gemm import AIEGEMM
 from src.operator.aie_gemv import AIEGEMV
 from src.operator.aie_silu import AIESiLU
+from src.operator.aie_swiglu_prefill import AIESwiGLUPrefill
+from src.operator.aie_swiglu_decode import AIESwiGLUDecode
+from ml_dtypes import bfloat16
 
 
 class FeedForward(nn.Module):
@@ -25,6 +29,16 @@ class FeedForward(nn.Module):
         super().__init__()
         self.cfg = cfg.copy()
 
+        assert (
+            cfg["use_aie_ffn_swiglu"]
+            and not (
+                cfg["use_aie_ffn_silu"]
+                or cfg["use_aie_ffn_gemm"]
+                or cfg["use_aie_ffn_mul"]
+            )
+            or not cfg["use_aie_ffn_swiglu"]
+        ), "Cannot mix fused SwiGLU with individual AIE operators."
+
         self.emb_dim = cfg["emb_dim"]
         self.hidden_dim = cfg["hidden_dim"]
 
@@ -36,10 +50,17 @@ class FeedForward(nn.Module):
         else:
             self.silu = nn.SiLU()
 
-        self.emb_dim = cfg["emb_dim"]
-        self.hidden_dim = cfg["hidden_dim"]
+        if self.cfg["use_aie_ffn_swiglu"]:
+            self.aie_swiglu_prefill = AIESwiGLUPrefill(
+                seq_len=prompt_length,
+                embedding_dim=self.emb_dim,
+                hidden_dim=self.hidden_dim,
+            )
+            if self.cfg["use_kv_cache"]:
+                self.aie_swiglu_decode = AIESwiGLUDecode(
+                    embedding_dim=self.emb_dim, hidden_dim=self.hidden_dim
+                )
 
-        # Initialize FFN up and down projections
         if self.cfg["use_aie_ffn_gemm"]:
             if self.cfg["use_kv_cache"]:
                 M_prefill = prompt_length
@@ -110,6 +131,12 @@ class FeedForward(nn.Module):
 
         is_decode_with_kv = is_vector and self.cfg["use_kv_cache"]
 
+        if self.cfg["use_aie_ffn_swiglu"]:
+            if is_prefill:
+                return self.aie_swiglu_prefill(x)
+            else:
+                return self.aie_swiglu_decode(x)
+
         if is_decode_with_kv and self.cfg["use_aie_gemv"]:
             x_fc1 = self.aie_fc1_gemv(x)
             x_fc2 = self.aie_fc2_gemv(x)
@@ -131,6 +158,21 @@ class FeedForward(nn.Module):
             return self.fc3(x).view(original_shape)
 
     def assign_weights(self, l, fc1, fc2, fc3):
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+            self.aie_fc1_gemv.weight = fc1
+            self.aie_fc2_gemv.weight = fc2
+            self.aie_fc3_gemv.weight = fc3
+
+        if self.cfg["use_aie_ffn_swiglu"]:
+            self.aie_swiglu_prefill.weights_1 = fc1
+            self.aie_swiglu_prefill.weights_2 = fc2
+            self.aie_swiglu_prefill.weights_3 = fc3
+            if self.cfg["use_kv_cache"]:
+                self.aie_swiglu_decode.weights_1 = fc1
+                self.aie_swiglu_decode.weights_2 = fc2
+                self.aie_swiglu_decode.weights_3 = fc3
+            return
+
         self.fc1.weight = assign(
             self.fc1.weight,
             fc1,
@@ -146,8 +188,3 @@ class FeedForward(nn.Module):
             fc3,
             f"model.layers.{l}.mlp.down_proj.weight",
         )
-
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            self.aie_fc1_gemv.weight = fc1
-            self.aie_fc2_gemv.weight = fc2
-            self.aie_fc3_gemv.weight = fc3

@@ -17,6 +17,48 @@ from ..compilation import (
 from ..utils import torch_to_numpy, numpy_to_torch
 
 
+def get_silu_artifacts(
+    base_dir,
+    device_type,
+    size,
+    tile_size=1024,
+    num_columns=8,
+    num_channels=2,
+    prefix="silu_",
+):
+    file_name_base = f"{prefix}{num_columns}c_{num_channels}ch_{size}_{tile_size}t"
+
+    mlir_artifact = PythonGeneratedMLIRArtifact.new(
+        f"{file_name_base}.mlir",
+        import_path=base_dir / "example" / "silu" / "silu.py",
+        callback_fn="my_silu",
+        callback_args=[
+            device_type,
+            size,
+            num_columns,
+            num_channels,
+            tile_size,
+            0,
+        ],
+    )
+
+    xclbin_artifact = XclbinArtifact.new(
+        f"{file_name_base}.xclbin",
+        depends=[
+            mlir_artifact,
+            KernelObjectArtifact.new(
+                f"silu.o", depends=[SourceArtifact.new("aie_kernels/aie2p/silu.cc")]
+            ),
+        ],
+    )
+
+    insts_artifact = InstsBinArtifact.new(
+        f"{file_name_base}.bin", depends=[mlir_artifact]
+    )
+
+    return xclbin_artifact, insts_artifact
+
+
 class AIESiLU(AIEOperatorBase):
     """AIE-accelerated SiLU activation function"""
 
@@ -42,34 +84,14 @@ class AIESiLU(AIEOperatorBase):
 
     def set_up(self):
         # Compilation artifacts
-        file_name_base = f"silu_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
-
-        mlir_artifact = PythonGeneratedMLIRArtifact.new(
-            f"{file_name_base}.mlir",
-            import_path=self.base_dir / "example" / "silu" / "silu.py",
-            callback_fn="my_silu",
-            callback_args=[
-                self.device_manager.device_type,
-                self.size,
-                self.num_columns,
-                self.num_channels,
-                self.tile_size,
-                0,
-            ],
-        )
-
-        xclbin_artifact = XclbinArtifact.new(
-            f"{file_name_base}.xclbin",
-            depends=[
-                mlir_artifact,
-                KernelObjectArtifact.new(
-                    f"silu.o", depends=[SourceArtifact.new("aie_kernels/aie2p/silu.cc")]
-                ),
-            ],
-        )
-
-        insts_artifact = InstsBinArtifact.new(
-            f"{file_name_base}.bin", depends=[mlir_artifact]
+        xclbin_artifact, insts_artifact = get_silu_artifacts(
+            self.base_dir,
+            self.device_manager.device_type,
+            self.size,
+            self.tile_size,
+            self.num_columns,
+            self.num_channels,
+            prefix="silu_",
         )
 
         artifacts = [xclbin_artifact, insts_artifact]
