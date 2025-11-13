@@ -106,7 +106,7 @@ runs:
           });
 
     - name: Push new test results to branch
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
       continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
       shell: bash
       run: |
