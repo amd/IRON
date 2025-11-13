@@ -7,8 +7,8 @@ on:
   pull_request: 
   workflow_dispatch:
   push:
-  #   branches:
-  #     - main
+     branches:
+       - main
 
 # VJUNG: Introduce concurrency groups named with branch refs.
 # VJUNG: If one pushes 5 times on its branch only the most recent commit will trigger CI.
@@ -43,6 +43,7 @@ jobs:
           env_name: ci_env
 
       - name: Commit test results
+        id: commit_results
         env:
           HOME: /workspace
         uses: ./.github/actions/commit_results
@@ -52,8 +53,7 @@ jobs:
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: results-small
-          path: ../results/small/
+          name: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 14
 
       - name: Mark workflow as failed if tests failed

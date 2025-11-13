@@ -16,6 +16,11 @@ inputs:
   dir:
     required: true
 
+outputs:
+  results_dir:
+    description: "Absolute path to the directory containing generated test results"
+    value: ${{ steps.merge_results.outputs.results_dir }}
+
 runs:
   using: "composite"
   steps:
@@ -38,11 +43,14 @@ runs:
         cp pretty.md ../results/${{ inputs.dir }}/readme.md
         touch ../results/${{ inputs.dir }}/all.csv
 
-        ./ci/scripts/merge_all.py --all ../results/${{ inputs.dir }}/all.csv --latest ../results/${{ inputs.dir }}/latest.csv
-        ./ci/scripts/pretty_trends.py ../results/${{ inputs.dir }}/all.csv -o ../results/${{ inputs.dir }}/trends.md
+        RESULTS_DIR=$(realpath ../results/${{ inputs.dir }})
+
+        ./ci/scripts/merge_all.py --all ${RESULTS_DIR}/all.csv --latest ${RESULTS_DIR}/latest.csv
+        ./ci/scripts/pretty_trends.py ${RESULTS_DIR}/all.csv -o ${RESULTS_DIR}/trends.md
 
         echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
         echo "date=${DATE}" >> $GITHUB_OUTPUT
+        echo "results_dir=${RESULTS_DIR}" >> $GITHUB_OUTPUT
 
     - name: Comment results on PR
       if: ${{ startsWith(github.event_name, 'pull_request') }}
@@ -59,7 +67,7 @@ runs:
           
           let prettyContent = '';
           try {
-            prettyContent = fs.readFileSync(`../results/${{ inputs.dir }}/readme.md`, 'utf8');
+            prettyContent = fs.readFileSync(`${{ steps.merge_results.outputs.results_dir }}/readme.md`, 'utf8');
           } catch (error) {
             prettyContent = 'Pretty output not available.';
           }
@@ -67,7 +75,7 @@ runs:
           // Read the trends.md content
           let trendsContent = '';
           try {
-            trendsContent = fs.readFileSync(`../results/${{ inputs.dir }}/trends.md`, 'utf8');
+            trendsContent = fs.readFileSync(`${{ steps.merge_results.outputs.results_dir }}/trends.md`, 'utf8');
           } catch (error) {
             trendsContent = 'Trends not available.';
           }
