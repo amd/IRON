@@ -107,7 +107,7 @@ class AIEGEMV(AIEOperatorBase):
         self.add_buffer("output", self.M)
         self.add_to_runlist("gemv", "matrix", "vector", "output")
 
-    def forward(self, matrix, vector):
+    def forward(self, vector, matrix=None):
         """Forward pass through GEMV operation
 
         Args:
