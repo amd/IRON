@@ -37,11 +37,12 @@ class AIEGEMM(AIEOperatorBase):
         emulate_bf16_mmul_with_bfp16=False,
         prio_accuracy=True,
         use_scalar=False,
-        bf16_f32_only=True,
         round_conv_even=True,
     ):
-
-        min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
+        if emulate_bf16_mmul_with_bfp16:
+            min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
+        else:
+            min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
         assert tile_m >= min_tile_m, f"tile_m ({tile_m}) must be >= {min_tile_m}"
         assert tile_k >= min_tile_k, f"tile_k ({tile_k}) must be >= {min_tile_k}"
         assert tile_n >= min_tile_n, f"tile_n ({tile_n}) must be >= {min_tile_n}"
@@ -58,7 +59,6 @@ class AIEGEMM(AIEOperatorBase):
         self.emulate_bf16_mmul_with_bfp16 = emulate_bf16_mmul_with_bfp16
         self.prio_accuracy = prio_accuracy
         self.use_scalar = use_scalar
-        self.bf16_f32_only = bf16_f32_only
         self.round_conv_even = round_conv_even
         self.n_aie_rows = 4
         self.num_columns = num_columns
@@ -86,10 +86,14 @@ class AIEGEMM(AIEOperatorBase):
             f"-DDIM_K={self.tile_k}",
             f"-DDIM_N={self.tile_n}",
         ]
-        if self.bf16_f32_only:
+        if self.prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
+        else:
+            kernel_flags.append("-Dbf16_bf16_ONLY")
         if self.round_conv_even:
             kernel_flags.append("-DROUND_CONV_EVEN")
+        if self.emulate_bf16_mmul_with_bfp16:
+            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
         device_str = self.device_manager.device_str()
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
