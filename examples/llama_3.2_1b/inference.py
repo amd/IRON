@@ -80,7 +80,7 @@ def profile_function_calls(frame, event, arg):
     return profile_function_calls
 
 
-def enable_profiling():
+def enable_profiling(logs_dir_name):
     """Enable function call profiling using sys.setprofile."""
     global _profile_logger
 
@@ -91,14 +91,10 @@ def enable_profiling():
     _profile_logger.propagate = False
 
     # Create log file for profiling data
-    LOGS_DIR_NAME = "logs"
-    if not os.path.exists(LOGS_DIR_NAME):
-        os.makedirs(LOGS_DIR_NAME)
-
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        LOGS_DIR_NAME,
+        logs_dir_name,
         f"profile_{timestamp}.log",
     )
 
@@ -145,8 +141,14 @@ _iron_chat = r"""
 
 def setup_logging(verbosity):
     """Set up logging based on verbosity level."""
+
+    # Ensure the logs directory is created in case of profiling
+    logs_dir_name = "logs"
+    if not os.path.exists(logs_dir_name):
+        os.makedirs(logs_dir_name)
+
     if verbosity == 0:
-        return
+        return logs_dir_name
 
     levels = {
         4: logging.DEBUG,
@@ -155,11 +157,13 @@ def setup_logging(verbosity):
         # 1: log everything (DEBUG) to a file
     }
 
-    # Create log file
-    if not os.path.exists("logs"):
-        os.makedirs("logs")
+    # Create log file for profiling data
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = f"logs/inference_{timestamp}.log"
+    log_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        logs_dir_name,
+        f"inference_{timestamp}.log",
+    )
 
     handlers = [logging.FileHandler(log_file)]
     if verbosity > 0:
@@ -173,6 +177,8 @@ def setup_logging(verbosity):
         handlers=handlers,
         force=True,  # Override any existing configuration
     )
+
+    return logs_dir_name
 
 
 def save_layer_data(module, input, output, name, input_data_path, output_data_path):
@@ -401,11 +407,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Set up logging
-    setup_logging(args.v)
+    logs_dir_name = setup_logging(args.v)
 
     # Enable function profiling
     if args.profile:
-        enable_profiling()
+        enable_profiling(logs_dir_name)
 
     try:
         prompt = args.prompt
