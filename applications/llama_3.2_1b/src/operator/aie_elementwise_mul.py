@@ -15,6 +15,49 @@ from ..compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from ..utils import torch_to_numpy, numpy_to_torch
+from pathlib import Path
+
+
+def get_elementwise_mul_artifacts(
+    base_dir,
+    device_type,
+    size,
+    tile_size=2048,
+    num_columns=4,
+    num_channels=2,
+    prefix="eltwise_mul_",
+):
+    file_name_base = f"{prefix}{num_columns}c_{num_channels}ch_{size}_{tile_size}t"
+
+    mlir_artifact = PythonGeneratedMLIRArtifact.new(
+        f"{file_name_base}.mlir",
+        import_path=base_dir / "example" / "elementwise_mul" / "eltwise_mul.py",
+        callback_fn="my_eltwise_mul",
+        callback_args=[
+            device_type,
+            size,
+            num_columns,
+            num_channels,
+            tile_size,
+            0,
+        ],
+    )
+
+    xclbin_artifact = XclbinArtifact.new(
+        f"{file_name_base}.xclbin",
+        depends=[
+            mlir_artifact,
+            KernelObjectArtifact.new(
+                f"mul.o", depends=[SourceArtifact.new("aie_kernels/generic/mul.cc")]
+            ),
+        ],
+    )
+
+    insts_artifact = InstsBinArtifact.new(
+        f"{file_name_base}.bin", depends=[mlir_artifact]
+    )
+
+    return xclbin_artifact, insts_artifact
 
 
 class AIEElementwiseMul(AIEOperatorBase):
@@ -42,38 +85,19 @@ class AIEElementwiseMul(AIEOperatorBase):
 
     def set_up(self):
         # Compilation artifacts
-        file_name_base = f"mul_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
-
-        mlir_artifact = PythonGeneratedMLIRArtifact.new(
-            f"{file_name_base}.mlir",
-            import_path=self.base_dir
-            / "example"
-            / "elementwise_mul"
-            / "eltwise_mul.py",
-            callback_fn="my_eltwise_mul",
-            callback_args=[
-                self.device_manager.device_type,
-                self.size,
-                self.num_columns,
-                self.num_channels,
-                self.tile_size,
-                0,
-            ],
+        xclbin_artifact, insts_artifact = get_elementwise_mul_artifacts(
+            self.base_dir,
+            self.device_manager.device_type,
+            self.size,
+            self.tile_size,
+            self.num_columns,
+            self.num_channels,
+            prefix="",
         )
 
-        xclbin_artifact = XclbinArtifact.new(
-            f"{file_name_base}.xclbin",
-            depends=[
-                mlir_artifact,
-                KernelObjectArtifact.new(
-                    f"mul.o", depends=[SourceArtifact.new("aie_kernels/generic/mul.cc")]
-                ),
-            ],
-        )
-
-        insts_artifact = InstsBinArtifact.new(
-            f"{file_name_base}.bin", depends=[mlir_artifact]
-        )
+        # Override device_type in the mlir_artifact's callback_args if needed
+        mlir_artifact = xclbin_artifact.depends[0]
+        mlir_artifact.callback_args[0] = self.device_manager.device_type
 
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
