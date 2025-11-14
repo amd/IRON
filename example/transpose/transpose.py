@@ -134,6 +134,10 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, trace_size, m, n, s)
     rt = Runtime()
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
+
+        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+        tg = rt.task_group()
+
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
@@ -141,9 +145,9 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, trace_size, m, n, s)
                     of_in1s_L3L2[i * num_channels + j].prod(),
                     A,
                     taps_in_L3L2[i * num_channels + j],
+                    task_group=tg,
                 )
         # Drain the output objectFIFOs with data
-        tg_out = rt.task_group()
         for i in range(num_columns):
             for j in range(num_channels):
                 rt.drain(
@@ -151,9 +155,9 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, trace_size, m, n, s)
                     C,
                     taps_out_L1L3[i * num_channels + j],
                     wait=True,  # wait for the transfer to complete and data to be available
-                    task_group=tg_out,
+                    task_group=tg,
                 )
-        rt.finish_task_group(tg_out)
+        rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())

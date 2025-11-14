@@ -96,28 +96,33 @@ def my_weighted_rms_norm(
     rt = Runtime()
     with rt.sequence(tensor_ty, weights_ty, tensor_ty) as (A, B, C):
         rt.start(*my_workers)
+
+        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+        tg = rt.task_group()
+
         # Fill the input objectFIFOs with data
         for i in range(total_cores):
             rt.fill(
                 of_in1s[i].prod(),
                 A,
                 taps[i],
+                task_group=tg,
             )
         rt.fill(
             of_in2s.prod(),
             B,
+            task_group=tg,
         )
         # Drain the output objectFIFOs with data
-        tg_out = rt.task_group()
         for i in range(total_cores):
             rt.drain(
                 of_outs[i].cons(),
                 C,
                 taps[i],
                 wait=True,
-                task_group=tg_out,
+                task_group=tg,
             )
-        rt.finish_task_group(tg_out)
+        rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())
