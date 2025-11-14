@@ -82,6 +82,14 @@ def print_config(cfg, console=Console()):
         dont_print |= {"use_aie_regular_mha"}
     else:
         dont_print |= {"use_aie_fused_mha"}
+    if cfg["use_aie_ffn_swiglu"]:
+        dont_print |= {
+            "use_aie_ffn_gemm",
+            "use_aie_ffn_mul",
+            "use_aie_ffn_silu",
+        }
+    else:
+        dont_print |= {"use_aie_ffn_swiglu"}
 
     console.print(
         "AIE Configuration ([green]✔[/green] = AIE NPU / [red]✘[/red] = CPU):",
