@@ -256,12 +256,7 @@ def my_mem_copy(dev, size, num_cores, num_channels, bypass, tile_size, trace_siz
             tg_out = rt.task_group()  # Use taskgroup for parallel drain tasks
             # Fill the input objectFIFOs with data
             for i in range(num_cores):
-                rt.fill(
-                    of_ins[i].prod(),
-                    a_in,
-                    taps[i],
-                    task_group=tg_out
-                )
+                rt.fill(of_ins[i].prod(), a_in, taps[i], task_group=tg_out)
             # Drain the output objectFIFOs with data
             for i in range(num_cores):
                 rt.drain(
