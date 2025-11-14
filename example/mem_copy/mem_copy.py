@@ -235,29 +235,171 @@ def my_mem_copy(dev, size, num_cores, num_channels, bypass, tile_size, trace_siz
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
     with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
-        rt.start(*my_workers)
+        # Start the workers if not bypass
+        if not bypass:
+            rt.start(*my_workers)
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        # Calculate how much of workload can be partitioned evenly and what's remaining
+        minimum_work_size = (
+            line_size * num_cores
+        )  # Workload size the NPU is configured for
+        num_whole_partitions = math.floor(size / minimum_work_size)
+        whole_partition_size = minimum_work_size * num_whole_partitions
+        partial_work_size = size - whole_partition_size
 
-        # Fill the input objectFIFOs with data
-        for i in range(num_cores):
-            rt.fill(
-                of_ins[i].prod(),
-                a_in,
-                taps[i * num_channels + j],
-                task_group=tg,
+        # Runtime for the part of the workload partitionable to all cores utilized
+        if num_whole_partitions > 0:
+            taps = create_whole_workload_taps(
+                size, num_cores, line_size, whole_partition_size
             )
-        # Drain the output objectFIFOs with data
-        for i in range(num_cores):
-            rt.drain(
-                of_outs[i].cons(),
-                b_out,
-                taps[i],
-                wait=True,  # wait for the transfer to complete and data to be available
-                task_group=tg,
+
+            tg_out = rt.task_group()  # Use taskgroup for parallel drain tasks
+            # Fill the input objectFIFOs with data
+            for i in range(num_cores):
+                rt.fill(
+                    of_ins[i].prod(),
+                    a_in,
+                    taps[i],
+                    task_group=tg_out
+                )
+            # Drain the output objectFIFOs with data
+            for i in range(num_cores):
+                rt.drain(
+                    of_outs[i].cons(),
+                    b_out,
+                    taps[i],
+                    wait=True,  # wait for the transfer to complete and data to be available
+                    task_group=tg_out,
+                )
+            rt.finish_task_group(tg_out)
+
+        # Runtime for the part of the workload partially partitionable to the cores utilized
+        if partial_work_size > 0:
+            partial_config = create_partial_workload_config(
+                size,
+                num_cores,
+                line_size,
+                minimum_work_size,
+                whole_partition_size,
+                partial_work_size,
             )
-        rt.finish_task_group(tg)
+
+            # Use a while loop below so that the tasks for sending full tiles can
+            # be grouped together in a for-loop
+            objfifo_idx = 0
+            while objfifo_idx < num_cores:
+                if objfifo_idx < partial_config.num_cores_with_no_tiles:
+                    if num_whole_partitions == 0:
+                        # Resolving the IRON program requires all objectfifos to have
+                        # a defined connection
+                        for j in range(partial_config.num_cores_with_no_tiles):
+                            ofh = of_ins[objfifo_idx + j].prod()
+                            ofh.endpoint = RuntimeEndpoint(AnyShimTile)
+                            rt._fifos.add(ofh)
+                            ofh = of_outs[objfifo_idx + j].cons()
+                            ofh.endpoint = RuntimeEndpoint(AnyShimTile)
+                            rt._fifos.add(ofh)
+                    objfifo_idx = objfifo_idx + partial_config.num_cores_with_no_tiles
+                elif (
+                    objfifo_idx == num_cores - 1
+                    and partial_config.partial_tap is not None
+                ):
+                    # Fill the last objfifo with padding+real data
+                    tg_out = rt.task_group()
+                    tg_count = 1
+                    for padding_tap_repeat, padding_tap in zip(
+                        partial_config.padding_tap_repeats, partial_config.padding_taps
+                    ):
+                        for _ in range(padding_tap_repeat):
+                            if tg_count % TASK_GROUP_SIZE == 0:
+                                rt.fill(
+                                    of_ins[objfifo_idx].prod(),
+                                    a_in,
+                                    padding_tap,
+                                    wait=True,
+                                    task_group=tg_out,
+                                )
+                                rt.finish_task_group(tg_out)
+                                tg_out = rt.task_group()
+                            else:
+                                rt.fill(
+                                    of_ins[objfifo_idx].prod(),
+                                    a_in,
+                                    padding_tap,
+                                    task_group=tg_out,
+                                )
+                            tg_count = tg_count + 1
+                    if tg_count % TASK_GROUP_SIZE == 0:
+                        rt.fill(
+                            of_ins[objfifo_idx].prod(),
+                            a_in,
+                            partial_config.partial_tap,
+                            wait=True,
+                            task_group=tg_out,
+                        )
+                        rt.finish_task_group(tg_out)
+                        tg_out = rt.task_group()
+                    else:
+                        rt.fill(
+                            of_ins[objfifo_idx].prod(),
+                            a_in,
+                            partial_config.partial_tap,
+                            task_group=tg_out,
+                        )
+                    tg_count = tg_count + 1
+                    # Drain the last objfifo with padding+real data
+                    for padding_tap_repeat, padding_tap in zip(
+                        partial_config.padding_tap_repeats, partial_config.padding_taps
+                    ):
+                        for _ in range(padding_tap_repeat):
+                            if tg_count % TASK_GROUP_SIZE == 0:
+                                rt.drain(
+                                    of_outs[objfifo_idx].cons(),
+                                    b_out,
+                                    padding_tap,
+                                    wait=True,
+                                    task_group=tg_out,
+                                )
+                                rt.finish_task_group(tg_out)
+                                tg_out = rt.task_group()
+                            else:
+                                rt.drain(
+                                    of_outs[objfifo_idx].cons(),
+                                    b_out,
+                                    padding_tap,
+                                    task_group=tg_out,
+                                )
+                            tg_count = tg_count + 1
+                    rt.drain(
+                        of_outs[objfifo_idx].cons(),
+                        b_out,
+                        partial_config.partial_tap,
+                        wait=True,
+                        task_group=tg_out,
+                    )
+                    rt.finish_task_group(tg_out)
+                    objfifo_idx = objfifo_idx + 1
+                else:
+                    tg_out = rt.task_group()  # Use taskgroup for parallel drain tasks
+                    for j in range(partial_config.num_cores_with_full_tiles):
+                        # Fill the input objectFIFOs with valid data
+                        rt.fill(
+                            of_ins[objfifo_idx + j].prod(),
+                            a_in,
+                            partial_config.full_taps[j],
+                            task_group=tg_out,
+                        )
+                    for j in range(partial_config.num_cores_with_full_tiles):
+                        # Drain the output objectFIFOs with valid data
+                        rt.drain(
+                            of_outs[objfifo_idx + j].cons(),
+                            b_out,
+                            partial_config.full_taps[j],
+                            wait=True,
+                            task_group=tg_out,
+                        )
+                    rt.finish_task_group(tg_out)
+                    objfifo_idx = objfifo_idx + partial_config.num_cores_with_full_tiles
 
     # Place components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer(num_channels))
