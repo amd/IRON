@@ -72,11 +72,23 @@ def print_config(cfg, console=Console()):
             return f"{name} {checkmark}"
         return f"{name}: {value}"
 
+    dont_print = {"dtype"}
+    # The following options are mutually exclusive, e.g. regular and fused MHA
+    # cannot be enabled at the same time. But it looks bad to have red Xs,
+    # indicating things are running on the CPU when they are not. So, we only
+    # print one of these mutually exclusive options.
+    if cfg["use_aie_fused_mha"]:
+        dont_print |= {"use_aie_regular_mha"}
+    else:
+        dont_print |= {"use_aie_fused_mha"}
+
     console.print(
         "AIE Configuration ([green]✔[/green] = AIE NPU / [red]✘[/red] = CPU):",
         style="bold underline",
     )
     for option_key, (option_ty, option_default, option_name) in config_options.items():
+        if option_key in dont_print:
+            continue
         console.print(format_option(option_name, cfg.get(option_key, option_default)))
     console.print("")
 
