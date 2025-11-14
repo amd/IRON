@@ -42,7 +42,7 @@ jobs:
         uses: ./.github/actions/build
         with:
           env_name: ci_env
-          cmake_extra_flags: "-DBUILD_EXAMPLES=ON -DBUILD_OPERATORS=OFF"
+          cmake_extra_flags: "-DBUILD_APPLICATIONS=ON -DBUILD_EXAMPLES=OFF"
 
       - name: Run examples
         id: test
