@@ -788,10 +788,18 @@ def batched_matmul_single_core(
 
                 # Thow on bd containing the full K and V in the object fifo, then does it transfer cunks of inKV size at the time?
                 rt.fill(
-                    inK.prod(), K, tap=K_tiles[head_idx], placement=Tile(col=5, row=0), task_group=tg,
+                    inK.prod(),
+                    K,
+                    tap=K_tiles[head_idx],
+                    placement=Tile(col=5, row=0),
+                    task_group=tg,
                 )
                 rt.fill(
-                    inV.prod(), V, tap=V_tiles[head_idx], placement=Tile(col=6, row=0), task_group=tg,
+                    inV.prod(),
+                    V,
+                    tap=V_tiles[head_idx],
+                    placement=Tile(col=6, row=0),
+                    task_group=tg,
                 )
 
                 if number_of_pipelines > 6:
