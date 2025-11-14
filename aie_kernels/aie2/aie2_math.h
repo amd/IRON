@@ -16,9 +16,9 @@
 #ifndef AIE2_MATH_H
 #define AIE2_MATH_H
 
+#include <cstring>
 #include <stdint.h>
 #include <stdlib.h>
-#include <cstring>
 
 // fast inverse square root implementation from Quake III Arena
 inline __attribute__((always_inline)) float invsqrt(float in)
