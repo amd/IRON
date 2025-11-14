@@ -753,6 +753,9 @@ def batched_matmul_single_core(
 
             for q_block_idx in range(num_q_block_per_pipeline):
 
+                # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+                tg = rt.task_group()
+
                 if number_of_pipelines > 6:
                     rt.fill(
                         inQ.prod(),
@@ -761,6 +764,7 @@ def batched_matmul_single_core(
                             2 * head_idx * num_q_block_per_pipeline + q_block_idx * 2
                         ],
                         placement=Tile(col=4, row=0),
+                        task_group=tg,
                     )
                     rt.fill(
                         inQ2.prod(),
@@ -771,6 +775,7 @@ def batched_matmul_single_core(
                             + 1
                         ],
                         placement=Tile(col=4, row=0),
+                        task_group=tg,
                     )
                 else:
                     rt.fill(
@@ -778,14 +783,15 @@ def batched_matmul_single_core(
                         Q,
                         tap=Q_tiles[head_idx * num_q_block_per_pipeline + q_block_idx],
                         placement=Tile(col=4, row=0),
+                        task_group=tg,
                     )
 
                 # Thow on bd containing the full K and V in the object fifo, then does it transfer cunks of inKV size at the time?
                 rt.fill(
-                    inK.prod(), K, tap=K_tiles[head_idx], placement=Tile(col=5, row=0)
+                    inK.prod(), K, tap=K_tiles[head_idx], placement=Tile(col=5, row=0), task_group=tg,
                 )
                 rt.fill(
-                    inV.prod(), V, tap=V_tiles[head_idx], placement=Tile(col=6, row=0)
+                    inV.prod(), V, tap=V_tiles[head_idx], placement=Tile(col=6, row=0), task_group=tg,
                 )
 
                 if number_of_pipelines > 6:
@@ -797,6 +803,7 @@ def batched_matmul_single_core(
                         ],
                         wait=True,
                         placement=Tile(col=7, row=0),
+                        task_group=tg,
                     )
                     rt.drain(
                         memO2.cons(),
@@ -808,6 +815,7 @@ def batched_matmul_single_core(
                         ],
                         wait=True,
                         placement=Tile(col=7, row=0),
+                        task_group=tg,
                     )
                 else:
                     rt.drain(
@@ -816,7 +824,10 @@ def batched_matmul_single_core(
                         tap=O_tiles[head_idx * num_q_block_per_pipeline + q_block_idx],
                         wait=True,
                         placement=Tile(col=7, row=0),
+                        task_group=tg,
                     )
+
+                rt.finish_task_group(tg)
 
     # Create the program from the device type and runtime
     if dev == "npu":
