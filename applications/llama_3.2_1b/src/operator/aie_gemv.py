@@ -24,10 +24,7 @@ def get_gemv_artifacts(
 
     mlir_artifact = PythonGeneratedMLIRArtifact.new(
         f"{file_name_base}.mlir",
-        import_path=base_dir
-        / "example"
-        / "matrix_vector_mul"
-        / "matrix_vector_mul.py",
+        import_path=base_dir / "example" / "matrix_vector_mul" / "matrix_vector_mul.py",
         callback_fn="my_matvec",
         callback_args=[
             device_type,
