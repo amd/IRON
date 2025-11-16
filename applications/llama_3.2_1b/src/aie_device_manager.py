@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Any
 import pyxrt
-from aie.iron.config import detect_npu_device
+from aie.iron.hostruntime.config import detect_npu_device
 from aie.iron.device import NPU1, NPU2
 
 
