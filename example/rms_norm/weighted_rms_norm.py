@@ -19,7 +19,7 @@ def my_weighted_rms_norm(
     dev, num_elements, num_columns, num_channels, weight_length, trace_size
 ):
     per_tile_elements = weight_length
-    total_cores = num_columns
+    total_cores = num_columns  # For each core that does rms norm, another core will take its output to do eltwise mul
     n = per_tile_elements * total_cores
     if num_elements % n != 0:
         raise ValueError(
@@ -42,41 +42,72 @@ def my_weighted_rms_norm(
         for i in range(total_cores)
     ]
     of_in2s = ObjectFifo(weights_ty, name=f"in2_weights", depth=fifodepth)
-    of_outs = [
-        ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
+    of_out1s = [
+        ObjectFifo(tile_ty, name=f"out1_{i}", depth=fifodepth)
+        for i in range(total_cores)
+    ]
+    of_out2s = [
+        ObjectFifo(tile_ty, name=f"out2_{i}", depth=fifodepth)
         for i in range(total_cores)
     ]
 
     # AIE Core Function declaration
-    weighted_rms_norm_kernel = Kernel(
-        "weighted_rms_norm", "rms_norm.o", [tile_ty, weights_ty, tile_ty, np.int32]
+    rms_norm_kernel = Kernel(
+        "rms_norm_bf16_vector", "rms_norm_archive.a", [tile_ty, tile_ty, np.int32]
+    )
+    eltwise_mul_kernel = Kernel(
+        "eltwise_mul_bf16_vector",
+        "rms_norm_archive.a",
+        [tile_ty, weights_ty, tile_ty, np.int32],
     )
 
     # Define a task that will run on a compute tile
-    def core_body(of_in1, of_in2, of_out, weighted_rms_norm):
+    def core_body_norm(of_in1, of_out1, rms_norm):
+        # Number of sub-vector "tile" iterations
+        for _ in range_(N_div_n):
+            elem_in1 = of_in1.acquire(1)
+            elem_out = of_out1.acquire(1)
+            rms_norm(elem_in1, elem_out, per_tile_elements)
+            of_in1.release(1)
+            of_out1.release(1)
+
+    def core_body_mul(of_in1, of_in2, of_out2, eltwise_mul):
         # Number of sub-vector "tile" iterations
         elem_in2 = of_in2.acquire(1)
         for _ in range_(N_div_n):
             elem_in1 = of_in1.acquire(1)
-            elem_out = of_out.acquire(1)
-            weighted_rms_norm_kernel(elem_in1, elem_in2, elem_out, per_tile_elements)
+            elem_out = of_out2.acquire(1)
+            eltwise_mul(elem_in1, elem_in2, elem_out, per_tile_elements)
             of_in1.release(1)
-            of_out.release(1)
+            of_out2.release(1)
         of_in2.release(1)
 
-    # Create a worker to run the task on a compute tile
-    my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i].cons(),
-                of_in2s.cons(),
-                of_outs[i].prod(),
-                weighted_rms_norm_kernel,
-            ],
+    # Create workers to run the task on compute tiles,
+    # one core for rms norm and another pipelined to do eltwise mul
+    my_workers = []
+    for i in range(total_cores):
+        my_workers.append(
+            Worker(
+                core_body_norm,
+                [
+                    of_in1s[i].cons(),
+                    of_out1s[i].prod(),
+                    rms_norm_kernel,
+                ],
+            )
         )
-        for i in range(total_cores)
-    ]
+    for i in range(total_cores):
+        my_workers.append(
+            Worker(
+                core_body_mul,
+                [
+                    of_out1s[i].cons(),
+                    of_in2s.cons(),
+                    of_out2s[i].prod(),
+                    eltwise_mul_kernel,
+                ],
+            )
+        )
 
     # Create a TensorAccessPattern for each core
     # to describe the data movement
@@ -116,7 +147,7 @@ def my_weighted_rms_norm(
         # Drain the output objectFIFOs with data
         for i in range(total_cores):
             rt.drain(
-                of_outs[i].cons(),
+                of_out2s[i].cons(),
                 C,
                 taps[i],
                 wait=True,

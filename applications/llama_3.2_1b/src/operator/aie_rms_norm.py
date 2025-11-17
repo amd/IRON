@@ -22,30 +22,31 @@ class AIERMSNorm(AIEOperatorBase):
     """AIE-accelerated RMS Normalization layer"""
 
     def __init__(
-        self, emb_dim, eps=1e-6, num_columns=None, num_channels=None, tile_size=None
+        self, size, eps=1e-6, num_columns=None, num_channels=None, tile_size=None
     ):
-        self.emb_dim = emb_dim
-        self.eps = eps
-
-        if num_channels is None:
-            num_channels = 2
-        if num_columns is None:
-            num_columns = 4
-
-        # Initializes weights to 1
-        self.weight = nn.Parameter(torch.ones(emb_dim, dtype=torch.bfloat16))
+        max_multiple = num_columns * tile_size
+        padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
+        self.orig_size = size
+        self.size = padded_size
+        self.tile_size = tile_size
 
         self.num_columns = num_columns
         self.num_channels = num_channels
-        self.tile_size = tile_size
+        self.eps = eps
 
-        # Initialize AIE base class
+        # Initializes weights to 1. Weights have size embedding dim, which is assumed to be tile size
+        self.weight = nn.Parameter(torch.ones(tile_size, dtype=torch.bfloat16))
+
+        # Enforce ShimDMA limits for weighted RMS Norm (uses 2 inputs per core)
+        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
+        total_shimdma_channels = self.num_columns * self.num_channels
+        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
+
         AIEOperatorBase.__init__(self)
 
     def set_up(self):
         # Compilation artifacts
-        total_elements = self.emb_dim * self.num_columns * self.num_channels
-        file_name_base = f"weighted_rms_{total_elements}_{self.num_columns}c_{self.num_channels}ch_{self.emb_dim}emb"
+        file_name_base = f"weighted_rms_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -53,10 +54,10 @@ class AIERMSNorm(AIEOperatorBase):
             callback_fn="my_weighted_rms_norm",
             callback_args=[
                 self.device_manager.device_type,
-                total_elements,
+                self.size,
                 self.num_columns,
                 self.num_channels,
-                self.emb_dim,
+                self.tile_size,
                 0,
             ],
         )
@@ -65,9 +66,20 @@ class AIERMSNorm(AIEOperatorBase):
             f"{file_name_base}.xclbin",
             depends=[
                 mlir_artifact,
-                KernelObjectArtifact.new(
-                    f"rms_norm.o",
-                    depends=[SourceArtifact.new("aie_kernels/aie2p/rms_norm.cc")],
+                KernelArchiveArtifact.new(
+                    f"rms_norm_archive.a",
+                    depends=[
+                        KernelObjectArtifact.new(
+                            f"rms_norm.o",
+                            depends=[
+                                SourceArtifact.new("aie_kernels/aie2p/rms_norm.cc")
+                            ],
+                        ),
+                        KernelObjectArtifact.new(
+                            "mul.o",
+                            [SourceArtifact.new("aie_kernels/generic/mul.cc")],
+                        ),
+                    ],
                 ),
             ],
         )
@@ -84,98 +96,74 @@ class AIERMSNorm(AIEOperatorBase):
         if self.weight is not None:
             static_weights = torch_to_numpy(self.weight)
 
-        total_elements = self.emb_dim * self.num_columns * self.num_channels
-        self.add_buffer("input1", total_elements)
-        self.add_buffer("input2", total_elements, static_data=static_weights)
-        self.add_buffer("output", total_elements)
+        self.add_buffer("input1", self.size)
+        self.add_buffer("input2", self.tile_size, static_data=static_weights)
+        self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_mul", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "rms_norm", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
         )
-        self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
+        self.add_to_runlist("rms_norm", "input1", "input2", "output")
 
     def forward(self, x, y=None):
-        """Forward pass through RMS normalization"""
+        """Forward pass for rms norm"""
         applicable = (
-            len(x.shape) >= 2
-            and x.shape[-1] == self.emb_dim
-            and x.dtype == torch.bfloat16
+            len(x.shape) >= 1 and x.shape[-1] <= self.size and x.numel() <= self.size
         )
         if not applicable:
-            raise AIEOPeratorConstraintError("AIERMSNorm: incompatible tensor shape(s)")
+            raise AIEOperatorConstraintError("AIERMSNorm: incompatible tensor shape(s)")
 
-        return self._execute_aie_operation(x, y)
+        # Always flatten to [batch, orig_size]
+        original_shape = x.shape
+        batch = x.shape[0] if x.dim() > 1 else 1
+        x_flat = x.reshape(batch, -1)
+        if y is not None:
+            y_flat = y.reshape(batch, -1)
+        else:
+            y_flat = None
+
+        pad_len = self.size - x_flat.shape[1]
+        if pad_len > 0:
+            x_flat = torch.nn.functional.pad(x_flat, (0, pad_len))
+
+        out = self._execute_aie_operation(x_flat, y_flat)
+
+        # Remove padding if added
+        numel = np.prod(original_shape)
+        if pad_len > 0:
+            out = out.reshape(-1)[..., :numel]
+        # Restore original shape
+        out = out.reshape(*original_shape)
+
+        return out
 
     def _execute_aie_operation(self, x, y=None):
-        """Execute RMS normalization on AIE hardware"""
+        """Execute rms norm operation on AIE hardware"""
+        # x, y are [batch, size]
+        batch = x.shape[0] if x.dim() > 1 else 1
 
-        original_shape = x.shape
-        if len(x.shape) > 2:
-            x = x.view(-1, x.shape[-1])
-        if y is not None and len(y.shape) > 1:
-            y = y.view(-1, y.shape[-1])
+        # Flatten inputs for AIE processing
+        x_flat = x.view(-1)
+        x_np = torch_to_numpy(x_flat)
+        if y is not None:
+            y_flat = y.view(-1)
+            y_np = torch_to_numpy(y_flat)
 
-        batch_size, seq_len = x.shape
-        rows_per_batch = self.num_columns * self.num_channels
+        # Verify size matches expected
+        if len(x_np) != self.size:
+            raise AIEOperatorConstraintError(
+                f"Input size x={len(x_np)} doesn't match configured size {self.size}"
+            )
 
-        # Process in batches
-        results = []
-        for i in range(0, batch_size, rows_per_batch):
-            end_idx = min(i + rows_per_batch, batch_size)
-            batch_data = x[i:end_idx, :]
-
-            # Pad if necessary to match expected rows_per_batch
-            if batch_data.shape[0] < rows_per_batch:
-                padding = torch.zeros(
-                    rows_per_batch - batch_data.shape[0],
-                    seq_len,
-                    dtype=batch_data.dtype,
-                    device=batch_data.device,
-                )
-                batch_data_padded = torch.cat([batch_data, padding], dim=0)
-                result = self._process_batch(batch_data_padded, y)
-                result = result[: batch_data.shape[0], :]
-            else:
-                result = self._process_batch(batch_data, y)
-
-            results.append(result)
-
-        # Concatenate all batch results
-        result = torch.cat(results, dim=0)
-
-        # Restore original shape if needed
-        if len(original_shape) > 2:
-            result = result.view(original_shape)
-
-        return result
-
-    def _process_batch(self, batch_data, weight_data=None):
-        """Process a batch of sequences through the AIE kernel"""
-        batch_flat = batch_data.view(-1)
-        input_data = torch_to_numpy(batch_flat)
-        if weight_data is not None:
-            weights_data = torch_to_numpy(weight_data)
-
-        # Calculate buffer sizes for the batch
-        input_size = input_data.nbytes
-
-        # Write data to buffers
-        self.write_buffer("input1", input_data)
-        if weight_data is not None:
-            self.write_buffer("input2", weights_data)
+        self.write_buffer("input1", x_np)
+        if y is not None:
+            self.write_buffer("input2", y_np)
         else:
             assert (
                 self.weight is not None
             ), "Weights must be provided either as input or during initialization."
-        # Initialize output buffer
-        test_pattern = np.zeros(len(input_data), dtype=bfloat16)
+        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
-
-        # Execute kernel
         self.run_runlist()
+        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
 
-        # Read output
-        batch_result = self.read_buffer_as_torch(
-            "output", shape=batch_data.shape, dtype=bfloat16
-        )
-
-        return batch_result
+        return result
