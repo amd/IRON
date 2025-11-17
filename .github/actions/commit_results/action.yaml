@@ -28,6 +28,7 @@ runs:
       id: merge_results
       env:
         HOME: /workspace
+        PR_NUMBER: ${{ github.event.number }}
       shell: bash
       run: |
         export DATE=$(printf '%(%Y_%m_%d_%H_%M_%S)T')
@@ -48,62 +49,12 @@ runs:
         ./ci/scripts/merge_all.py --all ${RESULTS_DIR}/all.csv --latest ${RESULTS_DIR}/latest.csv
         ./ci/scripts/pretty_trends.py ${RESULTS_DIR}/all.csv -o ${RESULTS_DIR}/trends.md
 
+        echo ${PR_NUMBER} > ${RESULTS_DIR}/pr_number
+        echo ${COMMIT_SHA} > ${RESULTS_DIR}/commit_sha
+        echo ${DATE} > ${RESULTS_DIR}/date
         echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
         echo "date=${DATE}" >> $GITHUB_OUTPUT
         echo "results_dir=${RESULTS_DIR}" >> $GITHUB_OUTPUT
-
-    - name: Comment results on PR
-      if: ${{ startsWith(github.event_name, 'pull_request') }}
-      continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ github.token }}
-        script: |
-          const fs = require('fs');
-          const commitSha = '${{ steps.merge_results.outputs.commit_sha }}';
-          const date = '${{ steps.merge_results.outputs.date }}';
-          const server = '${{ github.server_url }}';
-          const repo = '${{ github.repository }}';
-          
-          let prettyContent = '';
-          try {
-            prettyContent = fs.readFileSync(`${{ steps.merge_results.outputs.results_dir }}/readme.md`, 'utf8');
-          } catch (error) {
-            prettyContent = 'Pretty output not available.';
-          }
-          
-          // Read the trends.md content
-          let trendsContent = '';
-          try {
-            trendsContent = fs.readFileSync(`${{ steps.merge_results.outputs.results_dir }}/trends.md`, 'utf8');
-          } catch (error) {
-            trendsContent = 'Trends not available.';
-          }
-          
-          const body = `<details>
-          <summary>📊 Test Results for ${process.env.GITHUB_WORKFLOW}</summary>
-
-          [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
-          
-          ${prettyContent}
-          
-          </details>
-          
-          <details>
-          <summary>📈 Trends (vs main branch) for ${process.env.GITHUB_WORKFLOW}</summary>
-
-          [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
-
-          ${trendsContent}
-          
-          </details>`;
-          
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: body
-          });
 
     - name: Push new test results to branch
       if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
