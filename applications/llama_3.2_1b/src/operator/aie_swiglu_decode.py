@@ -61,7 +61,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
             self.base_dir,
             self.device_manager.device_type,
             self.hidden_dim,
-            num_columns=4,
+            tile_size=self.hidden_dim // 16, # Partition 1 input to 8 columns and 2 channels per column 
             prefix="swiglu_decode_silu_",
         )
         silu_xclbin.xclbin_input = gemv_1_xclbin
@@ -77,6 +77,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
             self.base_dir,
             self.device_manager.device_type,
             self.hidden_dim,
+            tile_size=self.hidden_dim // 8, # Partition 2 inputs to 8 columns and 1 channel per column for each input
             prefix="swiglu_decode_eltwise_mul_",
         )
         eltwise_mul_xclbin.xclbin_input = silu_xclbin
