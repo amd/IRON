@@ -33,6 +33,7 @@ from src.utils import (
 _function_call_stack = []
 _profile_logger = None
 
+
 def profile_function_calls(frame, event, arg):
     """
     Profile function that logs start and end times of every function call.
@@ -120,6 +121,7 @@ def disable_profiling():
             handler.close()
             _profile_logger.removeHandler(handler)
 
+
 _iron_chat = r"""
         /$$$$$$ /$$$$$$$   /$$$$$$  /$$   /$$
        |_  $$_/| $$__  $$ /$$__  $$| $$$ | $$
@@ -176,6 +178,7 @@ def setup_logging(verbosity):
         )
 
     return logs_dir_name
+
 
 def save_layer_data(module, input, output, name, input_data_path, output_data_path):
     for count, i in enumerate(input):
