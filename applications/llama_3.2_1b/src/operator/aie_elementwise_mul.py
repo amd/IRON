@@ -23,7 +23,7 @@ def get_elementwise_mul_artifacts(
     device_type,
     size,
     tile_size=2048,
-    num_columns=4,
+    num_columns=8,
     num_channels=2,
     prefix="eltwise_mul_",
 ):
@@ -64,22 +64,18 @@ class AIEElementwiseMul(AIEOperatorBase):
     """AIE-accelerated element-wise multiplication"""
 
     def __init__(self, size, num_columns=None, num_channels=None, tile_size=None):
-        self.size = size
-
-        # Enforce ShimDMA limits for elementwise_mul (uses 2 inputs per core)
-        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
-        if num_columns is not None and num_channels is not None:
-            total_shimdma_channels = num_columns * num_channels * 2  # 2 inputs per core
-            if total_shimdma_channels > 16:  # Conservative ShimDMA limit
-                # print(
-                #     f"Warning: ElementwiseMul reducing {num_columns}c×{num_channels}ch to 8c×2ch (ShimDMA limit)"
-                # )
-                num_columns = min(num_columns, 8)
-                num_channels = min(num_channels, 2)
+        max_multiple = num_columns * tile_size
+        padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
+        self.orig_size = size
+        self.size = padded_size
+        self.tile_size = tile_size
 
         self.num_columns = num_columns
         self.num_channels = num_channels
-        self.tile_size = tile_size
+        # Enforce ShimDMA limits for elementwise_mul (uses 2 inputs per core)
+        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
+        total_shimdma_channels = self.num_columns * self.num_channels
+        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
         AIEOperatorBase.__init__(self)
 
@@ -116,51 +112,62 @@ class AIEElementwiseMul(AIEOperatorBase):
         applicable = (
             len(x.shape) >= 1
             and len(y.shape) >= 1
-            and x.shape[-1] == self.size
-            and y.shape[-1] == self.size
+            and x.shape[-1] <= self.size
+            and y.shape[-1] <= self.size
+            and x.numel() <= self.size
+            and y.numel() <= self.size
+            and x.numel() == y.numel()
+            and x.shape == y.shape
         )
         if not applicable:
             raise AIEOperatorConstraintError(
                 "AIEElementwiseMul: incompatible tensor shape(s)"
             )
 
-        return self._execute_aie_operation(x, y)
+        # Always flatten to [batch, orig_size]
+        original_shape = x.shape
+        batch = x.shape[0] if x.dim() > 1 else 1
+        x_flat = x.reshape(batch, -1)
+        y_flat = y.reshape(batch, -1)
+
+        pad_len = self.size - x_flat.shape[1]
+        if pad_len > 0:
+            x_flat = torch.nn.functional.pad(x_flat, (0, pad_len))
+            y_flat = torch.nn.functional.pad(y_flat, (0, pad_len))
+
+        out = self._execute_aie_operation(x_flat, y_flat)
+
+        # Remove padding if added
+        numel = np.prod(original_shape)
+        if pad_len > 0:
+            out = out.reshape(-1)[..., :numel]
+        # Restore original shape
+        out = out.reshape(*original_shape)
+
+        return out
 
     def _execute_aie_operation(self, x, y):
         """Execute element-wise multiplication operation on AIE hardware"""
+        # x, y are [batch, size]
+        batch = x.shape[0] if x.dim() > 1 else 1
 
-        original_shape = x.shape
-        x = x.view(-1, self.size)
-        y = y.view(-1, self.size)
-        batch_seq_len = x.shape[0]
+        # Flatten inputs for AIE processing
+        x_flat = x.view(-1)
+        y_flat = y.view(-1)
+        x_np = torch_to_numpy(x_flat)
+        y_np = torch_to_numpy(y_flat)
 
-        # Extract single size-d vectors and process each [size] vector pair separately
-        results = []
-
-        for i in range(batch_seq_len):
-            x_single = x[i]
-            y_single = y[i]
-
-            x_np = torch_to_numpy(x_single)
-            y_np = torch_to_numpy(y_single)
-
-            # Verify size matches expected
-            if len(x_np) != self.size or len(y_np) != self.size:
-                raise RuntimeError(
-                    f"Input size x={len(x_np)}, y={len(y_np)} doesn't match configured size {self.size}"
-                )
-
-            self.write_buffer("input1", x_np)
-            self.write_buffer("input2", y_np)
-            test_pattern = np.zeros(len(x_np), dtype=bfloat16)
-            self.write_buffer("output", test_pattern)
-            self.run_runlist()
-            result = self.read_buffer_as_torch(
-                "output", shape=x_np.shape, dtype=bfloat16
+        # Verify size matches expected
+        if len(x_np) != self.size or len(y_np) != self.size:
+            raise AIEOperatorConstraintError(
+                f"Input size x={len(x_np)}, y={len(y_np)} doesn't match configured size {self.size}"
             )
-            results.append(result)
 
-        result = torch.stack(results, dim=0)
-        result = result.view(original_shape)
+        self.write_buffer("input1", x_np)
+        self.write_buffer("input2", y_np)
+        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        self.write_buffer("output", test_pattern)
+        self.run_runlist()
+        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
 
         return result
