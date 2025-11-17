@@ -63,6 +63,16 @@ class FeedForward(nn.Module):
             self.fc3 = AIEGEMM(
                 M=M_prefill, K=self.hidden_dim, N=self.emb_dim, **aie_config_prefill
             )
+        else:
+            self.fc1 = nn.Linear(
+                cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
+            )
+            self.fc2 = nn.Linear(
+                cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
+            )
+            self.fc3 = nn.Linear(
+                cfg["hidden_dim"], cfg["emb_dim"], dtype=cfg["dtype"], bias=False
+            )
 
         if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
             aie_gemv_config = {"num_columns": 1, "is_mv": False}
