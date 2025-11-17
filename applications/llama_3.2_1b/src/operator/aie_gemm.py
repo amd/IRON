@@ -34,8 +34,8 @@ def get_gemm_artifacts(
     c_col_maj=False,
     dtype_in="bf16",
     dtype_out="bf16",
-    emulate_bf16_mmul_with_bfp16=False,
-    prio_accuracy=True,
+    emulate_bf16_mmul_with_bfp16=True,
+    prio_accuracy=False,
     use_scalar=False,
     round_conv_even=True,
 ):
