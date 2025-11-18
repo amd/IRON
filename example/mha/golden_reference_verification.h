@@ -37,13 +37,12 @@ int verify_against_golden(GoldenReference &ref,
                           float rel_tol,
                           int heads,
                           int S_q,
-                          int S_kv,
                           int d)
 {
 
     // Check dimensions match
     if (actual_O.size() != (uint)heads * S_q * d) {
-        std::cerr << "Error: Output size mismatch. Expected " << heads * S_q * S_kv << " but got " << actual_O.size()
+        std::cerr << "Error: Output size mismatch. Expected " << (heads * S_q * d) << " but got " << actual_O.size()
                   << std::endl;
         return -1;
     }
@@ -55,16 +54,23 @@ int verify_against_golden(GoldenReference &ref,
 
     std::vector<matmul_common::error<Tout>> errors;
     std::vector<Tout> &golden_ref = *ref.get<Tout>("O");
+    // Golden O is stored with sequence padding (S_q_pad). Infer per-head stride from size.
+    if (golden_ref.size() % (static_cast<size_t>(heads) * static_cast<size_t>(d)) != 0) {
+        std::cerr << "Golden reference size is inconsistent with heads and d." << std::endl;
+        return -1;
+    }
+    int padded_S_q = static_cast<int>(golden_ref.size() / (static_cast<size_t>(heads) * static_cast<size_t>(d)));
     Tout max_rel_error = (Tout)0.0f;
 
     for (int head = 0; head < heads; head++) {
         for (int row = 0; row < S_q; row++) {
             for (int col = 0; col < d; col++) {
 
-                int idx = (head * S_q * d) + (row * d) + col;
+                int idx_actual = (head * S_q * d) + (row * d) + col;
+                int idx_golden = (head * padded_S_q * d) + (row * d) + col;
 
-                Tout expected = golden_ref[idx];
-                Tout actual = actual_O[idx];
+                Tout expected = golden_ref[idx_golden];
+                Tout actual = actual_O[idx_actual];
 
                 average_error += std::abs(actual - expected);
                 max_abs_error = std::max(max_abs_error, std::abs(actual - expected));
@@ -104,25 +110,24 @@ int verify_against_golden(GoldenReference &ref,
     std::cout << "Number of errors: " << n_errors << " out of " << (heads * S_q * d) << " elements." << std::endl;
     std::cout << "Maximum acceptable errors: " << max_acceptable_errors << std::endl;
 
-    if (n_errors > max_acceptable_errors) {
+    if (verbosity >= 1) {
+        std::cout << std::endl << "Golden Reference:" << std::endl;
+        matmul_common::print_matrix(golden_ref, d, 32, 16);
 
-        matmul_common::print_error_summary(std::cout, n_errors, heads * S_q * d, errors, max_rel_error);
+        std::cout << std::endl << "Actual Output:" << std::endl;
+        matmul_common::print_matrix(actual_O, d, 32, 16);
 
-        if (n_errors > -1 && verbosity >= 1) {
-            std::cout << std::endl << "Golden Reference:" << std::endl;
-            matmul_common::print_matrix(golden_ref, d, 32, 16);
+        std::cout << std::endl << "Difference:" << std::endl;
+        std::vector<Tout> diff(actual_O.size());
 
-            std::cout << std::endl << "Actual Output:" << std::endl;
-            matmul_common::print_matrix(actual_O, d, 32, 16);
-
-            std::cout << std::endl << "Difference:" << std::endl;
-            std::vector<Tout> diff(actual_O.size());
-
-            for (uint i = 0; i < actual_O.size(); i++) {
-                diff[i] = golden_ref[i] - actual_O[i];
-            }
-            matmul_common::print_matrix(diff, d, 32, 16, std::cout, " | ", " ... ", 6);
+        for (uint i = 0; i < actual_O.size(); i++) {
+            diff[i] = golden_ref[i] - actual_O[i];
         }
+        matmul_common::print_matrix(diff, d, 32, 16, std::cout, " | ", " ... ", 6);
+    }
+
+    if (n_errors > max_acceptable_errors) {
+        matmul_common::print_error_summary(std::cout, n_errors, heads * S_q * d, errors, max_rel_error);
     } else {
         n_errors = 0; // reset to 0 if within acceptable range
     }
@@ -132,17 +137,52 @@ int verify_against_golden(GoldenReference &ref,
 
 // Load input matrices from golden references
 template <typename Tin>
-void load_golden_inputs(GoldenReference &ref, std::vector<Tin> &Q, std::vector<Tin> &K, std::vector<Tin> &V)
+void load_golden_inputs(GoldenReference &ref,
+                        std::vector<Tin> &Q,
+                        std::vector<Tin> &K,
+                        std::vector<Tin> &V,
+                        int heads,
+                        int S_q,
+                        int S_kv,
+                        int d)
 {
-    // Copy from golden reference arrays
-    for (size_t i = 0; i < Q.size(); i++) {
-        Q[i] = (*ref.get<Tin>("Q"))[i];
+    // Golden inputs are stored padded per-head: (heads, S_pad, d).
+    // Copy only the valid (unpadded) rows per head into compact buffers.
+    std::vector<Tin> &gQ = *ref.get<Tin>("Q");
+    std::vector<Tin> &gK = *ref.get<Tin>("K");
+    std::vector<Tin> &gV = *ref.get<Tin>("V");
+
+    auto infer_padded_S = [&](const std::vector<Tin> &g, int H, int D) -> int {
+        size_t denom = static_cast<size_t>(H) * static_cast<size_t>(D);
+        if (g.size() % denom != 0) {
+            throw std::invalid_argument("Golden input size inconsistent with heads and d");
+        }
+        return static_cast<int>(g.size() / denom);
+    };
+
+    int S_q_pad = infer_padded_S(gQ, heads, d);
+    int S_kv_pad = infer_padded_S(gK, heads, d);
+
+    // Q: (heads, S_q, d) from (heads, S_q_pad, d)
+    for (int h = 0; h < heads; ++h) {
+        for (int s = 0; s < S_q; ++s) {
+            const Tin *src = gQ.data() + (static_cast<size_t>(h) * S_q_pad + s) * d;
+            Tin *dst = Q.data() + (static_cast<size_t>(h) * S_q + s) * d;
+            std::copy_n(src, d, dst);
+        }
     }
-    for (size_t i = 0; i < K.size(); i++) {
-        K[i] = (*ref.get<Tin>("K"))[i];
-    }
-    for (size_t i = 0; i < V.size(); i++) {
-        V[i] = (*ref.get<Tin>("V"))[i];
+
+    // K and V: (heads, S_kv, d) from (heads, S_kv_pad, d)
+    for (int h = 0; h < heads; ++h) {
+        for (int s = 0; s < S_kv; ++s) {
+            const Tin *srcK = gK.data() + (static_cast<size_t>(h) * S_kv_pad + s) * d;
+            Tin *dstK = K.data() + (static_cast<size_t>(h) * S_kv + s) * d;
+            std::copy_n(srcK, d, dstK);
+
+            const Tin *srcV = gV.data() + (static_cast<size_t>(h) * S_kv_pad + s) * d;
+            Tin *dstV = V.data() + (static_cast<size_t>(h) * S_kv + s) * d;
+            std::copy_n(srcV, d, dstV);
+        }
     }
 }
 

@@ -128,34 +128,110 @@ void partial_softmax(bfloat16 *A,
                      int32_t *idx_buffer,
                      bfloat16 inv_scale,
                      int32_t B_q,
-                     int32_t B_kv)
+                     int32_t B_kv,
+                     int32_t S_q_eff,
+                     int32_t S_kv_eff)
 {
 
     ::aie::set_rounding(ROUNDING_MODE);
 
-    if (idx_buffer[0] == idx_buffer[1]) {
-        int32_t q_block_idx = idx_buffer[1];
-        int32_t kv_block_idx = idx_buffer[0];
-        // VJUNG: Causal mask based on block position (naive implementation)
-        for (int32_t i = 0; i < B_q; i++) {
-            for (int32_t j = 0; j < B_kv; j++) {
-                int32_t global_j = kv_block_idx * B_kv + j;
-                int32_t global_i = q_block_idx * B_q + i;
-                if (global_j > global_i) {
+    // Block indices
+    int32_t q_block_idx = idx_buffer[1];
+    int32_t kv_block_idx = idx_buffer[0];
+
+    // Causal full mask: skip blocks strictly above diagonal
+    if (kv_block_idx > q_block_idx) {
+        zero_bf16(P);
+        return;
+    }
+
+    // Compute valid extents within this block for padded tails
+    int32_t valid_q_rows = S_q_eff - q_block_idx * B_q;
+    if (valid_q_rows < 0)
+        valid_q_rows = 0;
+    if (valid_q_rows > B_q)
+        valid_q_rows = B_q;
+
+    int32_t valid_kv_cols = S_kv_eff - kv_block_idx * B_kv;
+    if (valid_kv_cols < 0)
+        valid_kv_cols = 0;
+    if (valid_kv_cols > B_kv)
+        valid_kv_cols = B_kv;
+
+    // Fully padded block: contributes nothing
+    if (valid_q_rows == 0 || valid_kv_cols == 0) {
+        zero_bf16(P);
+        return;
+    }
+
+    // Tail mask: invalidate padded Q rows
+    if (valid_q_rows < B_q) {
+        using Vec64bf16 = aie::vector<bfloat16, VECTOR_LENGTH>;
+        Vec64bf16 lowest_vec = aie::broadcast<bfloat16, VECTOR_LENGTH>(std::numeric_limits<bfloat16>::lowest());
+
+        for (int32_t i = valid_q_rows; i < B_q; i++) {
+            for (int32_t j = 0; j < B_kv; j += VECTOR_LENGTH) {
+                aie::store_v(A + i * B_kv + j, lowest_vec);
+            }
+        }
+    }
+    // Tail mask: invalidate padded KV cols for valid rows
+    if (valid_kv_cols < B_kv) {
+        using Vec64bf16 = aie::vector<bfloat16, VECTOR_LENGTH>;
+        Vec64bf16 lowest_vec = aie::broadcast<bfloat16, VECTOR_LENGTH>(std::numeric_limits<bfloat16>::lowest());
+
+        for (int32_t i = 0; i < valid_q_rows; i++) {
+            int32_t j = valid_kv_cols;
+            for (; j + VECTOR_LENGTH <= B_kv; j += VECTOR_LENGTH) {
+                aie::store_v(A + i * B_kv + j, lowest_vec);
+            }
+            // Remainder loop
+            for (; j < B_kv; j++) {
+                A[i * B_kv + j] = std::numeric_limits<bfloat16>::lowest();
+            }
+        }
+    }
+
+    // Diagonal small causal mask only within valid region (vectorized)
+    if (kv_block_idx == q_block_idx) {
+        using Vec64bf16 = aie::vector<bfloat16, VECTOR_LENGTH>;
+        Vec64bf16 lowest_vec = aie::broadcast<bfloat16, VECTOR_LENGTH>(std::numeric_limits<bfloat16>::lowest());
+        for (int32_t i = 0; i < valid_q_rows; i++) {
+            int32_t j = i + 1;
+            if (j < valid_kv_cols) {
+                // Vectorized stores for upper triangle within valid_kv_cols
+                for (; j + VECTOR_LENGTH <= valid_kv_cols; j += VECTOR_LENGTH) {
+                    aie::store_v(A + i * B_kv + j, lowest_vec);
+                }
+                // Remainder
+                for (; j < valid_kv_cols; ++j) {
                     A[i * B_kv + j] = std::numeric_limits<bfloat16>::lowest();
                 }
             }
         }
     }
 
-    if (idx_buffer[0] > idx_buffer[1]) {
-        zero_bf16(P);
-        return;
-    }
-
     using Vec64bf16 = aie::vector<bfloat16, VECTOR_LENGTH>;
-    for (int32_t i = 0; i < B_q; i++) {
+    int32_t i = 0;
+    for (; i + 4 <= valid_q_rows; i += 4) {
         partial_softmax_bf16(A + B_kv * i, P + B_kv * i, scale_buffer, B_kv, i, B_q, inv_scale);
+        partial_softmax_bf16(A + B_kv * (i + 1), P + B_kv * (i + 1), scale_buffer, B_kv, i + 1, B_q, inv_scale);
+        partial_softmax_bf16(A + B_kv * (i + 2), P + B_kv * (i + 2), scale_buffer, B_kv, i + 2, B_q, inv_scale);
+        partial_softmax_bf16(A + B_kv * (i + 3), P + B_kv * (i + 3), scale_buffer, B_kv, i + 3, B_q, inv_scale);
+    }
+    for (; i < valid_q_rows; i++) {
+        partial_softmax_bf16(A + B_kv * i, P + B_kv * i, scale_buffer, B_kv, i, B_q, inv_scale);
+    }
+    // Zero out P rows corresponding to padded Q rows
+    if (valid_q_rows < B_q) {
+        using Vec64bf16 = aie::vector<bfloat16, VECTOR_LENGTH>;
+        Vec64bf16 zeros_vec = aie::broadcast<bfloat16, VECTOR_LENGTH>(0.0f);
+
+        for (int32_t i = valid_q_rows; i < B_q; i++) {
+            for (int32_t j = 0; j < B_kv; j += VECTOR_LENGTH) {
+                aie::store_v(P + i * B_kv + j, zeros_vec);
+            }
+        }
     }
 
     for (int32_t i = 0; i < B_q; i += VECTOR_LENGTH) {

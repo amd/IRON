@@ -55,6 +55,13 @@ def main():
         help="Number of heads for Key-Value pairs",
     )
 
+    parser.add_argument(
+        "--num_pipeline",
+        type=int,
+        default=1,
+        help="Number of pipelines for padding calculation",
+    )
+
     args = parser.parse_args()
 
     num_kv_heads = args.num_KV_heads
@@ -86,6 +93,25 @@ def main():
         is_causal=True,
         scale=inv_scale,
     )
+
+    def pad_to_multiple_of_64(tensor, seq_dim, num_pipeline=1):
+        seq_len = tensor.shape[seq_dim]
+        padded_seq_len = ((seq_len + 63 * num_pipeline) // (64 * num_pipeline)) * (
+            64 * num_pipeline
+        )
+        if padded_seq_len == seq_len:
+            return tensor
+
+        pad_size = padded_seq_len - seq_len
+        pad_dims = [0] * (2 * tensor.ndim)
+        pad_dims[2 * (tensor.ndim - 1 - seq_dim) + 1] = pad_size
+
+        return torch.nn.functional.pad(tensor, pad_dims)
+
+    Q = pad_to_multiple_of_64(Q, seq_dim=1, num_pipeline=args.num_pipeline)
+    K = pad_to_multiple_of_64(K, seq_dim=1, num_pipeline=args.num_pipeline)
+    V = pad_to_multiple_of_64(V, seq_dim=1, num_pipeline=args.num_pipeline)
+    O = pad_to_multiple_of_64(O, seq_dim=1, num_pipeline=args.num_pipeline)
 
     tensor_dict = {
         "Q": torch_to_numpy(Q),

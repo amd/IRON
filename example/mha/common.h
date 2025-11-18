@@ -47,6 +47,9 @@ void add_default_options(cxxopts::Options &options)
         "S_q", "Sequence Length of Queries", cxxopts::value<int>()->default_value("512"))(
         "d", "Embedding Dimension", cxxopts::value<int>()->default_value("512"))(
         "S_kv", "Sequence Length of Keys and Values", cxxopts::value<int>()->default_value("512"))(
+        "num_pipeline",
+        "Number of pipeline, used to decide how to pad the kernel",
+        cxxopts::value<int>()->default_value("1"))(
         "iters", "number of iterations", cxxopts::value<int>()->default_value("1"))(
         "warmup", "number of warmup iterations", cxxopts::value<int>()->default_value("0"))(
         "trace_sz,t", "trace size", cxxopts::value<int>()->default_value("0"))(
