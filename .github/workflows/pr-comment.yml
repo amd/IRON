@@ -37,14 +37,17 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
+            const path = require('path');
+            const downloadPath = '${{ steps.download.outputs.download-path }}' || process.env.GITHUB_WORKSPACE;
             
             // Check if pr_number file exists
-            if (!fs.existsSync('./pr_number')) {
+            const prNumberPath = path.join(downloadPath, 'pr_number');
+            if (!fs.existsSync(prNumberPath)) {
               console.log('No pr_number file found. Skipping comment.');
               return;
             }
             
-            const issue_number = Number(fs.readFileSync('./pr_number', 'utf8').trim());
+            const issue_number = Number(fs.readFileSync(prNumberPath, 'utf8').trim());
             
             // Skip if not triggered by a PR (pr_number will be empty or invalid)
             if (!issue_number || isNaN(issue_number)) {
@@ -52,14 +55,14 @@ jobs:
               return;
             }
             
-            const commitSha = fs.readFileSync('./commit_sha', 'utf8').trim();
-            const date = fs.readFileSync('./date', 'utf8').trim();
+            const commitSha = fs.readFileSync(path.join(downloadPath, 'commit_sha'), 'utf8').trim();
+            const date = fs.readFileSync(path.join(downloadPath, 'date'), 'utf8').trim();
             const server = '${{ github.server_url }}';
             const repo = '${{ github.repository }}';
             
             let prettyContent = '';
             try {
-              prettyContent = fs.readFileSync(`./readme.md`, 'utf8');
+              prettyContent = fs.readFileSync(path.join(downloadPath, 'readme.md'), 'utf8');
             } catch (error) {
               prettyContent = 'Pretty output not available.';
             }
@@ -67,7 +70,7 @@ jobs:
             // Read the trends.md content
             let trendsContent = '';
             try {
-              trendsContent = fs.readFileSync(`./trends.md`, 'utf8');
+              trendsContent = fs.readFileSync(path.join(downloadPath, 'trends.md'), 'utf8');
             } catch (error) {
               trendsContent = 'Trends not available.';
             }
