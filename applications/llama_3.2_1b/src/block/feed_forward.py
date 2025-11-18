@@ -109,9 +109,8 @@ class FeedForward(nn.Module):
         )
 
         is_decode_with_kv = is_vector and self.cfg["use_kv_cache"]
-        is_prefill = not is_vector or not self.cfg["use_kv_cache"]
 
-        if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
             x_fc1 = self.aie_fc1_gemv(x)
             x_fc2 = self.aie_fc2_gemv(x)
         else:
@@ -125,7 +124,7 @@ class FeedForward(nn.Module):
         else:
             x = x_fc1_silu * x_fc2
 
-        if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
             result = self.aie_fc3_gemv(x)
             return result.view(original_shape)
         else:
