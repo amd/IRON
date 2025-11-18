@@ -147,15 +147,6 @@ def print_summary(stats, sort_by="total", top_n=20, min_calls=1):
 
     print("-" * 160)
 
-    # Print overall statistics
-    total_calls = sum(s.call_count for s in filtered_stats.values())
-    total_time = sum(s.total_time for s in filtered_stats.values())
-
-    print(f"\nTotal unique functions: {len(filtered_stats)}")
-    print(f"Total function calls: {total_calls:,}")
-    print(f"Total execution time: {total_time:.6f} seconds")
-    print("=" * 120 + "\n")
-
 
 def print_function_details(stats, function_name):
     """
