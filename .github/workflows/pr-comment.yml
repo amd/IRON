@@ -59,9 +59,17 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
-            const issue_number = Number(fs.readFileSync('./pr_number'));
-            const commitSha = fs.readFileSync('./commit_sha');
-            const date = fs.readFileSync('./date');
+            const maybe_issue_number = fs.readFileSync('./pr_number', 'utf8').trim();
+            const issue_number = Number(maybe_issue_number);
+            
+            // Skip if not triggered by a PR (pr_number will be empty or invalid)
+            if (!issue_number || isNaN(issue_number)) {
+              console.log('Not triggered by a PR. Skipping comment.');
+              return;
+            }
+            
+            const commitSha = fs.readFileSync('./commit_sha', 'utf8').trim();
+            const date = fs.readFileSync('./date', 'utf8').trim();
             const server = '${{ github.server_url }}';
             const repo = '${{ github.repository }}';
             
