@@ -82,19 +82,10 @@ class AIEGEMM(AIEOperatorBase):
 
     def set_up(self):
         # Describe required artifacts (xclbin, insts.bin)
-        # file_name_tile_base = f"{self.tile_m}x{self.tile_k}x{self.tile_n}"
+        file_name_tile_base = f"{self.tile_m}x{self.tile_k}x{self.tile_n}"
         file_name_total_base = (
             f"{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}"
         )
-        # FIXME: We should be able to reuse the same xclbin for same tile
-        # sizes, only swapping out the instruction sequence for different
-        # problem sizes. However, there seem to be cases where this does
-        # not work and the GEMM appears to be misconfigured for the wrong
-        # size (resulting in a timeout when trying to run it). Perhaps
-        # XRT is caching something, or something is wrong with the run-
-        # time parameter (synchronization)? For now, create separate
-        # xclbins for each problem size.
-        file_name_tile_base = file_name_total_base
         xclbin_kernel_name = f"gemm_{file_name_tile_base}"
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
@@ -133,8 +124,16 @@ class AIEGEMM(AIEOperatorBase):
             requires_context=True,
         )
 
+        # FIXME: We should be able to reuse the same xclbin for same tile
+        # sizes, only swapping out the instruction sequence for different
+        # problem sizes. However, there seem to be cases where this does
+        # not work and the GEMM appears to be misconfigured for the wrong
+        # size (resulting in a timeout when trying to run it). Perhaps
+        # XRT is caching something, or something is wrong with the run-
+        # time parameter (synchronization)? For now, create separate
+        # xclbins for each problem size.
         xclbin_artifact = XclbinArtifact.new(
-            f"gemm_{file_name_tile_base}.xclbin",
+            f"gemm_{file_name_total_base}.xclbin",
             depends=[
                 mlir_artifact,
                 KernelArchiveArtifact.new(
