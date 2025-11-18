@@ -17,9 +17,9 @@ from ..compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from ..utils import torch_to_numpy, numpy_to_torch
-from .aie_gemv import get_gemv_artifacts
-from .aie_silu import get_silu_artifacts
-from .aie_elementwise_mul import get_elementwise_mul_artifacts
+from .aie_gemv import AIEGEMV
+from .aie_silu import AIESiLU
+from .aie_elementwise_mul import AIEElementwiseMul
 
 
 class AIESwiGLUDecode(AIEOperatorBase):
@@ -38,15 +38,16 @@ class AIESwiGLUDecode(AIEOperatorBase):
         # ---
         artifacts = []
         device_str = self.device_manager.device_str()
-        gemv_config = {"num_columns": 1, "tile_size": 1}
 
-        gemv_1_xclbin, gemv_1_insts = get_gemv_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.hidden_dim,
-            self.embedding_dim,
-            prefix="swiglu_decode_gemv_1_",
-            **gemv_config
+        gemv_1 = AIEGEMV(
+            M=self.hidden_dim,
+            K=self.embedding_dim,
+            num_columns=8,
+            tile_size=1,
+            do_set_up=False,
+        )
+        gemv_1_xclbin, gemv_1_insts = gemv_1.get_artifacts(
+            prefix="swiglu_decode_gemv_1_"
         )
         gemv_1_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_gemv_1",
@@ -57,13 +58,14 @@ class AIESwiGLUDecode(AIEOperatorBase):
             gemv_1_insts
         )  # xclbin artifact will be pulled in as a dependency of last xclbin
 
-        silu_xclbin, silu_insts = get_silu_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.hidden_dim,
+        silu = AIESiLU(
+            size=self.hidden_dim,
             num_columns=4,
-            prefix="swiglu_decode_silu_",
+            num_channels=2,
+            tile_size=1024,
+            do_set_up=False,
         )
+        silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_decode_silu_")
         silu_xclbin.xclbin_input = gemv_1_xclbin
         silu_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_silu",
@@ -73,11 +75,15 @@ class AIESwiGLUDecode(AIEOperatorBase):
         silu_xclbin.depends += [gemv_1_xclbin]
         artifacts.append(silu_insts)
 
-        eltwise_mul_xclbin, eltwise_mul_insts = get_elementwise_mul_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.hidden_dim,
-            prefix="swiglu_decode_eltwise_mul_",
+        eltwise_mul = AIEElementwiseMul(
+            size=self.hidden_dim,
+            num_columns=8,
+            num_channels=2,
+            tile_size=1024,
+            do_set_up=False,
+        )
+        eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
+            prefix="swiglu_decode_eltwise_mul_"
         )
         eltwise_mul_xclbin.xclbin_input = silu_xclbin
         eltwise_mul_xclbin.extra_flags += [
@@ -88,13 +94,15 @@ class AIESwiGLUDecode(AIEOperatorBase):
         eltwise_mul_xclbin.depends += [silu_xclbin]
         artifacts.append(eltwise_mul_insts)
 
-        gemv_2_xclbin, gemv_2_insts = get_gemv_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.embedding_dim,
-            self.hidden_dim,
-            prefix="swiglu_decode_gemv_2_",
-            **gemv_config
+        gemv_2 = AIEGEMV(
+            M=self.embedding_dim,
+            K=self.hidden_dim,
+            num_columns=8,
+            tile_size=1,
+            do_set_up=False,
+        )
+        gemv_2_xclbin, gemv_2_insts = gemv_2.get_artifacts(
+            prefix="swiglu_decode_gemv_2_"
         )
         gemv_2_xclbin.xclbin_input = eltwise_mul_xclbin
         gemv_2_xclbin.extra_flags += [

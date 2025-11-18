@@ -17,9 +17,9 @@ from ..compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from ..utils import torch_to_numpy, numpy_to_torch
-from .aie_gemm import get_gemm_artifacts
-from .aie_silu import get_silu_artifacts
-from .aie_elementwise_mul import get_elementwise_mul_artifacts
+from .aie_gemm import AIEGEMM
+from .aie_silu import AIESiLU
+from .aie_elementwise_mul import AIEElementwiseMul
 
 
 class AIESwiGLUPrefill(AIEOperatorBase):
@@ -39,19 +39,16 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         # ---
         artifacts = []
         device_str = self.device_manager.device_str()
-        gemm_config = {}
 
         seq_len_chunk_size = self.get_seq_len_chunk_size()
 
-        gemm_1_xclbin, gemm_1_insts = get_gemm_artifacts(
-            self.base_dir,
-            device_str,
-            seq_len_chunk_size,
-            self.embedding_dim,
-            self.hidden_dim,
-            prefix="swiglu_gemm_1_",
-            **gemm_config
+        gemm_1 = AIEGEMM(
+            M=seq_len_chunk_size,
+            K=self.embedding_dim,
+            N=self.hidden_dim,
+            do_set_up=False,
         )
+        gemm_1_xclbin, gemm_1_insts = gemm_1.get_artifacts(prefix="swiglu_gemm_1_")
         gemm_1_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_gemm_1",
             "--xclbin-kernel-id=0x901",
@@ -61,13 +58,14 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             gemm_1_insts
         )  # xclbin artifact will be pulled in as a dependency of last xclbin
 
-        silu_xclbin, silu_insts = get_silu_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            seq_len_chunk_size * self.hidden_dim,
+        silu = AIESiLU(
+            size=seq_len_chunk_size * self.hidden_dim,
             num_columns=4,
-            prefix="swiglu_silu_",
+            num_channels=2,
+            tile_size=1024,
+            do_set_up=False,
         )
+        silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
         silu_xclbin.xclbin_input = gemm_1_xclbin
         silu_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_silu",
@@ -77,11 +75,15 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         silu_xclbin.depends += [gemm_1_xclbin]
         artifacts.append(silu_insts)
 
-        eltwise_mul_xclbin, eltwise_mul_insts = get_elementwise_mul_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            seq_len_chunk_size * self.hidden_dim,
-            prefix="swiglu_eltwise_mul_",
+        eltwise_mul = AIEElementwiseMul(
+            size=seq_len_chunk_size * self.hidden_dim,
+            num_columns=4,
+            num_channels=2,
+            tile_size=1024,
+            do_set_up=False,
+        )
+        eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
+            prefix="swiglu_eltwise_mul_"
         )
         eltwise_mul_xclbin.xclbin_input = silu_xclbin
         eltwise_mul_xclbin.extra_flags += [
@@ -92,15 +94,13 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         eltwise_mul_xclbin.depends += [silu_xclbin]
         artifacts.append(eltwise_mul_insts)
 
-        gemm_2_xclbin, gemm_2_insts = get_gemm_artifacts(
-            self.base_dir,
-            device_str,
-            seq_len_chunk_size,
-            self.hidden_dim,
-            self.embedding_dim,
-            prefix="swiglu_gemm_2_",
-            **gemm_config
+        gemm_2 = AIEGEMM(
+            M=seq_len_chunk_size,
+            K=self.hidden_dim,
+            N=self.embedding_dim,
+            do_set_up=False,
         )
+        gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
         gemm_2_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_gemm_2",

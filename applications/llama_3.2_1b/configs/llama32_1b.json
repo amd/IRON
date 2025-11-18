@@ -22,7 +22,7 @@
     "use_aie_norm2": true,
     "use_aie_residual": true,
     "use_aie_regular_mha": false,
-    "use_aie_fused_mha": false,
+    "use_aie_fused_mha": true,
     "use_aie_final_gemm": false,
     "rope_freq": {
       "factor": 32.0,

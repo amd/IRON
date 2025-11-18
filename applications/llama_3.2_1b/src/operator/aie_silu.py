@@ -17,52 +17,12 @@ from ..compilation import (
 from ..utils import torch_to_numpy, numpy_to_torch
 
 
-def get_silu_artifacts(
-    base_dir,
-    device_type,
-    size,
-    tile_size=1024,
-    num_columns=8,
-    num_channels=2,
-    prefix="silu_",
-):
-    file_name_base = f"{prefix}{num_columns}c_{num_channels}ch_{size}_{tile_size}t"
-
-    mlir_artifact = PythonGeneratedMLIRArtifact.new(
-        f"{file_name_base}.mlir",
-        import_path=base_dir / "example" / "silu" / "silu.py",
-        callback_fn="my_silu",
-        callback_args=[
-            device_type,
-            size,
-            num_columns,
-            num_channels,
-            tile_size,
-            0,
-        ],
-    )
-
-    xclbin_artifact = XclbinArtifact.new(
-        f"{file_name_base}.xclbin",
-        depends=[
-            mlir_artifact,
-            KernelObjectArtifact.new(
-                f"silu.o", depends=[SourceArtifact.new("aie_kernels/aie2p/silu.cc")]
-            ),
-        ],
-    )
-
-    insts_artifact = InstsBinArtifact.new(
-        f"{file_name_base}.bin", depends=[mlir_artifact]
-    )
-
-    return xclbin_artifact, insts_artifact
-
-
 class AIESiLU(AIEOperatorBase):
     """AIE-accelerated SiLU activation function"""
 
-    def __init__(self, size, num_columns=None, num_channels=None, tile_size=None):
+    def __init__(
+        self, size, num_columns=None, num_channels=None, tile_size=None, do_set_up=True
+    ):
         self.size = size
 
         # SiLU uses only 1 input per core (less ShimDMA pressure than elementwise ops)
@@ -79,20 +39,50 @@ class AIESiLU(AIEOperatorBase):
         self.num_columns = num_columns
         self.num_channels = num_channels
         self.tile_size = tile_size
+        self.do_set_up = do_set_up
 
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
-        # Compilation artifacts
-        xclbin_artifact, insts_artifact = get_silu_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.size,
-            self.tile_size,
-            self.num_columns,
-            self.num_channels,
-            prefix="silu_",
+    def get_artifacts(self, prefix="silu_"):
+        file_name_base = f"{prefix}{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+
+        mlir_artifact = PythonGeneratedMLIRArtifact.new(
+            f"{file_name_base}.mlir",
+            import_path=self.base_dir / "example" / "silu" / "silu.py",
+            callback_fn="my_silu",
+            callback_args=[
+                self.device_manager.device_type,
+                self.size,
+                self.num_columns,
+                self.num_channels,
+                self.tile_size,
+                0,
+            ],
         )
+
+        xclbin_artifact = XclbinArtifact.new(
+            f"{file_name_base}.xclbin",
+            depends=[
+                mlir_artifact,
+                KernelObjectArtifact.new(
+                    f"silu.o", depends=[SourceArtifact.new("aie_kernels/aie2p/silu.cc")]
+                ),
+            ],
+        )
+
+        insts_artifact = InstsBinArtifact.new(
+            f"{file_name_base}.bin", depends=[mlir_artifact]
+        )
+
+        return xclbin_artifact, insts_artifact
+
+    def set_up(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+
+        # Compilation artifacts
+        xclbin_artifact, insts_artifact = self.get_artifacts()
 
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)

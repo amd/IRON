@@ -17,41 +17,6 @@ from ..compilation import (
 from ..utils import torch_to_numpy, numpy_to_torch
 
 
-def get_gemv_artifacts(
-    base_dir, device_type, M, K, tile_size=1, num_columns=1, prefix="gemv_"
-):
-    file_name_base = f"{prefix}{num_columns}c_{M}x{K}_{tile_size}t"
-
-    mlir_artifact = PythonGeneratedMLIRArtifact.new(
-        f"{file_name_base}.mlir",
-        import_path=base_dir / "example" / "matrix_vector_mul" / "matrix_vector_mul.py",
-        callback_fn="my_matvec",
-        callback_args=[
-            device_type,
-            num_columns,
-            M,
-            K,
-            tile_size,
-        ],
-    )
-
-    xclbin_artifact = XclbinArtifact.new(
-        f"{file_name_base}.xclbin",
-        depends=[
-            mlir_artifact,
-            KernelObjectArtifact.new(
-                f"mv.o", depends=[SourceArtifact.new("aie_kernels/generic/mv.cc")]
-            ),
-        ],
-    )
-
-    insts_artifact = InstsBinArtifact.new(
-        f"{file_name_base}.bin", depends=[mlir_artifact]
-    )
-
-    return xclbin_artifact, insts_artifact
-
-
 class AIEGEMV(AIEOperatorBase):
     """AIE-accelerated General Matrix-Vector/Vector-Matrix Multiplication layer"""
 
@@ -63,6 +28,7 @@ class AIEGEMV(AIEOperatorBase):
         tile_size=1,
         is_mv=True,
         use_static_weight=False,
+        do_set_up=True,
     ):
 
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
@@ -80,19 +46,55 @@ class AIEGEMV(AIEOperatorBase):
         # For compatibility with my_matvec parameters
         self.m = self.tile_size
 
+        self.do_set_up = do_set_up
+
         AIEOperatorBase.__init__(self)
 
+    def get_artifacts(self, prefix="gemv_"):
+        file_name_base = (
+            f"{prefix}{self.num_columns}c_{self.M}x{self.K}_{self.tile_size}t"
+        )
+
+        mlir_artifact = PythonGeneratedMLIRArtifact.new(
+            f"{file_name_base}.mlir",
+            import_path=self.base_dir
+            / "example"
+            / "matrix_vector_mul"
+            / "matrix_vector_mul.py",
+            callback_fn="my_matvec",
+            callback_args=[
+                self.device_manager.device_type,
+                self.num_columns,
+                self.M,
+                self.K,
+                self.tile_size,
+            ],
+        )
+
+        xclbin_artifact = XclbinArtifact.new(
+            f"{file_name_base}.xclbin",
+            depends=[
+                mlir_artifact,
+                KernelObjectArtifact.new(
+                    f"mv.o", depends=[SourceArtifact.new("aie_kernels/generic/mv.cc")]
+                ),
+            ],
+        )
+
+        insts_artifact = InstsBinArtifact.new(
+            f"{file_name_base}.bin", depends=[mlir_artifact]
+        )
+
+        return xclbin_artifact, insts_artifact
+
     def set_up(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+
         # Compilation Artifacts
         # ---
-        xclbin_artifact, insts_artifact = get_gemv_artifacts(
-            self.base_dir,
-            self.device_manager.device_type,
-            self.M,
-            self.K,
-            self.tile_size,
-            self.num_columns,
-        )
+        xclbin_artifact, insts_artifact = self.get_artifacts()
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 

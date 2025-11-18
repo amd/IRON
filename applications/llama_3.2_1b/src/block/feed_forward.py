@@ -6,7 +6,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 import torch
 import torch.nn as nn
 from ..utils import torch_to_numpy, assign
@@ -129,6 +128,7 @@ class FeedForward(nn.Module):
             or (len(x.shape) == 3 and x.shape[0] == 1 and x.shape[1] == 1)
         )
 
+        is_prefill = not is_vector or not self.cfg["use_kv_cache"]
         is_decode_with_kv = is_vector and self.cfg["use_kv_cache"]
 
         if self.cfg["use_aie_ffn_swiglu"]:
