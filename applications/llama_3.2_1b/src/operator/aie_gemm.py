@@ -80,7 +80,6 @@ def get_gemm_artifacts(
         requires_context=True,
     )
 
-
     # FIXME: We should be able to reuse the same xclbin for same tile
     # sizes, only swapping out the instruction sequence for different
     # problem sizes. However, there seem to be cases where this does
