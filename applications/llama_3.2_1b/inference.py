@@ -18,6 +18,7 @@ from safetensors.torch import load_file
 import os
 import shutil
 import logging
+from collections import deque
 
 from src.operator.aie_base import AIEOperatorBase
 from src.utils import (
@@ -29,8 +30,7 @@ from src.utils import (
     generate,
 )
 
-# Global dictionary to track function call times
-_function_call_stack = []
+# Global logger for profiling
 _profile_logger = None
 
 
@@ -58,23 +58,12 @@ def profile_function_calls(frame, event, arg):
     if event == "call":
         # Function is being called
         timestamp = time.perf_counter()
-        _function_call_stack.append({"name": func_identifier, "start_time": timestamp})
         _profile_logger.debug(f"[CALL] {func_identifier} started at {timestamp:.9f}")
 
     elif event == "return":
         # Function is returning
         timestamp = time.perf_counter()
-        if _function_call_stack:
-            call_info = _function_call_stack.pop()
-            duration = timestamp - call_info["start_time"]
-            _profile_logger.debug(
-                f"[RETURN] {call_info['name']} ended at {timestamp:.9f} "
-                f"(duration: {duration:.9f}s)"
-            )
-        else:
-            _profile_logger.debug(
-                f"[RETURN] {func_identifier} ended at {timestamp:.9f}"
-            )
+        _profile_logger.debug(f"[RETURN] {func_identifier} ended at {timestamp:.9f}")
 
     return profile_function_calls
 
@@ -107,6 +96,12 @@ def enable_profiling(logs_dir_name):
     # Set the profile function
     sys.setprofile(profile_function_calls)
     _profile_logger.info("Function profiling enabled")
+
+    # Explicitly call profile_function_calls to log this function's call
+    import inspect
+
+    frame = inspect.currentframe()
+    profile_function_calls(frame, "call", None)
 
 
 def disable_profiling():
