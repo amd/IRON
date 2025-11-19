@@ -196,14 +196,13 @@ add_custom_target(mha_reconfig
     BYPRODUCTS
             ${build_dir}/mha_fast.mlir
             ${build_dir}/mha_fast.bin
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Fast reconfiguration: regenerate insts.bin and golden references only"
 )
 
 # Optional: run host with the newly generated instruction sequence and golden references
 add_custom_target(mha_reconfig_run
     COMMAND ${CMAKE_BINARY_DIR}/example/${currentDesignTarget}/${currentDesignTarget}
-            -x /scratch/vjung/ironclad/build/aie/${currentDesignTarget}.xclbin
+            -x ${build_dir}/${currentDesignTarget}.xclbin
             -i ${build_dir}/mha_fast.bin
             -k ${currentDesignTarget}
             --heads ${heads} --S_q ${S_q} --S_kv ${S_kv} -d ${d}
