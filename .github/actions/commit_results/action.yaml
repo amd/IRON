@@ -46,8 +46,11 @@ runs:
 
         RESULTS_DIR=$(realpath ../results/${{ inputs.dir }})
 
-        ./ci/scripts/merge_all.py --all ${RESULTS_DIR}/all.csv --latest ${RESULTS_DIR}/latest.csv
-        ./ci/scripts/pretty_trends.py ${RESULTS_DIR}/all.csv -o ${RESULTS_DIR}/trends.md
+        cp ${RESULTS_DIR}/all.csv ${RESULTS_DIR}/last_two.csv
+        ./ci/scripts/merge_all.py --all ${RESULTS_DIR}/all.csv --latest ${RESULTS_DIR}/latest.csv --limit 1000
+        ./ci/scripts/merge_all.py --all ${RESULTS_DIR}/last_two.csv --latest ${RESULTS_DIR}/latest.csv --limit 2
+        ./ci/scripts/pretty_trends.py ${RESULTS_DIR}/last_two.csv -o ${RESULTS_DIR}/trends.md
+        rm ${RESULTS_DIR}/last_two.csv
 
         echo ${PR_NUMBER} > ${RESULTS_DIR}/pr_number
         echo ${COMMIT_SHA} > ${RESULTS_DIR}/commit_sha
