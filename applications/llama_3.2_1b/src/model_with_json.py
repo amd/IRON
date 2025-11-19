@@ -184,10 +184,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
         for block in self.trf_blocks:
             x = block(x, mask, self.angles, input_pos)
 
-        if self.cfg.get("use_aie_final_norm", False):
-            x = self.final_norm(x, self.final_norm.weight)
-        else:
-            x = self.final_norm(x)
+        x = self.final_norm(x)
 
         logits = self.out_head(x.to(self.cfg["dtype"]))
 

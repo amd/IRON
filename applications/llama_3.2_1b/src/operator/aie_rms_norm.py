@@ -80,16 +80,20 @@ class AIERMSNorm(AIEOperatorBase):
         self.add_artifacts(artifacts)
 
         # Runtime setup
+        static_weights = None
+        if self.weight is not None:
+            static_weights = torch_to_numpy(self.weight)
+
         total_elements = self.emb_dim * self.num_columns * self.num_channels
         self.add_buffer("input1", total_elements)
-        self.add_buffer("input2", total_elements)
+        self.add_buffer("input2", total_elements, static_data=static_weights)
         self.add_buffer("output", total_elements)
         self.add_kernel(
             "eltwise_mul", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
         )
         self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
 
-    def forward(self, x, y):
+    def forward(self, x, y=None):
         """Forward pass through RMS normalization"""
         applicable = (
             len(x.shape) >= 2
@@ -101,7 +105,7 @@ class AIERMSNorm(AIEOperatorBase):
 
         return self._execute_aie_operation(x, y)
 
-    def _execute_aie_operation(self, x, y):
+    def _execute_aie_operation(self, x, y=None):
         """Execute RMS normalization on AIE hardware"""
 
         original_shape = x.shape
@@ -144,18 +148,24 @@ class AIERMSNorm(AIEOperatorBase):
 
         return result
 
-    def _process_batch(self, batch_data, weight_data):
+    def _process_batch(self, batch_data, weight_data=None):
         """Process a batch of sequences through the AIE kernel"""
         batch_flat = batch_data.view(-1)
         input_data = torch_to_numpy(batch_flat)
-        weights_data = torch_to_numpy(weight_data)
+        if weight_data is not None:
+            weights_data = torch_to_numpy(weight_data)
 
         # Calculate buffer sizes for the batch
         input_size = input_data.nbytes
 
         # Write data to buffers
         self.write_buffer("input1", input_data)
-        self.write_buffer("input2", weights_data)
+        if weight_data is not None:
+            self.write_buffer("input2", weights_data)
+        else:
+            assert (
+                self.weight is not None
+            ), "Weights must be provided either as input or during initialization."
         # Initialize output buffer
         test_pattern = np.zeros(len(input_data), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
