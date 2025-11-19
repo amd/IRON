@@ -26,6 +26,7 @@ class AIEGEMM(AIEOperatorBase):
         M,
         K,
         N,
+        use_static_weight=False,
         num_columns=8,
         tile_m=64,
         tile_k=64,
@@ -62,6 +63,11 @@ class AIEGEMM(AIEOperatorBase):
         self.round_conv_even = round_conv_even
         self.n_aie_rows = 4
         self.num_columns = num_columns
+        self.weight = (
+            None
+            if not use_static_weight
+            else torch.zeros((K, N), dtype=torch.bfloat16).T
+        )
 
         # The operator's M, K, N represent what the NPU operator supports.
         # Calls to forward() may supply matrices of different sizes, and the
@@ -118,8 +124,16 @@ class AIEGEMM(AIEOperatorBase):
             requires_context=True,
         )
 
+        # FIXME: We should be able to reuse the same xclbin for same tile
+        # sizes, only swapping out the instruction sequence for different
+        # problem sizes. However, there seem to be cases where this does
+        # not work and the GEMM appears to be misconfigured for the wrong
+        # size (resulting in a timeout when trying to run it). Perhaps
+        # XRT is caching something, or something is wrong with the run-
+        # time parameter (synchronization)? For now, create separate
+        # xclbins for each problem size.
         xclbin_artifact = XclbinArtifact.new(
-            f"gemm_{file_name_tile_base}.xclbin",
+            f"gemm_{file_name_total_base}.xclbin",
             depends=[
                 mlir_artifact,
                 KernelArchiveArtifact.new(
@@ -150,26 +164,33 @@ class AIEGEMM(AIEOperatorBase):
         self.add_artifacts(artifacts)
 
         # Describe runtime components
+        # The static weights might not yet be loaded upon initialization; therefore, the provided self.static_weights field is a callback that provides the weights at set-up time.
+        static_weights = None
+        if self.weight is not None:
+            static_weights = self.weight.T
+            if isinstance(static_weights, torch.Tensor):
+                static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
             "gemm", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
         )
         self.add_buffer("A", self.M * self.K)
-        self.add_buffer("B", self.K * self.N)
+        self.add_buffer("B", self.K * self.N, static_data=static_weights)
         self.add_buffer("C", self.M * self.N)
         self.add_to_runlist("gemm", "A", "B", "C")
 
-    def forward(self, A, B):
+    def forward(self, A, B=None):
         """Forward pass through GEMM operation: C = A @ B"""
-        expected_output_shape = A.shape[:-1] + (B.shape[-1],)
+        B_shape = B.shape if B is not None else self.weight.T.shape
+        expected_output_shape = A.shape[:-1] + (B_shape[-1],)
 
         # Remove batch dimension, if any
         if len(A.shape) > 2:
             A = A.view(-1, A.shape[-1])
-        if len(B.shape) > 2:
-            B = B.view(-1, B.shape[-1])
+        if B is not None and len(B.shape) > 2:
+            B = B.view(-1, B_shape[-1])
 
         M, K = A.shape
-        K2, N = B.shape
+        K2, N = B_shape
 
         applicable = (
             K == K2
@@ -181,7 +202,10 @@ class AIEGEMM(AIEOperatorBase):
             raise AIEOperatorConstraintError("AIEGEMM: incompatible tensor shape(s)")
 
         A_padded = self._pad_A(torch_to_numpy(A))
-        B_padded = self._pad_B(torch_to_numpy(B))
+        if B is not None:
+            B_padded = self._pad_B(torch_to_numpy(B))
+        else:
+            B_padded = None
 
         logging.debug(
             f"Executing GEMM for dimensions M={M}, K={K}, N={N} using NPU operator with M={self.M}, K={self.N}, N={self.N}"
@@ -232,10 +256,10 @@ class AIEGEMM(AIEOperatorBase):
             B_padded[:K, :N] = B_np
         return B_padded
 
-    def _execute_aie_operation(self, A_np, B_np):
+    def _execute_aie_operation(self, A_np, B_np=None):
         """Execute GEMM operation on AIE hardware"""
         M, K = A_np.shape
-        K2, N = B_np.shape
+        K2, N = B_np.shape if B_np is not None else self.weight.T.shape
 
         # If M is larger than kernel supports, split large GEMMs with many rows
         # into multiple invocations of the kernel. This is only supported for
@@ -244,8 +268,9 @@ class AIEGEMM(AIEOperatorBase):
         assert K == K2 and K == self.K
         assert N == self.N
 
-        self.write_buffer("B", B_np)
         self.write_buffer("A", A_np)
+        if B_np is not None:
+            self.write_buffer("B", B_np)
         self.run_runlist()
         result_np = self.read_buffer("C", shape=(M, N), dtype=bfloat16)
 

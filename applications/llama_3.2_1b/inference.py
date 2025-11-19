@@ -138,11 +138,15 @@ def inference(
     )
     logging.info("Model and tokenizer loaded.")
 
-    logging.info("Preparing AIE operators...")
-    # At this point the model is fully described (operators and their dimensions and how to compile them)
-    AIEOperatorBase.compile_all_operators()
-    AIEOperatorBase.prepare_runtime()
-    logging.info("AIE operator preparation completed.")
+    # Important: Set the seed again after initialization of the model. Each
+    # call that initializes an nn.Linear layer updates the RNG state, because
+    # weights are initialized with random values. For different JSON
+    # configurations, we initialize a different number of linear layers,
+    # so different configurations result in a different RNG state here. Since
+    # we use random numbers to sample from the token distribution during
+    # inference, it is important to have the same RNG state between runs so we
+    # can have reproducible results across configurations.
+    torch.manual_seed(1608560892)
 
     hook_handles = []
     if save_outputs:
@@ -195,6 +199,11 @@ def inference(
     model.to(device)
     del combined_weights
 
+    logging.info("Preparing AIE operators...")
+    # At this point the model is fully described (operators and their dimensions and how to compile them)
+    AIEOperatorBase.compile_all_operators()
+    AIEOperatorBase.prepare_runtime()
+    logging.info("AIE operator preparation completed.")
     print(f"Starting text generation...")
     print(f"Generating {num_tokens} tokens...")
     print("=" * 55)

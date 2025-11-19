@@ -20,13 +20,28 @@ from ..utils import torch_to_numpy, numpy_to_torch
 class AIEGEMV(AIEOperatorBase):
     """AIE-accelerated General Matrix-Vector/Vector-Matrix Multiplication layer"""
 
-    def __init__(self, M, K, num_columns=1, tile_size=1, is_mv=True):
+    def __init__(
+        self,
+        M,
+        K,
+        num_columns=1,
+        num_channels=2,
+        tile_size=1,
+        is_mv=True,
+        use_static_weight=False,
+    ):
 
-        self.M = M
-        self.K = K
+        self.M = M  # matrix rows  (if is_mv=False, matrix columns)
+        self.K = K  # matrix columns, vector rows  (if is_mv=False, matrix rows, vector columns)
         self.num_columns = num_columns
         self.tile_size = tile_size
         self.is_mv = is_mv
+        if use_static_weight:
+            self.weight = torch.zeros(
+                (M, K) if is_mv else (K, M), dtype=torch.bfloat16
+            ).T  # weights are stored col-major/transposed
+        else:
+            self.weight = None
 
         # For compatibility with my_matvec parameters
         self.m = self.tile_size
@@ -73,15 +88,26 @@ class AIEGEMV(AIEOperatorBase):
 
         # Runtime Setup
         # ---
+        static_weights = None
+        if self.weight is not None:
+            # Kernel expects row-major weights, so might need to transpose;
+            # also might need to transpose if is_mv
+            if self.is_mv:
+                static_weights = self.weight.T
+            else:
+                # Double transpose cancels out
+                static_weights = self.weight
+            if isinstance(static_weights, torch.Tensor):
+                static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
             "gemv", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
         )
-        self.add_buffer("matrix", self.M * self.K)
+        self.add_buffer("matrix", self.M * self.K, static_data=static_weights)
         self.add_buffer("vector", self.K)
         self.add_buffer("output", self.M)
         self.add_to_runlist("gemv", "matrix", "vector", "output")
 
-    def forward(self, matrix, vector):
+    def forward(self, vector, matrix=None):
         """Forward pass through GEMV operation
 
         Args:
@@ -92,16 +118,32 @@ class AIEGEMV(AIEOperatorBase):
         Returns:
             Output vector of shape (..., M) for MV or (..., K) for VM
         """
-        # Handle 3D tensor shapes like (1, 1, emb_dim) by getting the last dimensions
-        matrix_rows = matrix.shape[-2]
-        matrix_cols = matrix.shape[-1]
+
+        # Flatten batch dimensions if needed
+        if matrix is not None:
+            matrix = matrix.reshape(*matrix.shape[-2:])
+        vector = vector.reshape(*vector.shape[-1:])
+
+        # For vector-matrix, we'll transpose the matrix internally
+        if matrix is not None and not self.is_mv:
+            # Transpose the matrix for vector-matrix multiplication
+            # (if using static weights, the matrix is already transposed once at setup if needed)
+            matrix = matrix.transpose(-2, -1)
+
+        if matrix is not None:
+            matrix_rows = matrix.shape[-2]
+            matrix_cols = matrix.shape[-1]
+        else:
+            matrix_rows = self.M
+            matrix_cols = self.K
+
         vector_size = vector.shape[-1]
 
         applicable = (
-            vector_size == (matrix_cols if self.is_mv else matrix_rows)
-            and matrix_rows == (self.M if self.is_mv else self.K)
-            and matrix_cols == (self.K if self.is_mv else self.M)
-            and matrix.dtype == torch.bfloat16
+            matrix_cols == vector_size
+            and matrix_rows == self.M
+            and matrix_cols == self.K
+            and (matrix is None or matrix.dtype == torch.bfloat16)
             and vector.dtype == torch.bfloat16
         )
         if not applicable:
@@ -109,73 +151,11 @@ class AIEGEMV(AIEOperatorBase):
                 "AIEElementwiseAdd: incompatible tensor shape(s)"
             )
 
-        # For vector-matrix, we'll transpose the matrix internally
-        if not self.is_mv:
-            # Transpose the matrix for vector-matrix multiplication
-            matrix = matrix.transpose(-2, -1)
-
-        # Ensure vector is 1D for the last dimension
-        if vector.dim() > 1 and vector.shape[-1] == 1:
-            vector = vector.squeeze(-1)
-
-        return self._execute_aie_operation(matrix, vector)
-
-    def _execute_aie_operation(self, matrix, vector):
-        """Execute matrix-vector multiplication on AIE hardware"""
-
-        # Store original shapes
-        original_matrix_shape = matrix.shape
-        original_vector_shape = vector.shape
-
-        # Flatten batch dimensions if needed
-        if len(matrix.shape) > 2:
-            matrix = matrix.view(-1, matrix.shape[-2], matrix.shape[-1])
-        if len(vector.shape) > 1:
-            vector = vector.view(-1, vector.shape[-1])
-
-        batch_size = matrix.shape[0] if len(matrix.shape) > 2 else 1
-
-        # Process each batch element
-        results = []
-        for i in range(batch_size):
-            if batch_size > 1:
-                matrix_batch = matrix[i]
-                vector_batch = vector[i] if len(vector.shape) > 1 else vector
-            else:
-                matrix_batch = matrix
-                vector_batch = vector
-
-            result = self._process_single_gemv(matrix_batch, vector_batch)
-            results.append(result)
-
-        # Concatenate results
-        if len(results) > 1:
-            result = torch.stack(results, dim=0)
-        else:
-            result = results[0]
-
-        # Restore original shape if needed
-        if len(original_matrix_shape) > 2:
-            if self.is_mv:
-                result_shape = original_matrix_shape[:-2] + (self.M,)
-            else:
-                result_shape = original_matrix_shape[:-2] + (self.K,)
-            result = result.view(result_shape)
-
-        return result
-
-    def _process_single_gemv(self, matrix_data, vector_data):
-        """Process a single matrix-vector multiplication through the AIE kernel"""
-        # Ensure inputs are 2D and 1D respectively
-        if matrix_data.dim() == 3:
-            matrix_data = matrix_data.squeeze(0)
-        if vector_data.dim() == 2:
-            vector_data = vector_data.squeeze(0)
-
-        matrix_np = torch_to_numpy(matrix_data.contiguous())
-        vector_np = torch_to_numpy(vector_data.contiguous())
-
-        self.write_buffer("matrix", matrix_np)
+        vector_np = torch_to_numpy(vector)
+        if matrix is not None:
+            matrix_np = torch_to_numpy(matrix)
+            # If matrix is none, we are using static weights that have already been written to the buffer
+            self.write_buffer("matrix", matrix_np)
         self.write_buffer("vector", vector_np)
         self.run_runlist()
         result = self.read_buffer_as_torch("output", (self.M,))

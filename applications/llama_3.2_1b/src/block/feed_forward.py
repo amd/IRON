@@ -8,7 +8,7 @@
 
 import torch
 import torch.nn as nn
-from ..utils import torch_to_numpy
+from ..utils import torch_to_numpy, assign
 from src.operator.aie_elementwise_mul import AIEElementwiseMul
 from src.operator.aie_gemm import AIEGEMM
 from src.operator.aie_gemv import AIEGEMV
@@ -24,17 +24,6 @@ class FeedForward(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg.copy()
-
-        # Weights for FFN
-        self.fc1 = nn.Linear(
-            cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
-        )
-        self.fc2 = nn.Linear(
-            cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
-        )
-        self.fc3 = nn.Linear(
-            cfg["hidden_dim"], cfg["emb_dim"], dtype=cfg["dtype"], bias=False
-        )
 
         self.emb_dim = cfg["emb_dim"]
         self.hidden_dim = cfg["hidden_dim"]
@@ -62,16 +51,27 @@ class FeedForward(nn.Module):
                 "tile_m": 64,
                 "tile_k": 64,
                 "tile_n": 64,
+                "use_static_weight": True,
             }
 
-            self.aie_fc1_prefill = AIEGEMM(
+            self.fc1 = AIEGEMM(
                 M=M_prefill, K=self.emb_dim, N=self.hidden_dim, **aie_config_prefill
             )
-            self.aie_fc2_prefill = AIEGEMM(
+            self.fc2 = AIEGEMM(
                 M=M_prefill, K=self.emb_dim, N=self.hidden_dim, **aie_config_prefill
             )
-            self.aie_fc3_prefill = AIEGEMM(
+            self.fc3 = AIEGEMM(
                 M=M_prefill, K=self.hidden_dim, N=self.emb_dim, **aie_config_prefill
+            )
+        else:
+            self.fc1 = nn.Linear(
+                cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
+            )
+            self.fc2 = nn.Linear(
+                cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
+            )
+            self.fc3 = nn.Linear(
+                cfg["hidden_dim"], cfg["emb_dim"], dtype=cfg["dtype"], bias=False
             )
 
         if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
@@ -109,18 +109,10 @@ class FeedForward(nn.Module):
         )
 
         is_decode_with_kv = is_vector and self.cfg["use_kv_cache"]
-        is_prefill = not is_vector or not self.cfg["use_kv_cache"]
 
-        if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            x_fc1 = self.aie_fc1_gemv(self.fc1.weight.T, x)
-            x_fc2 = self.aie_fc2_gemv(self.fc2.weight.T, x)
-        elif self.cfg["use_aie_ffn_gemm"]:
-            if is_decode_with_kv:
-                x_fc1 = self.fc1(x)
-                x_fc2 = self.fc2(x)
-            else:
-                x_fc1 = self.aie_fc1_prefill(x, self.fc1.weight.T)
-                x_fc2 = self.aie_fc2_prefill(x, self.fc2.weight.T)
+        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
+            x_fc1 = self.aie_fc1_gemv(x)
+            x_fc2 = self.aie_fc2_gemv(x)
         else:
             x_fc1 = self.fc1(x)
             x_fc2 = self.fc2(x)
@@ -132,13 +124,30 @@ class FeedForward(nn.Module):
         else:
             x = x_fc1_silu * x_fc2
 
-        if is_vector and self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            result = self.aie_fc3_gemv(self.fc3.weight.T, x)
+        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
+            result = self.aie_fc3_gemv(x)
             return result.view(original_shape)
-        elif self.cfg["use_aie_ffn_gemm"]:
-            if is_decode_with_kv:
-                return self.fc3(x).view(original_shape)
-            else:
-                return self.aie_fc3_prefill(x, self.fc3.weight.T)
         else:
             return self.fc3(x).view(original_shape)
+
+    def assign_weights(self, l, fc1, fc2, fc3):
+        self.fc1.weight = assign(
+            self.fc1.weight,
+            fc1,
+            f"model.layers.{l}.mlp.gate_proj.weight",
+        )
+        self.fc2.weight = assign(
+            self.fc2.weight,
+            fc2,
+            f"model.layers.{l}.mlp.up_proj.weight",
+        )
+        self.fc3.weight = assign(
+            self.fc3.weight,
+            fc3,
+            f"model.layers.{l}.mlp.down_proj.weight",
+        )
+
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+            self.aie_fc1_gemv.weight = fc1
+            self.aie_fc2_gemv.weight = fc2
+            self.aie_fc3_gemv.weight = fc3

@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 from src.block.gqa import GroupedQueryAttention
 from src.block.feed_forward import FeedForward
+from src.operator.aie_rms_norm import AIERMSNorm
+from src.operator.aie_elementwise_add import AIEElementwiseAdd
 
 
 class TransformerBlock(nn.Module):
@@ -38,8 +40,6 @@ class TransformerBlock(nn.Module):
         )
 
         if self.cfg["use_aie_norm1"]:
-            from src.operator.aie_rms_norm import AIERMSNorm
-
             self.norm1 = AIERMSNorm(
                 emb_dim=cfg["emb_dim"],
                 eps=1e-5,
@@ -51,8 +51,6 @@ class TransformerBlock(nn.Module):
             self.norm1 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
 
         if self.cfg["use_aie_norm2"]:
-            from src.operator.aie_rms_norm import AIERMSNorm
-
             self.norm2 = AIERMSNorm(
                 emb_dim=cfg["emb_dim"],
                 eps=1e-5,
@@ -64,8 +62,6 @@ class TransformerBlock(nn.Module):
             self.norm2 = nn.RMSNorm(cfg["emb_dim"], eps=1e-5, dtype=cfg["dtype"])
 
         if self.cfg["use_aie_residual"]:
-            from src.operator.aie_elementwise_add import AIEElementwiseAdd
-
             if self.cfg["use_kv_cache"]:
                 max_prefill_size = prompt_length * cfg["emb_dim"]
             else:
@@ -103,10 +99,7 @@ class TransformerBlock(nn.Module):
             is_decode_with_kv = False
 
         shortcut = x
-        if self.cfg["use_aie_norm1"]:
-            x = self.norm1(x, self.norm1.weight)
-        else:
-            x = self.norm1(x)
+        x = self.norm1(x)
 
         x = self.att(x, mask, angles, input_pos)
 
@@ -120,11 +113,7 @@ class TransformerBlock(nn.Module):
 
         # Shortcut connection for feed-forward block
         shortcut = x
-        if self.cfg["use_aie_norm2"]:
-            x = self.norm2(x, self.norm2.weight)
-        else:
-            x = self.norm2(x)
-
+        x = self.norm2(x)
         x = self.ff(x)
 
         if self.cfg["use_aie_residual"]:
