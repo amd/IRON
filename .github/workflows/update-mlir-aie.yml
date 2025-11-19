@@ -55,7 +55,6 @@ jobs:
           git checkout -b $new_branch
           
           # Update requirements.txt
-          sed -i "s/mlir_aie==${{ steps.current_version.outputs.version }}/mlir_aie==${{ steps.latest_release.outputs.tag }}/" requirements.txt
           sed -i "s|/v${{ steps.current_version.outputs.version }}/|/v${{ steps.latest_release.outputs.tag }}/|" requirements.txt
           
           # Commit changes
