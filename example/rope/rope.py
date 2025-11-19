@@ -46,7 +46,7 @@ def rope(
     # AIE Core Function declaration
     rope_kernel = Kernel(
         "rope",
-        f"rope{f"_{method_type}" if method_type is not None else ""}.o",
+        "rope" + (f"_{method_type}" if method_type is not None else "") + ".o",
         [tile_ty, tile_ty, tile_ty, np.int32],
     )
 
