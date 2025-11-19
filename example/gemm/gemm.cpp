@@ -160,6 +160,11 @@ int main(int argc, const char *argv[])
     double bandwidth_GBps = (total_bytes / (1024 * 1024 * 1024)) / (npu_time * 1e-6);
     std::cout << "Effective Bandwidth: " << bandwidth_GBps << " GB/s" << std::endl;
 
+    // Need to cast to long long since M/K/N=2048 would give 17*10^9 ops for example
+    unsigned long long n_ops = static_cast<unsigned long long>(M) * K * N * 2;
+    float throughput = n_ops / npu_time / 1e3; // GOP/s
+    std::cout << "Throughput: " << throughput << " GFLOP/s" << std::endl;
+
     std::bfloat16_t *bufOut1 = bo_out.map<std::bfloat16_t *>();
 
     // Compare with golden reference

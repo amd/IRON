@@ -16,6 +16,7 @@
 #ifndef AIE2_MATH_H
 #define AIE2_MATH_H
 
+#include <cstring>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -25,7 +26,7 @@ inline __attribute__((always_inline)) float invsqrt(float in)
     float x2 = in * 0.5f;
     float y = in;
     int32_t i;
-    memcpy(&i, &y, sizeof(y)); // avoid strict-aliasing
+    std::memcpy(&i, &y, sizeof(y)); // avoid strict-aliasing
     i = 0x5f3759df - (i >> 1);
     y = *(float *)&i;
     const float threehalfs = 1.5f;

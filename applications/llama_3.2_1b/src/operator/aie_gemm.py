@@ -133,7 +133,7 @@ class AIEGEMM(AIEOperatorBase):
                 "trace_size": 0,
                 "generate_taps": False,
             },
-            requires_context=True,
+            requires_context=False,
         )
 
         # FIXME: We should be able to reuse the same xclbin for same tile
