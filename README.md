@@ -33,31 +33,31 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 #### 🎯 Operator Dashboard
 
-| Section | Description | Datatype | Status | Design Example |
-|:--------|:------------|:---------|:-------|:-------------|
-| [Element-wise Add](./aie_kernels/aie2/add.cc) | Element-wise addition kernel | bfloat16 | 🟢 | [example/elementwise_add/](./example/elementwise_add/) |
-| [Element-wise Mul](./aie_kernels/aie2/mul.cc) | Element-wise multiplication kernel | bfloat16 | 🟢 | [example/elementwise_mul/](./example/elementwise_mul/) |
-| [GEMM](./aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | 🟢 | [example/gemm/](./example/gemm/) |
-| [GEMV](./aie_kernels/aie2/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | 🟢 | [example/gemv/](./example/gemv/) |
-| [GQA](./aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | 🟢 | [example/mha/](./example/mha/) |
-| [MHA](./aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | 🟢 | [example/mha/](./example/mha/) |
-| [RMSNorm](./aie_kernels/aie2p/rms_norm.cc) | RMSNorm kernel | bfloat16 | 🟢 | [example/rms_norm/](./example/rms_norm/) |
-| [RoPE](./aie_kernels/aie2p/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | 🟢 | [example/rope/](./example/rope/) |
-| [SiLU](./aie_kernels/aie2p/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | 🟢 | [example/silu/](./example/silu/) |
-| [Softmax](./aie_kernels/aie2p/softmax.cc) | Softmax kernel | bfloat16 | 🟢 | [example/softmax/](./example/softmax/) |
-| [Weighted RMSNorm](./aie_kernels/aie2p/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | 🟢 | [example/rms_norm/](./example/rms_norm/) |
-| [Copy](./aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | 🟢 | [example/copy/](./example/copy/) |
-| [Transpose](./aie_kernels/aie2p/transpose.cc) | Transpose | bfloat16 | 🟢 | [example/transpose/](./example/transpose/) |
-| [AXPY](./aie_kernels/aie2p/axpy.cc) | AXPY | bfloat16 | 🟢 | [example/axpy/](./example/axpy/) |
-| [Reduction]() | Reduction | bfloat16 | 🟡 |  |
-| [Dequant](./aie_kernels/aie2/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | 🟢 | [example/dequant/](./example/dequant/) |
-| [RELU](./aie_kernels/aie2p/relu.cc) | RELU | bfloat16 | 🟢 | [example/relu/](./example/relu/) |
-| [Leaky RELU](./aie_kernels/aie2p/leaky_relu.cc) (WIP) | Leaky RELU kernel | bfloat16 | ⚪ | [example/leaky_relu/](./example/leaky_relu/) |
-| [GELU](./aie_kernels/aie2p/gelu.cc) | GELU | bfloat16 | 🟢 | [example/gelu/](./example/gelu/) |
-| [LayerNorm](./aie_kernels/aie2p/layer_norm.cc) | LayerNorm | bfloat16 | 🟢 | [example/layer_norm/](./example/layer_norm/) |
-| [Convolution]() | Convolution | bfloat16 | 🟡 |  |
-| [MaxPool]() | MaxPool | bfloat16 | ⚪ |  |
-| [AveragePool]() | AveragePool | bfloat16 | ⚪ |  |
+| Section | Description | Datatype | AIE2 | AIE2P | Status | Design Example |
+|:--------|:------------|:---------|:-----|:------|:-------|:-------------|
+| [Element-wise Add](./aie_kernels/generic/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/elementwise_add/](./example/elementwise_add/) |
+| [Element-wise Mul](./aie_kernels/generic/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/elementwise_mul/](./example/elementwise_mul/) |
+| [GEMM](./aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/gemm/](./example/gemm/) |
+| [GEMV](./aie_kernels/generic/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/matrix_vector_mul/](./example/matrix_vector_mul/) |
+| [GQA](./aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [example/mha/](./example/mha/) |
+| [MHA](./aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [example/mha/](./example/mha/) |
+| [RMSNorm](./aie_kernels/aie2/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/rms_norm/](./example/rms_norm/) |
+| [RoPE](./aie_kernels/generic/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/rope/](./example/rope/) |
+| [SiLU](./aie_kernels/aie2/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/silu/](./example/silu/) |
+| [Softmax](./aie_kernels/aie2/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/softmax/](./example/softmax/) |
+| [Weighted RMSNorm](./aie_kernels/aie2/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/rms_norm/](./example/rms_norm/) |
+| [Copy](./aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [example/mem_copy/](./example/mem_copy/) |
+| [Transpose](./aie_kernels/generic/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [example/transpose/](./example/transpose/) |
+| [AXPY](./aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [example/axpy/](./example/axpy/) |
+| [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
+| [Dequant](./aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [example/dequant/](./example/dequant/) |
+| [RELU](./aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [example/relu/](./example/relu/) |
+| [Leaky RELU](./aie_kernels/aie2p/leaky_relu.cc) (WIP) | Leaky RELU kernel | bfloat16 | | ✓ | ⚪ | [example/leaky_relu/](./example/leaky_relu/) |
+| [GELU](./aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [example/gelu/](./example/gelu/) |
+| [LayerNorm](./aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [example/layer_norm/](./example/layer_norm/) |
+| [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
+| [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
+| [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
 
 > Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
 
@@ -132,6 +132,9 @@ IRON is a CMake-based project. To configure the project, run:
 ```shell
 cmake -B build
 ```
+
+> Note: By default, the project is built for AIE2P. To build for AIE2, set the target using:
+>       `cmake -B build -DIRONCLAD_AIE_TARGET=aie2`
 
 To build all designs, use: 
 ```shell
