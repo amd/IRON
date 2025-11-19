@@ -34,7 +34,7 @@ jobs:
       - name: Get latest mlir-aie release
         id: latest_release
         run: |
-          latest_tag_with_v=$(curl -s "https://api.github.com/repos/Xilinx/mlir-aie/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          latest_tag_with_v=$(curl -s "https://api.github.com/repos/Xilinx/mlir-aie/releases/latest" | jq '.tag_name')
           latest_tag=${latest_tag_with_v#v}
           echo "Latest tag: $latest_tag"
           echo "tag=$latest_tag" >> $GITHUB_OUTPUT
