@@ -6,7 +6,7 @@ name: Check for new mlir-aie release
 on:
   workflow_dispatch: # Allow manual triggering
   schedule:
-    - cron: '0 0 * * *' # Run every day at midnight
+    - cron: '0 7 * * *' # Run every day at 7 AM UTC (midnight Mountain Time)
 
 permissions:
   contents: write
