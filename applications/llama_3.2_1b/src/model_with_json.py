@@ -17,6 +17,7 @@ from rich.text import Text
 
 from src.operator.aie_rms_norm import AIERMSNorm
 
+
 def dtype_from_string(inp):
     if isinstance(inp, torch.dtype):
         return inp

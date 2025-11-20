@@ -138,7 +138,7 @@ def load_weights_into_llama(model, param_config, params):
             params[f"model.layers.{l}.input_layernorm.weight"],
             params[f"model.layers.{l}.post_attention_layernorm.weight"],
         )
-        
+
     # Load output layer weights
     model.assign_weights(params["model.norm.weight"])
 
