@@ -15,12 +15,21 @@ from ..compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from ..utils import torch_to_numpy, numpy_to_torch
+from pathlib import Path
 
 
 class AIEElementwiseMul(AIEOperatorBase):
     """AIE-accelerated element-wise multiplication"""
 
-    def __init__(self, size, num_columns=None, num_channels=None, tile_size=None):
+    def __init__(
+        self,
+        size,
+        num_columns=None,
+        num_channels=None,
+        tile_size=None,
+        trace_size=0,
+        do_set_up=True,
+    ):
         self.size = size
 
         # Enforce ShimDMA limits for elementwise_mul (uses 2 inputs per core)
@@ -37,12 +46,13 @@ class AIEElementwiseMul(AIEOperatorBase):
         self.num_columns = num_columns
         self.num_channels = num_channels
         self.tile_size = tile_size
+        self.trace_size = trace_size
+        self.do_set_up = do_set_up
 
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
-        # Compilation artifacts
-        file_name_base = f"mul_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+    def get_artifacts(self, prefix="eltwise_mul_"):
+        file_name_base = f"{prefix}{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -57,7 +67,7 @@ class AIEElementwiseMul(AIEOperatorBase):
                 self.num_columns,
                 self.num_channels,
                 self.tile_size,
-                0,
+                self.trace_size,
             ],
         )
 
@@ -74,6 +84,20 @@ class AIEElementwiseMul(AIEOperatorBase):
         insts_artifact = InstsBinArtifact.new(
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
+
+        return xclbin_artifact, insts_artifact
+
+    def set_up(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+
+        # Compilation artifacts
+        xclbin_artifact, insts_artifact = self.get_artifacts()
+
+        # Override device_type in the mlir_artifact's callback_args if needed
+        mlir_artifact = xclbin_artifact.depends[0]
+        mlir_artifact.callback_args[0] = self.device_manager.device_type
 
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)

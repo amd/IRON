@@ -60,6 +60,9 @@ class AIEOperatorBase(ABC):
             cls.static_data_pool[buffer_data] = bo
 
         for op in cls.registered_operators:
+            if len(op.kernels) == 0:
+                # Operator likely is used as a sub-operator in another operator and does need any setup.
+                continue
             logging.info(f"Preparing runtime for AIE operator: {op.__class__.__name__}")
 
             # Set up for each kernel

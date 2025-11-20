@@ -37,6 +37,7 @@ config_options = {
     "use_aie_ffn_gemm":             (bool,              False,         "[FFN] GEMM"),
     "use_aie_ffn_mul":              (bool,              False,         "[FFN] Elementwise Mul"),
     "use_aie_ffn_silu":             (bool,              False,         "[FFN] SiLU"),
+    "use_aie_ffn_swiglu":           (bool,              False,         "[FFN] Runlist-based SwiGLU"),
     "use_aie_residual":             (bool,              False,         "[Transformer] Residual Addition"),
     "use_aie_norm1":                (bool,              False,         "[Transformer] Pre Norm"),
     "use_aie_norm2":                (bool,              False,         "[Transformer] Post Norm"),
@@ -81,6 +82,14 @@ def print_config(cfg, console=Console()):
         dont_print |= {"use_aie_regular_mha"}
     else:
         dont_print |= {"use_aie_fused_mha"}
+    if cfg["use_aie_ffn_swiglu"]:
+        dont_print |= {
+            "use_aie_ffn_gemm",
+            "use_aie_ffn_mul",
+            "use_aie_ffn_silu",
+        }
+    else:
+        dont_print |= {"use_aie_ffn_swiglu"}
 
     console.print(
         "AIE Configuration ([green]✔[/green] = AIE NPU / [red]✘[/red] = CPU):",

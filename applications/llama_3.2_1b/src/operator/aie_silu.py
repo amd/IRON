@@ -20,7 +20,9 @@ from ..utils import torch_to_numpy, numpy_to_torch
 class AIESiLU(AIEOperatorBase):
     """AIE-accelerated SiLU activation function"""
 
-    def __init__(self, size, num_columns=None, num_channels=None, tile_size=None):
+    def __init__(
+        self, size, num_columns=None, num_channels=None, tile_size=None, do_set_up=True
+    ):
         self.size = size
 
         # SiLU uses only 1 input per core (less ShimDMA pressure than elementwise ops)
@@ -37,12 +39,12 @@ class AIESiLU(AIEOperatorBase):
         self.num_columns = num_columns
         self.num_channels = num_channels
         self.tile_size = tile_size
+        self.do_set_up = do_set_up
 
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
-        # Compilation artifacts
-        file_name_base = f"silu_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+    def get_artifacts(self, prefix="silu_"):
+        file_name_base = f"{prefix}{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -71,6 +73,16 @@ class AIESiLU(AIEOperatorBase):
         insts_artifact = InstsBinArtifact.new(
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
+
+        return xclbin_artifact, insts_artifact
+
+    def set_up(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+
+        # Compilation artifacts
+        xclbin_artifact, insts_artifact = self.get_artifacts()
 
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
