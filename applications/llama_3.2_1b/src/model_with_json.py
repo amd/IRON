@@ -15,6 +15,7 @@ from src.operator.rope import compute_rope_params
 from rich.console import Console
 from rich.text import Text
 
+from .utils import assign
 from src.operator.aie_rms_norm import AIERMSNorm
 
 

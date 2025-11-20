@@ -8,6 +8,7 @@
 
 import torch
 import torch.nn as nn
+from ..utils import assign
 from src.block.gqa import GroupedQueryAttention
 from src.block.feed_forward import FeedForward
 from src.operator.aie_rms_norm import AIERMSNorm
