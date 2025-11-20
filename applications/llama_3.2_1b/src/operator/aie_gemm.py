@@ -35,13 +35,6 @@ class AIEGEMM(AIEOperatorBase):
         **gemm_kwargs,
     ):
 
-        min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        assert tile_m >= min_tile_m, f"tile_m ({tile_m}) must be >= {min_tile_m}"
-        assert tile_k >= min_tile_k, f"tile_k ({tile_k}) must be >= {min_tile_k}"
-        assert tile_n >= min_tile_n, f"tile_n ({tile_n}) must be >= {min_tile_n}"
-        assert tile_k & (tile_k - 1) == 0, f"tile_k ({tile_k}) must be power of 2"
-        assert tile_n & (tile_n - 1) == 0, f"tile_n ({tile_n}) must be power of 2"
-
         self.tile_m = tile_m
         self.tile_k = tile_k
         self.tile_n = tile_n
@@ -89,12 +82,21 @@ class AIEGEMM(AIEOperatorBase):
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
         dtype_out = self.gemm_args.get("dtype_out", "bf16")
         emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
-            "emulate_bf16_mmul_with_bfp16", False
+            "emulate_bf16_mmul_with_bfp16", True
         )
-        prio_accuracy = self.gemm_args.get("prio_accuracy", True)
+        prio_accuracy = self.gemm_args.get("prio_accuracy", False)
         use_scalar = self.gemm_args.get("use_scalar", False)
-        bf16_f32_only = self.gemm_args.get("bf16_f32_only", True)
         round_conv_even = self.gemm_args.get("round_conv_even", True)
+
+        if emulate_bf16_mmul_with_bfp16:
+            min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
+        else:
+            min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
+        assert tile_m >= min_tile_m, f"tile_m ({tile_m}) must be >= {min_tile_m}"
+        assert tile_k >= min_tile_k, f"tile_k ({tile_k}) must be >= {min_tile_k}"
+        assert tile_n >= min_tile_n, f"tile_n ({tile_n}) must be >= {min_tile_n}"
+        assert tile_k & (tile_k - 1) == 0, f"tile_k ({tile_k}) must be power of 2"
+        assert tile_n & (tile_n - 1) == 0, f"tile_n ({tile_n}) must be power of 2"
 
         file_name_tile_base = f"{prefix}{tile_m}x{tile_k}x{tile_n}"
         file_name_total_base = f"{prefix}{M}x{K}x{N}_{tile_m}x{tile_k}x{tile_n}"
@@ -104,11 +106,14 @@ class AIEGEMM(AIEOperatorBase):
             f"-DDIM_K={tile_k}",
             f"-DDIM_N={tile_n}",
         ]
-        if bf16_f32_only:
+        if prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
+        else:
+            kernel_flags.append("-Dbf16_bf16_ONLY")
         if round_conv_even:
             kernel_flags.append("-DROUND_CONV_EVEN")
-        # FIXME: I believe the emulate_bf16_mmul_with_bfp16 flag should be added to the kernel flags here as well
+        if emulate_bf16_mmul_with_bfp16:
+            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_total_base}.mlir",
