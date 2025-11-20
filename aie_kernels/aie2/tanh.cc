@@ -26,7 +26,7 @@ void tanh_bf16_vectorized(bfloat16 *restrict input_vector, bfloat16 *restrict ou
         aie::vector<bfloat16, 16> tanh_x = getTanhBf16(input);
 
         // Store output vector
-        *it_out++ = tanh_half_x;
+        *it_out++ = tanh_x;
     }
 
     event1();
