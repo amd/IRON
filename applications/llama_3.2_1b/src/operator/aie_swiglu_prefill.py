@@ -40,10 +40,8 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts = []
         device_str = self.device_manager.device_str()
 
-        seq_len_chunk_size = self.get_seq_len_chunk_size()
-
         gemm_1 = AIEGEMM(
-            M=seq_len_chunk_size,
+            M=self.seq_len,
             K=self.embedding_dim,
             N=self.hidden_dim,
             do_set_up=False,
@@ -59,10 +57,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         )  # xclbin artifact will be pulled in as a dependency of last xclbin
 
         silu = AIESiLU(
-            size=seq_len_chunk_size * self.hidden_dim,
-            num_columns=4,
+            size=self.seq_len * self.hidden_dim,
+            num_columns=8,
             num_channels=2,
-            tile_size=1024,
+            tile_size=self.hidden_dim,
             do_set_up=False,
         )
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
@@ -76,10 +74,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts.append(silu_insts)
 
         eltwise_mul = AIEElementwiseMul(
-            size=seq_len_chunk_size * self.hidden_dim,
-            num_columns=4,
+            size=self.seq_len * self.hidden_dim,
+            num_columns=8,
             num_channels=2,
-            tile_size=1024,
+            tile_size=self.hidden_dim,
             do_set_up=False,
         )
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
@@ -95,7 +93,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts.append(eltwise_mul_insts)
 
         gemm_2 = AIEGEMM(
-            M=seq_len_chunk_size,
+            M=self.seq_len,
             K=self.hidden_dim,
             N=self.embedding_dim,
             do_set_up=False,
@@ -116,7 +114,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         # Runtime setup
         # ---
         combined_xclbin = gemm_2_xclbin
-        self.add_buffer("input", seq_len_chunk_size * self.embedding_dim)
+        self.add_buffer("input", self.seq_len * self.embedding_dim)
         self.add_buffer(
             "weights_1",
             self.embedding_dim * self.hidden_dim,
@@ -132,11 +130,11 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             self.hidden_dim * self.embedding_dim,
             static_data=torch_to_numpy(self.weights_3.T),
         )
-        self.add_buffer("left", seq_len_chunk_size * self.hidden_dim)
-        self.add_buffer("left_swished", seq_len_chunk_size * self.hidden_dim)
-        self.add_buffer("right", seq_len_chunk_size * self.hidden_dim)
-        self.add_buffer("intermediate", seq_len_chunk_size * self.hidden_dim)
-        self.add_buffer("output", seq_len_chunk_size * self.embedding_dim)
+        self.add_buffer("left", self.seq_len * self.hidden_dim)
+        self.add_buffer("left_swished", self.seq_len * self.hidden_dim)
+        self.add_buffer("right", self.seq_len * self.hidden_dim)
+        self.add_buffer("intermediate", self.seq_len * self.hidden_dim)
+        self.add_buffer("output", self.seq_len * self.embedding_dim)
         self.add_kernel(
             "swiglu_gemm_1", combined_xclbin, gemm_1_xclbin.kernel_name, gemm_1_insts
         )
@@ -160,37 +158,32 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         )
         self.add_to_runlist("swiglu_gemm_2", "intermediate", "weights_3", "output")
 
-    def get_seq_len_chunk_size(self):
-        min_multiple = 256
-        return (self.seq_len + min_multiple - 1) // min_multiple * min_multiple
-
     def forward(self, x):
-        # Turn into a 2D numpy array and drop the batch and other higher dimensions, if any; will error if batch or other higher dimensions > 1
-        x_np = torch_to_numpy(x.reshape(*x.shape[-2:]))
+        """Forward pass for SwiGLU operation"""
 
-        seq_len = x_np.shape[0]
-        seq_len_chunk_size = self.get_seq_len_chunk_size()
+        # Always flatten to [batch, orig_size]
+        original_shape = x.shape
+        batch = x.shape[0] if x.dim() > 1 else 1
+        x_flat = x.reshape(batch, -1)
 
-        output_parts = []
-        for i in range(0, seq_len, seq_len_chunk_size):
-            chunk_end = min(i + seq_len_chunk_size, x_np.shape[0])
-            x_chunk = x_np[i:chunk_end]
+        out = self._execute_aie_operation(x_flat)
 
-            # Since the sequence is a concatenation of rows, we don't need to pad the input;
-            # if this chunk is smaller than the chunksize, it is fine to just leave the last rows uninitialized, saving some writes
-            self.write_buffer("input", x_chunk)
-            self.run_runlist()
-            output_chunk = self.read_buffer(
-                "output",
-                (
-                    seq_len_chunk_size,
-                    self.embedding_dim,
-                ),
-            )
+        # Restore original shape
+        out = out.reshape(*original_shape)
 
-            # Drop padding, if any (match output to input dimensions)
-            output_parts.append(output_chunk[: x_chunk.shape[0]])
+        return out
 
-        output_np = np.concatenate(output_parts, axis=0)
-        output_torch = numpy_to_torch(output_np).view_as(x)
-        return output_torch
+    def _execute_aie_operation(self, x):
+        # x is [batch, size]
+        batch = x.shape[0] if x.dim() > 1 else 1
+
+        # Flatten inputs for AIE processing
+        x_flat = x.view(-1)
+        x_np = torch_to_numpy(x_flat)
+
+        self.write_buffer("input", x_np)
+        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        self.run_runlist()
+        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
+
+        return result

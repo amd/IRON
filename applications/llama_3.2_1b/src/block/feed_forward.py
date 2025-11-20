@@ -43,9 +43,28 @@ class FeedForward(nn.Module):
 
         # Initialize SiLU activation
         if self.cfg["use_aie_ffn_silu"]:
-            self.silu = AIESiLU(
-                size=cfg["hidden_dim"], num_columns=4, num_channels=2, tile_size=1024
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.hidden_dim
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.hidden_dim
+            self.aie_silu_prefill = AIESiLU(
+                size=max_prefill_size,
+                num_columns=8,
+                num_channels=2,
+                tile_size=self.hidden_dim,
             )
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.hidden_dim  # 1 token * emb_dim
+                self.aie_silu_decode = AIESiLU(
+                    size=decode_size,
+                    num_columns=1,
+                    num_channels=1,
+                    tile_size=self.hidden_dim,
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_silu_decode = self.silu_prefill
         else:
             self.silu = nn.SiLU()
 
@@ -110,12 +129,30 @@ class FeedForward(nn.Module):
 
         # Initialize AIE elementwise multiply
         if self.cfg["use_aie_ffn_mul"]:
-            self.aie_mul = AIEElementwiseMul(
-                size=self.hidden_dim,
-                num_columns=4,
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.hidden_dim
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.hidden_dim
+
+            self.aie_mul_prefill = AIEElementwiseMul(
+                size=max_prefill_size,
+                num_columns=8,
                 num_channels=2,
-                tile_size=1024,
+                tile_size=self.hidden_dim,
             )
+
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.hidden_dim  # 1 token * emb_dim
+                self.aie_mul_decode = AIEElementwiseMul(
+                    size=decode_size,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.hidden_dim,
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_mul_decode = self.aie_mul_prefill
 
     def forward(self, x):
         original_shape = x.shape
@@ -144,10 +181,19 @@ class FeedForward(nn.Module):
             x_fc1 = self.fc1(x)
             x_fc2 = self.fc2(x)
 
-        x_fc1_silu = self.silu(x_fc1)
+        if self.cfg["use_aie_ffn_silu"]:
+            if is_decode_with_kv:
+                x_fc1_silu = self.aie_silu_decode(x_fc1)
+            else:
+                x_fc1_silu = self.aie_silu_prefill(x_fc1)
+        else:
+            x_fc1_silu = self.silu(x_fc1)
 
         if self.cfg["use_aie_ffn_mul"]:
-            x = self.aie_mul(x_fc1_silu, x_fc2)
+            if is_decode_with_kv:
+                x = self.aie_mul_decode(x_fc1_silu, x_fc2)
+            else:
+                x = self.aie_mul_prefill(x_fc1_silu, x_fc2)
         else:
             x = x_fc1_silu * x_fc2
 

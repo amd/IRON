@@ -60,9 +60,10 @@ class AIESwiGLUDecode(AIEOperatorBase):
 
         silu = AIESiLU(
             size=self.hidden_dim,
-            num_columns=4,
+            num_columns=8,
             num_channels=2,
-            tile_size=1024,
+            tile_size=self.hidden_dim
+            // 16,  # Partition 1 input to 8 columns and 2 channels per column
             do_set_up=False,
         )
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_decode_silu_")
@@ -79,7 +80,8 @@ class AIESwiGLUDecode(AIEOperatorBase):
             size=self.hidden_dim,
             num_columns=8,
             num_channels=2,
-            tile_size=1024,
+            tile_size=self.hidden_dim
+            // 8,  # Partition 2 inputs to 8 columns and 1 channel per column for each input
             do_set_up=False,
         )
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
