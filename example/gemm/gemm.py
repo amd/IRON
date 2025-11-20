@@ -469,16 +469,17 @@ def my_matmul(
                 )
             )
 
-    # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
-    # We only transfer 6 rows of tiles at once before starting a new transfer block.
-    # tb = transfer block; block of transfers before sync call
-    tb_max_n_rows = 4
-    tb_n_rows = tb_max_n_rows // 2
-
     # Calculate RTP values for the reduction loop and total C tiles
     K_div_k = K // k
     n_c_col_tiles_per_core = N // mem_tile_n
     n_c_row_tiles_per_core = M // mem_tile_m_C
+
+    # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
+    # We only transfer 6 rows of tiles at once before starting a new transfer block.
+    # tb = transfer block; block of transfers before sync call
+    tb_max_n_rows = 4
+    # Min for the case where we don't need to max out the number of transfer blocks
+    tb_n_rows = min(n_c_row_tiles_per_core, tb_max_n_rows // 2)
 
     # Define tensor access patterns (tiling) for A, B, and C
     A_tiles = TensorTiler2D.group_tiler(
