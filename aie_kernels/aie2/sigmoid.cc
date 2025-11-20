@@ -9,7 +9,9 @@
 
 using namespace aie;
 
-void sigmoid_tanh_approx_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict output_vector, const int32_t vector_size)
+void sigmoid_tanh_approx_bf16(bfloat16 *restrict input_vector,
+                              bfloat16 *restrict output_vector,
+                              const int32_t vector_size)
 {
     event0();
 
