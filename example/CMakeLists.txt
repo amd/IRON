@@ -17,6 +17,7 @@ add_subdirectory(rope)
 add_subdirectory(softmax)
 add_subdirectory(silu)
 add_subdirectory(swiglu)
+add_subdirectory(tanh)
 add_subdirectory(transpose)
 
 if (IRONCLAD_AIE_TARGET STREQUAL "aie2p")
