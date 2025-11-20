@@ -125,12 +125,6 @@ def load_weights_into_llama(model, param_config, params):
             params[f"model.layers.{l}.self_attn.v_proj.weight"],
             params[f"model.layers.{l}.self_attn.o_proj.weight"],
         )
-        model.trf_blocks[l].norm1.weight = assign(
-            model.trf_blocks[l].norm1.weight,
-            params[f"model.layers.{l}.input_layernorm.weight"],
-            f"model.layers.{l}.input_layernorm.weight",
-        )
-
         # Load FeedForward weights
         model.trf_blocks[l].ff.assign_weights(
             l,
@@ -138,16 +132,15 @@ def load_weights_into_llama(model, param_config, params):
             fc2=params[f"model.layers.{l}.mlp.up_proj.weight"],
             fc3=params[f"model.layers.{l}.mlp.down_proj.weight"],
         )
-        model.trf_blocks[l].norm2.weight = assign(
-            model.trf_blocks[l].norm2.weight,
+        # Load RMS norm weights
+        model.trf_blocks[l].assign_weights(
+            l,
+            params[f"model.layers.{l}.input_layernorm.weight"],
             params[f"model.layers.{l}.post_attention_layernorm.weight"],
-            f"model.layers.{l}.post_attention_layernorm.weight",
         )
-
+        
     # Load output layer weights
-    model.final_norm.weight = assign(
-        model.final_norm.weight, params["model.norm.weight"], "model.norm.weight"
-    )
+    model.assign_weights(params["model.norm.weight"])
 
     if "lm_head.weight" in params.keys():
         model.out_head.weight = assign(
