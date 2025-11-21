@@ -46,11 +46,6 @@ class AIEGEMM(AIEOperatorBase):
             if not use_static_weight
             else torch.zeros((K, N), dtype=torch.bfloat16).T
         )
-        self.weight = (
-            None
-            if not use_static_weight
-            else torch.zeros((K, N), dtype=torch.bfloat16).T
-        )
 
         # The operator's M, K, N represent what the NPU operator supports.
         # Calls to forward() may supply matrices of different sizes, and the

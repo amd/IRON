@@ -39,7 +39,7 @@ function(add_aie_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE
     )
 endfunction()
 
-function(add_aie_weighted_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE)
+function(add_aie_weighted_rms_norm_design INPUT_LENGTH NUM_COLUMNS NUM_CHANNELS TILE_SIZE TRACE_SIZE ARCHIVE_NAME)
     set(EXAMPLE "weighted_rms_norm_${NUM_COLUMNS}_cols_${NUM_CHANNELS}_channels_${INPUT_LENGTH}_weights_${TILE_SIZE}")
         set(GOLDEN_VALUES_PATH "${CMAKE_BINARY_DIR}/example/rms_norm/golden_${EXAMPLE}")
 
