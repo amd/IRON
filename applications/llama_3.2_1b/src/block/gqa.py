@@ -70,6 +70,7 @@ class GroupedQueryAttention(nn.Module):
             "tile_m": 64,
             "tile_k": 64,
             "tile_n": 64,
+            "use_static_weight": False,
         }
 
         # Initialize KV Cache
@@ -138,6 +139,8 @@ class GroupedQueryAttention(nn.Module):
             else:
                 M_for_gemm = self.prompt_length + self.num_tokens
 
+            # GEMMs for projection use weights
+            aie_gemm_config["use_static_weight"] = True
             # Query: (batch_size, d_in) @ (d_in, d_out) -> (batch_size, d_out)
             self.aie_query = AIEGEMM(M=M_for_gemm, K=d_in, N=d_out, **aie_gemm_config)
             # Key: (batch_size, d_in) @ (d_in, num_kv_groups * head_dim) -> (batch_size, num_kv_groups * head_dim)
@@ -184,15 +187,15 @@ class GroupedQueryAttention(nn.Module):
             x_flat = x.reshape(-1, d_in)
             input_dtype = x.dtype
 
-            queries_flat = self.aie_query(x_flat, self.W_query.weight.T)
+            queries_flat = self.aie_query(x_flat)
             queries = queries_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
 
-            keys_flat = self.aie_key(x_flat, self.W_key.weight.T)
+            keys_flat = self.aie_key(x_flat)
             keys = keys_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
 
-            values_flat = self.aie_value(x_flat, self.W_value.weight.T)
+            values_flat = self.aie_value(x_flat)
             values = values_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
             ).to(input_dtype)
@@ -388,7 +391,7 @@ class GroupedQueryAttention(nn.Module):
             context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
         elif self.cfg["use_aie_attn_projection_gemm"]:
             context_vec_flat = context_vec.reshape(-1, self.d_out)
-            output_flat = self.aie_out_proj(context_vec_flat, self.out_proj.weight.T)
+            output_flat = self.aie_out_proj(context_vec_flat)
             context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
         else:
             context_vec = self.out_proj(context_vec)
@@ -401,6 +404,12 @@ class GroupedQueryAttention(nn.Module):
             self.aie_key_gemv.weight = w_key
             self.aie_value_gemv.weight = w_value
             self.aie_out_proj_gemv.weight = w_out_proj
+        
+        if self.cfg["use_aie_attn_projection_gemm"]:
+            self.aie_query.weight = w_query
+            self.aie_key.weight = w_key
+            self.aie_value.weight = w_value
+            self.aie_out_proj.weight = w_out_proj
 
         self.W_query.weight = assign(
             self.W_query.weight,
