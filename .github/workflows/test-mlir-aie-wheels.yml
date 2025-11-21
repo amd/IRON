@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test mlir-aie wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      wheels-version:
+        description: 'mlir-aie version to test (e.g., 0.0.1.2025071717+c5b3be6). Use "latest" to install the newest version available.'
+        required: true
+        default: 'latest'
+
+jobs:
+  test:
+    runs-on: [self-hosted, docker]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        env:
+          HOME: /workspace
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Install wheels
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          set -euxo pipefail
+          source ci_env/bin/activate
+          WHEELS_URL="https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-2"
+          if [[ "${{ github.event.inputs.wheels-version }}" == "latest" ]]; then
+            pip install --upgrade mlir-aie --find-links ${WHEELS_URL}
+          else
+            pip install --upgrade mlir-aie==${{ github.event.inputs.wheels-version }} --find-links ${WHEELS_URL}
+          fi
+
+      - name: Build
+        uses: ./.github/actions/build
+        with:
+          env_name: ci_env
+          cmake_extra_flags: "-DBUILD_APPLICATIONS=OFF -DBUILD_EXAMPLES=ON"
+
+      - name: Test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+
+      - name: Mark workflow as failed if tests failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
