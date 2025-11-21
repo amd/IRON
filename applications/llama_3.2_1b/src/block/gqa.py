@@ -276,7 +276,7 @@ class GroupedQueryAttention(nn.Module):
                 )  # Shape: (num_heads, num_tokens, head_dim)
 
                 # Reshape context_vec to prepare for output projection
-                context_vec = context_vec.transpose(1, 2)
+                context_vec = context_vec.transpose(0, 1)
                 context_vec = context_vec.reshape(b, num_tokens, self.d_out)
 
             elif self.cfg["use_aie_regular_mha"]:
