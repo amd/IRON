@@ -404,7 +404,7 @@ class GroupedQueryAttention(nn.Module):
             self.aie_key_gemv.weight = w_key
             self.aie_value_gemv.weight = w_value
             self.aie_out_proj_gemv.weight = w_out_proj
-        
+
         if self.cfg["use_aie_attn_projection_gemm"]:
             self.aie_query.weight = w_query
             self.aie_key.weight = w_key
