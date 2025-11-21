@@ -58,6 +58,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
 | [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
 | [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
+| [Tanh](./aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/tanh/](./example/tanh/) |
 | [Sigmoid](./aie_kernels/aie2/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [example/sigmoid/](./example/sigmoid/) |
 
 > Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
