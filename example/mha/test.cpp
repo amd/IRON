@@ -60,14 +60,47 @@ int main(int argc, const char *argv[])
     int S_q = vm["S_q"].as<int>();
     int S_kv = vm["S_kv"].as<int>();
     int d = vm["d"].as<int>();
+    int num_of_pipeline = vm["num_pipeline"].as<int>();
+
+    auto round_up64 = [num_of_pipeline](int n) {
+        return ((n + 63 * num_of_pipeline) / (64 * num_of_pipeline)) * (64 * num_of_pipeline);
+    };
+    int S_q_pad = round_up64(S_q);
+    int S_kv_pad = round_up64(S_kv);
 
     int Q_VOLUME = heads * S_q * d;
     int K_VOLUME = heads * S_kv * d;
     int O_VOLUME = heads * S_q * d;
 
-    size_t Q_SIZE = (Q_VOLUME * sizeof(DTYPE_ACT));
-    size_t K_SIZE = (K_VOLUME * sizeof(DTYPE_ACT));
-    size_t O_SIZE = (O_VOLUME * sizeof(DTYPE_ACT));
+    int Q_VOLUME_PAD = heads * S_q_pad * d;
+    int K_VOLUME_PAD = heads * S_kv_pad * d;
+    int O_VOLUME_PAD = heads * S_q_pad * d;
+
+    size_t Q_SIZE_PAD = (Q_VOLUME_PAD * sizeof(DTYPE_ACT));
+    size_t K_SIZE_PAD = (K_VOLUME_PAD * sizeof(DTYPE_ACT));
+    size_t O_SIZE_PAD = (O_VOLUME_PAD * sizeof(DTYPE_ACT));
+
+    auto pack_compact_to_padded =
+        [&](DTYPE_ACT *dst, const std::vector<DTYPE_ACT> &src, int H, int S, int S_pad, int D) {
+            for (int h = 0; h < H; ++h) {
+                for (int s = 0; s < S; ++s) {
+                    DTYPE_ACT *drow = dst + (h * S_pad + s) * D;
+                    const DTYPE_ACT *srow = src.data() + (h * S + s) * D;
+                    std::memcpy(drow, srow, D * sizeof(DTYPE_ACT));
+                }
+            }
+        };
+
+    auto unpack_padded_to_compact =
+        [&](std::vector<DTYPE_ACT> &dst, const DTYPE_ACT *src, int H, int S, int S_pad, int D) {
+            for (int h = 0; h < H; ++h) {
+                for (int s = 0; s < S; ++s) {
+                    DTYPE_ACT *drow = dst.data() + (h * S + s) * D;
+                    const DTYPE_ACT *srow = src + (h * S_pad + s) * D;
+                    std::memcpy(drow, srow, D * sizeof(DTYPE_ACT));
+                }
+            }
+        };
 
     std::vector<uint32_t> instr_v = test_utils::load_instr_binary(vm["instr"].as<std::string>());
 
@@ -101,10 +134,10 @@ int main(int argc, const char *argv[])
     auto kernel = xrt::kernel(context, kernelName);
 
     auto bo_instr = xrt::bo(device, instr_v.size() * sizeof(int), XCL_BO_FLAGS_CACHEABLE, kernel.group_id(1));
-    auto bo_q = xrt::bo(device, Q_SIZE, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
-    auto bo_k = xrt::bo(device, K_SIZE, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
-    auto bo_o = xrt::bo(device, O_SIZE, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
-    auto bo_v = xrt::bo(device, K_SIZE, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(6));
+    auto bo_q = xrt::bo(device, Q_SIZE_PAD, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
+    auto bo_k = xrt::bo(device, K_SIZE_PAD, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
+    auto bo_o = xrt::bo(device, O_SIZE_PAD, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+    auto bo_v = xrt::bo(device, K_SIZE_PAD, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(6));
 
     // Workaround so we declare a really small trace buffer when one is not used
     int tmp_trace_size = (trace_size > 0) ? trace_size : 1;
@@ -122,21 +155,24 @@ int main(int argc, const char *argv[])
     std::vector<DTYPE_ACT> VVec(K_VOLUME);
 
     // Load input data from golden reference for consistency
-    golden_reference_verification::load_golden_inputs(ref, QVec, KVec, VVec);
+    golden_reference_verification::load_golden_inputs(ref, QVec, KVec, VVec, heads, S_q, S_kv, d);
     if (verbosity >= 1) {
         std::cout << "Loaded golden reference inputs:" << std::endl;
         std::cout << "  Q[0] = " << (int)QVec[0] << ", Q[1] = " << (int)QVec[1] << std::endl;
         std::cout << "  K[0] = " << (int)KVec[0] << ", K[1] = " << (int)KVec[1] << std::endl;
     }
 
-    memcpy(bufQ, QVec.data(), (QVec.size() * sizeof(DTYPE_ACT)));
-    memcpy(bufK, KVec.data(), (KVec.size() * sizeof(DTYPE_ACT)));
-    memcpy(bufV, VVec.data(), (VVec.size() * sizeof(DTYPE_ACT)));
+    memset(bufQ, 0, Q_SIZE_PAD);
+    memset(bufK, 0, K_SIZE_PAD);
+    memset(bufV, 0, K_SIZE_PAD);
+    pack_compact_to_padded(bufQ, QVec, heads, S_q, S_q_pad, d);
+    pack_compact_to_padded(bufK, KVec, heads, S_kv, S_kv_pad, d);
+    pack_compact_to_padded(bufV, VVec, heads, S_kv, S_kv_pad, d);
 
     // Initialize outputs; bufO is results matrix plus tracing info
     char *bufO = bo_o.map<char *>();
     std::vector<DTYPE_ACT> OVec(O_VOLUME);
-    memset(bufO, 0, O_SIZE);
+    memset(bufO, 0, O_SIZE_PAD);
 
     char *bufTrace = bo_trace.map<char *>();
     if (trace_size > 0)
@@ -197,21 +233,13 @@ int main(int argc, const char *argv[])
             continue;
         }
 
-        memcpy(OVec.data(), bufO, (OVec.size() * sizeof(DTYPE_ACT)));
+        unpack_padded_to_compact(OVec, reinterpret_cast<DTYPE_ACT *>(bufO), heads, S_q, S_q_pad, d);
 
         std::cout << "Verifying against PyTorch golden reference..." << std::endl;
         auto vstart = std::chrono::system_clock::now();
 
-        errors =
-            golden_reference_verification::verify_against_golden<DTYPE_ACT, DTYPE_ACT, DTYPE_ACT>(ref,
-                                                                                                  OVec,
-                                                                                                  verbosity,
-                                                                                                  abs_tol,
-                                                                                                  rel_tol,
-                                                                                                  vm["heads"].as<int>(),
-                                                                                                  vm["S_q"].as<int>(),
-                                                                                                  vm["S_kv"].as<int>(),
-                                                                                                  vm["d"].as<int>());
+        errors = golden_reference_verification::verify_against_golden<DTYPE_ACT, DTYPE_ACT, DTYPE_ACT>(
+            ref, OVec, verbosity, abs_tol, rel_tol, vm["heads"].as<int>(), S_q, vm["d"].as<int>());
 
         auto vstop = std::chrono::system_clock::now();
         float vtime = std::chrono::duration_cast<std::chrono::seconds>(vstop - vstart).count();
@@ -240,7 +268,7 @@ int main(int argc, const char *argv[])
     std::cout << std::endl << "Max NPU MHA time: " << npu_time_max << "us." << std::endl;
     std::cout << "Min NPU gflops: " << macs / (1000 * npu_time_max) << std::endl;
 
-    double total_bytes = (Q_SIZE + K_SIZE + O_SIZE); // input and output
+    double total_bytes = (Q_SIZE_PAD + K_SIZE_PAD * (S_kv / 64 / num_of_pipeline) + O_SIZE_PAD); // input and output
     double bandwidth_GBps = total_bytes / (npu_time_total / n_iterations * 1e-6) / 1e9;
     std::cout << "Avg Bandwidth: " << bandwidth_GBps << " GB/s" << std::endl;
 

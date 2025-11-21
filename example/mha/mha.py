@@ -128,8 +128,16 @@ def fused_mha(
     else:
         number_of_pipelines_join_distribute = number_of_pipelines
 
-    num_q_blocks = S_q // B_q
-    num_kv_blocks = S_kv // B_kv
+    S_q_eff = S_q
+    S_kv_eff = S_kv
+    S_q_pad = (
+        (S_q_eff + (B_q * number_of_pipelines - 1)) // (B_q * number_of_pipelines)
+    ) * (B_q * number_of_pipelines)
+    S_kv_pad = (
+        (S_kv_eff + (B_kv * number_of_pipelines - 1)) // (B_kv * number_of_pipelines)
+    ) * (B_kv * number_of_pipelines)
+    num_q_blocks = S_q_pad // B_q
+    num_kv_blocks = S_kv_pad // B_kv
     num_q_block_per_pipeline = num_q_blocks // number_of_pipelines
 
     # VJUNG: When the number of KV head is 0 we do a regular MHA, otherwise we do GQA.
@@ -146,14 +154,11 @@ def fused_mha(
         print(f"Device: {dev}")
         print(f"Number of heads: {heads}")
         print(f"MHA Dimensions: S_q={S_q}, S_kv={S_kv}, d={d}, B_q={B_q}, B_kv={B_kv}")
+        print(f"Padded Dimensions: S_q_pad={S_q_pad}, S_kv_pad={S_kv_pad}")
         print(f"Data type: {dtype_str}")
         print(f"Microkernel MAC dimensions: r={r}, s={s}, t={t}")
         print(f"Vectorized: {vectorized}")
         print(f"Enable tracing: {enable_tracing}")
-
-    assert (
-        num_q_blocks % number_of_pipelines == 0
-    ), "Number of Q blocks must be divisible by number of pipelines (for now)"
 
     assert num_KV_heads > 0, "Number of KV heads must be greater than 0"
     assert heads > 0, "Number of heads must be greater than 0"
@@ -163,12 +168,13 @@ def fused_mha(
     assert (
         heads % num_KV_heads == 0
     ), f"Number of KV heads ({num_KV_heads}) must be divisible by number of heads ({heads})"
-    assert S_q % B_q == 0, f"S_q must be divisible by B_q ({S_q} % {B_q} != 0)"
-    assert S_kv % B_kv == 0, f"S_kv must be divisible by B_kv ({S_kv} % {B_kv} != 0)"
 
     assert B_q % r == 0, f"B_q must be divisible by r ({B_q} % {r} != 0)"
     assert B_kv % t == 0, f"B_kv must be divisible by t ({B_kv} % {t} != 0)"
     assert d % s == 0, f"d must be divisible by s ({d} % {s} != 0)"
+
+    assert S_q_pad % B_q == 0, "Padded S_q must be divisible by B_q"
+    assert S_kv_pad % B_kv == 0, "Padded S_kv must be divisible by B_kv"
 
     dtype = dtype_map[dtype_str]
 
@@ -178,7 +184,7 @@ def fused_mha(
     Q_ty = np.ndarray[
         (
             heads,
-            S_q,
+            S_q_pad,
             d,
         ),
         np.dtype[dtype],
@@ -186,7 +192,7 @@ def fused_mha(
     KV_ty = np.ndarray[
         (
             num_KV_heads,
-            S_kv * d,
+            S_kv_pad * d,
         ),
         np.dtype[dtype],
     ]
@@ -216,6 +222,8 @@ def fused_mha(
             s_ty,
             np.ndarray[(2,), np.dtype[np.int32]],
             dtype,
+            np.int32,
+            np.int32,
             np.int32,
             np.int32,
         ],
@@ -383,15 +391,15 @@ def fused_mha(
         )
 
     def batched_matmul_qk(
-        of_q, of_k, of_a_out, zero, matmul_QK, q_block_bias, loop_idx_rtp, barrier
+        of_q, of_k, of_a_out, zero, matmul_QK, q_block_bias, mha_rtps, barrier
     ):
 
         idx_buffer = LocalBuffer(initial_value=np.zeros(shape=(2,), dtype=np.int32))
 
         barrier.wait_for_value(1)
 
-        loop_idx_q = loop_idx_rtp[0]
-        loop_idx_kv = loop_idx_rtp[1]
+        loop_idx_q = mha_rtps[0]
+        loop_idx_kv = mha_rtps[1]
 
         for _ in range_(sys.maxsize):
 
@@ -427,7 +435,7 @@ def fused_mha(
         init_scale_buffer,
         memcopy_kernel_scale,
         q_block_bias,
-        loop_idx_rtp,
+        mha_rtps,
         barrier,
     ):
 
@@ -440,8 +448,11 @@ def fused_mha(
 
         barrier.wait_for_value(1)
 
-        loop_idx_q = loop_idx_rtp[0]
-        loop_idx_kv = loop_idx_rtp[1]
+        loop_idx_q = mha_rtps[0]
+        loop_idx_kv = mha_rtps[1]
+
+        S_q_effective = mha_rtps[2]
+        S_kv_effective = mha_rtps[3]
 
         for _ in range_(sys.maxsize):
 
@@ -467,6 +478,8 @@ def fused_mha(
                         inv_scale,
                         B_q,
                         B_kv,
+                        S_q_effective,
+                        S_kv_effective,
                     )
                     memcopy_kernel_scale(scale_buffer, elt_of_out_scale, 4 * B_q)
 
@@ -487,7 +500,7 @@ def fused_mha(
         matmul_PV,
         rescale_O,
         q_block_bias,
-        loop_idx_rtp,
+        mha_rtps,
         barrier,
     ):
 
@@ -495,8 +508,8 @@ def fused_mha(
 
         barrier.wait_for_value(1)
 
-        loop_idx_q = loop_idx_rtp[0]
-        loop_idx_kv = loop_idx_rtp[1]
+        loop_idx_q = mha_rtps[0]
+        loop_idx_kv = mha_rtps[1]
 
         for _ in range_(sys.maxsize):
 
@@ -589,11 +602,11 @@ def fused_mha(
 
     # Runtime parameter for workers loop index
     # VJUNG: We need one GlobalBuffer per worker since they need to be placed
-    loop_idx_rtp_list = [
+    mha_rtps_list = [
         [
             GlobalBuffer(
-                np.ndarray[(2,), np.dtype[np.int32]],
-                name=f"loop_idx_rtps_{i}_stage{j}",
+                np.ndarray[(4,), np.dtype[np.int32]],
+                name=f"mha_rtpss_{i}_stage{j}",
                 initial_value=None,
                 use_write_rtp=True,
             )
@@ -622,7 +635,7 @@ def fused_mha(
                     zero_kernel,
                     matmul_QK,
                     i,
-                    loop_idx_rtp_list[0][i],
+                    mha_rtps_list[0][i],
                     worker_barrier_list[0][i],
                 ],
                 stack_size=0xD00,
@@ -641,7 +654,7 @@ def fused_mha(
                     scale_buffer_init_kernel,
                     memcopy_kernel_scale,
                     i,
-                    loop_idx_rtp_list[1][i],
+                    mha_rtps_list[1][i],
                     worker_barrier_list[1][i],
                 ],
                 stack_size=0xD00,
@@ -661,7 +674,7 @@ def fused_mha(
                     matmul_PV,
                     rescale_O,
                     i,
-                    loop_idx_rtp_list[2][i],
+                    mha_rtps_list[2][i],
                     worker_barrier_list[2][i],
                 ],
                 stack_size=0xD00,
@@ -673,15 +686,15 @@ def fused_mha(
     # Define tensor access patterns for inputs/outputs
     # A and B are tiled across M and N respectively, while C is tiled across M and N
     Q_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
+        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
     )
 
-    K_tiles = TensorTiler2D.group_tiler((heads * S_kv, d), (S_kv, d), (1, 1))
+    K_tiles = TensorTiler2D.group_tiler((heads * S_kv_pad, d), (S_kv_pad, d), (1, 1))
 
-    V_tiles = TensorTiler2D.group_tiler((heads * S_kv, d), (S_kv, d), (1, 1))
+    V_tiles = TensorTiler2D.group_tiler((heads * S_kv_pad, d), (S_kv_pad, d), (1, 1))
 
     O_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
+        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
     )
 
     def print_tap_seq_info(tap_seq, name):
@@ -694,7 +707,6 @@ def fused_mha(
     def legalize_tap(tap: TensorAccessPattern, max_dim_size: int):
 
         sizes = copy.deepcopy(tap._sizes)
-        strides = copy.deepcopy(tap._strides)
 
         # Skip is no need to legalize
         if all(size <= max_dim_size for size in sizes):
@@ -724,21 +736,23 @@ def fused_mha(
     if verbose:
         print(f"DMA Transfer Configuration: DRAM <-> Mem tile")
         # print_tap_seq_info(Q_tiles, "Q")
-        print_tap_seq_info(K_tiles, "K")
-        print_tap_seq_info(V_tiles, "V")
-        # print_tap_seq_info(O_tiles, "O")
+        # print_tap_seq_info(K_tiles, "K")
+        # print_tap_seq_info(V_tiles, "V")
+        print_tap_seq_info(O_tiles, "O")
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
     with rt.sequence(Q_ty, KV_ty, KV_ty, Q_ty) as (Q, K, V, O):
 
-        def set_loop_idx_rtp():
+        def set_mha_rtps():
             for j in range(3):
                 for i in range(number_of_pipelines):
-                    loop_idx_rtp_list[j][i][0] = num_q_block_per_pipeline
-                    loop_idx_rtp_list[j][i][1] = num_kv_blocks
+                    mha_rtps_list[j][i][0] = num_q_block_per_pipeline
+                    mha_rtps_list[j][i][1] = num_kv_blocks
+                    mha_rtps_list[j][i][2] = S_q_eff
+                    mha_rtps_list[j][i][3] = S_kv_eff
 
-        rt.inline_ops(set_loop_idx_rtp, ())
+        rt.inline_ops(set_mha_rtps, ())
 
         for j in range(3):
             for i in range(number_of_pipelines):

@@ -15,6 +15,9 @@ from src.operator.rope import compute_rope_params
 from rich.console import Console
 from rich.text import Text
 
+from .utils import assign
+from src.operator.aie_rms_norm import AIERMSNorm
+
 
 def dtype_from_string(inp):
     if isinstance(inp, torch.dtype):
@@ -37,6 +40,7 @@ config_options = {
     "use_aie_ffn_gemm":             (bool,              False,         "[FFN] GEMM"),
     "use_aie_ffn_mul":              (bool,              False,         "[FFN] Elementwise Mul"),
     "use_aie_ffn_silu":             (bool,              False,         "[FFN] SiLU"),
+    "use_aie_ffn_swiglu":           (bool,              False,         "[FFN] Runlist-based SwiGLU"),
     "use_aie_residual":             (bool,              False,         "[Transformer] Residual Addition"),
     "use_aie_norm1":                (bool,              False,         "[Transformer] Pre Norm"),
     "use_aie_norm2":                (bool,              False,         "[Transformer] Post Norm"),
@@ -81,6 +85,14 @@ def print_config(cfg, console=Console()):
         dont_print |= {"use_aie_regular_mha"}
     else:
         dont_print |= {"use_aie_fused_mha"}
+    if cfg["use_aie_ffn_swiglu"]:
+        dont_print |= {
+            "use_aie_ffn_gemm",
+            "use_aie_ffn_mul",
+            "use_aie_ffn_silu",
+        }
+    else:
+        dont_print |= {"use_aie_ffn_swiglu"}
 
     console.print(
         "AIE Configuration ([green]✔[/green] = AIE NPU / [red]✘[/red] = CPU):",
@@ -128,16 +140,30 @@ class Llama3ModelWithJSONConfig(nn.Module):
 
         # Create final norm - either AIE or PyTorch
         if self.cfg.get("use_aie_final_norm", False):
-            from src.operator.aie_rms_norm import AIERMSNorm
-
-            self.final_norm = AIERMSNorm(
-                emb_dim=self.cfg["emb_dim"],
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.cfg["emb_dim"]
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.cfg["emb_dim"]
+            self.aie_final_norm_prefill = AIERMSNorm(
+                size=max_prefill_size,
                 eps=1e-5,
                 num_columns=8,
                 num_channels=2,
                 tile_size=self.cfg["emb_dim"],
             )
-            # TODO: Add logging
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.cfg["emb_dim"]  # 1 token * emb_dim
+                self.aie_final_norm_decode = AIERMSNorm(
+                    size=decode_size,
+                    eps=1e-5,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.cfg["emb_dim"],
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_final_norm_decode = self.aie_final_norm_prefill
         else:
             self.final_norm = nn.RMSNorm(
                 self.cfg["emb_dim"], eps=1e-5, dtype=self.cfg["dtype"]
@@ -184,8 +210,28 @@ class Llama3ModelWithJSONConfig(nn.Module):
         for block in self.trf_blocks:
             x = block(x, mask, self.angles, input_pos)
 
-        x = self.final_norm(x)
+        # Sequence length of 1 from input shape means we're in the decode stage, which can use KV cache
+        if self.cfg.get("use_aie_final_norm", False):
+            if (x.shape[-2] == 1) and self.cfg.get("use_kv_cache", False):
+                x = self.aie_final_norm_decode(x)
+            else:
+                x = self.aie_final_norm_prefill(x)
+        else:
+            x = self.final_norm(x)
 
         logits = self.out_head(x.to(self.cfg["dtype"]))
 
         return logits
+
+    def assign_weights(self, final_norm):
+        if self.cfg.get("use_aie_final_norm", False):
+            self.aie_final_norm_prefill.weight = final_norm
+            if self.cfg["use_kv_cache"]:
+                self.aie_final_norm_decode.weight = final_norm
+            return
+
+        self.final_norm.weight = assign(
+            self.final_norm.weight,
+            final_norm,
+            f"model.norm.weight",
+        )

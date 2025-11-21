@@ -25,10 +25,10 @@ class AIEGEMV(AIEOperatorBase):
         M,
         K,
         num_columns=1,
-        num_channels=2,
         tile_size=1,
         is_mv=True,
         use_static_weight=False,
+        do_set_up=True,
     ):
 
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
@@ -46,12 +46,14 @@ class AIEGEMV(AIEOperatorBase):
         # For compatibility with my_matvec parameters
         self.m = self.tile_size
 
+        self.do_set_up = do_set_up
+
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
-        # Compilation Artifacts
-        # ---
-        file_name_base = f"gemv_{self.num_columns}c_{self.M}x{self.K}_{self.tile_size}t"
+    def get_artifacts(self, prefix="gemv_"):
+        file_name_base = (
+            f"{prefix}{self.num_columns}c_{self.M}x{self.K}_{self.tile_size}t"
+        )
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -83,6 +85,16 @@ class AIEGEMV(AIEOperatorBase):
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
 
+        return xclbin_artifact, insts_artifact
+
+    def set_up(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+
+        # Compilation Artifacts
+        # ---
+        xclbin_artifact, insts_artifact = self.get_artifacts()
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 

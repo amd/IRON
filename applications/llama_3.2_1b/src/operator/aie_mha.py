@@ -141,11 +141,68 @@ class AIEMHA(AIEOperatorBase):
         self.add_kernel(
             "mha", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
         )
-        self.add_buffer("Q", self.num_heads * self.d * self.seq_len)
-        self.add_buffer("K", self.num_heads * self.d * self.seq_len)
-        self.add_buffer("V", self.num_heads * self.d * self.seq_len)
-        self.add_buffer("O", self.num_heads * self.d * self.seq_len)
+        self.add_buffer(
+            "Q",
+            self.num_heads
+            * self.d
+            * self._calculate_seq_padding(self.seq_len, self.num_of_pipelines),
+        )
+        self.add_buffer(
+            "K",
+            self.num_heads
+            * self.d
+            * self._calculate_seq_padding(self.seq_len, self.num_of_pipelines),
+        )
+        self.add_buffer(
+            "V",
+            self.num_heads
+            * self.d
+            * self._calculate_seq_padding(self.seq_len, self.num_of_pipelines),
+        )
+        self.add_buffer(
+            "O",
+            self.num_heads
+            * self.d
+            * self._calculate_seq_padding(self.seq_len, self.num_of_pipelines),
+        )
         self.add_to_runlist("mha", "Q", "K", "V", "O")
+
+    def _calculate_seq_padding(self, seq_len, num_pipeline=1):
+        return ((seq_len + 63 * num_pipeline) // (64 * num_pipeline)) * (
+            64 * num_pipeline
+        )
+
+    def _pad_to_multiple_of_64(self, tensor, seq_dim, num_pipeline=1):
+        seq_len = tensor.shape[seq_dim]
+        padded_seq_len = _calculate_seq_padding(seq_len, num_pipeline)
+        if padded_seq_len == seq_len:
+            return tensor
+
+        pad_size = padded_seq_len - seq_len
+        pad_dims = [0] * (2 * tensor.ndim)
+        pad_dims[2 * (tensor.ndim - 1 - seq_dim) + 1] = pad_size
+
+        return torch.nn.functional.pad(tensor, pad_dims)
+
+    def _pack_compact_to_padded(
+        self, src: np.ndarray, H: int, S: int, S_pad: int, D: int
+    ) -> np.ndarray:
+        """Pack compact tensor into padded format."""
+        dst = src
+        if S != S_pad:
+            dst = np.zeros((H, S_pad, D), dtype=src.dtype)
+            dst[:H, :S, :D] = src
+        return dst
+
+    def _unpack_padded_to_compact(
+        self, src: np.ndarray, H: int, S: int, S_pad: int, D: int
+    ) -> np.ndarray:
+        """Unpack padded tensor back to compact format."""
+        dst = src
+        if S < S_pad:
+            dst = np.zeros((H, S, D), dtype=src.dtype)
+            dst = src[:H, :S, :D]
+        return dst
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         applicable = (
@@ -166,13 +223,43 @@ class AIEMHA(AIEOperatorBase):
         return ret
 
     def _execute_aie_operation(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        # Convert to numpy
         q_np = torch_to_numpy(q)
         k_np = torch_to_numpy(k)
         v_np = torch_to_numpy(v)
-        self.write_buffer("Q", q_np)
-        self.write_buffer("K", k_np)
-        self.write_buffer("V", v_np)
-        self.write_buffer("O", np.zeros(q_np.size, dtype=bfloat16))
+
+        # Calculate padded sequence length
+        S_pad = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
+
+        # Pack compact inputs to padded format
+        q_padded = self._pack_compact_to_padded(
+            q_np, self.num_heads, self.seq_len, S_pad, self.d
+        )
+        k_padded = self._pack_compact_to_padded(
+            k_np, self.num_heads, self.seq_len, S_pad, self.d
+        )
+        v_padded = self._pack_compact_to_padded(
+            v_np, self.num_heads, self.seq_len, S_pad, self.d
+        )
+
+        # Write padded buffers
+        self.write_buffer("Q", q_padded)
+        self.write_buffer("K", k_padded)
+        self.write_buffer("V", v_padded)
+
+        # Execute
         self.run_runlist()
-        result = self.read_buffer_as_torch("O", shape=q_np.shape, dtype=q_np.dtype)
+
+        # Read padded output
+        o_padded = self.read_buffer(
+            "O", shape=(self.num_heads, S_pad, self.d), dtype=bfloat16
+        )
+
+        # Unpack padded output to compact format
+        o_compact = self._unpack_padded_to_compact(
+            o_padded, self.num_heads, self.seq_len, S_pad, self.d
+        )
+
+        # Convert back to torch with correct shape
+        result = numpy_to_torch(o_compact)
         return result

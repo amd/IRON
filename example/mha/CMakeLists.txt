@@ -5,11 +5,11 @@
 # Configuration variables
 set(num_KV_heads 0)
 
-set(number_of_pipeline 1)
+set(number_of_pipelines 8)
 
 set(heads 1)
-set(S_q 2048)
-set(S_kv 2048)
+set(S_q 16384)
+set(S_kv 16384)
 set(d 64)
 set(B_q 64)
 set(k 64)
@@ -70,6 +70,7 @@ set(xclbin_target "${build_dir}/mha.xclbin")
 set(insts_target "${build_dir}/mha.bin")
 
 set(kernels_archive "${build_dir}/mha_kernels.a")
+set(kernel_target "mha_kernels.a")
 
 ### Kernel compilation ###
 add_aie_kernel(${mm_kernel} SOURCES ${kernels_dir}/mm.cc DEFINES
@@ -133,7 +134,7 @@ add_custom_command(
         COMMENT "Creating kernels archive"
 )
 
-add_custom_target("mha_kernels.a" DEPENDS ${kernels_archive})
+add_custom_target(${kernel_target} DEPENDS ${kernels_archive})
 
 add_aie_executable(${currentDesignTarget}
     HOST test.cpp
@@ -142,11 +143,11 @@ add_aie_executable(${currentDesignTarget}
         --heads ${heads}
         --S_q ${S_q} --S_kv ${S_kv} -d ${d}
         --B_q ${B_q} --B_kv ${B_kv}
-        --number-of-pipeline ${number_of_pipeline}
+        --number-of-pipeline ${number_of_pipelines}
         --num_KV_heads ${num_KV_heads}
         --trace_size 0 ${verbose_string}
         --output-file-path ${build_dir}/${currentDesignTarget}.mlir
-    AIE_CORE_KERNELS "mha_kernels.a"
+    AIE_CORE_KERNELS ${kernel_target}
     EXTRA_AIECC_FLAGS --dynamic-objFifos --profile
     OUTPUT_HOST MHA_HOST
     OUTPUT_XCLBIN MHA_XCLBIN
@@ -161,12 +162,13 @@ add_golden_reference_generator(${currentDesignTarget}
     --heads ${heads} --S_q ${S_q} --S_kv ${S_kv} -d ${d}
     --num_KV_heads ${num_KV_heads}
     --dtype ${dtype}
+    --num_pipeline ${number_of_pipelines}
     ${verbose_string}
 )
 
 add_aie_ci_test(${currentDesignTarget}
     RUN
-        "${MHA_HOST} -x ${MHA_XCLBIN} -i ${MHA_INSTS} -k ${currentDesignTarget} --heads ${heads} --S_q ${S_q} --S_kv ${S_kv} -d ${d} -v 2 --warmup 5 --iters 1 --verbosity ${verbose} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
+        "${MHA_HOST} -x ${MHA_XCLBIN} -i ${MHA_INSTS} -k ${currentDesignTarget} --heads ${heads} --S_q ${S_q} --S_kv ${S_kv} -d ${d} --num_pipeline ${number_of_pipelines} -v 2 --warmup 5 --iters 1 --verbosity ${verbose} --ref ${GOLDEN_VALUES_PATH}/golden_reference.bin"
     CHECK
         "PASS!"
     METRICS
@@ -181,7 +183,7 @@ add_custom_target(mha_reconfig
             --heads ${heads}
             --S_q ${S_q} --S_kv ${S_kv} -d ${d}
             --B_q ${B_q} --B_kv ${B_kv}
-            --number-of-pipeline ${number_of_pipeline}
+            --number-of-pipeline ${number_of_pipelines}
             --num_KV_heads ${num_KV_heads}
             --trace_size 0 ${verbose_string}
             --output-file-path ${build_dir}/mha_fast.mlir
@@ -190,18 +192,17 @@ add_custom_target(mha_reconfig
             --num_KV_heads ${num_KV_heads}
             --dtype ${dtype} ${verbose_string}
             --output-bin ${GOLDEN_VALUES_PATH}/golden_reference_fast.bin
-    COMMAND aiecc.py --no-compile --aie-generate-npu-insts --dynamic-objFifos --npu-insts-name=${build_dir}/mha_fast.bin ${build_dir}/mha_fast.mlir
+    COMMAND aiecc.py --no-compile --aie-generate-npu-insts --dynamic-objFifos --profile --npu-insts-name=${build_dir}/mha_fast.bin ${build_dir}/mha_fast.mlir
     BYPRODUCTS
             ${build_dir}/mha_fast.mlir
             ${build_dir}/mha_fast.bin
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Fast reconfiguration: regenerate insts.bin and golden references only"
 )
 
 # Optional: run host with the newly generated instruction sequence and golden references
 add_custom_target(mha_reconfig_run
     COMMAND ${CMAKE_BINARY_DIR}/example/${currentDesignTarget}/${currentDesignTarget}
-            -x /scratch/vjung/ironclad/build/aie/${currentDesignTarget}.xclbin
+            -x ${build_dir}/${currentDesignTarget}.xclbin
             -i ${build_dir}/mha_fast.bin
             -k ${currentDesignTarget}
             --heads ${heads} --S_q ${S_q} --S_kv ${S_kv} -d ${d}

@@ -13,6 +13,9 @@ from src.operator.aie_elementwise_mul import AIEElementwiseMul
 from src.operator.aie_gemm import AIEGEMM
 from src.operator.aie_gemv import AIEGEMV
 from src.operator.aie_silu import AIESiLU
+from src.operator.aie_swiglu_prefill import AIESwiGLUPrefill
+from src.operator.aie_swiglu_decode import AIESwiGLUDecode
+from ml_dtypes import bfloat16
 
 
 class FeedForward(nn.Module):
@@ -25,21 +28,57 @@ class FeedForward(nn.Module):
         super().__init__()
         self.cfg = cfg.copy()
 
+        assert (
+            cfg["use_aie_ffn_swiglu"]
+            and not (
+                cfg["use_aie_ffn_silu"]
+                or cfg["use_aie_ffn_gemm"]
+                or cfg["use_aie_ffn_mul"]
+            )
+            or not cfg["use_aie_ffn_swiglu"]
+        ), "Cannot mix fused SwiGLU with individual AIE operators."
+
         self.emb_dim = cfg["emb_dim"]
         self.hidden_dim = cfg["hidden_dim"]
 
         # Initialize SiLU activation
         if self.cfg["use_aie_ffn_silu"]:
-            self.silu = AIESiLU(
-                size=cfg["hidden_dim"], num_columns=4, num_channels=2, tile_size=1024
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.hidden_dim
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.hidden_dim
+            self.aie_silu_prefill = AIESiLU(
+                size=max_prefill_size,
+                num_columns=8,
+                num_channels=2,
+                tile_size=self.hidden_dim,
             )
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.hidden_dim  # 1 token * emb_dim
+                self.aie_silu_decode = AIESiLU(
+                    size=decode_size,
+                    num_columns=1,
+                    num_channels=1,
+                    tile_size=self.hidden_dim,
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_silu_decode = self.silu_prefill
         else:
             self.silu = nn.SiLU()
 
-        self.emb_dim = cfg["emb_dim"]
-        self.hidden_dim = cfg["hidden_dim"]
+        if self.cfg["use_aie_ffn_swiglu"]:
+            self.aie_swiglu_prefill = AIESwiGLUPrefill(
+                seq_len=prompt_length,
+                embedding_dim=self.emb_dim,
+                hidden_dim=self.hidden_dim,
+            )
+            if self.cfg["use_kv_cache"]:
+                self.aie_swiglu_decode = AIESwiGLUDecode(
+                    embedding_dim=self.emb_dim, hidden_dim=self.hidden_dim
+                )
 
-        # Initialize FFN up and down projections
         if self.cfg["use_aie_ffn_gemm"]:
             if self.cfg["use_kv_cache"]:
                 M_prefill = prompt_length
@@ -90,12 +129,30 @@ class FeedForward(nn.Module):
 
         # Initialize AIE elementwise multiply
         if self.cfg["use_aie_ffn_mul"]:
-            self.aie_mul = AIEElementwiseMul(
-                size=self.hidden_dim,
-                num_columns=4,
+            if self.cfg["use_kv_cache"]:
+                max_prefill_size = prompt_length * self.hidden_dim
+            else:
+                max_prefill_size = (prompt_length + num_tokens) * self.hidden_dim
+
+            self.aie_mul_prefill = AIEElementwiseMul(
+                size=max_prefill_size,
+                num_columns=8,
                 num_channels=2,
-                tile_size=1024,
+                tile_size=self.hidden_dim,
             )
+
+            # For decode phase - single token (only when using KV cache)
+            if self.cfg["use_kv_cache"]:
+                decode_size = self.hidden_dim  # 1 token * emb_dim
+                self.aie_mul_decode = AIEElementwiseMul(
+                    size=decode_size,
+                    num_columns=1,
+                    num_channels=2,
+                    tile_size=self.hidden_dim,
+                )
+            else:
+                # When not using KV cache, use same operator for both phases
+                self.aie_mul_decode = self.aie_mul_prefill
 
     def forward(self, x):
         original_shape = x.shape
@@ -108,7 +165,14 @@ class FeedForward(nn.Module):
             or (len(x.shape) == 3 and x.shape[0] == 1 and x.shape[1] == 1)
         )
 
+        is_prefill = not is_vector or not self.cfg["use_kv_cache"]
         is_decode_with_kv = is_vector and self.cfg["use_kv_cache"]
+
+        if self.cfg["use_aie_ffn_swiglu"]:
+            if is_prefill:
+                return self.aie_swiglu_prefill(x)
+            else:
+                return self.aie_swiglu_decode(x)
 
         if is_decode_with_kv and self.cfg["use_aie_gemv"]:
             x_fc1 = self.aie_fc1_gemv(x)
@@ -117,10 +181,19 @@ class FeedForward(nn.Module):
             x_fc1 = self.fc1(x)
             x_fc2 = self.fc2(x)
 
-        x_fc1_silu = self.silu(x_fc1)
+        if self.cfg["use_aie_ffn_silu"]:
+            if is_decode_with_kv:
+                x_fc1_silu = self.aie_silu_decode(x_fc1)
+            else:
+                x_fc1_silu = self.aie_silu_prefill(x_fc1)
+        else:
+            x_fc1_silu = self.silu(x_fc1)
 
         if self.cfg["use_aie_ffn_mul"]:
-            x = self.aie_mul(x_fc1_silu, x_fc2)
+            if is_decode_with_kv:
+                x = self.aie_mul_decode(x_fc1_silu, x_fc2)
+            else:
+                x = self.aie_mul_prefill(x_fc1_silu, x_fc2)
         else:
             x = x_fc1_silu * x_fc2
 
@@ -131,6 +204,21 @@ class FeedForward(nn.Module):
             return self.fc3(x).view(original_shape)
 
     def assign_weights(self, l, fc1, fc2, fc3):
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+            self.aie_fc1_gemv.weight = fc1
+            self.aie_fc2_gemv.weight = fc2
+            self.aie_fc3_gemv.weight = fc3
+
+        if self.cfg["use_aie_ffn_swiglu"]:
+            self.aie_swiglu_prefill.weights_1 = fc1
+            self.aie_swiglu_prefill.weights_2 = fc2
+            self.aie_swiglu_prefill.weights_3 = fc3
+            if self.cfg["use_kv_cache"]:
+                self.aie_swiglu_decode.weights_1 = fc1
+                self.aie_swiglu_decode.weights_2 = fc2
+                self.aie_swiglu_decode.weights_3 = fc3
+            return
+
         self.fc1.weight = assign(
             self.fc1.weight,
             fc1,
@@ -146,8 +234,3 @@ class FeedForward(nn.Module):
             fc3,
             f"model.layers.{l}.mlp.down_proj.weight",
         )
-
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            self.aie_fc1_gemv.weight = fc1
-            self.aie_fc2_gemv.weight = fc2
-            self.aie_fc3_gemv.weight = fc3
