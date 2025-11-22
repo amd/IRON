@@ -16,7 +16,7 @@ function(add_aie_gemm_xclbin m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_SIZE AR
     add_aie_design(${XCLBIN_NAME}
                    XCLBIN_ONLY
                    PYTHON gemm.py
-                   PYTHON_FLAGS --dev ${DEVICE} -M ${DUMMY_M} -K ${DUMMY_K} -N ${DUMMY_N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} ${PRIO_ACC_STR} --output-file-path ${CMAKE_BINARY_DIR}/aie/${XCLBIN_NAME}.mlir
+                   PYTHON_FLAGS --dev ${DEVICE} -M ${DUMMY_M} -K ${DUMMY_K} -N ${DUMMY_N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} ${PRIO_ACC_STR} --archive ${ARCHIVE_NAME} --output-file-path ${CMAKE_BINARY_DIR}/aie/${XCLBIN_NAME}.mlir
                    AIE_CORE_KERNELS ${ARCHIVE_NAME}
                    EXTRA_AIECC_FLAGS --dynamic-objFifos
                    OUTPUT_XCLBIN GEMM_XCLBIN_${XCLBIN_NAME})
@@ -43,7 +43,7 @@ function(add_aie_gemm_design M K N m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_S
     add_aie_design(${EXAMPLE}
                    INSTS_ONLY
                    PYTHON gemm.py
-                   PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -N ${N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} ${PRIO_ACC_STR} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
+                   PYTHON_FLAGS --dev ${DEVICE} -M ${M} -K ${K} -N ${N} -m ${m} -k ${k} -n ${n} --n-aie-cols ${NUM_COLUMNS} --b-col-maj ${B_COL_MAJ} --c-col-maj ${C_COL_MAJ} --dtype_in ${INPUT_DATA_TYPE_PYTHON} --dtype_out ${OUTPUT_DATA_TYPE_PYTHON} --trace_size ${TRACE_SIZE} ${EMULATE_STR} ${PRIO_ACC_STR} --archive ${ARCHIVE_NAME} --output-file-path ${CMAKE_BINARY_DIR}/aie/${EXAMPLE}.mlir
                    EXTRA_AIECC_FLAGS --dynamic-objFifos
                    OUTPUT_INSTS GEMM_INSTS)
 
@@ -83,47 +83,68 @@ set(m "64")
 set(k "64")
 set(n "64")
 
-set(ARCHIVE_NAME "gemm_${m}x${k}x${n}_archive.a")
 set(AIE_BUILD_DIR ${CMAKE_BINARY_DIR}/aie)
-set(ARCHIVE_PATH "${AIE_BUILD_DIR}/${ARCHIVE_NAME}")
 
 set(PRIO_ACCURACY True)
 set(EMULATE_BFLOAT16_MMUL_WITH_BFP16 False)
-set (B_COL_MAJ 0)
-set (C_COL_MAJ 0)
 
-set(MM_KERNEL_DEFINES "DIM_M=${m}" "DIM_K=${k}" "DIM_N=${n}" "ROUND_CONV_EVEN")
+# Common kernel defines setup
+set(MM_KERNEL_DEFINES_BASE "DIM_M=${m}" "DIM_K=${k}" "DIM_N=${n}" "ROUND_CONV_EVEN")
 if (EMULATE_BFLOAT16_MMUL_WITH_BFP16)
     set(EMULATE_STR --emulate-bf16-mmul-with-bfp16)
-    list(APPEND MM_KERNEL_DEFINES "AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
+    list(APPEND MM_KERNEL_DEFINES_BASE "AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
 endif()
 if (PRIO_ACCURACY)
     set(PRIO_ACC_STR --prio-accuracy)
-    list(APPEND MM_KERNEL_DEFINES "bf16_f32_ONLY")
+    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_f32_ONLY")
 else()
-    list(APPEND MM_KERNEL_DEFINES "bf16_bf16_ONLY")
+    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_bf16_ONLY")
 endif()
-if (B_COL_MAJ)
-    list(APPEND MM_KERNEL_DEFINES "B_COL_MAJ")
-endif()
-if (C_COL_MAJ)
-    list(APPEND MM_KERNEL_DEFINES "C_COL_MAJ")
-endif()
-
-add_aie_kernel("gemm_${m}x${k}x${n}"
-    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
-    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ)
 
 add_aie_kernel("convert_copy" SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/generic/convert_copy.cc OUTPUT_OBJECT CONVERT_OBJ)
 
-set(KERNEL_OBJ_LIST
-    ${MM_OBJ}
-    ${CONVERT_OBJ}
+# Create archive for B_COL_MAJ=0, C_COL_MAJ=0 (both row major)
+set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
+set(ARCHIVE_NAME_0_0 "gemm_${m}x${k}x${n}_0_bcolmaj_0_ccolmaj_archive.a")
+set(ARCHIVE_PATH_0_0 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_0_0}")
+
+add_aie_kernel("gemm_${m}x${k}x${n}_0_bcolmaj_0_ccolmaj"
+    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
+    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_0_0)
+
+add_aie_archive(${ARCHIVE_NAME_0_0}
+    OBJECT_FILES ${MM_OBJ_0_0} ${CONVERT_OBJ}
+    OUTPUT_OBJECT ${ARCHIVE_PATH_0_0}
 )
 
-add_aie_archive(${ARCHIVE_NAME}
-    OBJECT_FILES ${KERNEL_OBJ_LIST}
-    OUTPUT_OBJECT ${ARCHIVE_PATH}
+# Create archive for B_COL_MAJ=1, C_COL_MAJ=0 (B column major)
+set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
+list(APPEND MM_KERNEL_DEFINES "B_COL_MAJ")
+set(ARCHIVE_NAME_1_0 "gemm_${m}x${k}x${n}_1_bcolmaj_0_ccolmaj_archive.a")
+set(ARCHIVE_PATH_1_0 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_1_0}")
+
+add_aie_kernel("gemm_${m}x${k}x${n}_1_bcolmaj_0_ccolmaj"
+    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
+    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_1_0)
+
+add_aie_archive(${ARCHIVE_NAME_1_0}
+    OBJECT_FILES ${MM_OBJ_1_0} ${CONVERT_OBJ}
+    OUTPUT_OBJECT ${ARCHIVE_PATH_1_0}
+)
+
+# Create archive for B_COL_MAJ=0, C_COL_MAJ=1 (C column major)
+set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
+list(APPEND MM_KERNEL_DEFINES "C_COL_MAJ")
+set(ARCHIVE_NAME_0_1 "gemm_${m}x${k}x${n}_0_bcolmaj_1_ccolmaj_archive.a")
+set(ARCHIVE_PATH_0_1 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_0_1}")
+
+add_aie_kernel("gemm_${m}x${k}x${n}_0_bcolmaj_1_ccolmaj"
+    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
+    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_0_1)
+
+add_aie_archive(${ARCHIVE_NAME_0_1}
+    OBJECT_FILES ${MM_OBJ_0_1} ${CONVERT_OBJ}
+    OUTPUT_OBJECT ${ARCHIVE_PATH_0_1}
 )
 
 set(TRACE_SIZE "0")
@@ -133,7 +154,10 @@ if(EXTENSIVE_TESTING)
     list(APPEND N_LIST 8192)
 endif()
 
-add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME})
+# Test with B and C both row major
+set(B_COL_MAJ 0)
+set(C_COL_MAJ 0)
+add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_0})
 
 foreach(M IN LISTS M_LIST)
     foreach(K IN LISTS K_LIST)
@@ -142,7 +166,41 @@ foreach(M IN LISTS M_LIST)
             if(N EQUAL 8192 AND K EQUAL 8192)
                 continue()
             endif()
-            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME})
+            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_0})
+        endforeach()
+    endforeach()
+endforeach()
+
+# Test with B column major
+set(B_COL_MAJ 1)
+set(C_COL_MAJ 0)
+add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_1_0})
+
+foreach(M IN LISTS M_LIST)
+    foreach(K IN LISTS K_LIST)
+        foreach(N IN LISTS N_LIST)
+            # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
+            if(N EQUAL 8192 AND K EQUAL 8192)
+                continue()
+            endif()
+            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_1_0})
+        endforeach()
+    endforeach()
+endforeach()
+
+# Test with C column major
+set(B_COL_MAJ 0)
+set(C_COL_MAJ 1)
+add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_1})
+
+foreach(M IN LISTS M_LIST)
+    foreach(K IN LISTS K_LIST)
+        foreach(N IN LISTS N_LIST)
+            # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
+            if(N EQUAL 8192 AND K EQUAL 8192)
+                continue()
+            endif()
+            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_1})
         endforeach()
     endforeach()
 endforeach()

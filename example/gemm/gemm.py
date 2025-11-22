@@ -21,7 +21,7 @@ from aie.iron import (
 )
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
-from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D
+from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
@@ -60,6 +60,12 @@ def main():
         "--emulate-bf16-mmul-with-bfp16", action="store_true", default=False
     )
     argparser.add_argument("--prio-accuracy", action="store_true", default=False)
+    argparser.add_argument(
+        "--archive",
+        type=str,
+        default=None,
+        help="Name of the archive file for the AIE kernels",
+    )
     argparser.add_argument("--dtype_in", type=str, choices=["bf16"], default="bf16")
     argparser.add_argument(
         "--dtype_out",
@@ -99,6 +105,7 @@ def main():
         args.emulate_bf16_mmul_with_bfp16,
         args.prio_accuracy,
         args.trace_size,
+        args.archive,
         args.generate_taps,
     )
 
@@ -132,6 +139,7 @@ def my_matmul(
     emulate_bf16_mmul_with_bfp16,
     prio_accuracy,
     trace_size,
+    archive=None,
     generate_taps=False,
 ):
     n_aie_rows = 4
@@ -264,6 +272,7 @@ def my_matmul(
 
     # AIE Core Function declarations
     scalar_suffix = "_scalar" if use_scalar else ""
+    archive_name = f"gemm_{m}x{k}x{n}_archive.a" if archive is None else archive
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
@@ -273,19 +282,19 @@ def my_matmul(
         # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
         convert_copy_kernel = Kernel(
             f"convert_copy_f32_to_bf16",
-            f"gemm_{m}x{k}x{n}_archive.a",
+            archive_name,
             [C_l1_ty_internal, C_l1_ty, np.int32],
         )
         # Fix the kernels to use f32 outputs
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_f32",
-            f"gemm_{m}x{k}x{n}_archive.a",
+            archive_name,
             [C_l1_ty_internal],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_f32"
         matmul_kernel = Kernel(
             matmul_func_name,
-            f"gemm_{m}x{k}x{n}_archive.a",
+            archive_name,
             [A_l1_ty, B_l1_ty, C_l1_ty_internal],
         )
     else:
@@ -294,13 +303,13 @@ def my_matmul(
         fifo_depth_out = fifo_depth
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_{dtype_out_str}",
-            f"gemm_{m}x{k}x{n}_archive.a",
+            archive_name,
             [C_l1_ty],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
         matmul_kernel = Kernel(
             matmul_func_name,
-            f"gemm_{m}x{k}x{n}_archive.a",
+            archive_name,
             [A_l1_ty, B_l1_ty, C_l1_ty],
         )
 
@@ -392,11 +401,15 @@ def my_matmul(
         )
 
         # Output C
+        if c_col_maj:
+            dims_to_stream = [(n // t, t * m), (t, r), (m // r, r * t), (r, 1)]
+        else:
+            dims_to_stream = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
         C_l2l3_fifos[col] = ObjectFifo(
             C_l2_ty,
             name=f"C_L2L3_{col}",
             depth=fifo_depth,
-            dims_to_stream=[(m // r, r * n), (r, t), (n // t, r * t), (t, 1)],
+            dims_to_stream=dims_to_stream,
         )
         of_offsets = [m * n * i for i in range(n_aie_rows)]
 
@@ -477,9 +490,7 @@ def my_matmul(
     # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
     # We only transfer 6 rows of tiles at once before starting a new transfer block.
     # tb = transfer block; block of transfers before sync call
-    tb_max_n_rows = 4
-    # Min for the case where we don't need to max out the number of transfer blocks
-    tb_n_rows = min(n_c_row_tiles_per_core, tb_max_n_rows // 2)
+    tb_max_n_rows = 4 if not c_col_maj else 2
 
     # Define tensor access patterns (tiling) for A, B, and C
     A_tiles = TensorTiler2D.group_tiler(
@@ -511,16 +522,6 @@ def my_matmul(
             tile_group_col_major=True,  # Send all tiles in column before moving on to next column
             prune_step=False,
         )
-    C_tiles = TensorTiler2D.step_tiler(
-        (M, N),  # Size of C matrix
-        (mem_tile_m_C, n),  # Size of C tile
-        # Number of tiles per transfer in each dimension (partial col, partial row)
-        tile_group_repeats=(tb_n_rows, n_c_col_tiles_per_core),
-        # Collect every n_aie_cols row at a time (mirroring how we sent in B data)
-        tile_group_steps=(1, n_aie_cols),
-        prune_step=False,
-    )
-    c_index = 0
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
@@ -546,24 +547,18 @@ def my_matmul(
         tg = rt.task_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
-                if c_index >= len(C_tiles):
-                    # May not have pong iteration in some cases
-                    break
-
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
                 current_tb_n_rows = min(
                     [tb_max_n_rows // 2, n_c_row_tiles_per_core - row_base]
                 )
-
+                if current_tb_n_rows <= 0:
+                    # For small input sizes, we may not even need a "pong" iteration
+                    break
                 for col in range(n_aie_cols):
-
-                    # This line does not change MLIR output at all - it's just for recording data movement
-                    C_taps.append(C_tiles[c_index])
-
                     # C Output Transfer:
                     # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
                     # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
-                    # then repeat that (tb_n_rows) times for the next contiguous blocks of rows.
+                    # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
                     # Each shim will start at a different column offset, transferring interleaved
                     # columns. For example, shim 0 may transfer the blocks marked 0 below, and shim 1
                     # may transfer the blocks marked 1.
@@ -579,15 +574,41 @@ def my_matmul(
                     #     |                |
                     #     |                |
                     #      ----------------
+                    if not c_col_maj:
+                        C_row_offset = row_base * mem_tile_m_C * N
+                        C_col_offset = col * n
+                        C_offset = C_col_offset + C_row_offset
+                        C_sizes = [
+                            current_tb_n_rows,
+                            N // mem_tile_n,
+                            mem_tile_m_C,
+                            n,
+                        ]
+                        C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
+                    else:
+                        C_row_offset = row_base * mem_tile_m_C
+                        C_col_offset = col * n * M
+                        C_offset = C_col_offset + C_row_offset
+                        C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
+                        C_strides = [M * mem_tile_n, m, M, 1]
+                    C_tile = TensorAccessPattern(
+                                (N, M) if c_col_maj else (M, N),
+                                offset=C_offset,
+                                sizes=C_sizes,
+                                strides=C_strides,
+                            )
+
+                    # This line does not change MLIR output at all - it's just for recording data movement
+                    C_taps.append(C_tile)
+
                     rt.drain(
                         C_l2l3_fifos[col].cons(),
                         C,
-                        tap=C_tiles[c_index],
+                        tap=C_tile,
                         wait=True,
                         task_group=tg,
                         placement=Tile(col, 0),
                     )
-                    c_index += 1
 
                     for tile_row in range(current_tb_n_rows):
 
