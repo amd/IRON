@@ -592,11 +592,11 @@ def my_matmul(
                         C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
                         C_strides = [M * mem_tile_n, m, M, 1]
                     C_tile = TensorAccessPattern(
-                                (N, M) if c_col_maj else (M, N),
-                                offset=C_offset,
-                                sizes=C_sizes,
-                                strides=C_strides,
-                            )
+                        (N, M) if c_col_maj else (M, N),
+                        offset=C_offset,
+                        sizes=C_sizes,
+                        strides=C_strides,
+                    )
 
                     # This line does not change MLIR output at all - it's just for recording data movement
                     C_taps.append(C_tile)
