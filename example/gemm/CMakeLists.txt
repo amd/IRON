@@ -81,7 +81,7 @@ set(N_LIST "2048")
 # TODO: Do we need to sweep through a list of them instead?
 set(m "64")
 set(k "64")
-set(n "64")
+set(n "32")
 
 set(AIE_BUILD_DIR ${CMAKE_BINARY_DIR}/aie)
 
@@ -101,51 +101,36 @@ else()
     list(APPEND MM_KERNEL_DEFINES_BASE "bf16_bf16_ONLY")
 endif()
 
+function(add_gemm_archive m k n B_COL_MAJ C_COL_MAJ CONVERT_OBJ)
+    # Set up kernel defines based on configuration
+    set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
+    if(B_COL_MAJ EQUAL 1)
+        list(APPEND MM_KERNEL_DEFINES "B_COL_MAJ")
+    endif()
+    if(C_COL_MAJ EQUAL 1)
+        list(APPEND MM_KERNEL_DEFINES "C_COL_MAJ")
+    endif()
+    
+    # Set archive name and path
+    set(ARCHIVE_NAME "gemm_${m}x${k}x${n}_${B_COL_MAJ}_bcolmaj_${C_COL_MAJ}_ccolmaj_archive.a")
+    set(ARCHIVE_PATH "${AIE_BUILD_DIR}/${ARCHIVE_NAME}")
+    
+    # Create kernel
+    add_aie_kernel("gemm_${m}x${k}x${n}_${B_COL_MAJ}_bcolmaj_${C_COL_MAJ}_ccolmaj"
+        SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
+        DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ)
+    
+    # Create archive
+    add_aie_archive(${ARCHIVE_NAME}
+        OBJECT_FILES ${MM_OBJ} ${CONVERT_OBJ}
+        OUTPUT_OBJECT ${ARCHIVE_PATH}
+    )
+    
+    # Export archive name to parent scope
+    set(ARCHIVE_NAME ${ARCHIVE_NAME} PARENT_SCOPE)
+endfunction()
+
 add_aie_kernel("convert_copy" SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/generic/convert_copy.cc OUTPUT_OBJECT CONVERT_OBJ)
-
-# Create archive for B_COL_MAJ=0, C_COL_MAJ=0 (both row major)
-set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
-set(ARCHIVE_NAME_0_0 "gemm_${m}x${k}x${n}_0_bcolmaj_0_ccolmaj_archive.a")
-set(ARCHIVE_PATH_0_0 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_0_0}")
-
-add_aie_kernel("gemm_${m}x${k}x${n}_0_bcolmaj_0_ccolmaj"
-    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
-    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_0_0)
-
-add_aie_archive(${ARCHIVE_NAME_0_0}
-    OBJECT_FILES ${MM_OBJ_0_0} ${CONVERT_OBJ}
-    OUTPUT_OBJECT ${ARCHIVE_PATH_0_0}
-)
-
-# Create archive for B_COL_MAJ=1, C_COL_MAJ=0 (B column major)
-set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
-list(APPEND MM_KERNEL_DEFINES "B_COL_MAJ")
-set(ARCHIVE_NAME_1_0 "gemm_${m}x${k}x${n}_1_bcolmaj_0_ccolmaj_archive.a")
-set(ARCHIVE_PATH_1_0 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_1_0}")
-
-add_aie_kernel("gemm_${m}x${k}x${n}_1_bcolmaj_0_ccolmaj"
-    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
-    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_1_0)
-
-add_aie_archive(${ARCHIVE_NAME_1_0}
-    OBJECT_FILES ${MM_OBJ_1_0} ${CONVERT_OBJ}
-    OUTPUT_OBJECT ${ARCHIVE_PATH_1_0}
-)
-
-# Create archive for B_COL_MAJ=0, C_COL_MAJ=1 (C column major)
-set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
-list(APPEND MM_KERNEL_DEFINES "C_COL_MAJ")
-set(ARCHIVE_NAME_0_1 "gemm_${m}x${k}x${n}_0_bcolmaj_1_ccolmaj_archive.a")
-set(ARCHIVE_PATH_0_1 "${AIE_BUILD_DIR}/${ARCHIVE_NAME_0_1}")
-
-add_aie_kernel("gemm_${m}x${k}x${n}_0_bcolmaj_1_ccolmaj"
-    SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/${IRONCLAD_AIE_TARGET}/mm.cc
-    DEFINES ${MM_KERNEL_DEFINES} OUTPUT_OBJECT MM_OBJ_0_1)
-
-add_aie_archive(${ARCHIVE_NAME_0_1}
-    OBJECT_FILES ${MM_OBJ_0_1} ${CONVERT_OBJ}
-    OUTPUT_OBJECT ${ARCHIVE_PATH_0_1}
-)
 
 set(TRACE_SIZE "0")
 if(EXTENSIVE_TESTING)
@@ -157,7 +142,6 @@ endif()
 # Loop through different combinations of B_COL_MAJ and C_COL_MAJ
 set(B_COL_MAJ_LIST 0 1 0)
 set(C_COL_MAJ_LIST 0 0 1)
-set(ARCHIVE_NAME_LIST ${ARCHIVE_NAME_0_0} ${ARCHIVE_NAME_1_0} ${ARCHIVE_NAME_0_1})
 
 list(LENGTH B_COL_MAJ_LIST NUM_CONFIGS)
 math(EXPR NUM_CONFIGS_MINUS_1 "${NUM_CONFIGS} - 1")
@@ -165,7 +149,9 @@ math(EXPR NUM_CONFIGS_MINUS_1 "${NUM_CONFIGS} - 1")
 foreach(CONFIG_IDX RANGE ${NUM_CONFIGS_MINUS_1})
     list(GET B_COL_MAJ_LIST ${CONFIG_IDX} B_COL_MAJ)
     list(GET C_COL_MAJ_LIST ${CONFIG_IDX} C_COL_MAJ)
-    list(GET ARCHIVE_NAME_LIST ${CONFIG_IDX} ARCHIVE_NAME)
+    
+    # Create archive for this configuration
+    add_gemm_archive(${m} ${k} ${n} ${B_COL_MAJ} ${C_COL_MAJ} ${CONVERT_OBJ})
     
     add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME})
     
