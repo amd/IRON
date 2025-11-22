@@ -35,9 +35,13 @@ class AIEElementwiseAdd(AIEOperatorBase):
         total_shimdma_channels = self.num_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # Compilation artifacts
         file_name_base = f"add_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
@@ -72,15 +76,19 @@ class AIEElementwiseAdd(AIEOperatorBase):
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
+    def set_up_runtime(self):
         # Runtime setup
         self.add_buffer("input1", self.size)
         self.add_buffer("input2", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_add", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "eltwise_add", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_to_runlist("eltwise_add", "input1", "input2", "output")
 

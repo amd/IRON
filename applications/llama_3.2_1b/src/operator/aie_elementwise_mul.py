@@ -45,6 +45,10 @@ class AIEElementwiseMul(AIEOperatorBase):
         total_shimdma_channels = self.num_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
     def get_artifacts(self, prefix="eltwise_mul_"):
@@ -83,7 +87,7 @@ class AIEElementwiseMul(AIEOperatorBase):
 
         return xclbin_artifact, insts_artifact
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
         if not self.do_set_up:
             return
@@ -95,15 +99,23 @@ class AIEElementwiseMul(AIEOperatorBase):
         mlir_artifact = xclbin_artifact.depends[0]
         mlir_artifact.callback_args[0] = self.device_manager.device_type
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
+
+    def set_up_runtime(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
 
         # Runtime setup
         self.add_buffer("input1", self.size)
         self.add_buffer("input2", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_mul", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "eltwise_mul", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
 

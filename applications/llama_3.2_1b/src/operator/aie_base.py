@@ -29,15 +29,23 @@ class AIEOperatorBase(ABC):
     peano_dir = Path(aie.utils.config.peano_install_dir())
 
     @classmethod
-    def compile_all_operators(cls):
+    def compile_all_operators(cls, dry_run=False):
         """Compile all registered AIE operators."""
-        cls.build_dir.mkdir(parents=True, exist_ok=True)
+        if dry_run:
+            cmds = []
+        else:
+            cls.build_dir.mkdir(parents=True, exist_ok=True)
         for op in cls.registered_operators:
-            op.compile()
+            op.compile(dry_run=cmds)
+        if dry_run:
+            return cmds
 
     @classmethod
     def prepare_runtime(cls):
         """Setup XRT runtime for AIE execution using shared device manager"""
+
+        for op in cls.registered_operators:
+            self.set_up_runtime()
 
         # Pools of preallocated buffer objects; each buffer object is allocated
         # once at program start and then reused across operators where possible.
@@ -242,28 +250,32 @@ class AIEOperatorBase(ABC):
         self.get_bo(buffer_name).write(numpy_array.flatten().view(np.uint8), 0)
 
     @abstractmethod
-    def set_up(self):
+    def set_up_artifacts(self):
         """
         Subclasses should overwrite this method to set up their required dependenices and runtime runlist, kernels and buffers with calls to add_artifacts(), add_kernel(), add_buffer(), and add_to_runlist().
         Note: This method should only *describe* the required artifacts and runtime buffers, and not yet do any computation or compilation.
         Compilation will be handled automatically based on the provided description.
         """
         pass
+    
+    @abstractmethod
+    def set_up_runtime(self):
+        pass
 
-    def compile(self):
+    def compile(self, dry_run=None):
         """
         Set up the operator and compile any necessary artifacts.
         Subclasses are expected to overwrite set_up(); they may register any artifacts that they need to be compiled there.
         """
-        self.set_up()
+        self.set_up_artifacts()
         self._move_artifact_paths()
         work_list = comp.get_work_list(self.artifacts)
         compilation_rules = [
-            comp.GenerateMLIRFromPythonCompilationRule(),
-            comp.PeanoCompilationRule(self.peano_dir, self.mlir_aie_dir),
-            comp.ArchiveCompilationRule(self.peano_dir),
+            comp.GenerateMLIRFromPythonCompilationRule(dry_run=dry_run),
+            comp.PeanoCompilationRule(self.peano_dir, self.mlir_aie_dir, dry_run=dry_run),
+            comp.ArchiveCompilationRule(self.peano_dir, dry_run=dry_run),
             comp.AieccCompilationRule(
-                self.build_dir, self.peano_dir, self.mlir_aie_dir
+                self.build_dir, self.peano_dir, self.mlir_aie_dir, dry_run=dry_run
             ),
         ]
         if work_list:

@@ -37,6 +37,10 @@ class AIESiLU(AIEOperatorBase):
         total_shimdma_channels = self.num_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
     def get_artifacts(self, prefix="silu_"):
@@ -72,7 +76,7 @@ class AIESiLU(AIEOperatorBase):
 
         return xclbin_artifact, insts_artifact
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
         if not self.do_set_up:
             return
@@ -80,14 +84,22 @@ class AIESiLU(AIEOperatorBase):
         # Compilation artifacts
         xclbin_artifact, insts_artifact = self.get_artifacts()
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
+
+    def set_up_runtime(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
 
         # Runtime setup
         self.add_buffer("input", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "silu", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "silu", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_to_runlist("silu", "input", "output")
 

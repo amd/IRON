@@ -37,9 +37,14 @@ class AIEMHA(AIEOperatorBase):
         self.num_KV_heads = num_KV_heads
         self.num_of_pipelines = num_of_pipelines
         assert d == 64, "Only d=64 is supported in this version"
+        
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+        
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # Set up compilation artifacts
         # ---
 
@@ -133,13 +138,17 @@ class AIEMHA(AIEOperatorBase):
             f"mha.bin", depends=[mlir_artifact], extra_flags=["--dynamic-objFifos"]
         )
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
+    def set_up_runtime(self):
         # Set up runtime
         # ---
         self.add_kernel(
-            "mha", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "mha", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_buffer(
             "Q",

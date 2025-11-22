@@ -42,9 +42,13 @@ class AIERMSNorm(AIEOperatorBase):
         total_shimdma_channels = self.num_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # Compilation artifacts
         file_name_base = f"weighted_rms_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
@@ -88,9 +92,13 @@ class AIERMSNorm(AIEOperatorBase):
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
+    def set_up_runtime(self):
         # Runtime setup
         static_weights = None
         if self.weight is not None:
@@ -100,7 +108,7 @@ class AIERMSNorm(AIEOperatorBase):
         self.add_buffer("input2", self.tile_size, static_data=static_weights)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_mul", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "eltwise_mul", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
 

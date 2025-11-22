@@ -48,6 +48,10 @@ class AIEGEMV(AIEOperatorBase):
 
         self.do_set_up = do_set_up
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
     def get_artifacts(self, prefix="gemv_"):
@@ -87,7 +91,7 @@ class AIEGEMV(AIEOperatorBase):
 
         return xclbin_artifact, insts_artifact
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
         if not self.do_set_up:
             return
@@ -95,8 +99,17 @@ class AIEGEMV(AIEOperatorBase):
         # Compilation Artifacts
         # ---
         xclbin_artifact, insts_artifact = self.get_artifacts()
+        
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+        
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
+
+    def set_up_runtime(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
 
         # Runtime Setup
         # ---
@@ -112,7 +125,7 @@ class AIEGEMV(AIEOperatorBase):
             if isinstance(static_weights, torch.Tensor):
                 static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
-            "gemv", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "gemv", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_buffer("matrix", self.M * self.K, static_data=static_weights)
         self.add_buffer("vector", self.K)

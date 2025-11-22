@@ -26,9 +26,13 @@ class AIESoftmax(AIEOperatorBase):
         self.num_channels = num_channels
         self.num_columns = num_columns
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # Compilation artifacts
         file_name_base = f"softmax_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
@@ -61,14 +65,18 @@ class AIESoftmax(AIEOperatorBase):
             f"gemm_{file_name_base}.bin", depends=[mlir_artifact]
         )
 
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
+    def set_up_runtime(self):
         # Runlist setup
         self.add_buffer("in", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "softmax", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "softmax", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_to_runlist("softmax", "in", "output")
 

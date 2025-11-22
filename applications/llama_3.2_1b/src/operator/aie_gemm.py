@@ -58,6 +58,10 @@ class AIEGEMM(AIEOperatorBase):
 
         self.do_set_up = do_set_up
 
+        # Artifacts created by set_up_artifacts()
+        self.xclbin_artifact = None
+        self.insts_artifact = None
+
         AIEOperatorBase.__init__(self)
 
     def get_artifacts(self, prefix="gemm_"):
@@ -174,15 +178,24 @@ class AIEGEMM(AIEOperatorBase):
 
         return (xclbin_artifact, insts_artifact)
 
-    def set_up(self):
+    def set_up_artifacts(self):
         # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
         if not self.do_set_up:
             return
         # Describe required artifacts (xclbin, insts.bin)
         device_str = self.device_manager.device_str()
         xclbin_artifact, insts_artifact = self.get_artifacts()
+        
+        self.xclbin_artifact = xclbin_artifact
+        self.insts_artifact = insts_artifact
+        
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
+    def set_up_runtime(self):
+        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
+        if not self.do_set_up:
+            return
+        
         # Describe runtime components
         # The static weights might not yet be loaded upon initialization; therefore, the provided self.static_weights field is a callback that provides the weights at set-up time.
         static_weights = None
@@ -191,7 +204,7 @@ class AIEGEMM(AIEOperatorBase):
             if isinstance(static_weights, torch.Tensor):
                 static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
-            "gemm", xclbin_artifact, xclbin_artifact.kernel_name, insts_artifact
+            "gemm", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
         self.add_buffer("A", self.M * self.K)
         self.add_buffer("B", self.K * self.N, static_data=static_weights)
