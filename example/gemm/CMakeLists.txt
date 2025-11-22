@@ -154,53 +154,30 @@ if(EXTENSIVE_TESTING)
     list(APPEND N_LIST 8192)
 endif()
 
-# Test with B and C both row major
-set(B_COL_MAJ 0)
-set(C_COL_MAJ 0)
-add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_0})
+# Loop through different combinations of B_COL_MAJ and C_COL_MAJ
+set(B_COL_MAJ_LIST 0 1 0)
+set(C_COL_MAJ_LIST 0 0 1)
+set(ARCHIVE_NAME_LIST ${ARCHIVE_NAME_0_0} ${ARCHIVE_NAME_1_0} ${ARCHIVE_NAME_0_1})
 
-foreach(M IN LISTS M_LIST)
-    foreach(K IN LISTS K_LIST)
-        foreach(N IN LISTS N_LIST)
-            # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
-            if(N EQUAL 8192 AND K EQUAL 8192)
-                continue()
-            endif()
-            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_0})
-        endforeach()
-    endforeach()
-endforeach()
+list(LENGTH B_COL_MAJ_LIST NUM_CONFIGS)
+math(EXPR NUM_CONFIGS_MINUS_1 "${NUM_CONFIGS} - 1")
 
-# Test with B column major
-set(B_COL_MAJ 1)
-set(C_COL_MAJ 0)
-add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_1_0})
-
-foreach(M IN LISTS M_LIST)
-    foreach(K IN LISTS K_LIST)
-        foreach(N IN LISTS N_LIST)
-            # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
-            if(N EQUAL 8192 AND K EQUAL 8192)
-                continue()
-            endif()
-            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_1_0})
-        endforeach()
-    endforeach()
-endforeach()
-
-# Test with C column major
-set(B_COL_MAJ 0)
-set(C_COL_MAJ 1)
-add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_1})
-
-foreach(M IN LISTS M_LIST)
-    foreach(K IN LISTS K_LIST)
-        foreach(N IN LISTS N_LIST)
-            # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
-            if(N EQUAL 8192 AND K EQUAL 8192)
-                continue()
-            endif()
-            add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME_0_1})
+foreach(CONFIG_IDX RANGE ${NUM_CONFIGS_MINUS_1})
+    list(GET B_COL_MAJ_LIST ${CONFIG_IDX} B_COL_MAJ)
+    list(GET C_COL_MAJ_LIST ${CONFIG_IDX} C_COL_MAJ)
+    list(GET ARCHIVE_NAME_LIST ${CONFIG_IDX} ARCHIVE_NAME)
+    
+    add_aie_gemm_xclbin(${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME})
+    
+    foreach(M IN LISTS M_LIST)
+        foreach(K IN LISTS K_LIST)
+            foreach(N IN LISTS N_LIST)
+                # GEMM of {sequence length}*8192*8192 doesn't occur with the model, so skipping it to save time
+                if(N EQUAL 8192 AND K EQUAL 8192)
+                    continue()
+                endif()
+                add_aie_gemm_design(${M} ${K} ${N} ${m} ${k} ${n} ${MAX_COLUMNS} ${B_COL_MAJ} ${C_COL_MAJ} ${TRACE_SIZE} ${ARCHIVE_NAME})
+            endforeach()
         endforeach()
     endforeach()
 endforeach()
