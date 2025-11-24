@@ -34,9 +34,10 @@ jobs:
       - name: Get latest mlir-aie release
         id: latest_release
         run: |
-          latest_tag_with_v=$(curl -s "https://api.github.com/repos/Xilinx/mlir-aie/releases/latest" | jq '.tag_name')
-          latest_tag=${latest_tag_with_v#v}
+          latest_tag_with_v=$(curl -s "https://api.github.com/repos/Xilinx/mlir-aie/releases/latest" | jq -r '.tag_name')
+          latest_tag="${latest_tag_with_v#v}"
           echo "Latest tag: $latest_tag"
+          echo "tag_with_v=$latest_tag_with_v" >> $GITHUB_OUTPUT
           echo "tag=$latest_tag" >> $GITHUB_OUTPUT
 
       - name: Compare versions and create PR
@@ -44,28 +45,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "New version found: ${{ steps.latest_release.outputs.tag }}. Current version is ${{ steps.current_version.outputs.version }}."
+          echo "New version found: ${{ steps.latest_release.outputs.tag_with_v }}. Current version is v${{ steps.current_version.outputs.version }}."
           
           # Configure git
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
           
           # Create new branch
-          new_branch="update-mlir-aie-to-v${{ steps.latest_release.outputs.tag }}"
+          new_branch="update-mlir-aie-to-${{ steps.latest_release.outputs.tag_with_v }}"
           git checkout -b $new_branch
           
           # Update requirements.txt
-          sed -i "s|/v${{ steps.current_version.outputs.version }}/|/v${{ steps.latest_release.outputs.tag }}/|" requirements.txt
+          sed -i "s|==${{ steps.current_version.outputs.version }}|==${{ steps.latest_release.outputs.tag }}|" requirements.txt
           
           # Commit changes
           git add requirements.txt
-          git commit -m "Update mlir-aie to version ${{ steps.latest_release.outputs.tag }}"
+          git commit -m "Update mlir-aie to version ${{ steps.latest_release.outputs.tag_with_v }}"
           
           # Push changes
           git push --set-upstream origin $new_branch
           
           # Create Pull Request
-          gh pr create --base main --head $new_branch --title "Update mlir-aie to v${{ steps.latest_release.outputs.tag }}" --body "This PR updates the mlir-aie version to the latest release."
+          gh pr create --base main --head $new_branch --title "Update mlir-aie to ${{ steps.latest_release.outputs.tag_with_v }}" --body "This PR updates the mlir-aie version to the latest release."
           
       - name: No new version found
         if: steps.current_version.outputs.version == steps.latest_release.outputs.tag
