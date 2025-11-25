@@ -32,6 +32,9 @@ jobs:
         run: |
           set -euxo pipefail
           source ci_env/bin/activate
+          
+          pip uninstall -y mlir_aie
+          
           WHEELS_URL="https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-2"
           if [[ "${{ github.event.inputs.wheels-version }}" == "latest" ]]; then
             pip install --upgrade mlir-aie --find-links ${WHEELS_URL}
