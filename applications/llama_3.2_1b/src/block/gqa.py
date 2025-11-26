@@ -10,12 +10,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.operator.rope import apply_rope
-from src.operator.aie_rope import AIERope
-from src.operator.aie_softmax import AIESoftmax
-from src.operator.aie_mha import AIEMHA
-from src.operator.aie_gemm import AIEGEMM
-from src.operator.aie_gemv import AIEGEMV
+from operators import AIERope, AIESoftmax, AIEMHA, AIEGEMM, AIEGEMV
+from operators.rope.rope_utils import apply_rope
 
 from torchtune.modules import KVCache
 

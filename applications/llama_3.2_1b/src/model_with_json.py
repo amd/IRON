@@ -11,12 +11,12 @@ import torch.nn as nn
 import json
 from pathlib import Path
 from src.block.transformer import TransformerBlock
-from src.operator.rope import compute_rope_params
+from operators.rope.rope_utils import compute_rope_params
+from operators import AIERMSNorm
 from rich.console import Console
 from rich.text import Text
 
 from .utils import assign
-from src.operator.aie_rms_norm import AIERMSNorm
 
 
 def dtype_from_string(inp):

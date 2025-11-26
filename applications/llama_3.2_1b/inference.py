@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Copyright (c) Sebastian Raschka under Apache License 2.0.
 # Source for "Build a Large Language Model From Scratch"
 #   - https://www.manning.com/books/build-a-large-language-model-from-scratch
@@ -7,6 +8,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
+from pathlib import Path
+
+# Add IRON repository root to Python path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root))
+
 import argparse
 import time
 import torch
@@ -20,7 +27,7 @@ import shutil
 import logging
 from collections import deque
 
-from src.operator.aie_base import AIEOperatorBase
+from operators.common import AIEOperatorBase
 from src.utils import (
     model_memory_size,
     load_weights_into_llama,

@@ -9,12 +9,14 @@
 import torch
 import torch.nn as nn
 from ..utils import torch_to_numpy, assign
-from src.operator.aie_elementwise_mul import AIEElementwiseMul
-from src.operator.aie_gemm import AIEGEMM
-from src.operator.aie_gemv import AIEGEMV
-from src.operator.aie_silu import AIESiLU
-from src.operator.aie_swiglu_prefill import AIESwiGLUPrefill
-from src.operator.aie_swiglu_decode import AIESwiGLUDecode
+from operators import (
+    AIEElementwiseMul,
+    AIEGEMM,
+    AIEGEMV,
+    AIESiLU,
+    AIESwiGLUPrefill,
+    AIESwiGLUDecode,
+)
 from ml_dtypes import bfloat16
 
 

@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import torch
+import numpy as np
+from ml_dtypes import bfloat16
+
+
+def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
+    """
+    Generate golden reference data for SwiGLU decode (for single token).
+
+    SwiGLU computes: W3 @ (SiLU(W1 @ x) * (W2 @ x))
+    where SiLU(x) = x * sigmoid(x)
+
+    Parameters:
+        M: Batch size (typically 1 for decode)
+        K: Embedding dimension
+        N: Hidden dimension (FFN intermediate dimension)
+        seed: Random seed
+
+    Returns:
+        dict: Contains 'x', 'w_gate', 'w_up', 'w_down', 'left', 'left_swished', 'right', 'intermediate', 'y'
+    """
+    torch.manual_seed(seed)
+
+    # Generate golden inputs
+    val_range = 4
+    x = torch.randn(K, dtype=torch.bfloat16) * val_range
+    w_gate = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # gate projection
+    w_up = torch.randn(N, K, dtype=torch.bfloat16) * val_range    # up projection
+    w_down = torch.randn(K, N, dtype=torch.bfloat16) * val_range  # down projection
+
+    # Generate golden outputs (decode uses matrix-vector multiply)
+    left = w_gate @ x
+    left_swished = torch.nn.functional.silu(left)
+    right = w_up @ x
+    intermediate = left_swished * right
+    y = w_down @ intermediate
+
+    return {
+        "x": x.numpy().view(np.uint16).view(bfloat16),
+        "w_gate": w_gate.numpy().view(np.uint16).view(bfloat16),
+        "w_up": w_up.numpy().view(np.uint16).view(bfloat16),
+        "w_down": w_down.numpy().view(np.uint16).view(bfloat16),
+        "left": left.numpy().view(np.uint16).view(bfloat16),
+        "left_swished": left_swished.numpy().view(np.uint16).view(bfloat16),
+        "right": right.numpy().view(np.uint16).view(bfloat16),
+        "intermediate": intermediate.numpy().view(np.uint16).view(bfloat16),
+        "y": y.numpy().view(np.uint16).view(bfloat16),
+    }
