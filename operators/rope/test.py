@@ -15,13 +15,12 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    "--rows 64 --cols 64 --columns 1 --channels 1",
-    "--rows 64 --cols 64 --columns 2 --channels 1",
+    ("rope_64x64_1col_1ch", "--rows 64 --cols 64 --columns 1 --channels 1"),
+    ("rope_64x64_2col_1ch", "--rows 64 --cols 64 --columns 2 --channels 1"),
 ]
 
 
-extensive_test_cases = [
-]
+extensive_test_cases = []
 
 
 def main():

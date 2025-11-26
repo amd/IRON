@@ -24,18 +24,18 @@ from operators.common import (
 class AIEElementwiseAdd(AIEOperatorBase):
     """AIE-accelerated element-wise addition"""
 
-    def __init__(self, size, num_columns=None, num_channels=None, tile_size=None):
-        max_multiple = num_columns * tile_size
+    def __init__(self, size, num_aie_columns=None, num_channels=None, tile_size=None):
+        max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
         self.size = padded_size
         self.tile_size = tile_size
 
-        self.num_columns = num_columns
+        self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         # Enforce ShimDMA limits for elementwise_add (uses 2 inputs per core)
         # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
-        total_shimdma_channels = self.num_columns * self.num_channels
+        total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
         # Artifacts created by set_up_artifacts()
@@ -47,7 +47,7 @@ class AIEElementwiseAdd(AIEOperatorBase):
     def set_up_artifacts(self):
         # Compilation artifacts
         operator_dir = Path(__file__).parent
-        file_name_base = f"add_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"add_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -56,7 +56,7 @@ class AIEElementwiseAdd(AIEOperatorBase):
             callback_args=[
                 self.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 self.tile_size,
                 0,

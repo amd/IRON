@@ -20,21 +20,18 @@ from operators.common import (
 
 
 class AIEAXPY(AIEOperatorBase):
-    """AIE-accelerated AXPY operator"""
+    """AIE-accelerated aX + Y operator"""
 
-    def __init__(self, size, num_columns, num_channels, tile_size, alpha=0.01):
-        max_multiple = num_columns * tile_size
+    def __init__(self, size, num_aie_columns, num_channels, tile_size, scalar_factor=0.01):
+        max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
         self.size = padded_size
         self.tile_size = tile_size
-        self.num_columns = num_columns
+        self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
-        self.alpha = alpha
+        self.scalar_factor = scalar_factor
         
-        total_shimdma_channels = self.num_columns * self.num_channels * 2
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
-
         self.xclbin_artifact = None
         self.insts_artifact = None
 
@@ -42,7 +39,7 @@ class AIEAXPY(AIEOperatorBase):
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
-        file_name_base = f"axpy_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.scalar_factor}s"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -51,10 +48,11 @@ class AIEAXPY(AIEOperatorBase):
             callback_args=[
                 self.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 self.tile_size,
-                0, 3.0,
+                0, 
+                self.scalar_factor,
             ],
         )
 
@@ -78,17 +76,19 @@ class AIEAXPY(AIEOperatorBase):
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def set_up_runtime(self):
-        self.add_buffer("input", self.size)
-        self.add_buffer("input2", self.size)
+        self.add_buffer("x", self.size)
+        self.add_buffer("y", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
             "axpy", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
         )
-        self.add_to_runlist("axpy", "input", "input2", "output")
+        self.add_to_runlist("axpy", "x", "y", "output")
 
     def forward(self, x, y):
         if x.numel() > self.size or y.numel() > self.size:
             raise AIEOperatorConstraintError("AIEAXPY: input too large for configured size")
+        if x.numel() != y.numel():
+            raise AIEOperatorConstraintError("AIEAXPY: sizes of X and Y do not match")
 
         original_shape = x.shape
         x_flat = x.reshape(-1)
@@ -101,8 +101,8 @@ class AIEAXPY(AIEOperatorBase):
 
         x_np = torch_to_numpy(x_flat)
         y_np = torch_to_numpy(y_flat)
-        self.write_buffer("input", x_np)
-        self.write_buffer("input2", y_np)
+        self.write_buffer("x", x_np)
+        self.write_buffer("y", y_np)
         self.write_buffer("output", np.zeros(self.size, dtype=bfloat16))
         self.run_runlist()
         result = self.read_buffer_as_torch("output", shape=(self.size,), dtype=bfloat16)

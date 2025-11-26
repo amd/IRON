@@ -14,20 +14,34 @@ from operators.common.test_utils import run_test
 
 
 
-regular_test_cases = [
-    "-l 2048 --columns 1 --channels 2 --tile-size 2048",
-    "-l 2048 --columns 2 --channels 2 --tile-size 1024",
-]
+regular_test_cases = []
+extensive_test_cases = []
 
+max_aie_columns = 8
+num_channels = 2
+regular_input_lengths = [2048]
+extensive_input_lengths = [1024, 4096, 8192]
 
-extensive_test_cases = [
-]
+for (test_cases, input_lengths) in [
+    (regular_test_cases, regular_input_lengths),
+    (extensive_test_cases, extensive_input_lengths)
+]:
+    for input_length in input_lengths:
+        for num_aie_columns in range(1, max_aie_columns + 1):
+            tile_size = input_length // num_aie_columns
+            if tile_size > 4096:
+                tile_size = 4096
+            if tile_size * num_aie_columns != input_length:
+                continue
+            name = f"eltwise_mul_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+            cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size}"
+            test_cases.append((name, cmd))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--length", type=int, default=4096)
-    parser.add_argument("--columns", type=int, default=1)
+    parser.add_argument("--aie-columns", type=int, default=1)
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
     args = parser.parse_args()
@@ -36,7 +50,7 @@ def main():
     
     operator = AIEElementwiseMul(
         size=args.length,
-        num_columns=args.columns,
+        num_aie_columns=args.aie_columns,
         num_channels=args.channels,
         tile_size=args.tile_size
     )

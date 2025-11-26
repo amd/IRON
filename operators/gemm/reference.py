@@ -7,7 +7,7 @@ import torch
 from golden_model_lib import torch_dtype_map
 
 
-def generate_golden_reference(M: int, K: int, N: int, dtype='bf16', seed=42):
+def generate_golden_reference(M: int, K: int, N: int, dtype='bf16', seed=42, b_col_maj=False, c_col_maj=False):
     """
     Generate golden reference data for gemm.
     
@@ -20,4 +20,8 @@ def generate_golden_reference(M: int, K: int, N: int, dtype='bf16', seed=42):
     input_a = torch.randn(M, K, dtype=dtype_torch) * val_range
     input_b = torch.rand(K, N, dtype=dtype_torch) * val_range
     output = torch.matmul(input_a, input_b)
+    if b_col_maj:
+        input_b = input_b.T
+    if c_col_maj:
+        output = output.T
     return {"input": input_a, "input_b": input_b, "output": output}

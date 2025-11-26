@@ -15,15 +15,13 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    "--rows 1 --cols 128 --columns 1 --channels 1 --tile-size 128",
-    "--rows 1 --cols 128 --columns 2 --channels 1 --tile-size 64",
-    "--rows 1 --cols 128 --columns 1 --channels 2 --tile-size 64",
-    "--rows 1 --cols 128 --columns 2 --channels 2 --tile-size 32",
+    ("softmax_1x128_1col_1ch_128t", "--rows 1 --cols 128 --columns 1 --channels 1 --tile-size 128"),
+    ("softmax_1x128_2col_1ch_64t", "--rows 1 --cols 128 --columns 2 --channels 1 --tile-size 64"),
+    ("softmax_1x128_1col_2ch_64t", "--rows 1 --cols 128 --columns 1 --channels 2 --tile-size 64"),
+    ("softmax_1x128_2col_2ch_32t", "--rows 1 --cols 128 --columns 2 --channels 2 --tile-size 32"),
 ]
 
-
-extensive_test_cases = [
-]
+extensive_test_cases = []
 
 
 def main():

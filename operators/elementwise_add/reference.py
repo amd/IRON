@@ -1,19 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Golden reference generator for elementwise_add operator."""
-
 import torch
 from golden_model_lib import torch_dtype_map
 
 
 def generate_golden_reference(input_length: int, dtype='bf16', seed=42):
-    """
-    Generate golden reference data for elementwise_add.
-    
-    Returns:
-        dict: Dictionary with tensors for inputs and outputs
-    """
     torch.manual_seed(seed)
     val_range = 4
     dtype_torch = torch_dtype_map[dtype]

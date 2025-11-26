@@ -21,30 +21,30 @@ extensive_K_list = [2048, 8192, 64]
 extensive_N_list = [2048, 8192]
 
 m, k, n = 64, 64, 64
-NUM_COLUMNS = 2
-B_COL_MAJ = 0
-C_COL_MAJ = 0
-TRACE_SIZE = 0
+num_aie_columns = 2
+col_maj = [(False, False), (True, False), (False, True)]
+trace_size = 0
 
 regular_test_cases = []
 extensive_test_cases = []
 
 # Populate regular_test_cases
-for (tests, M_list, K_list, N_list) in [
-    (regular_test_cases, regular_M_list, regular_K_list, regular_N_list),
-    (extensive_test_cases, extensive_M_list, extensive_K_list, extensive_N_list),
+for (tests, M_list, K_list, N_list, col_maj_choices) in [
+    (regular_test_cases, regular_M_list, regular_K_list, regular_N_list, col_maj),
+    (extensive_test_cases, extensive_M_list, extensive_K_list, extensive_N_list, col_maj),
 ]:
-    for M in M_list:
-        for K in K_list:
-            for N in N_list:
-                if N == 8192 and K == 8192:
-                    continue  # Untested combination because huge & slow, unused in our application
-                tests.append(
-                    (
-                        f"gemm_{M}x{K}x{N}_{m}x{m}x{n}_{NUM_COLUMNS}_cols_{B_COL_MAJ}_bcolmaj_{C_COL_MAJ}_ccolmaj_{TRACE_SIZE}",
-                        f"-M {M} -K {K} -N {N} --columns {NUM_COLUMNS}",
+    for b_col_maj, c_col_maj in col_maj_choices:
+        for M in M_list:
+            for K in K_list:
+                for N in N_list:
+                    if N == 8192 and K == 8192:
+                        continue  # Untested combination because huge & slow, unused in our application
+                    tests.append(
+                        (
+                            f"gemm_{M}x{K}x{N}_{m}x{m}x{n}_{num_aie_columns}_cols_{b_col_maj}_bcolmaj_{c_col_maj}_ccolmaj_{trace_size}",
+                            f"-M {M} -K {K} -N {N} --columns {num_aie_columns}",
+                        )
                     )
-                )
 
 
 def main():
@@ -52,20 +52,24 @@ def main():
     parser.add_argument("-M", type=int, default=256)
     parser.add_argument("-K", type=int, default=256)
     parser.add_argument("-N", type=int, default=256)
-    parser.add_argument("--columns", type=int, default=1)
+    parser.add_argument("--aie-columns", type=int, default=1)
     parser.add_argument("--prio-accuracy", type=int, default=1)
     parser.add_argument("--emulate-bf16-mmul-with-bfp16", type=int, default=0)
+    parser.add_argument("--b-col-maj", type=int, default=0)
+    parser.add_argument("--c-col-maj", type=int, default=0)
     args = parser.parse_args()
     
-    golden_ref = generate_golden_reference(M=args.M, K=args.K, N=args.N)
+    golden_ref = generate_golden_reference(M=args.M, K=args.K, N=args.N, b_col_maj=bool(args.b_col_maj), c_col_maj=bool(args.c_col_maj))
     
     operator = AIEGEMM(
         M=args.M,
         K=args.K,
         N=args.N,
-        num_columns=args.columns,
-        prio_accuracy=bool(args.prio_accuracy)
-        emulate_bf16_mmul_with_bfp16=bool(args.emulate_bf16_mmul_with_bfp16)
+        num_aie_columns=args.aie_columns,
+        prio_accuracy=bool(args.prio_accuracy),
+        emulate_bf16_mmul_with_bfp16=bool(args.emulate_bf16_mmul_with_bfp16),
+        b_col_maj=bool(args.b_col_maj),
+        c_col_maj=bool(args.c_col_maj),
     )
     
     input_buffers = {

@@ -32,7 +32,7 @@ for (tests, input_lengths) in [(regular_test_cases, regular_input_lengths), (ext
                         (
                             f"layer_norm_{num_columns}_cols_{num_channels_layer}_channels_{input_length}_tile_{tile_size}",
                             f"--size {input_length} --columns {num_columns} --channels {num_channels_layer} --tile-size {tile_size}"
-                        )[0]
+                        )
                     )
 
 
@@ -43,14 +43,14 @@ def main():
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
     args = parser.parse_args()
-    
-    golden_ref = generate_golden_reference(rows=args.rows, cols=args.cols)
-    
+
+    golden_ref = generate_golden_reference(size=args.size)
+
     operator = AIELayerNorm(
-        size=args.length,
+        size=args.size,
         num_columns=args.columns,
         num_channels=args.channels,
-        tile_size=args.tile_size
+        tile_size=args.tile_size,
     )
     
     input_buffers = {'input': golden_ref['input']}

@@ -14,14 +14,11 @@ from operators.common.test_utils import run_test
 
 
 
+extensive_test_cases = []
 # Leaky ReLU is currently broken (#36); leave it untested
 
-regular_test_cases = [
-]
-
-
-extensive_test_cases = [
-]
+regular_test_cases = []
+extensive_test_cases = []
 
 
 def main():
@@ -30,6 +27,7 @@ def main():
     parser.add_argument("--columns", type=int, default=1)
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
+    parser.add_argument("--alpha", type=float, default=0.01)
     args = parser.parse_args()
     
     golden_ref = generate_golden_reference(input_length=args.length, alpha=args.alpha)

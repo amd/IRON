@@ -67,17 +67,32 @@ def discover_tests(operators_dir, extensive=False):
         # Extract test cases
         regular_cases = getattr(module, 'regular_test_cases', [])
         extensive_cases = getattr(module, 'extensive_test_cases', [])
-        
+
+        # Helper to normalize a case entry which may be either a string
+        # (old format) or a tuple (name, args) (new preferred format).
+        def normalize_case(case_entry, default_name_base, idx, extensive=False):
+            # If tuple/list, expect (name, args)
+            if isinstance(case_entry, (list, tuple)) and len(case_entry) >= 2:
+                name = case_entry[0]
+                args = case_entry[1]
+            else:
+                name = f"{default_name_base}_{'ext' if extensive else 'reg'}_{idx}"
+                args = case_entry
+            return name, args
+
         # Always include regular test cases
-        for i, test_args in enumerate(regular_cases):
-            test_name = f"{operator_name}_{i}"
+        for i, case in enumerate(regular_cases):
+            test_name_part, test_args = normalize_case(case, operator_name, i, extensive=False)
+            # Ensure unique test name by prefixing operator
+            test_name = f"{operator_name}_{test_name_part}" if not test_name_part.startswith(operator_name + "_") else test_name_part
             test_command = f"{test_file} {test_args}"
             tests.append((operator_name, test_command, test_name))
-        
+
         # Include extensive test cases if requested
         if extensive:
-            for i, test_args in enumerate(extensive_cases):
-                test_name = f"{operator_name}_extensive_{i}"
+            for i, case in enumerate(extensive_cases):
+                test_name_part, test_args = normalize_case(case, operator_name, i, extensive=True)
+                test_name = f"{operator_name}_{test_name_part}" if not test_name_part.startswith(operator_name + "_") else test_name_part
                 test_command = f"{test_file} {test_args}"
                 tests.append((operator_name, test_command, test_name))
     

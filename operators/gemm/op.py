@@ -33,14 +33,14 @@ class AIEGEMM(AIEOperatorBase):
         tile_m=64,
         tile_k=64,
         tile_n=64,
-        num_columns=8,
+        num_aie_columns=8,
         **gemm_kwargs,
     ):
 
         self.tile_m = tile_m
         self.tile_k = tile_k
         self.tile_n = tile_n
-        self.num_columns = num_columns
+        self.num_aie_columns = num_aie_columns
         self.n_aie_rows = 4
         self.gemm_args = gemm_kwargs
         self.weight = (
@@ -58,7 +58,6 @@ class AIEGEMM(AIEOperatorBase):
         self.K = K_padded
         self.N = N_padded
 
-
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
         self.insts_artifact = None
@@ -74,7 +73,7 @@ class AIEGEMM(AIEOperatorBase):
         M = self.M
         K = self.K
         N = self.N
-        num_columns = self.num_columns
+        num_aie_columns = self.num_aie_columns
         base_dir = self.base_dir
         device_str = self.device_manager.device_str()
 
@@ -100,12 +99,13 @@ class AIEGEMM(AIEOperatorBase):
         assert tile_n & (tile_n - 1) == 0, f"tile_n ({tile_n}) must be power of 2"
 
         file_name_tile_base = f"{prefix}{tile_m}x{tile_k}x{tile_n}"
-        file_name_total_base = f"{prefix}{M}x{K}x{N}_{tile_m}x{tile_k}x{tile_n}"
+        file_name_total_base = f"{prefix}{M}x{K}x{N}_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}"
         xclbin_kernel_name = f"gemm_{file_name_tile_base}"
         kernel_flags = [
             f"-DDIM_M={tile_m}",
             f"-DDIM_K={tile_k}",
             f"-DDIM_N={tile_n}",
+            "-DROUND_CONV_EVEN",
         ]
         if prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
@@ -115,6 +115,12 @@ class AIEGEMM(AIEOperatorBase):
             kernel_flags.append("-DROUND_CONV_EVEN")
         if emulate_bf16_mmul_with_bfp16:
             kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
+        if b_col_maj:
+            kernel_flags.append("-DB_COL_MAJ")
+        if c_col_maj:
+            kernel_flags.append("-DC_COL_MAJ")
+
+        kernel_archive = f"gemm_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}.a"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_total_base}.mlir",
@@ -128,15 +134,16 @@ class AIEGEMM(AIEOperatorBase):
                 "m": tile_m,
                 "k": tile_k,
                 "n": tile_n,
-                "n_aie_cols": num_columns,
+                "n_aie_cols": num_aie_columns,
                 "dtype_in_str": dtype_in,
                 "dtype_out_str": dtype_out,
-                "b_col_maj": b_col_maj,
-                "c_col_maj": c_col_maj,
+                "b_col_maj": int(b_col_maj),
+                "c_col_maj": int(c_col_maj),
                 "use_scalar": use_scalar,
                 "emulate_bf16_mmul_with_bfp16": emulate_bf16_mmul_with_bfp16,
                 "prio_accuracy": prio_accuracy,
                 "trace_size": 0,
+                "archive": kernel_archive,
                 "generate_taps": False,
             },
             requires_context=False,
@@ -155,10 +162,10 @@ class AIEGEMM(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelArchiveArtifact.new(
-                    f"gemm_{tile_m}x{tile_k}x{tile_n}_archive.a",
+                    kernel_archive,
                     depends=[
                         KernelObjectArtifact.new(
-                            f"gemm_{tile_m}x{tile_k}x{tile_n}.o",
+                            f"gemm_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}.o",
                             extra_flags=kernel_flags,
                             depends=[SourceArtifact.new(base_dir / "aie_kernels" / "aie2p" / "mm.cc")],
                         ),
@@ -255,11 +262,11 @@ class AIEGEMM(AIEOperatorBase):
 
     def _get_padded_dims(self, M, K, N):
         tile_m, tile_k, tile_n = self.tile_m, self.tile_n, self.tile_k
-        num_columns = self.num_columns
+        num_aie_columns = self.num_aie_columns
 
         min_M = tile_m * self.n_aie_rows
         min_K = tile_k
-        min_N = tile_n * num_columns
+        min_N = tile_n * num_aie_columns
 
         # Calculate padded dimensions
         M_padded = ((M + min_M - 1) // min_M) * min_M

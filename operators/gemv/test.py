@@ -26,7 +26,7 @@ regular_test_cases = [
     ("matrix_vector_mul_8192x2048_4_8col", "-M 8192 -K 2048 --columns 8 --tile-size 4"),
 ]
 
-extensive_test_cases = regular_test_cases + []
+extensive_test_cases = list(regular_test_cases)
 
 
 def main():

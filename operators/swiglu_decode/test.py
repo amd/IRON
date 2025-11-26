@@ -15,12 +15,10 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    "--M 1 --K 2048 --N 8192",
+    ("swiglu_decode_1x2048x8192", "--M 1 --K 2048 --N 8192"),
 ]
 
-
-extensive_test_cases = [
-]
+extensive_test_cases = []
 
 
 def main():

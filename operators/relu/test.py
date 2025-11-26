@@ -13,29 +13,30 @@ from operators.relu.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
+MAX_COLUMNS = 8
+regular_test_cases = []
+extensive_test_cases = []
 
-regular_test_cases = [
-    "-l 2048 --columns 1 --channels 1 --tile-size 2048",
-    "-l 2048 --columns 2 --channels 1 --tile-size 1024",
-    "-l 2048 --columns 1 --channels 2 --tile-size 1024",
-    "-l 2048 --columns 2 --channels 2 --tile-size 512",
-]
+INPUT_LENGTHS = [2048]
+NUM_CHANNELS = 1
+TRACE_SIZE = 65536
+EXTENSIVE_TESTING = False
+if EXTENSIVE_TESTING:
+    INPUT_LENGTHS = [1024, 2048, 4096, 8192]
 
-
-extensive_test_cases = [
-    "-l 1024 --columns 1 --channels 1 --tile-size 1024",
-    "-l 1024 --columns 2 --channels 1 --tile-size 512",
-    "-l 1024 --columns 1 --channels 2 --tile-size 512",
-    "-l 1024 --columns 2 --channels 2 --tile-size 256",
-    "-l 4096 --columns 1 --channels 1 --tile-size 4096",
-    "-l 4096 --columns 2 --channels 1 --tile-size 2048",
-    "-l 4096 --columns 1 --channels 2 --tile-size 2048",
-    "-l 4096 --columns 2 --channels 2 --tile-size 1024",
-    "-l 8192 --columns 1 --channels 1 --tile-size 8192",
-    "-l 8192 --columns 2 --channels 1 --tile-size 4096",
-    "-l 8192 --columns 1 --channels 2 --tile-size 4096",
-    "-l 8192 --columns 2 --channels 2 --tile-size 2048",
-]
+for input_length in INPUT_LENGTHS:
+    for num_columns in range(1, MAX_COLUMNS + 1):
+        tile_size = input_length // num_columns
+        if tile_size > 4096:
+            tile_size = 4096
+        if tile_size * num_columns != input_length:
+            continue
+        name = f"relu_{input_length}_{num_columns}cols_1ch_{tile_size}t"
+        cmd = f"-l {input_length} --columns {num_columns} --channels {NUM_CHANNELS} --tile-size {tile_size}"
+        if input_length == 2048:
+            regular_test_cases.append((name, cmd))
+        else:
+            extensive_test_cases.append((name, cmd))
 
 
 def main():

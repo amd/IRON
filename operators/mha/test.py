@@ -15,12 +15,10 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    "--M 32 --K 64 --N 128 --softmax-tile-size 128 --gemm-tile-size 1",
+    ("mha_32x64x128_softmax128_gemm1", "--M 32 --K 64 --N 128 --softmax-tile-size 128 --gemm-tile-size 1"),
 ]
 
-
-extensive_test_cases = [
-]
+extensive_test_cases = []
 
 
 def main():

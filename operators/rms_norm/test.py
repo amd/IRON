@@ -14,16 +14,32 @@ from operators.common.test_utils import run_test
 
 
 
-regular_test_cases = [
-    "--rows 1 --cols 2048 --columns 1 --channels 2 --tile-size 2048",
-    "--rows 1 --cols 2048 --columns 2 --channels 2 --tile-size 1024",
-]
+MAX_COLUMNS = 8
+regular_test_cases = []
+extensive_test_cases = []
 
+INPUT_LENGTHS = [2048]
+NUM_CHANNELS = 2
+TRACE_SIZE = 65536
+EXTENSIVE_TESTING = False
+if EXTENSIVE_TESTING:
+    INPUT_LENGTHS = [1024, 2048, 4096, 8192]
 
-extensive_test_cases = [
-    "--rows 1 --cols 8192 --columns 1 --channels 2 --tile-size 8192",
-    "--rows 1 --cols 8192 --columns 2 --channels 2 --tile-size 4096",
-]
+for input_length in INPUT_LENGTHS:
+    for num_columns in range(1, MAX_COLUMNS + 1):
+        for num_channels_rms in [1, 2]:
+            total_cores = num_columns * num_channels_rms
+            tile_size = input_length // total_cores
+            if tile_size > 8192:
+                tile_size = 8192
+            if tile_size * total_cores != input_length:
+                continue
+            name = f"rms_norm_{num_columns}cols_{num_channels_rms}ch_{input_length}_tile_{tile_size}"
+            cmd = f"--rows 1 --cols {tile_size} --columns {num_columns} --channels {num_channels_rms} --tile-size {tile_size}"
+            if input_length == 2048:
+                regular_test_cases.append((name, cmd))
+            else:
+                extensive_test_cases.append((name, cmd))
 
 
 def main():

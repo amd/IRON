@@ -14,14 +14,39 @@ from operators.common.test_utils import run_test
 
 
 
-regular_test_cases = [
-    "--rows 32 --cols 64 --columns 1",
-    "--rows 32 --cols 64 --columns 2",
-]
+extensive_test_cases = []
+MAX_COLUMNS = 8
+regular_test_cases = []
+extensive_test_cases = []
 
+# Generate tests following the logic in example/transpose/CMakeLists.txt
+INPUT_LENGTHS = [2048]
+N_LIST = [64]
+S_LIST = [8]
+EXTENSIVE_TESTING = False
+if EXTENSIVE_TESTING:
+    INPUT_LENGTHS = [64, 2048]
+    N_LIST = [64, 128, 256, 512]
 
-extensive_test_cases = [
-]
+m = 64
+n = 64
+
+for M in INPUT_LENGTHS:
+    for N in N_LIST:
+        for s in S_LIST:
+            for NUM_COLUMNS in range(1, MAX_COLUMNS + 1):
+                for NUM_CHANNELS in [1, 2]:
+                    row_part = M // NUM_CHANNELS
+                    col_part = N // NUM_COLUMNS
+                    if row_part % m != 0 or col_part % n != 0:
+                        continue
+                    check_length = row_part * col_part * NUM_CHANNELS * NUM_COLUMNS
+                    length = M * N
+                    if check_length != length:
+                        continue
+                    name = f"transpose_{M}x{N}_{NUM_COLUMNS}cols_{NUM_CHANNELS}ch_{s}s"
+                    cmd = f"--rows {M} --cols {N} --columns {NUM_COLUMNS}"
+                    regular_test_cases.append((name, cmd))
 
 
 def main():

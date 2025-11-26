@@ -15,15 +15,13 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    "-l 2048 --columns 1 --channels 1 --tile-size 2048",
-    "-l 2048 --columns 2 --channels 1 --tile-size 1024",
-    "-l 2048 --columns 1 --channels 2 --tile-size 1024",
-    "-l 2048 --columns 2 --channels 2 --tile-size 512",
+    ("sigmoid_2048_1col_1ch_2048t", "-l 2048 --columns 1 --channels 1 --tile-size 2048"),
+    ("sigmoid_2048_2col_1ch_1024t", "-l 2048 --columns 2 --channels 1 --tile-size 1024"),
+    ("sigmoid_2048_1col_2ch_1024t", "-l 2048 --columns 1 --channels 2 --tile-size 1024"),
+    ("sigmoid_2048_2col_2ch_512t", "-l 2048 --columns 2 --channels 2 --tile-size 512"),
 ]
 
-
-extensive_test_cases = [
-]
+extensive_test_cases = []
 
 
 def main():

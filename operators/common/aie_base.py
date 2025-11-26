@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from abc import ABC, abstractmethod
 import logging
+import time
 from ml_dtypes import bfloat16
 
 import aie.utils.config
@@ -23,8 +24,7 @@ class AIEOperatorBase(ABC):
     # Global configuration
     device_manager = AIEDeviceManager()
     base_dir = Path(__file__).parent.parent.parent  # IRON base dir
-    llama_dir = base_dir / "applications" / "llama_3.2_1b"
-    build_dir = llama_dir / "build"
+    build_dir = Path(os.getcwd()) / "build"
     mlir_aie_dir = Path(aie.utils.config.root_path())
     peano_dir = Path(aie.utils.config.peano_install_dir())
 
@@ -166,10 +166,13 @@ class AIEOperatorBase(ABC):
         bo_count = sum(len(pool) for pool in bo_pools.values())
         bo_footprint = sum(len(pool) * pool_sz for pool_sz, pool in bo_pools.items())
         logging.info(
-            f"Allocated {bo_count} total buffer objects with a total memory footprint of {bo_footprint//1024//1024} MiB."
+            f"Allocated {bo_count} total buffer objects with a total memory footprint of " +
+            (f"{bo_footprint//1024//1024} MiB." if bo_footprint >= 1024 * 1024 else f"{bo_footprint//1024} KiB.")
         )
+        static_data_footprint = sum(len(data) for data in cls.static_data_pool)
         logging.info(
-            f"Allocated {len(cls.static_data_pool)} static buffers with a total memory footprint of {sum(len(data) for data in cls.static_data_pool)//1024//1024} MiB."
+            f"Allocated {len(cls.static_data_pool)} static buffers with a total memory footprint of " +
+            (f"{static_data_footprint//1024//1024} MiB." if static_data_footprint >= 1024 * 1024 else f"{static_data_footprint//1024} KiB.")
         )
 
     def __init__(self):
@@ -309,10 +312,13 @@ class AIEOperatorBase(ABC):
         )
         for bo in bos | insts_bos:
             bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+        start = time.perf_counter()
         self.xrt_runlist.execute()
         self.xrt_runlist.wait()
+        stop = time.perf_counter()
         for bo in bos:
             bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+        return stop - start
 
 
 class AIEOperatorConstraintError(RuntimeError):
