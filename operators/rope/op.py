@@ -20,17 +20,18 @@ from operators.common import (
 
 class AIERope(AIEOperatorBase):
 
-    def __init__(self, size: int, last_dim: int, num_columns=None, num_channels=None):
+    def __init__(self, size: int, num_aie_columns=None, num_channels=None, tile_size=None, method_type=0):
         self.size = size
-        self.tile_size = last_dim
+        self.tile_size = tile_size if tile_size is not None else size
 
         if num_channels is None:
             num_channels = 1
-        if num_channels is None:
-            num_columns = 1
+        if num_aie_columns is None:
+            num_aie_columns = 1
 
-        self.num_columns = num_columns
+        self.num_columns = num_aie_columns
         self.num_channels = num_channels
+        self.method_type = method_type
 
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None

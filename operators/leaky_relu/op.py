@@ -22,14 +22,14 @@ from operators.common import (
 class AIELeakyReLU(AIEOperatorBase):
     """AIE-accelerated LEAKY RELU operator"""
 
-    def __init__(self, size, num_columns, num_channels, tile_size, alpha=0.01):
-        max_multiple = num_columns * tile_size
+    def __init__(self, size, num_aie_columns, num_channels, tile_size, alpha=0.01):
+        max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
         self.size = padded_size
         self.tile_size = tile_size
 
-        self.num_columns = num_columns
+        self.num_columns = num_aie_columns
         self.num_channels = num_channels
         self.alpha = alpha
 

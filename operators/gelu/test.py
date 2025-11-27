@@ -27,15 +27,16 @@ for (test_cases, input_lengths) in [
 ]:
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
-            tile_size = input_length // num_aie_columns
-            if tile_size > 8192:
-                tile_size = 8192
-            if tile_size * num_aie_columns != input_length:
-                continue
             for num_channels in num_channels_choices:
-                name = f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-                cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size}"
-                test_cases.append((name, cmd))
+                total_cores = num_aie_columns * num_channels
+                tile_size = input_length // total_cores
+                if tile_size > 8192:
+                    tile_size = 8192
+                check_length = tile_size * total_cores
+                if check_length == input_length:
+                    name = f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+                    cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size}"
+                    test_cases.append((name, cmd))
 
 
 def main():

@@ -25,17 +25,18 @@ class AIERMSNorm(AIEOperatorBase):
     """AIE-accelerated RMS Normalization layer"""
 
     def __init__(
-        self, size, eps=1e-6, num_columns=None, num_channels=None, tile_size=None
+        self, size, eps=1e-6, num_aie_columns=None, num_channels=None, tile_size=None, weighted=False
     ):
-        max_multiple = num_columns * tile_size
+        max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
         self.size = padded_size
         self.tile_size = tile_size
 
-        self.num_columns = num_columns
+        self.num_columns = num_aie_columns
         self.num_channels = num_channels
         self.eps = eps
+        self.weighted = weighted
 
         # Initializes weights to 1. Weights have size embedding dim, which is assumed to be tile size
         self.weight = nn.Parameter(torch.ones(tile_size, dtype=torch.bfloat16))

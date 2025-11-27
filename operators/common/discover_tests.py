@@ -6,8 +6,7 @@
 Test discovery script for operator tests.
 
 This script discovers all operator tests by importing test modules and
-extracting their test case definitions. It generates test lists similar
-to what CMake generates, allowing Python-based testing infrastructure.
+extracting their test case definitions, generating a list of tests.
 """
 
 import os
@@ -31,80 +30,36 @@ def load_test_module(test_path):
 
 
 def discover_tests(operators_dir, extensive=False):
-    """
-    Discover all operator tests.
-    
-    Args:
-        operators_dir: Path to the operators directory
-        extensive: If True, include extensive test cases
-    
-    Returns:
-        List of tuples (operator_name, test_command, test_name)
-    """
     operators_dir = Path(operators_dir)
     tests = []
     
     # Iterate over all subdirectories in operators/
     for subdir in sorted(operators_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        
-        # Skip common directory
-        if subdir.name == 'common':
-            continue
-        
         test_file = subdir / 'test.py'
-        if not test_file.exists():
+        if not subdir.is_dir() or subdir.name == 'common' or not test_file.exists():
             continue
         
-        # Load the test module
         module = load_test_module(test_file)
         if module is None:
             continue
         
         operator_name = subdir.name
         
-        # Extract test cases
         regular_cases = getattr(module, 'regular_test_cases', [])
         extensive_cases = getattr(module, 'extensive_test_cases', [])
+        test_cases = regular_cases if not extensive else extensive_cases
 
-        # Helper to normalize a case entry which may be either a string
-        # (old format) or a tuple (name, args) (new preferred format).
-        def normalize_case(case_entry, default_name_base, idx, extensive=False):
-            # If tuple/list, expect (name, args)
-            if isinstance(case_entry, (list, tuple)) and len(case_entry) >= 2:
-                name = case_entry[0]
-                args = case_entry[1]
-            else:
-                name = f"{default_name_base}_{'ext' if extensive else 'reg'}_{idx}"
-                args = case_entry
-            return name, args
-
-        # Always include regular test cases
-        for i, case in enumerate(regular_cases):
-            test_name_part, test_args = normalize_case(case, operator_name, i, extensive=False)
-            # Ensure unique test name by prefixing operator
-            test_name = f"{operator_name}_{test_name_part}" if not test_name_part.startswith(operator_name + "_") else test_name_part
+        for test_name, test_args in test_cases:
             test_command = f"{test_file} {test_args}"
             tests.append((operator_name, test_command, test_name))
 
-        # Include extensive test cases if requested
-        if extensive:
-            for i, case in enumerate(extensive_cases):
-                test_name_part, test_args = normalize_case(case, operator_name, i, extensive=True)
-                test_name = f"{operator_name}_{test_name_part}" if not test_name_part.startswith(operator_name + "_") else test_name_part
-                test_command = f"{test_file} {test_args}"
-                tests.append((operator_name, test_command, test_name))
-    
     return tests
 
 
 def generate_test_list(operators_dir, output_dir=None, extensive=False):
     """
-    Generate test files in the CMake-expected format.
-    
-    Creates a directory structure with individual test files and a ci_tests.py
-    index file, similar to what CMake's add_aie_ci_test generates.
+    Creates a directory structure where each operator has its own subdirectory, and each test for that operator has its own
+    test definition file within that directory. A top-level ci_tests.py index file lists all these tests.
     
     Args:
         operators_dir: Path to the operators directory
@@ -133,9 +88,6 @@ def generate_test_list(operators_dir, output_dir=None, extensive=False):
         test_file = operator_dir / f"{test_name}.py"
         
         # Convert test_command to avoid import conflicts:
-        # 1. Change to /tmp to avoid operators directory in sys.path
-        # 2. Use python3 explicitly
-        # The original test_command is like: "/path/to/test.py --args"
         test_parts = test_command.split()
         test_script = test_parts[0]
         test_args = ' '.join(test_parts[1:]) if len(test_parts) > 1 else ''

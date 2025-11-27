@@ -41,8 +41,8 @@ for (tests, M_list, K_list, N_list, col_maj_choices) in [
                         continue  # Untested combination because huge & slow, unused in our application
                     tests.append(
                         (
-                            f"gemm_{M}x{K}x{N}_{m}x{m}x{n}_{num_aie_columns}_cols_{b_col_maj}_bcolmaj_{c_col_maj}_ccolmaj_{trace_size}",
-                            f"-M {M} -K {K} -N {N} --columns {num_aie_columns}",
+                            f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}_cols_{int(b_col_maj)}_bcolmaj_{int(c_col_maj)}_ccolmaj_{trace_size}",
+                            f"-M {M} -K {K} -N {N} --aie-columns {num_aie_columns} --b-col-maj {int(b_col_maj)} --c-col-maj {int(c_col_maj)}",
                         )
                     )
 
@@ -52,7 +52,7 @@ def main():
     parser.add_argument("-M", type=int, default=256)
     parser.add_argument("-K", type=int, default=256)
     parser.add_argument("-N", type=int, default=256)
-    parser.add_argument("--aie-columns", type=int, default=1)
+    parser.add_argument("--aie-columns", type=int, default=2)
     parser.add_argument("--prio-accuracy", type=int, default=1)
     parser.add_argument("--emulate-bf16-mmul-with-bfp16", type=int, default=0)
     parser.add_argument("--b-col-maj", type=int, default=0)
@@ -83,10 +83,10 @@ def main():
     )
     
     print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
     
     gflops = (2.0 * args.M * args.K * args.N) / (latency_us * 1e-6) / 1e9
-    print(f"Performance: {gflops:.2f} GFLOPS\n")
+    print(f"Throughput: {gflops:.6e} GFLOP/s\n")
     
     if passed:
         print("PASS!\n")

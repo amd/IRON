@@ -22,12 +22,14 @@ from operators.common import (
 
 class AIESoftmax(AIEOperatorBase):
 
-    def __init__(self, size: int, last_dim: int, num_columns=1, num_channels=1):
-        self.size = size
-        self.tile_size = last_dim
+    def __init__(self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None):
+        self.size = rows * cols
+        self.tile_size = tile_size if tile_size is not None else cols
+        self.rows = rows
+        self.cols = cols
 
         self.num_channels = num_channels
-        self.num_columns = num_columns
+        self.num_columns = num_aie_columns
 
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None

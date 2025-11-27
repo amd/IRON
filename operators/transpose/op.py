@@ -22,18 +22,20 @@ from operators.common import (
 class AIETranspose(AIEOperatorBase):
     """AIE-accelerated transpose operator"""
 
-    def __init__(self, size, num_columns, num_channels, tile_size):
-        max_multiple = num_columns * tile_size
-        padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
-        self.orig_size = size
-        self.size = padded_size
-        self.tile_size = tile_size
+    def __init__(self, M, N, num_aie_columns, num_channels, m, n, s):
+        self.M = M
+        self.N = N
+        self.m = m
+        self.n = n
+        self.s = s
+        self.size = M * N
+        self.tile_size = m * n
 
-        self.num_columns = num_columns
+        self.num_columns = num_aie_columns
         self.num_channels = num_channels
 
-        self.rows = rows if 'rows' in locals() else 1
-        self.cols = cols if 'cols' in locals() else size
+        self.rows = M
+        self.cols = N
         
         total_shimdma_channels = self.num_columns * self.num_channels
         if 1 > 1:

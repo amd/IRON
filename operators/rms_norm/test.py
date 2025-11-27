@@ -14,55 +14,70 @@ from operators.common.test_utils import run_test
 
 
 
-MAX_COLUMNS = 8
 regular_test_cases = []
 extensive_test_cases = []
 
-INPUT_LENGTHS = [2048]
-NUM_CHANNELS = 2
-TRACE_SIZE = 65536
-EXTENSIVE_TESTING = False
-if EXTENSIVE_TESTING:
-    INPUT_LENGTHS = [1024, 2048, 4096, 8192]
+max_aie_columns = 8
+num_channels = 2
+regular_input_lengths = [2048]
+extensive_input_lengths = [1024, 4096, 8192]
 
-for input_length in INPUT_LENGTHS:
-    for num_columns in range(1, MAX_COLUMNS + 1):
-        for num_channels_rms in [1, 2]:
-            total_cores = num_columns * num_channels_rms
-            tile_size = input_length // total_cores
-            if tile_size > 8192:
-                tile_size = 8192
-            if tile_size * total_cores != input_length:
-                continue
-            name = f"rms_norm_{num_columns}cols_{num_channels_rms}ch_{input_length}_tile_{tile_size}"
-            cmd = f"--rows 1 --cols {tile_size} --columns {num_columns} --channels {num_channels_rms} --tile-size {tile_size}"
-            if input_length == 2048:
-                regular_test_cases.append((name, cmd))
-            else:
-                extensive_test_cases.append((name, cmd))
+for (test_cases, input_lengths) in [
+    (regular_test_cases, regular_input_lengths),
+    (extensive_test_cases, extensive_input_lengths)
+]:
+    for input_length in input_lengths:
+        # Normal RMS norm: 1 input, channels can be 1 or 2
+        for num_aie_columns in range(1, max_aie_columns + 1):
+            for num_channels_rms in range(1, 3):  # 1 or 2
+                total_cores = num_aie_columns * num_channels_rms
+                tile_size = input_length // total_cores
+                if tile_size > 8192:
+                    tile_size = 8192
+                check_length = tile_size * total_cores
+                if check_length == input_length:
+                    name = f"rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_tile_{tile_size}"
+                    cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels_rms} --tile-size {tile_size}"
+                    test_cases.append((name, cmd))
+        
+        # Weighted RMS norm: 2 inputs, channels = 2 (fixed)
+        for num_aie_columns in range(1, max_aie_columns + 1):
+            tile_size = input_length // num_aie_columns
+            if tile_size > 4096:
+                tile_size = 4096
+            check_length = tile_size * num_aie_columns
+            if check_length == input_length:
+                name = f"weighted_rms_norm_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_weights_{tile_size}"
+                cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size} --weighted"
+                test_cases.append((name, cmd))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--length", type=int, default=4096)
-    parser.add_argument("--columns", type=int, default=1)
+    parser.add_argument("--aie-columns", type=int, default=1)
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
+    parser.add_argument("--weighted", action="store_true", help="Use weighted RMS norm")
     args = parser.parse_args()
     
-    golden_ref = generate_golden_reference(rows=args.rows, cols=args.cols)
+    golden_ref = generate_golden_reference(size=args.length, weighted=args.weighted)
     
     operator = AIERMSNorm(
         size=args.length,
-        num_columns=args.columns,
+        num_aie_columns=args.aie_columns,
         num_channels=args.channels,
-        tile_size=args.tile_size
+        tile_size=args.tile_size,
+        weighted=args.weighted
     )
     
-    input_buffers = {
-        'input1': golden_ref['input'],
-        'input2': golden_ref['weight']
-    }
+    if args.weighted:
+        input_buffers = {
+            'input': golden_ref['input'],
+            'weight': golden_ref['weight']
+        }
+    else:
+        input_buffers = {'input': golden_ref['input']}
     output_buffers = {'output': golden_ref['output']}
     
     passed, latency_us, bandwidth_gbps = run_test(
