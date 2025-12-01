@@ -73,34 +73,6 @@ function(add_aie_gemm_design M K N m k n NUM_COLUMNS B_COL_MAJ C_COL_MAJ TRACE_S
                         "GFLOP/s" [=[Throughput:\s*(?P<metric>[\d\.e\+-]+) GFLOP/s]=])
 endfunction()
 
-set(M_LIST "2048")
-set(K_LIST "2048")
-set(N_LIST "2048")
-
-# Fix the AIE core tile dimensions
-# TODO: Do we need to sweep through a list of them instead?
-set(m "64")
-set(k "64")
-set(n "32")
-
-set(AIE_BUILD_DIR ${CMAKE_BINARY_DIR}/aie)
-
-set(PRIO_ACCURACY True)
-set(EMULATE_BFLOAT16_MMUL_WITH_BFP16 False)
-
-# Common kernel defines setup
-set(MM_KERNEL_DEFINES_BASE "DIM_M=${m}" "DIM_K=${k}" "DIM_N=${n}" "ROUND_CONV_EVEN")
-if (EMULATE_BFLOAT16_MMUL_WITH_BFP16)
-    set(EMULATE_STR --emulate-bf16-mmul-with-bfp16)
-    list(APPEND MM_KERNEL_DEFINES_BASE "AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
-endif()
-if (PRIO_ACCURACY)
-    set(PRIO_ACC_STR --prio-accuracy)
-    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_f32_ONLY")
-else()
-    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_bf16_ONLY")
-endif()
-
 function(add_gemm_archive m k n B_COL_MAJ C_COL_MAJ CONVERT_OBJ)
     # Set up kernel defines based on configuration
     set(MM_KERNEL_DEFINES ${MM_KERNEL_DEFINES_BASE})
@@ -129,6 +101,34 @@ function(add_gemm_archive m k n B_COL_MAJ C_COL_MAJ CONVERT_OBJ)
     # Export archive name to parent scope
     set(ARCHIVE_NAME ${ARCHIVE_NAME} PARENT_SCOPE)
 endfunction()
+
+set(M_LIST "2048")
+set(K_LIST "2048")
+set(N_LIST "2048")
+
+# Fix the AIE core tile dimensions
+# TODO: Do we need to sweep through a list of them instead?
+set(m "64")
+set(k "64")
+set(n "64")
+
+set(AIE_BUILD_DIR ${CMAKE_BINARY_DIR}/aie)
+
+set(PRIO_ACCURACY True)
+set(EMULATE_BFLOAT16_MMUL_WITH_BFP16 False)
+
+# Common kernel defines setup
+set(MM_KERNEL_DEFINES_BASE "DIM_M=${m}" "DIM_K=${k}" "DIM_N=${n}" "ROUND_CONV_EVEN")
+if (EMULATE_BFLOAT16_MMUL_WITH_BFP16)
+    set(EMULATE_STR --emulate-bf16-mmul-with-bfp16)
+    list(APPEND MM_KERNEL_DEFINES_BASE "AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
+endif()
+if (PRIO_ACCURACY)
+    set(PRIO_ACC_STR --prio-accuracy)
+    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_f32_ONLY")
+else()
+    list(APPEND MM_KERNEL_DEFINES_BASE "bf16_bf16_ONLY")
+endif()
 
 add_aie_kernel("convert_copy" SOURCES ${CMAKE_SOURCE_DIR}/aie_kernels/generic/convert_copy.cc OUTPUT_OBJECT CONVERT_OBJ)
 
