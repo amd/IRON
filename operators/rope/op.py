@@ -20,18 +20,19 @@ from operators.common import (
 
 class AIERope(AIEOperatorBase):
 
-    def __init__(self, size: int, num_aie_columns=None, num_channels=None, tile_size=None, method_type=0):
+    def __init__(self, size: int, last_dim: int, num_aie_columns=None, num_channels=None, method_type=0):
         self.size = size
-        self.tile_size = tile_size if tile_size is not None else size
+        self.tile_size = last_dim
 
         if num_channels is None:
             num_channels = 1
         if num_aie_columns is None:
             num_aie_columns = 1
 
-        self.num_columns = num_aie_columns
+        self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         self.method_type = method_type
+        assert method_type in {0, 1}
 
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
@@ -42,7 +43,7 @@ class AIERope(AIEOperatorBase):
     def set_up_artifacts(self):
         # Compilation artifacts
         operator_dir = Path(__file__).parent
-        file_name_base = f"rope_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"rope_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.method_type}m"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -51,10 +52,11 @@ class AIERope(AIEOperatorBase):
             callback_args=[
                 self.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 0,
                 self.tile_size,
+                self.method_type,
             ],
         )
 
@@ -63,8 +65,9 @@ class AIERope(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"rope.o",
+                    f"rope_{self.method_type}.o",
                     depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "rope.cc")],
+                    extra_flags=["-DTWO_HALVES" if 0 == self.method_type else "-DINTERLEAVED"],
                 ),
             ],
         )
@@ -98,11 +101,6 @@ class AIERope(AIEOperatorBase):
         if not applicable:
             raise AIEOPeratorConstraintError("AIERope: incompatible tensor shape(s)")
 
-        return self._execute_aie_operation(x, y)
-
-    def _execute_aie_operation(self, x, y):
-        """Execute RoPE on AIE hardware"""
-
         original_shape = x.shape
         if len(x.shape) > 2:
             x = x.view(-1, x.shape[-1])
@@ -110,7 +108,7 @@ class AIERope(AIEOperatorBase):
             y = y.view(-1, y.shape[-1])
 
         batch_size, head_dim = x.shape
-        rows_per_batch = self.num_columns
+        rows_per_batch = self.num_aie_columns
 
         # Process in batches
         results = []

@@ -99,19 +99,20 @@ class AIEOperatorBase(ABC):
             # If multiple buffers (of the same binned size) are used in the
             # same kernel invocation, they require separate allocations.
             conflicting_buffers = {}  # map buffer -> {set of conflicting buffers}
-            for kernel, *args in op.runlist:
-                for arg in args:
-                    if arg in op.buffer_static_data:
-                        # Static buffers never conflict
-                        continue
-                    # Conflict only exists if buffers are in the same size pool
-                    pool_sz = get_pool_sz(op.buffers[arg])
-                    conflicting_args = {
-                        a for a in args if get_pool_sz(op.buffers[a]) == pool_sz
-                    } - {arg}
-                    conflicting_buffers[arg] = conflicting_buffers.get(
-                        arg, set()
-                    ).union(conflicting_args)
+            #for kernel, *args in op.runlist:
+            args = {a for _, *args in op.runlist for a in args}
+            for arg in args:
+                if arg in op.buffer_static_data:
+                    # Static buffers never conflict
+                    continue
+                # Conflict only exists if buffers are in the same size pool
+                pool_sz = get_pool_sz(op.buffers[arg])
+                conflicting_args = {
+                    a for a in args if get_pool_sz(op.buffers[a]) == pool_sz
+                } - {arg}
+                conflicting_buffers[arg] = conflicting_buffers.get(
+                    arg, set()
+                ).union(conflicting_args)
 
             buffer_allocations = {}  # map buffer -> (key into bo_pools, list index)
             for buffer_name, buffer_min_size in op.buffers.items():

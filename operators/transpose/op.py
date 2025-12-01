@@ -34,8 +34,6 @@ class AIETranspose(AIEOperatorBase):
         self.num_columns = num_aie_columns
         self.num_channels = num_channels
 
-        self.rows = M
-        self.cols = N
         
         total_shimdma_channels = self.num_columns * self.num_channels
         if 1 > 1:
@@ -49,19 +47,22 @@ class AIETranspose(AIEOperatorBase):
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
-        file_name_base = f"transpose_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"transpose_{self.num_columns}c_{self.num_channels}ch_{self.M}x{self.N}_{self.m}x{self.n}_{self.s}s"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
             import_path=operator_dir / "design.py",
-            callback_fn="my_transpose",
+            callback_fn="shuffle_transpose",
             callback_args=[
                 self.device_manager.device_type,
-                self.size,
+                self.M,
+                self.N,
                 self.num_columns,
                 self.num_channels,
-                self.tile_size,
                 0,
+                self.m,
+                self.n,
+                self.s
             ],
         )
 
@@ -70,8 +71,12 @@ class AIETranspose(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"transpose.o", 
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "transpose.cc")]
+                    f"transpose_{self.m}x{self.n}.o", 
+                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "transpose.cc")],
+                    extra_flags=[
+                        f"-DDIM_m={self.m}",
+                        f"-DDIM_n={self.n}",
+                    ]
                 ),
             ],
         )

@@ -54,7 +54,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         gemv_1 = AIEGEMV(
             M=self.hidden_dim,
             K=self.embedding_dim,
-            num_columns=8,
+            num_aie_columns=8,
             tile_size=1,
         )
         gemv_1_xclbin, gemv_1_insts = gemv_1.get_artifacts(
@@ -71,10 +71,9 @@ class AIESwiGLUDecode(AIEOperatorBase):
 
         silu = AIESiLU(
             size=self.hidden_dim,
-            num_columns=8,
+            num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim
-            // 16,  # Partition 1 input to 8 columns and 2 channels per column
+            tile_size=self.hidden_dim // 16, 
             
         )
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_decode_silu_")
@@ -89,10 +88,9 @@ class AIESwiGLUDecode(AIEOperatorBase):
 
         eltwise_mul = AIEElementwiseMul(
             size=self.hidden_dim,
-            num_columns=8,
+            num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim
-            // 8,  # Partition 2 inputs to 8 columns and 1 channel per column for each input
+            tile_size=self.hidden_dim // 8,
             
         )
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
@@ -110,7 +108,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         gemv_2 = AIEGEMV(
             M=self.embedding_dim,
             K=self.hidden_dim,
-            num_columns=8,
+            num_aie_columns=8,
             tile_size=1,
         )
         gemv_2_xclbin, gemv_2_insts = gemv_2.get_artifacts(

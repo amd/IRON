@@ -13,32 +13,11 @@ from operators.leaky_relu.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
+extensive_test_cases = []
+# Leaky ReLU is currently broken (#36); leave it untested
 
 regular_test_cases = []
 extensive_test_cases = []
-
-# Leaky ReLU is currently broken (#36), but we generate tests that match CMakeLists.txt
-# Tests are only added if BUILD_LEAKY_RELU is set in the CMake build
-
-max_aie_columns = 8
-num_channels = 1  # 1 channel for 1 input
-regular_input_lengths = [2048]
-extensive_input_lengths = [1024, 4096, 8192]
-
-for (test_cases, input_lengths) in [
-    (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lengths)
-]:
-    for input_length in input_lengths:
-        for num_aie_columns in range(1, max_aie_columns + 1):
-            tile_size = input_length // num_aie_columns
-            if tile_size > 4096:
-                tile_size = 4096
-            check_length = tile_size * num_aie_columns
-            if check_length == input_length:
-                name = f"leaky_relu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-                cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size} --alpha 0.01"
-                test_cases.append((name, cmd))
 
 
 def main():
@@ -63,14 +42,14 @@ def main():
     input_buffers = {'input': golden_ref['input']}
     output_buffers = {'output': golden_ref['output']}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
     
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:

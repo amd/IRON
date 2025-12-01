@@ -74,14 +74,14 @@ def main():
     input_buffers = {'in': golden_ref['input'].flatten()}
     output_buffers = {'output': golden_ref['output'].flatten()}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
     
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:

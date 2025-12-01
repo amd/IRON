@@ -66,6 +66,7 @@ class AIEMHA(AIEOperatorBase):
             f"-DDIM_M={self.B_q}",
             f"-DDIM_K={self.d}",
             f"-DDIM_N={self.B_kv}",
+            "-DROUND_CONV_EVEN",
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
         ]
         mm_defines_colmaj = mm_defines_rowmaj + [

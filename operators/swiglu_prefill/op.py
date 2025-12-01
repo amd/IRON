@@ -24,7 +24,7 @@ from operators.elementwise_mul.op import AIEElementwiseMul
 
 class AIESwiGLUPrefill(AIEOperatorBase):
 
-    def __init__(self, seq_len, embedding_dim, hidden_dim):
+    def __init__(self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False):
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
@@ -33,6 +33,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.weights_2 = None
         self.weights_3 = None
         
+        self.prio_accuracy = prio_accuracy
         # Artifacts created by set_up_artifacts()
         self.combined_xclbin = None
         self.gemm_1_xclbin = None
@@ -52,10 +53,21 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts = []
         device_str = self.device_manager.device_str()
 
+        accuracy_flags = {}
+        if self.prio_accuracy:
+            accuracy_flags = {
+                "emulate_bf16_mmul_with_bfp16": False,
+                "prio_accuracy": True,
+                "round_conv_even": True
+            }
+
         gemm_1 = AIEGEMM(
             M=self.seq_len,
             K=self.embedding_dim,
             N=self.hidden_dim,
+            emulate_bf16_mmul_with_bfp16=False,
+            prio_accuracy=True,
+            round_conv_even=True
         )
         gemm_1_xclbin, gemm_1_insts = gemm_1.get_artifacts(prefix="swiglu_gemm_1_")
         gemm_1_xclbin.extra_flags += [
@@ -69,9 +81,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
 
         silu = AIESiLU(
             size=self.seq_len * self.hidden_dim,
-            num_columns=8,
+            num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim,
+            tile_size=self.hidden_dim // 8,
         )
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
         silu_xclbin.xclbin_input = gemm_1_xclbin
@@ -85,9 +97,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
 
         eltwise_mul = AIEElementwiseMul(
             size=self.seq_len * self.hidden_dim,
-            num_columns=8,
+            num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim,
+            tile_size=self.hidden_dim // 8,
         )
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_eltwise_mul_"
@@ -105,6 +117,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             M=self.seq_len,
             K=self.hidden_dim,
             N=self.embedding_dim,
+            emulate_bf16_mmul_with_bfp16=False,
+            prio_accuracy=True,
+            round_conv_even=True
         )
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin

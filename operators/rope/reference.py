@@ -127,24 +127,6 @@ def generate_golden_reference(
     rope_freq_orig_ctx_len=8192,
     seed=42,
 ):
-    """
-    Generate golden reference data for RoPE (Rotary Position Embedding).
-
-    Parameters:
-        rows: Number of tokens (sequence length)
-        cols: Head dimension (tile size)
-        context_len: Maximum context length
-        method_type: 0 for two-halves, 1 for interleaved
-        rope_theta_base: RoPE theta base parameter
-        rope_freq_factor: RoPE frequency scaling factor
-        rope_freq_low_factor: Low frequency adjustment factor
-        rope_freq_high_factor: High frequency adjustment factor
-        rope_freq_orig_ctx_len: Original context length for frequency adjustment
-        seed: Random seed
-
-    Returns:
-        dict: Contains 'A' (input), 'B' (lookup table), 'C' (output)
-    """
     torch.manual_seed(seed)
 
     # Generate golden inputs
@@ -173,7 +155,7 @@ def generate_golden_reference(
     C = apply_rope(A, cos, sin, method_type)
 
     return {
-        "A": A.numpy().view(np.uint16).view(bfloat16),
-        "B": B.numpy().view(np.uint16).view(bfloat16),
-        "C": C.numpy().view(np.uint16).view(bfloat16),
+        "A": A,
+        "B": B,
+        "C": C,
     }

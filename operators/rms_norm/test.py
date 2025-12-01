@@ -61,7 +61,9 @@ def main():
     parser.add_argument("--weighted", action="store_true", help="Use weighted RMS norm")
     args = parser.parse_args()
     
-    golden_ref = generate_golden_reference(size=args.length, weighted=args.weighted)
+    rows = args.length // args.tile_size
+    cols = args.tile_size
+    golden_ref = generate_golden_reference(rows=rows, cols=cols, weighted=args.weighted)
     
     operator = AIERMSNorm(
         size=args.length,
@@ -73,21 +75,21 @@ def main():
     
     if args.weighted:
         input_buffers = {
-            'input': golden_ref['input'],
-            'weight': golden_ref['weight']
+            'input1': golden_ref['input'],
+            'input2': golden_ref['weight']
         }
     else:
-        input_buffers = {'input': golden_ref['input']}
+        input_buffers = {'input1': golden_ref['input']}
     output_buffers = {'output': golden_ref['output']}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
     
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:

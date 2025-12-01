@@ -18,7 +18,7 @@ regular_test_cases = []
 extensive_test_cases = []
 
 max_aie_columns = 8
-num_channels = 2  # 2 channels for 2 inputs
+num_channels = 2
 regular_input_lengths = [4096]
 regular_method_types = [0]  # 0: Two-halves method
 extensive_input_lengths = [1024, 8192]
@@ -59,24 +59,24 @@ def main():
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
-        tile_size=args.tile_size,
+        last_dim=args.tile_size,
         method_type=args.method_type
     )
     
     input_buffers = {
-        'input': golden_ref['input'],
-        'angles': golden_ref['angles']
+        'in': golden_ref['A'].flatten(),
+        'angles': golden_ref['B'].flatten()
     }
-    output_buffers = {'output': golden_ref['output']}
+    output_buffers = {'output': golden_ref['C'].flatten()}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
     
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:

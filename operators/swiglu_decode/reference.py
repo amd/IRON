@@ -20,32 +20,34 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
         seed: Random seed
 
     Returns:
-        dict: Contains 'x', 'w_gate', 'w_up', 'w_down', 'left', 'left_swished', 'right', 'intermediate', 'y'
+        dict: Contains 'input', 'w_gate', 'w_up', 'w_down', 'left', 'left_swished', 'right', 'intermediate', 'output'
     """
     torch.manual_seed(seed)
 
     # Generate golden inputs
     val_range = 4
-    x = torch.randn(K, dtype=torch.bfloat16) * val_range
-    w_gate = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # gate projection
-    w_up = torch.randn(N, K, dtype=torch.bfloat16) * val_range    # up projection
-    w_down = torch.randn(K, N, dtype=torch.bfloat16) * val_range  # down projection
+    x = torch.randn(M, K, dtype=torch.bfloat16) * val_range
+    w_gate = torch.randn(K, N, dtype=torch.bfloat16) * val_range  # gate projection
+    bias1 = torch.randn(K, dtype=torch.bfloat16) * val_range  # currently unused
+    w_up = torch.randn(K, N, dtype=torch.bfloat16) * val_range    # up projection
+    bias2 = torch.randn(K, dtype=torch.bfloat16) * val_range  # currently unused
+    w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
 
     # Generate golden outputs (decode uses matrix-vector multiply)
-    left = w_gate @ x
+    left = x @ w_gate.T
     left_swished = torch.nn.functional.silu(left)
-    right = w_up @ x
+    right = x @ w_up.T
     intermediate = left_swished * right
-    y = w_down @ intermediate
+    y = intermediate @ w_down.T
 
     return {
-        "x": x.numpy().view(np.uint16).view(bfloat16),
-        "w_gate": w_gate.numpy().view(np.uint16).view(bfloat16),
-        "w_up": w_up.numpy().view(np.uint16).view(bfloat16),
-        "w_down": w_down.numpy().view(np.uint16).view(bfloat16),
-        "left": left.numpy().view(np.uint16).view(bfloat16),
-        "left_swished": left_swished.numpy().view(np.uint16).view(bfloat16),
-        "right": right.numpy().view(np.uint16).view(bfloat16),
-        "intermediate": intermediate.numpy().view(np.uint16).view(bfloat16),
-        "y": y.numpy().view(np.uint16).view(bfloat16),
+        "input": x,
+        "w_gate": w_gate,
+        "w_up": w_up,
+        "w_down": w_down,
+        "left": left,
+        "left_swished": left_swished,
+        "right": right,
+        "intermediate": intermediate,
+        "output": y,
     }

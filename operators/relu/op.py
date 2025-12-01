@@ -31,7 +31,7 @@ class AIEReLU(AIEOperatorBase):
         self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         
-        total_shimdma_channels = self.num_columns * self.num_channels
+        total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
         self.xclbin_artifact = None
@@ -41,7 +41,7 @@ class AIEReLU(AIEOperatorBase):
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
-        file_name_base = f"relu_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -50,7 +50,7 @@ class AIEReLU(AIEOperatorBase):
             callback_args=[
                 self.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 self.tile_size,
                 0,

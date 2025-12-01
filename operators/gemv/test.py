@@ -13,7 +13,6 @@ from operators.gemv.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-
 regular_test_cases = [
     ("matrix_vector_mul_128x128_32_1col", "-M 128 -K 128 --aie-columns 1 --tile-size 32"),
     ("matrix_vector_mul_2048x8192_1_1col", "-M 2048 -K 8192 --aie-columns 1 --tile-size 1"),
@@ -31,8 +30,8 @@ extensive_test_cases = list(regular_test_cases)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-M", type=int, default=42)
-    parser.add_argument("-K", type=int, default=42)
+    parser.add_argument("-M", type=int, default=128)
+    parser.add_argument("-K", type=int, default=128)
     parser.add_argument("--aie-columns", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1)
     args = parser.parse_args()
@@ -52,7 +51,7 @@ def main():
     }
     output_buffers = {'output': golden_ref['C']}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
     
@@ -62,7 +61,7 @@ def main():
     print(f"Throughput: {gflops:.6e} GFLOP/s")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:

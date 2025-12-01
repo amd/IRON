@@ -27,7 +27,7 @@ class AIEGEMV(AIEOperatorBase):
         self,
         M,
         K,
-        num_columns=1,
+        num_aie_columns=1,
         tile_size=1,
         is_mv=True,
         use_static_weight=False,
@@ -35,7 +35,7 @@ class AIEGEMV(AIEOperatorBase):
 
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
         self.K = K  # matrix columns, vector rows  (if is_mv=False, matrix rows, vector columns)
-        self.num_columns = num_columns
+        self.num_aie_columns = num_aie_columns
         self.tile_size = tile_size
         self.is_mv = is_mv
         if use_static_weight:
@@ -58,7 +58,7 @@ class AIEGEMV(AIEOperatorBase):
     def get_artifacts(self, prefix="gemv_"):
         operator_dir = Path(__file__).parent
         file_name_base = (
-            f"{prefix}{self.num_columns}c_{self.M}x{self.K}_{self.tile_size}t"
+            f"{prefix}{self.num_aie_columns}c_{self.M}x{self.K}_{self.tile_size}t"
         )
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
@@ -67,7 +67,7 @@ class AIEGEMV(AIEOperatorBase):
             callback_fn="my_matvec",
             callback_args=[
                 self.device_manager.device_type,
-                self.num_columns,
+                self.num_aie_columns,
                 self.M,
                 self.K,
                 self.tile_size,

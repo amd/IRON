@@ -27,7 +27,7 @@ def generate_golden_reference(
     S_q=256,
     S_kv=256,
     d=256,
-    num_KV_heads=2,
+    num_kv_heads=2,
     num_pipeline=1,
     seed=42,
 ):
@@ -39,7 +39,7 @@ def generate_golden_reference(
         S_q: Sequence length for query (Q)
         S_kv: Sequence length for key/value (KV)
         d: Embedding dimension per head
-        num_KV_heads: Number of heads for Key-Value pairs (0 means same as heads)
+        num_kv_heads: Number of heads for Key-Value pairs (0 means same as heads)
         num_pipeline: Number of pipelines for padding calculation
         seed: Random seed
 
@@ -49,8 +49,7 @@ def generate_golden_reference(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    num_kv_heads = num_KV_heads
-    if num_KV_heads == 0:
+    if num_kv_heads == 0:
         num_kv_heads = heads
     number_of_groups = heads // num_kv_heads
 
@@ -81,8 +80,8 @@ def generate_golden_reference(
     O = pad_to_multiple_of_64(O, seq_dim=1, num_pipeline=num_pipeline)
 
     return {
-        "Q": Q.numpy().view(np.uint16).view(bfloat16),
-        "K": K.numpy().view(np.uint16).view(bfloat16),
-        "V": V.numpy().view(np.uint16).view(bfloat16),
-        "O": O.numpy().view(np.uint16).view(bfloat16),
+        "Q": Q,
+        "K": K,
+        "V": V,
+        "O": O,
     }

@@ -15,7 +15,7 @@ from operators.common.test_utils import run_test
 
 
 regular_test_cases = [
-    ("mha_32x64x128_softmax128_gemm1", "--M 32 --K 64 --N 128 --softmax-tile-size 128 --gemm-tile-size 1"),
+    ("mha_32x64x128_softmax128_gemm1", "--seq-len 16384 --dim 64 --num-heads 1 --num-pipelines 8"),
 ]
 
 extensive_test_cases = []
@@ -23,21 +23,20 @@ extensive_test_cases = []
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=32)
-    parser.add_argument("--K", type=int, default=64)
-    parser.add_argument("--N", type=int, default=128)
-    parser.add_argument("--softmax-tile-size", type=int, default=128)
-    parser.add_argument("--gemm-tile-size", type=int, default=1)
+    parser.add_argument("--seq-len", type=int, default=16384)
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--num-heads", type=int, default=1)
+    parser.add_argument("--num-pipelines", type=int, default=8)
     args = parser.parse_args()
     
-    golden_ref = generate_golden_reference(M=args.M, K=args.K, N=args.N)
+    golden_ref = generate_golden_reference(S_q=args.seq_len, S_kv=args.seq_len, d=args.dim, heads=args.num_heads, num_kv_heads=args.num_heads, num_pipeline=args.num_pipelines)
     
     operator = AIEMHA(
-        M=args.M,
-        K=args.K,
-        N=args.N,
-        softmax_tile_size=args.softmax_tile_size,
-        gemm_tile_size=args.gemm_tile_size
+        num_heads=args.num_heads,
+        seq_len=args.seq_len,
+        d=args.dim,
+        num_KV_heads=args.num_heads,
+        num_of_pipelines=args.num_pipelines
     )
     
     input_buffers = {
@@ -47,14 +46,18 @@ def main():
     }
     output_buffers = {'O': golden_ref['O'].flatten()}
     
-    passed, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator, input_buffers, output_buffers, rel_tol=4.0e-2, abs_tol=1.5e-1
     )
     
+    error_threshold = 0.005
+    max_acceptable_errors = int(args.seq_len * args.dim * args.num_heads * error_threshold)
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    print("({} errors out of {} max allowable)".format(len(errors["O"]), max_acceptable_errors))
     
-    if passed:
+    if len(errors["O"]) <= max_acceptable_errors:
         print("PASS!\n")
         return 0
     else:

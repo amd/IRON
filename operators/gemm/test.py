@@ -78,7 +78,7 @@ def main():
     }
     output_buffers = {'C': golden_ref['output'].flatten()}
     
-    passed, latency_us, bandwidth_gbps = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
     )
     
@@ -88,7 +88,7 @@ def main():
     gflops = (2.0 * args.M * args.K * args.N) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s\n")
     
-    if passed:
+    if not errors:
         print("PASS!\n")
         return 0
     else:
