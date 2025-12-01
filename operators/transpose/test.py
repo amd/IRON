@@ -13,7 +13,6 @@ from operators.transpose.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-
 regular_test_cases = []
 extensive_test_cases = []
 
@@ -27,9 +26,9 @@ s_list = [8]
 m = 64
 n = 64
 
-for (test_cases, input_lengths, n_list) in [
+for test_cases, input_lengths, n_list in [
     (regular_test_cases, regular_input_lengths, regular_n_list),
-    (extensive_test_cases, extensive_input_lengths, extensive_n_list)
+    (extensive_test_cases, extensive_input_lengths, extensive_n_list),
 ]:
     for M in input_lengths:
         for N in n_list:
@@ -40,7 +39,9 @@ for (test_cases, input_lengths, n_list) in [
                         col_part = N // num_aie_columns
                         if row_part % m != 0 or col_part % n != 0:
                             continue
-                        check_length = row_part * col_part * num_channels * num_aie_columns
+                        check_length = (
+                            row_part * col_part * num_channels * num_aie_columns
+                        )
                         length = M * N
                         if check_length != length:
                             continue
@@ -59,9 +60,9 @@ def main():
     parser.add_argument("-n", type=int, default=64)
     parser.add_argument("-s", type=int, default=8)
     args = parser.parse_args()
-    
+
     golden_ref = generate_golden_reference(rows=args.M, cols=args.N)
-    
+
     operator = AIETranspose(
         M=args.M,
         N=args.N,
@@ -69,19 +70,19 @@ def main():
         num_channels=args.channels,
         m=args.m,
         n=args.n,
-        s=args.s
+        s=args.s,
     )
-    
-    input_buffers = {'input': golden_ref['input']}
-    output_buffers = {'output': golden_ref['output']}
-    
+
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

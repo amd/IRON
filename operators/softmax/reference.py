@@ -7,10 +7,10 @@ import torch
 from golden_model_lib import torch_dtype_map
 
 
-def generate_golden_reference(rows: int, cols: int, dtype='bf16', seed=42):
+def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
     """
     Generate golden reference data for softmax.
-    
+
     Returns:
         dict: Dictionary with tensors for inputs and outputs
     """

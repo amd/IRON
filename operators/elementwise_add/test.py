@@ -22,9 +22,9 @@ num_channels = 2
 regular_input_lengths = [2048]
 extensive_input_lenghts = [1024, 4096, 8192]
 
-for (test_cases, input_lenghts) in [
+for test_cases, input_lenghts in [
     (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lenghts)
+    (extensive_test_cases, extensive_input_lenghts),
 ]:
     for input_length in input_lenghts:
         for num_aie_columns in range(1, max_aie_columns + 1):
@@ -43,29 +43,26 @@ def main():
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
     args = parser.parse_args()
-    
+
     golden_ref = generate_golden_reference(input_length=args.length)
-    
+
     operator = AIEElementwiseAdd(
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
-        tile_size=args.tile_size
+        tile_size=args.tile_size,
     )
-    
-    input_buffers = {
-        'input1': golden_ref['A'],
-        'input2': golden_ref['B']
-    }
-    output_buffers = {'output': golden_ref['C']}
-    
+
+    input_buffers = {"input1": golden_ref["A"], "input2": golden_ref["B"]}
+    output_buffers = {"output": golden_ref["C"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

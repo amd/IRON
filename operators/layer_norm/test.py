@@ -19,9 +19,9 @@ max_aie_columns = 8
 regular_input_lengths = [2048]
 extensive_input_lengths = [1024, 4096, 8192]
 
-for (test_cases, input_lengths) in [
+for test_cases, input_lengths in [
     (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lengths)
+    (extensive_test_cases, extensive_input_lengths),
 ]:
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
@@ -55,17 +55,17 @@ def main():
         num_channels=args.channels,
         tile_size=args.tile_size,
     )
-    
-    input_buffers = {'input': golden_ref['input']}
-    output_buffers = {'output': golden_ref['output']}
-    
+
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.1, abs_tol=0.1
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

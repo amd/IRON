@@ -39,11 +39,11 @@ class AIEMHA(AIEOperatorBase):
         self.num_KV_heads = num_KV_heads
         self.num_of_pipelines = num_of_pipelines
         assert d == 64, "Only d=64 is supported in this version"
-        
+
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
         self.insts_artifact = None
-        
+
         AIEOperatorBase.__init__(self)
 
     def set_up_artifacts(self):
@@ -58,7 +58,9 @@ class AIEMHA(AIEOperatorBase):
         mm_source = str(self.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
         softmax_source = str(self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc")
         mha_source = str(self.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
-        passthrough_source = str(self.base_dir / "aie_kernels" / "generic" / "passThrough.cc")
+        passthrough_source = str(
+            self.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+        )
 
         # Compile mm.cc (col-major)
         mm_defines_rowmaj = [
@@ -148,7 +150,10 @@ class AIEMHA(AIEOperatorBase):
         # Set up runtime
         # ---
         self.add_kernel(
-            "mha", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "mha",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_buffer(
             "Q",

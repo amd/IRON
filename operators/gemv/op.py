@@ -48,7 +48,6 @@ class AIEGEMV(AIEOperatorBase):
         # For compatibility with my_matvec parameters
         self.m = self.tile_size
 
-
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
         self.insts_artifact = None
@@ -79,7 +78,12 @@ class AIEGEMV(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"mv.o", depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "mv.cc")]
+                    f"mv.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "mv.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -95,10 +99,10 @@ class AIEGEMV(AIEOperatorBase):
         # Compilation Artifacts
         # ---
         xclbin_artifact, insts_artifact = self.get_artifacts()
-        
+
         self.xclbin_artifact = xclbin_artifact
         self.insts_artifact = insts_artifact
-        
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
@@ -118,7 +122,10 @@ class AIEGEMV(AIEOperatorBase):
             if isinstance(static_weights, torch.Tensor):
                 static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
-            "gemv", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "gemv",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_buffer("matrix", self.M * self.K, static_data=static_weights)
         self.add_buffer("vector", self.K)

@@ -32,7 +32,7 @@ class AIEElementwiseMul(AIEOperatorBase):
         self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         self.trace_size = trace_size
-        
+
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
@@ -64,7 +64,12 @@ class AIEElementwiseMul(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"mul.o", depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "mul.cc")]
+                    f"mul.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "mul.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -92,7 +97,10 @@ class AIEElementwiseMul(AIEOperatorBase):
         self.add_buffer("input2", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_mul", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "eltwise_mul",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
 

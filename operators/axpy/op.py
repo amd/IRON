@@ -22,7 +22,9 @@ from operators.common import (
 class AIEAXPY(AIEOperatorBase):
     """AIE-accelerated aX + Y operator"""
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size, scalar_factor=0.01):
+    def __init__(
+        self, size, num_aie_columns, num_channels, tile_size, scalar_factor=0.01
+    ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
@@ -31,7 +33,7 @@ class AIEAXPY(AIEOperatorBase):
         self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         self.scalar_factor = scalar_factor
-        
+
         self.xclbin_artifact = None
         self.insts_artifact = None
 
@@ -51,7 +53,7 @@ class AIEAXPY(AIEOperatorBase):
                 self.num_aie_columns,
                 self.num_channels,
                 self.tile_size,
-                0, 
+                0,
                 self.scalar_factor,
             ],
         )
@@ -61,8 +63,12 @@ class AIEAXPY(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"axpy.o", 
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "axpy.cc")]
+                    f"axpy.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "axpy.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -80,20 +86,25 @@ class AIEAXPY(AIEOperatorBase):
         self.add_buffer("y", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "axpy", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "axpy",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("axpy", "x", "y", "output")
 
     def forward(self, x, y):
         if x.numel() > self.size or y.numel() > self.size:
-            raise AIEOperatorConstraintError("AIEAXPY: input too large for configured size")
+            raise AIEOperatorConstraintError(
+                "AIEAXPY: input too large for configured size"
+            )
         if x.numel() != y.numel():
             raise AIEOperatorConstraintError("AIEAXPY: sizes of X and Y do not match")
 
         original_shape = x.shape
         x_flat = x.reshape(-1)
         y_flat = y.reshape(-1)
-        
+
         pad_len = self.size - x_flat.numel()
         if pad_len > 0:
             x_flat = torch.nn.functional.pad(x_flat, (0, pad_len))
@@ -108,6 +119,6 @@ class AIEAXPY(AIEOperatorBase):
         result = self.read_buffer_as_torch("output", shape=(self.size,), dtype=bfloat16)
 
         if pad_len > 0:
-            result = result[:x_flat.numel() - pad_len]
-        
+            result = result[: x_flat.numel() - pad_len]
+
         return result.reshape(*original_shape)

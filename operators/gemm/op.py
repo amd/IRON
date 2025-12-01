@@ -120,7 +120,9 @@ class AIEGEMM(AIEOperatorBase):
         if c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
-        kernel_archive = f"gemm_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}.a"
+        kernel_archive = (
+            f"gemm_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}.a"
+        )
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_total_base}.mlir",
@@ -167,11 +169,22 @@ class AIEGEMM(AIEOperatorBase):
                         KernelObjectArtifact.new(
                             f"gemm_{tile_m}x{tile_k}x{tile_n}_{int(b_col_maj)}_{int(c_col_maj)}.o",
                             extra_flags=kernel_flags,
-                            depends=[SourceArtifact.new(base_dir / "aie_kernels" / "aie2p" / "mm.cc")],
+                            depends=[
+                                SourceArtifact.new(
+                                    base_dir / "aie_kernels" / "aie2p" / "mm.cc"
+                                )
+                            ],
                         ),
                         KernelObjectArtifact.new(
                             "convert_copy.o",
-                            [SourceArtifact.new(base_dir / "aie_kernels" / "generic" / "convert_copy.cc")],
+                            [
+                                SourceArtifact.new(
+                                    base_dir
+                                    / "aie_kernels"
+                                    / "generic"
+                                    / "convert_copy.cc"
+                                )
+                            ],
                         ),
                     ],
                 ),
@@ -191,14 +204,14 @@ class AIEGEMM(AIEOperatorBase):
         # Describe required artifacts (xclbin, insts.bin)
         device_str = self.device_manager.device_str()
         xclbin_artifact, insts_artifact = self.get_artifacts()
-        
+
         self.xclbin_artifact = xclbin_artifact
         self.insts_artifact = insts_artifact
-        
+
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def set_up_runtime(self):
-        
+
         # Describe runtime components
         # The static weights might not yet be loaded upon initialization; therefore, the provided self.static_weights field is a callback that provides the weights at set-up time.
         static_weights = None
@@ -207,7 +220,10 @@ class AIEGEMM(AIEOperatorBase):
             if isinstance(static_weights, torch.Tensor):
                 static_weights = torch_to_numpy(static_weights)
         self.add_kernel(
-            "gemm", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "gemm",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_buffer("A", self.M * self.K)
         self.add_buffer("B", self.K * self.N, static_data=static_weights)

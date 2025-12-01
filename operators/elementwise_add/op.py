@@ -68,7 +68,12 @@ class AIEElementwiseAdd(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"add.o", depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "add.cc")]
+                    f"add.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "add.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -89,7 +94,10 @@ class AIEElementwiseAdd(AIEOperatorBase):
         self.add_buffer("input2", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_add", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "eltwise_add",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("eltwise_add", "input1", "input2", "output")
 

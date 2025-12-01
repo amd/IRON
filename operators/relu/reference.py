@@ -5,9 +5,12 @@ import torch
 from golden_model_lib import torch_dtype_map
 
 
-def generate_golden_reference(input_length: int, dtype='bf16', seed=42):
+def generate_golden_reference(input_length: int, dtype="bf16", seed=42):
     torch.manual_seed(seed)
     val_range = 4
-    input_tensor = torch.rand(input_length, dtype=torch_dtype_map[dtype]) * val_range - val_range / 2
+    input_tensor = (
+        torch.rand(input_length, dtype=torch_dtype_map[dtype]) * val_range
+        - val_range / 2
+    )
     output_tensor = torch.nn.functional.relu(input_tensor)
     return {"input": input_tensor, "output": output_tensor}

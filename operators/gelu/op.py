@@ -30,7 +30,7 @@ class AIEGELU(AIEOperatorBase):
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
-        
+
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
@@ -62,8 +62,12 @@ class AIEGELU(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"gelu.o", 
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "aie2p" / "gelu.cc")]
+                    f"gelu.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -82,18 +86,23 @@ class AIEGELU(AIEOperatorBase):
         self.add_buffer("input", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "gelu", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "gelu",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("gelu", "input", "output")
 
     def forward(self, x):
         """Forward pass for GELU activation"""
         if x.numel() > self.size:
-            raise AIEOperatorConstraintError("AIEGELU: input too large for configured size")
+            raise AIEOperatorConstraintError(
+                "AIEGELU: input too large for configured size"
+            )
 
         original_shape = x.shape
         x_flat = x.reshape(-1)
-        
+
         # Pad if necessary
         pad_len = self.size - x_flat.numel()
         if pad_len > 0:
@@ -108,6 +117,6 @@ class AIEGELU(AIEOperatorBase):
 
         # Remove padding and restore shape
         if pad_len > 0:
-            result = result[:x_flat.numel() - pad_len]
-        
+            result = result[: x_flat.numel() - pad_len]
+
         return result.reshape(*original_shape)

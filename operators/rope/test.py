@@ -13,7 +13,6 @@ from operators.rope.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-
 regular_test_cases = []
 extensive_test_cases = []
 
@@ -24,9 +23,9 @@ regular_method_types = [0]  # 0: Two-halves method
 extensive_input_lengths = [1024, 8192]
 extensive_method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
 
-for (test_cases, input_lengths, method_types) in [
+for test_cases, input_lengths, method_types in [
     (regular_test_cases, regular_input_lengths, regular_method_types),
-    (extensive_test_cases, extensive_input_lengths, extensive_method_types)
+    (extensive_test_cases, extensive_input_lengths, extensive_method_types),
 ]:
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
@@ -49,33 +48,35 @@ def main():
     parser.add_argument("--tile-size", type=int, default=1024)
     parser.add_argument("--method-type", type=int, default=0)
     args = parser.parse_args()
-    
+
     rows = args.length // args.tile_size
     cols = args.tile_size
-    
-    golden_ref = generate_golden_reference(rows=rows, cols=cols, method_type=args.method_type)
-    
+
+    golden_ref = generate_golden_reference(
+        rows=rows, cols=cols, method_type=args.method_type
+    )
+
     operator = AIERope(
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
         last_dim=args.tile_size,
-        method_type=args.method_type
+        method_type=args.method_type,
     )
-    
+
     input_buffers = {
-        'in': golden_ref['A'].flatten(),
-        'angles': golden_ref['B'].flatten()
+        "in": golden_ref["A"].flatten(),
+        "angles": golden_ref["B"].flatten(),
     }
-    output_buffers = {'output': golden_ref['C'].flatten()}
-    
+    output_buffers = {"output": golden_ref["C"].flatten()}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

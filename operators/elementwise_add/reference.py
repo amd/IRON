@@ -5,7 +5,7 @@ import torch
 from golden_model_lib import torch_dtype_map
 
 
-def generate_golden_reference(input_length: int, dtype='bf16', seed=42):
+def generate_golden_reference(input_length: int, dtype="bf16", seed=42):
     torch.manual_seed(seed)
     val_range = 4
     dtype_torch = torch_dtype_map[dtype]

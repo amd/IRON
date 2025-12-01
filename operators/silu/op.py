@@ -66,7 +66,12 @@ class AIESiLU(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"silu.o", depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "aie2p" / "silu.cc")]
+                    f"silu.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "aie2p" / "silu.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -94,7 +99,10 @@ class AIESiLU(AIEOperatorBase):
         self.add_buffer("input", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "silu", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "silu",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("silu", "input", "output")
 

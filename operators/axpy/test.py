@@ -24,9 +24,9 @@ regular_scalar_factors = [3.0]
 extensive_input_lengths = [1024, 2048, 4096, 8192]
 extensive_scalar_factors = [3.0, 10.0]
 
-for (test_cases, input_lengths, scalar_factors) in [
+for test_cases, input_lengths, scalar_factors in [
     (regular_test_cases, regular_input_lengths, regular_scalar_factors),
-    (extensive_test_cases, extensive_input_lengths, extensive_scalar_factors)
+    (extensive_test_cases, extensive_input_lengths, extensive_scalar_factors),
 ]:
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_columns + 1):
@@ -47,30 +47,29 @@ def main():
     parser.add_argument("--tile-size", type=int, default=2048)
     parser.add_argument("--scalar-factor", type=float, default=3.0)
     args = parser.parse_args()
-    
-    golden_ref = generate_golden_reference(input_length=args.length, scalar=args.scalar_factor)
-    
+
+    golden_ref = generate_golden_reference(
+        input_length=args.length, scalar=args.scalar_factor
+    )
+
     operator = AIEAXPY(
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
         tile_size=args.tile_size,
-        scalar_factor=args.scalar_factor
+        scalar_factor=args.scalar_factor,
     )
-    
-    input_buffers = {
-        'x': golden_ref['A'],
-        'y': golden_ref['B']
-    }
-    output_buffers = {'output': golden_ref['C']}
-    
+
+    input_buffers = {"x": golden_ref["A"], "y": golden_ref["B"]}
+    output_buffers = {"output": golden_ref["C"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

@@ -13,7 +13,6 @@ from operators.silu.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-
 regular_test_cases = []
 extensive_test_cases = []
 
@@ -22,9 +21,9 @@ num_channels = 1  # 1 channel for 1 input
 regular_input_lengths = [2048]
 extensive_input_lengths = [1024, 4096, 8192]
 
-for (test_cases, input_lengths) in [
+for test_cases, input_lengths in [
     (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lengths)
+    (extensive_test_cases, extensive_input_lengths),
 ]:
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
@@ -45,26 +44,26 @@ def main():
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=1024)
     args = parser.parse_args()
-    
+
     golden_ref = generate_golden_reference(input_length=args.length)
-    
+
     operator = AIESiLU(
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
-        tile_size=args.tile_size
+        tile_size=args.tile_size,
     )
-    
-    input_buffers = {'input': golden_ref['input']}
-    output_buffers = {'output': golden_ref['output']}
-    
+
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

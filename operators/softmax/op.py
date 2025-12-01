@@ -22,7 +22,9 @@ from operators.common import (
 
 class AIESoftmax(AIEOperatorBase):
 
-    def __init__(self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None):
+    def __init__(
+        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None
+    ):
         self.size = rows * cols
         self.tile_size = tile_size if tile_size is not None else cols
         self.rows = rows
@@ -62,7 +64,11 @@ class AIESoftmax(AIEOperatorBase):
                 mlir_artifact,
                 KernelObjectArtifact.new(
                     f"softmax.o",
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc")],
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -82,7 +88,10 @@ class AIESoftmax(AIEOperatorBase):
         self.add_buffer("in", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "softmax", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "softmax",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("softmax", "in", "output")
 

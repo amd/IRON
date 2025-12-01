@@ -34,7 +34,6 @@ class AIETranspose(AIEOperatorBase):
         self.num_columns = num_aie_columns
         self.num_channels = num_channels
 
-        
         total_shimdma_channels = self.num_columns * self.num_channels
         if 1 > 1:
             total_shimdma_channels *= 1
@@ -62,7 +61,7 @@ class AIETranspose(AIEOperatorBase):
                 0,
                 self.m,
                 self.n,
-                self.s
+                self.s,
             ],
         )
 
@@ -71,12 +70,16 @@ class AIETranspose(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"transpose_{self.m}x{self.n}.o", 
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "transpose.cc")],
+                    f"transpose_{self.m}x{self.n}.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "transpose.cc"
+                        )
+                    ],
                     extra_flags=[
                         f"-DDIM_m={self.m}",
                         f"-DDIM_n={self.n}",
-                    ]
+                    ],
                 ),
             ],
         )
@@ -93,17 +96,22 @@ class AIETranspose(AIEOperatorBase):
         self.add_buffer("input", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "transpose", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "transpose",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("transpose", "input", "output")
 
     def forward(self, x):
         if x.numel() > self.size:
-            raise AIEOperatorConstraintError("AIETranspose: input too large for configured size")
+            raise AIEOperatorConstraintError(
+                "AIETranspose: input too large for configured size"
+            )
 
         original_shape = x.shape
         x_flat = x.reshape(-1)
-        
+
         pad_len = self.size - x_flat.numel()
         if pad_len > 0:
             x_flat = torch.nn.functional.pad(x_flat, (0, pad_len))
@@ -115,6 +123,6 @@ class AIETranspose(AIEOperatorBase):
         result = self.read_buffer_as_torch("output", shape=(self.size,), dtype=bfloat16)
 
         if pad_len > 0:
-            result = result[:x_flat.numel() - pad_len]
-        
+            result = result[: x_flat.numel() - pad_len]
+
         return result.reshape(*original_shape)

@@ -166,13 +166,21 @@ class AIEOperatorBase(ABC):
         bo_count = sum(len(pool) for pool in bo_pools.values())
         bo_footprint = sum(len(pool) * pool_sz for pool_sz, pool in bo_pools.items())
         logging.info(
-            f"Allocated {bo_count} total buffer objects with a total memory footprint of " +
-            (f"{bo_footprint//1024//1024} MiB." if bo_footprint >= 1024 * 1024 else f"{bo_footprint//1024} KiB.")
+            f"Allocated {bo_count} total buffer objects with a total memory footprint of "
+            + (
+                f"{bo_footprint//1024//1024} MiB."
+                if bo_footprint >= 1024 * 1024
+                else f"{bo_footprint//1024} KiB."
+            )
         )
         static_data_footprint = sum(len(data) for data in cls.static_data_pool)
         logging.info(
-            f"Allocated {len(cls.static_data_pool)} static buffers with a total memory footprint of " +
-            (f"{static_data_footprint//1024//1024} MiB." if static_data_footprint >= 1024 * 1024 else f"{static_data_footprint//1024} KiB.")
+            f"Allocated {len(cls.static_data_pool)} static buffers with a total memory footprint of "
+            + (
+                f"{static_data_footprint//1024//1024} MiB."
+                if static_data_footprint >= 1024 * 1024
+                else f"{static_data_footprint//1024} KiB."
+            )
         )
 
     def __init__(self):
@@ -259,7 +267,7 @@ class AIEOperatorBase(ABC):
         Compilation will be handled automatically based on the provided description.
         """
         pass
-    
+
     @abstractmethod
     def set_up_runtime(self):
         pass
@@ -274,7 +282,9 @@ class AIEOperatorBase(ABC):
         work_list = comp.get_work_list(self.artifacts)
         compilation_rules = [
             comp.GenerateMLIRFromPythonCompilationRule(dry_run=dry_run),
-            comp.PeanoCompilationRule(self.peano_dir, self.mlir_aie_dir, dry_run=dry_run),
+            comp.PeanoCompilationRule(
+                self.peano_dir, self.mlir_aie_dir, dry_run=dry_run
+            ),
             comp.ArchiveCompilationRule(self.peano_dir, dry_run=dry_run),
             comp.AieccCompilationRule(
                 self.build_dir, self.peano_dir, self.mlir_aie_dir, dry_run=dry_run

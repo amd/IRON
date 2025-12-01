@@ -31,7 +31,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.weights_1 = None
         self.weights_2 = None
         self.weights_3 = None
-        
+
         # Artifacts created by set_up_artifacts()
         self.combined_xclbin = None
         self.gemv_1_xclbin = None
@@ -42,7 +42,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.eltwise_mul_insts = None
         self.gemv_2_xclbin = None
         self.gemv_2_insts = None
-        
+
         super().__init__()
 
     def set_up_artifacts(self):
@@ -73,8 +73,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
             size=self.hidden_dim,
             num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim // 16, 
-            
+            tile_size=self.hidden_dim // 16,
         )
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_decode_silu_")
         silu_xclbin.xclbin_input = gemv_1_xclbin
@@ -91,7 +90,6 @@ class AIESwiGLUDecode(AIEOperatorBase):
             num_aie_columns=8,
             num_channels=2,
             tile_size=self.hidden_dim // 8,
-            
         )
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_decode_eltwise_mul_"
@@ -161,10 +159,16 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.add_buffer("intermediate", self.hidden_dim)
         self.add_buffer("output", self.embedding_dim)
         self.add_kernel(
-            "swiglu_gemv_1", self.combined_xclbin, self.gemv_1_xclbin.kernel_name, self.gemv_1_insts
+            "swiglu_gemv_1",
+            self.combined_xclbin,
+            self.gemv_1_xclbin.kernel_name,
+            self.gemv_1_insts,
         )
         self.add_kernel(
-            "swiglu_silu", self.combined_xclbin, self.silu_xclbin.kernel_name, self.silu_insts
+            "swiglu_silu",
+            self.combined_xclbin,
+            self.silu_xclbin.kernel_name,
+            self.silu_insts,
         )
         self.add_kernel(
             "swiglu_eltwise_mul",
@@ -173,7 +177,10 @@ class AIESwiGLUDecode(AIEOperatorBase):
             self.eltwise_mul_insts,
         )
         self.add_kernel(
-            "swiglu_gemv_2", self.combined_xclbin, self.gemv_2_xclbin.kernel_name, self.gemv_2_insts
+            "swiglu_gemv_2",
+            self.combined_xclbin,
+            self.gemv_2_xclbin.kernel_name,
+            self.gemv_2_insts,
         )
         self.add_to_runlist("swiglu_gemv_1", "weights_1", "input", "left")
         self.add_to_runlist("swiglu_gemv_1", "weights_2", "input", "right")

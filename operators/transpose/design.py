@@ -103,7 +103,9 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, trace_size, m, n, s)
     ]
 
     # AIE Core Function declaration
-    transpose_kernel = Kernel(f"transpose_{s}x{s}", f"transpose_{m}x{n}.o", [tile_ty, tile_ty])
+    transpose_kernel = Kernel(
+        f"transpose_{s}x{s}", f"transpose_{m}x{n}.o", [tile_ty, tile_ty]
+    )
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, transpose_kernel):

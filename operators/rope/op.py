@@ -20,7 +20,14 @@ from operators.common import (
 
 class AIERope(AIEOperatorBase):
 
-    def __init__(self, size: int, last_dim: int, num_aie_columns=None, num_channels=None, method_type=0):
+    def __init__(
+        self,
+        size: int,
+        last_dim: int,
+        num_aie_columns=None,
+        num_channels=None,
+        method_type=0,
+    ):
         self.size = size
         self.tile_size = last_dim
 
@@ -66,18 +73,24 @@ class AIERope(AIEOperatorBase):
                 mlir_artifact,
                 KernelObjectArtifact.new(
                     f"rope_{self.method_type}.o",
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "rope.cc")],
-                    extra_flags=["-DTWO_HALVES" if 0 == self.method_type else "-DINTERLEAVED"],
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "generic" / "rope.cc"
+                        )
+                    ],
+                    extra_flags=[
+                        "-DTWO_HALVES" if 0 == self.method_type else "-DINTERLEAVED"
+                    ],
                 ),
             ],
         )
         insts_artifact = InstsBinArtifact.new(
             f"{file_name_base}.bin", depends=[mlir_artifact]
         )
-        
+
         self.xclbin_artifact = xclbin_artifact
         self.insts_artifact = insts_artifact
-        
+
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
@@ -87,7 +100,10 @@ class AIERope(AIEOperatorBase):
         self.add_buffer("angles", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "rope", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "rope",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("rope", "in", "angles", "output")
 

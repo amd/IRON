@@ -31,7 +31,7 @@ class AIESigmoid(AIEOperatorBase):
 
         self.num_columns = num_aie_columns
         self.num_channels = num_channels
-        
+
         total_shimdma_channels = self.num_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
@@ -63,8 +63,12 @@ class AIESigmoid(AIEOperatorBase):
             depends=[
                 mlir_artifact,
                 KernelObjectArtifact.new(
-                    f"sigmoid.o", 
-                    depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "aie2p" / "sigmoid.cc")]
+                    f"sigmoid.o",
+                    depends=[
+                        SourceArtifact.new(
+                            self.base_dir / "aie_kernels" / "aie2p" / "sigmoid.cc"
+                        )
+                    ],
                 ),
             ],
         )
@@ -81,17 +85,22 @@ class AIESigmoid(AIEOperatorBase):
         self.add_buffer("input", self.size)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "sigmoid", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "sigmoid",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("sigmoid", "input", "output")
 
     def forward(self, x):
         if x.numel() > self.size:
-            raise AIEOperatorConstraintError("AIESigmoid: input too large for configured size")
+            raise AIEOperatorConstraintError(
+                "AIESigmoid: input too large for configured size"
+            )
 
         original_shape = x.shape
         x_flat = x.reshape(-1)
-        
+
         pad_len = self.size - x_flat.numel()
         if pad_len > 0:
             x_flat = torch.nn.functional.pad(x_flat, (0, pad_len))
@@ -103,6 +112,6 @@ class AIESigmoid(AIEOperatorBase):
         result = self.read_buffer_as_torch("output", shape=(self.size,), dtype=bfloat16)
 
         if pad_len > 0:
-            result = result[:x_flat.numel() - pad_len]
-        
+            result = result[: x_flat.numel() - pad_len]
+
         return result.reshape(*original_shape)

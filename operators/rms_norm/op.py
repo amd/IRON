@@ -25,7 +25,13 @@ class AIERMSNorm(AIEOperatorBase):
     """AIE-accelerated RMS Normalization layer"""
 
     def __init__(
-        self, size, eps=1e-6, num_aie_columns=None, num_channels=None, tile_size=None, weighted=False
+        self,
+        size,
+        eps=1e-6,
+        num_aie_columns=None,
+        num_channels=None,
+        tile_size=None,
+        weighted=False,
     ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
@@ -81,12 +87,21 @@ class AIERMSNorm(AIEOperatorBase):
                         KernelObjectArtifact.new(
                             f"rms_norm.o",
                             depends=[
-                                SourceArtifact.new(self.base_dir / "aie_kernels" / "aie2p" / "rms_norm.cc")
+                                SourceArtifact.new(
+                                    self.base_dir
+                                    / "aie_kernels"
+                                    / "aie2p"
+                                    / "rms_norm.cc"
+                                )
                             ],
                         ),
                         KernelObjectArtifact.new(
                             "mul.o",
-                            depends=[SourceArtifact.new(self.base_dir / "aie_kernels" / "generic" / "mul.cc")],
+                            depends=[
+                                SourceArtifact.new(
+                                    self.base_dir / "aie_kernels" / "generic" / "mul.cc"
+                                )
+                            ],
                         ),
                     ],
                 ),
@@ -113,7 +128,10 @@ class AIERMSNorm(AIEOperatorBase):
         self.add_buffer("input2", self.tile_size, static_data=static_weights)
         self.add_buffer("output", self.size)
         self.add_kernel(
-            "eltwise_mul", self.xclbin_artifact, self.xclbin_artifact.kernel_name, self.insts_artifact
+            "eltwise_mul",
+            self.xclbin_artifact,
+            self.xclbin_artifact.kernel_name,
+            self.insts_artifact,
         )
         self.add_to_runlist("eltwise_mul", "input1", "input2", "output")
 

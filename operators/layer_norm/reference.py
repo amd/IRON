@@ -5,9 +5,11 @@ import torch
 from golden_model_lib import torch_dtype_map
 
 
-def generate_golden_reference(rows: int, cols: int, dtype='bf16', seed=42):
+def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
     torch.manual_seed(seed)
     val_range = 4
     input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    output_tensor = torch.nn.functional.layer_norm(input_tensor, normalized_shape=(cols,))
+    output_tensor = torch.nn.functional.layer_norm(
+        input_tensor, normalized_shape=(cols,)
+    )
     return {"input": input_tensor, "output": output_tensor}

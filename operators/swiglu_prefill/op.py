@@ -32,7 +32,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.weights_1 = None
         self.weights_2 = None
         self.weights_3 = None
-        
+
         self.prio_accuracy = prio_accuracy
         # Artifacts created by set_up_artifacts()
         self.combined_xclbin = None
@@ -44,7 +44,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.eltwise_mul_insts = None
         self.gemm_2_xclbin = None
         self.gemm_2_insts = None
-        
+
         super().__init__()
 
     def set_up_artifacts(self):
@@ -58,7 +58,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             accuracy_flags = {
                 "emulate_bf16_mmul_with_bfp16": False,
                 "prio_accuracy": True,
-                "round_conv_even": True
+                "round_conv_even": True,
             }
 
         gemm_1 = AIEGEMM(
@@ -67,7 +67,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             N=self.hidden_dim,
             emulate_bf16_mmul_with_bfp16=False,
             prio_accuracy=True,
-            round_conv_even=True
+            round_conv_even=True,
         )
         gemm_1_xclbin, gemm_1_insts = gemm_1.get_artifacts(prefix="swiglu_gemm_1_")
         gemm_1_xclbin.extra_flags += [
@@ -119,7 +119,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             N=self.embedding_dim,
             emulate_bf16_mmul_with_bfp16=False,
             prio_accuracy=True,
-            round_conv_even=True
+            round_conv_even=True,
         )
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
@@ -169,10 +169,16 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.add_buffer("intermediate", self.seq_len * self.hidden_dim)
         self.add_buffer("output", self.seq_len * self.embedding_dim)
         self.add_kernel(
-            "swiglu_gemm_1", self.combined_xclbin, self.gemm_1_xclbin.kernel_name, self.gemm_1_insts
+            "swiglu_gemm_1",
+            self.combined_xclbin,
+            self.gemm_1_xclbin.kernel_name,
+            self.gemm_1_insts,
         )
         self.add_kernel(
-            "swiglu_silu", self.combined_xclbin, self.silu_xclbin.kernel_name, self.silu_insts
+            "swiglu_silu",
+            self.combined_xclbin,
+            self.silu_xclbin.kernel_name,
+            self.silu_insts,
         )
         self.add_kernel(
             "swiglu_eltwise_mul",
@@ -181,7 +187,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             self.eltwise_mul_insts,
         )
         self.add_kernel(
-            "swiglu_gemm_2", self.combined_xclbin, self.gemm_2_xclbin.kernel_name, self.gemm_2_insts
+            "swiglu_gemm_2",
+            self.combined_xclbin,
+            self.gemm_2_xclbin.kernel_name,
+            self.gemm_2_insts,
         )
         self.add_to_runlist("swiglu_gemm_1", "input", "weights_1", "left")
         self.add_to_runlist("swiglu_gemm_1", "input", "weights_2", "right")

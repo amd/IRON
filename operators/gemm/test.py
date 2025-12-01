@@ -29,9 +29,15 @@ regular_test_cases = []
 extensive_test_cases = []
 
 # Populate regular_test_cases
-for (tests, M_list, K_list, N_list, col_maj_choices) in [
+for tests, M_list, K_list, N_list, col_maj_choices in [
     (regular_test_cases, regular_M_list, regular_K_list, regular_N_list, col_maj),
-    (extensive_test_cases, extensive_M_list, extensive_K_list, extensive_N_list, col_maj),
+    (
+        extensive_test_cases,
+        extensive_M_list,
+        extensive_K_list,
+        extensive_N_list,
+        col_maj,
+    ),
 ]:
     for b_col_maj, c_col_maj in col_maj_choices:
         for M in M_list:
@@ -58,9 +64,15 @@ def main():
     parser.add_argument("--b-col-maj", type=int, default=0)
     parser.add_argument("--c-col-maj", type=int, default=0)
     args = parser.parse_args()
-    
-    golden_ref = generate_golden_reference(M=args.M, K=args.K, N=args.N, b_col_maj=bool(args.b_col_maj), c_col_maj=bool(args.c_col_maj))
-    
+
+    golden_ref = generate_golden_reference(
+        M=args.M,
+        K=args.K,
+        N=args.N,
+        b_col_maj=bool(args.b_col_maj),
+        c_col_maj=bool(args.c_col_maj),
+    )
+
     operator = AIEGEMM(
         M=args.M,
         K=args.K,
@@ -71,23 +83,23 @@ def main():
         b_col_maj=bool(args.b_col_maj),
         c_col_maj=bool(args.c_col_maj),
     )
-    
+
     input_buffers = {
-        'A': golden_ref['input'].flatten(),
-        'B': golden_ref['input_b'].flatten()
+        "A": golden_ref["input"].flatten(),
+        "B": golden_ref["input_b"].flatten(),
     }
-    output_buffers = {'C': golden_ref['output'].flatten()}
-    
+    output_buffers = {"C": golden_ref["output"].flatten()}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
-    
+
     gflops = (2.0 * args.M * args.K * args.N) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0

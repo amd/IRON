@@ -28,27 +28,27 @@ def main():
     parser.add_argument("--tile-size", type=int, default=1024)
     parser.add_argument("--alpha", type=float, default=0.01)
     args = parser.parse_args()
-    
+
     golden_ref = generate_golden_reference(input_length=args.length, alpha=args.alpha)
-    
+
     operator = AIELeakyReLU(
         size=args.length,
         num_aie_columns=args.aie_columns,
         num_channels=args.channels,
         tile_size=args.tile_size,
-        alpha=args.alpha
+        alpha=args.alpha,
     )
-    
-    input_buffers = {'input': golden_ref['input']}
-    output_buffers = {'output': golden_ref['output']}
-    
+
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
     )
-    
+
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    
+
     if not errors:
         print("PASS!\n")
         return 0
