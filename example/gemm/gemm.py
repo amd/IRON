@@ -50,7 +50,7 @@ def main():
     argparser.add_argument("-N", type=int, default=512)
     argparser.add_argument("-m", type=int, default=64)
     argparser.add_argument("-k", type=int, default=64)
-    argparser.add_argument("-n", type=int, default=32)
+    argparser.add_argument("-n", type=int, default=64)
     argparser.add_argument("--n-aie-cols", type=int, choices=[1, 2, 4, 8], default=4)
     argparser.add_argument("--b-col-maj", type=int, choices=[0, 1], default=0)
     argparser.add_argument("--c-col-maj", type=int, choices=[0, 1], default=0)
