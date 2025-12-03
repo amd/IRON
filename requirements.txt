@@ -16,7 +16,6 @@ llvm-aie
 black
 reuse
 torch
-cmake>=3.29, <4.0
 
 # MLIR-extras (Python bindings/helpers for MLIR)
 # For installing this, the following environment variables must be set:

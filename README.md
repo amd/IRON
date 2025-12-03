@@ -97,7 +97,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
     ```bash
     # Python versions 3.10, 3.12 and 3.13 are currently supported by our wheels
     sudo apt install \
-    build-essential clang clang-14 lld lld-14 cmake ninja-build python3-venv python3-pip
+    build-essential clang clang-14 lld lld-14 python3-venv python3-pip
     ```
 
 1. Setup a virtual environment and activate it:
