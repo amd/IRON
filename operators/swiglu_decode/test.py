@@ -61,7 +61,7 @@ def main():
 
     ref_2 = (
         operator.read_buffer_as_torch("intermediate", (1, args.hidden_dim))
-        @ golden_ref["w_down"] 
+        @ golden_ref["w_down"]
     )
     errors_2 = verify_buffer(operator, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
     if errors_2:
