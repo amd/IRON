@@ -12,20 +12,6 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 
-def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
-    if tensor.dtype == torch.bfloat16:
-        float_arr = tensor.float().detach().cpu().numpy()
-        return float_arr.astype(bfloat16)
-    return tensor.detach().cpu().numpy()
-
-
-def numpy_to_torch(array: np.ndarray) -> torch.Tensor:
-    device = torch.device("cpu")
-    if array.dtype == bfloat16:
-        return torch.from_numpy(array.astype(np.float32)).to(torch.bfloat16).to(device)
-    return torch.from_numpy(array).to(device)
-
-
 def model_memory_size(model, input_dtype=torch.float32):
     """
     Calculate the estimated memory size of a PyTorch model in gigabytes.

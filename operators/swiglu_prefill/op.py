@@ -14,12 +14,11 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 from operators.gemm.op import AIEGEMM
 from operators.silu.op import AIESiLU
 from operators.elementwise_mul.op import AIEElementwiseMul
+from operators.common.utils import torch_to_numpy
 
 
 class AIESwiGLUPrefill(AIEOperatorBase):
@@ -221,11 +220,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
 
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
-        x_np = torch_to_numpy(x_flat)
 
-        self.write_buffer("input", x_np)
-        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        self.write_buffer("input", x_flat)
+        test_pattern = np.zeros(len(x_flat), dtype=bfloat16)
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
+        result = self.read_buffer_as_torch("output", shape=x_flat.shape, dtype=bfloat16)
 
         return result

@@ -30,7 +30,7 @@ def load_test_module(test_path):
 def discover_application_tests(applications_dir, output_dir):
     """Discover test.py files in application subdirectories."""
     applications_dir = Path(applications_dir)
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tests = []

@@ -162,16 +162,14 @@ class AIERope(AIEOperatorBase):
     def _process_batch(self, batch_data, angle_data):
         """Process a batch of sequences through the AIE kernel"""
         batch_flat = batch_data.view(-1)
-        input_data = self.torch_to_numpy(batch_flat)
-        angles_data = self.torch_to_numpy(angle_data)
 
         # Calculate buffer sizes for the batch
-        input_size = input_data.nbytes
+        input_size = batch_data.nbytes
 
         # Write data to buffers
-        self.write_buffer("input", input_data)
-        self.write_buffer("angles", angles_data)
-        test_pattern = np.zeros(len(input_data), dtype=bfloat16)
+        self.write_buffer("input", batch_data)
+        self.write_buffer("angles", angle_data)
+        test_pattern = np.zeros(len(batch_data), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
 
         # Execute kernel

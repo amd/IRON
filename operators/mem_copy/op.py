@@ -14,8 +14,6 @@ from operators.common import (
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 
 
@@ -115,8 +113,7 @@ class AIEMemCopy(AIEOperatorBase):
         x_flat = x.reshape(-1)
 
         # Execute on AIE
-        x_np = torch_to_numpy(x_flat)
-        self.write_buffer("input", x_np)
+        self.write_buffer("input", x_flat)
         self.write_buffer("output", np.zeros(self.size, dtype=bfloat16))
         self.run_runlist()
         result = self.read_buffer_as_torch("output", shape=(self.size,), dtype=bfloat16)

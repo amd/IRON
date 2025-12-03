@@ -13,7 +13,6 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from .aie_device_manager import AIEDeviceManager
-from .utils import torch_to_numpy, numpy_to_torch
 
 __all__ = [
     "AIEOperatorBase",
@@ -25,6 +24,4 @@ __all__ = [
     "SourceArtifact",
     "PythonGeneratedMLIRArtifact",
     "AIEDeviceManager",
-    "torch_to_numpy",
-    "numpy_to_torch",
 ]

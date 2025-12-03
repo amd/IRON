@@ -8,7 +8,7 @@
 
 import torch
 import torch.nn as nn
-from ..utils import torch_to_numpy, assign
+from ..utils import assign
 from operators import (
     AIEElementwiseMul,
     AIEGEMM,

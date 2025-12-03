@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from operators.common.torch_dtype_map import torch_dtype_map
+from operators.common.utils import torch_dtype_map
 
 
 def generate_golden_reference(input_length: int, dtype="bf16", seed=42):

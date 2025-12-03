@@ -16,9 +16,8 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
+from operators.common.utils import torch_to_numpy
 
 
 class AIERMSNorm(AIEOperatorBase):
@@ -174,27 +173,25 @@ class AIERMSNorm(AIEOperatorBase):
 
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
-        x_np = torch_to_numpy(x_flat)
         if y is not None:
             y_flat = y.view(-1)
-            y_np = torch_to_numpy(y_flat)
 
         # Verify size matches expected
-        if len(x_np) != self.size:
+        if len(x_flat) != self.size:
             raise AIEOperatorConstraintError(
-                f"Input size x={len(x_np)} doesn't match configured size {self.size}"
+                f"Input size x={len(x_flat)} doesn't match configured size {self.size}"
             )
 
-        self.write_buffer("input1", x_np)
+        self.write_buffer("input1", x_flat)
         if y is not None:
-            self.write_buffer("input2", y_np)
+            self.write_buffer("input2", y_flat)
         else:
             assert (
                 self.weight is not None
             ), "Weights must be provided either as input or during initialization."
-        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        test_pattern = np.zeros(len(x_flat), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
+        result = self.read_buffer_as_torch("output", shape=x_flat.shape, dtype=bfloat16)
 
         return result

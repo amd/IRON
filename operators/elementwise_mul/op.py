@@ -15,8 +15,6 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 
 
@@ -147,20 +145,18 @@ class AIEElementwiseMul(AIEOperatorBase):
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
         y_flat = y.view(-1)
-        x_np = torch_to_numpy(x_flat)
-        y_np = torch_to_numpy(y_flat)
 
         # Verify size matches expected
-        if len(x_np) != self.size or len(y_np) != self.size:
+        if len(x_flat) != self.size or len(y_flat) != self.size:
             raise AIEOperatorConstraintError(
-                f"Input size x={len(x_np)}, y={len(y_np)} doesn't match configured size {self.size}"
+                f"Input size x={len(x_flat)}, y={len(y_flat)} doesn't match configured size {self.size}"
             )
 
-        self.write_buffer("input1", x_np)
-        self.write_buffer("input2", y_np)
-        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        self.write_buffer("input1", x_flat)
+        self.write_buffer("input2", y_flat)
+        test_pattern = np.zeros(len(x_flat), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
+        result = self.read_buffer_as_torch("output", shape=x_flat.shape, dtype=bfloat16)
 
         return result

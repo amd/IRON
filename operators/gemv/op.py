@@ -15,9 +15,8 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
+from operators.common.utils import torch_to_numpy
 
 
 class AIEGEMV(AIEOperatorBase):
@@ -176,12 +175,10 @@ class AIEGEMV(AIEOperatorBase):
                 "AIEElementwiseAdd: incompatible tensor shape(s)"
             )
 
-        vector_np = torch_to_numpy(vector)
         if matrix is not None:
-            matrix_np = torch_to_numpy(matrix)
             # If matrix is none, we are using static weights that have already been written to the buffer
-            self.write_buffer("matrix", matrix_np)
-        self.write_buffer("vector", vector_np)
+            self.write_buffer("matrix", matrix)
+        self.write_buffer("vector", vector)
         self.run_runlist()
         result = self.read_buffer_as_torch("output", (self.M,))
 

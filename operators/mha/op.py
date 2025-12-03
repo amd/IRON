@@ -16,9 +16,8 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
+from operators.common.utils import torch_to_numpy, numpy_to_torch
 
 
 class AIEMHA(AIEOperatorBase):
