@@ -14,12 +14,11 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 from operators.gemv.op import AIEGEMV
 from operators.silu.op import AIESiLU
 from operators.elementwise_mul.op import AIEElementwiseMul
+from operators.common.utils import torch_to_numpy
 
 
 class AIESwiGLUDecode(AIEOperatorBase):
@@ -193,11 +192,11 @@ class AIESwiGLUDecode(AIEOperatorBase):
 
     def forward(self, x):
         # Turn into a numpy vector and drop the batch and other higher dimensions, if any; will error if batch or other higher dimensions > 1
-        x_np = torch_to_numpy(x.reshape(x.shape[-1]))
+        x_flat = x.reshape(x.shape[-1])
 
-        assert x_np.shape[0] == self.embedding_dim
+        assert x_flat.shape[0] == self.embedding_dim
 
-        self.write_buffer("input", x_np)
+        self.write_buffer("input", x_flat)
         self.run_runlist()
         result = self.read_buffer_as_torch(
             "output",

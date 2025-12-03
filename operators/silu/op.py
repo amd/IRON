@@ -15,8 +15,6 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 
 
@@ -141,18 +139,17 @@ class AIESiLU(AIEOperatorBase):
 
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
-        x_np = torch_to_numpy(x_flat)
 
         # Verify size matches expected
-        if len(x_np) != self.size:
+        if len(x_flat) != self.size:
             raise AIEOperatorConstraintError(
-                f"Input size x={len(x_np)} doesn't match configured size {self.size}"
+                f"Input size x={len(x_flat)} doesn't match configured size {self.size}"
             )
 
-        self.write_buffer("input", x_np)
-        test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+        self.write_buffer("input", x_flat)
+        test_pattern = np.zeros(len(x_flat), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=x_np.shape, dtype=bfloat16)
+        result = self.read_buffer_as_torch("output", shape=x_flat.shape, dtype=bfloat16)
 
         return result

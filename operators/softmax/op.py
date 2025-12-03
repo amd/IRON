@@ -15,8 +15,6 @@ from operators.common import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
-    torch_to_numpy,
-    numpy_to_torch,
 )
 
 
@@ -116,10 +114,10 @@ class AIESoftmax(AIEOperatorBase):
         x_list = [x[0, h, :, :] for h in range(heads)]
         results = []
         for i in range(heads):
-            x_np = torch_to_numpy(x_list[i])
-            input_size = x_np.nbytes
-            self.write_buffer("in", x_np)
-            test_pattern = np.zeros(len(x_np), dtype=bfloat16)
+            x_iter = x_list[i]
+            input_size = x_iter.nbytes
+            self.write_buffer("in", x_iter)
+            test_pattern = np.zeros(len(x_iter), dtype=bfloat16)
             self.write_buffer("output", test_pattern)
             self.run_runlist()
             result = self.read_buffer_as_torch(

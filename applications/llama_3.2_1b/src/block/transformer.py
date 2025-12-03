@@ -47,7 +47,7 @@ class TransformerBlock(nn.Module):
             self.aie_norm1_prefill = AIERMSNorm(
                 size=max_prefill_size,
                 eps=1e-5,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=self.cfg["emb_dim"],
             )
@@ -57,7 +57,7 @@ class TransformerBlock(nn.Module):
                 self.aie_norm1_decode = AIERMSNorm(
                     size=decode_size,
                     eps=1e-5,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=2,
                     tile_size=self.cfg["emb_dim"],
                 )
@@ -75,7 +75,7 @@ class TransformerBlock(nn.Module):
             self.aie_norm2_prefill = AIERMSNorm(
                 size=max_prefill_size,
                 eps=1e-5,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=self.cfg["emb_dim"],
             )
@@ -85,7 +85,7 @@ class TransformerBlock(nn.Module):
                 self.aie_norm2_decode = AIERMSNorm(
                     size=decode_size,
                     eps=1e-5,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=2,
                     tile_size=self.cfg["emb_dim"],
                 )
@@ -103,7 +103,7 @@ class TransformerBlock(nn.Module):
 
             self.aie_residual_add_prefill = AIEElementwiseAdd(
                 size=max_prefill_size,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=cfg["emb_dim"],
             )
@@ -113,7 +113,7 @@ class TransformerBlock(nn.Module):
                 decode_size = cfg["emb_dim"]  # 1 token * emb_dim
                 self.aie_residual_add_decode = AIEElementwiseAdd(
                     size=decode_size,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=2,
                     tile_size=cfg["emb_dim"],
                 )

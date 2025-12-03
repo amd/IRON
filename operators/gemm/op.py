@@ -18,7 +18,7 @@ from operators.common import (
     PythonGeneratedMLIRArtifact,
 )
 
-from operators.common.util import torch_to_numpy
+from operators.common.utils import torch_to_numpy
 
 
 class AIEGEMM(AIEOperatorBase):

@@ -147,7 +147,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
             self.aie_final_norm_prefill = AIERMSNorm(
                 size=max_prefill_size,
                 eps=1e-5,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=self.cfg["emb_dim"],
             )
@@ -157,7 +157,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 self.aie_final_norm_decode = AIERMSNorm(
                     size=decode_size,
                     eps=1e-5,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=2,
                     tile_size=self.cfg["emb_dim"],
                 )

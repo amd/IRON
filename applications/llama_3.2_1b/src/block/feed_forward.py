@@ -51,7 +51,7 @@ class FeedForward(nn.Module):
                 max_prefill_size = (prompt_length + num_tokens) * self.hidden_dim
             self.aie_silu_prefill = AIESiLU(
                 size=max_prefill_size,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=self.hidden_dim,
             )
@@ -60,7 +60,7 @@ class FeedForward(nn.Module):
                 decode_size = self.hidden_dim  # 1 token * emb_dim
                 self.aie_silu_decode = AIESiLU(
                     size=decode_size,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=1,
                     tile_size=self.hidden_dim,
                 )
@@ -88,7 +88,7 @@ class FeedForward(nn.Module):
                 M_prefill = prompt_length + num_tokens
 
             aie_config_prefill = {
-                "num_columns": 8,
+                "num_aie_columns": 8,
                 "tile_m": 64,
                 "tile_k": 64,
                 "tile_n": 64,
@@ -116,7 +116,7 @@ class FeedForward(nn.Module):
             )
 
         if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            aie_gemv_config = {"num_columns": 1, "is_mv": False}
+            aie_gemv_config = {"num_aie_columns": 1, "is_mv": False}
             # FC1 and FC2: emb_dim -> hidden_dim
             self.aie_fc1_gemv = AIEGEMV(
                 M=self.hidden_dim, K=self.emb_dim, **aie_gemv_config
@@ -138,7 +138,7 @@ class FeedForward(nn.Module):
 
             self.aie_mul_prefill = AIEElementwiseMul(
                 size=max_prefill_size,
-                num_columns=8,
+                num_aie_columns=8,
                 num_channels=2,
                 tile_size=self.hidden_dim,
             )
@@ -148,7 +148,7 @@ class FeedForward(nn.Module):
                 decode_size = self.hidden_dim  # 1 token * emb_dim
                 self.aie_mul_decode = AIEElementwiseMul(
                     size=decode_size,
-                    num_columns=1,
+                    num_aie_columns=1,
                     num_channels=2,
                     tile_size=self.hidden_dim,
                 )
