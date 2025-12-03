@@ -36,7 +36,7 @@ jobs:
         uses: ./.github/actions/build
         with:
           env_name: ci_env
-          cmake_extra_flags: "-DEXTENSIVE_TESTING=ON"
+          extensive: "true"
 
       - name: Test
         id: test

@@ -10,22 +10,20 @@ inputs:
   env_name:
     required: false
     default: "ci_env"
-  cmake_extra_flags:
+  extensive:
     required: false
-    default: ""
+    default: "false"
 
 runs:
   using: "composite"
   steps:
-    - name: Build
+    - name: Discover tests
       env:
         HOME: /workspace
       shell: bash
       run: |
         source ${{ inputs.env_name }}/bin/activate
         set -euxo pipefail
-        if [ -n "${{ inputs.cmake_extra_flags }}" ]; then
-          echo "Using extra CMake flags: ${{ inputs.cmake_extra_flags }}"
-        fi
-        cmake -B build -DCMAKE_BUILD_TYPE=Release -DIRONCLAD_AIE_TARGET=aie2p ${{ inputs.cmake_extra_flags }}
-        cmake --build build -- -j1 VERBOSE=1
+        mkdir -p testing
+        cd testing
+        python3 ../operators/common/discover_tests.py $(if [ "${{ inputs.extensive }}" = "true" ]; then echo "--extensive"; fi) --output-dir .

@@ -38,19 +38,28 @@ jobs:
           source ci_env/bin/activate
           pip install -r requirements_examples.txt
 
-      - name: Build examples
-        uses: ./.github/actions/build
-        with:
-          env_name: ci_env
-          cmake_extra_flags: "-DBUILD_APPLICATIONS=ON -DBUILD_EXAMPLES=OFF"
+      - name: Generate application tests
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          source ci_env/bin/activate
+          set -euxo pipefail
+          mkdir -p testing
+          cd testing
+          python3 ../applications/discover_application_tests.py --output-dir .
+          echo "Application tests generated:"
+          ls -la
 
       - name: Run examples
         id: test
         continue-on-error: true
-        uses: ./.github/actions/test
-        with:
-          env_name: ci_env
-          test_flags: "--log tests.log --csv-latest tests_latest.csv"
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          source ci_env/bin/activate
+          ./scripts/run_tests.py --log tests.log --csv-latest tests_latest.csv testing
 
       - name: Commit example test results
         uses: ./.github/actions/commit_results

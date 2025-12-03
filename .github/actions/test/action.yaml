@@ -10,9 +10,9 @@ inputs:
   env_name:
     required: false
     default: "ci_env"
-  build_dir:
+  testing_dir:
     required: false
-    default: "build"
+    default: "testing"
 
 runs:
   using: "composite"
@@ -23,4 +23,4 @@ runs:
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate
-        ./scripts/run_tests.py ${{ inputs.test_flags }} ${{ inputs.build_dir }}
+        ./scripts/run_tests.py ${{ inputs.test_flags }} ${{ inputs.testing_dir }}

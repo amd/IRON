@@ -35,6 +35,7 @@ jobs:
         uses: ./.github/actions/build
         with:
           env_name: ci_env
+          extensive: "false"
 
       - name: Test
         id: test
