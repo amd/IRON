@@ -38,12 +38,12 @@ class AIEMemCopy(AIEOperatorBase):
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
-        
+
         size = self.tile_size * self.num_cores
-        
+
         # Xclbin base name (shared)
         xclbin_base_name = f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"
-        
+
         # Generate MLIR for xclbin (using dummy size)
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{xclbin_base_name}.mlir",
@@ -56,7 +56,7 @@ class AIEMemCopy(AIEOperatorBase):
                 self.num_channels,
                 self.bypass,
                 self.tile_size,
-                0
+                0,
             ],
         )
 

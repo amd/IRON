@@ -8,7 +8,7 @@ from ml_dtypes import bfloat16
 
 def generate_golden_reference(input_length):
     torch.manual_seed(42)
-    
+
     # Generate random input data
     val_range = 4
     A = torch.rand(input_length, dtype=torch.bfloat16) * val_range

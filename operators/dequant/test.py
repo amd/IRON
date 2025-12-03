@@ -29,11 +29,11 @@ for tests, input_lengths in [
             for num_channels in range(1, 3):  # 1 or 2 channels
                 total_cores = num_columns * num_channels
                 tile_size = input_length // total_cores
-                
+
                 # Cap tile_size at 16384
                 if tile_size > 16384:
                     tile_size = 16384
-                
+
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
                     test_name = f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
@@ -43,11 +43,19 @@ for tests, input_lengths in [
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--length", type=int, default=2048, help="Input length (output elements)")
-    parser.add_argument("--aie-columns", type=int, default=2, help="Number of AIE columns")
-    parser.add_argument("--num-channels", type=int, default=1, help="Number of channels")
+    parser.add_argument(
+        "-l", "--length", type=int, default=2048, help="Input length (output elements)"
+    )
+    parser.add_argument(
+        "--aie-columns", type=int, default=2, help="Number of AIE columns"
+    )
+    parser.add_argument(
+        "--num-channels", type=int, default=1, help="Number of channels"
+    )
     parser.add_argument("--tile-size", type=int, default=1024, help="Tile size")
-    parser.add_argument("--group-size", type=int, default=32, help="Group size for dequantization")
+    parser.add_argument(
+        "--group-size", type=int, default=32, help="Group size for dequantization"
+    )
     args = parser.parse_args()
 
     golden_ref = generate_golden_reference(

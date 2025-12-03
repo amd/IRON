@@ -31,14 +31,14 @@ for tests, input_lengths, bypass_list in [
                 for bypass in bypass_list:
                     # Calculate the maximum cores that can be utilized with 1 or 2 shim channels
                     max_cores = 8 * num_channels  # MAX_COLUMNS (8) * num_channels
-                    
+
                     if max_cores >= num_cores and num_cores >= num_channels:
                         tile_size = input_length // num_cores
-                        
+
                         # Cap tile_size at 8192
                         if tile_size > 8192:
                             tile_size = 8192
-                        
+
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
                             bypass_str = "bypass" if bypass else "no_bypass"
@@ -51,8 +51,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--length", type=int, default=2048, help="Input length")
     parser.add_argument("--num-cores", type=int, default=2, help="Number of cores")
-    parser.add_argument("--num-channels", type=int, default=1, help="Number of channels")
-    parser.add_argument("--bypass", type=int, default=0, help="Use bypass mode (0 or 1)")
+    parser.add_argument(
+        "--num-channels", type=int, default=1, help="Number of channels"
+    )
+    parser.add_argument(
+        "--bypass", type=int, default=0, help="Use bypass mode (0 or 1)"
+    )
     parser.add_argument("--tile-size", type=int, default=1024, help="Tile size")
     args = parser.parse_args()
 

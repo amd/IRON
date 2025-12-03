@@ -24,7 +24,7 @@ class AIEDequant(AIEOperatorBase):
     def __init__(self, size, num_aie_columns, num_channels, tile_size, group_size=32):
         # Store num_aie_columns in self.num_columns for internal use (following the pattern)
         self.num_columns = num_aie_columns
-        
+
         self.size = size
         self.tile_size = tile_size
         self.num_channels = num_channels
@@ -72,7 +72,10 @@ class AIEDequant(AIEOperatorBase):
                     self.base_dir / "aie_kernels" / "generic" / "expand.cc"
                 )
             ],
-            extra_flags=[f"-DTILE_SIZE={self.tile_size}", f"-DGROUP_SIZE={self.group_size}"],
+            extra_flags=[
+                f"-DTILE_SIZE={self.tile_size}",
+                f"-DGROUP_SIZE={self.group_size}",
+            ],
         )
 
         xclbin_artifact = XclbinArtifact.new(
@@ -105,10 +108,10 @@ class AIEDequant(AIEOperatorBase):
     def forward(self, x_packed):
         """
         Forward pass for dequantization.
-        
+
         Args:
             x_packed: Packed uint8 numpy array containing int4 data + scale factors
-            
+
         Returns:
             Dequantized bfloat16 torch tensor
         """
@@ -121,6 +124,8 @@ class AIEDequant(AIEOperatorBase):
         self.write_buffer("input", x_packed.flatten())
         self.write_buffer("output", np.zeros(self.output_size, dtype=bfloat16))
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=(self.output_size,), dtype=bfloat16)
+        result = self.read_buffer_as_torch(
+            "output", shape=(self.output_size,), dtype=bfloat16
+        )
 
         return result
