@@ -18,7 +18,7 @@ extensive_test_cases = []
 
 regular_input_lengths = [4096]
 regular_tile_sizes = [1024, 512, 2048]
-extensive_input_lengths = []  # Commented out in CMakeLists: 1024, 8192
+extensive_input_lengths = []
 
 
 def get_optimal_columns_channels(input_length, tile_size):

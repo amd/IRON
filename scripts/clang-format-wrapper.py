@@ -25,8 +25,6 @@ def find_cpp_files(root_dir: str = ".") -> List[str]:
         "node_modules",
         "__pycache__",
         ".pytest_cache",
-        "CMakeFiles",
-        ".cmake",
         "third_party",
         "3rdparty",
         "external",

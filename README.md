@@ -119,56 +119,30 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
-   cmake -B build
-   cmake --build build --target silu_1_cols_1_channels_2048_tile_2048_run
+   ./operators/axpy/test.py
    ```
 
-Note: On a fresh install, if you get `CMake Error: Could not find CMAKE_ROOT !!!`, just deactivate and reactivate your python environment.
+### Building/Using & Testing Operators
 
-### Building & Testing
+All available operators can be found in `operators`. These each contain:
 
-> NOTE: Be sure the XRT setup script has been sourced: 
+* `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
+* `design.py`: The implementation of the operator's NPU code. Often references a kernel in `aie_kernels` for the compute core code and describes the data movement using ObjectFIFOs.
+* `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
+* `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
+
+> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated: 
 >       `source /opt/xilinx/xrt/setup.sh`
+>       `source /path/to/ironenv/bin/activate`
 
-IRON is a CMake-based project. To configure the project, run:
-```shell
-cmake -B build
-```
-
-> Note: By default, the project is built for AIE2P. To build for AIE2, set the target using:
->       `cmake -B build -DIRONCLAD_AIE_TARGET=aie2`
-
-To build all designs, use: 
-```shell
-cmake --build build
-```
-
-To test all the designs, use the following python script:
+To build and test all the operators, first generate a list of all test cases, then run them:
 ``` python
-./scripts/run_tests.py --iter 1
+mkdir testing && cd testing
+../operators/common/discover_tests.py
+../scripts/run_tests.py --iter 1
 ``` 
+
 You can select a single test to run using the `--select` flag.
-
-> Targets are listed when running `cmake -B build` with the following syntax:
-> ```
-> Registering Executable: <TARGET_NAME>
-> ```
-
-If you want to build only a specific design, run:
-```shell
-# Example: cmake --build build --target silu_4_cols_1_channels_2048_tile_512
-cmake --build build --target <TARGET_NAME>
-```
-
-You can also test an individual (or a selection of multiple) test(s) using the same script:
-```shell
-./scripts/run_tests.py --select <TARGET_ONE> --select <TARGET_TWO>
-```
-
-Additionally a target to build & run is made available under the `<TARGET_NAME>_run` symbol. 
-```shell
-cmake --build build --target silu_4_cols_1_channels_2048_tile_512_run
-```
 
 ### Git Hooks (Optional but Recommended)
 

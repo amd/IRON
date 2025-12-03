@@ -3,11 +3,9 @@
 
 /my_install*
 /ironenv*
-/cmakeModules*
 .vscode
 __pycache__
 .DS_Store
-**/CMakeFiles
 *.bin
 build/*
 **/_build/**
