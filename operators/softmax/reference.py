@@ -4,7 +4,7 @@
 """Golden reference generator for softmax operator."""
 
 import torch
-from golden_model_lib import torch_dtype_map
+from operators.common.torch_dtype_map import torch_dtype_map
 
 
 def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
