@@ -233,7 +233,6 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         return artifacts
 
 
-
 class AieccCompilationRule(CompilationRule):
     def __init__(self, build_dir, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.build_dir = build_dir
