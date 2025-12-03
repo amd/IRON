@@ -71,6 +71,7 @@ def generate_test_list(operators_dir, output_dir=None, extensive=False):
     else:
         output_dir = Path(output_dir)
 
+    output_dir = output_dir.absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tests = discover_tests(operators_dir, extensive=extensive)
