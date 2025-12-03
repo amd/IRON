@@ -24,9 +24,10 @@ from operators.elementwise_mul.op import AIEElementwiseMul
 
 class AIESwiGLUDecode(AIEOperatorBase):
 
-    def __init__(self, embedding_dim, hidden_dim):
+    def __init__(self, embedding_dim, hidden_dim, prio_accuracy=False):
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
+        self.prio_accuracy = prio_accuracy
         # weights to be set by user (e.g., assign_weights in FeedForward block)
         self.weights_1 = None
         self.weights_2 = None

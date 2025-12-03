@@ -33,12 +33,12 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
     bias2 = torch.randn(K, dtype=torch.bfloat16) * val_range  # currently unused
     w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
 
-    # Generate golden outputs (decode uses matrix-vector multiply)
-    left = x @ w_gate.T
+    # Generate golden outputs
+    left = x @ w_gate
     left_swished = torch.nn.functional.silu(left)
-    right = x @ w_up.T
+    right = x @ w_up
     intermediate = left_swished * right
-    y = intermediate @ w_down.T
+    y = intermediate @ w_down
 
     return {
         "input": x,

@@ -15,7 +15,7 @@ from operators.common.test_utils import run_test
 
 regular_test_cases = [
     (
-        "mha_32x64x128_softmax128_gemm1",
+        "mha",
         "--seq-len 16384 --dim 64 --num-heads 1 --num-pipelines 8",
     ),
 ]

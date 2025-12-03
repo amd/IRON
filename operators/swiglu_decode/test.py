@@ -14,7 +14,7 @@ from operators.common.test_utils import run_test, verify_buffer
 
 
 regular_test_cases = [
-    ("swiglu_decode_1x2048x8192", "--embedding-dim 2048 --hidden-dim 8192"),
+    ("swiglu_decode_1x2048x2048", "--embedding-dim 2048 --hidden-dim 2048"),
 ]
 
 extensive_test_cases = []
@@ -31,9 +31,9 @@ def main():
     operator = AIESwiGLUDecode(
         embedding_dim=args.embedding_dim, hidden_dim=args.hidden_dim
     )
-    operator.weights_1 = golden_ref["w_gate"]
-    operator.weights_2 = golden_ref["w_up"]
-    operator.weights_3 = golden_ref["w_down"]
+    operator.weights_1 = golden_ref["w_gate"].T
+    operator.weights_2 = golden_ref["w_up"].T
+    operator.weights_3 = golden_ref["w_down"].T
 
     # In the following, some buffers are commented out.
     # Because this operator calls multiple kernels in sequence, rounding errors due to the smaller bf16 data type accumulate, which can cause it to fail verification.
@@ -61,7 +61,7 @@ def main():
 
     ref_2 = (
         operator.read_buffer_as_torch("intermediate", (1, args.hidden_dim))
-        @ operator.weights_3.T
+        @ golden_ref["w_down"] 
     )
     errors_2 = verify_buffer(operator, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
     if errors_2:

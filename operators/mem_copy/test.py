@@ -41,8 +41,7 @@ for tests, input_lengths, bypass_list in [
 
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
-                            bypass_str = "bypass" if bypass else "no_bypass"
-                            test_name = f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{bypass_str}"
+                            test_name = f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
                             cmd = f"-l {input_length} --num-cores {num_cores} --num-channels {num_channels} --bypass {int(bypass)} --tile-size {tile_size}"
                             tests.append((test_name, cmd))
 

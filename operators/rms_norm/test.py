@@ -72,10 +72,9 @@ def main():
         weighted=args.weighted,
     )
 
+    input_buffers = {"input1": golden_ref["input"]}
     if args.weighted:
-        input_buffers = {"input1": golden_ref["input"], "input2": golden_ref["weight"]}
-    else:
-        input_buffers = {"input1": golden_ref["input"]}
+        operator.weight = golden_ref["weight"]
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(

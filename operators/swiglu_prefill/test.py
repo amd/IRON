@@ -37,9 +37,9 @@ def main():
         hidden_dim=args.hidden_dim,
         prio_accuracy=bool(args.prio_accuracy),
     )
-    operator.weights_1 = golden_ref["w_gate"]
-    operator.weights_2 = golden_ref["w_up"]
-    operator.weights_3 = golden_ref["w_down"]
+    operator.weights_1 = golden_ref["w_gate"].T
+    operator.weights_2 = golden_ref["w_up"].T
+    operator.weights_3 = golden_ref["w_down"].T
 
     # In the following, some buffers are commented out.
     # Because this operator calls multiple kernels in sequence, rounding errors due to the smaller bf16 data type accumulate, which can cause it to fail verification.
@@ -75,7 +75,7 @@ def main():
 
     ref_3 = (
         operator.read_buffer_as_torch("intermediate", (args.seq_len, args.hidden_dim))
-        @ golden_ref["w_down"].T
+        @ golden_ref["w_down"]
     )
     errors_3 = verify_buffer(operator, "output", ref_3, rel_tol=0.04, abs_tol=0.4)
     if errors_3:
