@@ -7,6 +7,7 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 import logging
 import time
+import torch
 from ml_dtypes import bfloat16
 
 import aie.utils.config
@@ -253,8 +254,12 @@ class AIEOperatorBase(ABC):
     def read_buffer_as_torch(self, buffer_name, shape, dtype=bfloat16):
         return numpy_to_torch(self.read_buffer(buffer_name, shape, dtype))
 
-    def write_buffer(self, buffer_name, numpy_array):
+    def write_buffer(self, buffer_name, array):
         """Write buffer from a numpy array into a XRT buffer object"""
+        if isinstance(array, torch.Tensor):
+            numpy_array = torch_to_numpy(array)
+        else:
+            numpy_array = array
         if buffer_name in self.buffer_static_data:
             raise RuntimeError(f"Cannot write to static buffer: {buffer_name}")
         self.get_bo(buffer_name).write(numpy_array.flatten().view(np.uint8), 0)

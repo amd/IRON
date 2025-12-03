@@ -61,12 +61,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             }
 
         gemm_1 = AIEGEMM(
-            M=self.seq_len,
-            K=self.embedding_dim,
-            N=self.hidden_dim,
-            emulate_bf16_mmul_with_bfp16=False,
-            prio_accuracy=True,
-            round_conv_even=True,
+            M=self.seq_len, K=self.embedding_dim, N=self.hidden_dim, **accuracy_flags
         )
         gemm_1_xclbin, gemm_1_insts = gemm_1.get_artifacts(prefix="swiglu_gemm_1_")
         gemm_1_xclbin.extra_flags += [
@@ -113,12 +108,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts.append(eltwise_mul_insts)
 
         gemm_2 = AIEGEMM(
-            M=self.seq_len,
-            K=self.hidden_dim,
-            N=self.embedding_dim,
-            emulate_bf16_mmul_with_bfp16=False,
-            prio_accuracy=True,
-            round_conv_even=True,
+            M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
         )
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
