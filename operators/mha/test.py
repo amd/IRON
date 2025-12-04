@@ -25,11 +25,11 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "seq_len,dim,num_heads,num_pipelines", regular_params, ids=regular_names
+)
 def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     golden_ref = generate_golden_reference(
         S_q=seq_len,
@@ -61,9 +61,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     )
 
     error_threshold = 0.005
-    max_acceptable_errors = int(
-        seq_len * dim * num_heads * error_threshold
-    )
+    max_acceptable_errors = int(seq_len * dim * num_heads * error_threshold)
 
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
@@ -73,17 +71,18 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
         )
     )
 
-    assert len(errors["O"]) <= max_acceptable_errors, f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
+    assert (
+        len(errors["O"]) <= max_acceptable_errors
+    ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
 
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines",
-                         extensive_params,
-                         ids=extensive_names)
+@pytest.mark.parametrize(
+    "seq_len,dim,num_heads,num_pipelines", extensive_params, ids=extensive_names
+)
 def test_mha_extensive(seq_len, dim, num_heads, num_pipelines, aie_context):
     test_mha(seq_len, dim, num_heads, num_pipelines, aie_context)
-

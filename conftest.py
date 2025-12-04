@@ -58,8 +58,10 @@ class CSVReporter:
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
 
     def add_result(self, test_name, passed, captured_output, metric_patterns):
-        self.test_metrics.setdefault(test_name, {}).setdefault("passed", []).append(passed)
-        
+        self.test_metrics.setdefault(test_name, {}).setdefault("passed", []).append(
+            passed
+        )
+
         for metric_name, pattern in metric_patterns.items():
             match = re.search(pattern, captured_output)
             if not match:
@@ -84,7 +86,9 @@ class CSVReporter:
                     row[f"{metric_name} (median)"] = statistics.median(values)
                     row[f"{metric_name} (min)"] = min(values)
                     row[f"{metric_name} (max)"] = max(values)
-                    row[f"{metric_name} (stddev)"] = statistics.stdev(values) if len(values) > 1 else 0.0
+                    row[f"{metric_name} (stddev)"] = (
+                        statistics.stdev(values) if len(values) > 1 else 0.0
+                    )
             self.results.append(row)
 
     def write_csv(self):
@@ -122,20 +126,22 @@ def pytest_runtest_makereport(item, call):
             # The pytest nodeid looks like this:
             # operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
             # Extract only the stem out of that.
-            nodeid_components = re.match(r"^(.+?)::(.+?)\[(iter\d+-)?(.+?)\]$", item.nodeid)
+            nodeid_components = re.match(
+                r"^(.+?)::(.+?)\[(iter\d+-)?(.+?)\]$", item.nodeid
+            )
             if not nodeid_components:
                 raise RuntimeError(f"Unexpected test nodeid format: {item.nodeid}")
-            test_name = nodeid_components.group(4) 
-            
+            test_name = nodeid_components.group(4)
+
             passed = report.outcome == "passed"
             captured = report.capstdout
-            
+
             # Get metric patterns from test item's markers
             metric_patterns = {}
             for marker in item.iter_markers("metrics"):
                 metric_patterns = marker.kwargs
                 break
-            
+
             csv_reporter.add_result(test_name, passed, captured, metric_patterns)
 
 
@@ -157,7 +163,7 @@ def pytest_sessionfinish(session, exitstatus):
 def pytest_generate_tests(metafunc):
     """Generate multiple iterations of each test for statistics gathering"""
     iterations = metafunc.config.getoption("--iterations")
-    
+
     if iterations > 1:
         metafunc.fixturenames.append("_iteration")
         metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")

@@ -16,7 +16,7 @@ from operators.common.test_utils import run_test
 def generate_test_params(extensive=False):
     input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
     group_size = 32
-    
+
     params = []
     names = []
     for input_length in input_lengths:
@@ -31,9 +31,14 @@ def generate_test_params(extensive=False):
 
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
-                    names.append(f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}")
-                    params.append((input_length, num_columns, num_channels, tile_size, group_size))
+                    names.append(
+                        f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+                    )
+                    params.append(
+                        (input_length, num_columns, num_channels, tile_size, group_size)
+                    )
     return params, names
+
 
 regular_params, regular_names = generate_test_params(extensive=False)
 extensive_params, extensive_names = generate_test_params(extensive=True)
@@ -41,12 +46,16 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,group_size",
-                         regular_params,
-                         ids=regular_names)
-def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,group_size",
+    regular_params,
+    ids=regular_names,
+)
+def test_dequant(
+    input_length, num_aie_columns, num_channels, tile_size, group_size, aie_context
+):
     golden_ref = generate_golden_reference(
         input_length=input_length,
         tile_size=tile_size,
@@ -79,11 +88,15 @@ def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_s
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,group_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_dequant_extensive(input_length, num_aie_columns, num_channels, tile_size, group_size):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,group_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_dequant_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, group_size
+):
     test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size)

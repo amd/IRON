@@ -56,7 +56,9 @@ class AIEMHA(AIEOperatorBase):
 
         # Define source files
         mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
-        softmax_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc")
+        softmax_source = str(
+            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+        )
         mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
         passthrough_source = str(
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"

@@ -21,7 +21,13 @@ class AIEAXPY(AIEOperatorBase):
     """AIE-accelerated aX + Y operator"""
 
     def __init__(
-        self, size, num_aie_columns, num_channels, tile_size, scalar_factor=0.01, context=None
+        self,
+        size,
+        num_aie_columns,
+        num_channels,
+        tile_size,
+        scalar_factor=0.01,
+        context=None,
     ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
@@ -64,7 +70,10 @@ class AIEAXPY(AIEOperatorBase):
                     f"axpy.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "generic" / "axpy.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "generic"
+                            / "axpy.cc"
                         )
                     ],
                 ),

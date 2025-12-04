@@ -99,7 +99,10 @@ class AIERMSNorm(AIEOperatorBase):
                             "mul.o",
                             depends=[
                                 SourceArtifact.new(
-                                    self.context.base_dir / "aie_kernels" / "generic" / "mul.cc"
+                                    self.context.base_dir
+                                    / "aie_kernels"
+                                    / "generic"
+                                    / "mul.cc"
                                 )
                             ],
                         ),

@@ -19,7 +19,15 @@ from operators.common import (
 
 class AIEDequant(AIEOperatorBase):
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size, group_size=32, context=None):
+    def __init__(
+        self,
+        size,
+        num_aie_columns,
+        num_channels,
+        tile_size,
+        group_size=32,
+        context=None,
+    ):
         # Store num_aie_columns in self.num_columns for internal use (following the pattern)
         self.num_columns = num_aie_columns
 

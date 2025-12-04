@@ -64,7 +64,10 @@ class AIEMemCopy(AIEOperatorBase):
                 "mem_copy.o",
                 depends=[
                     SourceArtifact.new(
-                        self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+                        self.context.base_dir
+                        / "aie_kernels"
+                        / "generic"
+                        / "passThrough.cc"
                     )
                 ],
             )

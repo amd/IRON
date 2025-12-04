@@ -21,7 +21,13 @@ from operators.common import (
 class AIESoftmax(AIEOperatorBase):
 
     def __init__(
-        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None, context=None
+        self,
+        rows: int,
+        cols: int,
+        num_aie_columns=1,
+        num_channels=1,
+        tile_size=None,
+        context=None,
     ):
         self.size = rows * cols
         self.tile_size = tile_size if tile_size is not None else cols
@@ -64,7 +70,10 @@ class AIESoftmax(AIEOperatorBase):
                     f"softmax.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "aie2p"
+                            / "softmax.cc"
                         )
                     ],
                 ),

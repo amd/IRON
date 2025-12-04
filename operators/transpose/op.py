@@ -71,7 +71,10 @@ class AIETranspose(AIEOperatorBase):
                     f"transpose_{self.m}x{self.n}.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "generic" / "transpose.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "generic"
+                            / "transpose.cc"
                         )
                     ],
                     extra_flags=[

@@ -16,7 +16,7 @@ from operators.common.test_utils import run_test
 def generate_test_params(extensive=False):
     input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
     bypass_modes = [False] if not extensive else [False, True]
-    
+
     params = []
     names = []
 
@@ -36,8 +36,18 @@ def generate_test_params(extensive=False):
 
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
-                            names.append(f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}")
-                            params.append((input_length, num_cores, num_channels, bypass, tile_size))
+                            names.append(
+                                f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
+                            )
+                            params.append(
+                                (
+                                    input_length,
+                                    num_cores,
+                                    num_channels,
+                                    bypass,
+                                    tile_size,
+                                )
+                            )
 
     return params, names
 
@@ -48,12 +58,16 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_cores,num_channels,bypass,tile_size",
-                         regular_params,
-                         ids=regular_names)
-def test_mem_copy(input_length, num_cores, num_channels, bypass, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_cores,num_channels,bypass,tile_size",
+    regular_params,
+    ids=regular_names,
+)
+def test_mem_copy(
+    input_length, num_cores, num_channels, bypass, tile_size, aie_context
+):
     golden_ref = generate_golden_reference(input_length=input_length)
 
     operator = AIEMemCopy(
@@ -65,9 +79,7 @@ def test_mem_copy(input_length, num_cores, num_channels, bypass, tile_size, aie_
         context=aie_context,
     )
 
-    input_buffers = {
-        "input": golden_ref["inout"]
-    }
+    input_buffers = {"input": golden_ref["inout"]}
     output_buffers = {"output": golden_ref["inout"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
@@ -82,11 +94,15 @@ def test_mem_copy(input_length, num_cores, num_channels, bypass, tile_size, aie_
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_cores,num_channels,bypass,tile_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_mem_copy_extensive(input_length, num_cores, num_channels, bypass, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_cores,num_channels,bypass,tile_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_mem_copy_extensive(
+    input_length, num_cores, num_channels, bypass, tile_size, aie_context
+):
     test_mem_copy(input_length, num_cores, num_channels, bypass, tile_size, aie_context)

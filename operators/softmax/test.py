@@ -30,12 +30,13 @@ def get_optimal_columns_channels(input_length, tile_size):
     else:
         return 2, 2  # Default fallback
 
+
 def generate_test_params(extensive=False):
     max_aie_columns = 8
     num_channels = 2
     input_lengths = [4096] if not extensive else []
     tile_sizes = [1024, 512, 2048]
-    
+
     params = []
     names = []
     for input_length in input_lengths:
@@ -43,7 +44,9 @@ def generate_test_params(extensive=False):
             optimal_columns, optimal_channels = get_optimal_columns_channels(
                 input_length, tile_size
             )
-            names.append(f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}")
+            names.append(
+                f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
+            )
             params.append((input_length, optimal_columns, optimal_channels, tile_size))
     return params, names
 
@@ -54,11 +57,13 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    regular_params,
+    ids=regular_names,
+)
 def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context):
 
     rows = input_length // tile_size
@@ -90,11 +95,15 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_softmax_extensive(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_softmax_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, aie_context
+):
     test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context)

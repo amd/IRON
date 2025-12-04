@@ -22,7 +22,14 @@ from operators.common import (
 class AIEElementwiseAdd(AIEOperatorBase):
     """AIE-accelerated element-wise addition"""
 
-    def __init__(self, size, num_aie_columns=None, num_channels=None, tile_size=None, context=None):
+    def __init__(
+        self,
+        size,
+        num_aie_columns=None,
+        num_channels=None,
+        tile_size=None,
+        context=None,
+    ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size

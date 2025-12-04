@@ -25,7 +25,10 @@ def generate_test_params(extensive=False):
         (2048, 8192, 8, 1),
         (8192, 2048, 8, 4),
     ]
-    names = [f"matrix_vector_mul_{M}x{K}_{tile_size}_{num_aie_columns}col" for M, K, num_aie_columns, tile_size in params]
+    names = [
+        f"matrix_vector_mul_{M}x{K}_{tile_size}_{num_aie_columns}col"
+        for M, K, num_aie_columns, tile_size in params
+    ]
     return params, names
 
 
@@ -36,16 +39,20 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s"
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
-@pytest.mark.parametrize("M,K,num_aie_columns,tile_size",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size", regular_params, ids=regular_names
+)
 def test_gemv(M, K, num_aie_columns, tile_size, aie_context):
     golden_ref = generate_golden_reference(M=M, K=K)
 
     operator = AIEGEMV(
-        M=M, K=K, num_aie_columns=num_aie_columns, tile_size=tile_size, context=aie_context
+        M=M,
+        K=K,
+        num_aie_columns=num_aie_columns,
+        tile_size=tile_size,
+        context=aie_context,
     )
 
     input_buffers = {"matrix": golden_ref["A"].flatten(), "vector": golden_ref["B"]}
@@ -70,8 +77,8 @@ def test_gemv(M, K, num_aie_columns, tile_size, aie_context):
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("M,K,num_aie_columns,tile_size",
-                         extensive_params,
-                         ids=extensive_names)
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size", extensive_params, ids=extensive_names
+)
 def test_gemv_extensive(M, K, num_aie_columns, tile_size, aie_context):
     test_gemv(M, K, num_aie_columns, tile_size, aie_context)

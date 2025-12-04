@@ -17,7 +17,7 @@ def generate_test_params(extensive=False):
     max_aie_columns = 8
     num_channels_choices = [1, 2]
     input_lengths = [2048] if not extensive else [1024, 4096, 8192]
-    
+
     params = []
     names = []
     for input_length in input_lengths:
@@ -29,8 +29,12 @@ def generate_test_params(extensive=False):
                     tile_size = 8192
                 check_length = tile_size * total_cores
                 if check_length == input_length:
-                    names.append(f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}")
-                    params.append((input_length, num_aie_columns, num_channels, tile_size))
+                    names.append(
+                        f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+                    )
+                    params.append(
+                        (input_length, num_aie_columns, num_channels, tile_size)
+                    )
     return params, names
 
 
@@ -40,11 +44,13 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    regular_params,
+    ids=regular_names,
+)
 def test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
@@ -71,11 +77,15 @@ def test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_contex
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_gelu_extensive(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_gelu_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, aie_context
+):
     test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_context)

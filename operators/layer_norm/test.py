@@ -27,8 +27,12 @@ def generate_test_params(extensive=False):
                     tile_size = 8192
                 check_length = tile_size * total_cores
                 if check_length == input_length:
-                    names.append(f"layer_norm_{num_aie_columns}_cols_{num_channels_layer}_channels_{input_length}_tile_{tile_size}")
-                    params.append((input_length, num_aie_columns, num_channels_layer, tile_size))
+                    names.append(
+                        f"layer_norm_{num_aie_columns}_cols_{num_channels_layer}_channels_{input_length}_tile_{tile_size}"
+                    )
+                    params.append(
+                        (input_length, num_aie_columns, num_channels_layer, tile_size)
+                    )
     return params, names
 
 
@@ -38,12 +42,16 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         regular_params,
-                         ids=regular_names)
-def test_layer_norm(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    regular_params,
+    ids=regular_names,
+)
+def test_layer_norm(
+    input_length, num_aie_columns, num_channels, tile_size, aie_context
+):
 
     rows = input_length // tile_size
     cols = tile_size
@@ -72,11 +80,15 @@ def test_layer_norm(input_length, num_aie_columns, num_channels, tile_size, aie_
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_layer_norm_extensive(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_layer_norm_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, aie_context
+):
     test_layer_norm(input_length, num_aie_columns, num_channels, tile_size, aie_context)

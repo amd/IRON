@@ -21,19 +21,34 @@ def generate_test_params(extensive=False):
     num_aie_columns = 2
     col_maj = [(False, False), (True, False), (False, True)]
     trace_size = 0
-    
+
     params = []
     names = []
-    
+
     for b_col_maj, c_col_maj in col_maj:
         for M in M_list:
             for K in K_list:
                 for N in N_list:
                     if N == 8192 and K == 8192:
                         continue  # Untested combination because huge & slow, unused in our application
-                    params.append((M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size))
-                    names.append(f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}_cols_{int(b_col_maj)}_bcolmaj_{int(c_col_maj)}_ccolmaj_{trace_size}")
-    
+                    params.append(
+                        (
+                            M,
+                            K,
+                            N,
+                            num_aie_columns,
+                            b_col_maj,
+                            c_col_maj,
+                            m,
+                            k,
+                            n,
+                            trace_size,
+                        )
+                    )
+                    names.append(
+                        f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}_cols_{int(b_col_maj)}_bcolmaj_{int(c_col_maj)}_ccolmaj_{trace_size}"
+                    )
+
     return params, names
 
 
@@ -44,12 +59,16 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s"
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
-@pytest.mark.parametrize("M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
-                         regular_params,
-                         ids=regular_names)
-def test_gemm(M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context):
+@pytest.mark.parametrize(
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
+    regular_params,
+    ids=regular_names,
+)
+def test_gemm(
+    M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context
+):
     golden_ref = generate_golden_reference(
         M=M,
         K=K,
@@ -92,12 +111,17 @@ def test_gemm(M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_siz
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s"
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
-                         extensive_params,
-                         ids=extensive_names)
-def test_gemm_extensive(M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context):
-    test_gemm(M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context)
-
+@pytest.mark.parametrize(
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_gemm_extensive(
+    M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context
+):
+    test_gemm(
+        M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, aie_context
+    )

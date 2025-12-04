@@ -76,7 +76,10 @@ class AIERope(AIEOperatorBase):
                     f"rope_{self.method_type}.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "generic" / "rope.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "generic"
+                            / "rope.cc"
                         )
                     ],
                     extra_flags=[

@@ -17,7 +17,7 @@ def generate_test_params(extensive=False):
     max_aie_columns = 8
     num_channels = 2
     input_lengths = [2048] if not extensive else [1024, 4096, 8192]
-    
+
     params = []
     names = []
     for weighted in [False, True]:
@@ -38,10 +38,22 @@ def generate_test_params(extensive=False):
                         check_length = tile_size * num_aie_columns
                     if check_length == input_length:
                         if not weighted:
-                            names.append(f"rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_tile_{tile_size}")
+                            names.append(
+                                f"rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_tile_{tile_size}"
+                            )
                         else:
-                            names.append(f"weighted_rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_weights_{tile_size}")
-                        params.append((input_length, num_aie_columns, num_channels_rms, tile_size, weighted))
+                            names.append(
+                                f"weighted_rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_weights_{tile_size}"
+                            )
+                        params.append(
+                            (
+                                input_length,
+                                num_aie_columns,
+                                num_channels_rms,
+                                tile_size,
+                                weighted,
+                            )
+                        )
 
     return params, names
 
@@ -52,12 +64,16 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,weighted",
-                         regular_params,
-                         ids=regular_names)
-def test_rms_norm(input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,weighted",
+    regular_params,
+    ids=regular_names,
+)
+def test_rms_norm(
+    input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
+):
     rows = input_length // tile_size
     cols = tile_size
     golden_ref = generate_golden_reference(rows=rows, cols=cols, weighted=weighted)
@@ -88,11 +104,17 @@ def test_rms_norm(input_length, num_aie_columns, num_channels, tile_size, weight
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,weighted",
-                         extensive_params,
-                         ids=extensive_names)
-def test_rms_norm_extensive(input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context):
-    test_rms_norm(input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context)
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,weighted",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_rms_norm_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
+):
+    test_rms_norm(
+        input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
+    )

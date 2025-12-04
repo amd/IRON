@@ -20,7 +20,9 @@ from operators.common import (
 class AIELayerNorm(AIEOperatorBase):
     """AIE-accelerated LAYER NORM operator"""
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size, trace_size=0, context=None):
+    def __init__(
+        self, size, num_aie_columns, num_channels, tile_size, trace_size=0, context=None
+    ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
@@ -64,7 +66,10 @@ class AIELayerNorm(AIEOperatorBase):
                     f"layer_norm.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "aie2p" / "layer_norm.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "aie2p"
+                            / "layer_norm.cc"
                         )
                     ],
                 ),

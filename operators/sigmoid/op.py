@@ -64,7 +64,10 @@ class AIESigmoid(AIEOperatorBase):
                     f"sigmoid.o",
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / "aie2p" / "sigmoid.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "aie2p"
+                            / "sigmoid.cc"
                         )
                     ],
                 ),

@@ -19,14 +19,14 @@ def generate_test_params(extensive=False):
 
     max_aie_columns = 8
     num_channels = 2
-    
+
     if not extensive:
         input_lengths = [4096]
         method_types = [0]  # 0: Two-halves method
     else:
         input_lengths = [1024, 8192]
         method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
-    
+
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
             tile_size = input_length // num_aie_columns
@@ -35,9 +35,19 @@ def generate_test_params(extensive=False):
             check_length = tile_size * num_aie_columns
             if check_length == input_length:
                 for method_type in method_types:
-                    names.append(f"rope_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{method_type}")
-                    params.append((input_length, num_aie_columns, num_channels, tile_size, method_type))
-    
+                    names.append(
+                        f"rope_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{method_type}"
+                    )
+                    params.append(
+                        (
+                            input_length,
+                            num_aie_columns,
+                            num_channels,
+                            tile_size,
+                            method_type,
+                        )
+                    )
+
     return params, names
 
 
@@ -47,11 +57,13 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("length,aie_columns,channels,tile_size,method_type",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "length,aie_columns,channels,tile_size,method_type",
+    regular_params,
+    ids=regular_names,
+)
 def test_rope(length, aie_columns, channels, tile_size, method_type, aie_context):
     rows = length // tile_size
     cols = tile_size
@@ -88,11 +100,14 @@ def test_rope(length, aie_columns, channels, tile_size, method_type, aie_context
 @pytest.mark.extensive
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("length,aie_columns,channels,tile_size,method_type",
-                         extensive_params,
-                         ids=extensive_names)
-def test_rope_extensive(length, aie_columns, channels, tile_size, method_type, aie_context):
+@pytest.mark.parametrize(
+    "length,aie_columns,channels,tile_size,method_type",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_rope_extensive(
+    length, aie_columns, channels, tile_size, method_type, aie_context
+):
     test_rope(length, aie_columns, channels, tile_size, method_type, aie_context)
-

@@ -18,7 +18,7 @@ def generate_test_params(extensive=False):
     num_channels = 2
     input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
     scalar_factors = [3.0] if not extensive else [3.0, 10.0]
-    
+
     params = []
     names = []
     for input_length in input_lengths:
@@ -27,8 +27,12 @@ def generate_test_params(extensive=False):
             if tile_size * num_aie_columns != input_length:
                 continue
             for scalar in scalar_factors:
-                names.append(f"axpy_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{scalar}")
-                params.append((input_length, num_aie_columns, num_channels, tile_size, scalar))
+                names.append(
+                    f"axpy_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{scalar}"
+                )
+                params.append(
+                    (input_length, num_aie_columns, num_channels, tile_size, scalar)
+                )
     return params, names
 
 
@@ -38,15 +42,18 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
-                         regular_params,
-                         ids=regular_names)
-def test_axpy(input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context):
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
+    regular_params,
+    ids=regular_names,
+)
+def test_axpy(
+    input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context
+):
     golden_ref = generate_golden_reference(
-        input_length=input_length,
-        scalar=scalar_factor
+        input_length=input_length, scalar=scalar_factor
     )
 
     operator = AIEAXPY(
@@ -73,11 +80,22 @@ def test_axpy(input_length, num_aie_columns, num_channels, tile_size, scalar_fac
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.extensive
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
-                         extensive_params,
-                         ids=extensive_names)
-def test_axpy_extensive(input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context):
-    test_axpy(input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context)
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_axpy_extensive(
+    input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context
+):
+    test_axpy(
+        input_length,
+        num_aie_columns,
+        num_channels,
+        tile_size,
+        scalar_factor,
+        aie_context,
+    )

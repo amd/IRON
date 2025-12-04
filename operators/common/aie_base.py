@@ -23,14 +23,14 @@ class AIEOperatorBase(ABC):
     @classmethod
     def get_default_context(cls):
         """One global 'default' context if none is specified"""
-        if not hasattr(cls, '_default_context'):
+        if not hasattr(cls, "_default_context"):
             cls._default_context = AIEContext()
         return cls._default_context
 
     def __init__(self, context=None):
         self.artifacts = (
             []
-        ) # CompilationArtifact objects are uniqued within the context
+        )  # CompilationArtifact objects are uniqued within the context
         self.kernels = {}  # Name -> (xclbin_path, xclbin_kernel_name, insts_path)
         self.buffers = {}  # Name -> required buffer size in bytes
         self.buffer_static_data = {}
@@ -73,7 +73,9 @@ class AIEOperatorBase(ABC):
             if static_data_bytes not in self.context.static_data_pool:
                 self.context.static_data_pool[static_data_bytes] = None
             self.buffer_static_data[name] = next(
-                k for k, v in self.context.static_data_pool.items() if k == static_data_bytes
+                k
+                for k, v in self.context.static_data_pool.items()
+                if k == static_data_bytes
             )
 
     def add_to_runlist(self, kernel_name, *args):
@@ -136,7 +138,10 @@ class AIEOperatorBase(ABC):
             ),
             comp.ArchiveCompilationRule(context.peano_dir, dry_run=dry_run),
             comp.AieccCompilationRule(
-                context.build_dir, context.peano_dir, context.mlir_aie_dir, dry_run=dry_run
+                context.build_dir,
+                context.peano_dir,
+                context.mlir_aie_dir,
+                dry_run=dry_run,
             ),
         ]
         if work_list:

@@ -26,15 +26,13 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", 
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy", regular_params, ids=regular_names
+)
 def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
-    golden_ref = generate_golden_reference(
-        M=seq_len, K=embedding_dim, N=hidden_dim
-    )
+    golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
     operator = AIESwiGLUPrefill(
         seq_len=seq_len,
@@ -90,11 +88,14 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
 @pytest.mark.extensive
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", 
-                         extensive_params,
-                         ids=extensive_names)
-def test_swiglu_prefill_extensive(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy",
+    extensive_params,
+    ids=extensive_names,
+)
+def test_swiglu_prefill_extensive(
+    seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context
+):
     test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context)
-

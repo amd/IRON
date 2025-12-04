@@ -22,8 +22,7 @@ def generate_test_params(extensive=False):
     s_list = [8]
     m = 64
     n = 64
-    
-    
+
     for M in input_lengths:
         for N in n_list:
             for s in s_list:
@@ -39,9 +38,11 @@ def generate_test_params(extensive=False):
                         length = M * N
                         if check_length != length:
                             continue
-                        names.append(f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s")
+                        names.append(
+                            f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s"
+                        )
                         params.append((M, N, num_aie_columns, num_channels, m, n, s))
-    
+
     return params, names
 
 
@@ -51,11 +52,11 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s",
-                         regular_params,
-                         ids=regular_names)
+@pytest.mark.parametrize(
+    "M,N,aie_columns,channels,m,n,s", regular_params, ids=regular_names
+)
 def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     golden_ref = generate_golden_reference(rows=M, cols=N)
 
@@ -86,11 +87,10 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
 @pytest.mark.extensive
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s",
-                         extensive_params,
-                         ids=extensive_names)
+@pytest.mark.parametrize(
+    "M,N,aie_columns,channels,m,n,s", extensive_params, ids=extensive_names
+)
 def test_transpose_extensive(M, N, aie_columns, channels, m, n, s, aie_context):
     test_transpose(M, N, aie_columns, channels, m, n, s, aie_context)
-

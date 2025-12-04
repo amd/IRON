@@ -23,7 +23,9 @@ from operators.common.utils import torch_to_numpy
 
 class AIESwiGLUPrefill(AIEOperatorBase):
 
-    def __init__(self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None):
+    def __init__(
+        self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None
+    ):
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
