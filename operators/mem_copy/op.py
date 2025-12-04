@@ -19,7 +19,7 @@ from operators.common import (
 
 class AIEMemCopy(AIEOperatorBase):
 
-    def __init__(self, size, num_cores, num_channels, bypass, tile_size):
+    def __init__(self, size, num_cores, num_channels, bypass, tile_size, context=None):
         self.size = size
         self.num_cores = num_cores
         self.num_channels = num_channels
@@ -32,7 +32,7 @@ class AIEMemCopy(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
@@ -48,7 +48,7 @@ class AIEMemCopy(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_mem_copy",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 size,
                 self.num_cores,
                 self.num_channels,
@@ -64,7 +64,7 @@ class AIEMemCopy(AIEOperatorBase):
                 "mem_copy.o",
                 depends=[
                     SourceArtifact.new(
-                        self.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+                        self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
                     )
                 ],
             )

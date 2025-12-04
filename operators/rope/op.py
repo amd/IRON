@@ -27,6 +27,7 @@ class AIERope(AIEOperatorBase):
         num_aie_columns=None,
         num_channels=None,
         method_type=0,
+        context=None,
     ):
         self.size = size
         self.tile_size = last_dim
@@ -45,7 +46,7 @@ class AIERope(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         # Compilation artifacts
@@ -57,7 +58,7 @@ class AIERope(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="rope",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_aie_columns,
                 self.num_channels,
@@ -75,7 +76,7 @@ class AIERope(AIEOperatorBase):
                     f"rope_{self.method_type}.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "generic" / "rope.cc"
+                            self.context.base_dir / "aie_kernels" / "generic" / "rope.cc"
                         )
                     ],
                     extra_flags=[

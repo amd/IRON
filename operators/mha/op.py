@@ -29,6 +29,7 @@ class AIEMHA(AIEOperatorBase):
         d: int,
         num_KV_heads: int,
         num_of_pipelines: int = 1,
+        context=None,
     ):
         self.num_heads = num_heads
         self.seq_len = seq_len
@@ -43,7 +44,7 @@ class AIEMHA(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         # Set up compilation artifacts
@@ -54,11 +55,11 @@ class AIEMHA(AIEOperatorBase):
         file_name_base = f"mha_{self.num_heads}h_{kv_heads}kv_{self.seq_len}s_{self.d}d"
 
         # Define source files
-        mm_source = str(self.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
-        softmax_source = str(self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc")
-        mha_source = str(self.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
+        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
+        softmax_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc")
+        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
         passthrough_source = str(
-            self.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+            self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
 
         # Compile mm.cc (col-major)

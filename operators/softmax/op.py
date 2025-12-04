@@ -21,7 +21,7 @@ from operators.common import (
 class AIESoftmax(AIEOperatorBase):
 
     def __init__(
-        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None
+        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None, context=None
     ):
         self.size = rows * cols
         self.tile_size = tile_size if tile_size is not None else cols
@@ -35,7 +35,7 @@ class AIESoftmax(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         # Compilation artifacts
@@ -47,7 +47,7 @@ class AIESoftmax(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="softmax",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,
@@ -64,7 +64,7 @@ class AIESoftmax(AIEOperatorBase):
                     f"softmax.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+                            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
                         )
                     ],
                 ),

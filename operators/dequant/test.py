@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,17 +13,12 @@ from operators.dequant.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-regular_input_lengths = [2048]
-extensive_input_lengths = [1024, 2048, 4096, 8192]
-group_size = 32
-
-regular_test_cases = []
-extensive_test_cases = []
-
-for tests, input_lengths in [
-    (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lengths),
-]:
+def generate_test_params(extensive=False):
+    input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
+    group_size = 32
+    
+    params = []
+    names = []
     for input_length in input_lengths:
         for num_columns in range(1, 9):  # 1 to 8 columns
             for num_channels in range(1, 3):  # 1 or 2 channels
@@ -36,40 +31,34 @@ for tests, input_lengths in [
 
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
-                    test_name = f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-                    cmd = f"-l {input_length} --aie-columns {num_columns} --num-channels {num_channels} --tile-size {tile_size} --group-size {group_size}"
-                    tests.append((test_name, cmd))
+                    names.append(f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}")
+                    params.append((input_length, num_columns, num_channels, tile_size, group_size))
+    return params, names
+
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-l", "--length", type=int, default=2048, help="Input length (output elements)"
-    )
-    parser.add_argument(
-        "--aie-columns", type=int, default=2, help="Number of AIE columns"
-    )
-    parser.add_argument(
-        "--num-channels", type=int, default=1, help="Number of channels"
-    )
-    parser.add_argument("--tile-size", type=int, default=1024, help="Tile size")
-    parser.add_argument(
-        "--group-size", type=int, default=32, help="Group size for dequantization"
-    )
-    args = parser.parse_args()
-
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,group_size",
+                         regular_params,
+                         ids=regular_names)
+def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size):
     golden_ref = generate_golden_reference(
-        input_length=args.length,
-        tile_size=args.tile_size,
-        group_size=args.group_size,
+        input_length=input_length,
+        tile_size=tile_size,
+        group_size=group_size,
     )
 
     operator = AIEDequant(
-        size=args.length,
-        num_aie_columns=args.aie_columns,
-        num_channels=args.num_channels,
-        tile_size=args.tile_size,
-        group_size=args.group_size,
+        size=input_length,
+        num_aie_columns=num_aie_columns,
+        num_channels=num_channels,
+        tile_size=tile_size,
+        group_size=group_size,
     )
 
     input_buffers = {
@@ -84,13 +73,16 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
+    assert not errors, f"Test failed with errors: {errors}"
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.extensive
+@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,group_size",
+                         extensive_params,
+                         ids=extensive_names)
+def test_dequant_extensive(input_length, num_aie_columns, num_channels, tile_size, group_size):
+    test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size)

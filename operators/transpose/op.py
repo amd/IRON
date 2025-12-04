@@ -20,7 +20,7 @@ from operators.common import (
 class AIETranspose(AIEOperatorBase):
     """AIE-accelerated transpose operator"""
 
-    def __init__(self, M, N, num_aie_columns, num_channels, m, n, s):
+    def __init__(self, M, N, num_aie_columns, num_channels, m, n, s, context=None):
         self.M = M
         self.N = N
         self.m = m
@@ -40,7 +40,7 @@ class AIETranspose(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
@@ -51,7 +51,7 @@ class AIETranspose(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="shuffle_transpose",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.M,
                 self.N,
                 self.num_columns,
@@ -71,7 +71,7 @@ class AIETranspose(AIEOperatorBase):
                     f"transpose_{self.m}x{self.n}.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "generic" / "transpose.cc"
+                            self.context.base_dir / "aie_kernels" / "generic" / "transpose.cc"
                         )
                     ],
                     extra_flags=[

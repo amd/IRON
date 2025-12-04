@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,39 +13,39 @@ from operators.swiglu_decode.reference import generate_golden_reference
 from operators.common.test_utils import run_test, verify_buffer
 
 
-# This operation is currently untested except for the integrated llama application tests.
-regular_test_cases = []
+def generate_test_params(extensive=False):
+    # This operation is currently untested except for the integrated llama application tests.
+    params = []
+    names = []
+    return params, names
 
-extensive_test_cases = []
+
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--seq-len", type=int, default=512)
-    parser.add_argument("--embedding-dim", type=int, default=512)
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--prio-accuracy", type=int, default=1)
-    args = parser.parse_args()
-
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", 
+                         regular_params,
+                         ids=regular_names)
+def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
     golden_ref = generate_golden_reference(
-        M=args.seq_len, K=args.embedding_dim, N=args.hidden_dim
+        M=seq_len, K=embedding_dim, N=hidden_dim
     )
 
     operator = AIESwiGLUPrefill(
-        seq_len=args.seq_len,
-        embedding_dim=args.embedding_dim,
-        hidden_dim=args.hidden_dim,
-        prio_accuracy=bool(args.prio_accuracy),
+        seq_len=seq_len,
+        embedding_dim=embedding_dim,
+        hidden_dim=hidden_dim,
+        prio_accuracy=bool(prio_accuracy),
+        context=aie_context,
     )
     operator.weights_1 = golden_ref["w_gate"].T
     operator.weights_2 = golden_ref["w_up"].T
     operator.weights_3 = golden_ref["w_down"].T
-
-    # In the following, some buffers are commented out.
-    # Because this operator calls multiple kernels in sequence, rounding errors due to the smaller bf16 data type accumulate, which can cause it to fail verification.
-    # So, instead of verifying the intermediate and final output buffers against the float32-calculated reference, we calculate another reference for those two buffers:
-    # This reference is based on the previous intermediate results read back from the AIE operator, "resetting"  the accumulated error to zero.
-    # Note that those intermediate results _are_ still verified up to the given tolerance.
 
     input_buffers = {"input": golden_ref["input"]}
     # output_buffers = {'output': golden_ref['output']}
@@ -67,14 +67,14 @@ def main():
     )
 
     ref_2 = operator.read_buffer_as_torch(
-        "left_swished", (args.seq_len, args.hidden_dim)
-    ) * operator.read_buffer_as_torch("right", (args.seq_len, args.hidden_dim))
+        "left_swished", (seq_len, hidden_dim)
+    ) * operator.read_buffer_as_torch("right", (seq_len, hidden_dim))
     errors_2 = verify_buffer(operator, "intermediate", ref_2, rel_tol=0.04, abs_tol=0.4)
     if errors_2:
         errors["intermediate"] = errors_2
 
     ref_3 = (
-        operator.read_buffer_as_torch("intermediate", (args.seq_len, args.hidden_dim))
+        operator.read_buffer_as_torch("intermediate", (seq_len, hidden_dim))
         @ golden_ref["w_down"]
     )
     errors_3 = verify_buffer(operator, "output", ref_3, rel_tol=0.04, abs_tol=0.4)
@@ -84,13 +84,17 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
+    assert not errors, f"Test failed with errors: {errors}"
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+@pytest.mark.extensive
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", 
+                         extensive_params,
+                         ids=extensive_names)
+def test_swiglu_prefill_extensive(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+    test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context)
+

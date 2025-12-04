@@ -31,6 +31,7 @@ class AIERMSNorm(AIEOperatorBase):
         num_channels=None,
         tile_size=None,
         weighted=False,
+        context=None,
     ):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
@@ -55,7 +56,7 @@ class AIERMSNorm(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         # Compilation artifacts
@@ -67,7 +68,7 @@ class AIERMSNorm(AIEOperatorBase):
             import_path=operator_dir / "design_weighted.py",
             callback_fn="my_weighted_rms_norm",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,
@@ -87,7 +88,7 @@ class AIERMSNorm(AIEOperatorBase):
                             f"rms_norm.o",
                             depends=[
                                 SourceArtifact.new(
-                                    self.base_dir
+                                    self.context.base_dir
                                     / "aie_kernels"
                                     / "aie2p"
                                     / "rms_norm.cc"
@@ -98,7 +99,7 @@ class AIERMSNorm(AIEOperatorBase):
                             "mul.o",
                             depends=[
                                 SourceArtifact.new(
-                                    self.base_dir / "aie_kernels" / "generic" / "mul.cc"
+                                    self.context.base_dir / "aie_kernels" / "generic" / "mul.cc"
                                 )
                             ],
                         ),

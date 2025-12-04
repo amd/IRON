@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -11,14 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from operators.softmax.op import AIESoftmax
 from operators.softmax.reference import generate_golden_reference
 from operators.common.test_utils import run_test
-
-
-regular_test_cases = []
-extensive_test_cases = []
-
-regular_input_lengths = [4096]
-regular_tile_sizes = [1024, 512, 2048]
-extensive_input_lengths = []
 
 
 def get_optimal_columns_channels(input_length, tile_size):
@@ -38,44 +30,53 @@ def get_optimal_columns_channels(input_length, tile_size):
     else:
         return 2, 2  # Default fallback
 
-
-for test_cases, input_lengths, tile_sizes in [
-    (regular_test_cases, regular_input_lengths, regular_tile_sizes),
-    (extensive_test_cases, extensive_input_lengths, regular_tile_sizes),
-]:
+def generate_test_params(extensive=False):
+    max_aie_columns = 8
+    num_channels = 2
+    input_lengths = [4096] if not extensive else []
+    tile_sizes = [1024, 512, 2048]
+    
+    params = []
+    names = []
     for input_length in input_lengths:
         for tile_size in tile_sizes:
             optimal_columns, optimal_channels = get_optimal_columns_channels(
                 input_length, tile_size
             )
-            name = f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
-            cmd = f"-l {input_length} --aie-columns {optimal_columns} --channels {optimal_channels} --tile-size {tile_size}"
-            test_cases.append((name, cmd))
+            names.append(f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}")
+            params.append((input_length, optimal_columns, optimal_channels, tile_size))
+    return params, names
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--length", type=int, default=4096)
-    parser.add_argument("--aie-columns", type=int, default=1)
-    parser.add_argument("--channels", type=int, default=1)
-    parser.add_argument("--tile-size", type=int, default=1024)
-    args = parser.parse_args()
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
 
-    rows = args.length // args.tile_size
-    cols = args.tile_size
+
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
+                         regular_params,
+                         ids=regular_names)
+def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+
+    rows = input_length // tile_size
+    cols = tile_size
 
     golden_ref = generate_golden_reference(rows=rows, cols=cols)
 
     operator = AIESoftmax(
         rows=rows,
         cols=cols,
-        num_aie_columns=args.aie_columns,
-        num_channels=args.channels,
-        tile_size=args.tile_size,
+        num_aie_columns=num_aie_columns,
+        num_channels=num_channels,
+        tile_size=tile_size,
+        context=aie_context,
     )
 
-    input_buffers = {"in": golden_ref["input"].flatten()}
-    output_buffers = {"output": golden_ref["output"].flatten()}
+    input_buffers = {"in": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
@@ -84,13 +85,16 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
+    assert not errors, f"Test failed with errors: {errors}"
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s"
+)
+@pytest.mark.extensive
+@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size",
+                         extensive_params,
+                         ids=extensive_names)
+def test_softmax_extensive(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+    test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context)

@@ -32,18 +32,14 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Build
-        uses: ./.github/actions/build
-        with:
-          env_name: ci_env
-          extensive: "true"
-
       - name: Test
         id: test
         continue-on-error: true
         uses: ./.github/actions/test
         with:
           env_name: ci_env
+          extensive: "true"
+          test_suite: "operators"
 
       - name: Commit test results
         id: commit_results
