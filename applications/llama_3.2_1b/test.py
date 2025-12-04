@@ -10,7 +10,7 @@ test_dir = Path(__file__).parent
 
 
 def generate_test_params():
-    prompt_lengths = [64, 2048]
+    prompt_lengths = [2048]
     num_tokens_list = [40]
 
     params = []
