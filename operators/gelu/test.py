@@ -29,8 +29,8 @@ def generate_test_params(extensive=False):
                     tile_size = 8192
                 check_length = tile_size * total_cores
                 if check_length == input_length:
-                names.append(f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}")
-                params.append((input_length, num_aie_columns, num_channels, tile_size))
+                    names.append(f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}")
+                    params.append((input_length, num_aie_columns, num_channels, tile_size))
     return params, names
 
 
