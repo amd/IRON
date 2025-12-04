@@ -46,7 +46,7 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 @pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,group_size",
                          regular_params,
                          ids=regular_names)
-def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size):
+def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_size, aie_context):
     golden_ref = generate_golden_reference(
         input_length=input_length,
         tile_size=tile_size,
@@ -59,6 +59,7 @@ def test_dequant(input_length, num_aie_columns, num_channels, tile_size, group_s
         num_channels=num_channels,
         tile_size=tile_size,
         group_size=group_size,
+        context=aie_context,
     )
 
     input_buffers = {

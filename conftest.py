@@ -76,7 +76,7 @@ class CSVReporter:
                 "Test": test_name,
                 "Checks": f"{sum(data['passed'])}/{len(data['passed'])}",
             }
-            for metric_name, values in data['metrics'].items():
+            for metric_name, values in data.items():
                 if metric_name == "passed":
                     continue
                 if values:
@@ -119,10 +119,13 @@ def pytest_runtest_makereport(item, call):
     if report.when == "call":
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
-            # Strip iteration suffix from test name for aggregation
-            test_name = item.nodeid.split("::")[-1]
-            # Remove [iter0], [iter1], etc. from the name
-            test_name = re.sub(r'\[iter\d+\]$', '', test_name)
+            # The pytest nodeid looks like this:
+            # operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
+            # Extract only the stem out of that.
+            nodeid_components = re.match(r"^(.+?)::(.+?)\[(iter\d+-)?(.+?)\]$", item.nodeid)
+            if not nodeid_components:
+                raise RuntimeError(f"Unexpected test nodeid format: {item.nodeid}")
+            test_name = nodeid_components.group(4) 
             
             passed = report.outcome == "passed"
             captured = report.capstdout
