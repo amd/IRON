@@ -21,7 +21,7 @@ extensive_K_list = [2048, 8192, 64]
 extensive_N_list = [2048, 8192]
 
 m, k, n = 64, 64, 64
-num_aie_columns = 2
+num_aie_columns = 8
 col_maj = [(False, False), (True, False), (False, True)]
 trace_size = 0
 
@@ -58,11 +58,14 @@ def main():
     parser.add_argument("-M", type=int, default=256)
     parser.add_argument("-K", type=int, default=256)
     parser.add_argument("-N", type=int, default=256)
-    parser.add_argument("--aie-columns", type=int, default=2)
+    parser.add_argument("--aie-columns", type=int, default=8)
     parser.add_argument("--prio-accuracy", type=int, default=1)
     parser.add_argument("--emulate-bf16-mmul-with-bfp16", type=int, default=0)
     parser.add_argument("--b-col-maj", type=int, default=0)
     parser.add_argument("--c-col-maj", type=int, default=0)
+    # parser.add_argument("--partition-M", type=int, default=1, help="Partition size for M")
+    # parser.add_argument("--partition-K", type=int, default=1, help="Partition size for K")
+    parser.add_argument("--partition-N", type=int, default=1, help="Partition size for N")
     args = parser.parse_args()
 
     golden_ref = generate_golden_reference(
@@ -73,6 +76,9 @@ def main():
         c_col_maj=bool(args.c_col_maj),
     )
 
+    gemm_config = {
+        "separate_c_tiles": True,
+    }
     operator = AIEGEMM(
         M=args.M,
         K=args.K,
@@ -82,14 +88,29 @@ def main():
         emulate_bf16_mmul_with_bfp16=bool(args.emulate_bf16_mmul_with_bfp16),
         b_col_maj=bool(args.b_col_maj),
         c_col_maj=bool(args.c_col_maj),
+        # partition_M=args.partition_M,
+        # partition_K=args.partition_K,
+        partition_N=args.partition_N,
+        **gemm_config,
     )
 
     input_buffers = {
         "A": golden_ref["input"].flatten(),
-        "B": golden_ref["input_b"].flatten(),
     }
-    output_buffers = {"C": golden_ref["output"].flatten()}
+    output_buffers = {}
 
+    # Create buffers for B split across the columns of input_b
+    for i in range(args.partition_N):
+        col_start = i * (args.N // args.partition_N)
+        col_end = (i + 1) * (args.N // args.partition_N)
+        if args.b_col_maj:
+            input_buffers[f"B_{i}"] = golden_ref["input_b"][col_start:col_end, :].flatten()
+        else:
+            input_buffers[f"B_{i}"] = golden_ref["input_b"][:, col_start:col_end].flatten()
+        if args.c_col_maj:
+            output_buffers[f"C_{i}"] = golden_ref["output"][col_start:col_end, :].flatten()
+        else:
+            output_buffers[f"C_{i}"] = golden_ref["output"][:, col_start:col_end].flatten()
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
     )

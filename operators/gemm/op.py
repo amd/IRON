@@ -33,6 +33,10 @@ class AIEGEMM(AIEOperatorBase):
         tile_m=64,
         tile_k=64,
         tile_n=64,
+        # TODO: Add support for partitioning M and/or K
+        # partition_M=1,
+        # partition_K=1,
+        partition_N=1,
         num_aie_columns=8,
         **gemm_kwargs,
     ):
@@ -53,10 +57,12 @@ class AIEGEMM(AIEOperatorBase):
         # Calls to forward() may supply matrices of different sizes, and the
         # Python code will perform necessary padding/repeated application of
         # the NPU operator.
-        M_padded, K_padded, N_padded = self._get_padded_dims(M, K, N)
+        assert N % partition_N == 0, f"N ({N}) must be divisible by partition_N ({partition_N})"
+        M_padded, K_padded, N_padded = self._get_padded_dims(M, K, N // partition_N)
         self.M = M_padded
         self.K = K_padded
         self.N = N_padded
+        self.partition_N = partition_N
 
         # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
@@ -87,6 +93,7 @@ class AIEGEMM(AIEOperatorBase):
         prio_accuracy = self.gemm_args.get("prio_accuracy", False)
         use_scalar = self.gemm_args.get("use_scalar", False)
         round_conv_even = self.gemm_args.get("round_conv_even", True)
+        separate_c_tiles = self.gemm_args.get("separate_c_tiles", False)
 
         if emulate_bf16_mmul_with_bfp16:
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
@@ -144,6 +151,7 @@ class AIEGEMM(AIEOperatorBase):
                 "use_scalar": use_scalar,
                 "emulate_bf16_mmul_with_bfp16": emulate_bf16_mmul_with_bfp16,
                 "prio_accuracy": prio_accuracy,
+                "separate_c_tiles": int(separate_c_tiles),
                 "trace_size": 0,
                 "archive": kernel_archive,
                 "generate_taps": False,
@@ -226,14 +234,29 @@ class AIEGEMM(AIEOperatorBase):
             self.insts_artifact,
         )
         self.add_buffer("A", self.M * self.K)
-        self.add_buffer("B", self.K * self.N, static_data=static_weights)
-        self.add_buffer("C", self.M * self.N)
-        self.add_to_runlist("gemm", "A", "B", "C")
+        B_parts = self._partition_B(static_weights)
+        for i, B_part in enumerate(B_parts):
+            self.add_buffer(
+                f"B_{i}",
+                self.K * self.N,
+                static_data=B_part,
+            )
+            self.add_buffer(f"C_{i}", self.M * self.N)
+            self.add_to_runlist("gemm", "A", f"B_{i}", f"C_{i}")
 
     def forward(self, A, B=None):
         """Forward pass through GEMM operation: C = A @ B"""
         B_shape = B.shape if B is not None else self.weight.T.shape
-        expected_output_shape = A.shape[:-1] + (B_shape[-1],)
+        if self.b_col_maj:
+            if self.c_col_maj:
+                expected_output_shape = A.shape[:-2] + (B_shape[-2], A.shape[-1])
+            else:
+                expected_output_shape = A.shape[:-1] + (B_shape[-2],)
+        else:
+            if self.c_col_maj:
+                expected_output_shape = A.shape[:-2] + (B_shape[-1], A.shape[-1])
+            else:
+                expected_output_shape = A.shape[:-1] + (B_shape[-1],)
 
         # Remove batch dimension, if any
         if len(A.shape) > 2:
@@ -242,7 +265,10 @@ class AIEGEMM(AIEOperatorBase):
             B = B.view(-1, B_shape[-1])
 
         M, K = A.shape
-        K2, N = B_shape
+        if self.b_col_maj:
+            N, K2 = B_shape
+        else:
+            K2, N = B_shape
 
         applicable = (
             K == K2
@@ -255,23 +281,32 @@ class AIEGEMM(AIEOperatorBase):
 
         A_padded = self._pad_A(torch_to_numpy(A))
         if B is not None:
-            B_padded = self._pad_B(torch_to_numpy(B))
+            B_parts = self._partition_B(torch_to_numpy(B))
         else:
-            B_padded = None
+            B_parts = None
 
         logging.debug(
             f"Executing GEMM for dimensions M={M}, K={K}, N={N} using NPU operator with M={self.M}, K={self.N}, N={self.N}"
         )
 
-        result_padded = np.zeros((M, self.N), dtype=A_padded.dtype)
+        if self.c_col_maj:
+            result_padded = np.zeros((self.N, M), dtype=A_padded.dtype)
+        else:
+            result_padded = np.zeros((M, self.N), dtype=A_padded.dtype)
         for M_lo in range(0, M, self.M):
             A_part = A_padded[M_lo : M_lo + self.M, :]
-            result_part = self._execute_aie_operation(A_part, B_padded)
+            result_part = self._execute_aie_operation(A_part, B_parts)
             max_M = min(M_lo + self.M, M)
-            result_padded[M_lo:max_M, :] = result_part[:max_M, :]
+            if self.c_col_maj:
+                result_padded[:, M_lo:max_M] = result_part[:, :max_M]
+            else:
+                result_padded[M_lo:max_M, :] = result_part[:max_M, :]
 
         # GEMM produces 2D result, reshape to expected output shape
-        result = numpy_to_torch(result_padded[:M, :N])
+        if self.c_col_maj:
+            result = numpy_to_torch(result_padded[:N, :M])
+        else:
+            result = numpy_to_torch(result_padded[:M, :N])
         result = result.view(expected_output_shape)
 
         return result
@@ -301,17 +336,48 @@ class AIEGEMM(AIEOperatorBase):
         return A_padded
 
     def _pad_B(self, B_np):
-        K, N = B_np.shape
+        if self.b_col_maj:
+            N, K = B_np.shape
+        else:
+            K, N = B_np.shape
         B_padded = B_np
         if K != self.K or N != self.N:
-            B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
-            B_padded[:K, :N] = B_np
+            if self.b_col_maj:
+                B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
+                B_padded[:N, :K] = B_np
+            else:
+                B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
+                B_padded[:K, :N] = B_np
         return B_padded
 
-    def _execute_aie_operation(self, A_np, B_np=None):
+    def _partition_B(self, B):
+        B_parts = [None] * self.partition_N
+        if B is None:
+            return B_parts
+        for i in range(self.partition_N):
+            col_start = i * self.N
+            col_end = (i + 1) * self.N
+
+            # Just in case, pad the weights before adding the buffer
+            if self.b_col_maj:
+                B_parts[i] = self._pad_B(B[col_start:col_end, :])
+            else:
+                B_parts[i] = self._pad_B(B[:, col_start:col_end])
+        logging.debug(f"Created {self.partition_N} B buffers with partitions of {self.N} across the columns")
+        return B_parts
+
+
+    def _execute_aie_operation(self, A_np, B_nps=None):
         """Execute GEMM operation on AIE hardware"""
         M, K = A_np.shape
-        K2, N = B_np.shape if B_np is not None else self.weight.T.shape
+        if self.b_col_maj:
+            N, K2 = B_nps[0].shape if B_nps is not None else self.weight.T.shape
+        else:
+            K2, N = B_nps[0].shape if B_nps is not None else self.weight.T.shape
+        if self.c_col_maj:
+            C_shape = (N, M)
+        else:
+            C_shape = (M, N)
 
         # If M is larger than kernel supports, split large GEMMs with many rows
         # into multiple invocations of the kernel. This is only supported for
@@ -321,10 +387,33 @@ class AIEGEMM(AIEOperatorBase):
         assert N == self.N
 
         self.write_buffer("A", A_np)
-        if B_np is not None:
-            self.write_buffer("B", B_np)
+        if B_nps is not None:
+            for i, B_np in enumerate(B_nps):
+                self.add_buffer(
+                    f"B_{i}",
+                    self.M * self.N,
+                    static_data=B_np,
+                )
         self.run_runlist()
-        result_np = self.read_buffer("C", shape=(M, N), dtype=bfloat16)
+        result_nps = []
+        for i in range(self.partition_N):
+            result_nps.append(self.read_buffer(f"C_{i}", shape=C_shape, dtype=bfloat16))
+
+        # Concatenate results to form 2D buffer
+        # Column dimension should be multiple of list length and column dimension of each buffer
+        if self.c_col_maj:
+            # Column-major: each buffer is (N, M)
+            # Concatenate along axis=0 to get (partition_N * N, M)
+            # Then transpose to get final shape (M, partition_N * N)
+            result_np = np.concatenate(
+                result_nps, axis=0
+            ).T  # Shape: (M, partition_N * N)
+        else:
+            # Row-major: each buffer is (M, N)
+            # Concatenate along axis=1 to get (M, partition_N * N)
+            result_np = np.concatenate(
+                result_nps, axis=1
+            )  # Shape: (M, partition_N * N)
 
         # Check for NaN and fail hard
         if np.isnan(result_np).any():

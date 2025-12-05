@@ -60,6 +60,7 @@ def main():
         "--emulate-bf16-mmul-with-bfp16", action="store_true", default=False
     )
     argparser.add_argument("--prio-accuracy", action="store_true", default=False)
+    argparser.add_argument("--separate-c-tiles", type=int, choices=[0, 1], default=0)
     argparser.add_argument(
         "--archive",
         type=str,
@@ -104,6 +105,7 @@ def main():
         args.scalar,
         args.emulate_bf16_mmul_with_bfp16,
         args.prio_accuracy,
+        args.separate_c_tiles,
         args.trace_size,
         args.archive,
         args.generate_taps,
@@ -138,6 +140,7 @@ def my_matmul(
     use_scalar,
     emulate_bf16_mmul_with_bfp16,
     prio_accuracy,
+    separate_c_tiles,
     trace_size,
     archive=None,
     generate_taps=False,
@@ -555,62 +558,119 @@ def my_matmul(
                     # For small input sizes, we may not even need a "pong" iteration
                     break
                 for col in range(n_aie_cols):
-                    # C Output Transfer:
-                    # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
-                    # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
-                    # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
-                    # Each shim will start at a different column offset, transferring interleaved
-                    # columns. For example, shim 0 may transfer the blocks marked 0 below, and shim 1
-                    # may transfer the blocks marked 1.
-                    #
-                    #             N
-                    #      ----------------
-                    #     |0011    0011    |
-                    #     |0011    0011    |
-                    #     |0011    0011    |
-                    # M   |0011    0011    |
-                    #     |                |
-                    #     |                |
-                    #     |                |
-                    #     |                |
-                    #      ----------------
-                    if not c_col_maj:
-                        C_row_offset = row_base * mem_tile_m_C * N
-                        C_col_offset = col * n
-                        C_offset = C_col_offset + C_row_offset
-                        C_sizes = [
-                            current_tb_n_rows,
-                            N // mem_tile_n,
-                            mem_tile_m_C,
-                            n,
-                        ]
-                        C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
-                    else:
-                        C_row_offset = row_base * mem_tile_m_C
-                        C_col_offset = col * n * M
-                        C_offset = C_col_offset + C_row_offset
-                        C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                        C_strides = [M * mem_tile_n, m, M, 1]
-                    C_tile = TensorAccessPattern(
-                        (N, M) if c_col_maj else (M, N),
-                        offset=C_offset,
-                        sizes=C_sizes,
-                        strides=C_strides,
-                    )
+                    if not separate_c_tiles:
+                        # C Output Transfer:
+                        # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
+                        # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
+                        # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
+                        # Each shim will start at a different column offset, transferring interleaved
+                        # columns. For example, shim 0 may transfer the blocks marked 0 below, and shim 1
+                        # may transfer the blocks marked 1.
+                        #
+                        #             N
+                        #      ----------------
+                        #     |0011    0011    |
+                        #     |0011    0011    |
+                        #     |0011    0011    |
+                        # M   |0011    0011    |
+                        #     |                |
+                        #     |                |
+                        #     |                |
+                        #     |                |
+                        #      ----------------
+                        if not c_col_maj:
+                            C_row_offset = row_base * mem_tile_m_C * N
+                            C_col_offset = col * n
+                            C_offset = C_col_offset + C_row_offset
+                            C_sizes = [
+                                current_tb_n_rows,
+                                N // mem_tile_n,
+                                mem_tile_m_C,
+                                n,
+                            ]
+                            C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
+                        else:
+                            C_row_offset = row_base * mem_tile_m_C
+                            C_col_offset = col * n * M
+                            C_offset = C_col_offset + C_row_offset
+                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
+                            C_strides = [M * mem_tile_n, m, M, 1]
+                        C_tile = TensorAccessPattern(
+                            (N, M) if c_col_maj else (M, N),
+                            offset=C_offset,
+                            sizes=C_sizes,
+                            strides=C_strides,
+                        )
 
-                    # This line does not change MLIR output at all - it's just for recording data movement
-                    C_taps.append(C_tile)
+                        # This line does not change MLIR output at all - it's just for recording data movement
+                        C_taps.append(C_tile)
 
-                    rt.drain(
-                        C_l2l3_fifos[col].cons(),
-                        C,
-                        tap=C_tile,
-                        wait=True,
-                        task_group=tg,
-                        placement=Tile(col, 0),
-                    )
+                        rt.drain(
+                            C_l2l3_fifos[col].cons(),
+                            C,
+                            tap=C_tile,
+                            wait=True,
+                            task_group=tg,
+                            placement=Tile(col, 0),
+                        )
 
                     for tile_row in range(current_tb_n_rows):
+                        if separate_c_tiles:
+                            # C Output Transfer:
+                            # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
+                            # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
+                            # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
+                            # Each shim will start at a different column offset, transferring interleaved
+                            # columns. For example, shim 0 may transfer the blocks marked 0 below, and shim 1
+                            # may transfer the blocks marked 1.
+                            #
+                            #             N
+                            #      ----------------
+                            #     |0011    0011    |
+                            #     |0011    0011    |
+                            #     |0011    0011    |
+                            # M   |0011    0011    |
+                            #     |                |
+                            #     |                |
+                            #     |                |
+                            #     |                |
+                            #      ----------------
+                            C_col_offset = col * n if not c_col_maj else col * n * M
+                            if not c_col_maj:
+                                C_block_offset = (
+                                    (row_base + tile_row) * n_aie_rows * m * N
+                                )  # base address for this transfer block for all BDs
+                                C_offset = C_col_offset + C_block_offset
+                                C_sizes = [
+                                    1,
+                                    n_c_col_tiles_per_core,
+                                    mem_tile_m_C,
+                                    n,
+                                ]
+                                C_strides = [0, mem_tile_n, N, 1]
+                            else:
+                                C_block_offset = (
+                                    (row_base + tile_row) * n_aie_rows * m
+                                )  # base address for this transfer block for all BDs
+                                C_offset = C_col_offset + C_block_offset
+                                C_sizes = [n_c_col_tiles_per_core, 1, n, m]
+                                C_strides = [M * mem_tile_n, 0, M, 1]
+                            C_tile = TensorAccessPattern(
+                                (N, M) if c_col_maj else (M, N),
+                                offset=C_offset,
+                                sizes=C_sizes,
+                                strides=C_strides,
+                            )
+                            rt.drain(
+                                C_l2l3_fifos[col].cons(),
+                                C,
+                                tap=C_tile,
+                                wait=True,
+                                task_group=tg,
+                                placement=Tile(col, 0),
+                            )
+                            # This line does not change MLIR output at all - it's just for recording data movement
+                            C_taps.append(C_tile)
 
                         # A input transfer:
                         #
