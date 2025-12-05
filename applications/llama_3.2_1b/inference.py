@@ -299,7 +299,7 @@ def inference(
 
     logging.info("Preparing AIE operators...")
     # At this point the model is fully described (operators and their dimensions and how to compile them)
-    AIEOperatorBase.get_default_context().compile_all_operators()
+    AIEOperatorBase.get_default_context().compile_all()
     AIEOperatorBase.get_default_context().prepare_runtime()
     logging.info("AIE operator preparation completed.")
     print(f"Starting text generation...")
