@@ -559,7 +559,7 @@ def my_matmul(
                     break
                 for col in range(n_aie_cols):
                     if not separate_c_tiles:
-                        # C Output Transfer:
+                        # C Output Transfer for smaller N dimensions:
                         # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
                         # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
                         # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
@@ -616,10 +616,9 @@ def my_matmul(
 
                     for tile_row in range(current_tb_n_rows):
                         if separate_c_tiles:
-                            # C Output Transfer:
-                            # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
-                            # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
-                            # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
+                            # C Output Transfer for larger N dimensions:
+                            # The smallest transfer unit is an (m)-x-(n)-sized sub-tile of the matrix.
+                            # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced.
                             # Each shim will start at a different column offset, transferring interleaved
                             # columns. For example, shim 0 may transfer the blocks marked 0 below, and shim 1
                             # may transfer the blocks marked 1.
@@ -627,9 +626,9 @@ def my_matmul(
                             #             N
                             #      ----------------
                             #     |0011    0011    |
-                            #     |0011    0011    |
-                            #     |0011    0011    |
-                            # M   |0011    0011    |
+                            #     |                |
+                            #     |                |
+                            # M   |                |
                             #     |                |
                             #     |                |
                             #     |                |
