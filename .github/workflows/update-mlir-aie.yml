@@ -75,7 +75,12 @@ jobs:
           git push --set-upstream origin $new_branch
           
           # Create Pull Request
-          gh pr create --base devel --head $new_branch --title "Update mlir-aie to ${{ steps.latest_release.outputs.tag_with_v }}" --body "This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}"
+          sed 's/Describe the intent of your PR here./This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}./' .github/PULL_REQUEST_TEMPLATE.md | \
+          gh pr create \
+            --base devel \
+            --head $new_branch \
+            --title "Update mlir-aie from v${{ steps.current_version.outputs.version }} to ${{ steps.latest_release.outputs.tag_with_v }}" \
+            --body-file -
           
       - name: No new version found
         if: steps.current_version.outputs.version == steps.latest_release.outputs.tag
