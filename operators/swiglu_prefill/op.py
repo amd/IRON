@@ -51,6 +51,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
     def set_up_artifacts(self):
         # Artifact setup
         # ---
+        # Note: All operators (GEMM, SiLU, ElementwiseMul) apply their own padding
+        # to meet hardware alignment requirements. We store the padded dimensions
+        # from GEMM and verify that all operators use consistent padded sizes.
         artifacts = []
         device_str = self.context.device_manager.device_str()
 
@@ -65,6 +68,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         gemm_1 = AIEGEMM(
             M=self.seq_len, K=self.embedding_dim, N=self.hidden_dim, **accuracy_flags
         )
+        self.gemm_1 = gemm_1
+        self.seq_len_padded = gemm_1.M
+        self.embedding_dim_padded = gemm_1.K
+        self.hidden_dim_padded = gemm_1.N
         gemm_1_xclbin, gemm_1_insts = gemm_1.get_artifacts(prefix="swiglu_gemm_1_")
         gemm_1_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_gemm_1",
@@ -81,6 +88,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             num_channels=2,
             tile_size=self.hidden_dim // 8,
         )
+        self.silu = silu
+        assert self.seq_len * self.hidden_dim <= silu.size <= self.seq_len_padded * self.hidden_dim_padded
+        
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
         silu_xclbin.xclbin_input = gemm_1_xclbin
         silu_xclbin.extra_flags += [
@@ -97,6 +107,9 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             num_channels=2,
             tile_size=self.hidden_dim // 8,
         )
+        self.eltwise_mul = eltwise_mul
+        assert self.seq_len * self.hidden_dim <= eltwise_mul.size <= self.seq_len_padded * self.hidden_dim_padded
+        
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_eltwise_mul_"
         )
@@ -112,6 +125,11 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         gemm_2 = AIEGEMM(
             M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
         )
+        self.gemm_2 = gemm_2
+        assert gemm_2.M == self.seq_len_padded
+        assert gemm_2.K == self.hidden_dim_padded
+        assert gemm_2.N == self.embedding_dim_padded
+        
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
         gemm_2_xclbin.extra_flags += [
@@ -138,27 +156,27 @@ class AIESwiGLUPrefill(AIEOperatorBase):
     def set_up_runtime(self):
         # Runtime setup
         # ---
-        self.add_buffer("input", self.seq_len * self.embedding_dim)
+        self.add_buffer("input", self.seq_len_padded * self.embedding_dim_padded)
         self.add_buffer(
             "weights_1",
-            self.embedding_dim * self.hidden_dim,
+            self.embedding_dim_padded * self.hidden_dim_padded,
             static_data=torch_to_numpy(self.weights_1.T),
         )
         self.add_buffer(
             "weights_2",
-            self.embedding_dim * self.hidden_dim,
+            self.embedding_dim_padded * self.hidden_dim_padded,
             static_data=torch_to_numpy(self.weights_2.T),
         )
         self.add_buffer(
             "weights_3",
-            self.hidden_dim * self.embedding_dim,
+            self.hidden_dim_padded * self.embedding_dim_padded,
             static_data=torch_to_numpy(self.weights_3.T),
         )
-        self.add_buffer("left", self.seq_len * self.hidden_dim)
-        self.add_buffer("left_swished", self.seq_len * self.hidden_dim)
-        self.add_buffer("right", self.seq_len * self.hidden_dim)
-        self.add_buffer("intermediate", self.seq_len * self.hidden_dim)
-        self.add_buffer("output", self.seq_len * self.embedding_dim)
+        self.add_buffer("left", self.seq_len_padded * self.hidden_dim_padded)
+        self.add_buffer("left_swished", self.seq_len_padded * self.hidden_dim_padded)
+        self.add_buffer("right", self.seq_len_padded * self.hidden_dim_padded)
+        self.add_buffer("intermediate", self.seq_len_padded * self.hidden_dim_padded)
+        self.add_buffer("output", self.seq_len_padded * self.embedding_dim_padded)
         self.add_kernel(
             "swiglu_gemm_1",
             self.combined_xclbin,
@@ -212,10 +230,32 @@ class AIESwiGLUPrefill(AIEOperatorBase):
 
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
+        
+        # Verify input size matches expected dimensions
+        expected_size = batch * self.seq_len * self.embedding_dim
+        assert x_flat.shape[0] == expected_size
+        
+        # Pad input if necessary to match GEMM requirements
+        if self.seq_len_padded * self.embedding_dim_padded > x_flat.shape[0]:
+            x_padded = torch.zeros(
+                self.seq_len_padded * self.embedding_dim_padded,
+                dtype=x_flat.dtype,
+                device=x_flat.device
+            )
+            x_padded[:x_flat.shape[0]] = x_flat
+            x_flat = x_padded
 
         self.write_buffer("input", x_flat)
-        test_pattern = np.zeros(len(x_flat), dtype=bfloat16)
         self.run_runlist()
-        result = self.read_buffer_as_torch("output", shape=x_flat.shape, dtype=bfloat16)
+        
+        # Read padded output buffer
+        result_padded = self.read_buffer_as_torch(
+            "output", 
+            shape=(self.seq_len_padded * self.embedding_dim_padded,), 
+            dtype=bfloat16
+        )
+        
+        # Extract only the unpadded portion
+        result = result_padded[:expected_size].view(batch, -1)
 
         return result
