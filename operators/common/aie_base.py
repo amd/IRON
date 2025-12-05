@@ -23,9 +23,9 @@ class AIEOperatorBase(ABC):
     @classmethod
     def get_default_context(cls):
         """One global 'default' context if none is specified"""
-        if not hasattr(cls, "_default_context"):
-            cls._default_context = AIEContext()
-        return cls._default_context
+        if not hasattr(AIEOperatorBase, "_default_context"):
+            AIEOperatorBase._default_context = AIEContext()
+        return AIEOperatorBase._default_context
 
     def __init__(self, context=None):
         self.artifacts = (
