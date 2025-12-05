@@ -45,8 +45,12 @@ class AIEGEMM(AIEOperatorBase):
         self.tile_k = tile_k
         self.tile_n = tile_n
         self.num_aie_columns = num_aie_columns
-        self.n_aie_rows = 4
+        self.n_aie_rows = 4  # Number of AIE rows used in the design
         self.gemm_args = gemm_kwargs
+
+        # Set frequently accessed gemm_args
+        self.b_col_maj = gemm_kwargs.get("b_col_maj", False)
+        self.c_col_maj = gemm_kwargs.get("c_col_maj", False)
         self.weight = (
             None
             if not use_static_weight
@@ -71,7 +75,7 @@ class AIEGEMM(AIEOperatorBase):
         AIEOperatorBase.__init__(self)
 
     def get_artifacts(self, prefix="gemm_"):
-        # Get parameters from self
+        # Extract parameters from self
         operator_dir = Path(__file__).parent
         tile_m = self.tile_m
         tile_k = self.tile_k
@@ -83,8 +87,9 @@ class AIEGEMM(AIEOperatorBase):
         base_dir = self.base_dir
         device_str = self.device_manager.device_str()
 
-        b_col_maj = self.gemm_args.get("b_col_maj", False)
-        c_col_maj = self.gemm_args.get("c_col_maj", False)
+        # Extract all gemm_args parameters at once for clarity and performance
+        b_col_maj = self.b_col_maj
+        c_col_maj = self.c_col_maj
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
         dtype_out = self.gemm_args.get("dtype_out", "bf16")
         emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
@@ -247,16 +252,18 @@ class AIEGEMM(AIEOperatorBase):
     def forward(self, A, B=None):
         """Forward pass through GEMM operation: C = A @ B"""
         B_shape = B.shape if B is not None else self.weight.T.shape
-        if self.b_col_maj:
-            if self.c_col_maj:
-                expected_output_shape = A.shape[:-2] + (B_shape[-2], A.shape[-1])
-            else:
-                expected_output_shape = A.shape[:-1] + (B_shape[-2],)
+        
+        # Determine output dimensions based on matrix layout
+        # B is either (K, N) for row-major or (N, K) for column-major
+        output_N = B_shape[-2] if self.b_col_maj else B_shape[-1]
+        
+        # Build expected output shape based on C layout
+        if self.c_col_maj:
+            # Column-major output: (N, M) -> need to include batch dims
+            expected_output_shape = A.shape[:-2] + (output_N, A.shape[-1])
         else:
-            if self.c_col_maj:
-                expected_output_shape = A.shape[:-2] + (B_shape[-1], A.shape[-1])
-            else:
-                expected_output_shape = A.shape[:-1] + (B_shape[-1],)
+            # Row-major output: (M, N) -> standard matrix multiply shape
+            expected_output_shape = A.shape[:-1] + (output_N,)
 
         # Remove batch dimension, if any
         if len(A.shape) > 2:
@@ -327,27 +334,30 @@ class AIEGEMM(AIEOperatorBase):
         return M_padded, K_padded, N_padded
 
     def _pad_A(self, A_np):
+        """Pad A matrix to match operator dimensions (M, K)"""
         M, K = A_np.shape
-        A_padded = A_np
-        if M % self.M != 0 or K != self.K:
-            M_multiple = (M + self.M - 1) // self.M * self.M
-            A_padded = np.zeros((M_multiple, self.K), dtype=A_np.dtype)
-            A_padded[:M, :K] = A_np
+        if M % self.M == 0 and K == self.K:
+            return A_np
+        
+        M_padded = ((M + self.M - 1) // self.M) * self.M
+        A_padded = np.zeros((M_padded, self.K), dtype=A_np.dtype)
+        A_padded[:M, :K] = A_np
         return A_padded
 
     def _pad_B(self, B_np):
+        """Pad B matrix to match operator dimensions based on layout"""
         if self.b_col_maj:
             N, K = B_np.shape
+            if N == self.N and K == self.K:
+                return B_np
+            B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
+            B_padded[:N, :K] = B_np
         else:
             K, N = B_np.shape
-        B_padded = B_np
-        if K != self.K or N != self.N:
-            if self.b_col_maj:
-                B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
-                B_padded[:N, :K] = B_np
-            else:
-                B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
-                B_padded[:K, :N] = B_np
+            if K == self.K and N == self.N:
+                return B_np
+            B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
+            B_padded[:K, :N] = B_np
         return B_padded
 
     def _partition_B(self, B):
