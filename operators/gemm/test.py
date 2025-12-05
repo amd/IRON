@@ -79,9 +79,6 @@ def main():
         partition_N=args.partition_N,
     )
 
-    gemm_config = {
-        "separate_c_tiles": True,
-    }
     operator = AIEGEMM(
         M=args.M,
         K=args.K,
