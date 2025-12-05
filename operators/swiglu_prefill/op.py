@@ -89,8 +89,12 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             tile_size=self.hidden_dim // 8,
         )
         self.silu = silu
-        assert self.seq_len * self.hidden_dim <= silu.size <= self.seq_len_padded * self.hidden_dim_padded
-        
+        assert (
+            self.seq_len * self.hidden_dim
+            <= silu.size
+            <= self.seq_len_padded * self.hidden_dim_padded
+        )
+
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
         silu_xclbin.xclbin_input = gemm_1_xclbin
         silu_xclbin.extra_flags += [
@@ -108,8 +112,12 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             tile_size=self.hidden_dim // 8,
         )
         self.eltwise_mul = eltwise_mul
-        assert self.seq_len * self.hidden_dim <= eltwise_mul.size <= self.seq_len_padded * self.hidden_dim_padded
-        
+        assert (
+            self.seq_len * self.hidden_dim
+            <= eltwise_mul.size
+            <= self.seq_len_padded * self.hidden_dim_padded
+        )
+
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_eltwise_mul_"
         )
@@ -129,7 +137,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         assert gemm_2.M == self.seq_len_padded
         assert gemm_2.K == self.hidden_dim_padded
         assert gemm_2.N == self.embedding_dim_padded
-        
+
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
         gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
         gemm_2_xclbin.extra_flags += [
@@ -230,31 +238,31 @@ class AIESwiGLUPrefill(AIEOperatorBase):
 
         # Flatten inputs for AIE processing
         x_flat = x.view(-1)
-        
+
         # Verify input size matches expected dimensions
         expected_size = batch * self.seq_len * self.embedding_dim
         assert x_flat.shape[0] == expected_size
-        
+
         # Pad input if necessary to match GEMM requirements
         if self.seq_len_padded * self.embedding_dim_padded > x_flat.shape[0]:
             x_padded = torch.zeros(
                 self.seq_len_padded * self.embedding_dim_padded,
                 dtype=x_flat.dtype,
-                device=x_flat.device
+                device=x_flat.device,
             )
-            x_padded[:x_flat.shape[0]] = x_flat
+            x_padded[: x_flat.shape[0]] = x_flat
             x_flat = x_padded
 
         self.write_buffer("input", x_flat)
         self.run_runlist()
-        
+
         # Read padded output buffer
         result_padded = self.read_buffer_as_torch(
-            "output", 
-            shape=(self.seq_len_padded * self.embedding_dim_padded,), 
-            dtype=bfloat16
+            "output",
+            shape=(self.seq_len_padded * self.embedding_dim_padded,),
+            dtype=bfloat16,
         )
-        
+
         # Extract only the unpadded portion
         result = result_padded[:expected_size].view(batch, -1)
 
