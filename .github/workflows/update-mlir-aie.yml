@@ -47,12 +47,19 @@ jobs:
         run: |
           echo "New version found: ${{ steps.latest_release.outputs.tag_with_v }}. Current version is v${{ steps.current_version.outputs.version }}."
           
+          new_branch="update-mlir-aie-to-${{ steps.latest_release.outputs.tag_with_v }}"
+          
+          # Check if branch already exists
+          if git ls-remote --exit-code origin "refs/heads/$new_branch"; then
+            echo "Branch $new_branch already exists. Skipping update."
+            exit 0
+          fi
+          
           # Configure git
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
           
           # Create new branch
-          new_branch="update-mlir-aie-to-${{ steps.latest_release.outputs.tag_with_v }}"
           git checkout -b $new_branch
           
           # Update requirements.txt
