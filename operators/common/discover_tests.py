@@ -93,11 +93,10 @@ def generate_test_list(operators_dir, output_dir=None, extensive=False):
         test_script = test_parts[0]
         test_args = " ".join(test_parts[1:]) if len(test_parts) > 1 else ""
 
-        # Wrap command to run from /tmp to avoid sys.path issues
         if test_args:
-            wrapped_command = f"cd /tmp && python3 {test_script} {test_args}"
+            wrapped_command = f"cd {output_dir} && python3 {test_script} {test_args}"
         else:
-            wrapped_command = f"cd /tmp && python3 {test_script}"
+            wrapped_command = f"cd {output_dir} && python3 {test_script}"
 
         # Generate test file content
         content = f"""run = '{wrapped_command}'
