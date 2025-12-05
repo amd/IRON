@@ -56,6 +56,7 @@ class AIEGEMM(AIEOperatorBase):
             if not use_static_weight
             else torch.zeros((K, N), dtype=torch.bfloat16).T
         )
+        self.static_weight_shape = (K, N)
 
         # The operator's M, K, N represent what the NPU operator supports.
         # Calls to forward() may supply matrices of different sizes, and the
@@ -249,21 +250,29 @@ class AIEGEMM(AIEOperatorBase):
             self.add_buffer(f"C_{i}", self.M * self.N)
             self.add_to_runlist("gemm", "A", f"B_{i}", f"C_{i}")
 
+    def _get_B_dims(self, B_shape):
+        """Extract K and N dimensions from B matrix shape based on layout.
+        
+        Returns:
+            tuple: (K, N) dimensions regardless of B's layout
+        """
+        if self.b_col_maj:
+            return B_shape[-1], B_shape[-2]  # B is (N, K) -> return (K, N)
+        else:
+            return B_shape[-2], B_shape[-1]  # B is (K, N) -> return (K, N)
+
     def forward(self, A, B=None):
         """Forward pass through GEMM operation: C = A @ B"""
-        B_shape = B.shape if B is not None else self.weight.T.shape
+        B_shape = B.shape if B is not None else self.static_weight_shape
         
         # Determine output dimensions based on matrix layout
-        # B is either (K, N) for row-major or (N, K) for column-major
-        output_N = B_shape[-2] if self.b_col_maj else B_shape[-1]
+        K2, N = self._get_B_dims(B_shape)
         
         # Build expected output shape based on C layout
-        if self.c_col_maj:
-            # Column-major output: (N, M) -> need to include batch dims
-            expected_output_shape = A.shape[:-2] + (output_N, A.shape[-1])
-        else:
-            # Row-major output: (M, N) -> standard matrix multiply shape
-            expected_output_shape = A.shape[:-1] + (output_N,)
+        expected_output_shape = (
+            A.shape[:-2] + (N, A.shape[-1]) if self.c_col_maj
+            else A.shape[:-1] + (N,)
+        )
 
         # Remove batch dimension, if any
         if len(A.shape) > 2:
@@ -272,10 +281,6 @@ class AIEGEMM(AIEOperatorBase):
             B = B.view(-1, B_shape[-1])
 
         M, K = A.shape
-        if self.b_col_maj:
-            N, K2 = B_shape
-        else:
-            K2, N = B_shape
 
         applicable = (
             K == K2
@@ -373,25 +378,18 @@ class AIEGEMM(AIEOperatorBase):
                 B_parts[i] = self._pad_B(B[col_start:col_end, :])
             else:
                 B_parts[i] = self._pad_B(B[:, col_start:col_end])
-        logging.debug(f"Created {self.partition_N} B buffers with partitions of {self.N} across the columns")
+        self.static_weight_shape = B_parts[0].shape
         return B_parts
 
 
     def _execute_aie_operation(self, A_np, B_nps=None):
         """Execute GEMM operation on AIE hardware"""
         M, K = A_np.shape
-        if self.b_col_maj:
-            N, K2 = B_nps[0].shape if B_nps is not None else self.weight.T.shape
-        else:
-            K2, N = B_nps[0].shape if B_nps is not None else self.weight.T.shape
-        if self.c_col_maj:
-            C_shape = (N, M)
-        else:
-            C_shape = (M, N)
+        B_shape = B_nps[0].shape if B_nps is not None else self.static_weight_shape
+        K2, N = self._get_B_dims(B_shape)
+        C_shape = (N, M) if self.c_col_maj else (M, N)
 
-        # If M is larger than kernel supports, split large GEMMs with many rows
-        # into multiple invocations of the kernel. This is only supported for
-        # row-wise concatenation of output in row-major order.
+        # Validate dimensions match operator configuration
         assert M == self.M
         assert K == K2 and K == self.K
         assert N == self.N
@@ -405,25 +403,16 @@ class AIEGEMM(AIEOperatorBase):
                     static_data=B_np,
                 )
         self.run_runlist()
-        result_nps = []
-        for i in range(self.partition_N):
-            result_nps.append(self.read_buffer(f"C_{i}", shape=C_shape, dtype=bfloat16))
+        result_nps = [
+            self.read_buffer(f"C_{i}", shape=C_shape, dtype=bfloat16)
+            for i in range(self.partition_N)
+        ]
 
-        # Concatenate results to form 2D buffer
-        # Column dimension should be multiple of list length and column dimension of each buffer
+        # Concatenate partitioned results: axis=0 for col-major (then transpose), axis=1 for row-major
         if self.c_col_maj:
-            # Column-major: each buffer is (N, M)
-            # Concatenate along axis=0 to get (partition_N * N, M)
-            # Then transpose to get final shape (M, partition_N * N)
-            result_np = np.concatenate(
-                result_nps, axis=0
-            ).T  # Shape: (M, partition_N * N)
+            result_np = np.concatenate(result_nps, axis=0).T
         else:
-            # Row-major: each buffer is (M, N)
-            # Concatenate along axis=1 to get (M, partition_N * N)
-            result_np = np.concatenate(
-                result_nps, axis=1
-            )  # Shape: (M, partition_N * N)
+            result_np = np.concatenate(result_nps, axis=1)
 
         # Check for NaN and fail hard
         if np.isnan(result_np).any():
