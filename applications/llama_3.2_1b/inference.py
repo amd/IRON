@@ -400,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt_len",
         type=int,
-        default=64,
+        default=2048,
         help="Truncate prompt to this many tokens.",
     )
     parser.add_argument(

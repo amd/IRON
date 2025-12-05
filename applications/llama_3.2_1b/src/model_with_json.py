@@ -12,7 +12,10 @@ import json
 from pathlib import Path
 from src.block.transformer import TransformerBlock
 from operators.rope.rope_utils import compute_rope_params
-from operators import AIERMSNorm
+from operators import (
+    AIERMSNorm,
+    AIEGEMM,
+)
 from rich.console import Console
 from rich.text import Text
 
@@ -169,13 +172,37 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 self.cfg["emb_dim"], eps=1e-5, dtype=self.cfg["dtype"]
             )
 
-        # Depedns on use_aie_final_gemm
-        self.out_head = nn.Linear(
-            self.cfg["emb_dim"],
-            self.cfg["vocab_size"],
-            bias=False,
-            dtype=self.cfg["dtype"],
-        )
+        # Offload final linear layer if enabled
+        if self.cfg.get("use_aie_final_gemm", False):
+            # Since this GEMM has such a large N dimension, partition the N dimension by 4, 
+            # and GEMM will execute for a workload of that smaller N dimension across different buffers of B and C
+            aie_config_prefill = {
+                "num_aie_columns": 8,
+                "tile_m": 64,
+                "tile_k": 64,
+                "tile_n": 64,
+                "b_col_maj": True,
+                "use_static_weight": True,
+                "separate_c_tiles": True,
+                "partition_N": 4,
+            }
+            if self.cfg["use_kv_cache"]:
+                M_for_gemm = self.prompt_length
+            else:
+                M_for_gemm = self.prompt_length + self.num_tokens
+            self.out_head = AIEGEMM(
+                M=M_for_gemm,
+                K=self.cfg["emb_dim"],
+                N=self.cfg["vocab_size"], 
+                **aie_config_prefill,
+            )
+        else:
+            self.out_head = nn.Linear(
+                self.cfg["emb_dim"],
+                self.cfg["vocab_size"],
+                bias=False,
+                dtype=self.cfg["dtype"],
+            )
 
         # Reusable utilities
         cos, sin = compute_rope_params(
@@ -193,6 +220,22 @@ class Llama3ModelWithJSONConfig(nn.Module):
         # Forward pass
         tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
+
+        # Check if input is a vector (decode phase) or matrix (prefill phase)
+        # Handle 1D: (emb_dim,), 2D: (1, emb_dim), or 3D: (1, 1, emb_dim)
+        is_vector = (
+            len(x.shape) == 1
+            or (len(x.shape) == 2 and x.shape[0] == 1)
+            or (len(x.shape) == 3 and x.shape[0] == 1 and x.shape[1] == 1)
+        )
+
+        # (batch, sequence, embedding) where sequence=1 indicates decode
+        if len(x.shape) == 3:
+            is_decode_with_kv = (x.shape[1] == 1) and self.cfg["use_kv_cache"]
+        elif len(x.shape) == 2:
+            is_decode_with_kv = (x.shape[0] == 1) and self.cfg["use_kv_cache"]
+        else:
+            is_decode_with_kv = False
 
         num_tokens = x.shape[1]
 
@@ -219,19 +262,39 @@ class Llama3ModelWithJSONConfig(nn.Module):
         else:
             x = self.final_norm(x)
 
-        logits = self.out_head(x.to(self.cfg["dtype"]))
+        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
+            # TODO: Offload to NPU
+            # logits = self.aie_out_head_gemv(x.to(self.cfg["dtype"]))
+            logits = self.out_head(x.to(self.cfg["dtype"]))
+        else:
+            logits = self.out_head(x.to(self.cfg["dtype"]))
 
         return logits
 
-    def assign_weights(self, final_norm):
+    def assign_weights(self, final_norm, out_head, out_head_name):
         if self.cfg.get("use_aie_final_norm", False):
             self.aie_final_norm_prefill.weight = final_norm
             if self.cfg["use_kv_cache"]:
                 self.aie_final_norm_decode.weight = final_norm
-            return
+        else:
+            self.final_norm.weight = assign(
+                self.final_norm.weight,
+                final_norm,
+                f"model.norm.weight",
+            )
 
-        self.final_norm.weight = assign(
-            self.final_norm.weight,
-            final_norm,
-            f"model.norm.weight",
-        )
+        # TODO: Offload GEMV to NPU
+        # if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        #     self.aie_out_head_gemv.weight = out_head
+        if self.cfg["use_aie_final_gemm"]:
+            # Want column-major for B
+            self.out_head.weight = out_head.T
+            # TODO: Create separate linear layers for prefill and decode (with gemm/gemv)
+            # if self.cfg["use_kv_cache"]:
+            #     self.out_head.weight = out_head.T
+        else:
+            self.out_head.weight = assign(
+                self.out_head.weight,
+                out_head,
+                out_head_name,
+            )

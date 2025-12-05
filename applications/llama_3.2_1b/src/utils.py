@@ -126,18 +126,10 @@ def load_weights_into_llama(model, param_config, params):
         )
 
     # Load output layer weights
-    model.assign_weights(params["model.norm.weight"])
-
     if "lm_head.weight" in params.keys():
-        model.out_head.weight = assign(
-            model.out_head.weight, params["lm_head.weight"], "lm_head.weight"
-        )
+        model.assign_weights(params["model.norm.weight"], params["lm_head.weight"], "lm_head.weight")
     else:
-        model.out_head.weight = assign(
-            model.out_head.weight,
-            params["model.embed_tokens.weight"],
-            "model.embed_tokens.weight",
-        )
+        model.assign_weights(params["model.norm.weight"], params["model.embed_tokens.weight"], "model.embed_tokens.weight")
 
 
 def text_to_token_ids(text, tokenizer):
