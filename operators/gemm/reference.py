@@ -6,7 +6,14 @@ from operators.common.utils import torch_dtype_map
 
 
 def generate_golden_reference(
-    M: int, K: int, N: int, dtype="bf16", seed=42, b_col_maj=False, c_col_maj=False, partition_N=1
+    M: int,
+    K: int,
+    N: int,
+    dtype="bf16",
+    seed=42,
+    b_col_maj=False,
+    c_col_maj=False,
+    partition_N=1,
 ):
     torch.manual_seed(seed)
     val_range = 4
@@ -18,7 +25,7 @@ def generate_golden_reference(
         input_b_full = input_b_full.T
     if c_col_maj:
         output_full = output_full.T
-    
+
     # Create partitioned buffers for B
     input_b = []
     for i in range(partition_N):
@@ -28,7 +35,7 @@ def generate_golden_reference(
             input_b.append(input_b_full[col_start:col_end, :])
         else:
             input_b.append(input_b_full[:, col_start:col_end])
-    
+
     # Create partitioned buffers for C (output)
     output = []
     for i in range(partition_N):
@@ -38,5 +45,5 @@ def generate_golden_reference(
             output.append(output_full[col_start:col_end, :])
         else:
             output.append(output_full[:, col_start:col_end])
-    
+
     return {"input": input_a, "input_b": input_b, "output": output}

@@ -115,25 +115,31 @@ class AIEOperatorBase(ABC):
                         # Static buffers never conflict
                         continue
                     pool_sz = get_pool_sz(op.buffers[arg])
-                    
+
                     # Buffers conflict if they're in the same runlist entry
                     conflicting_args = {
                         a for a in args if get_pool_sz(op.buffers[a]) == pool_sz
                     } - {arg}
-                    
+
                     # Also conflict with buffers in other runlist entries that share
                     # a buffer with this entry
                     for other_arg in args:
                         if other_arg == arg:
                             continue
-                        for other_idx in buffer_to_runlist_entries.get(other_arg, set()):
+                        for other_idx in buffer_to_runlist_entries.get(
+                            other_arg, set()
+                        ):
                             if other_idx != idx:
                                 _, *other_args = op.runlist[other_idx]
-                                conflicting_args.update({
-                                    a for a in other_args 
-                                    if get_pool_sz(op.buffers[a]) == pool_sz and a != arg
-                                })
-                    
+                                conflicting_args.update(
+                                    {
+                                        a
+                                        for a in other_args
+                                        if get_pool_sz(op.buffers[a]) == pool_sz
+                                        and a != arg
+                                    }
+                                )
+
                     conflicting_buffers[arg] = conflicting_buffers.get(
                         arg, set()
                     ).union(conflicting_args)

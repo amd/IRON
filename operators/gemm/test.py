@@ -65,7 +65,9 @@ def main():
     parser.add_argument("--c-col-maj", type=int, default=0)
     # parser.add_argument("--partition-M", type=int, default=1, help="Partition size for M")
     # parser.add_argument("--partition-K", type=int, default=1, help="Partition size for K")
-    parser.add_argument("--partition-N", type=int, default=1, help="Partition size for N")
+    parser.add_argument(
+        "--partition-N", type=int, default=1, help="Partition size for N"
+    )
     args = parser.parse_args()
 
     golden_ref = generate_golden_reference(

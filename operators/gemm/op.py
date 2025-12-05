@@ -62,7 +62,9 @@ class AIEGEMM(AIEOperatorBase):
         # Calls to forward() may supply matrices of different sizes, and the
         # Python code will perform necessary padding/repeated application of
         # the NPU operator.
-        assert N % partition_N == 0, f"N ({N}) must be divisible by partition_N ({partition_N})"
+        assert (
+            N % partition_N == 0
+        ), f"N ({N}) must be divisible by partition_N ({partition_N})"
         M_padded, K_padded, N_padded = self._get_padded_dims(M, K, N // partition_N)
         self.M = M_padded
         self.K = K_padded
@@ -252,7 +254,7 @@ class AIEGEMM(AIEOperatorBase):
 
     def _get_B_dims(self, B_shape):
         """Extract K and N dimensions from B matrix shape based on layout.
-        
+
         Returns:
             tuple: (K, N) dimensions regardless of B's layout
         """
@@ -264,14 +266,13 @@ class AIEGEMM(AIEOperatorBase):
     def forward(self, A, B=None):
         """Forward pass through GEMM operation: C = A @ B"""
         B_shape = B.shape if B is not None else self.static_weight_shape
-        
+
         # Determine output dimensions based on matrix layout
         K2, N = self._get_B_dims(B_shape)
-        
+
         # Build expected output shape based on C layout
         expected_output_shape = (
-            A.shape[:-2] + (N, A.shape[-1]) if self.c_col_maj
-            else A.shape[:-1] + (N,)
+            A.shape[:-2] + (N, A.shape[-1]) if self.c_col_maj else A.shape[:-1] + (N,)
         )
 
         # Remove batch dimension, if any
@@ -343,7 +344,7 @@ class AIEGEMM(AIEOperatorBase):
         M, K = A_np.shape
         if M % self.M == 0 and K == self.K:
             return A_np
-        
+
         M_padded = ((M + self.M - 1) // self.M) * self.M
         A_padded = np.zeros((M_padded, self.K), dtype=A_np.dtype)
         A_padded[:M, :K] = A_np
@@ -380,7 +381,6 @@ class AIEGEMM(AIEOperatorBase):
                 B_parts[i] = self._pad_B(B[:, col_start:col_end])
         self.static_weight_shape = B_parts[0].shape
         return B_parts
-
 
     def _execute_aie_operation(self, A_np, B_nps=None):
         """Execute GEMM operation on AIE hardware"""
