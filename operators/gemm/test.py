@@ -74,6 +74,7 @@ def main():
         N=args.N,
         b_col_maj=bool(args.b_col_maj),
         c_col_maj=bool(args.c_col_maj),
+        partition_N=args.partition_N,
     )
 
     gemm_config = {
@@ -99,18 +100,10 @@ def main():
     }
     output_buffers = {}
 
-    # Create buffers for B split across the columns of input_b
+    # Create A, B, C dictionaries from the partitioned buffers
     for i in range(args.partition_N):
-        col_start = i * (args.N // args.partition_N)
-        col_end = (i + 1) * (args.N // args.partition_N)
-        if args.b_col_maj:
-            input_buffers[f"B_{i}"] = golden_ref["input_b"][col_start:col_end, :].flatten()
-        else:
-            input_buffers[f"B_{i}"] = golden_ref["input_b"][:, col_start:col_end].flatten()
-        if args.c_col_maj:
-            output_buffers[f"C_{i}"] = golden_ref["output"][col_start:col_end, :].flatten()
-        else:
-            output_buffers[f"C_{i}"] = golden_ref["output"][:, col_start:col_end].flatten()
+        input_buffers[f"B_{i}"] = golden_ref["input_b"][i].flatten()
+        output_buffers[f"C_{i}"] = golden_ref["output"][i].flatten()
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
     )
