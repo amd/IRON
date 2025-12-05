@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: devel
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -73,7 +75,7 @@ jobs:
           git push --set-upstream origin $new_branch
           
           # Create Pull Request
-          gh pr create --base main --head $new_branch --title "Update mlir-aie to ${{ steps.latest_release.outputs.tag_with_v }}" --body "This PR updates the mlir-aie version to the latest release."
+          gh pr create --base devel --head $new_branch --title "Update mlir-aie to ${{ steps.latest_release.outputs.tag_with_v }}" --body "This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}"
           
       - name: No new version found
         if: steps.current_version.outputs.version == steps.latest_release.outputs.tag
