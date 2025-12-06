@@ -283,10 +283,10 @@ class AIEOperatorBase(ABC):
         mv = self.get_bo(buffer_name).map()
 
         # Create a NumPy view over mapped memory (zero-copy)
-        arr = np.frombuffer(mv, dtype=dtype, count=np.prod(shape))
-        if copy:
-            return arr.copy()
-        return arr.reshape(shape)
+        arr = np.frombuffer(mv, dtype=dtype, count=np.prod(shape)).reshape(shape)
+
+        # Return a snapshot if the BO will be reused or modified later
+        return arr.copy() if copy else arr
 
     def read_buffer_as_torch(self, buffer_name, shape, dtype=bfloat16):
         return numpy_to_torch(self.read_buffer(buffer_name, shape, dtype))
