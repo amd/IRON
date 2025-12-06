@@ -163,20 +163,19 @@ class GroupedQueryAttention(nn.Module):
             # Decode phase with KV cache - use GEMV for single token
             # weight.T @ input, which is vector-matrix multiplication (So, is_mv=False)
             x_flat = x.reshape(1, -1)  # Shape: (1, d_in)
-            input_dtype = x.dtype
 
             queries_flat = self.aie_query_gemv(x_flat)
-            queries = queries_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
+            queries = queries_flat.reshape(b, num_tokens, self.d_out)
 
             keys_flat = self.aie_key_gemv(x_flat)
             keys = keys_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
-            ).to(input_dtype)
+            )
 
             values_flat = self.aie_value_gemv(x_flat)
             values = values_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
-            ).to(input_dtype)
+            )
 
         elif self.cfg["use_aie_attn_projection_gemm"]:
             # Prefill phase - use GEMM for multiple tokens
@@ -184,17 +183,17 @@ class GroupedQueryAttention(nn.Module):
             input_dtype = x.dtype
 
             queries_flat = self.aie_query(x_flat)
-            queries = queries_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
+            queries = queries_flat.reshape(b, num_tokens, self.d_out)
 
             keys_flat = self.aie_key(x_flat)
             keys = keys_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
-            ).to(input_dtype)
+            )
 
             values_flat = self.aie_value(x_flat)
             values = values_flat.reshape(
                 b, num_tokens, self.num_kv_groups * self.head_dim
-            ).to(input_dtype)
+            )
         else:
             queries = self.W_query(x)
             keys = self.W_key(x)
@@ -348,9 +347,9 @@ class GroupedQueryAttention(nn.Module):
                 def my_mha(queries, keys, values):
                     inv_scale = 1 / np.sqrt(values.shape[-1])
                     context_vec = torch.nn.functional.scaled_dot_product_attention(
-                        queries.to(torch.bfloat16).to("cpu"),
-                        keys.to(torch.bfloat16).to("cpu"),
-                        values.to(torch.bfloat16).to("cpu"),
+                        queries,
+                        keys,
+                        values,
                         dropout_p=0.0,
                         is_causal=True,
                         scale=inv_scale,
@@ -384,11 +383,11 @@ class GroupedQueryAttention(nn.Module):
         if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gemv"]:
             context_vec_flat = context_vec.reshape(1, -1)
             output_flat = self.aie_out_proj_gemv(context_vec_flat)
-            context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
+            context_vec = output_flat.reshape(b, num_tokens, self.d_out)
         elif self.cfg["use_aie_attn_projection_gemm"]:
             context_vec_flat = context_vec.reshape(-1, self.d_out)
             output_flat = self.aie_out_proj(context_vec_flat)
-            context_vec = output_flat.reshape(b, num_tokens, self.d_out).to(input_dtype)
+            context_vec = output_flat.reshape(b, num_tokens, self.d_out)
         else:
             context_vec = self.out_proj(context_vec)
 

@@ -264,10 +264,10 @@ class Llama3ModelWithJSONConfig(nn.Module):
 
         if is_decode_with_kv and self.cfg["use_aie_gemv"]:
             # TODO: Offload to NPU
-            # logits = self.aie_out_head_gemv(x.to(self.cfg["dtype"]))
-            logits = self.out_head(x.to(self.cfg["dtype"]))
+            # logits = self.aie_out_head_gemv(x)
+            logits = self.out_head(x)
         else:
-            logits = self.out_head(x.to(self.cfg["dtype"]))
+            logits = self.out_head(x)
 
         return logits
 

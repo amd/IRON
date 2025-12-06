@@ -23,14 +23,33 @@ torch_dtype_map = {
 
 
 def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
-    if tensor.dtype == torch.bfloat16:
-        float_arr = tensor.float().detach().cpu().numpy()
-        return float_arr.astype(bfloat16)
-    return tensor.detach().cpu().numpy()
+    # Detach (to drop grad) and ensure on CPU
+    t = tensor.detach()
+    if t.device.type != 'cpu':
+        t = t.cpu()
+    # Ensure contiguous for safe view operations
+    if not t.is_contiguous():
+        t = t.contiguous()
+
+    if t.dtype == torch.bfloat16:
+        # Zero-copy reinterpret: view the same memory as uint16, then as NumPy bfloat16
+        # This avoids numeric conversion and extra passes over memory.
+        u16_np = t.view(torch.uint16).numpy()        # shares memory, zero-copy
+        return u16_np.view(np.dtype('bfloat16'))     # reinterpret, zero-copy
+
+    # For supported dtypes, this is already zero-copy
+    return t.numpy()
 
 
 def numpy_to_torch(array: np.ndarray) -> torch.Tensor:
-    device = torch.device("cpu")
-    if array.dtype == bfloat16:
-        return torch.from_numpy(array.astype(np.float32)).to(torch.bfloat16).to(device)
-    return torch.from_numpy(array).to(device)
+    # Ensure contiguous to let from_numpy create a view
+    if not array.flags['C_CONTIGUOUS']:
+        array = np.ascontiguousarray(array)
+
+    if array.dtype == np.dtype('bfloat16'):
+        # reinterpret the same memory as uint16, then view as torch.bfloat16
+        t_u16 = torch.from_numpy(array.view(np.uint16))  # zero-copy
+        return t_u16.view(torch.bfloat16)                # view, zero-copy
+
+    # For supported dtypes, from_numpy is already zero-copy
+    return torch.from_numpy(array)
