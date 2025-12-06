@@ -274,12 +274,19 @@ class AIEOperatorBase(ABC):
     def get_bo(self, buffer_name):
         return self.buffer_bos[buffer_name]
 
-    def read_buffer(self, buffer_name, shape, dtype=bfloat16):
+    def read_buffer(self, buffer_name, shape, copy=False, dtype=bfloat16):
         """Read buffer and return values as a numpy array"""
-        size = np.prod(shape) * np.dtype(dtype).itemsize
-        output_bytes = self.get_bo(buffer_name).read(size, 0)
-        output_data_flat = np.frombuffer(output_bytes, dtype=dtype)
-        return output_data_flat.reshape(*shape)
+        # Total bytes
+        size = int(np.prod(shape)) * np.dtype(dtype).itemsize
+
+        # Map once; map() should return a Python buffer interface over the BO
+        mv = self.get_bo(buffer_name).map()
+
+        # Create a NumPy view over mapped memory (zero-copy)
+        arr = np.frombuffer(mv, dtype=dtype, count=np.prod(shape))
+        if copy:
+            return arr.copy()
+        return arr.reshape(shape)
 
     def read_buffer_as_torch(self, buffer_name, shape, dtype=bfloat16):
         return numpy_to_torch(self.read_buffer(buffer_name, shape, dtype))
