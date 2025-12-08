@@ -190,7 +190,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 M_for_gemm = self.prompt_length
             else:
                 M_for_gemm = self.prompt_length + self.num_tokens
-            self.out_head = AIEGEMM(
+            self.out_head_aie = AIEGEMM(
                 M=M_for_gemm,
                 K=self.cfg["emb_dim"],
                 N=self.cfg["vocab_size"], 
@@ -203,6 +203,12 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 bias=False,
                 dtype=self.cfg["dtype"],
             )
+        self.out_head = nn.Linear(
+            self.cfg["emb_dim"],
+            self.cfg["vocab_size"],
+            bias=False,
+            dtype=self.cfg["dtype"],
+        )
 
         # Reusable utilities
         cos, sin = compute_rope_params(
@@ -262,10 +268,13 @@ class Llama3ModelWithJSONConfig(nn.Module):
         else:
             x = self.final_norm(x)
 
-        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
-            # TODO: Offload to NPU
-            # logits = self.aie_out_head_gemv(x)
-            logits = self.out_head(x)
+        if self.cfg["use_aie_gemv"]:
+            if is_decode_with_kv:
+                # TODO: Create GEMV operator
+                # logits = self.aie_out_head_gemv(x)
+                logits = self.out_head(x) # Running on CPU
+            else:
+                logits = self.out_head_aie(x)
         else:
             logits = self.out_head(x)
 
@@ -283,12 +292,17 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 f"model.norm.weight",
             )
 
+        self.out_head.weight = assign(
+            self.out_head.weight,
+            out_head,
+            out_head_name,
+        )
         # TODO: Offload GEMV to NPU
         # if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
         #     self.aie_out_head_gemv.weight = out_head
         if self.cfg["use_aie_final_gemm"]:
             # Want column-major for B
-            self.out_head.weight = out_head.T
+            self.out_head_aie.weight = out_head.T
             # TODO: Create separate linear layers for prefill and decode (with gemm/gemv)
             # if self.cfg["use_kv_cache"]:
             #     self.out_head.weight = out_head.T
