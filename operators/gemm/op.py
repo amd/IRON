@@ -303,18 +303,26 @@ class AIEGEMM(AIEOperatorBase):
         )
 
         if self.c_col_maj:
-            result_padded = np.zeros((self.N * self.partition_N, M), dtype=A_padded.dtype)
+            result_padded = np.zeros(
+                (self.N * self.partition_N, M), dtype=A_padded.dtype
+            )
         else:
-            result_padded = np.zeros((M, self.N * self.partition_N), dtype=A_padded.dtype)
+            result_padded = np.zeros(
+                (M, self.N * self.partition_N), dtype=A_padded.dtype
+            )
         for M_lo in range(0, M, self.M):
             A_part = A_padded[M_lo : M_lo + self.M, :]
             result_parts = self._execute_aie_operation(A_part, B_parts)
             max_M = min(M_lo + self.M, M)
             for part in range(self.partition_N):
                 if self.c_col_maj:
-                    result_padded[part * self.N:(part + 1) * self.N, M_lo:max_M] = result_parts[part][:, :max_M]
+                    result_padded[part * self.N : (part + 1) * self.N, M_lo:max_M] = (
+                        result_parts[part][:, :max_M]
+                    )
                 else:
-                    result_padded[M_lo:max_M,part * self.N:(part + 1) * self.N] = result_parts[part][:max_M, :]
+                    result_padded[M_lo:max_M, part * self.N : (part + 1) * self.N] = (
+                        result_parts[part][:max_M, :]
+                    )
 
         # GEMM produces 2D result, reshape to expected output shape
         if self.c_col_maj:

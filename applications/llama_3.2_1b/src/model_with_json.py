@@ -174,7 +174,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
 
         # Offload final linear layer if enabled
         if self.cfg.get("use_aie_final_gemm", False):
-            # Since this GEMM has such a large N dimension, partition the N dimension by 4, 
+            # Since this GEMM has such a large N dimension, partition the N dimension by 4,
             # and GEMM will execute for a workload of that smaller N dimension across different buffers of B and C
             aie_config_prefill = {
                 "num_aie_columns": 8,
@@ -193,7 +193,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
             self.out_head_aie = AIEGEMM(
                 M=M_for_gemm,
                 K=self.cfg["emb_dim"],
-                N=self.cfg["vocab_size"], 
+                N=self.cfg["vocab_size"],
                 **aie_config_prefill,
             )
         else:
@@ -268,11 +268,11 @@ class Llama3ModelWithJSONConfig(nn.Module):
         else:
             x = self.final_norm(x)
 
-        if self.cfg["use_aie_gemv"]:
-            if is_decode_with_kv:
+        if self.cfg["use_aie_final_gemm"]:
+            if is_decode_with_kv and self.cfg["use_aie_gemv"]:
                 # TODO: Create GEMV operator
                 # logits = self.aie_out_head_gemv(x)
-                logits = self.out_head(x) # Running on CPU
+                logits = self.out_head(x)  # Running on CPU
             else:
                 logits = self.out_head_aie(x)
         else:

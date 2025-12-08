@@ -168,9 +168,7 @@ class GroupedQueryAttention(nn.Module):
             queries = queries_flat.reshape(b, num_tokens, self.d_out)
 
             keys_flat = self.aie_key_gemv(x_flat)
-            keys = keys_flat.reshape(
-                b, num_tokens, self.num_kv_groups * self.head_dim
-            )
+            keys = keys_flat.reshape(b, num_tokens, self.num_kv_groups * self.head_dim)
 
             values_flat = self.aie_value_gemv(x_flat)
             values = values_flat.reshape(
@@ -186,9 +184,7 @@ class GroupedQueryAttention(nn.Module):
             queries = queries_flat.reshape(b, num_tokens, self.d_out)
 
             keys_flat = self.aie_key(x_flat)
-            keys = keys_flat.reshape(
-                b, num_tokens, self.num_kv_groups * self.head_dim
-            )
+            keys = keys_flat.reshape(b, num_tokens, self.num_kv_groups * self.head_dim)
 
             values_flat = self.aie_value(x_flat)
             values = values_flat.reshape(
