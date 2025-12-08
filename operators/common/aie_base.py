@@ -293,13 +293,28 @@ class AIEOperatorBase(ABC):
 
     def write_buffer(self, buffer_name, array):
         """Write buffer from a numpy array into a XRT buffer object"""
-        if isinstance(array, torch.Tensor):
-            numpy_array = torch_to_numpy(array)
-        else:
-            numpy_array = array
         if buffer_name in self.buffer_static_data:
             raise RuntimeError(f"Cannot write to static buffer: {buffer_name}")
-        self.get_bo(buffer_name).write(numpy_array.flatten().view(np.uint8), 0)
+
+        # Normalize the source
+        if isinstance(array, torch.Tensor):
+            src = torch_to_numpy(array)
+        else:
+            src = np.asarray(array)
+
+        if not src.flags["C_CONTIGUOUS"]:
+            src = np.ascontiguousarray(src)
+
+        # Create a byte view of the source without extra copies
+        src_bytes = src.ravel().view(np.uint8)
+
+        bo = self.get_bo(buffer_name)
+        ptr = bo.map()  # pointer-like buffer
+        # Create a numpy array that aliases the BO memory
+        dst_bytes = np.frombuffer(ptr, dtype=np.uint8, count=bo.size())
+
+        # Copy bytes; releases GIL and uses optimized memcpy
+        np.copyto(dst_bytes[:src_bytes.size], src_bytes, casting='no')
 
     @abstractmethod
     def set_up_artifacts(self):
