@@ -314,7 +314,7 @@ class AIEOperatorBase(ABC):
         dst_bytes = np.frombuffer(ptr, dtype=np.uint8, count=bo.size())
 
         # Copy bytes; releases GIL and uses optimized memcpy
-        np.copyto(dst_bytes[:src_bytes.size], src_bytes, casting='no')
+        np.copyto(dst_bytes[: src_bytes.size], src_bytes, casting="no")
 
     @abstractmethod
     def set_up_artifacts(self):
