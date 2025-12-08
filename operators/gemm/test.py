@@ -91,7 +91,6 @@ def main():
         # partition_M=args.partition_M,
         # partition_K=args.partition_K,
         partition_N=args.partition_N,
-        **gemm_config,
     )
 
     input_buffers = {

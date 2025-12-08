@@ -101,7 +101,6 @@ class AIEGEMM(AIEOperatorBase):
         prio_accuracy = self.gemm_args.get("prio_accuracy", False)
         use_scalar = self.gemm_args.get("use_scalar", False)
         round_conv_even = self.gemm_args.get("round_conv_even", True)
-        separate_c_tiles = self.gemm_args.get("separate_c_tiles", False)
 
         if emulate_bf16_mmul_with_bfp16:
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
@@ -159,7 +158,7 @@ class AIEGEMM(AIEOperatorBase):
                 "use_scalar": use_scalar,
                 "emulate_bf16_mmul_with_bfp16": emulate_bf16_mmul_with_bfp16,
                 "prio_accuracy": prio_accuracy,
-                "separate_c_tiles": int(separate_c_tiles),
+                "separate_c_tiles": int(self.partition_N > 1),
                 "trace_size": 0,
                 "archive": kernel_archive,
                 "generate_taps": False,
