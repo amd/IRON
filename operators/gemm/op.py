@@ -268,6 +268,7 @@ class AIEGEMM(AIEOperatorBase):
 
         # Determine output dimensions based on matrix layout
         K2, N = self._get_B_dims(B_shape)
+        N_part = N // self.partition_N
 
         # Build expected output shape based on C layout
         expected_output_shape = (
@@ -303,11 +304,11 @@ class AIEGEMM(AIEOperatorBase):
 
         if self.c_col_maj:
             result_padded = np.zeros(
-                (self.N * self.partition_N, M), dtype=A_padded.dtype
+                (N, M), dtype=A_padded.dtype
             )
         else:
             result_padded = np.zeros(
-                (M, self.N * self.partition_N), dtype=A_padded.dtype
+                (M, N), dtype=A_padded.dtype
             )
         for M_lo in range(0, M, self.M):
             A_part = A_padded[M_lo : M_lo + self.M, :]
@@ -315,12 +316,12 @@ class AIEGEMM(AIEOperatorBase):
             max_M = min(M_lo + self.M, M)
             for part in range(self.partition_N):
                 if self.c_col_maj:
-                    result_padded[part * self.N : (part + 1) * self.N, M_lo:max_M] = (
-                        result_parts[part][:, :max_M]
+                    result_padded[part * N_part : (part + 1) * N_part, M_lo:max_M] = (
+                        result_parts[part][:N_part, :max_M]
                     )
                 else:
-                    result_padded[M_lo:max_M, part * self.N : (part + 1) * self.N] = (
-                        result_parts[part][:max_M, :]
+                    result_padded[M_lo:max_M, part * N_part : (part + 1) * N_part] = (
+                        result_parts[part][:max_M, :N_part]
                     )
 
         # GEMM produces 2D result, reshape to expected output shape
