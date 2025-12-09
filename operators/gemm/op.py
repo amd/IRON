@@ -303,13 +303,9 @@ class AIEGEMM(AIEOperatorBase):
         )
 
         if self.c_col_maj:
-            result_padded = np.zeros(
-                (N, M), dtype=A_padded.dtype
-            )
+            result_padded = np.zeros((N, M), dtype=A_padded.dtype)
         else:
-            result_padded = np.zeros(
-                (M, N), dtype=A_padded.dtype
-            )
+            result_padded = np.zeros((M, N), dtype=A_padded.dtype)
         for M_lo in range(0, M, self.M):
             A_part = A_padded[M_lo : M_lo + self.M, :]
             result_parts = self._execute_aie_operation(A_part, B_parts)
