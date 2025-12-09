@@ -276,16 +276,13 @@ class AIEOperatorBase(ABC):
 
     def read_buffer(self, buffer_name, shape, copy=False, dtype=bfloat16):
         """Read buffer and return values as a numpy array"""
-        # Total bytes
-        size = int(np.prod(shape)) * np.dtype(dtype).itemsize
-
-        # Map once; map() should return a Python buffer interface over the BO
+        # Create a byte accessible memory view of the buffer object
         mv = self.get_bo(buffer_name).map()
 
-        # Create a NumPy view over mapped memory (zero-copy)
+        # Interpret the buffer as a 1-dimensional array then change its view to the expected shape
         arr = np.frombuffer(mv, dtype=dtype, count=np.prod(shape)).reshape(shape)
 
-        # Return a snapshot if the BO will be reused or modified later
+        # Return an independent copy of the array if needed
         return arr.copy() if copy else arr
 
     def read_buffer_as_torch(self, buffer_name, shape, dtype=bfloat16):
@@ -302,18 +299,15 @@ class AIEOperatorBase(ABC):
         else:
             src = np.asarray(array)
 
-        if not src.flags["C_CONTIGUOUS"]:
-            src = np.ascontiguousarray(src)
-
-        # Create a byte view of the source without extra copies
+        # Create a flattened 1D byte view of the source
         src_bytes = src.ravel().view(np.uint8)
 
         bo = self.get_bo(buffer_name)
-        ptr = bo.map()  # pointer-like buffer
-        # Create a numpy array that aliases the BO memory
-        dst_bytes = np.frombuffer(ptr, dtype=np.uint8, count=bo.size())
+        mv = bo.map()  # byte accessible memory view
+        # Interpret the buffer as a 1-dimensional array
+        dst_bytes = np.frombuffer(mv, dtype=np.uint8, count=bo.size())
 
-        # Copy bytes; releases GIL and uses optimized memcpy
+        # The BO is an existing array, so copyto() can be called, which doesn't create a new array
         np.copyto(dst_bytes[: src_bytes.size], src_bytes, casting="no")
 
     @abstractmethod
