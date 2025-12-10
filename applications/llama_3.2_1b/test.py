@@ -7,7 +7,7 @@ import pytest
 from pathlib import Path
 
 test_dir = Path(__file__).parent
-weights_dir = Path("/scratch/roesti/models")
+weights_dir = Path("/srv")
 
 
 def generate_test_params():
