@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 test_dir = Path(__file__).parent
+weights_dir = Path("/scratch/roesti/models")
 
 
 def generate_test_params():
@@ -32,7 +33,7 @@ params, names = generate_test_params()
 )
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
-    command = f"python3 {test_dir}/inference.py /srv/llama3.2-1b/model.safetensors /srv/llama3.2-1b/tokenizer.model --prompt_len {prompt_len} --num_tokens {num_tokens}"
+    command = f"python3 {test_dir}/inference.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --prompt_len {prompt_len} --num_tokens {num_tokens}"
 
     result = subprocess.run(
         command,

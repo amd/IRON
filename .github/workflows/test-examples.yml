@@ -45,6 +45,7 @@ jobs:
         with:
           env_name: ci_env
           test_suite: "applications"
+          test_flags: "--iterations 1"
 
       - name: Commit example test results
         uses: ./.github/actions/commit_results
