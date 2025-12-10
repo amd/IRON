@@ -22,14 +22,21 @@ def generate_test_params(extensive=False):
 regular_params, regular_names = generate_test_params(extensive=False)
 extensive_params, extensive_names = generate_test_params(extensive=True)
 
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize(
-    "seq_len,dim,num_heads,num_pipelines", regular_params, ids=regular_names
-)
+@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines", all_params)
 def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     golden_ref = generate_golden_reference(
         S_q=seq_len,
@@ -74,15 +81,3 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     assert (
         len(errors["O"]) <= max_acceptable_errors
     ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
-
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.extensive
-@pytest.mark.parametrize(
-    "seq_len,dim,num_heads,num_pipelines", extensive_params, ids=extensive_names
-)
-def test_mha_extensive(seq_len, dim, num_heads, num_pipelines, aie_context):
-    test_mha(seq_len, dim, num_heads, num_pipelines, aie_context)

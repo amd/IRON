@@ -22,12 +22,21 @@ def generate_test_params(extensive=False):
 regular_params, regular_names = generate_test_params(extensive=False)
 extensive_params, extensive_names = generate_test_params(extensive=True)
 
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("embedding_dim,hidden_dim", regular_params, ids=regular_names)
+@pytest.mark.parametrize("embedding_dim,hidden_dim", all_params)
 def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
 
@@ -74,15 +83,3 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
-
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.extensive
-@pytest.mark.parametrize(
-    "embedding_dim,hidden_dim", extensive_params, ids=extensive_names
-)
-def test_swiglu_decode_extensive(embedding_dim, hidden_dim, aie_context):
-    test_swiglu_decode(embedding_dim, hidden_dim, aie_context)

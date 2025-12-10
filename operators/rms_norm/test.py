@@ -61,6 +61,15 @@ def generate_test_params(extensive=False):
 regular_params, regular_names = generate_test_params(extensive=False)
 extensive_params, extensive_names = generate_test_params(extensive=True)
 
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
@@ -68,8 +77,7 @@ extensive_params, extensive_names = generate_test_params(extensive=True)
 )
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size,weighted",
-    regular_params,
-    ids=regular_names,
+    all_params,
 )
 def test_rms_norm(
     input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
@@ -100,21 +108,3 @@ def test_rms_norm(
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
-
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.extensive
-@pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size,weighted",
-    extensive_params,
-    ids=extensive_names,
-)
-def test_rms_norm_extensive(
-    input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
-):
-    test_rms_norm(
-        input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
-    )

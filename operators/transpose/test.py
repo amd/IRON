@@ -49,14 +49,21 @@ def generate_test_params(extensive=False):
 regular_params, regular_names = generate_test_params(extensive=False)
 extensive_params, extensive_names = generate_test_params(extensive=True)
 
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize(
-    "M,N,aie_columns,channels,m,n,s", regular_params, ids=regular_names
-)
+@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s", all_params)
 def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     golden_ref = generate_golden_reference(rows=M, cols=N)
 
@@ -82,15 +89,3 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
-
-
-@pytest.mark.extensive
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "M,N,aie_columns,channels,m,n,s", extensive_params, ids=extensive_names
-)
-def test_transpose_extensive(M, N, aie_columns, channels, m, n, s, aie_context):
-    test_transpose(M, N, aie_columns, channels, m, n, s, aie_context)
