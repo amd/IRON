@@ -32,12 +32,11 @@ def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
         t = t.contiguous()
 
     if t.dtype == torch.bfloat16:
-        # Zero-copy reinterpret: view the same memory as uint16, then as NumPy bfloat16
+        # View the same memory as uint16, then as NumPy bfloat16
         # This avoids numeric conversion and extra passes over memory.
-        u16_np = t.view(torch.uint16).numpy()  # shares memory, zero-copy
-        return u16_np.view(np.dtype("bfloat16"))  # reinterpret, zero-copy
+        u16_np = t.view(torch.uint16).numpy()  # shares memory
+        return u16_np.view(np.dtype("bfloat16"))  # reinterpret
 
-    # For supported dtypes, this is already zero-copy
     return t.numpy()
 
 
@@ -48,8 +47,7 @@ def numpy_to_torch(array: np.ndarray) -> torch.Tensor:
 
     if array.dtype == np.dtype("bfloat16"):
         # reinterpret the same memory as uint16, then view as torch.bfloat16
-        t_u16 = torch.from_numpy(array.view(np.uint16))  # zero-copy
-        return t_u16.view(torch.bfloat16)  # view, zero-copy
+        t_u16 = torch.from_numpy(array.view(np.uint16))
+        return t_u16.view(torch.bfloat16)  # view
 
-    # For supported dtypes, from_numpy is already zero-copy
     return torch.from_numpy(array)
