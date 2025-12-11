@@ -38,28 +38,14 @@ jobs:
           source ci_env/bin/activate
           pip install -r requirements_examples.txt
 
-      - name: Generate application tests
-        shell: bash
-        env:
-          HOME: /workspace
-        run: |
-          source ci_env/bin/activate
-          set -euxo pipefail
-          mkdir -p testing
-          cd testing
-          python3 ../applications/discover_application_tests.py --output-dir .
-          echo "Application tests generated:"
-          ls -la
-
       - name: Run examples
         id: test
         continue-on-error: true
-        shell: bash
-        env:
-          HOME: /workspace
-        run: |
-          source ci_env/bin/activate
-          ./scripts/run_tests.py --log tests.log --csv-latest tests_latest.csv testing
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+          test_suite: "applications"
+          test_flags: "--iterations 1"
 
       - name: Commit example test results
         uses: ./.github/actions/commit_results

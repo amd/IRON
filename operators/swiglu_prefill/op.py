@@ -23,7 +23,9 @@ from operators.common.utils import torch_to_numpy
 
 class AIESwiGLUPrefill(AIEOperatorBase):
 
-    def __init__(self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False):
+    def __init__(
+        self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None
+    ):
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
@@ -44,13 +46,13 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.gemm_2_xclbin = None
         self.gemm_2_insts = None
 
-        super().__init__()
+        super().__init__(context=context)
 
     def set_up_artifacts(self):
         # Artifact setup
         # ---
         artifacts = []
-        device_str = self.device_manager.device_str()
+        device_str = self.context.device_manager.device_str()
 
         accuracy_flags = {}
         if self.prio_accuracy:

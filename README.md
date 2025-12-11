@@ -135,14 +135,20 @@ All available operators can be found in `operators`. These each contain:
 >       `source /opt/xilinx/xrt/setup.sh`
 >       `source /path/to/ironenv/bin/activate`
 
-To build and test all the operators, first generate a list of all test cases, then run them:
-``` python
-mkdir testing && cd testing
-../operators/common/discover_tests.py
-../scripts/run_tests.py --iter 1
+To build and test all the operators:
+``` bash
+pytest operators/ -m "not extensive"
 ``` 
 
-You can select a single test to run using the `--select` flag.
+To run the extensive test suite:
+``` bash
+pytest operators/
+```
+
+To run a specific operator's tests:
+``` bash
+pytest operators/axpy/
+```
 
 ### Git Hooks (Optional but Recommended)
 

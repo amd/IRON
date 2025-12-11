@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,23 +13,35 @@ from operators.swiglu_decode.reference import generate_golden_reference
 from operators.common.test_utils import run_test, verify_buffer
 
 
-regular_test_cases = [
-    ("swiglu_decode_1x2048x2048", "--embedding-dim 2048 --hidden-dim 2048"),
+def generate_test_params(extensive=False):
+    params = [(2048, 2048)]
+    names = [f"swiglu_decode_1x{emb}x{hid}" for emb, hid in params]
+    return params, names
+
+
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
+
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
 ]
 
-extensive_test_cases = []
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--embedding-dim", type=int, default=2048)
-    parser.add_argument("--hidden-dim", type=int, default=2048)
-    args = parser.parse_args()
-
-    golden_ref = generate_golden_reference(M=1, K=args.embedding_dim, N=args.hidden_dim)
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("embedding_dim,hidden_dim", all_params)
+def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
+    golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
 
     operator = AIESwiGLUDecode(
-        embedding_dim=args.embedding_dim, hidden_dim=args.hidden_dim
+        embedding_dim=embedding_dim, hidden_dim=hidden_dim, context=aie_context
     )
     operator.weights_1 = golden_ref["w_gate"].T
     operator.weights_2 = golden_ref["w_up"].T
@@ -60,7 +72,7 @@ def main():
     )
 
     ref_2 = (
-        operator.read_buffer_as_torch("intermediate", (1, args.hidden_dim))
+        operator.read_buffer_as_torch("intermediate", (1, hidden_dim))
         @ golden_ref["w_down"]
     )
     errors_2 = verify_buffer(operator, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
@@ -70,13 +82,4 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not errors, f"Test failed with errors: {errors}"

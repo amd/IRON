@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,39 +13,47 @@ from operators.mha.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-regular_test_cases = [
-    (
-        "mha",
-        "--seq-len 16384 --dim 64 --num-heads 1 --num-pipelines 8",
-    ),
+def generate_test_params(extensive=False):
+    params = [(16384, 64, 1, 8)]
+    names = ["mha"]
+    return params, names
+
+
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
+
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
 ]
 
-extensive_test_cases = []
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--seq-len", type=int, default=16384)
-    parser.add_argument("--dim", type=int, default=64)
-    parser.add_argument("--num-heads", type=int, default=1)
-    parser.add_argument("--num-pipelines", type=int, default=8)
-    args = parser.parse_args()
-
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines", all_params)
+def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     golden_ref = generate_golden_reference(
-        S_q=args.seq_len,
-        S_kv=args.seq_len,
-        d=args.dim,
-        heads=args.num_heads,
-        num_kv_heads=args.num_heads,
-        num_pipeline=args.num_pipelines,
+        S_q=seq_len,
+        S_kv=seq_len,
+        d=dim,
+        heads=num_heads,
+        num_kv_heads=num_heads,
+        num_pipeline=num_pipelines,
     )
 
     operator = AIEMHA(
-        num_heads=args.num_heads,
-        seq_len=args.seq_len,
-        d=args.dim,
-        num_KV_heads=args.num_heads,
-        num_of_pipelines=args.num_pipelines,
+        num_heads=num_heads,
+        seq_len=seq_len,
+        d=dim,
+        num_KV_heads=num_heads,
+        num_of_pipelines=num_pipelines,
+        context=aie_context,
     )
 
     input_buffers = {
@@ -60,9 +68,7 @@ def main():
     )
 
     error_threshold = 0.005
-    max_acceptable_errors = int(
-        args.seq_len * args.dim * args.num_heads * error_threshold
-    )
+    max_acceptable_errors = int(seq_len * dim * num_heads * error_threshold)
 
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
@@ -72,13 +78,6 @@ def main():
         )
     )
 
-    if len(errors["O"]) <= max_acceptable_errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert (
+        len(errors["O"]) <= max_acceptable_errors
+    ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"

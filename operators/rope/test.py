@@ -3,30 +3,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import pytest
 from operators.rope.op import AIERope
 from operators.rope.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-regular_test_cases = []
-extensive_test_cases = []
+def generate_test_params(extensive=False):
+    params = []
+    names = []
 
-max_aie_columns = 8
-num_channels = 2
-regular_input_lengths = [4096]
-regular_method_types = [0]  # 0: Two-halves method
-extensive_input_lengths = [1024, 8192]
-extensive_method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
+    max_aie_columns = 8
+    num_channels = 2
 
-for test_cases, input_lengths, method_types in [
-    (regular_test_cases, regular_input_lengths, regular_method_types),
-    (extensive_test_cases, extensive_input_lengths, extensive_method_types),
-]:
+    if not extensive:
+        input_lengths = [4096]
+        method_types = [0]  # 0: Two-halves method
+    else:
+        input_lengths = [1024, 8192]
+        method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
+
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
             tile_size = input_length // num_aie_columns
@@ -35,33 +35,58 @@ for test_cases, input_lengths, method_types in [
             check_length = tile_size * num_aie_columns
             if check_length == input_length:
                 for method_type in method_types:
-                    name = f"rope_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{method_type}"
-                    cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size} --method-type {method_type}"
-                    test_cases.append((name, cmd))
+                    names.append(
+                        f"rope_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{method_type}"
+                    )
+                    params.append(
+                        (
+                            input_length,
+                            num_aie_columns,
+                            num_channels,
+                            tile_size,
+                            method_type,
+                        )
+                    )
+
+    return params, names
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--length", type=int, default=4096)
-    parser.add_argument("--aie-columns", type=int, default=1)
-    parser.add_argument("--channels", type=int, default=2)
-    parser.add_argument("--tile-size", type=int, default=1024)
-    parser.add_argument("--method-type", type=int, default=0)
-    args = parser.parse_args()
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
 
-    rows = args.length // args.tile_size
-    cols = args.tile_size
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
+
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize(
+    "length,aie_columns,channels,tile_size,method_type",
+    all_params,
+)
+def test_rope(length, aie_columns, channels, tile_size, method_type, aie_context):
+    rows = length // tile_size
+    cols = tile_size
 
     golden_ref = generate_golden_reference(
-        rows=rows, cols=cols, method_type=args.method_type
+        rows=rows, cols=cols, method_type=method_type
     )
 
     operator = AIERope(
-        size=args.length,
-        num_aie_columns=args.aie_columns,
-        num_channels=args.channels,
-        last_dim=args.tile_size,
-        method_type=args.method_type,
+        size=length,
+        num_aie_columns=aie_columns,
+        num_channels=channels,
+        last_dim=tile_size,
+        method_type=method_type,
+        context=aie_context,
     )
 
     input_buffers = {
@@ -77,13 +102,4 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not errors, f"Test failed with errors: {errors}"

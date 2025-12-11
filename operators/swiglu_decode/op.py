@@ -23,7 +23,7 @@ from operators.common.utils import torch_to_numpy
 
 class AIESwiGLUDecode(AIEOperatorBase):
 
-    def __init__(self, embedding_dim, hidden_dim, prio_accuracy=False):
+    def __init__(self, embedding_dim, hidden_dim, prio_accuracy=False, context=None):
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
         self.prio_accuracy = prio_accuracy
@@ -43,13 +43,13 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.gemv_2_xclbin = None
         self.gemv_2_insts = None
 
-        super().__init__()
+        super().__init__(context=context)
 
     def set_up_artifacts(self):
         # Artifact setup
         # ---
         artifacts = []
-        device_str = self.device_manager.device_str()
+        device_str = self.context.device_manager.device_str()
 
         gemv_1 = AIEGEMV(
             M=self.hidden_dim,

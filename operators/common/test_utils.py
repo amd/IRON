@@ -4,7 +4,6 @@
 import time
 import numpy as np
 from ml_dtypes import bfloat16
-from .aie_base import AIEOperatorBase
 from .utils import torch_to_numpy
 import logging
 
@@ -83,8 +82,8 @@ def run_test(
         level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
     )
     logger = logging.getLogger(__name__)
-    AIEOperatorBase.compile_all_operators()
-    AIEOperatorBase.prepare_runtime()
+    operator.context.compile_all()
+    operator.context.prepare_runtime()
 
     # Run warmup iterations before writing to buffers (warmup iters might corrupt the buffers)
     for _ in range(warmup_iters):
