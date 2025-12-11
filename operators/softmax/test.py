@@ -84,7 +84,7 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
         cols=cols,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,
-        context=aie_context
+        context=aie_context,
     )
 
     input_buffers = {"in": golden_ref["input"]}

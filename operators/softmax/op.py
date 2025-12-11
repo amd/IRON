@@ -21,12 +21,7 @@ from operators.common import (
 class AIESoftmax(AIEOperatorBase):
 
     def __init__(
-        self, 
-        rows: int, 
-        cols: int, 
-        num_aie_columns=1, 
-        num_channels=1, 
-        context=None
+        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, context=None
     ):
         self.size = rows * cols
         self.rows = rows
