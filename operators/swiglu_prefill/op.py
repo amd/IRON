@@ -83,17 +83,13 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         )  # xclbin artifact will be pulled in as a dependency of last xclbin
 
         silu = AIESiLU(
-            size=self.seq_len * self.hidden_dim,
+            size=self.seq_len_padded * self.hidden_dim_padded,
             num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim // 8,
+            tile_size=self.hidden_dim_padded // 8,
         )
         self.silu = silu
-        assert (
-            self.seq_len * self.hidden_dim
-            <= silu.size
-            <= self.seq_len_padded * self.hidden_dim_padded
-        )
+        assert silu.size == self.seq_len_padded * self.hidden_dim_padded
 
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
         silu_xclbin.xclbin_input = gemm_1_xclbin
@@ -106,17 +102,13 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         artifacts.append(silu_insts)
 
         eltwise_mul = AIEElementwiseMul(
-            size=self.seq_len * self.hidden_dim,
+            size=self.seq_len_padded * self.hidden_dim_padded,
             num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim // 8,
+            tile_size=self.hidden_dim_padded // 8,
         )
         self.eltwise_mul = eltwise_mul
-        assert (
-            self.seq_len * self.hidden_dim
-            <= eltwise_mul.size
-            <= self.seq_len_padded * self.hidden_dim_padded
-        )
+        assert eltwise_mul.size == self.seq_len_padded * self.hidden_dim_padded
 
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_eltwise_mul_"
