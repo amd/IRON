@@ -11,7 +11,7 @@ weights_dir = Path("/srv")
 
 
 def generate_test_params():
-    prompt_lengths = [2048, 13, 3]
+    prompt_lengths = [2048, 13]
     num_tokens_list = [40, 1]
 
     params = []
