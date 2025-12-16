@@ -84,8 +84,8 @@ class GroupedQueryAttention(nn.Module):
             self.aie_softmax = AIESoftmax(
                 num_aie_columns=1,
                 num_channels=1,
-                size=prompt_length * prompt_length,
-                last_dim=prompt_length,
+                rows=prompt_length,
+                cols=prompt_length,
             )
             M_for_gemm = prompt_length + num_tokens
             self.aie_mha_gemm_qk = AIEGEMM(

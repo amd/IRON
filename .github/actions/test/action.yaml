@@ -6,13 +6,17 @@ name: "Run test suite"
 inputs:
   test_flags:
     required: false
-    default: "--log tests.log --csv-latest tests_latest.csv"
+    default: ""
   env_name:
     required: false
     default: "ci_env"
-  testing_dir:
+  extensive:
     required: false
-    default: "testing"
+    default: "false"
+  test_suite:
+    required: false
+    default: "operators"
+    description: "Which tests to run: 'operators', 'applications', or 'both'"
 
 runs:
   using: "composite"
@@ -23,4 +27,23 @@ runs:
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate
-        ./scripts/run_tests.py ${{ inputs.test_flags }} ${{ inputs.testing_dir }}
+        
+        case "${{ inputs.test_suite }}" in
+          operators)
+            TEST_PATH="operators/"
+            ;;
+          applications)
+            TEST_PATH="applications/"
+            ;;
+          *)
+            echo "Invalid test_suite: ${{ inputs.test_suite }}"
+            exit 1
+            ;;
+        esac
+        
+        if [ "${{ inputs.extensive }}" = "true" ]; then
+          pytest $TEST_PATH --csv-output=tests_latest.csv ${{ inputs.test_flags }}
+        else
+          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv ${{ inputs.test_flags }}
+        fi
+

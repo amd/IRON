@@ -21,10 +21,9 @@ from operators.common import (
 class AIESoftmax(AIEOperatorBase):
 
     def __init__(
-        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, tile_size=None
+        self, rows: int, cols: int, num_aie_columns=1, num_channels=1, context=None
     ):
         self.size = rows * cols
-        self.tile_size = tile_size if tile_size is not None else cols
         self.rows = rows
         self.cols = cols
 
@@ -35,24 +34,24 @@ class AIESoftmax(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         # Compilation artifacts
         operator_dir = Path(__file__).parent
-        file_name_base = f"softmax_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        file_name_base = f"softmax_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.cols}t"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
             import_path=operator_dir / "design.py",
             callback_fn="softmax",
             callback_args=[
-                self.device_manager.device_type,
-                self.size,
+                self.context.device_manager.device_type,
+                self.rows * self.cols,
                 self.num_columns,
                 self.num_channels,
                 0,
-                self.tile_size,
+                self.cols,
             ],
         )
 
@@ -64,7 +63,10 @@ class AIESoftmax(AIEOperatorBase):
                     f"softmax.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / "aie2p"
+                            / "softmax.cc"
                         )
                     ],
                 ),
@@ -96,7 +98,7 @@ class AIESoftmax(AIEOperatorBase):
     def forward(self, x):
         applicable = (
             x.shape[-1] * x.shape[-2] == self.size
-            and x.shape[-1] == self.tile_size
+            and x.shape[-1] == self.cols
             and x.shape[-1] % 16 == 0
             and x.shape[-2] % 16 == 0
         )

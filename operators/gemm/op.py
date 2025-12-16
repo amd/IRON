@@ -34,6 +34,7 @@ class AIEGEMM(AIEOperatorBase):
         tile_k=64,
         tile_n=64,
         num_aie_columns=8,
+        context=None,
         **gemm_kwargs,
     ):
 
@@ -62,7 +63,7 @@ class AIEGEMM(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def get_artifacts(self, prefix="gemm_"):
         # Get parameters from self
@@ -74,8 +75,8 @@ class AIEGEMM(AIEOperatorBase):
         K = self.K
         N = self.N
         num_aie_columns = self.num_aie_columns
-        base_dir = self.base_dir
-        device_str = self.device_manager.device_str()
+        base_dir = self.context.base_dir
+        device_str = self.context.device_manager.device_str()
 
         b_col_maj = self.gemm_args.get("b_col_maj", False)
         c_col_maj = self.gemm_args.get("c_col_maj", False)
@@ -202,7 +203,7 @@ class AIEGEMM(AIEOperatorBase):
 
     def set_up_artifacts(self):
         # Describe required artifacts (xclbin, insts.bin)
-        device_str = self.device_manager.device_str()
+        device_str = self.context.device_manager.device_str()
         xclbin_artifact, insts_artifact = self.get_artifacts()
 
         self.xclbin_artifact = xclbin_artifact

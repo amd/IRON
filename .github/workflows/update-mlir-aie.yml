@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   check-and-update:
@@ -66,6 +67,7 @@ jobs:
           
           # Update requirements.txt
           sed -i "s|==${{ steps.current_version.outputs.version }}|==${{ steps.latest_release.outputs.tag }}|" requirements.txt
+          sed -i "s|mlir-aie/releases/expanded_assets/.*|mlir-aie/releases/expanded_assets/${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
           
           # Commit changes
           git add requirements.txt
@@ -81,6 +83,12 @@ jobs:
             --head $new_branch \
             --title "Update mlir-aie from v${{ steps.current_version.outputs.version }} to ${{ steps.latest_release.outputs.tag_with_v }}" \
             --body-file -
+
+          # Trigger CI workflows
+          echo "Triggering CI workflows..."
+          gh workflow run ci-lint.yml --ref $new_branch
+          gh workflow run small.yml --ref $new_branch
+          gh workflow run test-examples.yml --ref $new_branch
           
       - name: No new version found
         if: steps.current_version.outputs.version == steps.latest_release.outputs.tag
