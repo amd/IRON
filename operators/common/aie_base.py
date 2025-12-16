@@ -167,23 +167,46 @@ class AIEOperatorBase(ABC):
             todo.extend(artifact.depends)
 
     def run_runlist(self):
-        bos = set(
-            self.buffer_bos[buffer_arg]
-            for _, *buffer_args in self.runlist
-            for buffer_arg in buffer_args
-        )
-        insts_bos = set(
-            self.xrt_kernels[kernel_name][2] for (kernel_name, *_) in self.runlist
-        )
-        for bo in bos | insts_bos:
-            bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
-        start = time.perf_counter()
-        self.xrt_runlist.execute()
-        self.xrt_runlist.wait()
-        stop = time.perf_counter()
-        for bo in bos:
-            bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
-        return stop - start
+        elapsed = 0.0
+        if self.xrt_runlist is None:
+            # Execute as separate xclbin kernel invocations
+            for i, (kernel_name, *buffer_args) in enumerate(self.runlist):
+                context, xrt_kernel, insts_bo, insts_len = self.xrt_kernels[kernel_name]
+                insts_bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+                bos = [self.buffer_bos[buffer_arg] for buffer_arg in buffer_args]
+                for bo in bos:
+                    bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+                opcode = 3
+                start = time.perf_counter()
+                run = xrt_kernel(opcode, insts_bo, insts_len, *bos)
+                result = run.wait()
+                stop = time.perf_counter()
+                elapsed += stop - start
+                if result != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
+                    raise RuntimeError(
+                        f"Kernel {kernel_name} did not complete correctly: {result}"
+                    )
+                for bo in bos:
+                    bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+        else:
+            bos = set(
+                self.buffer_bos[buffer_arg]
+                for _, *buffer_args in self.runlist
+                for buffer_arg in buffer_args
+            )
+            insts_bos = set(
+                self.xrt_kernels[kernel_name][2] for (kernel_name, *_) in self.runlist
+            )
+            for bo in bos | insts_bos:
+                bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+            start = time.perf_counter()
+            self.xrt_runlist.execute()
+            self.xrt_runlist.wait()
+            stop = time.perf_counter()
+            for bo in bos:
+                bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+            elapsed = stop - start
+        return elapsed
 
 
 class AIEOperatorConstraintError(RuntimeError):

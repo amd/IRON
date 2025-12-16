@@ -84,7 +84,6 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
         cols=cols,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,
-        tile_size=tile_size,
         context=aie_context,
     )
 

@@ -46,8 +46,6 @@ class AIESwiGLUDecode(AIEOperatorBase):
         super().__init__(context=context)
 
     def set_up_artifacts(self):
-        # Artifact setup
-        # ---
         artifacts = []
         device_str = self.context.device_manager.device_str()
 
@@ -57,6 +55,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
             num_aie_columns=8,
             tile_size=1,
         )
+        self.gemv_1 = gemv_1
         gemv_1_xclbin, gemv_1_insts = gemv_1.get_artifacts(
             prefix="swiglu_decode_gemv_1_"
         )
@@ -75,6 +74,8 @@ class AIESwiGLUDecode(AIEOperatorBase):
             num_channels=2,
             tile_size=self.hidden_dim // 16,
         )
+        self.silu = silu
+        self.hidden_dim_padded = silu.size
         silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_decode_silu_")
         silu_xclbin.xclbin_input = gemv_1_xclbin
         silu_xclbin.extra_flags += [
@@ -91,6 +92,8 @@ class AIESwiGLUDecode(AIEOperatorBase):
             num_channels=2,
             tile_size=self.hidden_dim // 8,
         )
+        self.eltwise_mul = eltwise_mul
+        assert self.hidden_dim <= eltwise_mul.size <= self.hidden_dim_padded
         eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
             prefix="swiglu_decode_eltwise_mul_"
         )
@@ -109,6 +112,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
             num_aie_columns=8,
             tile_size=1,
         )
+        self.gemv_2 = gemv_2
         gemv_2_xclbin, gemv_2_insts = gemv_2.get_artifacts(
             prefix="swiglu_decode_gemv_2_"
         )
@@ -135,28 +139,26 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.add_artifacts(artifacts)
 
     def set_up_runtime(self):
-        # Runtime setup
-        # ---
         self.add_buffer("input", self.embedding_dim)
         self.add_buffer(
             "weights_1",
-            self.embedding_dim * self.hidden_dim,
+            self.embedding_dim * self.hidden_dim_padded,
             static_data=torch_to_numpy(self.weights_1),
         )
         self.add_buffer(
             "weights_2",
-            self.embedding_dim * self.hidden_dim,
+            self.embedding_dim * self.hidden_dim_padded,
             static_data=torch_to_numpy(self.weights_2),
         )
         self.add_buffer(
             "weights_3",
-            self.hidden_dim * self.embedding_dim,
+            self.hidden_dim_padded * self.embedding_dim,
             static_data=torch_to_numpy(self.weights_3),
         )
-        self.add_buffer("left", self.hidden_dim)
-        self.add_buffer("left_swished", self.hidden_dim)
-        self.add_buffer("right", self.hidden_dim)
-        self.add_buffer("intermediate", self.hidden_dim)
+        self.add_buffer("left", self.hidden_dim_padded)
+        self.add_buffer("left_swished", self.hidden_dim_padded)
+        self.add_buffer("right", self.hidden_dim_padded)
+        self.add_buffer("intermediate", self.hidden_dim_padded)
         self.add_buffer("output", self.embedding_dim)
         self.add_kernel(
             "swiglu_gemv_1",
@@ -191,9 +193,7 @@ class AIESwiGLUDecode(AIEOperatorBase):
         self.add_to_runlist("swiglu_gemv_2", "weights_3", "intermediate", "output")
 
     def forward(self, x):
-        # Turn into a numpy vector and drop the batch and other higher dimensions, if any; will error if batch or other higher dimensions > 1
         x_flat = x.reshape(x.shape[-1])
-
         assert x_flat.shape[0] == self.embedding_dim
 
         self.write_buffer("input", x_flat)

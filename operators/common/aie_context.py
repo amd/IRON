@@ -14,7 +14,7 @@ import aie.utils.config
 class AIEContext:
     """Context for managing AIE operator compilation and runtime state"""
 
-    def __init__(self):
+    def __init__(self, use_runlist=True):
         self.operators = []
         self.static_data_pool = {}
         self.device_manager = AIEDeviceManager()
@@ -22,6 +22,8 @@ class AIEContext:
         self.build_dir = Path(os.getcwd()) / "build"
         self.mlir_aie_dir = Path(aie.utils.config.root_path())
         self.peano_dir = Path(aie.utils.config.peano_install_dir())
+        # Disable the XRT runlist sacrifices performance by executing kernels individually as separate xclbin invocations for easier debugging (can tell which part of runlist execution failed)
+        self.use_runlist = use_runlist
         self._runtime_prepared = False
 
     def register_operator(self, operator):
@@ -146,20 +148,23 @@ class AIEContext:
             context, _ = self.device_manager.get_context_and_kernel(
                 str(first_xclbin.path), first_xclbin_kernel_name
             )
-            op.xrt_runlist = pyxrt.runlist(context)
-            for i, (kernel_name, *buffer_args) in enumerate(op.runlist):
-                this_context, xrt_kernel, insts_bo, insts_len = op.xrt_kernels[
-                    kernel_name
-                ]
-                assert this_context == context
-                opcode = 3
-                run = pyxrt.run(xrt_kernel)
-                run.set_arg(0, opcode)
-                run.set_arg(1, insts_bo)
-                run.set_arg(2, insts_len)
-                for j, buffer_arg in enumerate(buffer_args):
-                    run.set_arg(j + 3, op.buffer_bos[buffer_arg])
-                op.xrt_runlist.add(run)
+            if self.use_runlist:
+                op.xrt_runlist = pyxrt.runlist(context)
+                for i, (kernel_name, *buffer_args) in enumerate(op.runlist):
+                    this_context, xrt_kernel, insts_bo, insts_len = op.xrt_kernels[
+                        kernel_name
+                    ]
+                    assert this_context == context
+                    opcode = 3
+                    run = pyxrt.run(xrt_kernel)
+                    run.set_arg(0, opcode)
+                    run.set_arg(1, insts_bo)
+                    run.set_arg(2, insts_len)
+                    for j, buffer_arg in enumerate(buffer_args):
+                        run.set_arg(j + 3, op.buffer_bos[buffer_arg])
+                    op.xrt_runlist.add(run)
+            else:
+                op.xrt_runlist = None
 
         # Log allocation info
         bo_count = sum(len(pool) for pool in bo_pools.values())
