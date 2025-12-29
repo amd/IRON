@@ -36,8 +36,14 @@ jobs:
 
       - name: Get latest mlir-aie release
         id: latest_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest_tag_with_v=$(curl -s "https://api.github.com/repos/Xilinx/mlir-aie/releases/latest" | jq -r '.tag_name')
+          latest_tag_with_v=$(gh api repos/Xilinx/mlir-aie/releases/latest --jq .tag_name)
+          if [ -z "$latest_tag_with_v" ] || [ "$latest_tag_with_v" = "null" ]; then
+            echo "Failed to fetch latest release tag."
+            exit 1
+          fi
           latest_tag="${latest_tag_with_v#v}"
           echo "Latest tag: $latest_tag"
           echo "tag_with_v=$latest_tag_with_v" >> $GITHUB_OUTPUT
