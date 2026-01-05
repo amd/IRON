@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # 🦾 - IRON: Unlocking the Full Potential of NPUs - 🦾
 
-<a href="https://discord.gg/Qm6FCD78Xb">
+<a href="https://discord.gg/cW99Ds85e8">
     <img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord" /></a>
 <a href="https://github.com/amd/iron/releases/latest" title="Download the latest release">
    <img src="https://img.shields.io/github/v/release/amd/iron?include_prereleases" alt="Latest Release" /></a>
