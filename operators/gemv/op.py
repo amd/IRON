@@ -30,6 +30,7 @@ class AIEGEMV(AIEOperatorBase):
         tile_size=1,
         is_mv=True,
         use_static_weight=False,
+        context=None,
     ):
 
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
@@ -51,7 +52,7 @@ class AIEGEMV(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def get_artifacts(self, prefix="gemv_"):
         operator_dir = Path(__file__).parent
@@ -64,7 +65,7 @@ class AIEGEMV(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_matvec",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.num_aie_columns,
                 self.M,
                 self.K,
@@ -80,7 +81,7 @@ class AIEGEMV(AIEOperatorBase):
                     f"mv.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "generic" / "mv.cc"
+                            self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
                         )
                     ],
                 ),

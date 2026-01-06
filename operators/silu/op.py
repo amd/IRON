@@ -21,7 +21,7 @@ from operators.common import (
 class AIESiLU(AIEOperatorBase):
     """AIE-accelerated SiLU activation function"""
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size):
+    def __init__(self, size, num_aie_columns, num_channels, tile_size, context=None):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
@@ -39,7 +39,7 @@ class AIESiLU(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def get_artifacts(self, prefix="silu_"):
         operator_dir = Path(__file__).parent
@@ -50,7 +50,7 @@ class AIESiLU(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_silu",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,
@@ -67,7 +67,7 @@ class AIESiLU(AIEOperatorBase):
                     f"silu.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "aie2p" / "silu.cc"
+                            self.context.base_dir / "aie_kernels" / "aie2p" / "silu.cc"
                         )
                     ],
                 ),

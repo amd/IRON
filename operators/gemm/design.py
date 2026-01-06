@@ -12,11 +12,11 @@ from aie.iron import (
     Kernel,
     ObjectFifo,
     Program,
-    GlobalBuffer,
+    Buffer,
     Runtime,
     Worker,
     WorkerRuntimeBarrier,
-    LocalBuffer,
+    Buffer,
     str_to_dtype,
 )
 from aie.iron.placers import SequentialPlacer
@@ -333,7 +333,7 @@ def my_matmul(
     # Runtime parameters
     rtps = [
         [
-            GlobalBuffer(
+            Buffer(
                 np.ndarray[(2,), np.dtype[np.int32]],
                 name=f"rtp{row}_{col}",
                 initial_value=np.array([0, 0], dtype=np.int32),
@@ -432,11 +432,17 @@ def my_matmul(
             C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
     # Tasks for each worker to perform
-    def core_fn(in_a, in_b, out_c, zero, matmul, convert_copy, my_rtp, barrier):
-        if use_larger_internal_buffer:
-            elem_out_internal = LocalBuffer(
-                type=C_l1_ty_internal,
-            )
+    def core_fn(
+        in_a,
+        in_b,
+        out_c,
+        zero,
+        matmul,
+        convert_copy,
+        my_rtp,
+        barrier,
+        elem_out_internal,
+    ):
         barrier.wait_for_value(1)
         rtp_K_div_k = my_rtp[0]
         rtp_n_tiles_per_core = my_rtp[1]
@@ -467,6 +473,12 @@ def my_matmul(
     for row in range(n_aie_rows):
         for col in range(n_aie_cols):
             tile_col, tile_row = core_tiles[row][col]
+            acc_buffer = None
+            if use_larger_internal_buffer:
+                acc_buffer = Buffer(
+                    type=C_l1_ty_internal, name=f"acc_buffer_{row}_{col}"
+                )
+
             workers.append(
                 Worker(
                     core_fn,
@@ -479,6 +491,7 @@ def my_matmul(
                         convert_copy_kernel if use_larger_internal_buffer else None,
                         rtps[row][col],
                         workerBarriers[row][col],
+                        acc_buffer,
                     ],
                     placement=Tile(tile_col, tile_row),
                     stack_size=0xD00,

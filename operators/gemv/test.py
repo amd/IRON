@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -13,60 +13,53 @@ from operators.gemv.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
 
-regular_test_cases = [
-    (
-        "matrix_vector_mul_128x128_32_1col",
-        "-M 128 -K 128 --aie-columns 1 --tile-size 32",
-    ),
-    (
-        "matrix_vector_mul_2048x8192_1_1col",
-        "-M 2048 -K 8192 --aie-columns 1 --tile-size 1",
-    ),
-    (
-        "matrix_vector_mul_8192x2048_4_1col",
-        "-M 8192 -K 2048 --aie-columns 1 --tile-size 4",
-    ),
-    (
-        "matrix_vector_mul_2048x8192_1_2col",
-        "-M 2048 -K 8192 --aie-columns 2 --tile-size 1",
-    ),
-    (
-        "matrix_vector_mul_8192x2048_4_2col",
-        "-M 8192 -K 2048 --aie-columns 2 --tile-size 4",
-    ),
-    (
-        "matrix_vector_mul_2048x8192_1_4col",
-        "-M 2048 -K 8192 --aie-columns 4 --tile-size 1",
-    ),
-    (
-        "matrix_vector_mul_8192x2048_4_4col",
-        "-M 8192 -K 2048 --aie-columns 4 --tile-size 4",
-    ),
-    (
-        "matrix_vector_mul_2048x8192_1_8col",
-        "-M 2048 -K 8192 --aie-columns 8 --tile-size 1",
-    ),
-    (
-        "matrix_vector_mul_8192x2048_4_8col",
-        "-M 8192 -K 2048 --aie-columns 8 --tile-size 4",
-    ),
+def generate_test_params(extensive=False):
+    params = [
+        (128, 128, 1, 32),
+        (2048, 8192, 1, 1),
+        (8192, 2048, 1, 4),
+        (2048, 8192, 2, 1),
+        (8192, 2048, 2, 4),
+        (2048, 8192, 4, 1),
+        (8192, 2048, 4, 4),
+        (2048, 8192, 8, 1),
+        (8192, 2048, 8, 4),
+    ]
+    names = [
+        f"matrix_vector_mul_{M}x{K}_{tile_size}_{num_aie_columns}col"
+        for M, K, num_aie_columns, tile_size in params
+    ]
+    return params, names
+
+
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
+
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
 ]
 
-extensive_test_cases = list(regular_test_cases)
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-M", type=int, default=128)
-    parser.add_argument("-K", type=int, default=128)
-    parser.add_argument("--aie-columns", type=int, default=1)
-    parser.add_argument("--tile-size", type=int, default=1)
-    args = parser.parse_args()
-
-    golden_ref = generate_golden_reference(M=args.M, K=args.K)
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+)
+@pytest.mark.parametrize("M,K,num_aie_columns,tile_size", all_params)
+def test_gemv(M, K, num_aie_columns, tile_size, aie_context):
+    golden_ref = generate_golden_reference(M=M, K=K)
 
     operator = AIEGEMV(
-        M=args.M, K=args.K, num_aie_columns=args.aie_columns, tile_size=args.tile_size
+        M=M,
+        K=K,
+        num_aie_columns=num_aie_columns,
+        tile_size=tile_size,
+        context=aie_context,
     )
 
     input_buffers = {"matrix": golden_ref["A"].flatten(), "vector": golden_ref["B"]}
@@ -76,19 +69,10 @@ def main():
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.0f} us")
+    print(f"\nLatency: {latency_us:.1f} us")
 
-    gflops = (2.0 * args.M * args.K) / (latency_us * 1e-6) / 1e9
+    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not errors, f"Test failed with errors: {errors}"

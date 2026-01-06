@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-import argparse
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -12,19 +12,14 @@ from operators.gelu.op import AIEGELU
 from operators.gelu.reference import generate_golden_reference
 from operators.common.test_utils import run_test
 
-regular_test_cases = []
-extensive_test_cases = []
 
-max_aie_columns = 8
+def generate_test_params(extensive=False):
+    max_aie_columns = 8
+    num_channels_choices = [1, 2]
+    input_lengths = [2048] if not extensive else [1024, 4096, 8192]
 
-num_channels_choices = [1, 2]
-regular_input_lengths = [2048]
-extensive_input_lengths = [1024, 4096, 8192]
-
-for test_cases, input_lengths in [
-    (regular_test_cases, regular_input_lengths),
-    (extensive_test_cases, extensive_input_lengths),
-]:
+    params = []
+    names = []
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
             for num_channels in num_channels_choices:
@@ -34,26 +29,45 @@ for test_cases, input_lengths in [
                     tile_size = 8192
                 check_length = tile_size * total_cores
                 if check_length == input_length:
-                    name = f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-                    cmd = f"-l {input_length} --aie-columns {num_aie_columns} --channels {num_channels} --tile-size {tile_size}"
-                    test_cases.append((name, cmd))
+                    names.append(
+                        f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+                    )
+                    params.append(
+                        (input_length, num_aie_columns, num_channels, tile_size)
+                    )
+    return params, names
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--length", type=int, default=4096)
-    parser.add_argument("--aie-columns", type=int, default=1)
-    parser.add_argument("--channels", type=int, default=1)
-    parser.add_argument("--tile-size", type=int, default=1024)
-    args = parser.parse_args()
+regular_params, regular_names = generate_test_params(extensive=False)
+extensive_params, extensive_names = generate_test_params(extensive=True)
 
-    golden_ref = generate_golden_reference(input_length=args.length)
+# Combine params with marks - extensive params get pytest.mark.extensive
+all_params = [
+    pytest.param(*params, id=name)
+    for params, name in zip(regular_params, regular_names)
+] + [
+    pytest.param(*params, marks=pytest.mark.extensive, id=name)
+    for params, name in zip(extensive_params, extensive_names)
+]
+
+
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size",
+    all_params,
+)
+def test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_context):
+    golden_ref = generate_golden_reference(input_length=input_length)
 
     operator = AIEGELU(
-        size=args.length,
-        num_aie_columns=args.aie_columns,
-        num_channels=args.channels,
-        tile_size=args.tile_size,
+        size=input_length,
+        num_aie_columns=num_aie_columns,
+        num_channels=num_channels,
+        tile_size=tile_size,
+        context=aie_context,
     )
 
     input_buffers = {"input": golden_ref["input"]}
@@ -66,13 +80,4 @@ def main():
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    if not errors:
-        print("PASS!\n")
-        return 0
-    else:
-        print("fail.\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert not errors, f"Test failed with errors: {errors}"

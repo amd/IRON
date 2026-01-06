@@ -20,7 +20,7 @@ from operators.common import (
 class AIETanh(AIEOperatorBase):
     """AIE-accelerated Tanh activation function"""
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size):
+    def __init__(self, size, num_aie_columns, num_channels, tile_size, context=None):
         max_multiple = num_aie_columns * tile_size
         padded_size = ((size + max_multiple - 1) // max_multiple) * max_multiple
         self.orig_size = size
@@ -36,7 +36,7 @@ class AIETanh(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
@@ -47,7 +47,7 @@ class AIETanh(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_tanh",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,
@@ -64,7 +64,7 @@ class AIETanh(AIEOperatorBase):
                     f"tanh.o",
                     depends=[
                         SourceArtifact.new(
-                            self.base_dir / "aie_kernels" / "aie2p" / "tanh.cc"
+                            self.context.base_dir / "aie_kernels" / "aie2p" / "tanh.cc"
                         )
                     ],
                 ),

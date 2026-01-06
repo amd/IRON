@@ -19,7 +19,15 @@ from operators.common import (
 
 class AIEDequant(AIEOperatorBase):
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size, group_size=32):
+    def __init__(
+        self,
+        size,
+        num_aie_columns,
+        num_channels,
+        tile_size,
+        group_size=32,
+        context=None,
+    ):
         # Store num_aie_columns in self.num_columns for internal use (following the pattern)
         self.num_columns = num_aie_columns
 
@@ -41,7 +49,7 @@ class AIEDequant(AIEOperatorBase):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        AIEOperatorBase.__init__(self)
+        AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
         operator_dir = Path(__file__).parent
@@ -52,7 +60,7 @@ class AIEDequant(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_dequant_kernel",
             callback_args=[
-                self.device_manager.device_type,
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,
@@ -67,7 +75,7 @@ class AIEDequant(AIEOperatorBase):
             f"expand_aie2_{self.tile_size}.o",
             depends=[
                 SourceArtifact.new(
-                    self.base_dir / "aie_kernels" / "generic" / "expand.cc"
+                    self.context.base_dir / "aie_kernels" / "generic" / "expand.cc"
                 )
             ],
             extra_flags=[

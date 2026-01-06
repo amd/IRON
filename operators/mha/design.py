@@ -16,8 +16,8 @@ from aie.iron import (
     Program,
     Runtime,
     Worker,
-    LocalBuffer,
-    GlobalBuffer,
+    Buffer,
+    Buffer,
     WorkerRuntimeBarrier,
 )
 from aie.iron.placers import SequentialPlacer
@@ -391,10 +391,16 @@ def fused_mha(
         )
 
     def batched_matmul_qk(
-        of_q, of_k, of_a_out, zero, matmul_QK, q_block_bias, mha_rtps, barrier
+        of_q,
+        of_k,
+        of_a_out,
+        zero,
+        matmul_QK,
+        q_block_bias,
+        mha_rtps,
+        barrier,
+        idx_buffer,
     ):
-
-        idx_buffer = LocalBuffer(initial_value=np.zeros(shape=(2,), dtype=np.int32))
 
         barrier.wait_for_value(1)
 
@@ -437,14 +443,12 @@ def fused_mha(
         q_block_bias,
         mha_rtps,
         barrier,
+        idx_buffer,
+        scale_buffer,
     ):
 
         # VJUNG: The index buffer count how many Q and KV block this worker has processed
         # From this info we can infer the position in A and P
-        idx_buffer = LocalBuffer(initial_value=np.zeros(shape=(2,), dtype=np.int32))
-        scale_buffer = LocalBuffer(
-            initial_value=np.zeros(shape=(4 * B_q,), dtype=dtype)
-        )
 
         barrier.wait_for_value(1)
 
@@ -502,9 +506,8 @@ def fused_mha(
         q_block_bias,
         mha_rtps,
         barrier,
+        idx_buffer,
     ):
-
-        idx_buffer = LocalBuffer(initial_value=np.zeros(shape=(2,), dtype=np.int32))
 
         barrier.wait_for_value(1)
 
@@ -601,10 +604,10 @@ def fused_mha(
                 of_o_out.release(1)
 
     # Runtime parameter for workers loop index
-    # VJUNG: We need one GlobalBuffer per worker since they need to be placed
+    # VJUNG: We need one Buffer per worker since they need to be placed
     mha_rtps_list = [
         [
-            GlobalBuffer(
+            Buffer(
                 np.ndarray[(4,), np.dtype[np.int32]],
                 name=f"mha_rtpss_{i}_stage{j}",
                 initial_value=None,
@@ -625,6 +628,10 @@ def fused_mha(
     softmax_workers = []
     matmul_pv_workers = []
     for i in range(number_of_pipelines):
+        idx_buffer_qk = Buffer(
+            initial_value=np.zeros(shape=(2,), dtype=np.int32),
+            name=f"idx_buffer_qk_{i}",
+        )
         matmul_workers.append(
             Worker(
                 batched_matmul_qk,
@@ -637,11 +644,20 @@ def fused_mha(
                     i,
                     mha_rtps_list[0][i],
                     worker_barrier_list[0][i],
+                    idx_buffer_qk,
                 ],
                 stack_size=0xD00,
                 placement=Tile(col=i, row=2),
                 while_true=False,
             )
+        )
+        idx_buffer_softmax = Buffer(
+            initial_value=np.zeros(shape=(2,), dtype=np.int32),
+            name=f"idx_buffer_softmax_{i}",
+        )
+        scale_buffer_softmax = Buffer(
+            initial_value=np.zeros(shape=(4 * B_q,), dtype=dtype),
+            name=f"scale_buffer_softmax_{i}",
         )
         softmax_workers.append(
             Worker(
@@ -656,11 +672,17 @@ def fused_mha(
                     i,
                     mha_rtps_list[1][i],
                     worker_barrier_list[1][i],
+                    idx_buffer_softmax,
+                    scale_buffer_softmax,
                 ],
                 stack_size=0xD00,
                 placement=Tile(col=i, row=3),
                 while_true=False,
             )
+        )
+        idx_buffer_pv = Buffer(
+            initial_value=np.zeros(shape=(2,), dtype=np.int32),
+            name=f"idx_buffer_pv_{i}",
         )
         matmul_pv_workers.append(
             Worker(
@@ -676,6 +698,7 @@ def fused_mha(
                     i,
                     mha_rtps_list[2][i],
                     worker_barrier_list[2][i],
+                    idx_buffer_pv,
                 ],
                 stack_size=0xD00,
                 placement=Tile(col=i, row=4),
