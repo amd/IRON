@@ -89,6 +89,9 @@ def test_gemm(
         M=M,
         K=K,
         N=N,
+        tile_m=m,
+        tile_k=k,
+        tile_n=n,
         num_aie_columns=num_aie_columns,
         prio_accuracy=True,
         emulate_bf16_mmul_with_bfp16=False,
@@ -113,4 +116,4 @@ def test_gemm(
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
     print(f"Throughput: {gflops:.6e} GFLOP/s\n")
 
-    assert not errors, f"Test failed with errors: {errors}"
+    assert not errors, f"Test failed with errors: {errors[:10]}"
