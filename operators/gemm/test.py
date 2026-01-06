@@ -83,6 +83,7 @@ def test_gemm(
         M=M,
         K=K,
         N=N,
+        partition_N=partition_N,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
     )
@@ -106,7 +107,7 @@ def test_gemm(
     output_buffers = {}
 
     # Create A, B, C dictionaries from the partitioned buffers
-    for i in range(args.partition_N):
+    for i in range(partition_N):
         input_buffers[f"B_{i}"] = golden_ref["input_b"][i].flatten()
         output_buffers[f"C_{i}"] = golden_ref["output"][i].flatten()
     errors, latency_us, bandwidth_gbps = run_test(
