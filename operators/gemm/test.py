@@ -44,7 +44,7 @@ def generate_test_params(extensive=False):
                             k,
                             n,
                             trace_size,
-                            partition_N
+                            partition_N,
                         )
                     )
                     names.append(
@@ -77,7 +77,18 @@ all_params = [
     all_params,
 )
 def test_gemm(
-    M, K, N, num_aie_columns, b_col_maj, c_col_maj, m, k, n, trace_size, partition_N, aie_context
+    M,
+    K,
+    N,
+    num_aie_columns,
+    b_col_maj,
+    c_col_maj,
+    m,
+    k,
+    n,
+    trace_size,
+    partition_N,
+    aie_context,
 ):
     golden_ref = generate_golden_reference(
         M=M,
