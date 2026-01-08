@@ -27,16 +27,24 @@ class AIEGEMV(AIEOperatorBase):
         M,
         K,
         num_aie_columns=1,
-        tile_size=1,
+        tile_size_input=2,
+        tile_size_output=None,
         is_mv=True,
         use_static_weight=False,
         context=None,
     ):
+        if tile_size_output is None:
+            tile_size_output = tile_size_input
 
+        assert (
+            tile_size_output % tile_size_input == 0
+            and tile_size_output >= tile_size_input
+        ), "tile_size_output must be a multiple of tile_size_input"
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
         self.K = K  # matrix columns, vector rows  (if is_mv=False, matrix rows, vector columns)
         self.num_aie_columns = num_aie_columns
-        self.tile_size = tile_size
+        self.tile_size_input = tile_size_input
+        self.tile_size_output = tile_size_output
         self.is_mv = is_mv
         if use_static_weight:
             self.weight = torch.zeros(
@@ -45,20 +53,15 @@ class AIEGEMV(AIEOperatorBase):
         else:
             self.weight = None
 
-        # For compatibility with my_matvec parameters
-        self.m = self.tile_size
-
-        # Artifacts created by set_up_artifacts()
         self.xclbin_artifact = None
         self.insts_artifact = None
 
         AIEOperatorBase.__init__(self, context=context)
 
     def get_artifacts(self, prefix="gemv_"):
+        # The underlying MLIR design is a matrix-vector multiplication. We support vector-matrix multiplication by transposing the matrix beforehand (AB = C <=> B^T A^T = C^T).
         operator_dir = Path(__file__).parent
-        file_name_base = (
-            f"{prefix}{self.num_aie_columns}c_{self.M}x{self.K}_{self.tile_size}t"
-        )
+        file_name_base = f"{prefix}{self.M}x{self.K}_{self.tile_size_input}tsi_{self.tile_size_output}tso_{self.num_aie_columns}col"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -69,7 +72,8 @@ class AIEGEMV(AIEOperatorBase):
                 self.num_aie_columns,
                 self.M,
                 self.K,
-                self.tile_size,
+                self.tile_size_input,
+                self.tile_size_output,
             ],
         )
 
@@ -95,9 +99,6 @@ class AIEGEMV(AIEOperatorBase):
         return xclbin_artifact, insts_artifact
 
     def set_up_artifacts(self):
-        # If this operator is only used as a sub-operator in another operator that sets it up, we should skip the setup here as those artifacts and buffers may not be needed.
-        # Compilation Artifacts
-        # ---
         xclbin_artifact, insts_artifact = self.get_artifacts()
 
         self.xclbin_artifact = xclbin_artifact
@@ -112,7 +113,7 @@ class AIEGEMV(AIEOperatorBase):
         # ---
         static_weights = None
         if self.weight is not None:
-            # Kernel expects row-major weights, so might need to transpose;
+            # Kernel expects row-major weights, so might need to transpose (torch weights are stored in col-major);
             # also might need to transpose if is_mv
             if self.is_mv:
                 static_weights = self.weight.T
@@ -147,6 +148,7 @@ class AIEGEMV(AIEOperatorBase):
         # Flatten batch dimensions if needed
         if matrix is not None:
             matrix = matrix.reshape(*matrix.shape[-2:])
+        original_vector_dims = vector.ndim
         vector = vector.reshape(*vector.shape[-1:])
 
         # For vector-matrix, we'll transpose the matrix internally
@@ -182,5 +184,9 @@ class AIEGEMV(AIEOperatorBase):
         self.write_buffer("vector", vector)
         self.run_runlist()
         result = self.read_buffer_as_torch("output", (self.M,))
+
+        # Add back batch dimensions if we removed them earlier.
+        if result.ndim < original_vector_dims:
+            result = result.reshape(*((1,) * (original_vector_dims - 1)), -1)
 
         return result

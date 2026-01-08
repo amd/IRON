@@ -22,8 +22,8 @@ def generate_golden_reference(M=42, K=42, seed=42):
 
     # Generate golden inputs
     val_range = 4
-    A = torch.rand(M, K, dtype=torch.bfloat16) * val_range
-    B = torch.rand(K, dtype=torch.bfloat16) * val_range
+    A = torch.randn(M, K, dtype=torch.bfloat16) * val_range
+    B = torch.randn(K, dtype=torch.bfloat16) * val_range
 
     # Generate golden outputs
     C = A @ B

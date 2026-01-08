@@ -115,18 +115,42 @@ class GroupedQueryAttention(nn.Module):
             )
 
         # Initialize AIE GEMV operators for decode phase (when using KV cache)
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gqa_gemv"]:
 
             aie_gemv_config = {
-                "num_aie_columns": 1,
+                "num_aie_columns": 8,
                 "is_mv": False,
                 "use_static_weight": True,
             }
-            self.aie_query_gemv = AIEGEMV(M=d_out, K=d_in, **aie_gemv_config)
+            self.aie_query_gemv = AIEGEMV(
+                M=d_out,
+                K=d_in,
+                tile_size_input=1,
+                tile_size_output=d_out // 16,
+                **aie_gemv_config,
+            )
             kv_out_dim = num_kv_groups * self.head_dim
-            self.aie_key_gemv = AIEGEMV(M=kv_out_dim, K=d_in, **aie_gemv_config)
-            self.aie_value_gemv = AIEGEMV(M=kv_out_dim, K=d_in, **aie_gemv_config)
-            self.aie_out_proj_gemv = AIEGEMV(M=d_out, K=d_out, **aie_gemv_config)
+            self.aie_key_gemv = AIEGEMV(
+                M=kv_out_dim,
+                K=d_in,
+                tile_size_input=1,
+                tile_size_output=kv_out_dim // 16,
+                **aie_gemv_config,
+            )
+            self.aie_value_gemv = AIEGEMV(
+                M=kv_out_dim,
+                K=d_in,
+                tile_size_input=1,
+                tile_size_output=kv_out_dim // 16,
+                **aie_gemv_config,
+            )
+            self.aie_out_proj_gemv = AIEGEMV(
+                M=d_out,
+                K=d_out,
+                tile_size_input=1,
+                tile_size_output=d_out // 16,
+                **aie_gemv_config,
+            )
 
         # Initialize AIE GEMM operators
         if self.cfg["use_aie_attn_projection_gemm"]:
@@ -159,7 +183,7 @@ class GroupedQueryAttention(nn.Module):
         is_decode = input_pos is not None
 
         # Choose between GEMM (prefill) and GEMV (decode) based on KV cache usage
-        if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gemv"]:
+        if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gqa_gemv"]:
             # Decode phase with KV cache - use GEMV for single token
             # weight.T @ input, which is vector-matrix multiplication (So, is_mv=False)
             x_flat = x.reshape(1, -1)  # Shape: (1, d_in)
@@ -376,7 +400,7 @@ class GroupedQueryAttention(nn.Module):
             context_vec = context_vec.reshape(b, num_tokens, self.d_out)
 
         # Choose output projection based on phase
-        if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gemv"]:
+        if self.cfg["use_kv_cache"] and is_decode and self.cfg["use_aie_gqa_gemv"]:
             context_vec_flat = context_vec.reshape(1, -1)
             output_flat = self.aie_out_proj_gemv(context_vec_flat)
             context_vec = output_flat.reshape(b, num_tokens, self.d_out)
@@ -390,7 +414,7 @@ class GroupedQueryAttention(nn.Module):
         return context_vec
 
     def assign_weights(self, l, w_query, w_key, w_value, w_out_proj):
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gqa_gemv"]:
             self.aie_query_gemv.weight = w_query
             self.aie_key_gemv.weight = w_key
             self.aie_value_gemv.weight = w_value

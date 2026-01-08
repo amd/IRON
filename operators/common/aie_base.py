@@ -68,7 +68,7 @@ class AIEOperatorBase(ABC):
         if static_data is not None:
             assert (
                 static_data.nbytes <= self.buffers[name]
-            ), f"Static data for buffer {name} exceeds allocated size."
+            ), f"Static data for buffer {name} exceeds allocated size: expected {self.buffers[name]} bytes, got {static_data.nbytes} bytes."
             static_data_bytes = static_data.flatten().view(np.uint8).tobytes()
             if static_data_bytes not in self.context.static_data_pool:
                 self.context.static_data_pool[static_data_bytes] = None

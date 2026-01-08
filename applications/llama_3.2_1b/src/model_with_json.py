@@ -12,10 +12,7 @@ import json
 from pathlib import Path
 from src.block.transformer import TransformerBlock
 from operators.rope.rope_utils import compute_rope_params
-from operators import (
-    AIERMSNorm,
-    AIEGEMM,
-)
+from operators import AIERMSNorm, AIEGEMM, AIEGEMV
 from rich.console import Console
 from rich.text import Text
 
@@ -35,20 +32,22 @@ def dtype_from_string(inp):
 config_options = {
     "dtype":                        (dtype_from_string, torch.float32, "Data type"),
     "use_kv_cache":                 (bool,              False,         "[Model] KV Cache"),
-    "use_aie_gemv":                 (bool,              False,         "[Decode] GEMV"),
     "use_aie_rope":                 (bool,              False,         "[Attention] Rope"),
     "use_aie_attn_projection_gemm": (bool,              False,         "[Attention] QKV GEMM"),
     "use_aie_regular_mha":          (bool,              False,         "[Attention] Regular MHA"),
     "use_aie_fused_mha":            (bool,              False,         "[Attention] Fused MHA"),
+    "use_aie_gqa_gemv":             (bool,              False,         "[Attention] GEMV (Decode)"),
     "use_aie_ffn_gemm":             (bool,              False,         "[FFN] GEMM"),
     "use_aie_ffn_mul":              (bool,              False,         "[FFN] Elementwise Mul"),
     "use_aie_ffn_silu":             (bool,              False,         "[FFN] SiLU"),
     "use_aie_ffn_swiglu":           (bool,              False,         "[FFN] Runlist-based SwiGLU"),
+    "use_aie_ffn_gemv":             (bool,              False,         "[FFN] GEMV (Decode)"),
     "use_aie_residual":             (bool,              False,         "[Transformer] Residual Addition"),
     "use_aie_norm1":                (bool,              False,         "[Transformer] Pre Norm"),
     "use_aie_norm2":                (bool,              False,         "[Transformer] Post Norm"),
     "use_aie_final_norm":           (bool,              False,         "[Transformer] Final Norm"),
     "use_aie_final_gemm":           (bool,              False,         "[Transformer] Final GEMM"),   
+    "use_aie_final_gemv":           (bool,              False,         "[Transformer] Final GEMV"),
 }
 # fmt: on
 
@@ -190,12 +189,25 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 M_for_gemm = self.prompt_length
             else:
                 M_for_gemm = self.prompt_length + self.num_tokens
-            self.out_head_aie = AIEGEMM(
+            self.out_head_prefill = AIEGEMM(
                 M=M_for_gemm,
                 K=self.cfg["emb_dim"],
                 N=self.cfg["vocab_size"],
                 **aie_config_prefill,
             )
+            aie_gemv_config = {
+                "num_aie_columns": 8,
+                "is_mv": True,
+                "use_static_weight": True,
+                "num_aie_columns": 8,
+                "tile_size_input": 4,
+                "tile_size_output": 32,
+            }
+            # FC1 and FC2: emb_dim -> hidden_dim
+            if self.cfg["use_aie_final_gemv"]:
+                self.out_head_decode = AIEGEMV(
+                    M=self.cfg["vocab_size"], K=self.cfg["emb_dim"], **aie_gemv_config
+                )
         else:
             self.out_head = nn.Linear(
                 self.cfg["emb_dim"],
@@ -203,12 +215,6 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 bias=False,
                 dtype=self.cfg["dtype"],
             )
-        self.out_head = nn.Linear(
-            self.cfg["emb_dim"],
-            self.cfg["vocab_size"],
-            bias=False,
-            dtype=self.cfg["dtype"],
-        )
 
         # Reusable utilities
         cos, sin = compute_rope_params(
@@ -269,12 +275,10 @@ class Llama3ModelWithJSONConfig(nn.Module):
             x = self.final_norm(x)
 
         if self.cfg["use_aie_final_gemm"]:
-            if is_decode_with_kv and self.cfg["use_aie_gemv"]:
-                # TODO: Create GEMV operator
-                # logits = self.aie_out_head_gemv(x)
-                logits = self.out_head(x)  # Running on CPU
+            if is_decode_with_kv and self.cfg["use_aie_final_gemv"]:
+                logits = self.out_head_decode(x)
             else:
-                logits = self.out_head_aie(x)
+                logits = self.out_head_prefill(x)
         else:
             logits = self.out_head(x)
 
@@ -292,20 +296,11 @@ class Llama3ModelWithJSONConfig(nn.Module):
                 f"model.norm.weight",
             )
 
-        self.out_head.weight = assign(
-            self.out_head.weight,
-            out_head,
-            out_head_name,
-        )
-        # TODO: Offload GEMV to NPU
-        # if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-        #     self.aie_out_head_gemv.weight = out_head
         if self.cfg["use_aie_final_gemm"]:
             # Want column-major for B
-            self.out_head_aie.weight = out_head.T
-            # TODO: Create separate linear layers for prefill and decode (with gemm/gemv)
-            # if self.cfg["use_kv_cache"]:
-            #     self.out_head.weight = out_head.T
+            self.out_head_prefill.weight = out_head.T
+            if self.cfg["use_aie_final_gemv"]:
+                self.out_head_decode.weight = out_head.T
         else:
             self.out_head.weight = assign(
                 self.out_head.weight,

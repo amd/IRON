@@ -361,6 +361,7 @@ class AieccCompilationRule(CompilationRule):
                 "--no-xbridge",
                 "--peano",
                 str(self.peano_dir),
+                "--dynamic-objFifos",
             ]
             do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
             do_compile_insts_bin = mlir_source in mlir_sources_to_insts_bins

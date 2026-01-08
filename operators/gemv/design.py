@@ -19,7 +19,33 @@ from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 
 
-def my_matvec(dev, cols, M, K, m):
+"""
+Matrix-vector design
+
+Calls into the mv.cc kernel code. That kernel computes a single output row (a single value in the output vector).
+
+
+ - cols: Number of AIE columns to split work across
+ - M: number of rows in the matrix
+ - K: number of columns in the matrix == number of rows in the vector
+ - m_input: number of input rows stored on each AIE core == chunk size for data movement of input A
+ - m_output: number of output rows stored on each AIE core == chunk size for data movement of output C
+"""
+
+
+def my_matvec(dev, cols, M, K, m_input, m_output=None):
+    if m_output is None:
+        m_output = m_input
+
+    # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
+    assert (
+        m_output % m_input == 0 and m_output >= m_input
+    ), "m_output must be a multiple of m_input"
+    assert m_output <= M // cols, "m_output must be less than or equal to M/cols"
+    assert (M // cols) % m_output == 0, "m_output must evenly divide M/cols"
+    assert m_input <= M // cols, "m_input must be less than or equal to M/cols"
+    assert (M // cols) % m_input == 0, "m_input must evenly divide M/cols"
+
     vectorized = True
     dtype_in = np.dtype[bfloat16]
     dtype_in_str = "bf16"
@@ -33,10 +59,22 @@ def my_matvec(dev, cols, M, K, m):
     else:
         dev_ty = NPU2()
 
-    L1_A_ty = np.ndarray[(m * K,), dtype_in]
+    L1_A_ty = np.ndarray[
+        (
+            m_input,
+            K,
+        ),
+        dtype_in,
+    ]
     L1_B_ty = np.ndarray[(K,), dtype_in]
-    L1_C_ty = np.ndarray[(M // cols,), dtype_out]
-    L3_A_ty = np.ndarray[(M * K,), dtype_in]
+    L1_C_ty = np.ndarray[(m_output,), dtype_out]
+    L3_A_ty = np.ndarray[
+        (
+            M,
+            K,
+        ),
+        dtype_in,
+    ]
     L3_B_ty = np.ndarray[(K,), dtype_in]
     L3_C_ty = np.ndarray[(M,), dtype_out]
 
@@ -47,26 +85,31 @@ def my_matvec(dev, cols, M, K, m):
         [np.int32, np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 
-    A_L3L1_fifos = [ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}") for i in range(cols)]
+    A_L3L1_fifos = [
+        ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
+    ]
     B_L3L1_fifos = [
         ObjectFifo(L1_B_ty, name=f"B_L3L1_{i}", depth=1) for i in range(cols)
     ]
     C_L1L3_fifos = [
-        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=1) for i in range(cols)
+        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(cols)
     ]
 
     def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec):
         one_idx = index.constant(1)
-        m_idx = index.constant(m)
         for _ in range_(0xFFFFFFFF):
             b = B_L3L1_fifo.acquire(1)
-            c = C_L1L3_fifo.acquire(1)
-            for i_idx in range_(M // m // cols):
-                a = A_L3L1_fifo.acquire(1)
+            # The kernel function computes m output rows; each core is responsible for (M/cols) output rows, so we need to call the kernel (M/cols)/m times.
+            for i_idx in range_(M // m_output // cols):
+                c = C_L1L3_fifo.acquire(1)
                 i_i32 = index.casts(T.i32(), i_idx)
-                matvec(m, K, i_i32, a, b, c)
-                A_L3L1_fifo.release(1)
-            C_L1L3_fifo.release(1)
+                for j_idx in range_(m_output // m_input):
+                    j_i32 = index.casts(T.i32(), j_idx)
+                    output_row_offset = j_i32 * m_input
+                    a = A_L3L1_fifo.acquire(1)
+                    matvec(m_input, K, output_row_offset, a, b, c)
+                    A_L3L1_fifo.release(1)
+                C_L1L3_fifo.release(1)
             B_L3L1_fifo.release(1)
 
     workers = [
@@ -82,19 +125,29 @@ def my_matvec(dev, cols, M, K, m):
         for i in range(cols)
     ]
 
+    # Distribution pattern for the input matrix A: each AIE core gets a contiguous chunk of rows.
+    # The input matrix in DDR is MxK-sized (row-major); each core processes (M/cols)xK-sized matrices in chunks of mxK-sized tiles.
+    # The chunking into mxK-sized tiles happens in the ObjectFIFO; the shim puts all data on the stream in sequence.
     A_taps = [
         TensorAccessPattern(
-            (M, K),
-            col * (M // cols) * K,
-            [1, 1, 1, (M // cols) * K],
-            [0, 0, 0, 1],
+            tensor_dims=(M, K),
+            offset=col * (M // cols) * K,
+            sizes=[1, 1, 1, (M // cols) * K],
+            strides=[0, 0, 0, 1],
         )
         for col in range(cols)
     ]
-    # Every column gets the whole of B, no TAP needed.
+
+    # Every column gets the entirety of the vector B, no TAP needed.
+    # This design assumes that all of B fits on the cores.
+
+    # Collection pattern for the output vector C: each AIE core writes back its contiguous chunk of rows.
     C_taps = [
         TensorAccessPattern(
-            (1, M), col * (M // cols), [1, 1, 1, (M // cols)], [0, 0, 0, 1]
+            tensor_dims=(1, M),
+            offset=col * (M // cols),
+            sizes=[1, 1, 1, (M // cols)],
+            strides=[0, 0, 0, 1],
         )
         for col in range(cols)
     ]
@@ -120,7 +173,7 @@ def main():
     argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu")
     argparser.add_argument("-M", type=int)
     argparser.add_argument("-K", type=int)
-    argparser.add_argument("-m", type=int)
+    argparser.add_argument("--m", type=int)
     argparser.add_argument("--cols", type=int)
     argparser.add_argument(
         "--output-file-path",

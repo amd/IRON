@@ -115,18 +115,30 @@ class FeedForward(nn.Module):
                 cfg["hidden_dim"], cfg["emb_dim"], dtype=cfg["dtype"], bias=False
             )
 
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
-            aie_gemv_config = {"num_aie_columns": 1, "is_mv": False}
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_ffn_gemv"]:
+            aie_gemv_config = {"num_aie_columns": 8, "is_mv": False}
             # FC1 and FC2: emb_dim -> hidden_dim
             self.aie_fc1_gemv = AIEGEMV(
-                M=self.hidden_dim, K=self.emb_dim, **aie_gemv_config
+                M=self.hidden_dim,
+                K=self.emb_dim,
+                tile_size_input=1,
+                tile_size_output=self.hidden_dim // 16,
+                **aie_gemv_config,
             )
             self.aie_fc2_gemv = AIEGEMV(
-                M=self.hidden_dim, K=self.emb_dim, **aie_gemv_config
+                M=self.hidden_dim,
+                K=self.emb_dim,
+                tile_size_input=1,
+                tile_size_output=self.hidden_dim // 16,
+                **aie_gemv_config,
             )
             # FC3: hidden_dim -> emb_dim
             self.aie_fc3_gemv = AIEGEMV(
-                M=self.emb_dim, K=self.hidden_dim, **aie_gemv_config
+                M=self.emb_dim,
+                K=self.hidden_dim,
+                tile_size_input=1,
+                tile_size_output=self.emb_dim // 16,
+                **aie_gemv_config,
             )
 
         # Initialize AIE elementwise multiply
@@ -176,7 +188,7 @@ class FeedForward(nn.Module):
             else:
                 return self.aie_swiglu_decode(x)
 
-        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
+        if is_decode_with_kv and self.cfg["use_aie_ffn_gemv"]:
             x_fc1 = self.aie_fc1_gemv(x)
             x_fc2 = self.aie_fc2_gemv(x)
         else:
@@ -199,14 +211,14 @@ class FeedForward(nn.Module):
         else:
             x = x_fc1_silu * x_fc2
 
-        if is_decode_with_kv and self.cfg["use_aie_gemv"]:
+        if is_decode_with_kv and self.cfg["use_aie_ffn_gemv"]:
             result = self.aie_fc3_gemv(x)
             return result.view(original_shape)
         else:
             return self.fc3(x).view(original_shape)
 
     def assign_weights(self, l, fc1, fc2, fc3):
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_gemv"]:
+        if self.cfg["use_kv_cache"] and self.cfg["use_aie_ffn_gemv"]:
             self.aie_fc1_gemv.weight = fc1
             self.aie_fc2_gemv.weight = fc2
             self.aie_fc3_gemv.weight = fc3

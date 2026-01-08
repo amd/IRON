@@ -15,27 +15,39 @@
 
 #include <aie_api/aie.hpp>
 
-void matvec_scalar(uint32_t m, uint32_t k, uint32_t row_offset, bfloat16 *a, bfloat16 *b, bfloat16 *c)
+void matvec_scalar(uint32_t m,
+                   uint32_t k,
+                   const bfloat16 *__restrict a,
+                   const bfloat16 *__restrict b,
+                   bfloat16 *__restrict c)
 {
     for (uint32_t row = 0; row < m; row++) {
         float acc = 0;
         for (uint32_t i = 0; i < k; i++) {
             acc += a[row * k + i] * b[i];
         }
-        c[row + row_offset * m] = static_cast<bfloat16>(acc);
+        c[row] = static_cast<bfloat16>(acc);
     }
 }
 
+/*
+Matrix-vector multiplication kernel
+
+ - m: Number of output rows == number of rows in the input matrix
+ - k: Number of columns in the input matrix == length of the input vector
+ - a: Pointer to the input matrix, stored in row-major order
+ - b: Pointer to the input vector
+ - c: Pointer to the output vector
+ - r: Vector size; data from the matrix and vector will be loaded in and processed in chunks of this size
+*/
 template <uint32_t r>
 void matvec_vectorized(uint32_t m,
                        uint32_t k,
-                       uint32_t row_offset,
                        const bfloat16 *__restrict a,
                        const bfloat16 *__restrict b,
                        bfloat16 *__restrict c)
 {
     ::aie::set_rounding(aie::rounding_mode::conv_even);
-    c += row_offset * m;
     bfloat16 *c_end = c + m;
     const bfloat16 *b_end = b + k;
     for (; c < c_end; c++) {
@@ -55,24 +67,30 @@ void matvec_vectorized(uint32_t m,
 
 extern "C" {
 
+/* The row offset parameter in the functions below is a workaround. The output will be written to c + row_offset * m.
+ * This is simpler than to do pointer arithmetic in the calling MLIR code, but that's all this is for -- an offset into
+ * `c`.  */
+
 void matvec_scalar_bf16_bf16(uint32_t m,
                              uint32_t k,
                              uint32_t row_offset,
-                             bfloat16 *a_in,
-                             bfloat16 *b_in,
-                             bfloat16 *c_out)
+                             const bfloat16 *__restrict a_in,
+                             const bfloat16 *__restrict b_in,
+                             bfloat16 *__restrict c_out)
 {
-    matvec_scalar(m, k, row_offset, a_in, b_in, c_out);
+    c_out += row_offset;
+    matvec_scalar(m, k, a_in, b_in, c_out);
 }
 
 void matvec_vectorized_bf16_bf16(uint32_t m,
                                  uint32_t k,
                                  uint32_t row_offset,
-                                 bfloat16 *a_in,
-                                 bfloat16 *b_in,
-                                 bfloat16 *c_out)
+                                 const bfloat16 *__restrict a_in,
+                                 const bfloat16 *__restrict b_in,
+                                 bfloat16 *__restrict c_out)
 {
-    matvec_vectorized<64>(m, k, row_offset, a_in, b_in, c_out);
+    c_out += row_offset;
+    matvec_vectorized<64>(m, k, a_in, b_in, c_out);
 }
 
 } // extern "C"

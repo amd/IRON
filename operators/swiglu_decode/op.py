@@ -53,7 +53,8 @@ class AIESwiGLUDecode(AIEOperatorBase):
             M=self.hidden_dim,
             K=self.embedding_dim,
             num_aie_columns=8,
-            tile_size=1,
+            tile_size_input=4,
+            tile_size_output=self.hidden_dim // 8,
         )
         self.gemv_1 = gemv_1
         gemv_1_xclbin, gemv_1_insts = gemv_1.get_artifacts(
@@ -110,7 +111,8 @@ class AIESwiGLUDecode(AIEOperatorBase):
             M=self.embedding_dim,
             K=self.hidden_dim,
             num_aie_columns=8,
-            tile_size=1,
+            tile_size_input=1,
+            tile_size_output=self.embedding_dim // 8,
         )
         self.gemv_2 = gemv_2
         gemv_2_xclbin, gemv_2_insts = gemv_2.get_artifacts(

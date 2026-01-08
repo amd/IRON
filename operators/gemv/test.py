@@ -15,19 +15,19 @@ from operators.common.test_utils import run_test
 
 def generate_test_params(extensive=False):
     params = [
-        (128, 128, 1, 32),
-        (2048, 8192, 1, 1),
-        (8192, 2048, 1, 4),
-        (2048, 8192, 2, 1),
-        (8192, 2048, 2, 4),
-        (2048, 8192, 4, 1),
-        (8192, 2048, 4, 4),
-        (2048, 8192, 8, 1),
-        (8192, 2048, 8, 4),
+        (128, 128, 1, 32, 32),
+        (2048, 8192, 1, 1, 1),
+        (8192, 2048, 1, 4, 4),
+        (2048, 8192, 2, 1, 1),
+        (8192, 2048, 2, 4, 4),
+        (2048, 8192, 4, 1, 1),
+        (8192, 2048, 4, 4, 4),
+        (2048, 8192, 8, 1, 1),
+        (8192, 2048, 8, 4, 4),
     ]
     names = [
-        f"matrix_vector_mul_{M}x{K}_{tile_size}_{num_aie_columns}col"
-        for M, K, num_aie_columns, tile_size in params
+        f"matrix_vector_mul_{M}x{K}_{tile_size_input}tsi_{tile_size_output}tso_{num_aie_columns}col"
+        for M, K, num_aie_columns, tile_size_input, tile_size_output in params
     ]
     return params, names
 
@@ -50,15 +50,18 @@ all_params = [
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
-@pytest.mark.parametrize("M,K,num_aie_columns,tile_size", all_params)
-def test_gemv(M, K, num_aie_columns, tile_size, aie_context):
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size_input,tile_size_output", all_params
+)
+def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
     golden_ref = generate_golden_reference(M=M, K=K)
 
     operator = AIEGEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,
-        tile_size=tile_size,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
         context=aie_context,
     )
 
