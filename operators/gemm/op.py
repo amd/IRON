@@ -91,7 +91,6 @@ class AIEGEMM(AIEOperatorBase):
         base_dir = self.context.base_dir
         device_str = self.context.device_manager.device_str()
 
-        # Extract all gemm_args parameters at once for clarity and performance
         b_col_maj = self.b_col_maj
         c_col_maj = self.c_col_maj
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
@@ -227,9 +226,6 @@ class AIEGEMM(AIEOperatorBase):
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def set_up_runtime(self):
-
-        # Describe runtime components
-        # The static weights might not yet be loaded upon initialization; therefore, the provided self.static_weights field is a callback that provides the weights at set-up time.
         static_weights = None
         if self.weight is not None:
             static_weights = self.weight.T
