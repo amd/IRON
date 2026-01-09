@@ -34,7 +34,8 @@ def verify_buffer(operator, buf_name, reference, rel_tol=0.04, abs_tol=1e-6):
     expected_np = torch_to_numpy(reference).reshape((-1,))
     buf_size = operator.buffers[buf_name] // 2
     output = operator.read_buffer(buf_name, (buf_size,))
-    if len(output) != len(expected_np):
+    if len(output) < len(expected_np):
+        # Allow larger buffers - binning may have allocated more space than needed
         print(
             f"Buffer size mismatch for {buf_name}: expected {len(expected_np)}, got {len(output)}"
         )

@@ -21,6 +21,18 @@ def generate_golden_reference(
     input_a = torch.randn(M, K, dtype=dtype_torch) * val_range
     input_b_full = torch.rand(K, N, dtype=dtype_torch) * val_range
     output_full = torch.matmul(input_a, input_b_full)
+    if False:
+        # The following inputs are useful for debugging;
+        # the A matrix becomes a matrix where each element encodes its row and column index,
+        # and the B matrix is an identity matrix.
+        col_digits = len(str(K - 1)) if K > 0 else 1
+        factor = 10 ** (col_digits + 1)
+        row_indices = torch.arange(M, dtype=torch.int64).unsqueeze(1)
+        col_indices = torch.arange(K, dtype=torch.int64).unsqueeze(0)
+        input_a = (row_indices * factor + col_indices).to(dtype=dtype_torch)
+        input_b_full = torch.zeros(K, N, dtype=dtype_torch)
+        diag_dim = min(K, N)
+        input_b_full[:diag_dim, :diag_dim] = torch.eye(diag_dim, dtype=dtype_torch)
     if b_col_maj:
         input_b_full = input_b_full.T
     if c_col_maj:
