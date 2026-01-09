@@ -46,7 +46,6 @@ class AIEGEMM(AIEOperatorBase):
         self.tile_k = tile_k
         self.tile_n = tile_n
         self.num_aie_columns = num_aie_columns
-        self.n_aie_rows = 4  # Number of AIE rows used in the design
         self.gemm_args = gemm_kwargs
 
         # Set frequently accessed gemm_args
@@ -66,7 +65,9 @@ class AIEGEMM(AIEOperatorBase):
         assert (
             N % partition_N == 0
         ), f"N ({N}) must be divisible by partition_N ({partition_N})"
-        M_padded, K_padded, N_padded = self._get_padded_dims(M, K, N // partition_N)
+        M_padded, K_padded, N_padded = self._get_padded_dims(
+            M, K, N // partition_N, tile_m, tile_k, tile_n
+        )
         self.M = M_padded
         self.K = K_padded
         self.N = N_padded
@@ -324,11 +325,11 @@ class AIEGEMM(AIEOperatorBase):
 
         return result
 
-    def _get_padded_dims(self, M, K, N):
-        tile_m, tile_k, tile_n = self.tile_m, self.tile_n, self.tile_k
+    def _get_padded_dims(self, M, K, N, tile_m, tile_k, tile_n):
         num_aie_columns = self.num_aie_columns
+        num_aie_rows = 4
 
-        min_M = tile_m * self.n_aie_rows
+        min_M = tile_m * num_aie_rows
         min_K = tile_k
         min_N = tile_n * num_aie_columns
 
