@@ -97,17 +97,25 @@ class GroupedQueryAttention(nn.Module):
 
         # Initialize AIE RoPE operator
         if self.cfg["use_aie_rope"]:
-            self.aie_rope_prefill = AIERope(
-                rows=self.prompt_length,
+            self.aie_rope_prefill_k = AIERope(
+                rows=self.prompt_length * self.num_kv_groups,
                 cols=self.head_dim,
-                num_aie_columns=1,
-                method_type=0,
+                angle_rows=self.prompt_length,
             )
-            self.aie_rope_decode = AIERope(
-                rows=1,
+            self.aie_rope_prefill_q = AIERope(
+                rows=self.prompt_length * self.num_heads,
                 cols=self.head_dim,
-                num_aie_columns=1,
-                method_type=0,
+                angle_rows=self.prompt_length,
+            )
+            self.aie_rope_decode_k = AIERope(
+                rows=self.num_kv_groups,
+                cols=self.head_dim,
+                angle_rows=1,
+            )
+            self.aie_rope_decode_q = AIERope(
+                rows=self.num_heads,
+                cols=self.head_dim,
+                angle_rows=1,
             )
 
         # Initialize fused AIE MHA operator
@@ -254,20 +262,17 @@ class GroupedQueryAttention(nn.Module):
             angle_slice = angles[:num_tokens, :]
 
         # Apply RoPE with AIE
-        def apply_rope_and_transpose(tensor, num_heads_dim, angle_slice):
-            transposed = (
-                tensor.view(num_tokens, num_heads_dim, self.head_dim)
-                .transpose(0, 1)
-                .contiguous()
-            )
+        def apply_rope_and_transpose(aie_op, tensor, num_heads_dim, angle_slice):
             angle_slice = angle_slice.to(dtype=tensor.dtype)
             if self.cfg["use_aie_rope"]:
-                if is_prefill:
-                    result = self.aie_rope_prefill(transposed, angle_slice)
-                else:
-                    result = self.aie_rope_decode(transposed, angle_slice)
-                result = result.view(b, num_heads_dim, num_tokens, self.head_dim)
+                result = aie_op(tensor.view(num_tokens * num_heads_dim, self.head_dim), angle_slice)
+                result = result.view(b, num_tokens, num_heads_dim, self.head_dim).transpose(1, 2)
             else:
+                transposed = (
+                    tensor.view(num_tokens, num_heads_dim, self.head_dim)
+                    .transpose(0, 1)
+                    .contiguous()
+                )
                 result = apply_rope(
                     transposed.view(1, num_heads_dim, num_tokens, self.head_dim),
                     angle_slice,
@@ -276,8 +281,8 @@ class GroupedQueryAttention(nn.Module):
             # assert torch.allclose(ref, result, atol=0.7, rtol=0.07), "AIE RoPE result does not match reference"
             return result
 
-        keys = apply_rope_and_transpose(keys, self.num_kv_groups, angle_slice)
-        queries = apply_rope_and_transpose(queries, self.num_heads, angle_slice)
+        keys = apply_rope_and_transpose(self.aie_rope_prefill_k if is_prefill else self.aie_rope_decode_k, keys, self.num_kv_groups, angle_slice)
+        queries = apply_rope_and_transpose(self.aie_rope_prefill_q if is_prefill else self.aie_rope_decode_q, queries, self.num_heads, angle_slice)
         values = values.transpose(1, 2)
 
         if self.cfg["use_kv_cache"]:
