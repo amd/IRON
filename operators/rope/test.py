@@ -73,10 +73,7 @@ all_params = [
 )
 def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
     golden_ref = generate_golden_reference(
-        rows=rows, 
-        cols=cols, 
-        context_len=angle_rows, 
-        method_type=method_type
+        rows=rows, cols=cols, context_len=angle_rows, method_type=method_type
     )
 
     operator = AIERope(
@@ -88,20 +85,24 @@ def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
         context=aie_context,
     )
 
+    # golden reference produces tensors of shape (n_heads, seq_len, cols);
+    # NPU design expects (seq_len, n_heads, cols), so we transpose inputs/outputs
     input_buffers = {
-        "in": golden_ref["A"].transpose(0,1).contiguous(),
+        "in": golden_ref["A"].transpose(0, 1).contiguous(),
         "angles": golden_ref["B"],
     }
-    output_buffers = {"output": golden_ref["C"].transpose(0,1).contiguous()}
+    output_buffers = {"output": golden_ref["C"].transpose(0, 1).contiguous()}
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.05, abs_tol=0.5
     )
 
     print(golden_ref["C"])
-    print(operator.read_buffer_as_torch("output", (rows // angle_rows, angle_rows, cols)))
+    print(
+        operator.read_buffer_as_torch("output", (rows // angle_rows, angle_rows, cols))
+    )
 
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
-    #assert not errors, f"Test failed with errors: {errors}"
+    # assert not errors, f"Test failed with errors: {errors}"

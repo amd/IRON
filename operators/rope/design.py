@@ -26,8 +26,10 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
 - cols: number of columns in the input tensor (e.g., head dimension)
 - angle_rows: number of input rows in the angle look-up table.
   If this is less than `rows`, each row of angles will be reused for `rows / angle_rows` consecutive rows of the input tensor.
-  This is useful for models where multiple heads share the same positional encodings and the heads are `interspersed` in the input tensor (i.e. input tensor shape is (rows, n_heads, cols)).
+  This is useful for models where multiple heads share the same positional encodings and the heads are 'interspersed' in the input tensor (i.e. input tensor shape is (rows, n_heads, cols)).
 """
+
+
 def rope(
     dev,
     rows,
@@ -41,8 +43,10 @@ def rope(
 
     if angle_rows is None:
         angle_rows = rows
-    
-    assert cols % (16 * 2) == 0 and cols >= (16 * 2), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
+
+    assert cols % (16 * 2) == 0 and cols >= (
+        16 * 2
+    ), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
     assert rows % num_aie_columns == 0, "rows must be divisible by num_aie_columns"
     assert angle_rows <= rows and rows % angle_rows == 0, "angle_rows must divide rows"
 
@@ -58,8 +62,12 @@ def rope(
 
     # AIE-array data movement with object fifos (one per column, not per channel)
     of_in = [ObjectFifo(tensor_tile_ty, name=f"in_{i}") for i in range(num_aie_columns)]
-    of_lut = [ObjectFifo(angle_tile_ty, name=f"lut_{i}") for i in range(num_aie_columns)]
-    of_out = [ObjectFifo(tensor_tile_ty, name=f"out_{i}") for i in range(num_aie_columns)]
+    of_lut = [
+        ObjectFifo(angle_tile_ty, name=f"lut_{i}") for i in range(num_aie_columns)
+    ]
+    of_out = [
+        ObjectFifo(tensor_tile_ty, name=f"out_{i}") for i in range(num_aie_columns)
+    ]
 
     # AIE Core Function declaration
     rope_kernel = Kernel(

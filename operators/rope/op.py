@@ -24,7 +24,7 @@ class AIERope(AIEOperatorBase):
         self,
         rows: int,
         cols: int,
-        angle_rows=None, 
+        angle_rows=None,
         num_aie_columns=None,
         method_type=0,
         context=None,
@@ -129,8 +129,6 @@ class AIERope(AIEOperatorBase):
         self.run_runlist()
 
         # Read output
-        result = self.read_buffer_as_torch(
-            "output", shape=tensor.shape, dtype=bfloat16
-        )
+        result = self.read_buffer_as_torch("output", shape=tensor.shape, dtype=bfloat16)
 
         return result
