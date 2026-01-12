@@ -49,6 +49,9 @@ def rope(
     ), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
     assert rows % num_aie_columns == 0, "rows must be divisible by num_aie_columns"
     assert angle_rows <= rows and rows % angle_rows == 0, "angle_rows must divide rows"
+    assert (
+        angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0
+    ), "angle_rows must be divisible by num_aie_columns"
 
     tensor_rows_per_aie_column = rows // num_aie_columns
     angle_rows_per_aie_column = angle_rows // num_aie_columns

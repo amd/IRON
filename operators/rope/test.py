@@ -17,31 +17,32 @@ def generate_test_params(extensive=False):
     params = []
     names = []
 
-    max_aie_columns = 8
+    num_aie_columns_options = [1, 2, 8]
 
     if not extensive:
-        input_rows = [8]
+        input_rows = [32]
         input_cols = [512]
-        input_angle_rows = [2, 8]
+        input_angle_rows = [8, 32]
         method_types = [0]  # 0: Two-halves method
     else:
-        input_rows = [8, 16]
+        input_rows = [32, 64]
         input_cols = [128]
-        input_angle_rows = [2, 8]
+        input_angle_rows = [8, 16, 32]
         method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
 
-    for num_aie_columns in range(1, max_aie_columns + 1):
+    for num_aie_columns in num_aie_columns_options:
         for n_rows in input_rows:
-            for angle_rows in input_angle_rows:
+            for n_angle_rows in input_angle_rows:
                 for n_cols in input_cols:
                     for method_type in method_types:
                         names.append(
-                            f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{angle_rows}arows_{method_type}m"
+                            f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{n_angle_rows}arows_{method_type}m"
                         )
                         params.append(
                             (
                                 n_rows,
                                 n_cols,
+                                n_angle_rows,
                                 num_aie_columns,
                                 method_type,
                             )
