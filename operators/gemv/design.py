@@ -22,7 +22,7 @@ from aie.iron.device import NPU1, NPU2
 """
 Matrix-vector design
 
-Calls into the mv.cc kernel code. That kernel computes a single output row (a single value in the output vector).
+Calls into the mv.cc kernel code. That kernel computes `m_input` output rows per call.
 
 
  - cols: Number of AIE columns to split work across
@@ -173,7 +173,7 @@ def main():
     argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu")
     argparser.add_argument("-M", type=int)
     argparser.add_argument("-K", type=int)
-    argparser.add_argument("--m", type=int)
+    argparser.add_argument("-m", type=int)
     argparser.add_argument("--cols", type=int)
     argparser.add_argument(
         "--output-file-path",
