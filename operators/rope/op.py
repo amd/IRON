@@ -22,23 +22,19 @@ class AIERope(AIEOperatorBase):
 
     def __init__(
         self,
-        size: int,
-        last_dim: int,
+        rows: int,
+        cols: int,
         num_aie_columns=None,
-        num_channels=None,
         method_type=0,
         context=None,
     ):
-        self.size = size
-        self.tile_size = last_dim
+        self.rows = rows
+        self.cols = cols
 
-        if num_channels is None:
-            num_channels = 1
         if num_aie_columns is None:
             num_aie_columns = 1
 
         self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
         self.method_type = method_type
         assert method_type in {0, 1}
 
@@ -51,7 +47,7 @@ class AIERope(AIEOperatorBase):
     def set_up_artifacts(self):
         # Compilation artifacts
         operator_dir = Path(__file__).parent
-        file_name_base = f"rope_{self.num_aie_columns}c_{self.size}_{self.tile_size}t_{self.method_type}m"
+        file_name_base = f"rope_{self.num_aie_columns}c_{self.rows}rows_{self.cols}cols_{self.method_type}m"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -59,11 +55,10 @@ class AIERope(AIEOperatorBase):
             callback_fn="rope",
             callback_args=[
                 self.context.device_manager.device_type,
-                self.size,
+                self.rows,
+                self.cols,
                 self.num_aie_columns,
-                self.num_channels,
                 0,
-                self.tile_size,
                 self.method_type,
             ],
         )
@@ -100,9 +95,9 @@ class AIERope(AIEOperatorBase):
 
     def set_up_runtime(self):
         # Runtime setup
-        self.add_buffer("in", self.size)
-        self.add_buffer("angles", self.size)
-        self.add_buffer("output", self.size)
+        self.add_buffer("in", self.rows * self.cols)
+        self.add_buffer("angles", self.rows * self.cols)
+        self.add_buffer("output", self.rows * self.cols)
         self.add_kernel(
             "rope",
             self.xclbin_artifact,
@@ -113,8 +108,8 @@ class AIERope(AIEOperatorBase):
 
     def forward(self, x, y):
         applicable = (
-            x.shape[-1] * x.shape[-2] == self.size
-            and x.shape[-1] == self.tile_size
+            x.shape[-2] == self.rows
+            and x.shape[-1] == self.cols
             and x.shape[-1] % 16 == 0
             and x.shape[-2:] == y.shape
         )

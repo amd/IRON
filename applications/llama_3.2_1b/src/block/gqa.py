@@ -98,14 +98,14 @@ class GroupedQueryAttention(nn.Module):
         # Initialize AIE RoPE operator
         if self.cfg["use_aie_rope"]:
             self.aie_rope_prefill = AIERope(
-                size=self.prompt_length * self.head_dim,
-                last_dim=self.head_dim,
+                rows=self.prompt_length,
+                cols=self.head_dim,
                 num_aie_columns=1,
                 method_type=0,
             )
             self.aie_rope_decode = AIERope(
-                size=self.head_dim,
-                last_dim=self.head_dim,
+                rows=1,
+                cols=self.head_dim,
                 num_aie_columns=1,
                 method_type=0,
             )
