@@ -51,7 +51,7 @@ class AIERope(AIEOperatorBase):
     def set_up_artifacts(self):
         # Compilation artifacts
         operator_dir = Path(__file__).parent
-        file_name_base = f"rope_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.method_type}m"
+        file_name_base = f"rope_{self.num_aie_columns}c_{self.size}_{self.tile_size}t_{self.method_type}m"
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -119,7 +119,7 @@ class AIERope(AIEOperatorBase):
             and x.shape[-2:] == y.shape
         )
         if not applicable:
-            raise AIEOPeratorConstraintError("AIERope: incompatible tensor shape(s)")
+            raise AIEOperatorConstraintError("AIERope: incompatible tensor shape(s)")
 
         original_shape = x.shape
         if len(x.shape) > 2:
@@ -137,6 +137,7 @@ class AIERope(AIEOperatorBase):
             batch_data = x[i:end_idx, :]
 
             # Pad if necessary to match expected rows_per_batch
+            angle_offset = i % y.shape[0]
             if batch_data.shape[0] < rows_per_batch:
                 padding = torch.zeros(
                     rows_per_batch - batch_data.shape[0],
@@ -146,12 +147,13 @@ class AIERope(AIEOperatorBase):
                 )
                 batch_data_padded = torch.cat([batch_data, padding], dim=0)
                 result = self._process_batch(
-                    batch_data_padded, y[i % y.shape[0] : batch_size]
+                    batch_data_padded, y[angle_offset : angle_offset + rows_per_batch]
                 )
                 result = result[: batch_data.shape[0], :]
             else:
-                result = self._process_batch(batch_data, y[i % y.shape[0] : batch_size])
-
+                result = self._process_batch(
+                    batch_data, y[angle_offset : angle_offset + rows_per_batch]
+                )
             results.append(result)
 
         # Concatenate all batch results
@@ -165,13 +167,9 @@ class AIERope(AIEOperatorBase):
 
     def _process_batch(self, batch_data, angle_data):
         """Process a batch of sequences through the AIE kernel"""
-        batch_flat = batch_data.view(-1)
-
-        # Calculate buffer sizes for the batch
-        input_size = batch_data.nbytes
 
         # Write data to buffers
-        self.write_buffer("input", batch_data)
+        self.write_buffer("in", batch_data)
         self.write_buffer("angles", angle_data)
         test_pattern = np.zeros(len(batch_data), dtype=bfloat16)
         self.write_buffer("output", test_pattern)
