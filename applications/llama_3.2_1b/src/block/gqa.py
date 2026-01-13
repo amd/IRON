@@ -286,13 +286,21 @@ class GroupedQueryAttention(nn.Module):
             return result
 
         keys = apply_rope_and_transpose(
-            self.aie_rope_prefill_k if is_prefill else self.aie_rope_decode_k,
+            (
+                (self.aie_rope_prefill_k if is_prefill else self.aie_rope_decode_k)
+                if self.cfg["use_aie_rope"]
+                else None
+            ),
             keys,
             self.num_kv_groups,
             angle_slice,
         )
         queries = apply_rope_and_transpose(
-            self.aie_rope_prefill_q if is_prefill else self.aie_rope_decode_q,
+            (
+                (self.aie_rope_prefill_q if is_prefill else self.aie_rope_decode_q)
+                if self.cfg["use_aie_rope"]
+                else None
+            ),
             queries,
             self.num_heads,
             angle_slice,
