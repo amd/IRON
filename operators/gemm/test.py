@@ -14,42 +14,64 @@ from operators.common.test_utils import run_test
 
 
 def generate_test_params(extensive=False):
-    M_list = [2048] if not extensive else [2048]
-    K_list = [2048] if not extensive else [2048, 8192, 64]
-    N_list = [2048] if not extensive else [2048, 8192]
-    m, k, n = 64, 64, 64
-    num_aie_columns = 8
-    col_maj = [(False, False), (True, False), (False, True)]
-    trace_size = 0
-    partition_N = 1
+    # fmt: off
+    params = [
+        #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0,           1),
+        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
+        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0,           1),
+        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0,           1),
+        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0,           1),
+        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0,           1),
+        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0,           1),
+        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0,           1),
+    ]                                                                                          
+    extensive_params = [                                                                       
+        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0,           1),
+        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0,           1),
+        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0,           1),
+        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0,           1),
+        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0,           1),
+        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0,           1),
+        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0,           1),
+        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
+        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
+        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0,           1),
+        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0,           1),
+        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0,           1),
+        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0,           1),
+        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0,           1),
+        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0,           1),
+    ]
+    # fmt: on
 
-    params = []
+    if extensive:
+        params = extensive_params
+
     names = []
-
-    for b_col_maj, c_col_maj in col_maj:
-        for M in M_list:
-            for K in K_list:
-                for N in N_list:
-                    if N == 8192 and K == 8192:
-                        continue  # Untested combination because huge & slow, unused in our application
-                    params.append(
-                        (
-                            M,
-                            K,
-                            N,
-                            num_aie_columns,
-                            b_col_maj,
-                            c_col_maj,
-                            m,
-                            k,
-                            n,
-                            trace_size,
-                            partition_N,
-                        )
-                    )
-                    names.append(
-                        f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}_cols_{int(b_col_maj)}_bcolmaj_{int(c_col_maj)}_ccolmaj_{trace_size}{f"_{partition_N}" if partition_N > 1 else ""}"
-                    )
+    for (
+        M,
+        K,
+        N,
+        num_aie_columns,
+        b_col_maj,
+        c_col_maj,
+        m,
+        k,
+        n,
+        trace_size,
+        partition_N,
+    ) in params:
+        name = f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}cols"
+        if b_col_maj:
+            name += "_bcolmaj"
+        if c_col_maj:
+            name += "_ccolmaj"
+        if partition_N > 1:
+            name += f"_{partition_N}npart"
+        if trace_size > 0:
+            name += f"_{trace_size}trace"
+        names.append(name)
 
     return params, names
 
@@ -103,6 +125,9 @@ def test_gemm(
         M=M,
         K=K,
         N=N,
+        tile_m=m,
+        tile_k=k,
+        tile_n=n,
         num_aie_columns=num_aie_columns,
         prio_accuracy=True,
         emulate_bf16_mmul_with_bfp16=False,
@@ -131,4 +156,4 @@ def test_gemm(
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
     print(f"Throughput: {gflops:.6e} GFLOP/s\n")
 
-    assert not errors, f"Test failed with errors: {errors}"
+    assert not errors, f"Test failed"

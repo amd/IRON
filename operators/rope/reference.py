@@ -72,8 +72,8 @@ def compute_rope_params(
 def apply_rope(x, cos, sin, method_type=0):
     """Apply rotary position embedding to input tensor."""
     if method_type == 0:  # For the two-halves method used in HF transformers
-        # x: (seq_len, head_dim)
-        seq_len, head_dim = x.shape
+        # x: (n_heads, seq_len, head_dim)
+        n_heads, seq_len, head_dim = x.shape
         assert head_dim % 2 == 0, "Head dimension must be even"
 
         # Split x into first half and second half
@@ -92,8 +92,8 @@ def apply_rope(x, cos, sin, method_type=0):
         # It's ok to use lower-precision after applying cos and sin rotation
         return x_rotated.to(dtype=x.dtype)
     elif method_type == 1:  # For the interleaved method used in the Llama paper
-        # x: (seq_len, head_dim)
-        seq_len, head_dim = x.shape
+        # x: (n_heads, seq_len, head_dim)
+        n_heads, seq_len, head_dim = x.shape
         assert head_dim % 2 == 0, "Head dimension must be even"
 
         # Split x into even and odd columns
@@ -144,12 +144,14 @@ def generate_golden_reference(
         freq_config=freq_config,
     )
     val_range = 4
-    A = torch.rand(rows, cols, dtype=torch.bfloat16) * val_range
+    n_heads = rows // context_len if context_len < rows else 1
+    seq_len = rows // n_heads
+    A = torch.rand(n_heads, seq_len, cols, dtype=torch.bfloat16) * val_range
 
     # Create the lut by interleaving cos and sin
-    B = torch.empty_like(A)
-    B[:, ::2] = cos[:rows, : cols // 2]
-    B[:, 1::2] = sin[:rows, : cols // 2]
+    B = torch.zeros((seq_len, cols), dtype=torch.bfloat16)
+    B[:, ::2] = cos[:seq_len, : cols // 2]
+    B[:, 1::2] = sin[:seq_len, : cols // 2]
 
     # Generate golden outputs
     C = apply_rope(A, cos, sin, method_type)
