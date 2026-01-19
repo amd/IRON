@@ -9,7 +9,7 @@ from pathlib import Path
 
 from iron.operators.rms_norm.op import AIERMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
-from iron.operators.common.test_utils import run_test
+from iron.common.test_utils import run_test
 
 
 def generate_test_params(extensive=False):

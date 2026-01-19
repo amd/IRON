@@ -9,7 +9,7 @@ from pathlib import Path
 
 from iron.operators.softmax.op import AIESoftmax
 from iron.operators.softmax.reference import generate_golden_reference
-from iron.operators.common.test_utils import run_test
+from iron.common.test_utils import run_test
 
 
 def get_optimal_columns_channels(input_length, tile_size):

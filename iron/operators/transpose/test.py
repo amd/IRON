@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from iron.operators.transpose.op import AIETranspose
 from iron.operators.transpose.reference import generate_golden_reference
-from iron.operators.common.test_utils import run_test
+from iron.common.test_utils import run_test
 
 
 def generate_test_params(extensive=False):

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.operators.common.utils import torch_dtype_map
+from iron.common.utils import torch_dtype_map
 
 
 def generate_golden_reference(

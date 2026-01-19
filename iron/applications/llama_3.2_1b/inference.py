@@ -23,7 +23,7 @@ import shutil
 import logging
 from collections import deque
 
-from iron.operators.common import AIEOperatorBase
+from iron.common import AIEOperatorBase
 from src.utils import (
     model_memory_size,
     load_weights_into_llama,

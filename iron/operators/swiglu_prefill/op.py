@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.operators.common import (
+from iron.common import (
     AIEOperatorBase,
     XclbinArtifact,
     InstsBinArtifact,
@@ -18,7 +18,7 @@ from iron.operators.common import (
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.silu.op import AIESiLU
 from iron.operators.elementwise_mul.op import AIEElementwiseMul
-from iron.operators.common.utils import torch_to_numpy
+from iron.common.utils import torch_to_numpy
 
 
 class AIESwiGLUPrefill(AIEOperatorBase):

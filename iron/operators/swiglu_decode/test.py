@@ -9,7 +9,7 @@ from pathlib import Path
 
 from iron.operators.swiglu_decode.op import AIESwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
-from iron.operators.common.test_utils import run_test, verify_buffer
+from iron.common.test_utils import run_test, verify_buffer
 
 
 def generate_test_params(extensive=False):

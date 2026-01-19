@@ -10,7 +10,7 @@ import pytest
 import sys
 import statistics
 
-from iron.operators.common import AIEContext
+from iron.common import AIEContext
 
 
 @pytest.fixture

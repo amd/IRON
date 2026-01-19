@@ -18,7 +18,7 @@ class AIEContext:
         self.operators = []
         self.static_data_pool = {}
         self.device_manager = AIEDeviceManager()
-        self.base_dir = Path(__file__).parent.parent.parent.parent
+        self.base_dir = Path(__file__).parent.parent.parent
         self.build_dir = Path(os.getcwd()) / "build"
         self.mlir_aie_dir = Path(aie.utils.config.root_path())
         self.peano_dir = Path(aie.utils.config.peano_install_dir())
