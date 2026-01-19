@@ -4,7 +4,7 @@ SPDX-PackageSupplier = "Advanced Micro Devices, Inc."
 SPDX-PackageDownloadLocation = "https://github.com/AARInternal/ironclad"
 
 [[annotations]]
-path = "applications/llama_3.2_1b/prompt.txt"
+path = "iron/applications/llama_3.2_1b/prompt.txt"
 precedence = "closest"
 SPDX-FileCopyrightText = "Public Domain"
 SPDX-License-Identifier = "CC0-1.0"

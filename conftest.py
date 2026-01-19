@@ -11,7 +11,7 @@ import sys
 import statistics
 
 sys.path.insert(0, str(Path(__file__).parent))
-from operators.common import AIEContext
+from iron.operators.common import AIEContext
 
 
 @pytest.fixture
@@ -124,7 +124,7 @@ def pytest_runtest_makereport(item, call):
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
             # The pytest nodeid looks like this:
-            # operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
+            # iron/operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
             # Extract only the stem out of that.
             nodeid_components = re.match(
                 r"^(.+?)::(.+?)\[(iter\d+-)?(.+?)\]$", item.nodeid

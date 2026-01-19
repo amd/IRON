@@ -30,10 +30,10 @@ runs:
         
         case "${{ inputs.test_suite }}" in
           operators)
-            TEST_PATH="operators/"
+            TEST_PATH="iron/operators/"
             ;;
           applications)
-            TEST_PATH="applications/"
+            TEST_PATH="iron/applications/"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"
@@ -46,4 +46,3 @@ runs:
         else
           pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv ${{ inputs.test_flags }}
         fi
-
