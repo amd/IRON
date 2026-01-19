@@ -114,7 +114,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. Install required Python packages (from requirements.txt):
    ```bash
-   MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3" HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie" pip install -r requirements.txt
+   pip install -r requirements.txt
    ```
 
 1. To test your installation, you can try to build and run the example below:

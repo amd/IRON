@@ -75,26 +75,14 @@ class AIEContext:
 
             # Set up kernels
             for kernel_name, (xclbin, xclbin_kernel_name, insts) in op.kernels.items():
-                context, xrt_kernel = self.device_manager.get_context_and_kernel(
-                    str(xclbin.path), xclbin_kernel_name
+                handle = self.device_manager.get_kernel_handle(
+                    str(xclbin.path), xclbin_kernel_name, str(insts.path)
                 )
-                with open(str(insts.path), "rb") as f:
-                    instructions = np.frombuffer(f.read(), dtype=np.uint32)
-                logging.debug(
-                    f"Allocating instruction buffer for {len(instructions)} instructions."
-                )
-                insts_bo = pyxrt.bo(
-                    self.device_manager.device,
-                    instructions.nbytes,
-                    pyxrt.bo.cacheable,
-                    xrt_kernel.group_id(1),
-                )
-                insts_bo.write(instructions.view(np.uint8), 0)
                 op.xrt_kernels[kernel_name] = (
-                    context,
-                    xrt_kernel,
-                    insts_bo,
-                    len(instructions),
+                    handle.context,
+                    handle.kernel,
+                    handle.insts_bo,
+                    len(handle.insts),
                 )
 
             # If multiple buffers (of the same binned size) are used in the
@@ -174,12 +162,13 @@ class AIEContext:
                 op.buffer_bos[buffer_name] = bo_pools[alloc_pool][alloc_idx]
 
             # Setup runlist
-            _, (first_xclbin, first_xclbin_kernel_name, _) = next(
+            _, (first_xclbin, first_xclbin_kernel_name, first_insts) = next(
                 iter(op.kernels.items())
             )
-            context, _ = self.device_manager.get_context_and_kernel(
-                str(first_xclbin.path), first_xclbin_kernel_name
+            handle = self.device_manager.get_kernel_handle(
+                str(first_xclbin.path), first_xclbin_kernel_name, str(first_insts.path)
             )
+            context = handle.context
             if self.use_runlist:
                 op.xrt_runlist = pyxrt.runlist(context)
                 for i, (kernel_name, *buffer_args) in enumerate(op.runlist):
