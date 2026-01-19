@@ -20,5 +20,5 @@ runs:
         python3 -m venv ${{ inputs.env_name }}
         source ${{ inputs.env_name }}/bin/activate
         pip install --upgrade pip
-        env MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3" HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie" pip install -r requirements.txt
+        pip install -r requirements.txt
         echo "Prerequisites installed into ${{ inputs.env_name }}"

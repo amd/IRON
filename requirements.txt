@@ -6,11 +6,11 @@
 # version of torch (don't need CUDA), so we give this index precedence over the
 # main PyPI. These indices are consulted in order of precedence by pip.
 --index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.1.4
+--extra-index-url https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.2.0-alpha0
 --extra-index-url https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==1.1.4
+mlir_aie==v1.2.0-alpha0
 llvm-aie
 
 black
@@ -18,10 +18,3 @@ reuse
 torch
 pytest
 pytest-xdist
-
-# MLIR-extras (Python bindings/helpers for MLIR)
-# For installing this, the following environment variables must be set:
-# MLIR_PYTHON_EXTRAS_SET_VERSION="0.0.8.3"
-# HOST_MLIR_PYTHON_PACKAGE_PREFIX="aie"
-git+https://github.com/erwei-xilinx/mlir-python-extras@a801853ac0eef50a0f2779cfbbd7dabc931806ee
--f https://github.com/llvm/eudsl/releases/expanded_assets/latest
