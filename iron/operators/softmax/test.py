@@ -6,7 +6,6 @@ import sys
 import pytest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from iron.operators.softmax.op import AIESoftmax
 from iron.operators.softmax.reference import generate_golden_reference

@@ -6,7 +6,6 @@ import sys
 import pytest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from iron.operators.layer_norm.op import AIELayerNorm
 from iron.operators.layer_norm.reference import generate_golden_reference

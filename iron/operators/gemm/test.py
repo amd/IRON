@@ -6,7 +6,6 @@ import sys
 import pytest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.gemm.reference import generate_golden_reference

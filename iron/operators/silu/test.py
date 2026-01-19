@@ -6,7 +6,6 @@ import sys
 import pytest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from iron.operators.silu.op import AIESiLU
 from iron.operators.silu.reference import generate_golden_reference

@@ -10,7 +10,6 @@ import pytest
 import sys
 import statistics
 
-sys.path.insert(0, str(Path(__file__).parent))
 from iron.operators.common import AIEContext
 
 
