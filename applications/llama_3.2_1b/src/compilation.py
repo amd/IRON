@@ -39,7 +39,6 @@ import importlib.util
 from contextlib import nullcontext
 from aie.extras.context import mlir_mod_ctx
 
-
 # Compilation Artifacts
 # --------------------------------------------------------------------------
 

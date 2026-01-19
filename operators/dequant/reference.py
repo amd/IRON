@@ -5,7 +5,6 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 
-
 tensor_type_to_quant = {torch.uint8: torch.quint8}
 
 
