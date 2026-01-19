@@ -24,7 +24,7 @@ from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1Col1, NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
-from aie.helpers.dialects.ext.scf import if_, else_
+from aie.helpers.dialects.scf import if_, else_
 
 base_dir = Path(__file__).parent
 

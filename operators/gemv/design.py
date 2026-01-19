@@ -12,12 +12,11 @@ import aie.dialects.index as index
 import aie.dialects.memref as memref
 from aie.dialects.aie import *
 from aie.dialects.aiex import *
-from aie.helpers.dialects.ext.scf import _for as range_
+from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.util import try_convert_np_type_to_mlir_type
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
-
 
 """
 Matrix-vector design
