@@ -10,7 +10,7 @@
 --extra-index-url https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==v1.2.0
+mlir_aie==1.2.0
 llvm-aie
 
 black
