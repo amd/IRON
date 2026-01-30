@@ -61,6 +61,9 @@ def generate_golden_reference(
     K = torch.rand(num_kv_heads, S_kv, d, dtype=torch.bfloat16) * val_range
     V = torch.rand(num_kv_heads, S_kv, d, dtype=torch.bfloat16) * val_range
 
+    K_original = K.clone()
+    V_original = V.clone()
+
     K = K.repeat_interleave(number_of_groups, dim=0)
     V = V.repeat_interleave(number_of_groups, dim=0)
 
@@ -79,13 +82,13 @@ def generate_golden_reference(
 
     # Pad all tensors to multiple of 64
     Q = pad_to_multiple_of_64(Q, seq_dim=1, num_pipeline=num_pipeline)
-    K = pad_to_multiple_of_64(K, seq_dim=1, num_pipeline=num_pipeline)
-    V = pad_to_multiple_of_64(V, seq_dim=1, num_pipeline=num_pipeline)
+    K_original = pad_to_multiple_of_64(K_original, seq_dim=1, num_pipeline=num_pipeline)
+    V_original = pad_to_multiple_of_64(V_original, seq_dim=1, num_pipeline=num_pipeline)
     O = pad_to_multiple_of_64(O, seq_dim=1, num_pipeline=num_pipeline)
 
     return {
         "Q": Q,
-        "K": K,
-        "V": V,
+        "K": K_original,
+        "V": V_original,
         "O": O,
     }
