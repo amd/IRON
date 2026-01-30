@@ -758,10 +758,10 @@ def fused_mha(
 
     if verbose:
         print(f"DMA Transfer Configuration: DRAM <-> Mem tile")
-        print_tap_seq_info(Q_tiles, "Q")
+        # print_tap_seq_info(Q_tiles, "Q")
         print_tap_seq_info(K_tiles, "K")
         print_tap_seq_info(V_tiles, "V")
-        print_tap_seq_info(O_tiles, "O")
+        # print_tap_seq_info(O_tiles, "O")
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
