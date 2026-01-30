@@ -17,19 +17,19 @@ def generate_test_params(extensive=False):
 
     names = []
 
-    params = [
-                (16384, 64, 1, 8, 0)
-            ]
+    params = [(16384, 64, 1, 8, 0)]
 
     if extensive:
         params += [
-                    (4096, 64, 8, 8, 4),
-                    (4096, 64, 8, 8, 2),
-                    (4096, 64, 8, 8, 0),
-                ]
+            (4096, 64, 8, 8, 4),
+            (4096, 64, 8, 8, 2),
+            (4096, 64, 8, 8, 0),
+        ]
 
     for seq_len, head_dim, heads, number_of_pipeline, num_kv_heads in params:
-        names += [f"mha_{seq_len}_{head_dim}_{heads}_{number_of_pipeline}_{num_kv_heads}"]
+        names += [
+            f"mha_{seq_len}_{head_dim}_{heads}_{number_of_pipeline}_{num_kv_heads}"
+        ]
 
     return params, names
 
@@ -52,9 +52,18 @@ all_params = [
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines,num_kv_heads", all_params)
-def test_mha(seq_len: int, dim: int, num_heads: int, num_pipelines: int, num_kv_heads: int, aie_context):
+def test_mha(
+    seq_len: int,
+    dim: int,
+    num_heads: int,
+    num_pipelines: int,
+    num_kv_heads: int,
+    aie_context,
+):
 
-    print(f"\nTest configuration: seq_len={seq_len}, dim={dim}, num_heads={num_heads}, num_pipelines={num_pipelines}, num_kv_heads={num_kv_heads}")
+    print(
+        f"\nTest configuration: seq_len={seq_len}, dim={dim}, num_heads={num_heads}, num_pipelines={num_pipelines}, num_kv_heads={num_kv_heads}"
+    )
 
     golden_ref = generate_golden_reference(
         S_q=seq_len,
@@ -72,7 +81,7 @@ def test_mha(seq_len: int, dim: int, num_heads: int, num_pipelines: int, num_kv_
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
         context=aie_context,
-    ) # VJUNG: TODO: Pass the verbose flag to the operator for debugging
+    )  # VJUNG: TODO: Pass the verbose flag to the operator for debugging
 
     input_buffers = {
         "Q": golden_ref["Q"].flatten(),

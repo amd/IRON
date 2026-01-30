@@ -712,9 +712,13 @@ def fused_mha(
         (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
     )
 
-    K_tiles = TensorTiler2D.group_tiler((num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1))
+    K_tiles = TensorTiler2D.group_tiler(
+        (num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1)
+    )
 
-    V_tiles = TensorTiler2D.group_tiler((num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1))
+    V_tiles = TensorTiler2D.group_tiler(
+        (num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1)
+    )
 
     O_tiles = TensorTiler2D.group_tiler(
         (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)

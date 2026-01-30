@@ -139,7 +139,9 @@ class AIEMHA(AIEOperatorBase):
         )
 
         insts_artifact = InstsBinArtifact.new(
-            f"{file_name_base}.bin", depends=[mlir_artifact], extra_flags=["--dynamic-objFifos"]
+            f"{file_name_base}.bin",
+            depends=[mlir_artifact],
+            extra_flags=["--dynamic-objFifos"],
         )
 
         self.xclbin_artifact = xclbin_artifact
