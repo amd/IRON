@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -64,14 +66,16 @@ def generate_golden_reference(
 
     # MHA from PyTorch
     inv_scale = 1 / np.sqrt(K.shape[-1])
-    O = torch.nn.functional.scaled_dot_product_attention(
-        Q.to(torch.bfloat16),
-        K.to(torch.bfloat16),
-        V.to(torch.bfloat16),
-        dropout_p=0.0,
-        is_causal=True,
-        scale=inv_scale,
-    )
+
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        O = torch.nn.functional.scaled_dot_product_attention(
+            Q.to(torch.bfloat16).unsqueeze(0),
+            K.to(torch.bfloat16).unsqueeze(0),
+            V.to(torch.bfloat16).unsqueeze(0),
+            dropout_p=0.0,
+            is_causal=True,
+            scale=inv_scale,
+        ).squeeze(0)
 
     # Pad all tensors to multiple of 64
     Q = pad_to_multiple_of_64(Q, seq_dim=1, num_pipeline=num_pipeline)
