@@ -12,7 +12,7 @@ weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
 
 
 def generate_test_params():
-    prompt_lengths = [1024, 13]
+    prompt_lengths = [2048, 13]
     num_tokens_list = [40, 1]
 
     params = []
@@ -28,12 +28,13 @@ params, names = generate_test_params()
 
 
 @pytest.mark.metrics(
-    TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
-    TPS=r"\[Decode\]\s*Tokens per second: (?P<value>[\d\.e\+-]+)",
+    TTFT=r"Prefill time: (?P<value>[\d\.e\+-]+) seconds",
+    TPS=r"Tokens per second: (?P<value>[\d\.e\+-]+)",
+    Num_Tokens=r"Tokens generated: (?P<value>[\d\.e\+-]+)",
 )
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
-    command = f"python3 {test_dir}/llama_npu.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --num-tokens {num_tokens} --prompt-len {prompt_len}"
+    command = f"python3 {test_dir}/inference.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --prompt_len {prompt_len} --num_tokens {num_tokens}"
 
     result = subprocess.run(
         command,
@@ -41,11 +42,11 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
         shell=True,
         capture_output=True,
         text=True,
+        timeout=300,
     )
-
-    print(result.stdout)
-    print(result.stderr)
 
     assert (
         result.returncode == 0
     ), f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
+
+    print(result.stdout)
