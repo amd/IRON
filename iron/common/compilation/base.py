@@ -507,6 +507,20 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 ]
             compile_cmd += [os.path.abspath(mlir_source.filename)]
 
+            # If the MLIR source depends on a kernel archive, pass it to aiecc.py so it can be linked
+            if (
+                isinstance(mlir_source, PythonGeneratedMLIRArtifact)
+                and "kernel_archive" in mlir_source.callback_kwargs
+            ):
+                compile_cmd.append(
+                    os.path.abspath(
+                        os.path.join(
+                            self.build_dir,
+                            mlir_source.callback_kwargs["kernel_archive"],
+                        )
+                    )
+                )
+
             commands.append(
                 ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
             )

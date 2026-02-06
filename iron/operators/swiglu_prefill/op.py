@@ -28,23 +28,37 @@ class SwiGLUPrefillCallable:
     def __init__(self, op):
         self.op = op
 
-        def create_callable(sub_op, xclbin_artifact, insts_artifact):
+        def create_callable(sub_op, xclbin_path, kernel_name, insts_artifact):
             return SingleXclbinCallable(
-                xclbin_path=xclbin_artifact.filename,
-                kernel_name=xclbin_artifact.kernel_name,
+                xclbin_path=xclbin_path,
+                kernel_name=kernel_name,
                 insts_bin_path=insts_artifact.filename,
                 args_spec=sub_op.get_arg_spec(),
             )
 
         self.gemm_1_callable = create_callable(
-            op.gemm_1, op.combined_xclbin, op.gemm_1_insts
+            op.gemm_1,
+            op.combined_xclbin.filename,
+            op.gemm_1_xclbin.kernel_name,
+            op.gemm_1_insts,
         )
-        self.silu_callable = create_callable(op.silu, op.combined_xclbin, op.silu_insts)
+        self.silu_callable = create_callable(
+            op.silu,
+            op.combined_xclbin.filename,
+            op.silu_xclbin.kernel_name,
+            op.silu_insts,
+        )
         self.eltwise_mul_callable = create_callable(
-            op.eltwise_mul, op.combined_xclbin, op.eltwise_mul_insts
+            op.eltwise_mul,
+            op.combined_xclbin.filename,
+            op.eltwise_mul_xclbin.kernel_name,
+            op.eltwise_mul_insts,
         )
         self.gemm_2_callable = create_callable(
-            op.gemm_2, op.combined_xclbin, op.gemm_2_insts
+            op.gemm_2,
+            op.combined_xclbin.filename,
+            op.gemm_2_xclbin.kernel_name,
+            op.gemm_2_insts,
         )
 
         # Allocate and upload weights
@@ -59,8 +73,10 @@ class SwiGLUPrefillCallable:
         self.right = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
         self.left_swished = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
         self.intermediate = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
+        self.last_output_buf = None
 
     def __call__(self, input_buf, output_buf):
+        self.last_output_buf = output_buf
         input_buf.to("npu")
         output_buf.to("npu")
         self.weights_1.to("npu")
