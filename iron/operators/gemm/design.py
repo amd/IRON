@@ -106,6 +106,7 @@ def main():
         args.separate_c_tiles,
         args.trace_size,
         args.archive,
+        "",
         args.generate_taps,
     )
 
