@@ -10,4 +10,6 @@ from .rms_norm.op import AIERMSNorm
 from .rope.op import AIERope
 from .silu.op import AIESiLU
 from .softmax.op import AIESoftmax
+from .swiglu_decode.op import AIESwiGLUDecode
+from .swiglu_prefill.op import AIESwiGLUPrefill
 from .transpose.op import AIETranspose

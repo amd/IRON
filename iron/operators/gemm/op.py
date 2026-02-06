@@ -140,9 +140,13 @@ class AIEGEMM(MLIROperator):
             kernel_flags.append("-DB_COL_MAJ")
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
+
+        # Include flags in the filename to avoid stale builds when flags change
+        flags_suffix = f"_{int(prio_accuracy)}_{int(emulate_bf16_mmul_with_bfp16)}_{int(round_conv_even)}"
+
         return [
             KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}.o",
+                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
                     SourceArtifact(base_dir / "aie_kernels" / "aie2p" / "mm.cc")
