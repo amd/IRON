@@ -7,9 +7,12 @@ import pytest
 from pathlib import Path
 
 
+from ml_dtypes import bfloat16
+from iron.common.base import AIEBuffer
+from iron.common.utils import torch_to_numpy
 from iron.operators.swiglu_decode.op import AIESwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
-from iron.common.test_utils import run_test, verify_buffer
+from iron.common.test_utils import verify_buffer
 
 
 def generate_test_params(extensive=False):
@@ -52,33 +55,32 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     # This reference is based on the previous intermediate result read back from the AIE operator, "resetting"  the accumulated error to zero.
     # Note that the previous intermediate result _is_ still verified up to the given tolerance.
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": None}
-    intermediate_buffers = {
-        "left": golden_ref["left"],
-        "left_swished": golden_ref["left_swished"],
-        "right": golden_ref["right"],
-        "intermediate": golden_ref["intermediate"],
-    }
+    operator.compile()
+    op_func = operator.get_callable()
 
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        input_buffers,
-        output_buffers,
-        intermediate_buffers,
+    input_buf = AIEBuffer.from_np(torch_to_numpy(golden_ref["input"]))
+    output_buf = AIEBuffer(shape=(1, embedding_dim), dtype=bfloat16)
+
+    op_func(input_buf, output_buf)
+
+    errors = {}
+    # Verify intermediate result
+    intermediate = op_func.intermediate.view_as_torch().reshape((1, hidden_dim))
+    errors_intermediate = verify_buffer(
+        intermediate,
+        "intermediate",
+        golden_ref["intermediate"],
         rel_tol=0.07,
         abs_tol=0.7,
     )
+    if errors_intermediate:
+        errors["intermediate"] = errors_intermediate
 
-    ref_2 = (
-        operator.read_buffer_as_torch("intermediate", (1, hidden_dim))
-        @ golden_ref["w_down"]
-    )
-    errors_2 = verify_buffer(operator, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
-    if errors_2:
-        errors["output"] = errors_2
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    # Verify output using intermediate result
+    ref_2 = intermediate @ golden_ref["w_down"]
+    output = output_buf.view_as_torch().reshape((1, embedding_dim))
+    errors_output = verify_buffer(output, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
+    if errors_output:
+        errors["output"] = errors_output
 
     assert not errors, f"Test failed with errors: {errors}"

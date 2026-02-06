@@ -31,23 +31,37 @@ class SwiGLUDecodeCallable:
         # We need to manually construct SingleXclbinCallable because sub-operators weren't "compiled" in the standard way
 
         # Helper to create callable from operator and artifacts
-        def create_callable(sub_op, xclbin_artifact, insts_artifact):
+        def create_callable(sub_op, xclbin_path, kernel_name, insts_artifact):
             return SingleXclbinCallable(
-                xclbin_path=xclbin_artifact.filename,
-                kernel_name=xclbin_artifact.kernel_name,
+                xclbin_path=xclbin_path,
+                kernel_name=kernel_name,
                 insts_bin_path=insts_artifact.filename,
                 args_spec=sub_op.get_arg_spec(),
             )
 
         self.gemv_1_callable = create_callable(
-            op.gemv_1, op.combined_xclbin, op.gemv_1_insts
+            op.gemv_1,
+            op.combined_xclbin.filename,
+            op.gemv_1_xclbin.kernel_name,
+            op.gemv_1_insts,
         )
-        self.silu_callable = create_callable(op.silu, op.combined_xclbin, op.silu_insts)
+        self.silu_callable = create_callable(
+            op.silu,
+            op.combined_xclbin.filename,
+            op.silu_xclbin.kernel_name,
+            op.silu_insts,
+        )
         self.eltwise_mul_callable = create_callable(
-            op.eltwise_mul, op.combined_xclbin, op.eltwise_mul_insts
+            op.eltwise_mul,
+            op.combined_xclbin.filename,
+            op.eltwise_mul_xclbin.kernel_name,
+            op.eltwise_mul_insts,
         )
         self.gemv_2_callable = create_callable(
-            op.gemv_2, op.combined_xclbin, op.gemv_2_insts
+            op.gemv_2,
+            op.combined_xclbin.filename,
+            op.gemv_2_xclbin.kernel_name,
+            op.gemv_2_insts,
         )
 
         # Allocate and upload weights
