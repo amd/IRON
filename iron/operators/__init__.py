@@ -5,6 +5,7 @@ from .elementwise_add.op import AIEElementwiseAdd
 from .elementwise_mul.op import AIEElementwiseMul
 from .gemm.op import AIEGEMM
 from .gemv.op import AIEGEMV
+from .mha.op import AIEMHA
 from .rms_norm.op import AIERMSNorm
 from .rope.op import AIERope
 from .silu.op import AIESiLU
