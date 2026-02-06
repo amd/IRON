@@ -97,6 +97,7 @@ def test_rms_norm(
     input_buffers = {"input1": golden_ref["input"]}
     if weighted:
         operator.weight = golden_ref["weight"]
+        input_buffers["weight"] = golden_ref["weight"]
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
