@@ -10,4 +10,3 @@ from .rope.op import AIERope
 from .silu.op import AIESiLU
 from .softmax.op import AIESoftmax
 from .transpose.op import AIETranspose
-from .repeat.op import AIERepeat
