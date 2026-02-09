@@ -6,11 +6,11 @@
 # version of torch (don't need CUDA), so we give this index precedence over the
 # main PyPI. These indices are consulted in order of precedence by pip.
 --index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.2.0
+--extra-index-url https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.2.1
 --extra-index-url https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==v1.2.0
+mlir_aie==1.2.1
 llvm-aie
 
 black
