@@ -12,8 +12,8 @@ from iron.operators.gemv.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    params = [
+def get_params():
+    params_list = [
         (128, 128, 1, 32, 128),
         (2048, 8192, 1, 1, 2048),
         (8192, 2048, 1, 4, 1024),
@@ -24,24 +24,16 @@ def generate_test_params(extensive=False):
         (2048, 8192, 8, 1, 256),
         (8192, 2048, 8, 4, 1024),
     ]
-    names = [
-        f"matrix_vector_mul_{M}x{K}_{tile_size_input}tsi_{tile_size_output}tso_{num_aie_columns}col"
-        for M, K, num_aie_columns, tile_size_input, tile_size_output in params
-    ]
-    return params, names
 
+    params = []
+    for p in params_list:
+        M, K, num_aie_columns, tile_size_input, tile_size_output = p
+        name = f"matrix_vector_mul_{M}x{K}_{tile_size_input}tsi_{tile_size_output}tso_{num_aie_columns}col"
 
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+        # All tests are considered regular here as per original code structure
+        # (original code returned same list for both regular and extensive)
+        params.append(pytest.param(*p, id=name))
+    return params
 
 
 @pytest.mark.metrics(
@@ -50,7 +42,7 @@ all_params = [
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.parametrize(
-    "M,K,num_aie_columns,tile_size_input,tile_size_output", all_params
+    "M,K,num_aie_columns,tile_size_input,tile_size_output", get_params()
 )
 def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
     golden_ref = generate_golden_reference(M=M, K=K)

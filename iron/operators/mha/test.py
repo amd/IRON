@@ -12,30 +12,21 @@ from iron.operators.mha.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    params = [(16384, 64, 1, 8)]
+def get_params():
+    params_list = [(16384, 64, 1, 8)]
     names = ["mha"]
-    return params, names
 
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    params = []
+    for p, name in zip(params_list, names):
+        params.append(pytest.param(*p, id=name))
+    return params
 
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines", all_params)
+@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines", get_params())
 def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
     golden_ref = generate_golden_reference(
         S_q=seq_len,

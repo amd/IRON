@@ -12,12 +12,11 @@ from iron.operators.dequant.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
+def get_params():
+    input_lengths = [1024, 2048, 4096, 8192]
     group_size = 32
 
     params = []
-    names = []
     for input_length in input_lengths:
         for num_columns in range(1, 9):  # 1 to 8 columns
             for num_channels in range(1, 3):  # 1 or 2 channels
@@ -30,26 +29,23 @@ def generate_test_params(extensive=False):
 
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
-                    names.append(
-                        f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-                    )
+                    name = f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
+
+                    is_regular = input_length == 2048
+                    marks = [] if is_regular else [pytest.mark.extensive]
+
                     params.append(
-                        (input_length, num_columns, num_channels, tile_size, group_size)
+                        pytest.param(
+                            input_length,
+                            num_columns,
+                            num_channels,
+                            tile_size,
+                            group_size,
+                            id=name,
+                            marks=marks,
+                        )
                     )
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -58,7 +54,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size,group_size",
-    all_params,
+    get_params(),
 )
 def test_dequant(
     input_length, num_aie_columns, num_channels, tile_size, group_size, aie_context

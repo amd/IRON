@@ -12,10 +12,10 @@ from iron.operators.gemm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
+def get_params():
     # fmt: off
-    params = [
-        #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+    regular_params = [
         (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0,           1),
         (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
         (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0,           1),
@@ -44,48 +44,43 @@ def generate_test_params(extensive=False):
     ]
     # fmt: on
 
-    if extensive:
-        params = extensive_params
+    params = []
 
-    names = []
-    for (
-        M,
-        K,
-        N,
-        num_aie_columns,
-        b_col_maj,
-        c_col_maj,
-        m,
-        k,
-        n,
-        trace_size,
-        partition_N,
-    ) in params:
-        name = f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}cols"
-        if b_col_maj:
-            name += "_bcolmaj"
-        if c_col_maj:
-            name += "_ccolmaj"
-        if partition_N > 1:
-            name += f"_{partition_N}npart"
-        if trace_size > 0:
-            name += f"_{trace_size}trace"
-        names.append(name)
+    # Helper to generate name and append param
+    def add_params(param_list, is_extensive):
+        for p in param_list:
+            (
+                M,
+                K,
+                N,
+                num_aie_columns,
+                b_col_maj,
+                c_col_maj,
+                m,
+                k,
+                n,
+                trace_size,
+                partition_N,
+            ) = p
 
-    return params, names
+            name = f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}cols"
+            if b_col_maj:
+                name += "_bcolmaj"
+            if c_col_maj:
+                name += "_ccolmaj"
+            if partition_N > 1:
+                name += f"_{partition_N}npart"
+            if trace_size > 0:
+                name += f"_{trace_size}trace"
 
+            marks = [pytest.mark.extensive] if is_extensive else []
 
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
+            params.append(pytest.param(*p, id=name, marks=marks))
 
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    add_params(regular_params, is_extensive=False)
+    add_params(extensive_params, is_extensive=True)
+
+    return params
 
 
 @pytest.mark.metrics(
@@ -95,7 +90,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N",
-    all_params,
+    get_params(),
 )
 def test_gemm(
     M,

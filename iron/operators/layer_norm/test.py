@@ -12,11 +12,10 @@ from iron.operators.layer_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
+def get_params():
     max_aie_columns = 8
-    input_lengths = [2048] if not extensive else [1024, 4096, 8192]
+    input_lengths = [1024, 2048, 4096, 8192]
     params = []
-    names = []
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
             for num_channels_layer in range(1, 3):  # 1 or 2
@@ -26,26 +25,22 @@ def generate_test_params(extensive=False):
                     tile_size = 8192
                 check_length = tile_size * total_cores
                 if check_length == input_length:
-                    names.append(
-                        f"layer_norm_{num_aie_columns}_cols_{num_channels_layer}_channels_{input_length}_tile_{tile_size}"
-                    )
+                    name = f"layer_norm_{num_aie_columns}_cols_{num_channels_layer}_channels_{input_length}_tile_{tile_size}"
+
+                    is_regular = input_length == 2048
+                    marks = [] if is_regular else [pytest.mark.extensive]
+
                     params.append(
-                        (input_length, num_aie_columns, num_channels_layer, tile_size)
+                        pytest.param(
+                            input_length,
+                            num_aie_columns,
+                            num_channels_layer,
+                            tile_size,
+                            id=name,
+                            marks=marks,
+                        )
                     )
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -54,7 +49,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size",
-    all_params,
+    get_params(),
 )
 def test_layer_norm(
     input_length, num_aie_columns, num_channels, tile_size, aie_context

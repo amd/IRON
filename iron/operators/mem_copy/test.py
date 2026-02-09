@@ -12,12 +12,11 @@ from iron.operators.mem_copy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    input_lengths = [2048] if not extensive else [1024, 2048, 4096, 8192]
-    bypass_modes = [False] if not extensive else [False, True]
+def get_params():
+    input_lengths = [1024, 2048, 4096, 8192]
+    bypass_modes = [False, True]
 
     params = []
-    names = []
 
     for input_length in input_lengths:
         for num_cores in range(1, 17):  # 1 to 16 cores
@@ -35,33 +34,24 @@ def generate_test_params(extensive=False):
 
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
-                            names.append(
-                                f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
-                            )
+                            name = f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
+
+                            is_regular = input_length == 2048 and bypass == False
+                            marks = [] if is_regular else [pytest.mark.extensive]
+
                             params.append(
-                                (
+                                pytest.param(
                                     input_length,
                                     num_cores,
                                     num_channels,
                                     bypass,
                                     tile_size,
+                                    id=name,
+                                    marks=marks,
                                 )
                             )
 
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -70,7 +60,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "input_length,num_cores,num_channels,bypass,tile_size",
-    all_params,
+    get_params(),
 )
 def test_mem_copy(
     input_length, num_cores, num_channels, bypass, tile_size, aie_context

@@ -12,55 +12,49 @@ from iron.operators.rope.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    params = []
-    names = []
-
+def get_params():
     num_aie_columns_options = [1, 2, 8]
 
-    if not extensive:
-        input_rows = [32]
-        input_cols = [512]
-        input_angle_rows = [8, 32]
-        method_types = [0]  # 0: Two-halves method
-    else:
-        input_rows = [32, 64]
-        input_cols = [128]
-        input_angle_rows = [8, 16, 32]
-        method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
+    # Combine all options
+    input_rows = [32, 64]
+    input_cols = [128, 512]
+    input_angle_rows = [8, 16, 32]
+    method_types = [0, 1]  # 0: Two-halves method, 1: interleaved method
 
+    params = []
     for num_aie_columns in num_aie_columns_options:
         for n_rows in input_rows:
             for n_angle_rows in input_angle_rows:
                 for n_cols in input_cols:
                     for method_type in method_types:
-                        names.append(
-                            f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{n_angle_rows}arows_{method_type}m"
+                        name = f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{n_angle_rows}arows_{method_type}m"
+
+                        is_regular = (
+                            n_rows == 32
+                            and n_cols == 512
+                            and n_angle_rows in [8, 32]
+                            and method_type == 0
                         )
+
+                        is_extensive_valid = n_cols == 128
+
+                        if not is_regular and not is_extensive_valid:
+                            continue
+
+                        marks = [] if is_regular else [pytest.mark.extensive]
+
                         params.append(
-                            (
+                            pytest.param(
                                 n_rows,
                                 n_cols,
                                 n_angle_rows,
                                 num_aie_columns,
                                 method_type,
+                                id=name,
+                                marks=marks,
                             )
                         )
-
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -69,7 +63,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "rows,cols,angle_rows,aie_columns,method_type",
-    all_params,
+    get_params(),
 )
 def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
     golden_ref = generate_golden_reference(

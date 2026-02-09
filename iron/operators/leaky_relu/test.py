@@ -12,24 +12,10 @@ from iron.operators.leaky_relu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
+def get_params():
     # Leaky ReLU is currently broken (#36); leave it untested
     params = []
-    names = []
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -38,7 +24,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size,alpha",
-    all_params,
+    get_params(),
 )
 def test_leaky_relu(
     input_length, num_aie_columns, num_channels, tile_size, alpha, aie_context

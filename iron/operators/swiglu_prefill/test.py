@@ -15,31 +15,23 @@ from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
 
 
-def generate_test_params(extensive=False):
+def get_params():
     # This operation is currently untested except for the integrated llama application tests.
-    params = [(256, 2048, 2048, False)]
-    names = [f"swiglu_prefill_256x{emb}x{hid}" for _, emb, hid, _ in params]
-    return params, names
+    params_list = [(256, 2048, 2048, False)]
 
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    params = []
+    for p in params_list:
+        _, emb, hid, _ = p
+        name = f"swiglu_prefill_256x{emb}x{hid}"
+        params.append(pytest.param(*p, id=name))
+    return params
 
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", all_params)
+@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
 def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 

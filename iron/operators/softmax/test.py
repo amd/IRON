@@ -30,37 +30,27 @@ def get_optimal_columns_channels(input_length, tile_size):
         return 2, 2  # Default fallback
 
 
-def generate_test_params(extensive=False):
+def get_params():
     max_aie_columns = 8
     num_channels = 2
-    input_lengths = [32768] if not extensive else []
+    input_lengths = [32768]
     tile_sizes = [1024, 512, 2048]
 
     params = []
-    names = []
     for input_length in input_lengths:
         for tile_size in tile_sizes:
             optimal_columns, optimal_channels = get_optimal_columns_channels(
                 input_length, tile_size
             )
-            names.append(
-                f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
+            name = f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
+
+            # All tests are regular as extensive list was empty in original code
+            params.append(
+                pytest.param(
+                    input_length, optimal_columns, optimal_channels, tile_size, id=name
+                )
             )
-            params.append((input_length, optimal_columns, optimal_channels, tile_size))
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
@@ -69,7 +59,7 @@ all_params = [
 )
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size",
-    all_params,
+    get_params(),
 )
 def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context):
 

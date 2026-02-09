@@ -12,16 +12,15 @@ from iron.operators.transpose.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def generate_test_params(extensive=False):
-    params = []
-    names = []
+def get_params():
     max_aie_columns = 8
-    input_lengths = [2048] if not extensive else [64, 2048]
-    n_list = [64] if not extensive else [64, 128, 256, 512]
+    input_lengths = [64, 2048]
+    n_list = [64, 128, 256, 512]
     s_list = [8]
     m = 64
     n = 64
 
+    params = []
     for M in input_lengths:
         for N in n_list:
             for s in s_list:
@@ -37,32 +36,33 @@ def generate_test_params(extensive=False):
                         length = M * N
                         if check_length != length:
                             continue
-                        names.append(
-                            f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s"
+                        name = f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s"
+
+                        is_regular = M == 2048 and N == 64
+                        marks = [] if is_regular else [pytest.mark.extensive]
+
+                        params.append(
+                            pytest.param(
+                                M,
+                                N,
+                                num_aie_columns,
+                                num_channels,
+                                m,
+                                n,
+                                s,
+                                id=name,
+                                marks=marks,
+                            )
                         )
-                        params.append((M, N, num_aie_columns, num_channels, m, n, s))
 
-    return params, names
-
-
-regular_params, regular_names = generate_test_params(extensive=False)
-extensive_params, extensive_names = generate_test_params(extensive=True)
-
-# Combine params with marks - extensive params get pytest.mark.extensive
-all_params = [
-    pytest.param(*params, id=name)
-    for params, name in zip(regular_params, regular_names)
-] + [
-    pytest.param(*params, marks=pytest.mark.extensive, id=name)
-    for params, name in zip(extensive_params, extensive_names)
-]
+    return params
 
 
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s", all_params)
+@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s", get_params())
 def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     golden_ref = generate_golden_reference(rows=M, cols=N)
 
