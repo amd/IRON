@@ -316,24 +316,6 @@ class SingleXclbinCallable:
             raise RuntimeError(f"Kernel did not complete correctly: {ret_code}")
 
 
-class PatchableSingleXclbinCallable(SingleXclbinCallable):
-    def __init__(
-        self, xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager=None
-    ):
-        super().__init__(
-            xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager
-        )
-        self.baseline_instructions = self.insts_buffer.view_as_np().copy()
-
-    def patch(self, patches):
-        """Apply patches with masking: dict of {position: (value, mask)}."""
-        insts = self.insts_buffer.view_as_np()
-        insts[:] = self.baseline_instructions
-        for pos, (val, mask) in patches.items():
-            insts[pos] = (np.int64(insts[pos]) & ~mask) | (val & mask)
-        self.insts_buffer.to("npu")
-
-
 class CompositeCallable:
     """Callable for executing a sequence of sub-operators"""
 

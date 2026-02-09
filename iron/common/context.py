@@ -26,7 +26,6 @@ class AIEContext:
         self.use_runlist = use_runlist
         self.mlir_verbose = bool(mlir_verbose)
         self.compilation_rules = [
-            comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.PeanoCompilationRule(self.peano_dir, self.mlir_aie_dir),
             comp.ArchiveCompilationRule(self.peano_dir),
