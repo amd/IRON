@@ -104,7 +104,6 @@ class TransformerBlock(nn.Module):
             self.aie_residual_add_prefill = AIEElementwiseAdd(
                 size=max_prefill_size,
                 num_aie_columns=8,
-                num_channels=2,
                 tile_size=cfg["emb_dim"],
             )
 
@@ -114,7 +113,6 @@ class TransformerBlock(nn.Module):
                 self.aie_residual_add_decode = AIEElementwiseAdd(
                     size=decode_size,
                     num_aie_columns=1,
-                    num_channels=2,
                     tile_size=cfg["emb_dim"],
                 )
             else:
