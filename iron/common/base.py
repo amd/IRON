@@ -11,6 +11,8 @@ import torch
 from ml_dtypes import bfloat16
 
 import aie.utils.config
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from aie.utils.hostruntime.tensor_class import Tensor
 from . import compilation as comp
 from .context import AIEContext
 from .device_manager import AIEDeviceManager, pyxrt
@@ -174,23 +176,32 @@ class AIERuntimeArgSpec:
         self.direction = direction
 
 
-class AIEBuffer:
+class AIEBuffer(XRTTensor):
     def __init__(self, shape, dtype=bfloat16, bo=None, device_manager=None):
-        size = np.prod(shape) * np.dtype(dtype).itemsize
-        self.shape = shape
-        self.dtype = dtype
-        self.bo = bo
-        self.on = "cpu"
         self.device_manager = device_manager or AIEDeviceManager()
-        if not self.bo:
-            self.bo = pyxrt.bo(
-                self.device_manager.device,
-                size,
-                pyxrt.bo.host_only,
-                0x10000,
-            )
-        self.memory_view = self.bo.map()
         self.subviews = []
+
+        if bo is not None:
+            Tensor.__init__(self, shape, dtype=dtype, device="cpu")
+            self._shape = shape
+            self.xrt_device = self.device_manager.device
+            self._bo = bo
+            ptr = self._bo.map()
+            self._data = np.frombuffer(ptr, dtype=self.dtype).reshape(self._shape)
+        else:
+            super().__init__(shape, dtype=dtype, device="cpu")
+
+    @property
+    def bo(self):
+        return self._bo
+
+    @property
+    def on(self):
+        return self.device
+
+    @on.setter
+    def on(self, value):
+        self.device = value
 
     def subbuffer(self, length, offset, shape, dtype=None):
         if dtype is None:
@@ -228,41 +239,24 @@ class AIEBuffer:
         return sub_buffer
 
     def view_as_np(self):
-        self.to("cpu")
-        # Interpret the buffer as a 1-dimensional array then change its view to the expected shape
-        return np.frombuffer(
-            self.memory_view, dtype=self.dtype, count=np.prod(self.shape)
-        ).reshape(self.shape)
+        return self.numpy()
 
     def view_as_torch(self):
-        return numpy_to_torch(self.view_as_np())
+        return numpy_to_torch(self.numpy())
 
     def to(self, dest):
-        direction = {
-            "npu": pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE,
-            "cpu": pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE,
-        }
-        if dest not in direction:
-            raise RuntimeError(f"Unknown destination for AIEBuffer.to(): {dest}")
-        if self.on == dest:
-            return self
-        direction = direction[dest]
-        self.bo.sync(direction)
-        self.on = dest
+        super().to(dest)
         todo = self.subviews.copy()
         while todo:
             sub_buffer = todo.pop()
-            sub_buffer.on = self.on
+            sub_buffer.device = dest
             todo.extend(sub_buffer.subviews)
         return self
 
     @staticmethod
     def from_np(buffer):
-        shape = buffer.shape
-        dtype = buffer.dtype
-        size = np.prod(shape) * np.dtype(dtype).itemsize
-        aie_buffer = AIEBuffer(shape=shape, dtype=dtype)
-        aie_buffer.view_as_np()[:] = buffer
+        aie_buffer = AIEBuffer(buffer.shape, dtype=buffer.dtype)
+        aie_buffer.data[:] = buffer
         aie_buffer.to("npu")
         return aie_buffer
 
