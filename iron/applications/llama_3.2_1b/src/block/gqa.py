@@ -133,7 +133,6 @@ class GroupedQueryAttention(nn.Module):
 
             aie_gemv_config = {
                 "num_aie_columns": 8,
-                "is_mv": False,
                 "use_static_weight": True,
             }
             self.aie_query_gemv = AIEGEMV(

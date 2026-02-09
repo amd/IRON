@@ -116,7 +116,7 @@ class FeedForward(nn.Module):
             )
 
         if self.cfg["use_kv_cache"] and self.cfg["use_aie_ffn_gemv"]:
-            aie_gemv_config = {"num_aie_columns": 8, "is_mv": False}
+            aie_gemv_config = {"num_aie_columns": 8}
             # FC1 and FC2: emb_dim -> hidden_dim
             self.aie_fc1_gemv = AIEGEMV(
                 M=self.hidden_dim,

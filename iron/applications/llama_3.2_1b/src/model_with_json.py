@@ -197,9 +197,7 @@ class Llama3ModelWithJSONConfig(nn.Module):
             )
             aie_gemv_config = {
                 "num_aie_columns": 8,
-                "is_mv": True,
                 "use_static_weight": True,
-                "num_aie_columns": 8,
                 "tile_size_input": 4,
                 "tile_size_output": 32,
             }
