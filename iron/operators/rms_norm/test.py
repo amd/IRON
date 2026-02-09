@@ -35,11 +35,6 @@ def get_params():
                             tile_size = 4096
                         check_length = tile_size * num_aie_columns
                     if check_length == input_length:
-                        if not weighted:
-                            name = f"rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_tile_{tile_size}"
-                        else:
-                            name = f"weighted_rms_norm_{num_aie_columns}_cols_{num_channels_rms}_channels_{input_length}_weights_{tile_size}"
-
                         is_regular = input_length == 2048
                         marks = [] if is_regular else [pytest.mark.extensive]
 
@@ -50,7 +45,6 @@ def get_params():
                                 num_channels_rms,
                                 tile_size,
                                 weighted,
-                                id=name,
                                 marks=marks,
                             )
                         )

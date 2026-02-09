@@ -20,9 +20,7 @@ def get_params():
 
     params = []
     for p in params_list:
-        _, emb, hid, _ = p
-        name = f"swiglu_prefill_256x{emb}x{hid}"
-        params.append(pytest.param(*p, id=name))
+        params.append(pytest.param(*p))
     return params
 
 

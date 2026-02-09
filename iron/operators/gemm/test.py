@@ -49,33 +49,8 @@ def get_params():
     # Helper to generate name and append param
     def add_params(param_list, is_extensive):
         for p in param_list:
-            (
-                M,
-                K,
-                N,
-                num_aie_columns,
-                b_col_maj,
-                c_col_maj,
-                m,
-                k,
-                n,
-                trace_size,
-                partition_N,
-            ) = p
-
-            name = f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}cols"
-            if b_col_maj:
-                name += "_bcolmaj"
-            if c_col_maj:
-                name += "_ccolmaj"
-            if partition_N > 1:
-                name += f"_{partition_N}npart"
-            if trace_size > 0:
-                name += f"_{trace_size}trace"
-
             marks = [pytest.mark.extensive] if is_extensive else []
-
-            params.append(pytest.param(*p, id=name, marks=marks))
+            params.append(pytest.param(*p, marks=marks))
 
     add_params(regular_params, is_extensive=False)
     add_params(extensive_params, is_extensive=True)

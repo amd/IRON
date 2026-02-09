@@ -36,7 +36,6 @@ def get_params():
                         length = M * N
                         if check_length != length:
                             continue
-                        name = f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s"
 
                         is_regular = M == 2048 and N == 64
                         marks = [] if is_regular else [pytest.mark.extensive]
@@ -50,7 +49,6 @@ def get_params():
                                 m,
                                 n,
                                 s,
-                                id=name,
                                 marks=marks,
                             )
                         )

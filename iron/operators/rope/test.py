@@ -27,8 +27,6 @@ def get_params():
             for n_angle_rows in input_angle_rows:
                 for n_cols in input_cols:
                     for method_type in method_types:
-                        name = f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{n_angle_rows}arows_{method_type}m"
-
                         is_regular = (
                             n_rows == 32
                             and n_cols == 512
@@ -50,7 +48,6 @@ def get_params():
                                 n_angle_rows,
                                 num_aie_columns,
                                 method_type,
-                                id=name,
                                 marks=marks,
                             )
                         )

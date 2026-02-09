@@ -42,13 +42,10 @@ def get_params():
             optimal_columns, optimal_channels = get_optimal_columns_channels(
                 input_length, tile_size
             )
-            name = f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
 
             # All tests are regular as extensive list was empty in original code
             params.append(
-                pytest.param(
-                    input_length, optimal_columns, optimal_channels, tile_size, id=name
-                )
+                pytest.param(input_length, optimal_columns, optimal_channels, tile_size)
             )
     return params
 

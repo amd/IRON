@@ -27,12 +27,9 @@ def get_params():
 
     params = []
     for p in params_list:
-        M, K, num_aie_columns, tile_size_input, tile_size_output = p
-        name = f"matrix_vector_mul_{M}x{K}_{tile_size_input}tsi_{tile_size_output}tso_{num_aie_columns}col"
-
         # All tests are considered regular here as per original code structure
         # (original code returned same list for both regular and extensive)
-        params.append(pytest.param(*p, id=name))
+        params.append(pytest.param(*p))
     return params
 
 

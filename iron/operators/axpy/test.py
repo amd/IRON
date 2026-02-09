@@ -25,8 +25,6 @@ def get_params():
             if tile_size * num_aie_columns != input_length:
                 continue
             for scalar in scalar_factors:
-                name = f"axpy_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{scalar}"
-
                 # Determine if this is a regular test case
                 is_regular = input_length == 2048 and scalar == 3.0
                 marks = [] if is_regular else [pytest.mark.extensive]
@@ -38,7 +36,6 @@ def get_params():
                         num_channels,
                         tile_size,
                         scalar,
-                        id=name,
                         marks=marks,
                     )
                 )

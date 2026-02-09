@@ -169,3 +169,8 @@ def pytest_generate_tests(metafunc):
     if iterations > 1:
         metafunc.fixturenames.append("_iteration")
         metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")
+
+
+def pytest_make_parametrize_id(config, val, argname):
+    """Automatically generate test IDs with parameter names"""
+    return f"{argname}_{val}"

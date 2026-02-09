@@ -15,11 +15,10 @@ from iron.common.test_utils import run_test
 def get_params():
     # (seq_len, head_dim, heads, number_of_pipeline, num_kv_heads)
     params_list = [(16384, 64, 1, 8, 0)]
-    names = ["mha"]
 
     params = []
-    for p, name in zip(params_list, names):
-        params.append(pytest.param(*p, id=name))
+    for p in params_list:
+        params.append(pytest.param(*p))
     return params
 
 

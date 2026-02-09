@@ -29,8 +29,6 @@ def get_params():
 
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
-                    name = f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-
                     is_regular = input_length == 2048
                     marks = [] if is_regular else [pytest.mark.extensive]
 
@@ -41,7 +39,6 @@ def get_params():
                             num_channels,
                             tile_size,
                             group_size,
-                            id=name,
                             marks=marks,
                         )
                     )

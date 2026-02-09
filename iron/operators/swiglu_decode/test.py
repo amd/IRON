@@ -20,9 +20,7 @@ def get_params():
 
     params = []
     for p in params_list:
-        emb, hid = p
-        name = f"swiglu_decode_1x{emb}x{hid}"
-        params.append(pytest.param(*p, id=name))
+        params.append(pytest.param(*p))
     return params
 
 

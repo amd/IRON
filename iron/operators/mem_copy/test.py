@@ -34,8 +34,6 @@ def get_params():
 
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
-                            name = f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
-
                             is_regular = input_length == 2048 and bypass == False
                             marks = [] if is_regular else [pytest.mark.extensive]
 
@@ -46,7 +44,6 @@ def get_params():
                                     num_channels,
                                     bypass,
                                     tile_size,
-                                    id=name,
                                     marks=marks,
                                 )
                             )
