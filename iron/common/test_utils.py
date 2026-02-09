@@ -6,7 +6,8 @@ import numpy as np
 from ml_dtypes import bfloat16
 from .utils import torch_to_numpy
 import logging
-from .base import MLIROperator, CompositeOperator, AIEBuffer
+from .base import MLIROperator, CompositeOperator
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 
 def nearly_equal(
@@ -141,18 +142,18 @@ def run_test(
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for arg spec")
             data_np = torch_to_numpy(data)
-            buf = AIEBuffer.from_np(data_np)
+            buf = XRTTensor(data_np, dtype=data_np.dtype)
             args.append(buf)
-            total_bytes += buf.bo.size()
+            total_bytes += buf.buffer_object().size()
         elif spec.direction == "out":
             try:
                 name, expected = next(output_iter)
             except StopIteration:
                 raise ValueError("Not enough output buffers provided for arg spec")
-            buf = AIEBuffer(shape=spec.shape, dtype=spec.dtype)
+            buf = XRTTensor(spec.shape, dtype=spec.dtype)
             args.append(buf)
             output_map[name] = buf
-            total_bytes += buf.bo.size()
+            total_bytes += buf.buffer_object().size()
         else:
             # Handle other directions if needed, or raise error
             raise ValueError(f"Unsupported direction: {spec.direction}")
@@ -177,10 +178,8 @@ def run_test(
             continue
         if buf_name in output_map:
             buf = output_map[buf_name]
-            output_np = buf.view_as_np()
-            buf_errors = verify_buffer(
-                output_np, buf_name, expected, rel_tol, abs_tol, max_error_rate
-            )
+            output_np = buf.numpy()
+            buf_errors = verify_buffer(output_np, buf_name, expected, rel_tol, abs_tol)
             if buf_errors:
                 errors[buf_name] = buf_errors
         else:

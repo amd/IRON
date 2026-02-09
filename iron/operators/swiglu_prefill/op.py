@@ -6,10 +6,10 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
-    AIEBuffer,
     SingleXclbinCallable,
     XclbinArtifact,
     InstsBinArtifact,
@@ -62,17 +62,20 @@ class SwiGLUPrefillCallable:
         )
 
         # Allocate and upload weights
-        self.weights_1 = AIEBuffer.from_np(torch_to_numpy(op.weights_1.T))
-        self.weights_2 = AIEBuffer.from_np(torch_to_numpy(op.weights_2.T))
-        self.weights_3 = AIEBuffer.from_np(torch_to_numpy(op.weights_3.T))
+        w1 = torch_to_numpy(op.weights_1.T)
+        self.weights_1 = XRTTensor(w1, dtype=w1.dtype)
+        w2 = torch_to_numpy(op.weights_2.T)
+        self.weights_2 = XRTTensor(w2, dtype=w2.dtype)
+        w3 = torch_to_numpy(op.weights_3.T)
+        self.weights_3 = XRTTensor(w3, dtype=w3.dtype)
 
         # Allocate intermediate buffers
         # Sizes are padded
         size_hidden = op.seq_len_padded * op.hidden_dim_padded
-        self.left = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
-        self.right = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
-        self.left_swished = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
-        self.intermediate = AIEBuffer(shape=(size_hidden,), dtype=bfloat16)
+        self.left = XRTTensor((size_hidden,), dtype=bfloat16)
+        self.right = XRTTensor((size_hidden,), dtype=bfloat16)
+        self.left_swished = XRTTensor((size_hidden,), dtype=bfloat16)
+        self.intermediate = XRTTensor((size_hidden,), dtype=bfloat16)
         self.last_output_buf = None
 
     def __call__(self, input_buf, output_buf):

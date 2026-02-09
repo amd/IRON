@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 from ml_dtypes import bfloat16
-from iron.common.base import AIEBuffer
-from iron.common.utils import torch_to_numpy
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from iron.common.utils import torch_to_numpy, numpy_to_torch
 from iron.operators.swiglu_decode.op import AIESwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
@@ -42,14 +42,15 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     operator.compile()
     op_func = operator.get_callable()
 
-    input_buf = AIEBuffer.from_np(torch_to_numpy(golden_ref["input"]))
-    output_buf = AIEBuffer(shape=(1, embedding_dim), dtype=bfloat16)
+    input_np = torch_to_numpy(golden_ref["input"])
+    input_buf = XRTTensor(input_np, dtype=input_np.dtype)
+    output_buf = XRTTensor((1, embedding_dim), dtype=bfloat16)
 
     op_func(input_buf, output_buf)
 
     errors = {}
     # Verify intermediate result
-    intermediate = op_func.intermediate.view_as_torch().reshape((1, hidden_dim))
+    intermediate = numpy_to_torch(op_func.intermediate.numpy()).reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
         intermediate,
         "intermediate",
@@ -62,7 +63,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
 
     # Verify output using intermediate result
     ref_2 = intermediate @ golden_ref["w_down"]
-    output = output_buf.view_as_torch().reshape((1, embedding_dim))
+    output = numpy_to_torch(output_buf.numpy()).reshape((1, embedding_dim))
     errors_output = verify_buffer(output, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
     if errors_output:
         errors["output"] = errors_output

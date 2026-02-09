@@ -3,12 +3,12 @@
 
 """Common utilities and base classes for IRON operators."""
 
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from .base import (
     AIEOperatorBase,
     MLIROperator,
     CompositeOperator,
     CompositeCallable,
-    AIEBuffer,
     SingleXclbinCallable,
     AIERuntimeArgSpec,
 )

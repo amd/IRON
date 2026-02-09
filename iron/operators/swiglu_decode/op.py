@@ -6,10 +6,10 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
-    AIEBuffer,
     SingleXclbinCallable,
     XclbinArtifact,
     InstsBinArtifact,
@@ -65,19 +65,22 @@ class SwiGLUDecodeCallable:
         )
 
         # Allocate and upload weights
-        self.weights_1 = AIEBuffer.from_np(torch_to_numpy(op.weights_1))
-        self.weights_2 = AIEBuffer.from_np(torch_to_numpy(op.weights_2))
-        self.weights_3 = AIEBuffer.from_np(torch_to_numpy(op.weights_3))
+        w1 = torch_to_numpy(op.weights_1)
+        self.weights_1 = XRTTensor(w1, dtype=w1.dtype)
+        w2 = torch_to_numpy(op.weights_2)
+        self.weights_2 = XRTTensor(w2, dtype=w2.dtype)
+        w3 = torch_to_numpy(op.weights_3)
+        self.weights_3 = XRTTensor(w3, dtype=w3.dtype)
 
         # Allocate intermediate buffers
         # left: output of gemv_1 (hidden_dim_padded)
-        self.left = AIEBuffer(shape=(op.hidden_dim_padded,), dtype=bfloat16)
+        self.left = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
         # right: output of gemv_1 (hidden_dim_padded)
-        self.right = AIEBuffer(shape=(op.hidden_dim_padded,), dtype=bfloat16)
+        self.right = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
         # left_swished: output of silu (hidden_dim_padded)
-        self.left_swished = AIEBuffer(shape=(op.hidden_dim_padded,), dtype=bfloat16)
+        self.left_swished = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
         # intermediate: output of eltwise_mul (hidden_dim_padded)
-        self.intermediate = AIEBuffer(shape=(op.hidden_dim_padded,), dtype=bfloat16)
+        self.intermediate = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
 
     def __call__(self, input_buf, output_buf):
         # Ensure inputs are on device
