@@ -42,8 +42,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     operator.compile()
     op_func = operator.get_callable()
 
-    input_np = torch_to_numpy(golden_ref["input"])
-    input_buf = XRTTensor(input_np, dtype=input_np.dtype)
+    input_buf = XRTTensor.from_torch(golden_ref["input"])
     output_buf = XRTTensor((1, embedding_dim), dtype=bfloat16)
 
     op_func(input_buf, output_buf)

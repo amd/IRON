@@ -61,12 +61,9 @@ class SwiGLUPrefillCallable:
         )
 
         # Allocate and upload weights
-        w1 = torch_to_numpy(op.weights_1.T)
-        self.weights_1 = XRTTensor(w1, dtype=w1.dtype)
-        w2 = torch_to_numpy(op.weights_2.T)
-        self.weights_2 = XRTTensor(w2, dtype=w2.dtype)
-        w3 = torch_to_numpy(op.weights_3.T)
-        self.weights_3 = XRTTensor(w3, dtype=w3.dtype)
+        self.weights_1 = XRTTensor.from_torch(op.weights_1.T)
+        self.weights_2 = XRTTensor.from_torch(op.weights_2.T)
+        self.weights_3 = XRTTensor.from_torch(op.weights_3.T)
 
         # Allocate intermediate buffers
         # Sizes are padded

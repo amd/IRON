@@ -64,12 +64,9 @@ class SwiGLUDecodeCallable:
         )
 
         # Allocate and upload weights
-        w1 = torch_to_numpy(op.weights_1)
-        self.weights_1 = XRTTensor(w1, dtype=w1.dtype)
-        w2 = torch_to_numpy(op.weights_2)
-        self.weights_2 = XRTTensor(w2, dtype=w2.dtype)
-        w3 = torch_to_numpy(op.weights_3)
-        self.weights_3 = XRTTensor(w3, dtype=w3.dtype)
+        self.weights_1 = XRTTensor.from_torch(op.weights_1)
+        self.weights_2 = XRTTensor.from_torch(op.weights_2)
+        self.weights_3 = XRTTensor.from_torch(op.weights_3)
 
         # Allocate intermediate buffers
         # left: output of gemv_1 (hidden_dim_padded)

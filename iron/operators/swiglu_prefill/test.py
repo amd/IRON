@@ -46,8 +46,7 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     operator.compile()
     op_func = operator.get_callable()
 
-    input_np = torch_to_numpy(golden_ref["input"])
-    input_buf = XRTTensor(input_np, dtype=input_np.dtype)
+    input_buf = XRTTensor.from_torch(golden_ref["input"])
     output_buf = XRTTensor(
         (seq_len * embedding_dim,), dtype=bfloat16
     )  # Output is flattened

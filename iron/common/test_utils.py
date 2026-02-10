@@ -141,8 +141,7 @@ def run_test(
                 name, data = next(input_iter)
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for arg spec")
-            data_np = torch_to_numpy(data)
-            buf = XRTTensor(data_np, dtype=data_np.dtype)
+            buf = XRTTensor.from_torch(data)
             args.append(buf)
             total_bytes += buf.buffer_object().size()
         elif spec.direction == "out":
