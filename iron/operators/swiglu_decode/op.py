@@ -28,7 +28,7 @@ class SwiGLUDecodeCallable:
     def __init__(self, op):
         self.op = op
         # Create callables for sub-operators
-        # We need to manually construct SingleXclbinCallable because sub-operators weren't "compiled" in the standard way
+        # We need to manually construct NPUKernel because sub-operators weren't "compiled" in the standard way
 
         # Helper to create callable from operator and artifacts
         def create_callable(sub_op, xclbin_path, kernel_name, insts_artifact):
