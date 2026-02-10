@@ -24,17 +24,17 @@ import time
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from operators.common.context import AIEContext
-from operators.common import AIEBuffer
-from operators.common.utils import torch_to_numpy
-from operators.common.base import PatchableSingleXclbinCallable
-from operators.common.fusion import (
+from iron.common.context import AIEContext
+from iron.common import AIEBuffer
+from iron.common.utils import torch_to_numpy
+from iron.common.base import PatchableSingleXclbinCallable
+from iron.common.fusion import (
     FusedMLIROperator,
     FusedFullELFCallable,
     load_elf,
     patch_elf,
 )
-from operators import (
+from iron.operators import (
     AIERMSNorm,
     AIEGEMM,
     AIEGEMV,
@@ -87,6 +87,7 @@ class AIELlamaOperators:
                 num_aie_columns=8,
                 num_channels=2,
                 tile_size=config.emb_dim,
+                weighted=True,
                 context=self.context,
             )
             .compile()
@@ -406,6 +407,7 @@ class AIELlamaOperators:
             num_aie_columns=1,
             num_channels=2,
             tile_size=config.emb_dim,
+            weighted=True,
             context=elf_ctx,
         )
 

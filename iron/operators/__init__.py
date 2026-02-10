@@ -13,3 +13,5 @@ from .softmax.op import AIESoftmax
 from .swiglu_decode.op import AIESwiGLUDecode
 from .swiglu_prefill.op import AIESwiGLUPrefill
 from .transpose.op import AIETranspose
+from .strided_copy.op import AIEStridedCopy
+from .repeat.op import AIERepeat

@@ -240,7 +240,8 @@ def load_elf(op):
 def patch_elf(elf_data, patches):
     for i, patch in patches.items():
         val, mask = patch
-        elf_data[i] = (elf_data[i] & ~mask) | (val & mask)
+        mask = np.uint64(mask)  # avoid numpy overflow errors
+        elf_data[i] = np.uint32((elf_data[i] & ~mask) | (val & mask))
     return elf_data
 
 
