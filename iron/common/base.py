@@ -11,9 +11,12 @@ import torch
 from ml_dtypes import bfloat16
 
 import aie.utils.config
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from aie.utils.hostruntime.tensor_class import Tensor
+from aie.utils.npukernel import NPUKernel
 from . import compilation as comp
 from .context import AIEContext
-from .device_manager import AIEDeviceManager, pyxrt
+from .device_manager import pyxrt
 from .utils import numpy_to_torch, torch_to_numpy
 from .compilation import (
     XclbinArtifact,
@@ -151,11 +154,10 @@ class MLIROperator(AIEOperatorBase, ABC):
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def get_callable(self):
-        return SingleXclbinCallable(
+        return NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
             kernel_name=self.xclbin_artifact.kernel_name,
-            insts_bin_path=self.insts_artifact.filename,
-            args_spec=self.get_arg_spec(),
+            insts_path=self.insts_artifact.filename,
         )
 
 
@@ -175,46 +177,6 @@ class AIERuntimeArgSpec:
 
     def __repr__(self):
         return f"AIERuntimeArgSpec(direction={self.direction}, shape={self.shape}, dtype={self.dtype})"
-
-
-class SingleXclbinCallable:
-    def __init__(
-        self, xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager=None
-    ):
-        self.device_manager = device_manager or AIEDeviceManager()
-        self.context, self.xrt_kernel = self.device_manager.get_context_and_kernel(
-            str(xclbin_path), kernel_name
-        )
-        with open(str(insts_bin_path), "rb") as f:
-            instructions = np.frombuffer(f.read(), dtype=np.uint32)
-        self.insts_buffer = XRTTensor(
-            instructions,
-            dtype=np.uint32,
-            flags=pyxrt.bo.cacheable,
-            group_id=self.xrt_kernel.group_id(1),
-        )
-        self.args_spec = args_spec
-
-    def __call__(self, *buffers):
-        assert len(buffers) == len(self.args_spec)
-        # assert all(
-        #    np.prod(buffers[i].shape) >= np.prod(self.args_spec[i].shape) and buffers[i].dtype == self.args_spec[i].dtype
-        #    for i in range(len(buffers))
-        # ), "Input buffer shapes or dtypes do not match expected argument specification."
-        self.insts_buffer.to("npu")
-        for buf in buffers:
-            buf.to("npu")
-        opcode = 3
-        bos = [buffer.buffer_object() for buffer in buffers]
-        run = self.xrt_kernel(
-            opcode,
-            self.insts_buffer.buffer_object(),
-            self.insts_buffer.shape[0],
-            *bos,
-        )
-        ret_code = run.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"Kernel did not complete correctly: {ret_code}")
 
 
 class CompositeCallable:

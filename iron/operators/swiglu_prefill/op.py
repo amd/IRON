@@ -7,10 +7,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from aie.utils.npukernel import NPUKernel
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
-    SingleXclbinCallable,
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
@@ -29,11 +29,10 @@ class SwiGLUPrefillCallable:
         self.op = op
 
         def create_callable(sub_op, xclbin_path, kernel_name, insts_artifact):
-            return SingleXclbinCallable(
+            return NPUKernel(
                 xclbin_path=xclbin_path,
                 kernel_name=kernel_name,
-                insts_bin_path=insts_artifact.filename,
-                args_spec=sub_op.get_arg_spec(),
+                insts_path=insts_artifact.filename,
             )
 
         self.gemm_1_callable = create_callable(

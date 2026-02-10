@@ -9,7 +9,6 @@ from .base import (
     MLIROperator,
     CompositeOperator,
     CompositeCallable,
-    SingleXclbinCallable,
     AIERuntimeArgSpec,
 )
 from .context import AIEContext
