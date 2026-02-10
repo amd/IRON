@@ -4,7 +4,7 @@
 import time
 import numpy as np
 from ml_dtypes import bfloat16
-from .utils import torch_to_numpy
+from .utils import xrt_to_torch
 import logging
 from .base import MLIROperator, CompositeOperator
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -50,22 +50,22 @@ def verify_buffer(
         List of error indices. Empty if verification passes.
     """
     errors = []
-    expected_np = torch_to_numpy(reference).reshape((-1,))
+    expected = reference.reshape((-1,))
     output = output.reshape((-1,))
 
-    if len(output) < len(expected_np):
+    if len(output) < len(expected):
         # Allow larger buffers - binning may have allocated more space than needed
         print(
-            f"Buffer size mismatch for {buf_name}: expected {len(expected_np)}, got {len(output)}"
+            f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(output)}"
         )
-        errors.extend(i for i in range(abs(len(output) - len(expected_np))))
-    compare_len = min(len(output), len(expected_np))
+        errors.extend(i for i in range(abs(len(output) - len(expected))))
+    compare_len = min(len(output), len(expected))
     for i in range(compare_len):
-        if not nearly_equal(float(output[i]), float(expected_np[i]), rel_tol, abs_tol):
+        if not nearly_equal(float(output[i]), float(expected[i]), rel_tol, abs_tol):
             errors.append(i)
             if len(errors) <= 10:
                 print(
-                    f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
+                    f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(output[i]):.6f}"
                 )
 
     # Check if error rate is acceptable
@@ -177,8 +177,10 @@ def run_test(
             continue
         if buf_name in output_map:
             buf = output_map[buf_name]
-            output_np = buf.numpy()
-            buf_errors = verify_buffer(output_np, buf_name, expected, rel_tol, abs_tol)
+            output_torch = xrt_to_torch(buf)
+            buf_errors = verify_buffer(
+                output_torch, buf_name, expected, rel_tol, abs_tol
+            )
             if buf_errors:
                 errors[buf_name] = buf_errors
         else:

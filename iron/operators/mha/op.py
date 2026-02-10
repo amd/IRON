@@ -17,7 +17,6 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
-from iron.common.utils import torch_to_numpy, numpy_to_torch
 
 
 class AIEMHA(MLIROperator):

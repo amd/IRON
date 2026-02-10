@@ -21,32 +21,28 @@ torch_dtype_map = {
 }
 
 
-def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
-    # Detach (to drop grad) and ensure on CPU
-    t = tensor.detach()
-    if t.device.type != "cpu":
-        t = t.cpu()
-    # Ensure contiguous for safe view operations
-    if not t.is_contiguous():
-        t = t.contiguous()
+def xrt_to_torch(xrttensor) -> torch.Tensor:
+    """
+    Convert an XRTTensor (or compatible object with buffer_object()) to a Torch tensor
+    without intermediate numpy array creation, supporting bfloat16.
+    """
+    dtype_map = {
+        np.dtype("float32"): torch.float32,
+        np.dtype("int32"): torch.int32,
+        np.dtype("int16"): torch.int16,
+        np.dtype("int8"): torch.int8,
+        np.dtype("uint8"): torch.uint8,
+        np.dtype("float16"): torch.float16,
+        np.dtype(bfloat16): torch.bfloat16,
+        bfloat16: torch.bfloat16,
+    }
 
-    if t.dtype == torch.bfloat16:
-        # View the same memory as uint16, then as NumPy bfloat16
-        # This avoids numeric conversion and extra passes over memory.
-        u16_np = t.view(torch.uint16).numpy()  # shares memory
-        return u16_np.view(np.dtype("bfloat16"))  # reinterpret
+    torch_dtype = dtype_map.get(xrttensor.dtype)
+    if torch_dtype is None:
+        raise ValueError(f"Unsupported dtype: {xrttensor.dtype}")
 
-    return t.numpy()
-
-
-def numpy_to_torch(array: np.ndarray) -> torch.Tensor:
-    # Ensure contiguous to let from_numpy create a view
-    if not array.flags["C_CONTIGUOUS"]:
-        array = np.ascontiguousarray(array)
-
-    if array.dtype == np.dtype("bfloat16"):
-        # reinterpret the same memory as uint16, then view as torch.bfloat16
-        t_u16 = torch.from_numpy(array.view(np.uint16))
-        return t_u16.view(torch.bfloat16)  # view
-
-    return torch.from_numpy(array)
+    xrttensor.to("cpu")
+    bo = xrttensor.buffer_object()
+    mem = bo.map()
+    t = torch.frombuffer(mem, dtype=torch_dtype)
+    return t.reshape(xrttensor.shape)

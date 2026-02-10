@@ -16,7 +16,6 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
-from iron.common.utils import torch_to_numpy
 
 
 class AIEGEMV(MLIROperator):

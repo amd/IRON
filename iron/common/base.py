@@ -17,7 +17,6 @@ from aie.utils.npukernel import NPUKernel
 from . import compilation as comp
 from .context import AIEContext
 from .device_manager import pyxrt
-from .utils import numpy_to_torch, torch_to_numpy
 from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
@@ -81,21 +80,6 @@ class AIEOperatorBase(ABC):
     def add_artifacts(self, artifacts):
         for artifact in artifacts:
             self.artifacts.add(artifact)
-
-
-def sync_to_device(bos):
-    for bo in bos:
-        bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
-
-
-def sync_from_device(bos):
-    for bo in bos:
-        bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
-
-
-def execute_runlist(runlist):
-    runlist.execute()
-    runlist.wait()
 
 
 class MLIROperator(AIEOperatorBase, ABC):

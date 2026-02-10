@@ -21,7 +21,6 @@ from iron.common import (
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.silu.op import AIESiLU
 from iron.operators.elementwise_mul.op import AIEElementwiseMul
-from iron.common.utils import torch_to_numpy
 
 
 class SwiGLUPrefillCallable:

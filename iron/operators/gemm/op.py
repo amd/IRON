@@ -17,8 +17,6 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 
-from iron.common.utils import torch_to_numpy, numpy_to_torch
-
 
 class AIEGEMM(MLIROperator):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
