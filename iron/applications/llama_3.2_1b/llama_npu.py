@@ -101,11 +101,6 @@ class AIELlamaOperators:
             .compile()
             .get_callable()
         )
-        self.decode.residual_add = (
-            AIEElementwiseAdd(size=config.emb_dim, tile_size=config.emb_dim // 8)
-            .compile()
-            .get_callable()
-        )
 
         min_N = 64 * 8 * 4  # tile_n * num_aie_columns * partition_N
         config.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
@@ -1343,7 +1338,7 @@ def main():
     aie_buffers = AIELlamaBuffers(config, max_seq_len)
 
     print(prompt, end="", flush=True)
-    harness.generate(config, state, llama_forward_pass, use_kv_cache=True)
+    harness.generate(config, state, llama_forward_pass, use_kv_cache=False)
 
 
 if __name__ == "__main__":
