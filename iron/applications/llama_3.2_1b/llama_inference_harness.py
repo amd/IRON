@@ -179,12 +179,25 @@ def parse_args():
         "tokenizer_path", type=str, help="Path to the tokenizer model (tiktoken file)"
     )
     parser.add_argument(
+        "--prompt-len",
+        type=int,
+        default=2048,
+        help="Length of the input prompt in tokens (default: 2048)",
+    )
+    parser.add_argument(
         "--num-tokens",
         type=int,
         default=40,
         help="Number of tokens to generate (default: 40)",
     )
     return parser.parse_args()
+
+
+def get_prompt(prompt_len):
+    with open("prompt.txt", "r") as f:
+        prompt = f.read()
+    prompt = prompt[:prompt_len]
+    return prompt
 
 
 def init(
@@ -249,12 +262,13 @@ def generate(config, state, forward_pass, num_tokens=100, use_kv_cache=True):
     t_decode = t_decode_end - t_decode_start
     sys.stderr.write("\n\n=== Performance Statistics ===\n")
     sys.stderr.write(f"[Prefill] Time to first token:   {t_prefill:7.3f} s\n")
-    sys.stderr.write(
-        f"[Decode]  Time per token (mean): {t_decode / (n_tokens_generated - 1):7.3f} s\n"
-    )
-    sys.stderr.write(
-        f"[Decode]  Tokens per second:     {(n_tokens_generated - 1) / t_decode:7.3f}\n"
-    )
+    if n_tokens_generated > 1:
+        sys.stderr.write(
+            f"[Decode]  Time per token (mean): {t_decode / (n_tokens_generated - 1):7.3f} s\n"
+        )
+        sys.stderr.write(
+            f"[Decode]  Tokens per second:     {(n_tokens_generated - 1) / t_decode:7.3f}\n"
+        )
     sys.stderr.write(
         f"[Total]   Time per token (mean): {(t_prefill + t_decode) / n_tokens_generated:7.3f} s\n"
     )

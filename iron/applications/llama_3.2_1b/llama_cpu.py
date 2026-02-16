@@ -291,8 +291,8 @@ def llama_forward_pass(config, state):
 
 
 def main():
-    prompt = "The capital of France is "
     args = harness.parse_args()
+    prompt = harness.get_prompt(args.prompt_len)
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
     print(prompt, end="", flush=True)
     harness.generate(config, state, llama_forward_pass, num_tokens=args.num_tokens)

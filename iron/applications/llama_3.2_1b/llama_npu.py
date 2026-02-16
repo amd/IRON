@@ -1326,13 +1326,14 @@ def llama_forward_pass(config, state):
 
 
 def main():
-    global aie_ops, aie_buffers
-    prompt = "The capital of France is "
-    # with open('prompt.txt', 'r') as f:
-    #    prompt = f.read()
-    # prompt = prompt[:max_seq_len]
-
+    global aie_ops, aie_buffers, max_seq_len
     args = harness.parse_args()
+
+    assert (
+        max_seq_len >= args.prompt_len + args.num_tokens
+    ), "max_seq_len must be at least prompt_len + num_tokens"
+
+    prompt = harness.get_prompt(args.prompt_len)
 
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
