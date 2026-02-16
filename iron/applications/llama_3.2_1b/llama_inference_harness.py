@@ -16,6 +16,7 @@ import torch
 import math
 import sys
 import time
+import argparse
 
 import safetensors.torch
 import tiktoken, tiktoken.load
@@ -169,9 +170,26 @@ def generate_token(config, forward_pass, state):
     return next_token.item(), state
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="LLaMA 3.2 1B Inference Harness")
+    parser.add_argument(
+        "weights_path", type=str, help="Path to the model weights (safetensors file)"
+    )
+    parser.add_argument(
+        "tokenizer_path", type=str, help="Path to the tokenizer model (tiktoken file)"
+    )
+    parser.add_argument(
+        "--num-tokens",
+        type=int,
+        default=40,
+        help="Number of tokens to generate (default: 40)",
+    )
+    return parser.parse_args()
+
+
 def init(
-    weights_path="/scratch/roesti/models/llama3.2-1b/model.safetensors",
-    tokenizer_path="/scratch/roesti/models/llama3.2-1b/tokenizer.model",
+    weights_path,
+    tokenizer_path,
     prompt="The capital of France is ",
 ):
     config = LlamaConfig(weights_path, tokenizer_path)

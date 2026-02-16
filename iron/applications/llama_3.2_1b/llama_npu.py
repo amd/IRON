@@ -1332,13 +1332,15 @@ def main():
     #    prompt = f.read()
     # prompt = prompt[:max_seq_len]
 
-    config, state = harness.init(prompt=prompt)
+    args = harness.parse_args()
+
+    config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
     aie_ops = AIELlamaOperators(config, max_seq_len)
     aie_buffers = AIELlamaBuffers(config, max_seq_len)
 
     print(prompt, end="", flush=True)
-    harness.generate(config, state, llama_forward_pass, use_kv_cache=False)
+    harness.generate(config, state, llama_forward_pass, use_kv_cache=False, num_tokens=args.num_tokens)
 
 
 if __name__ == "__main__":
