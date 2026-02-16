@@ -172,7 +172,7 @@ class AIERuntimeArgSpec:
         self.dtype = dtype
         assert direction in {"in", "out", "inout"}
         self.direction = direction
-    
+
     def __repr__(self):
         return f"AIERuntimeArgSpec(direction={self.direction}, shape={self.shape}, dtype={self.dtype})"
 

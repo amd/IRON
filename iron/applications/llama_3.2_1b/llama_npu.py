@@ -1340,7 +1340,9 @@ def main():
     aie_buffers = AIELlamaBuffers(config, max_seq_len)
 
     print(prompt, end="", flush=True)
-    harness.generate(config, state, llama_forward_pass, use_kv_cache=True, num_tokens=args.num_tokens)
+    harness.generate(
+        config, state, llama_forward_pass, use_kv_cache=True, num_tokens=args.num_tokens
+    )
 
 
 if __name__ == "__main__":
