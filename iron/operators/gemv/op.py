@@ -62,6 +62,7 @@ class AIEGEMV(AIEOperatorBase):
         # The underlying MLIR design is a matrix-vector multiplication. We support vector-matrix multiplication by transposing the matrix beforehand (AB = C <=> B^T A^T = C^T).
         operator_dir = Path(__file__).parent
         file_name_base = f"{prefix}{self.M}x{self.K}_{self.tile_size_input}tsi_{self.tile_size_output}tso_{self.num_aie_columns}col"
+        mlir_verbose = getattr(self.context, "mlir_verbose", False)
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -74,6 +75,7 @@ class AIEGEMV(AIEOperatorBase):
                 self.K,
                 self.tile_size_input,
                 self.tile_size_output,
+                mlir_verbose,
             ],
         )
 

@@ -32,9 +32,15 @@ Calls into the mv.cc kernel code. That kernel computes `m_input` output rows per
 """
 
 
-def my_matvec(dev, cols, M, K, m_input, m_output=None):
+def my_matvec(dev, cols, M, K, m_input, m_output=None, verbose=False):
     if m_output is None:
         m_output = m_input
+
+    if verbose:
+        print(f"Device: {dev}")
+        print(f"Matrix dimensions: M={M}, K={K}")
+        print(f"Tiling: m_input={m_input}, m_output={m_output}")
+        print(f"Columns: {cols}")
 
     # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
     assert (
