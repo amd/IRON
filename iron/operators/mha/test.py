@@ -81,7 +81,7 @@ def test_mha(
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
         context=aie_context,
-    )  # VJUNG: TODO: Pass the verbose flag to the operator for debugging
+    )
 
     input_buffers = {
         "Q": golden_ref["Q"].flatten(),
