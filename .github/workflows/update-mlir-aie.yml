@@ -30,9 +30,11 @@ jobs:
       - name: Get current mlir-aie version
         id: current_version
         run: |
-          version=$(grep 'mlir_aie==' requirements.txt | cut -d'=' -f3)
+          raw_version=$(grep 'mlir_aie==' requirements.txt | cut -d'=' -f3)
+          version=$(echo "$raw_version" | sed 's/^v//')
           echo "Current version: $version"
           echo "version=$version" >> $GITHUB_OUTPUT
+          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
 
       - name: Get latest mlir-aie release
         id: latest_release
@@ -72,7 +74,7 @@ jobs:
           git checkout -b $new_branch
           
           # Update requirements.txt
-          sed -i "s|==${{ steps.current_version.outputs.version }}|==${{ steps.latest_release.outputs.tag }}|" requirements.txt
+          sed -i "s|==${{ steps.current_version.outputs.raw_version }}|==${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
           sed -i "s|mlir-aie/releases/expanded_assets/.*|mlir-aie/releases/expanded_assets/${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
           
           # Commit changes
