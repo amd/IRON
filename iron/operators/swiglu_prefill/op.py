@@ -16,8 +16,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 from iron.operators.gemm.op import AIEGEMM
-from iron.operators.silu.op import AIESiLU
-from iron.operators.elementwise_mul.op import AIEElementwiseMul
+from iron.operators.silu_mul.op import AIESiLUMul
 from iron.common.utils import torch_to_numpy
 
 
@@ -39,10 +38,8 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         self.combined_xclbin = None
         self.gemm_1_xclbin = None
         self.gemm_1_insts = None
-        self.silu_xclbin = None
-        self.silu_insts = None
-        self.eltwise_mul_xclbin = None
-        self.eltwise_mul_insts = None
+        self.silu_mul_xclbin = None
+        self.silu_mul_insts = None
         self.gemm_2_xclbin = None
         self.gemm_2_insts = None
 
@@ -51,7 +48,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
     def set_up_artifacts(self):
         # Artifact setup
         # ---
-        # Note: All operators (GEMM, SiLU, ElementwiseMul) apply their own padding
+        # Note: All operators (GEMM, SiLUMul) apply their own padding
         # to meet hardware alignment requirements. We store the padded dimensions
         # from GEMM and verify that all operators use consistent padded sizes.
         artifacts = []
@@ -82,45 +79,26 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             gemm_1_insts
         )  # xclbin artifact will be pulled in as a dependency of last xclbin
 
-        silu = AIESiLU(
+        silu_mul = AIESiLUMul(
             size=self.seq_len_padded * self.hidden_dim_padded,
             num_aie_columns=8,
             num_channels=2,
             tile_size=self.hidden_dim_padded // 8,
         )
-        self.silu = silu
-        assert silu.size == self.seq_len_padded * self.hidden_dim_padded
+        self.silu_mul = silu_mul
+        assert silu_mul.size == self.seq_len_padded * self.hidden_dim_padded
 
-        silu_xclbin, silu_insts = silu.get_artifacts(prefix="swiglu_silu_")
-        silu_xclbin.xclbin_input = gemm_1_xclbin
-        silu_xclbin.extra_flags += [
-            "--xclbin-instance-name=swiglu_silu",
+        silu_mul_xclbin, silu_mul_insts = silu_mul.get_artifacts(
+            prefix="swiglu_silu_mul_"
+        )
+        silu_mul_xclbin.xclbin_input = gemm_1_xclbin
+        silu_mul_xclbin.extra_flags += [
+            "--xclbin-instance-name=swiglu_silu_mul",
             "--xclbin-kernel-id=0x902",
         ]
-        silu_xclbin.kernel_name = "swiglu_silu"
-        silu_xclbin.depends += [gemm_1_xclbin]
-        artifacts.append(silu_insts)
-
-        eltwise_mul = AIEElementwiseMul(
-            size=self.seq_len_padded * self.hidden_dim_padded,
-            num_aie_columns=8,
-            num_channels=2,
-            tile_size=self.hidden_dim_padded // 8,
-        )
-        self.eltwise_mul = eltwise_mul
-        assert eltwise_mul.size == self.seq_len_padded * self.hidden_dim_padded
-
-        eltwise_mul_xclbin, eltwise_mul_insts = eltwise_mul.get_artifacts(
-            prefix="swiglu_eltwise_mul_"
-        )
-        eltwise_mul_xclbin.xclbin_input = silu_xclbin
-        eltwise_mul_xclbin.extra_flags += [
-            "--xclbin-instance-name=swiglu_eltwise_mul",
-            "--xclbin-kernel-id=0x903",
-        ]
-        eltwise_mul_xclbin.kernel_name = "swiglu_eltwise_mul"
-        eltwise_mul_xclbin.depends += [silu_xclbin]
-        artifacts.append(eltwise_mul_insts)
+        silu_mul_xclbin.kernel_name = "swiglu_silu_mul"
+        silu_mul_xclbin.depends += [gemm_1_xclbin]
+        artifacts.append(silu_mul_insts)
 
         gemm_2 = AIEGEMM(
             M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
@@ -131,23 +109,21 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         assert gemm_2.N == self.embedding_dim_padded
 
         gemm_2_xclbin, gemm_2_insts = gemm_2.get_artifacts(prefix="swiglu_gemm_2_")
-        gemm_2_xclbin.xclbin_input = eltwise_mul_xclbin
+        gemm_2_xclbin.xclbin_input = silu_mul_xclbin
         gemm_2_xclbin.extra_flags += [
             "--xclbin-instance-name=swiglu_gemm_2",
-            "--xclbin-kernel-id=0x904",
+            "--xclbin-kernel-id=0x903",
         ]
         gemm_2_xclbin.kernel_name = "swiglu_gemm_2"
-        gemm_2_xclbin.depends += [eltwise_mul_xclbin]
+        gemm_2_xclbin.depends += [silu_mul_xclbin]
         artifacts.append(gemm_2_xclbin)
         artifacts.append(gemm_2_insts)
 
         self.combined_xclbin = gemm_2_xclbin
         self.gemm_1_xclbin = gemm_1_xclbin
         self.gemm_1_insts = gemm_1_insts
-        self.silu_xclbin = silu_xclbin
-        self.silu_insts = silu_insts
-        self.eltwise_mul_xclbin = eltwise_mul_xclbin
-        self.eltwise_mul_insts = eltwise_mul_insts
+        self.silu_mul_xclbin = silu_mul_xclbin
+        self.silu_mul_insts = silu_mul_insts
         self.gemm_2_xclbin = gemm_2_xclbin
         self.gemm_2_insts = gemm_2_insts
 
@@ -173,7 +149,6 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             static_data=torch_to_numpy(self.weights_3.T),
         )
         self.add_buffer("left", self.seq_len_padded * self.hidden_dim_padded)
-        self.add_buffer("left_swished", self.seq_len_padded * self.hidden_dim_padded)
         self.add_buffer("right", self.seq_len_padded * self.hidden_dim_padded)
         self.add_buffer("intermediate", self.seq_len_padded * self.hidden_dim_padded)
         self.add_buffer("output", self.seq_len_padded * self.embedding_dim_padded)
@@ -184,16 +159,10 @@ class AIESwiGLUPrefill(AIEOperatorBase):
             self.gemm_1_insts,
         )
         self.add_kernel(
-            "swiglu_silu",
+            "swiglu_silu_mul",
             self.combined_xclbin,
-            self.silu_xclbin.kernel_name,
-            self.silu_insts,
-        )
-        self.add_kernel(
-            "swiglu_eltwise_mul",
-            self.combined_xclbin,
-            self.eltwise_mul_xclbin.kernel_name,
-            self.eltwise_mul_insts,
+            self.silu_mul_xclbin.kernel_name,
+            self.silu_mul_insts,
         )
         self.add_kernel(
             "swiglu_gemm_2",
@@ -203,10 +172,7 @@ class AIESwiGLUPrefill(AIEOperatorBase):
         )
         self.add_to_runlist("swiglu_gemm_1", "input", "weights_1", "left")
         self.add_to_runlist("swiglu_gemm_1", "input", "weights_2", "right")
-        self.add_to_runlist("swiglu_silu", "left", "left_swished")
-        self.add_to_runlist(
-            "swiglu_eltwise_mul", "left_swished", "right", "intermediate"
-        )
+        self.add_to_runlist("swiglu_silu_mul", "left", "right", "intermediate")
         self.add_to_runlist("swiglu_gemm_2", "intermediate", "weights_3", "output")
 
     def forward(self, x):

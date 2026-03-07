@@ -55,9 +55,6 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     input_buffers = {"input": golden_ref["input"]}
     output_buffers = {}
     intermediate_buffers = {
-        "left": golden_ref["left"],
-        "left_swished": golden_ref["left_swished"],
-        "right": golden_ref["right"],
         "intermediate": golden_ref["intermediate"],
     }
 

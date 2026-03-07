@@ -3,6 +3,7 @@
 
 from .axpy.op import AIEAXPY
 from .dequant.op import AIEDequant
+from .dual_gemv_silu_mul.op import AIEDualGEMVSiLUMul
 from .elementwise_add.op import AIEElementwiseAdd
 from .elementwise_mul.op import AIEElementwiseMul
 from .gelu.op import AIEGELU
@@ -17,6 +18,7 @@ from .rms_norm.op import AIERMSNorm
 from .rope.op import AIERope
 from .sigmoid.op import AIESigmoid
 from .silu.op import AIESiLU
+from .silu_mul.op import AIESiLUMul
 from .softmax.op import AIESoftmax
 from .swiglu_decode.op import AIESwiGLUDecode
 from .swiglu_prefill.op import AIESwiGLUPrefill
