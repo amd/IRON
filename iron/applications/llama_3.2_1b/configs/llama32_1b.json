@@ -15,6 +15,7 @@
     "use_aie_ffn_silu": false,
     "use_aie_ffn_mul": false,
     "use_aie_ffn_swiglu": true,
+    "use_aie_ffn_swiglu_fused": true,
     "use_aie_ffn_gemv": true,
     "use_aie_attn_projection_gemm": true,
     "use_aie_gqa_gemv": true,

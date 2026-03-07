@@ -14,6 +14,8 @@ from iron.common.test_utils import run_test, verify_buffer
 
 def generate_test_params(extensive=False):
     params = [(2048, 2048)]
+    if extensive:
+        params += [(2048, 8192)]
     names = [f"swiglu_decode_1x{emb}x{hid}" for emb, hid in params]
     return params, names
 
@@ -55,9 +57,6 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     input_buffers = {"input": golden_ref["input"]}
     output_buffers = {}
     intermediate_buffers = {
-        "left": golden_ref["left"],
-        "left_swished": golden_ref["left_swished"],
-        "right": golden_ref["right"],
         "intermediate": golden_ref["intermediate"],
     }
 

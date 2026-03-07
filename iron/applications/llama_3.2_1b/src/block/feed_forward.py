@@ -16,6 +16,7 @@ from iron.operators import (
     AIESiLU,
     AIESwiGLUPrefill,
     AIESwiGLUDecode,
+    AIESwiGLUFusedDecode,
 )
 from ml_dtypes import bfloat16
 
@@ -77,9 +78,16 @@ class FeedForward(nn.Module):
                 hidden_dim=self.hidden_dim,
             )
             if self.cfg["use_kv_cache"]:
-                self.aie_swiglu_decode = AIESwiGLUDecode(
-                    embedding_dim=self.emb_dim, hidden_dim=self.hidden_dim
-                )
+                if self.cfg.get("use_aie_ffn_swiglu_fused", False):
+                    self.aie_swiglu_decode = AIESwiGLUFusedDecode(
+                        embedding_dim=self.emb_dim,
+                        hidden_dim=self.hidden_dim,
+                    )
+                else:
+                    self.aie_swiglu_decode = AIESwiGLUDecode(
+                        embedding_dim=self.emb_dim,
+                        hidden_dim=self.hidden_dim,
+                    )
 
         if self.cfg["use_aie_ffn_gemm"]:
             if self.cfg["use_kv_cache"]:
@@ -115,7 +123,12 @@ class FeedForward(nn.Module):
                 cfg["hidden_dim"], cfg["emb_dim"], dtype=cfg["dtype"], bias=False
             )
 
-        if self.cfg["use_kv_cache"] and self.cfg["use_aie_ffn_gemv"]:
+        # Skip creating separate decode GEMVs when fused SwiGLU handles everything
+        if (
+            self.cfg["use_kv_cache"]
+            and self.cfg["use_aie_ffn_gemv"]
+            and not self.cfg.get("use_aie_ffn_swiglu_fused", False)
+        ):
             aie_gemv_config = {"num_aie_columns": 8, "is_mv": False}
             # FC1 and FC2: emb_dim -> hidden_dim
             self.aie_fc1_gemv = AIEGEMV(
@@ -228,9 +241,14 @@ class FeedForward(nn.Module):
             self.aie_swiglu_prefill.weights_2 = fc2
             self.aie_swiglu_prefill.weights_3 = fc3
             if self.cfg["use_kv_cache"]:
-                self.aie_swiglu_decode.weights_1 = fc1
-                self.aie_swiglu_decode.weights_2 = fc2
-                self.aie_swiglu_decode.weights_3 = fc3
+                if self.cfg.get("use_aie_ffn_swiglu_fused", False):
+                    self.aie_swiglu_decode.weights_gate = fc1
+                    self.aie_swiglu_decode.weights_up = fc2
+                    self.aie_swiglu_decode.weights_down = fc3
+                else:
+                    self.aie_swiglu_decode.weights_1 = fc1
+                    self.aie_swiglu_decode.weights_2 = fc2
+                    self.aie_swiglu_decode.weights_3 = fc3
             return
 
         self.fc1.weight = assign(
