@@ -56,9 +56,8 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     output_buffers = {}
     intermediate_buffers = {
         "left": golden_ref["left"],
-        "left_swished": golden_ref["left_swished"],
         "right": golden_ref["right"],
-        # 'intermediate': golden_ref['intermediate']
+        "intermediate": golden_ref["intermediate"],
     }
 
     errors, latency_us, bandwidth_gbps = run_test(
@@ -70,20 +69,13 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         abs_tol=0.7,
     )
 
-    ref_2 = operator.read_buffer_as_torch(
-        "left_swished", (seq_len, hidden_dim)
-    ) * operator.read_buffer_as_torch("right", (seq_len, hidden_dim))
-    errors_2 = verify_buffer(operator, "intermediate", ref_2, rel_tol=0.04, abs_tol=0.4)
-    if errors_2:
-        errors["intermediate"] = errors_2
-
     ref_3 = (
         operator.read_buffer_as_torch("intermediate", (seq_len, hidden_dim))
         @ golden_ref["w_down"]
     )
     errors_3 = verify_buffer(operator, "output", ref_3, rel_tol=0.04, abs_tol=0.4)
     if errors_3:
-        errors["output"] = errors_2
+        errors["output"] = errors_3
 
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
