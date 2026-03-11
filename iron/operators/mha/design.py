@@ -15,7 +15,6 @@ from aie.iron import (
     Runtime,
     Worker,
     Buffer,
-    Buffer,
     WorkerRuntimeBarrier,
 )
 from aie.iron.placers import SequentialPlacer

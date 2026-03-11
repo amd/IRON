@@ -2,18 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from pathlib import Path
 from ml_dtypes import bfloat16
-import argparse
 
 from aie.extras.context import mlir_mod_ctx
-from aie.ir import StridedLayoutAttr, ShapedType
-import aie.dialects.index as index
-import aie.dialects.memref as memref
 from aie.dialects.aie import *
 from aie.dialects.aiex import *
 from aie.helpers.dialects.scf import _for as range_
-from aie.helpers.util import try_convert_np_type_to_mlir_type
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2

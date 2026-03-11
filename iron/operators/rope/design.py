@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from pathlib import Path
 import numpy as np
-import argparse
-import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer

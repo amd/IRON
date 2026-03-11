@@ -6,7 +6,6 @@ import numpy as np
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import Tile, NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 

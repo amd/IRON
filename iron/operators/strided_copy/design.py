@@ -3,10 +3,6 @@
 
 import numpy as np
 
-# from aie.extras.context import mlir_mod_ctx
-# from aie.ir import StridedLayoutAttr, ShapedType
-# from aie.dialects.aie import *
-# from aie.dialects.aiex import *
 from aie.dialects.aiex import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer

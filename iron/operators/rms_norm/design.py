@@ -2,17 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 import numpy as np
-import argparse
-import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
-from aie.helpers.util import np_ndarray_type_get_shape
 
 
 def my_rms_norm(

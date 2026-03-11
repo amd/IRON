@@ -21,7 +21,6 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from aie.iron.runtime.endpoint import RuntimeEndpoint
 from aie.iron.device import AnyShimTile
-import aie.dialects.index as index_dialect
 
 # The maximum value the 4th dimension of DMA BD can be set
 TAP_REPEAT_MAX = 64
