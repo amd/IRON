@@ -27,7 +27,9 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params())
+@pytest.mark.parametrize(
+    "seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params()
+)
 def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
     golden_ref = generate_golden_reference(
         S_q=seq_len,

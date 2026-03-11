@@ -30,7 +30,24 @@ def nearly_equal(
     return diff < max(abs_tol, rel_tol * norm)
 
 
-def verify_buffer(output, buf_name, reference, rel_tol=0.04, abs_tol=1e-6):
+def verify_buffer(
+    output, buf_name, reference, rel_tol=0.04, abs_tol=1e-6, max_error_rate=0.0
+):
+    """
+    Verify buffer contents match reference within tolerances.
+
+    Args:
+        output: Output buffer to verify
+        buf_name: Name of buffer for error messages
+        reference: Reference data to compare against
+        rel_tol: Relative tolerance for comparison
+        abs_tol: Absolute tolerance for comparison
+        max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
+                       For example, 0.01 allows up to 1% of elements to fail
+
+    Returns:
+        List of error indices. Empty if verification passes.
+    """
     errors = []
     expected_np = torch_to_numpy(reference).reshape((-1,))
     output = output.reshape((-1,))
@@ -49,6 +66,21 @@ def verify_buffer(output, buf_name, reference, rel_tol=0.04, abs_tol=1e-6):
                 print(
                     f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
                 )
+
+    # Check if error rate is acceptable
+    if max_error_rate > 0.0 and len(errors) > 0:
+        error_rate = len(errors) / compare_len
+        max_allowed_errors = int(compare_len * max_error_rate)
+        if len(errors) <= max_allowed_errors:
+            print(
+                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+            )
+            return []  # Pass - within allowed error rate
+        else:
+            print(
+                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+            )
+
     return errors
 
 
@@ -59,6 +91,7 @@ def run_test(
     intermediate_buffers=None,
     rel_tol=0.04,
     abs_tol=1e-6,
+    max_error_rate=0.0,
     warmup_iters=1,
     timed_iters=1,
 ):
@@ -72,6 +105,7 @@ def run_test(
         intermediate_buffers: Optional dict mapping buffer names to reference arrays for validation
         rel_tol: Relative tolerance for comparison of output and intermediate buffers
         abs_tol: Absolute tolerance for comparison of output and intermediate buffers
+        max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
 
     Returns:
         (errors: list, latency_us: float, bandwidth_gbps: float)
@@ -144,7 +178,9 @@ def run_test(
         if buf_name in output_map:
             buf = output_map[buf_name]
             output_np = buf.view_as_np()
-            buf_errors = verify_buffer(output_np, buf_name, expected, rel_tol, abs_tol)
+            buf_errors = verify_buffer(
+                output_np, buf_name, expected, rel_tol, abs_tol, max_error_rate
+            )
             if buf_errors:
                 errors[buf_name] = buf_errors
         else:
