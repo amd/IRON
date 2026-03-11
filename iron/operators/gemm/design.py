@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 
 import numpy as np
-import argparse
-import sys
 
 from aie.iron import (
     Kernel,
@@ -774,7 +771,3 @@ def my_matmul(
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program(SequentialPlacer())
     return module
-
-
-if __name__ == "__main__":
-    main()

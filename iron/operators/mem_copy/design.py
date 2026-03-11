@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List
 
 import numpy as np
 import math
-import argparse
-import sys
 
 from aie.iron import (
     Kernel,
@@ -407,102 +404,3 @@ def my_mem_copy(
 
     # Place components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer(num_channels))
-
-
-if __name__ == "__main__":
-
-    def str_to_device(device: str):
-        if device == "npu":
-            return NPU1()
-        elif device == "npu2":
-            return NPU2()
-        else:
-            raise ValueError(f"Device name {device} is unknown.")
-
-    p = argparse.ArgumentParser()
-    # Parse command line arguments
-
-    # Device name is required to select the AIE device: npu or npu2
-    p.add_argument(
-        "-d",
-        "--dev",
-        required=True,
-        dest="device",
-        help="AIE Device",
-        type=str_to_device,
-    )
-    # Transfer size is required to define the size of the data to be transferred
-    # It must be a multiple of 1024 and divisible by the number of num_cores
-    p.add_argument("-l", "--length", required=True, dest="length", help="Transfer size")
-    # Number of cores is required to define the number of cores to be used
-    # It must be less than or equal to 16 for npu and 32 for npu2
-    p.add_argument(
-        "-c", "--cores", required=True, dest="num_cores", help="Number of cores"
-    )
-    # Number of channels is required to define the number of channels to be used
-    # It must be 1 or 2
-    p.add_argument(
-        "-ch", "--channels", required=True, dest="chans", help="Number of channels"
-    )
-    ## Bypass is required to define if the bypass path should be used
-    p.add_argument(
-        "-b", "--bypass", required=True, dest="bypass", help="Use DMA-only bypass path"
-    )
-    # Tile size (elements per tile) - defaults to 1024 for backward compatibility
-    p.add_argument(
-        "-ts",
-        "--tile-size",
-        required=False,
-        dest="tile_size",
-        default="1024",
-        help="Tile size (elements per tile)",
-    )
-    # Trace Size
-    p.add_argument(
-        "-t", "--trace-size", required=True, dest="trace_size", help="Trace size"
-    )
-    p.add_argument(
-        "--output-file-path",
-        "-o",
-        type=str,
-        help="Output file path for the generated MLIR module",
-    )
-    opts = p.parse_args(sys.argv[1:])
-
-    length = int(opts.length)
-    num_cores = int(opts.num_cores)
-    dev = opts.device  # Now this is already a device object!
-
-    # Validate num_cores based on device type
-    if num_cores > len(dev.get_compute_tiles()):
-        raise ValueError(
-            f"[ERROR] Device cannot allocate more than {len(dev.get_compute_tiles())} cores"
-        )
-
-    channels = int(opts.chans)
-    if channels < 1 or channels > 2:
-        raise ValueError("Number of channels must be 1 or 2")
-    tile_size = int(opts.tile_size)
-    # Check the size of the workload. Since DMA transfers operate on a granularity of
-    # 32 bits, the workload must have a size that's a multiple of 32 bits
-    # Calculate how many bfloat16 values fit in an int32
-    bfloat16_per_int32 = np.dtype(np.int32).itemsize // np.dtype(bfloat16).itemsize
-    if length % bfloat16_per_int32 != 0:
-        print(
-            f"DMA transfers operate on a granularity of 32-bits, so for bfloat16 length must be a multiple of {bfloat16_per_int32} but is {length}"
-        )
-    ## Bypass is a boolean value that indicates if the bypass path should be used
-    ## It must be one of the following: yes, true, t, 1
-    ## It is converted to a boolean value
-    bypass = str(opts.bypass).lower() in ("yes", "true", "t", "1")
-    trace_size = opts.trace_size
-    # Call the my_mem_copy function with the parsed arguments
-    # and print the MLIR as a result
-    module = my_mem_copy(
-        dev, length, num_cores, channels, bypass, tile_size, trace_size
-    )
-
-    output_file_path = Path(opts.output_file_path)
-
-    with open(output_file_path, "w") as f:
-        f.write(str(module))

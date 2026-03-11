@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 import numpy as np
-import argparse
-import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
@@ -122,93 +119,3 @@ def my_tanh(
 
     # Place components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())
-
-
-if __name__ == "__main__":
-
-    def str_to_device(device: str):
-        if device == "npu":
-            return NPU1()
-        elif device == "npu2":
-            return NPU2()
-        else:
-            raise ValueError(f"Device name {device} is unknown.")
-
-    p = argparse.ArgumentParser()
-    # Parse command line arguments
-
-    # Device name is required to select the AIE device: npu or npu2
-    p.add_argument(
-        "-d",
-        "--dev",
-        required=True,
-        dest="device",
-        help="AIE Device",
-        type=str_to_device,
-    )
-    # Transfer size is required to define the size of the data to be transferred
-    # It must be a multiple of 1024 and divisible by the number of columns and 2 channels per column
-    p.add_argument("-l", "--length", required=True, dest="length", help="Transfer size")
-    # Number of columns is required to define the number of columns to be used
-    # It must be less than or equal to 4 for npu and 8 for npu2
-    p.add_argument(
-        "-co", "--columns", required=True, dest="cols", help="Number of columns"
-    )
-    # Number of channels is required to define the number of channels to be used
-    # It must be 1 or 2
-    p.add_argument(
-        "-ch", "--channels", required=True, dest="chans", help="Number of channels"
-    )
-    # Tile size (elements per tile) - defaults to 1024 for backward compatibility
-    p.add_argument(
-        "-ts",
-        "--tile-size",
-        required=False,
-        dest="tile_size",
-        default="1024",
-        help="Tile size (elements per tile)",
-    )
-    # Trace Size
-    p.add_argument(
-        "-t", "--trace-size", required=True, dest="trace_size", help="Trace size"
-    )
-    p.add_argument(
-        "--output-file-path",
-        "-o",
-        type=str,
-        help="Output file path for the generated MLIR module",
-    )
-
-    opts = p.parse_args(sys.argv[1:])
-
-    length = int(opts.length)
-    columns = int(opts.cols)
-    dev = opts.device  # Now this is already a device object!
-
-    # Validate columns based on device type
-    if isinstance(dev, NPU1) and columns > 4:
-        raise ValueError("[ERROR] NPU device cannot allocate more than 4 columns")
-    elif isinstance(dev, NPU2) and columns > 8:
-        raise ValueError("[ERROR] NPU2 device cannot allocate more than 8 columns")
-
-    channels = int(opts.chans)
-    if channels < 1 or channels > 2:
-        raise ValueError("Number of channels must be 1 or 2")
-    tile_size = int(opts.tile_size)
-    if ((length % tile_size) % columns % channels) != 0:
-        print(
-            "transfer size ("
-            + str(length)
-            + ") must be a multiple of "
-            + str(tile_size)
-            + " and divisible by the number of columns and channels per column"
-        )
-        raise ValueError
-    trace_size = opts.trace_size
-
-    module = my_tanh(dev, length, columns, channels, tile_size, trace_size)
-
-    output_file_path = Path(opts.output_file_path)
-
-    with open(output_file_path, "w") as f:
-        f.write(str(module))

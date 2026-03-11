@@ -4,8 +4,6 @@
 import sys
 import math
 import copy
-import argparse
-from pathlib import Path
 
 from ml_dtypes import bfloat16
 import numpy as np
@@ -25,8 +23,6 @@ from aie.iron.device import NPU1Col1, NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
-
-base_dir = Path(__file__).parent
 
 dtype_map = {
     "bf16": bfloat16,
@@ -891,7 +887,3 @@ def fused_mha(
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program(SequentialPlacer())
     return module
-
-
-if __name__ == "__main__":
-    main()
