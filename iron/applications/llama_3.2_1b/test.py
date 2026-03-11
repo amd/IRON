@@ -41,11 +41,11 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
         shell=True,
         capture_output=True,
         text=True,
-        timeout=300,
     )
+
+    print(result.stdout)
+    print(result.stderr)
 
     assert (
         result.returncode == 0
     ), f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
-
-    print(result.stdout)
