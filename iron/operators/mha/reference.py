@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -59,29 +61,34 @@ def generate_golden_reference(
     K = torch.rand(num_kv_heads, S_kv, d, dtype=torch.bfloat16) * val_range
     V = torch.rand(num_kv_heads, S_kv, d, dtype=torch.bfloat16) * val_range
 
+    K_original = K.clone()
+    V_original = V.clone()
+
     K = K.repeat_interleave(number_of_groups, dim=0)
     V = V.repeat_interleave(number_of_groups, dim=0)
 
     # MHA from PyTorch
     inv_scale = 1 / np.sqrt(K.shape[-1])
-    O = torch.nn.functional.scaled_dot_product_attention(
-        Q.to(torch.bfloat16),
-        K.to(torch.bfloat16),
-        V.to(torch.bfloat16),
-        dropout_p=0.0,
-        is_causal=True,
-        scale=inv_scale,
-    )
+
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        O = torch.nn.functional.scaled_dot_product_attention(
+            Q.to(torch.bfloat16).unsqueeze(0),
+            K.to(torch.bfloat16).unsqueeze(0),
+            V.to(torch.bfloat16).unsqueeze(0),
+            dropout_p=0.0,
+            is_causal=True,
+            scale=inv_scale,
+        ).squeeze(0)
 
     # Pad all tensors to multiple of 64
     Q = pad_to_multiple_of_64(Q, seq_dim=1, num_pipeline=num_pipeline)
-    K = pad_to_multiple_of_64(K, seq_dim=1, num_pipeline=num_pipeline)
-    V = pad_to_multiple_of_64(V, seq_dim=1, num_pipeline=num_pipeline)
+    K_original = pad_to_multiple_of_64(K_original, seq_dim=1, num_pipeline=num_pipeline)
+    V_original = pad_to_multiple_of_64(V_original, seq_dim=1, num_pipeline=num_pipeline)
     O = pad_to_multiple_of_64(O, seq_dim=1, num_pipeline=num_pipeline)
 
     return {
         "Q": Q,
-        "K": K,
-        "V": V,
+        "K": K_original,
+        "V": V_original,
         "O": O,
     }

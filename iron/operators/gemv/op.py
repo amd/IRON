@@ -62,6 +62,7 @@ class AIEGEMV(MLIROperator):
 
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent
+        mlir_verbose = getattr(self.context, "mlir_verbose", False)
 
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
@@ -76,6 +77,9 @@ class AIEGEMV(MLIROperator):
                 self.tile_size_output,
                 self.num_batches,
             ],
+            callback_kwargs={
+                "verbose": mlir_verbose,
+            },
         )
 
     def get_kernel_artifacts(self):

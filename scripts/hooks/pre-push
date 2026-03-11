@@ -23,7 +23,7 @@ echo "Checking licenses with reuse..."
 if command -v reuse &> /dev/null; then
     if ! reuse lint; then
         echo "❌ License check failed"
-        echo '   Run: reuse annotate --template ApacheAMD --copyright-prefix spdx-string-c --copyright "Advanced Micro Devices, Inc. All rights reserved." --license="Apache-2.0" --recursive --skip-unrecognised ./
+        echo '   Run: reuse annotate --template ApacheAMD --copyright-prefix spdx-string-c --copyright "Advanced Micro Devices, Inc. All rights reserved." --license="Apache-2.0" --recursive --skip-unrecognised ./'
         FAILED=1
     else
         echo "✅ License check passed"

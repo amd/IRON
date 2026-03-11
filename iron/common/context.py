@@ -14,7 +14,7 @@ import aie.utils.config
 class AIEContext:
     """Context for managing AIE operator compilation and runtime state"""
 
-    def __init__(self, use_runlist=True, build_dir=None):
+    def __init__(self, use_runlist=True, build_dir=None, mlir_verbose=None):
         self.operators = []
         self.static_data_pool = {}
         self.device_manager = AIEDeviceManager()
@@ -24,6 +24,7 @@ class AIEContext:
         self.peano_dir = Path(aie.utils.config.peano_install_dir())
         # Disable the XRT runlist sacrifices performance by executing kernels individually as separate xclbin invocations for easier debugging (can tell which part of runlist execution failed)
         self.use_runlist = use_runlist
+        self.mlir_verbose = bool(mlir_verbose)
         self.compilation_rules = [
             comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),

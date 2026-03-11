@@ -14,9 +14,10 @@ from iron.common import AIEContext
 
 
 @pytest.fixture
-def aie_context():
+def aie_context(request):
     """Create a fresh AIEContext for each test"""
-    ctx = AIEContext()
+    verbose_mlir = request.config.option.verbose > 0
+    ctx = AIEContext(mlir_verbose=verbose_mlir)
     yield ctx
     ctx.device_manager.reset()
 

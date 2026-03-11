@@ -43,9 +43,16 @@ def my_matvec(
     num_batches=1,
     kernel_archive="mv.o",
     func_prefix="",
+    verbose=False,
 ):
     if m_output is None:
         m_output = m_input
+
+    if verbose:
+        print(f"Device: {dev}")
+        print(f"Matrix dimensions: M={M}, K={K}")
+        print(f"Tiling: m_input={m_input}, m_output={m_output}")
+        print(f"Columns: {cols}")
 
     # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
     assert (

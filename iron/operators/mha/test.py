@@ -13,7 +13,8 @@ from iron.common.test_utils import run_test
 
 
 def get_params():
-    params_list = [(16384, 64, 1, 8)]
+    # (seq_len, head_dim, heads, number_of_pipeline, num_kv_heads)
+    params_list = [(16384, 64, 1, 8, 0)]
     names = ["mha"]
 
     params = []
@@ -26,14 +27,14 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines", get_params())
-def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
+@pytest.mark.parametrize("seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params())
+def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
     golden_ref = generate_golden_reference(
         S_q=seq_len,
         S_kv=seq_len,
         d=dim,
         heads=num_heads,
-        num_kv_heads=num_heads,
+        num_kv_heads=num_kv_heads,
         num_pipeline=num_pipelines,
     )
 
@@ -41,7 +42,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, aie_context):
         num_heads=num_heads,
         seq_len=seq_len,
         d=dim,
-        num_KV_heads=num_heads,
+        num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
         context=aie_context,
     )
