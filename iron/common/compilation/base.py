@@ -427,8 +427,9 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
 
         for artifact in worklist:
             compile_cmd = [
-                "python",
+                sys.executable,
                 str(self.aiecc_path),
+                "-v",
                 "--no-compile-host",
                 "--no-xchesscc",
                 "--no-xbridge",
@@ -471,8 +472,9 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
         for mlir_source in mlir_sources:
             compile_cmd = [
-                "python",
+                sys.executable,
                 str(self.aiecc_path),
+                "-v",
                 "--no-compile-host",
                 "--no-xchesscc",
                 "--no-xbridge",
