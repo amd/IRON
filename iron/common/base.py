@@ -76,7 +76,7 @@ class MLIROperator(AIEOperatorBase, ABC):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
     def __init__(self, *args, **kwargs):
-        AIEOperatorBase.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
 
     @abstractmethod

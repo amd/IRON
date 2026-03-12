@@ -9,19 +9,10 @@ from iron.operators.leaky_relu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def get_params():
-    # Leaky ReLU is currently broken (#36); leave it untested
-    params = []
-    return params
-
-
+@pytest.mark.skip(reason="Leaky ReLU is currently broken (#36)")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size,alpha",
-    get_params(),
 )
 def test_leaky_relu(
     input_length, num_aie_columns, num_channels, tile_size, alpha, aie_context

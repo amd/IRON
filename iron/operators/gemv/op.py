@@ -48,7 +48,7 @@ class AIEGEMV(MLIROperator):
         self.xclbin_artifact = None
         self.insts_artifact = None
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"gemv_{self.M}x{self.K}_{self.tile_size_input}tsi_{self.tile_size_output}tso_{self.num_batches}batch_{self.num_aie_columns}col"

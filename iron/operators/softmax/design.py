@@ -142,7 +142,7 @@ def softmax(
         #   as a threshold to zero out elements beyond the unmasked patch boundary before softmax.
         def set_rtps(*args):
             for rtp in args:
-                rtp[0] = rtp_vector_size if not mask_patch_value else mask_patch_value
+                rtp[0] = mask_patch_value if mask_patch_value else rtp_vector_size
 
         rt.inline_ops(set_rtps, rtps)
 

@@ -28,7 +28,7 @@ class AIEMemCopy(MLIROperator):
         # For naming consistency with other operators
         self.bypass_str = "bypass" if bypass else "no_bypass"
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"
@@ -51,29 +51,28 @@ class AIEMemCopy(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        if not self.bypass:
-            return [
-                KernelObjectArtifact(
-                    "mem_copy.o",
-                    dependencies=[
-                        SourceArtifact(
-                            self.context.base_dir
-                            / "aie_kernels"
-                            / "generic"
-                            / "passThrough.cc"
-                        )
-                    ],
-                )
-            ]
-        else:
+        if self.bypass:
             return []
+        return [
+            KernelObjectArtifact(
+                "mem_copy.o",
+                dependencies=[
+                    SourceArtifact(
+                        self.context.base_dir
+                        / "aie_kernels"
+                        / "generic"
+                        / "passThrough.cc"
+                    )
+                ],
+            )
+        ]
 
     def get_artifacts(self):
         # Override to add --dynamic-objFifos flag
         operator_name = self.get_operator_name()
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
+        if kernel_deps_inputs:
             mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
         kernel_deps = (
             [

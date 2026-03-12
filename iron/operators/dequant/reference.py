@@ -5,8 +5,6 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 
-tensor_type_to_quant = {torch.uint8: torch.quint8}
-
 
 def generate_golden_reference(input_length, tile_size, group_size):
     torch.manual_seed(42)
@@ -46,7 +44,7 @@ def generate_golden_reference(input_length, tile_size, group_size):
         scales=scales.to(torch.float32),
         zero_points=zero_points.to(torch.float32),
         axis=0,
-        dtype=tensor_type_to_quant[torch.uint8],
+        dtype=torch.quint8,
     )
     B = torch.dequantize(A)
 
@@ -71,10 +69,13 @@ def generate_golden_reference(input_length, tile_size, group_size):
             A_concat[i, per_tile_size + 2 * j] = torch.bitwise_and(
                 scales[i * num_scale_factors + j].view(torch.uint16), 0xFF
             )
+            # Extract high byte (bits 15-8) of the bfloat16 bit pattern.
+            # View as int16 (same width), promote to int32 for bitwise_right_shift
+            # support, shift right 8, then mask to 8 bits. The & 0xFF also
+            # handles sign-extension from int32 arithmetic right shift.
             A_concat[i, per_tile_size + 2 * j + 1] = torch.bitwise_and(
-                torch.bitwise_right_shift(
-                    scales[i * num_scale_factors + j].view(torch.uint16), 8
-                ),
+                scales[i * num_scale_factors + j].view(torch.int16).to(torch.int32)
+                >> 8,
                 0xFF,
             )
 

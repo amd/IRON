@@ -25,10 +25,10 @@ class AIEAXPY(MLIROperator):
         context=None,
     ):
         max_multiple = num_aie_columns * tile_size
-        assert (
-            size % max_multiple == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
-        assert size % tile_size == 0, "size must be multiple of tile_size"
+        if size % max_multiple != 0:
+            raise ValueError(
+                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
+            )
 
         self.size = size
         self.tile_size = tile_size
@@ -36,7 +36,7 @@ class AIEAXPY(MLIROperator):
         self.num_channels = num_channels
         self.scalar_factor = scalar_factor
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.scalar_factor}s"

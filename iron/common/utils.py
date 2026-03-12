@@ -14,6 +14,20 @@ torch_dtype_map = {
     "i32": torch.int32,
 }
 
+# Maps XRTTensor dtype objects/types to their torch equivalents.
+# Both np.dtype(...) objects and bare ml_dtypes types are included because
+# xrttensor.dtype may return either form depending on how the tensor was created.
+_XRT_TO_TORCH_DTYPE: dict = {
+    np.dtype("float32"): torch.float32,
+    np.dtype("int32"): torch.int32,
+    np.dtype("int16"): torch.int16,
+    np.dtype("int8"): torch.int8,
+    np.dtype("uint8"): torch.uint8,
+    np.dtype("float16"): torch.float16,
+    np.dtype(bfloat16): torch.bfloat16,
+    bfloat16: torch.bfloat16,
+}
+
 
 def xrt_to_torch(xrttensor) -> torch.Tensor:
     """
@@ -23,18 +37,7 @@ def xrt_to_torch(xrttensor) -> torch.Tensor:
     Note: calls xrttensor.to("cpu") as a side effect to ensure the buffer is
     synchronized to host memory before reading.
     """
-    dtype_map = {
-        np.dtype("float32"): torch.float32,
-        np.dtype("int32"): torch.int32,
-        np.dtype("int16"): torch.int16,
-        np.dtype("int8"): torch.int8,
-        np.dtype("uint8"): torch.uint8,
-        np.dtype("float16"): torch.float16,
-        np.dtype(bfloat16): torch.bfloat16,  # numpy dtype object for bfloat16
-        bfloat16: torch.bfloat16,  # bare ml_dtypes.bfloat16 type
-    }
-
-    torch_dtype = dtype_map.get(xrttensor.dtype)
+    torch_dtype = _XRT_TO_TORCH_DTYPE.get(xrttensor.dtype)
     if torch_dtype is None:
         raise ValueError(f"Unsupported dtype: {xrttensor.dtype}")
 

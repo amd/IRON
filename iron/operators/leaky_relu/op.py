@@ -34,10 +34,12 @@ class AIELeakyReLU(MLIROperator):
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
-        alpha_str = f"{self.alpha}".replace(".", "_")
+        # Use fixed-precision formatting to avoid scientific notation (e.g. 1e-05)
+        # which would produce invalid filenames with '-' characters.
+        alpha_str = f"{self.alpha:.6f}".replace(".", "_")
         return f"leaky_relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_a{alpha_str}"
 
     def get_mlir_artifact(self):

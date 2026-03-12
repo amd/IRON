@@ -33,7 +33,7 @@ class AIELayerNorm(MLIROperator):
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"layer_norm_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"

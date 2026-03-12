@@ -27,10 +27,10 @@ class AIERMSNorm(MLIROperator):
     ):
         # Note: epsilon is hardcoded to 1e-5 in the AIE kernel (rms_norm.cc) and cannot be changed at runtime.
         max_multiple = num_aie_columns * tile_size
-        assert (
-            size % max_multiple == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
-        assert size % tile_size == 0, "size must be multiple of tile_size"
+        if size % max_multiple != 0:
+            raise ValueError(
+                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
+            )
 
         self.size = size
         self.tile_size = tile_size
@@ -42,12 +42,16 @@ class AIERMSNorm(MLIROperator):
         # Enforce ShimDMA limits for weighted RMS Norm (uses 2 inputs per core)
         # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
         total_shimdma_channels = self.num_columns * self.num_channels
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
+        if total_shimdma_channels > 16:
+            raise ValueError(
+                f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
+            )
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
-        return f"weighted_rms_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        prefix = "weighted_rms" if self.weighted else "rms_norm"
+        return f"{prefix}_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent

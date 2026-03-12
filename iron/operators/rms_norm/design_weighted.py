@@ -164,4 +164,6 @@ def my_weighted_rms_norm(
         rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program(SequentialPlacer(num_channels))
+    # num_channels is always 1 (enforced by assertion above); SequentialPlacer()
+    # defaults to single-channel routing which is correct for this design.
+    return Program(dev, rt).resolve_program(SequentialPlacer())

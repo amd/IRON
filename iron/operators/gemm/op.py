@@ -49,11 +49,13 @@ class AIEGEMM(MLIROperator):
         self.gemm_args = gemm_kwargs
         self.b_col_maj = gemm_kwargs.get("b_col_maj", False)
         self.c_col_maj = gemm_kwargs.get("c_col_maj", False)
-
-        emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
+        self.emulate_bf16_mmul_with_bfp16 = gemm_kwargs.get(
             "emulate_bf16_mmul_with_bfp16", True
         )
-        if emulate_bf16_mmul_with_bfp16:
+        self.prio_accuracy = gemm_kwargs.get("prio_accuracy", False)
+        self.round_conv_even = gemm_kwargs.get("round_conv_even", True)
+
+        if self.emulate_bf16_mmul_with_bfp16:
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
         else:
             min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
@@ -61,7 +63,7 @@ class AIEGEMM(MLIROperator):
         assert tile_k >= min_tile_k, f"tile_k ({tile_k}) must be >= {min_tile_k}"
         assert tile_n >= min_tile_n, f"tile_n ({tile_n}) must be >= {min_tile_n}"
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"gemm_{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
@@ -166,7 +168,7 @@ class AIEGEMM(MLIROperator):
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""
         M, K = A_np.shape
-        if M % self.M == 0 and K == self.K:
+        if M == self.M and K == self.K:
             return A_np
 
         M_padded = ((M + self.M - 1) // self.M) * self.M

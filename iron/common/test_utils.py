@@ -19,8 +19,10 @@ def nearly_equal(
     Original author: P-Gn
     Source: https://stackoverflow.com/a/32334103
     """
-    assert np.finfo(np.float32).eps <= rel_tol
-    assert rel_tol < 1.0
+    if np.finfo(np.float32).eps > rel_tol:
+        raise ValueError(f"rel_tol {rel_tol!r} must be >= machine epsilon")
+    if rel_tol >= 1.0:
+        raise ValueError(f"rel_tol {rel_tol!r} must be < 1.0")
 
     if a == b:
         return True
@@ -115,7 +117,7 @@ def run_test(
     Returns:
         (errors: list, latency_us: float, bandwidth_gbps: float)
     """
-    if intermediate_buffers is not None and intermediate_buffers:
+    if intermediate_buffers:
         raise ValueError(
             "intermediate_buffers verification is not supported in run_test"
         )
@@ -170,10 +172,10 @@ def run_test(
         op_func(*args)
 
     # Run operator
-    start_time = time.time()
+    start_time = time.perf_counter()
     for _ in range(timed_iters):
         op_func(*args)
-    end_time = time.time()
+    end_time = time.perf_counter()
 
     elapsed = (end_time - start_time) / timed_iters
     latency_us = elapsed * 1e6
@@ -187,7 +189,7 @@ def run_test(
             buf = output_map[buf_name]
             output_torch = xrt_to_torch(buf)
             buf_errors = verify_buffer(
-                output_torch, buf_name, expected, rel_tol, abs_tol
+                output_torch, buf_name, expected, rel_tol, abs_tol, max_error_rate
             )
             if buf_errors:
                 errors[buf_name] = buf_errors

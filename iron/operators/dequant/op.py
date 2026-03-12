@@ -43,7 +43,7 @@ class AIEDequant(MLIROperator):
         assert self.size % total_cores == 0, "Size must be divisible by total cores"
         assert total_cores <= 16, "Total cores (columns * channels) must be <= 16"
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"dequant_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
@@ -55,7 +55,7 @@ class AIEDequant(MLIROperator):
             import_path=operator_dir / "design.py",
             callback_fn="my_dequant_kernel",
             callback_args=[
-                self.context.device_manager.device_str(),
+                self.context.device_manager.device_type,
                 self.size,
                 self.num_columns,
                 self.num_channels,

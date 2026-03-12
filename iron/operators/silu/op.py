@@ -16,16 +16,20 @@ class AIESiLU(MLIROperator):
     """AIE-accelerated SiLU activation function"""
 
     def __init__(self, size, tile_size, num_aie_columns=8, context=None):
-        assert (
-            size % (num_aie_columns * tile_size) == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
+        if size % (num_aie_columns * tile_size) != 0:
+            raise ValueError(
+                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({num_aie_columns * tile_size})"
+            )
         self.size = size
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
         # Enforce ShimDMA limits for SiLU (uses 1 input per core)
         # Maximum safe configuration: 8 columns × 1 channel = 8 ShimDMA channels
-        assert self.num_aie_columns <= 16, "Conservative ShimDMA limit"
-        MLIROperator.__init__(self, context=context)
+        if self.num_aie_columns > 8:
+            raise ValueError(
+                f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit: a unary operator uses 2 DMA channels per column, max 8 columns (16 channels total)"
+            )
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"silu_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"

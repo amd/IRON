@@ -117,7 +117,7 @@ def fused_mha(
 
     of_depth = 2
     vectorized = True
-    enable_tracing = True if trace_size > 0 else False
+    enable_tracing = trace_size > 0
     dtype_str = "bf16"
     dev = "npu2"
 

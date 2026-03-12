@@ -39,7 +39,7 @@ class AIESoftmax(MLIROperator):
         self.rtp_vector_size = rtp_vector_size
         self.mask_patch_value = mask_patch_value
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         name = f"softmax_{self.num_aie_columns}col_{self.num_channels}ch_{self.size}_{self.cols}t"

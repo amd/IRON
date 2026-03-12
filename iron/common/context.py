@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
-import os
 
 from .device_manager import AIEDeviceManager, pyxrt
 from . import compilation as comp
@@ -17,7 +16,7 @@ class AIEContext:
         self.device_manager = AIEDeviceManager()
         # base_dir points to the repo root: iron/common/../../.. = three levels up from this file
         self.base_dir = Path(__file__).parent.parent.parent
-        self.build_dir = build_dir or Path(os.getcwd()) / "build"
+        self.build_dir = build_dir or Path.cwd() / "build"
         self.mlir_aie_dir = Path(aie.utils.config.root_path())
         self.peano_dir = Path(aie.utils.config.peano_install_dir())
         self.mlir_verbose = mlir_verbose

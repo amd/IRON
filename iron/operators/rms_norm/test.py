@@ -18,7 +18,9 @@ def get_params():
     for weighted in [False, True]:
         for input_length in input_lengths:
             for num_aie_columns in range(1, max_aie_columns + 1):
-                num_channels_options = range(1, 3) if not weighted else [num_channels]
+                # Weighted RMS Norm only supports num_channels=1; multi-channel
+                # weight routing is not yet implemented in design_weighted.py.
+                num_channels_options = range(1, 3) if not weighted else [1]
                 for num_channels_rms in num_channels_options:  # 1 or 2
                     if not weighted:
                         total_cores = num_aie_columns * num_channels_rms

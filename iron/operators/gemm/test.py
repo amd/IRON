@@ -102,10 +102,10 @@ def test_gemm(
 
     input_buffers = {
         "A": golden_ref["input"].flatten(),
-        "B": golden_ref["input_b"].flatten(),
+        "B": golden_ref["input_b"][0].flatten(),
     }
     output_buffers = {
-        "C": golden_ref["output"].flatten(),
+        "C": golden_ref["output"][0].flatten(),
     }
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005

@@ -47,11 +47,11 @@ def my_sigmoid(
     )
 
     # Task for the core to perform
-    def core_fn(of_in, of_out, sigmoidLine):
+    def core_fn(of_in, of_out, sigmoid_line):
         for _ in range_(N_div_n):
-            elemIn = of_in.acquire(1)
-            elemOut = of_out.acquire(1)
-            sigmoidLine(elemIn, elemOut, line_size)
+            elem_in = of_in.acquire(1)
+            elem_out = of_out.acquire(1)
+            sigmoid_line(elem_in, elem_out, line_size)
             of_in.release(1)
             of_out.release(1)
 

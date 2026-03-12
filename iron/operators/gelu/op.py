@@ -17,10 +17,10 @@ class AIEGELU(MLIROperator):
 
     def __init__(self, size, num_aie_columns, num_channels, tile_size, context=None):
         max_multiple = num_aie_columns * tile_size
-        assert (
-            size % max_multiple == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
-        assert size % tile_size == 0, "size must be multiple of tile_size"
+        if size % max_multiple != 0:
+            raise ValueError(
+                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
+            )
 
         self.size = size
         self.tile_size = tile_size
@@ -28,9 +28,12 @@ class AIEGELU(MLIROperator):
         self.num_channels = num_channels
 
         total_shimdma_channels = self.num_aie_columns * self.num_channels
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
+        if total_shimdma_channels > 16:
+            raise ValueError(
+                f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
+            )
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"gelu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"

@@ -32,7 +32,7 @@ class AIEElementwiseMul(MLIROperator):
         # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
         total_shimdma_channels = self.num_aie_columns * 2
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"eltwise_mul_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"

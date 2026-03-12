@@ -46,7 +46,7 @@ class AIERope(MLIROperator):
         self.method_type = method_type
         assert method_type in {0, 1}
 
-        MLIROperator.__init__(self, context=context)
+        super().__init__(context=context)
 
     def get_operator_name(self):
         return f"rope_{self.num_aie_columns}col_{self.rows}rows_{self.cols}cols_{self.angle_rows}arows_{self.method_type}m"

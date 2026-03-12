@@ -16,7 +16,7 @@ def my_eltwise_add(
     num_columns,
     tile_size,
     trace_size,
-    kernel_archive,
+    kernel_archive=None,
     func_prefix="",
 ):
     per_tile_elements = 4096 if tile_size > 4096 else tile_size
