@@ -316,6 +316,7 @@ class ShellCompilationCommand(CompilationCommand):
             env=self.env,
         )
         if 0 != result.returncode:
+            print("Return code: ", result.returncode)
             print(result.stdout)
             print(result.stderr, file=sys.stderr)
         return 0 == result.returncode
