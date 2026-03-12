@@ -55,7 +55,7 @@ class AIEElementwiseMul(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"mul.o",
+                "mul.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "generic" / "mul.cc"

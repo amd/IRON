@@ -18,9 +18,7 @@ class AIEOperatorBase(ABC):
     """Base class for AIE-accelerated operations"""
 
     def __init__(self, context=None):
-        self.artifacts = comp.CompilationArtifactGraph(
-            []
-        )  # CompilationArtifact objects are uniqued within the context
+        self.artifacts = comp.CompilationArtifactGraph()
         if context is None:
             context = self.get_default_context()
         context.register_operator(self)
@@ -29,11 +27,12 @@ class AIEOperatorBase(ABC):
     @abstractmethod
     def set_up_artifacts(self):
         """
-        Subclasses should overwrite this method to set up their required dependencies
-        with calls to add_artifacts().
-        Note: This method should only *describe* the required artifacts, and not yet do
-        any computation or compilation.
-        Compilation will be handled automatically based on the provided description.
+        Declare the artifact dependency graph for this operator.
+
+        Subclasses must implement this method and call add_artifacts() to register
+        the artifacts they require. This method should only *describe* dependencies;
+        it must not perform any computation or compilation.  Compilation is triggered
+        separately via compile().
         """
         pass
 
@@ -95,15 +94,14 @@ class MLIROperator(AIEOperatorBase, ABC):
         operator_name = prefix + self.get_operator_name()
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
-            # FIXME: currently hard-coding that the design will accept this argument as an input if it uses kernels
-            # Also not handling name collisions of kernels with the same name
+        if kernel_deps_inputs:
+            # Inject kernel archive name into the MLIR generation callback so the
+            # design function knows which archive to link against.
             mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
         kernel_deps = (
             [
                 KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
+                    self.kernel_archive, dependencies=kernel_deps_inputs
                 )
             ]
             if kernel_deps_inputs
@@ -166,7 +164,9 @@ class CompositeCallable:
             intermediate_buffers: List of XRTTensor objects for intermediate results.
         """
         self.sequence = sequence
-        self.intermediate_buffers = intermediate_buffers or []
+        self.intermediate_buffers = (
+            intermediate_buffers if intermediate_buffers is not None else []
+        )
 
     def __call__(self, *args):
         """

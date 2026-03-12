@@ -91,7 +91,7 @@ class AIERMSNorm(MLIROperator):
     def get_kernel_artifacts(self):
         artifacts = [
             KernelObjectArtifact(
-                f"rms_norm.o",
+                "rms_norm.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "aie2p" / "rms_norm.cc"

@@ -68,7 +68,7 @@ class AIESoftmax(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"softmax.o",
+                "softmax.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"

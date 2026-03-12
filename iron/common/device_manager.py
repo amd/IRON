@@ -31,8 +31,9 @@ class AIEDeviceManager:
 
         self.device = pyxrt.device(0)
         self.device_type = XRTHostRuntime().device()
-        self.contexts = {}  # xclbin_path -> (context, xclbin)
-        self.kernels = {}  # (xclbin_path, kernel_name) -> kernel
+        self.contexts: dict[str, tuple] = {}  # xclbin_path -> (context, xclbin)
+        self.kernels: dict[tuple, object] = {}  # (xclbin_path, kernel_name) -> kernel
+        self._default_kernel_names: dict[str, str] = {}  # xclbin_path -> kernel_name
 
     def get_context_and_kernel(
         self, xclbin_path: str, kernel_name: str | None = None
@@ -51,12 +52,15 @@ class AIEDeviceManager:
             context, xclbin = self.contexts[xclbin_path]
             logging.debug(f"Reusing context for {Path(xclbin_path).name}")
 
-        # Get kernel name if not provided
+        # Get kernel name if not provided; cache it alongside the context so
+        # we don't call get_kernels() on every lookup for the same xclbin.
         if kernel_name is None:
-            kernels = xclbin.get_kernels()
-            if not kernels:
-                raise RuntimeError("No kernels found in xclbin")
-            kernel_name = kernels[0].get_name()
+            if xclbin_path not in self._default_kernel_names:
+                kernels = xclbin.get_kernels()
+                if not kernels:
+                    raise RuntimeError("No kernels found in xclbin")
+                self._default_kernel_names[xclbin_path] = kernels[0].get_name()
+            kernel_name = self._default_kernel_names[xclbin_path]
 
         # Check if we already have the kernel
         kernel_key = (xclbin_path, kernel_name)
@@ -78,16 +82,11 @@ class AIEDeviceManager:
 
     def cleanup(self):
         """Clean up all XRT resources"""
+        # Clear kernels before contexts: kernels hold references to contexts.
         self.kernels.clear()
+        self._default_kernel_names.clear()
         self.contexts.clear()
-
-        # Clear device
-        if self.device is not None:
-            try:
-                del self.device
-            except Exception:
-                pass
-            self.device = None
+        self.device = None
 
         logging.debug("Cleaned up AIE device manager")
 

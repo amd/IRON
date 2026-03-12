@@ -74,12 +74,7 @@ class AIEGEMM(MLIROperator):
         device_str = self.context.device_manager.device_str()
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
         dtype_out = self.gemm_args.get("dtype_out", "bf16")
-        emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
-            "emulate_bf16_mmul_with_bfp16", True
-        )
-        prio_accuracy = self.gemm_args.get("prio_accuracy", False)
         use_scalar = self.gemm_args.get("use_scalar", False)
-        round_conv_even = self.gemm_args.get("round_conv_even", True)
         separate_c_tiles = self.gemm_args.get("separate_c_tiles", False)
         return PythonGeneratedMLIRArtifact(
             f"{operator_name}.mlir",
@@ -99,8 +94,8 @@ class AIEGEMM(MLIROperator):
                 "b_col_maj": int(self.b_col_maj),
                 "c_col_maj": int(self.c_col_maj),
                 "use_scalar": use_scalar,
-                "emulate_bf16_mmul_with_bfp16": emulate_bf16_mmul_with_bfp16,
-                "prio_accuracy": prio_accuracy,
+                "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
+                "prio_accuracy": self.prio_accuracy,
                 "separate_c_tiles": int(separate_c_tiles),
                 "trace_size": 0,
                 "generate_taps": False,
@@ -110,23 +105,18 @@ class AIEGEMM(MLIROperator):
 
     def get_kernel_artifacts(self):
         base_dir = self.context.base_dir
-        emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
-            "emulate_bf16_mmul_with_bfp16", True
-        )
-        prio_accuracy = self.gemm_args.get("prio_accuracy", False)
-        round_conv_even = self.gemm_args.get("round_conv_even", True)
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
             f"-DDIM_K={self.tile_k}",
             f"-DDIM_N={self.tile_n}",
         ]
-        if prio_accuracy:
+        if self.prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
         else:
             kernel_flags.append("-Dbf16_bf16_ONLY")
-        if round_conv_even:
+        if self.round_conv_even:
             kernel_flags.append("-DROUND_CONV_EVEN")
-        if emulate_bf16_mmul_with_bfp16:
+        if self.emulate_bf16_mmul_with_bfp16:
             kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
         if self.b_col_maj:
             kernel_flags.append("-DB_COL_MAJ")
@@ -134,7 +124,7 @@ class AIEGEMM(MLIROperator):
             kernel_flags.append("-DC_COL_MAJ")
 
         # Include flags in the filename to avoid stale builds when flags change
-        flags_suffix = f"_{int(prio_accuracy)}_{int(emulate_bf16_mmul_with_bfp16)}_{int(round_conv_even)}"
+        flags_suffix = f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
         return [
             KernelObjectArtifact(

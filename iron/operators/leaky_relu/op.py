@@ -39,7 +39,12 @@ class AIELeakyReLU(MLIROperator):
     def get_operator_name(self):
         # Use fixed-precision formatting to avoid scientific notation (e.g. 1e-05)
         # which would produce invalid filenames with '-' characters.
-        alpha_str = f"{self.alpha:.6f}".replace(".", "_")
+        alpha_str = (
+            f"{self.alpha:.8f}".rstrip("0")
+            .rstrip(".")
+            .replace(".", "_")
+            .replace("-", "neg")
+        )
         return f"leaky_relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_a{alpha_str}"
 
     def get_mlir_artifact(self):

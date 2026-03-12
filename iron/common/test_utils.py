@@ -115,7 +115,7 @@ def run_test(
         timed_iters: Number of timed iterations for latency/bandwidth measurement
 
     Returns:
-        (errors: list, latency_us: float, bandwidth_gbps: float)
+        (errors: dict, latency_us: float, bandwidth_gbps: float)
     """
     if intermediate_buffers:
         raise ValueError(
