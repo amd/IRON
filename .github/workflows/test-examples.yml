@@ -38,6 +38,17 @@ jobs:
           source ci_env/bin/activate
           pip install -r requirements_examples.txt
 
+      - name: Print mlir-aie version
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          set -euxo pipefail
+          source ci_env/bin/activate
+          echo "=== mlir-aie version ==="
+          aie-opt --version
+          echo "========================"
+
       - name: Run examples
         id: test
         continue-on-error: true
@@ -60,6 +71,17 @@ jobs:
           name: results-examples
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 14
+
+      - name: Upload MLIR artifacts for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-artifacts
+          path: |
+            iron/applications/llama_3.2_1b/build/*.mlir
+            iron/applications/llama_3.2_1b/build_elf/*.mlir
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Fail workflow if examples failed
         if: steps.test.outcome == 'failure'
