@@ -15,6 +15,7 @@ def my_gelu(
     dev, size, num_columns, num_channels, tile_size, trace_size, kernel_archive=None
 ):
     xfr_dtype = bfloat16
+    # Cap to 8192 bfloat16 elements (16 KB) to fit AIE core local memory
     line_size = 8192 if tile_size > 8192 else tile_size
     fifodepth = 1 if line_size > 4096 else 2
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
@@ -50,8 +51,8 @@ def my_gelu(
     # Task for the core to perform
     def core_fn(of_in, of_out, geluLine):
         for _ in range_(N_div_n):
-            elemOut = of_out.acquire(1)
             elemIn = of_in.acquire(1)
+            elemOut = of_out.acquire(1)
             geluLine(elemIn, elemOut, line_size)
             of_in.release(1)
             of_out.release(1)

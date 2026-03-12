@@ -1,12 +1,6 @@
-# Copyright (c) Sebastian Raschka under Apache License 2.0.
-# Source for "Build a Large Language Model From Scratch"
-#   - https://www.manning.com/books/build-a-large-language-model-from-scratch
-# Code: https://github.com/rasbt/LLMs-from-scratch/blob/main/ch05/07_gpt_to_llama/standalone-llama32.ipynb
-#
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
@@ -23,8 +17,11 @@ torch_dtype_map = {
 
 def xrt_to_torch(xrttensor) -> torch.Tensor:
     """
-    Convert an XRTTensor (or compatible object with buffer_object()) to a Torch tensor
-    without intermediate numpy array creation, supporting bfloat16.
+    Convert an XRTTensor (or compatible object with buffer_object()) to a Torch tensor,
+    supporting bfloat16.
+
+    Note: calls xrttensor.to("cpu") as a side effect to ensure the buffer is
+    synchronized to host memory before reading.
     """
     dtype_map = {
         np.dtype("float32"): torch.float32,
@@ -33,8 +30,8 @@ def xrt_to_torch(xrttensor) -> torch.Tensor:
         np.dtype("int8"): torch.int8,
         np.dtype("uint8"): torch.uint8,
         np.dtype("float16"): torch.float16,
-        np.dtype(bfloat16): torch.bfloat16,
-        bfloat16: torch.bfloat16,
+        np.dtype(bfloat16): torch.bfloat16,  # numpy dtype object for bfloat16
+        bfloat16: torch.bfloat16,  # bare ml_dtypes.bfloat16 type
     }
 
     torch_dtype = dtype_map.get(xrttensor.dtype)

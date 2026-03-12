@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+from pathlib import Path
+
 from ml_dtypes import bfloat16
 
 import numpy as np
@@ -50,7 +53,7 @@ def main():
     argparser.add_argument("--b-col-maj", type=int, choices=[0, 1], default=0)
     argparser.add_argument("--c-col-maj", type=int, choices=[0, 1], default=0)
     # Whether to use the scalar kernel; this is low, but can be useful for debugging smaller sizes
-    argparser.add_argument("--scalar", type=bool, choices=[0, 1], default=0)
+    argparser.add_argument("--scalar", type=int, choices=[0, 1], default=0)
     argparser.add_argument(
         "--emulate-bf16-mmul-with-bfp16", action="store_true", default=False
     )

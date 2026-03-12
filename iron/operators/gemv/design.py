@@ -4,11 +4,10 @@
 import numpy as np
 from ml_dtypes import bfloat16
 
-from aie.extras.context import mlir_mod_ctx
-from aie.dialects.aie import *
-from aie.dialects.aiex import *
 import aie.dialects.index as index
+from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
@@ -150,7 +149,7 @@ def my_matvec(
         for col in range(cols)
     ]
 
-    # Every column gets the entirety of the vector B, no TAP needed.
+    # Every column gets the entirety of the vector B.
     # This design assumes that all of B fits on the cores.
     B_tap = TensorAccessPattern(
         tensor_dims=L3_B_ty.__args__[0],

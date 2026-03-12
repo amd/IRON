@@ -6,8 +6,6 @@ from pathlib import Path
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -26,8 +24,7 @@ class AIESiLU(MLIROperator):
         self.num_aie_columns = num_aie_columns
         # Enforce ShimDMA limits for SiLU (uses 1 input per core)
         # Maximum safe configuration: 8 columns × 1 channel = 8 ShimDMA channels
-        total_shimdma_channels = self.num_aie_columns * 1
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
+        assert self.num_aie_columns <= 16, "Conservative ShimDMA limit"
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
@@ -51,7 +48,7 @@ class AIESiLU(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"silu.o",
+                "silu.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "aie2p" / "silu.cc"
@@ -61,7 +58,6 @@ class AIESiLU(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # Runtime setup
         return [
             AIERuntimeArgSpec("in", (self.size,)),  # input
             AIERuntimeArgSpec("out", (self.size,)),  # output

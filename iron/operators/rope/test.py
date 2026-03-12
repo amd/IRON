@@ -2,10 +2,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from pathlib import Path
-
-
 import pytest
 from iron.operators.rope.op import AIERope
 from iron.operators.rope.reference import generate_golden_reference

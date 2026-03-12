@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.gemv.op import AIEGEMV
 from iron.operators.gemv.reference import generate_golden_reference
@@ -27,8 +24,6 @@ def get_params():
 
     params = []
     for p in params_list:
-        # All tests are considered regular here as per original code structure
-        # (original code returned same list for both regular and extensive)
         params.append(pytest.param(*p))
     return params
 

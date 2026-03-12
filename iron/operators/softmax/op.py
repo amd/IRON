@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,

@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.gelu.op import AIEGELU
 from iron.operators.gelu.reference import generate_golden_reference

@@ -5,8 +5,7 @@ import time
 import numpy as np
 from ml_dtypes import bfloat16
 from .utils import xrt_to_torch
-import logging
-from .base import MLIROperator, CompositeOperator
+from .base import AIEOperatorBase
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 
@@ -58,30 +57,33 @@ def verify_buffer(
         print(
             f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(output)}"
         )
-        errors.extend(i for i in range(abs(len(output) - len(expected))))
+        # Record the indices that are missing from output (do not count toward max_error_rate)
+        errors.extend(i for i in range(len(output), len(expected)))
     compare_len = min(len(output), len(expected))
+    mismatch_errors = []
     for i in range(compare_len):
         if not nearly_equal(float(output[i]), float(expected[i]), rel_tol, abs_tol):
-            errors.append(i)
-            if len(errors) <= 10:
+            mismatch_errors.append(i)
+            if len(mismatch_errors) <= 10:
                 print(
                     f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(output[i]):.6f}"
                 )
 
-    # Check if error rate is acceptable
-    if max_error_rate > 0.0 and len(errors) > 0:
-        error_rate = len(errors) / compare_len
+    # Check if error rate is acceptable (only counting value mismatches, not size mismatches)
+    if max_error_rate > 0.0 and len(mismatch_errors) > 0:
+        error_rate = len(mismatch_errors) / compare_len
         max_allowed_errors = int(compare_len * max_error_rate)
-        if len(errors) <= max_allowed_errors:
+        if len(mismatch_errors) <= max_allowed_errors:
             print(
-                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+                f"{buf_name}: {len(mismatch_errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
             )
-            return []  # Pass - within allowed error rate
+            return errors  # Pass value check - within allowed error rate; return any size-mismatch errors only
         else:
             print(
-                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+                f"{buf_name}: {len(mismatch_errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
             )
 
+    errors.extend(mismatch_errors)
     return errors
 
 
@@ -97,31 +99,29 @@ def run_test(
     timed_iters=1,
 ):
     """
-    Run operator test with specified input/output/intermediate buffers.
+    Run operator test with specified input/output buffers.
 
     Args:
-        operator: AIE operator instance
+        operator: AIE operator instance (must be an AIEOperatorBase subclass)
         input_buffers: Dict mapping buffer names to input data arrays
         output_buffers: Dict mapping buffer names to reference output arrays
-        intermediate_buffers: Optional dict mapping buffer names to reference arrays for validation
-        rel_tol: Relative tolerance for comparison of output and intermediate buffers
-        abs_tol: Absolute tolerance for comparison of output and intermediate buffers
+        intermediate_buffers: Not supported; passing a non-empty value raises ValueError
+        rel_tol: Relative tolerance for comparison of output buffers
+        abs_tol: Absolute tolerance for comparison of output buffers
         max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
+        warmup_iters: Number of warmup iterations before timing
+        timed_iters: Number of timed iterations for latency/bandwidth measurement
 
     Returns:
         (errors: list, latency_us: float, bandwidth_gbps: float)
     """
-    if intermediate_buffers is None:
-        intermediate_buffers = {}
+    if intermediate_buffers is not None and intermediate_buffers:
+        raise ValueError(
+            "intermediate_buffers verification is not supported in run_test"
+        )
 
-    # Build operator and prepare runtime
-    logging.basicConfig(
-        level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-
-    if not isinstance(operator, (MLIROperator, CompositeOperator)):
-        raise ValueError("run_test only supports MLIROperator or CompositeOperator")
+    if not isinstance(operator, AIEOperatorBase):
+        raise ValueError("run_test only supports AIEOperatorBase subclasses")
 
     operator.compile()
     op_func = operator.get_callable()
@@ -153,8 +153,16 @@ def run_test(
             args.append(buf)
             output_map[name] = buf
             total_bytes += buf.buffer_object().size()
+        elif spec.direction == "inout":
+            try:
+                name, data = next(input_iter)
+            except StopIteration:
+                raise ValueError("Not enough input buffers provided for inout arg spec")
+            buf = XRTTensor.from_torch(data)
+            args.append(buf)
+            output_map[name] = buf
+            total_bytes += buf.buffer_object().size()
         else:
-            # Handle other directions if needed, or raise error
             raise ValueError(f"Unsupported direction: {spec.direction}")
 
     # Run warmup iterations
@@ -185,11 +193,6 @@ def run_test(
                 errors[buf_name] = buf_errors
         else:
             print(f"Warning: Output buffer {buf_name} not found in operator arguments")
-
-    # Intermediate buffers are not supported in this generic run_test
-    # unless we expose them somehow. For now, ignore or warn.
-    if intermediate_buffers:
-        print("Warning: intermediate_buffers verification is not supported in run_test")
 
     # Calculate bandwidth
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9

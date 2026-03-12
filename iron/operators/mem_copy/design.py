@@ -131,8 +131,8 @@ def create_partial_workload_config(
         padding_needed = line_size - partial_tile_size
         highest_common_factor_pad = math.gcd(partial_tile_size, padding_needed)
         for tap_repeat_exp in reversed(
-            range(0, math.ceil(math.log2(TAP_REPEAT_MAX) + 1))
-        ):  # +1 to include the end of range
+            range(0, math.ceil(math.log2(TAP_REPEAT_MAX)) + 1)
+        ):
             padding_size = highest_common_factor_pad * 2**tap_repeat_exp
             padding_tap_repeat = math.floor(padding_needed / padding_size)
             config.padding_tap_repeats.append(padding_tap_repeat)
@@ -213,12 +213,15 @@ def my_mem_copy(
         )
 
         # Task for the core to perform
+        num_lines = tile_size // line_size
+
         def core_fn(of_in, of_out, mem_copyLine):
-            elemOut = of_out.acquire(1)
-            elemIn = of_in.acquire(1)
-            mem_copyLine(elemIn, elemOut, line_size)
-            of_in.release(1)
-            of_out.release(1)
+            for _ in range_(num_lines):
+                elemIn = of_in.acquire(1)
+                elemOut = of_out.acquire(1)
+                mem_copyLine(elemIn, elemOut, line_size)
+                of_in.release(1)
+                of_out.release(1)
 
         # Create a worker to perform the task
         my_workers = [
@@ -306,7 +309,7 @@ def my_mem_copy(
                 ):
                     # Fill the last objfifo with padding+real data
                     tg_out = rt.task_group()
-                    tg_count = 1
+                    tg_count = 0
                     for padding_tap_repeat, padding_tap in zip(
                         partial_config.padding_tap_repeats, partial_config.padding_taps
                     ):

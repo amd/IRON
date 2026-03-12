@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
-
-from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
-
 """
 Repeat interleave
 """
 
+import numpy as np
 
-def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
+from aie.dialects.aiex import TensorAccessPattern
+from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron.placers import SequentialPlacer
+
+
+def repeat(dev, dtype, rows, cols, num_repeats, transfer_size=None):
     dtype = np.dtype[dtype]
 
     # Try to work around hardware size limitations by breaking transfers into smaller chunks
@@ -36,7 +36,7 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
         dtype,
     ]
     out_ty = np.ndarray[
-        (rows * repeat, cols),
+        (rows * num_repeats, cols),
         dtype,
     ]
     transfer_ty = np.ndarray[
@@ -47,15 +47,15 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
     input_tap = TensorAccessPattern(
         tensor_dims=(rows, cols),
         offset=0,
-        sizes=[repeat, rows, cols // cols_split, cols_split],
+        sizes=[num_repeats, rows, cols // cols_split, cols_split],
         strides=[0, cols, cols_split, 1],
     )
 
     output_tap = TensorAccessPattern(
-        tensor_dims=(rows * repeat, cols),
+        tensor_dims=(rows * num_repeats, cols),
         offset=0,
-        sizes=[repeat, rows, cols // cols_split, cols_split],
-        strides=[cols, cols * repeat, cols_split, 1],
+        sizes=[num_repeats, rows, cols // cols_split, cols_split],
+        strides=[cols, cols * num_repeats, cols_split, 1],
     )
 
     # Use smaller FIFOs for the transfer amount

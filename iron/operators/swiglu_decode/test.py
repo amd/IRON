@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -49,6 +46,9 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
 
     errors = {}
     # Verify intermediate result
+    # Reshape to (1, hidden_dim) using the unpadded dimension to match the golden reference shape.
+    # Note: op.hidden_dim_padded may differ if padding was applied; we use hidden_dim here
+    # because the golden reference was generated with the unpadded hidden_dim.
     intermediate = xrt_to_torch(op_func.intermediate).reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
         intermediate,

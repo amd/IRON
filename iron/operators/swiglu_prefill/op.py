@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-import torch
-import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -11,12 +8,6 @@ from aie.utils.npukernel import NPUKernel
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
-    KernelObjectArtifact,
-    KernelArchiveArtifact,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
 )
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.silu.op import AIESiLU
@@ -90,6 +81,8 @@ class SwiGLUPrefillCallable:
         self.gemm_1_callable(input_buf, self.weights_1, self.left)
 
         # 2. GEMM(input, weights_2, right)
+        # Intentionally reuses gemm_1_callable for the up-projection: both gate and up
+        # projections share the same GEMM kernel configuration (same M, K, N dimensions).
         self.gemm_1_callable(input_buf, self.weights_2, self.right)
 
         # 3. SiLU(left, left_swished)
@@ -136,7 +129,6 @@ class AIESwiGLUPrefill(CompositeOperator):
         # to meet hardware alignment requirements. We store the padded dimensions
         # from GEMM and verify that all operators use consistent padded sizes.
         artifacts = []
-        device_str = self.context.device_manager.device_str()
 
         accuracy_flags = {}
         if self.prio_accuracy:

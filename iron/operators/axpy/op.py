@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -66,7 +61,7 @@ class AIEAXPY(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"axpy.o",
+                "axpy.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "generic" / "axpy.cc"

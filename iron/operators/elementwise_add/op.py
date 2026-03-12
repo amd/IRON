@@ -1,19 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
-import logging
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -72,7 +65,6 @@ class AIEElementwiseAdd(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # Runtime setup
         return [
             AIERuntimeArgSpec("in", (self.size,)),  # input1
             AIERuntimeArgSpec("in", (self.size,)),  # input2

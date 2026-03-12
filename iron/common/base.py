@@ -1,29 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
-import os
-from pathlib import Path
 from abc import ABC, abstractmethod
-import logging
-import time
-import torch
 from ml_dtypes import bfloat16
 
-import aie.utils.config
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-from aie.utils.hostruntime.tensor_class import Tensor
 from aie.utils.npukernel import NPUKernel
 from . import compilation as comp
 from .context import AIEContext
-from .device_manager import pyxrt
 from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
-    KernelObjectArtifact,
     KernelArchiveArtifact,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
 )
 
 
@@ -42,8 +29,10 @@ class AIEOperatorBase(ABC):
     @abstractmethod
     def set_up_artifacts(self):
         """
-        Subclasses should overwrite this method to set up their required dependenices and runtime runlist, kernels and buffers with calls to add_artifacts(), add_kernel(), add_buffer(), and add_to_runlist().
-        Note: This method should only *describe* the required artifacts and runtime buffers, and not yet do any computation or compilation.
+        Subclasses should overwrite this method to set up their required dependencies
+        with calls to add_artifacts().
+        Note: This method should only *describe* the required artifacts, and not yet do
+        any computation or compilation.
         Compilation will be handled automatically based on the provided description.
         """
         pass
@@ -58,7 +47,7 @@ class AIEOperatorBase(ABC):
 
     @classmethod
     def get_default_context(cls):
-        """One global 'default' context if none is specified"""
+        """Return the process-wide default AIEContext, creating it on first call (lazy singleton)."""
         if not hasattr(AIEOperatorBase, "_default_context"):
             AIEOperatorBase._default_context = AIEContext()
         return AIEOperatorBase._default_context
@@ -66,7 +55,8 @@ class AIEOperatorBase(ABC):
     def compile(self, dry_run=False):
         """
         Set up the operator and compile any necessary artifacts.
-        Subclasses are expected to overwrite set_up(); they may register any artifacts that they need to be compiled there.
+        Subclasses are expected to overwrite set_up_artifacts(); they may register any
+        artifacts that they need to be compiled there.
         """
         self.set_up_artifacts()
         comp.compile(
@@ -86,8 +76,8 @@ class MLIROperator(AIEOperatorBase, ABC):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
     def __init__(self, *args, **kwargs):
-        self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
         AIEOperatorBase.__init__(self, *args, **kwargs)
+        self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
 
     @abstractmethod
     def get_operator_name(self):
@@ -148,15 +138,17 @@ class MLIROperator(AIEOperatorBase, ABC):
 class CompositeOperator(AIEOperatorBase, ABC):
     """Base class for composite operators that chain multiple sub-operators"""
 
-    def __init__(self, context=None):
-        super().__init__(context)
-
 
 class AIERuntimeArgSpec:
+    """Specification for a single runtime argument of an AIE operator."""
+
     def __init__(self, direction, shape, dtype=bfloat16):
         self.shape = shape
         self.dtype = dtype
-        assert direction in {"in", "out", "inout"}
+        if direction not in {"in", "out", "inout"}:
+            raise ValueError(
+                f"Invalid direction {direction!r}: must be one of 'in', 'out', 'inout'"
+            )
         self.direction = direction
 
     def __repr__(self):
@@ -177,6 +169,15 @@ class CompositeCallable:
         self.intermediate_buffers = intermediate_buffers or []
 
     def __call__(self, *args):
+        """
+        Execute the sub-operator sequence.
+
+        Buffer index layout: the combined buffer list is [*args, *intermediate_buffers],
+        where args contains the caller-supplied inputs and outputs in declaration order,
+        and intermediate_buffers contains any pre-allocated scratch tensors.
+        Each (callable, indices) entry in self.sequence selects buffers by position
+        from this combined list.
+        """
         # args contains inputs and outputs
         all_buffers = list(args) + self.intermediate_buffers
 

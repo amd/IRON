@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.elementwise_mul.op import AIEElementwiseMul
 from iron.operators.elementwise_mul.reference import generate_golden_reference
@@ -14,7 +11,6 @@ from iron.common.test_utils import run_test
 
 def get_params():
     max_aie_columns = 8
-    num_channels = 2
     input_lengths = [1024, 2048, 4096, 8192]
 
     params = []
@@ -33,7 +29,6 @@ def get_params():
                 pytest.param(
                     input_length,
                     num_aie_columns,
-                    num_channels,
                     tile_size,
                     marks=marks,
                 )
@@ -46,12 +41,10 @@ def get_params():
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size",
+    "input_length,num_aie_columns,tile_size",
     get_params(),
 )
-def test_elementwise_mul(
-    input_length, num_aie_columns, num_channels, tile_size, aie_context
-):
+def test_elementwise_mul(input_length, num_aie_columns, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
     operator = AIEElementwiseMul(

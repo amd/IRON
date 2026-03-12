@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -32,17 +27,18 @@ class AIELeakyReLU(MLIROperator):
         self.size = size
         self.tile_size = tile_size
 
-        self.num_columns = num_aie_columns
+        self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
         self.alpha = alpha
 
-        total_shimdma_channels = self.num_columns * self.num_channels
+        total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        return f"leaky_relu_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        alpha_str = f"{self.alpha}".replace(".", "_")
+        return f"leaky_relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_a{alpha_str}"
 
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent
@@ -53,7 +49,7 @@ class AIELeakyReLU(MLIROperator):
             callback_args=[
                 self.context.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 self.tile_size,
                 0,
@@ -64,7 +60,7 @@ class AIELeakyReLU(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"leaky_relu.o",
+                "leaky_relu.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir

@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
@@ -19,6 +16,7 @@ from iron.common import (
 
 
 class AIEMemCopy(MLIROperator):
+    """AIE-accelerated memory copy operator. Note: the `prefix` parameter is intentionally not supported."""
 
     def __init__(self, size, num_cores, num_channels, bypass, tile_size, context=None):
         self.size = size
@@ -37,14 +35,13 @@ class AIEMemCopy(MLIROperator):
 
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent
-        size = self.tile_size * self.num_cores
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
             import_path=operator_dir / "design.py",
             callback_fn="my_mem_copy",
             callback_args=[
                 self.context.device_manager.device_type,
-                size,
+                self.size,
                 self.num_cores,
                 self.num_channels,
                 self.bypass,

@@ -194,8 +194,6 @@ class AIEMHA(MLIROperator):
         self, src: np.ndarray, H: int, S: int, S_pad: int, D: int
     ) -> np.ndarray:
         """Unpack padded tensor back to compact format."""
-        dst = src
         if S < S_pad:
-            dst = np.zeros((H, S, D), dtype=src.dtype)
-            dst = src[:H, :S, :D]
-        return dst
+            return src[:H, :S, :D]
+        return src

@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import sys
 import math
 import copy
+from pathlib import Path
 
 from ml_dtypes import bfloat16
 import numpy as np
@@ -66,7 +68,7 @@ def main():
         "--output-file-path",
         "-o",
         type=str,
-        default=base_dir / "build" / f"my_mha.mlir",
+        default="my_mha.mlir",
         help="Output file path for the generated MLIR module",
     )
     argparser.add_argument(
@@ -136,11 +138,14 @@ def fused_mha(
     num_kv_blocks = S_kv_pad // B_kv
     num_q_block_per_pipeline = num_q_blocks // number_of_pipelines
 
-    # VJUNG: When the number of KV head is 0 we do a regular MHA, otherwise we do GQA.
+    # VJUNG: When the number of KV heads is 0, treat it as regular MHA (num_KV_heads == heads).
+    # Otherwise, num_KV_heads < heads indicates GQA.
     if num_KV_heads == 0:
         num_KV_heads = heads
 
-    emulate_bf16_mmul_with_bfp16 = True
+    assert (
+        emulate_bf16_mmul_with_bfp16
+    ), "Only emulate_bf16_mmul_with_bfp16=True is supported"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
     mac_dims = microkernel_mac_dim_map[dev][dtype_str]
@@ -163,7 +168,7 @@ def fused_mha(
     ), "Number of KV heads must be less than or equal to number of heads"
     assert (
         heads % num_KV_heads == 0
-    ), f"Number of KV heads ({num_KV_heads}) must be divisible by number of heads ({heads})"
+    ), f"Number of heads ({heads}) must be divisible by number of KV heads ({num_KV_heads})"
 
     assert B_q % r == 0, f"B_q must be divisible by r ({B_q} % {r} != 0)"
     assert B_kv % t == 0, f"B_kv must be divisible by t ({B_kv} % {t} != 0)"
@@ -174,7 +179,9 @@ def fused_mha(
 
     dtype = dtype_map[dtype_str]
 
-    inv_scale = (1 / np.sqrt(d)) * 1.4453125
+    inv_scale = (
+        1 / np.sqrt(d)
+    ) * 1.4453125  # 1.4453125 ≈ log2(e), converts softmax base
 
     # Tensors living in DRAM
     Q_ty = np.ndarray[

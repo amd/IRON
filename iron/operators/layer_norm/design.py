@@ -49,7 +49,7 @@ def my_layer_norm(
 
     # AIE Core Function declaration
     layer_norm_kernel = Kernel(
-        "layer_norm", "layer_norm.o", [tile_ty, tile_ty, np.int32]
+        "layer_norm", kernel_archive or "layer_norm.o", [tile_ty, tile_ty, np.int32]
     )
 
     # Define a task that will run on a compute tile

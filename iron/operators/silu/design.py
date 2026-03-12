@@ -11,9 +11,10 @@ from aie.iron.controlflow import range_
 
 
 def my_silu(
-    dev, size, num_columns, tile_size, trace_size, kernel_archive, func_prefix=""
+    dev, size, num_columns, tile_size, trace_size, kernel_archive=None, func_prefix=""
 ):
     xfr_dtype = bfloat16
+    # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
     line_size = 4096 if tile_size > 4096 else tile_size
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
@@ -49,8 +50,8 @@ def my_silu(
     # Task for the core to perform
     def core_fn(of_in, of_out, siluLine):
         for _ in range_(N_div_n):
-            elemOut = of_out.acquire(1)
             elemIn = of_in.acquire(1)
+            elemOut = of_out.acquire(1)
             siluLine(elemIn, elemOut, line_size)
             of_in.release(1)
             of_out.release(1)

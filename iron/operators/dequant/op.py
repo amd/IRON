@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import numpy as np
 from ml_dtypes import bfloat16
 from pathlib import Path
@@ -9,8 +8,6 @@ from pathlib import Path
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -36,7 +33,7 @@ class AIEDequant(MLIROperator):
         self.num_channels = num_channels
         self.group_size = group_size
 
-        # Calculate buffer sizes
+        # Calculate buffer sizes (in bytes)
         # Input: int4 packed data + scale factors
         # For N int4 values, we need N/2 bytes + N/group_size scale factors (bfloat16, 2 bytes each)
         self.input_size = (size // 2) + (size // group_size) * 2
@@ -58,7 +55,7 @@ class AIEDequant(MLIROperator):
             import_path=operator_dir / "design.py",
             callback_fn="my_dequant_kernel",
             callback_args=[
-                self.context.device_manager.device_type,
+                self.context.device_manager.device_str(),
                 self.size,
                 self.num_columns,
                 self.num_channels,

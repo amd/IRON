@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-import torch
-import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -11,12 +8,6 @@ from aie.utils.npukernel import NPUKernel
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
-    KernelObjectArtifact,
-    KernelArchiveArtifact,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
 )
 from iron.operators.gemv.op import AIEGEMV
 from iron.operators.silu.op import AIESiLU
@@ -70,7 +61,7 @@ class SwiGLUDecodeCallable:
         # Allocate intermediate buffers
         # left: output of gemv_1 (hidden_dim_padded)
         self.left = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
-        # right: output of gemv_1 (hidden_dim_padded)
+        # right: output of up-projection GEMV (weights_2) (hidden_dim_padded)
         self.right = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
         # left_swished: output of silu (hidden_dim_padded)
         self.left_swished = XRTTensor((op.hidden_dim_padded,), dtype=bfloat16)
@@ -94,6 +85,8 @@ class SwiGLUDecodeCallable:
         self.gemv_1_callable(self.weights_1, input_buf, self.left)
 
         # 2. GEMV(weights_2, input, right)
+        # Intentionally reuses gemv_1_callable for the up-projection: both gate and up
+        # projections share the same GEMV kernel configuration (same M, K dimensions).
         self.gemv_1_callable(self.weights_2, input_buf, self.right)
 
         # 3. SiLU(left, left_swished)
@@ -132,7 +125,6 @@ class AIESwiGLUDecode(CompositeOperator):
 
     def set_up_artifacts(self):
         artifacts = []
-        device_str = self.context.device_manager.device_str()
 
         gemv_1 = AIEGEMV(
             M=self.hidden_dim,

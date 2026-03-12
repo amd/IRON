@@ -46,7 +46,7 @@ def my_dequant_kernel(
     out_tile_ty = np.ndarray[(per_tile_elements,), np.dtype[out_dtype]]
 
     fifodepth = 1 if tile_size > 8192 else 2
-    enable_trace = 1 if trace_size > 0 else None
+    enable_trace = trace_size > 0
 
     # AIE-array data movement with object fifos
     of_in1s = [

@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.common.utils import xrt_to_torch
 from iron.operators.swiglu_prefill.op import AIESwiGLUPrefill
+
+# swiglu_prefill shares the same reference implementation as swiglu_decode:
+# both compute W3 @ (SiLU(W1 @ x) * (W2 @ x)), differing only in that prefill
+# operates on a full sequence (M > 1) while decode operates on a single token (M = 1).
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
 

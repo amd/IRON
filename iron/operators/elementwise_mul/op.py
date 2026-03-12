@@ -6,8 +6,6 @@ from pathlib import Path
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -37,7 +35,7 @@ class AIEElementwiseMul(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        return f"mul_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
+        return f"eltwise_mul_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
 
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent
@@ -67,7 +65,6 @@ class AIEElementwiseMul(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # Runtime setup
         return [
             AIERuntimeArgSpec("in", (self.size,)),  # input1
             AIERuntimeArgSpec("in", (self.size,)),  # input2

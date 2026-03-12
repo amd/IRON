@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.mem_copy.op import AIEMemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
@@ -73,8 +70,9 @@ def test_mem_copy(
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["inout"]}
-    output_buffers = {"output": golden_ref["inout"]}
+    # num_cores >= num_channels is required: each channel must have at least one core assigned
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.01, abs_tol=1e-6

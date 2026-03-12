@@ -7,12 +7,9 @@ Global AIE Device Manager for resource sharing and cleanup
 
 import logging
 import os
-import sys
 from pathlib import Path
-from typing import Dict, Optional, Any
 import pyxrt
 from aie.utils.hostruntime.xrtruntime.hostruntime import XRTHostRuntime
-from aie.iron.device import NPU1, NPU2
 
 
 class AIEDeviceManager:
@@ -39,7 +36,7 @@ class AIEDeviceManager:
 
     def get_context_and_kernel(
         self, xclbin_path: str, kernel_name: str | None = None
-    ) -> (pyxrt.hw_context, pyxrt.kernel):
+    ) -> tuple:
         """Get or create hardware context and kernel for xclbin"""
         # Check if we already have a context for this xclbin
 
@@ -76,25 +73,19 @@ class AIEDeviceManager:
         return context, self.kernels[kernel_key]
 
     def device_str(self) -> str:
+        """Return the resolved device name string (e.g. 'NPU1' or 'NPU2')."""
         return self.device_type.resolve().name
 
     def cleanup(self):
         """Clean up all XRT resources"""
         self.kernels.clear()
-
-        # Clear contexts
-        for xclbin_path, (context, xclbin) in self.contexts.items():
-            try:
-                del context
-            except:
-                pass
         self.contexts.clear()
 
         # Clear device
         if self.device is not None:
             try:
                 del self.device
-            except:
+            except Exception:
                 pass
             self.device = None
 

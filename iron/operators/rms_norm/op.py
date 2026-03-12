@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import torch.nn as nn
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     KernelArchiveArtifact,
     SourceArtifact,
@@ -25,13 +19,13 @@ class AIERMSNorm(MLIROperator):
     def __init__(
         self,
         size,
-        eps=1e-6,
         num_aie_columns=None,
         num_channels=None,
         tile_size=None,
         weighted=False,
         context=None,
     ):
+        # Note: epsilon is hardcoded to 1e-5 in the AIE kernel (rms_norm.cc) and cannot be changed at runtime.
         max_multiple = num_aie_columns * tile_size
         assert (
             size % max_multiple == 0
@@ -43,7 +37,6 @@ class AIERMSNorm(MLIROperator):
 
         self.num_columns = num_aie_columns
         self.num_channels = num_channels
-        self.eps = eps
         self.weighted = weighted
 
         # Enforce ShimDMA limits for weighted RMS Norm (uses 2 inputs per core)

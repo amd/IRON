@@ -1,17 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import numpy as np
-from ml_dtypes import bfloat16
-import logging
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -26,7 +21,6 @@ class AIEGEMM(MLIROperator):
         M,
         K,
         N,
-        use_static_weight=False,
         tile_m=64,
         tile_k=64,
         tile_n=64,
@@ -75,7 +69,6 @@ class AIEGEMM(MLIROperator):
     def get_mlir_artifact(self):
         operator_dir = Path(__file__).parent
         operator_name = self.get_operator_name()
-        base_dir = self.context.base_dir
         device_str = self.context.device_manager.device_str()
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
         dtype_out = self.gemm_args.get("dtype_out", "bf16")
@@ -124,7 +117,6 @@ class AIEGEMM(MLIROperator):
             f"-DDIM_M={self.tile_m}",
             f"-DDIM_K={self.tile_k}",
             f"-DDIM_N={self.tile_n}",
-            "-DROUND_CONV_EVEN",
         ]
         if prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
@@ -170,84 +162,6 @@ class AIEGEMM(MLIROperator):
                 "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
             ),  # output C
         ]
-
-    # def _get_B_dims(self, B_shape):
-    #     """Extract K and N dimensions from B matrix shape based on layout.
-
-    #     Returns:
-    #         tuple: (K, N) dimensions regardless of B's layout
-    #     """
-    #     if self.b_col_maj:
-    #         return B_shape[-1], B_shape[-2]  # B is (N, K) -> return (K, N)
-    #     else:
-    #         return B_shape[-2], B_shape[-1]  # B is (K, N) -> return (K, N)
-
-    # def forward(self, A, B=None):
-    #     """Forward pass through GEMM operation: C = A @ B"""
-    #     B_shape = B.shape if B is not None else self.static_weight_shape
-
-    #     # Determine output dimensions based on matrix layout
-    #     K2, N = self._get_B_dims(B_shape)
-    #     N_part = N // self.partition_N
-
-    #     # Build expected output shape based on C layout
-    #     expected_output_shape = (
-    #         A.shape[:-2] + (N, A.shape[-1]) if self.c_col_maj else A.shape[:-1] + (N,)
-    #     )
-
-    #     # Remove batch dimension, if any
-    #     if len(A.shape) > 2:
-    #         A = A.view(-1, A.shape[-1])
-    #     if B is not None and len(B.shape) > 2:
-    #         B = B.view(-1, B_shape[-1])
-
-    #     M, K = A.shape
-
-    #     applicable = (
-    #         K == K2
-    #         and (M <= self.M or not self.c_col_maj)
-    #         and K <= self.K
-    #         and N <= self.N
-    #     )
-    #     if not applicable:
-    #         raise AIEOperatorConstraintError("AIEGEMM: incompatible tensor shape(s)")
-
-    #     A_padded = self._pad_A(torch_to_numpy(A))
-    #     if B is not None:
-    #         B_parts = self._partition_B(torch_to_numpy(B))
-    #     else:
-    #         B_parts = None
-
-    #     logging.debug(
-    #         f"Executing GEMM for dimensions M={M}, K={K}, N={N} using NPU operator with M={self.M}, K={self.N}, N={self.N}"
-    #     )
-
-    #     if self.c_col_maj:
-    #         result_padded = np.zeros((N, M), dtype=A_padded.dtype)
-    #     else:
-    #         result_padded = np.zeros((M, N), dtype=A_padded.dtype)
-    #     for M_lo in range(0, M, self.M):
-    #         A_part = A_padded[M_lo : M_lo + self.M, :]
-    #         result_parts = self._execute_aie_operation(A_part, B_parts)
-    #         max_M = min(M_lo + self.M, M)
-    #         for part in range(self.partition_N):
-    #             if self.c_col_maj:
-    #                 result_padded[part * N_part : (part + 1) * N_part, M_lo:max_M] = (
-    #                     result_parts[part][:N_part, :max_M]
-    #                 )
-    #             else:
-    #                 result_padded[M_lo:max_M, part * N_part : (part + 1) * N_part] = (
-    #                     result_parts[part][:max_M, :N_part]
-    #                 )
-
-    #     # GEMM produces 2D result, reshape to expected output shape
-    #     if self.c_col_maj:
-    #         result = numpy_to_torch(result_padded[:N, :M])
-    #     else:
-    #         result = numpy_to_torch(result_padded[:M, :N])
-    #     result = result.view(expected_output_shape)
-
-    #     return result
 
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""

@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -18,7 +13,7 @@ from iron.common import (
 
 
 class AIELayerNorm(MLIROperator):
-    """AIE-accelerated LAYER NORM operator"""
+    """AIE-accelerated Layer Normalization operator"""
 
     def __init__(
         self, size, num_aie_columns, num_channels, tile_size, trace_size=0, context=None

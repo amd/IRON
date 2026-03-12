@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.rms_norm.op import AIERMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
@@ -78,7 +75,6 @@ def test_rms_norm(
 
     input_buffers = {"input1": golden_ref["input"]}
     if weighted:
-        operator.weight = golden_ref["weight"]
         input_buffers["weight"] = golden_ref["weight"]
     output_buffers = {"output": golden_ref["output"]}
 

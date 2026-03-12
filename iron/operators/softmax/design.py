@@ -135,7 +135,11 @@ def softmax(
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
 
-        # Set run-time parameter for actual vector size (remainder is considered padding and ignored by the computation)
+        # Set run-time parameter controlling how many elements each core processes:
+        # - Normal case (mask_patch_value == 0): set to rtp_vector_size (the actual active row width;
+        #   elements beyond this are padding and are ignored by the softmax computation).
+        # - Masked case (mask_patch_value != 0): set to mask_patch_value, which the mask kernel uses
+        #   as a threshold to zero out elements beyond the unmasked patch boundary before softmax.
         def set_rtps(*args):
             for rtp in args:
                 rtp[0] = rtp_vector_size if not mask_patch_value else mask_patch_value

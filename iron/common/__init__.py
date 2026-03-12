@@ -1,9 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Common utilities and base classes for IRON operators."""
+"""
+Common utilities and base classes for IRON operators.
 
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+Exported groups:
+  - Operator base classes: AIEOperatorBase, MLIROperator, CompositeOperator
+  - Callable/argument types: CompositeCallable, AIERuntimeArgSpec
+  - Context management: AIEContext
+  - Compilation artifacts: XclbinArtifact, InstsBinArtifact, KernelObjectArtifact,
+                            KernelArchiveArtifact, SourceArtifact, PythonGeneratedMLIRArtifact
+  - Device management: AIEDeviceManager
+"""
+
 from .base import (
     AIEOperatorBase,
     MLIROperator,
@@ -21,3 +30,19 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
 )
 from .device_manager import AIEDeviceManager
+
+__all__ = [
+    "AIEOperatorBase",
+    "MLIROperator",
+    "CompositeOperator",
+    "CompositeCallable",
+    "AIERuntimeArgSpec",
+    "AIEContext",
+    "XclbinArtifact",
+    "InstsBinArtifact",
+    "KernelObjectArtifact",
+    "KernelArchiveArtifact",
+    "SourceArtifact",
+    "PythonGeneratedMLIRArtifact",
+    "AIEDeviceManager",
+]

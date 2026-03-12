@@ -28,9 +28,7 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
     val_range = 4
     x = torch.randn(M, K, dtype=torch.bfloat16) * val_range
     w_gate = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # gate projection
-    bias1 = torch.randn(K, dtype=torch.bfloat16) * val_range  # currently unused
     w_up = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # up projection
-    bias2 = torch.randn(K, dtype=torch.bfloat16) * val_range  # currently unused
     w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
 
     # Generate golden outputs

@@ -72,8 +72,8 @@ def generate_golden_reference(input_length, tile_size, group_size):
                 scales[i * num_scale_factors + j].view(torch.uint16), 0xFF
             )
             A_concat[i, per_tile_size + 2 * j + 1] = torch.bitwise_and(
-                (scales[i * num_scale_factors + j].view(torch.uint16) / 2**8).to(
-                    torch.uint16
+                torch.bitwise_right_shift(
+                    scales[i * num_scale_factors + j].view(torch.uint16), 8
                 ),
                 0xFF,
             )

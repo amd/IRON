@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
 from pathlib import Path
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     KernelArchiveArtifact,
     SourceArtifact,
@@ -29,7 +24,6 @@ class AIEGEMV(MLIROperator):
         tile_size_input=2,
         tile_size_output=None,
         num_batches=1,
-        use_static_weight=False,
         kernel_vector_size=64,
         context=None,
     ):
@@ -68,7 +62,7 @@ class AIEGEMV(MLIROperator):
             import_path=operator_dir / "design.py",
             callback_fn="my_matvec",
             callback_args=[
-                self.context.device_manager.device_type,
+                self.context.device_manager.device_str(),
                 self.num_aie_columns,
                 self.M,
                 self.K,

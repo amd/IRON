@@ -1,20 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
-import numpy as np
-
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.helpers.dialects.scf import _for as range_
-from ml_dtypes import bfloat16
-
 """
 Rotary Positional Encoding (RoPE) design
 
-Applies RoPE to each row of the input tensor. 
+Applies RoPE to each row of the input tensor.
 Expects input tensor of shape (rows, cols) and a tensor of precomputed angles (look-up table) of shape (angle_rows, cols).
 Another interpretation of the input tensor is (rows / num_heads, num_heads, cols), where num_heads = rows / angle_rows.
 
@@ -24,6 +14,15 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
   If this is less than `rows`, each row of angles will be reused for `rows / angle_rows` consecutive rows of the input tensor.
   This is useful for models where multiple heads share the same positional encodings and the heads are 'interspersed' in the input tensor (i.e. input tensor shape is (rows, n_heads, cols)).
 """
+
+import numpy as np
+
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron.placers import SequentialPlacer
+from aie.iron.device import NPU1, NPU2
+from aie.helpers.taplib.tap import TensorAccessPattern
+from aie.helpers.dialects.scf import _for as range_
+from ml_dtypes import bfloat16
 
 
 def rope(

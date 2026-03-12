@@ -6,7 +6,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 
-def generate_golden_reference(M=42, K=42, seed=42):
+def generate_golden_reference(M=128, K=128, seed=42):
     """
     Generate golden reference data for GEMV (General Matrix-Vector Multiplication).
 

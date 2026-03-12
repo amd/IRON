@@ -14,6 +14,7 @@ def my_relu(
     dev, size, num_columns, num_channels, tile_size, trace_size, kernel_archive=None
 ):
     xfr_dtype = bfloat16
+    # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
     line_size = 4096 if tile_size > 4096 else tile_size
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
@@ -48,8 +49,8 @@ def my_relu(
     # Task for the core to perform
     def core_fn(of_in, of_out, reluLine):
         for _ in range_(N_div_n):
-            elemOut = of_out.acquire(1)
             elemIn = of_in.acquire(1)
+            elemOut = of_out.acquire(1)
             reluLine(elemIn, elemOut, line_size)
             of_in.release(1)
             of_out.release(1)

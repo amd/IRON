@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
-
-from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
-
 """
 Strided copy design
 
 This can be useful for data layout manipulation and data copying such as:
 input[0, :, 0] -> output[:, 0, 0]
 """
+
+import numpy as np
+
+from aie.dialects.aiex import TensorAccessPattern
+from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron.placers import SequentialPlacer
 
 
 def strided_copy(
@@ -66,6 +66,13 @@ def strided_copy(
         np.dtype[dtype],
     ]
 
+    # input_offset_patch_marker (and output_offset_patch_marker) is a deferred-offset mechanism:
+    # When non-zero, it is used as a placeholder offset value in the TensorAccessPattern instead
+    # of the statically-computed input_offset. The actual offset is then patched at runtime by the
+    # caller (e.g., AIEStridedCopy.forward()) by writing the real byte offset into the instruction
+    # stream. This allows the same compiled xclbin/insts to be reused with different runtime offsets
+    # into a shared buffer, without recompilation. The tensor_dims is also expanded by the marker
+    # value to prevent the compiler from flagging out-of-bounds accesses during code generation.
     input_taps = [
         TensorAccessPattern(
             tensor_dims=(int(input_buffer_size + input_offset_patch_marker),),

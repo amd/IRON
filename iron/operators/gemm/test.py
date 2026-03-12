@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
-
 
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.gemm.reference import generate_golden_reference
@@ -14,33 +11,33 @@ from iron.common.test_utils import run_test
 
 def get_params():
     # fmt: off
-    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size
     regular_params = [
-        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0,           1),
-        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
-        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0,           1),
-        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0,           1),
-        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0,           1),
-        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0,           1),
-        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0,           1),
-        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0,           1),
-    ]                                                                                          
-    extensive_params = [                                                                       
-        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0,           1),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0,           1),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0,           1),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0,           1),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0,           1),
-        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0,           1),
-        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0,           1),
-        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
-        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0,           1),
-        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0,           1),
-        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0,           1),
-        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0,           1),
-        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0,           1),
-        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0,           1),
-        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0,           1),
+        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0),
+        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0),
+        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0),
+        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0),
+        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0),
+        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0),
+        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0),
+        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0),
+    ]
+    extensive_params = [
+        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0),
+        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0),
+        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0),
+        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0),
+        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0),
+        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0),
+        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0),
+        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0),
+        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0),
+        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0),
+        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0),
+        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0),
+        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0),
+        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0),
+        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0),
     ]
     # fmt: on
 
@@ -64,7 +61,7 @@ def get_params():
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.parametrize(
-    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N",
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
     get_params(),
 )
 def test_gemm(
@@ -78,14 +75,12 @@ def test_gemm(
     k,
     n,
     trace_size,
-    partition_N,
     aie_context,
 ):
     golden_ref = generate_golden_reference(
         M=M,
         K=K,
         N=N,
-        partition_N=partition_N,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
     )
@@ -102,19 +97,16 @@ def test_gemm(
         emulate_bf16_mmul_with_bfp16=False,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
-        partition_N=partition_N,
         context=aie_context,
     )
 
     input_buffers = {
         "A": golden_ref["input"].flatten(),
+        "B": golden_ref["input_b"].flatten(),
     }
-    output_buffers = {}
-
-    # Create A, B, C dictionaries from the partitioned buffers
-    for i in range(partition_N):
-        input_buffers[f"B_{i}"] = golden_ref["input_b"][i].flatten()
-        output_buffers[f"C_{i}"] = golden_ref["output"][i].flatten()
+    output_buffers = {
+        "C": golden_ref["output"].flatten(),
+    }
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
     )
