@@ -72,6 +72,8 @@ jobs:
         id: test
         continue-on-error: true
         uses: ./.github/actions/test
+        env:
+          PYTHONUNBUFFERED: "1"
         with:
           env_name: ci_env
           test_suite: "applications"
