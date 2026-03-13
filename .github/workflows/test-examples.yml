@@ -49,6 +49,25 @@ jobs:
           aie-opt --version
           echo "========================"
 
+      - name: Debug - Print resource limits and environment
+        shell: bash
+        run: |
+          echo "=== ulimit -a ==="
+          ulimit -a
+          echo ""
+          echo "=== /proc/self/limits ==="
+          cat /proc/self/limits
+          echo ""
+          echo "=== TTY check ==="
+          if [ -t 0 ]; then echo "stdin is a TTY"; else echo "stdin is NOT a TTY"; fi
+          if [ -t 1 ]; then echo "stdout is a TTY"; else echo "stdout is NOT a TTY"; fi
+          echo ""
+          echo "=== Environment variables ==="
+          env | grep -E "(PYTHON|MALLOC|OMP|MKL|STACK|LIMIT)" || true
+          echo ""
+          echo "=== Free memory ==="
+          free -h
+
       - name: Run examples
         id: test
         continue-on-error: true
