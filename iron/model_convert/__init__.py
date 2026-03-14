@@ -101,7 +101,8 @@ from .converter import (
 )
 
 # Architecture scanning and gap analysis
-from .architecture_scanner import (
+# NOTE: These are now imported from model_analysis (cross-platform, no AIE deps)
+from iron.model_analysis.architecture_scanner import (
     ArchitectureScanner,
     ModelCodeAnalyzer,
     ArchitectureRequirements,
@@ -113,7 +114,7 @@ from .architecture_scanner import (
     get_model_info_summary,
 )
 
-from .capability_registry import (
+from iron.model_analysis.capability_registry import (
     CapabilityRegistry,
     OperatorCapability,
     SupportLevel,
@@ -126,7 +127,7 @@ from .capability_registry import (
     analyze_model_support,
 )
 
-from .gap_analyzer import (
+from iron.model_analysis.gap_analyzer import (
     GapAnalyzer,
     GapItem,
     GapReport,
@@ -136,7 +137,7 @@ from .gap_analyzer import (
     quick_check,
 )
 
-from .extensibility import (
+from iron.model_analysis.extensibility import (
     CustomOperatorBase,
     OperatorRegistry,
     ArchitectureRegistry,
@@ -153,7 +154,7 @@ from .extensibility import (
 )
 
 # Transformers integration (direct HF library scanning)
-from .transformers_integration import (
+from iron.model_analysis.transformers_integration import (
     TransformersScanner,
     TransformerModelInfo,
     scan_model_from_transformers,
