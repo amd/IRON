@@ -497,11 +497,42 @@ def generate_gap_report(
     Returns:
         GapReport
     """
-    from .architecture_scanner import ArchitectureScanner
+    # Try Transformers integration first (works with HF Hub names)
+    try:
+        from .transformers_integration import scan_model_from_transformers
+        info = scan_model_from_transformers(model_path)
 
-    # Scan model
-    scanner = ArchitectureScanner(model_path)
-    requirements = scanner.scan()
+        # Convert TransformerModelInfo to ArchitectureRequirements for gap analysis
+        from .architecture_scanner import ArchitectureRequirements, LayerInfo, LayerCategory
+
+        requirements = ArchitectureRequirements(
+            model_name=info.architecture_name,
+            model_type=info.model_type,
+            discovered_layers=[
+                LayerInfo(
+                    name=layer['name'],
+                    category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
+                    module_path=layer.get('module', ''),
+                    is_supported=_is_layer_supported(layer['name'], layer['category']),
+                )
+                for layer in info.layer_classes
+            ] if info.layer_classes else [],
+            attention=AttentionInfo(
+                attention_type=info.attention_type,
+                num_heads=info.config_dict.get('num_attention_heads', 0),
+                num_kv_heads=info.config_dict.get('num_key_value_heads', info.config_dict.get('num_attention_heads', 0)),
+            ) if info.config_dict else None,
+            ffn=FFNInfo(
+                ffn_type=info.ffn_type,
+                hidden_dim=info.config_dict.get('intermediate_size', 0),
+            ) if info.config_dict else None,
+            has_custom_code=not info.is_known_architecture,
+        )
+    except Exception as e:
+        # Fall back to AST scanner for local files
+        from .architecture_scanner import ArchitectureScanner
+        scanner = ArchitectureScanner(model_path)
+        requirements = scanner.scan()
 
     # Analyze gaps
     analyzer = GapAnalyzer()
@@ -512,6 +543,30 @@ def generate_gap_report(
         report.save(output_path)
 
     return report
+
+
+def _is_layer_supported(name: str, category: str) -> bool:
+    """Check if a layer is likely supported"""
+    supported_patterns = [
+        'attention', 'norm', 'rmsnorm', 'layernorm', 'linear', 'dense',
+        'embedding', 'mlp', 'ffn', 'rms_norm', 'layer_norm'
+    ]
+    unsupported_patterns = ['moe', 'expert', 'mixtral', 'switch']
+
+    name_lower = name.lower()
+    category_lower = category.lower() if category else ''
+
+    # Check unsupported first
+    for pattern in unsupported_patterns:
+        if pattern in name_lower or pattern in category_lower:
+            return False
+
+    # Check supported
+    for pattern in supported_patterns:
+        if pattern in name_lower or pattern in category_lower:
+            return True
+
+    return True
 
 
 def print_gap_summary(model_path: str) -> str:
@@ -585,24 +640,62 @@ def quick_check(model_name: str) -> bool:
     """
     Quick check if a model is likely supported.
 
+    Uses Transformers library to fetch model config from HuggingFace Hub.
+
     Args:
         model_name: HF model name or path
 
     Returns:
         True if model is likely supported, False otherwise
     """
-    from .architecture_scanner import ArchitectureScanner
+    # Try Transformers integration first (works with HF Hub)
+    try:
+        from .transformers_integration import scan_model_from_transformers
+        info = scan_model_from_transformers(model_name)
 
-    scanner = ArchitectureScanner(model_name)
-    requirements = scanner.scan()
+        # Check if model type is known/supported
+        supported_types = ['llama', 'mistral', 'phi', 'gemma', 'qwen', 'qwen2']
+        model_type = info.model_type.lower()
 
-    # Quick heuristics
-    if requirements.model_type.lower() in ["llama", "mistral", "phi"]:
-        return True
+        # Check for MoE - needs custom implementation
+        if info.has_moe:
+            return False  # MoE models need custom operators
 
-    # Check support percentage
-    if requirements.discovered_layers:
-        supported = len([l for l in requirements.discovered_layers if l.is_supported])
+        # Check for sliding window - needs custom implementation
+        if info.has_sliding_window:
+            return False  # Sliding window needs custom operators
+
+        # Known architectures are likely supported
+        if model_type in supported_types:
+            return True
+
+        # Check architecture name
+        arch_name = info.architecture_name.lower()
+        for supported in supported_types:
+            if supported in arch_name:
+                return True
+
+        return info.is_known_architecture
+
+    except Exception as e:
+        # Fall back to AST scanner for local files
+        from .architecture_scanner import ArchitectureScanner
+        try:
+            scanner = ArchitectureScanner(model_name)
+            requirements = scanner.scan()
+
+            if requirements.model_type.lower() in ["llama", "mistral", "phi"]:
+                return True
+
+            # Check support percentage
+            if requirements.discovered_layers:
+                supported = len([l for l in requirements.discovered_layers if l.is_supported])
+                total = len(requirements.discovered_layers)
+                return (supported / total) >= 0.8
+
+            return False
+        except Exception:
+            return False
         if supported / len(requirements.discovered_layers) >= 0.8:
             return True
 
