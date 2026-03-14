@@ -515,15 +515,17 @@ def generate_gap_report(
     # Build discovered layers from config
     discovered_layers = []
     if info.layer_classes:
-        discovered_layers = [
-            LayerInfo(
-                name=layer['name'],
-                category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
-                module_path=layer.get('module', ''),
-                is_supported=_is_layer_supported(layer['name'], layer['category']),
+        for layer in info.layer_classes:
+            # Check if this is attention layer with sliding window
+            is_supported = _is_layer_supported(layer['name'], layer['category'], info)
+            discovered_layers.append(
+                LayerInfo(
+                    name=layer['name'],
+                    category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
+                    module_path=layer.get('module', ''),
+                    is_supported=is_supported,
+                )
             )
-            for layer in info.layer_classes
-        ]
     else:
         # Infer layers from config - create representative layers
         discovered_layers = _infer_layers_from_config(info)
@@ -559,7 +561,7 @@ def generate_gap_report(
     return report
 
 
-def _is_layer_supported(name: str, category: str) -> bool:
+def _is_layer_supported(name: str, category: str, info=None) -> bool:
     """Check if a layer is likely supported"""
     supported_patterns = [
         'attention', 'norm', 'rmsnorm', 'layernorm', 'linear', 'dense',
@@ -578,6 +580,9 @@ def _is_layer_supported(name: str, category: str) -> bool:
     # Check supported
     for pattern in supported_patterns:
         if pattern in name_lower or pattern in category_lower:
+            # Special case: attention layers with sliding window are not supported
+            if pattern == 'attention' and info and info.has_sliding_window:
+                return False
             return True
 
     return True
@@ -618,6 +623,15 @@ def _infer_layers_from_config(info) -> List[LayerInfo]:
             category=LayerCategory.UNKNOWN,
             module_path=f"transformers.models.{model_type}",
             is_supported=False,  # MoE not supported yet
+        ))
+
+    # Add sliding window attention if applicable
+    if info.has_sliding_window:
+        layers.append(LayerInfo(
+            name="SlidingWindowAttention",
+            category=LayerCategory.ATTENTION,
+            module_path=f"transformers.models.{model_type}",
+            is_supported=False,  # Sliding window not supported yet
         ))
 
     # Add positional encoding if RoPE
