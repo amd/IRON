@@ -29,12 +29,24 @@ print(f"Support: {report.support_percentage}%")
 # Quick check
 python -m iron.model_analysis check meta-llama/Llama-2-7b-hf
 
-# Scan model
+# Scan model architecture
 python -m iron.model_analysis scan Qwen/Qwen3.5-27B -o scan.json
 
-# Analyze compatibility
+# Analyze compatibility (gap analysis)
 python -m iron.model_analysis analyze Qwen/Qwen3.5-27B -o report.json
+
+# Generate operator specification (for creating custom operators)
+python -m iron.model_analysis spec mistralai/Mistral-7B-v0.1 \
+    --layer MistralAttention \
+    --output mistral_attn_spec.md \
+    --skeleton mistral_attn.py
 ```
+
+**What each command does:**
+- `check` → Quick yes/no compatibility check
+- `scan` → Shows WHAT the model has (architecture details)
+- `analyze` → Shows WHAT IRON CAN/CAN'T DO (gaps, support %, action items)
+- `spec` → Generates detailed spec for implementing a custom operator
 
 ## What This Does
 
@@ -118,12 +130,16 @@ FFN Type: moe
 
 ```
 iron/model_analysis/
-├── __init__.py              # Main exports (this file)
+├── __init__.py              # Main exports
+├── __main__.py              # CLI entry point
 ├── transformers_integration.py  # HF Transformers scanning (PREFERRED)
 ├── architecture_scanner.py  # AST scanning (fallback)
 ├── capability_registry.py   # Support tracking
 ├── gap_analyzer.py          # Gap analysis
-└── extensibility.py         # Plugin system
+├── operator_spec.py         # Operator specification generator
+├── extensibility.py         # Plugin system
+├── README.md                # This file
+└── CREATING_OPERATORS.md    # Guide for creating custom operators
 ```
 
 ## Relationship to model_convert
@@ -139,7 +155,9 @@ iron/model_analysis/          iron/model_convert/
 **Workflow:**
 1. Use `model_analysis` on Windows/macOS to analyze models
 2. Identify gaps and requirements
-3. Move to Linux with NPU for actual conversion using `model_convert`
+3. For unsupported layers, generate specs with `spec` command
+4. Implement custom operators (see CREATING_OPERATORS.md)
+5. Move to Linux with NPU for actual conversion using `model_convert`
 
 ## SLC Principles
 
