@@ -34,7 +34,7 @@ def cmd_check(args):
 
 def cmd_scan(args):
     """Scan model architecture"""
-    from . import scan_model_from_transformers, get_architecture_summary
+    from . import scan_model_from_transformers
 
     print(f"Scanning: {args.model}")
     print("-" * 60)
@@ -42,7 +42,30 @@ def cmd_scan(args):
     try:
         info = scan_model_from_transformers(args.model, trust_remote_code=args.trust_remote_code)
 
-        print(get_architecture_summary(info.architecture_name))
+        # Print summary directly from info object
+        lines = [
+            f"Architecture Summary: {info.architecture_name}",
+            "=" * 60,
+            f"Model Type: {info.model_type}",
+            f"Config Class: {info.config_class}",
+            "",
+            "Architecture Details:",
+            f"  Hidden Size: {info.config_dict.get('hidden_size', 'N/A')}",
+            f"  Attention Heads: {info.config_dict.get('num_attention_heads', 'N/A')}",
+            f"  KV Heads: {info.config_dict.get('num_key_value_heads', 'N/A')}",
+            f"  Layers: {info.config_dict.get('num_hidden_layers', 'N/A')}",
+            f"  Intermediate Size: {info.config_dict.get('intermediate_size', 'N/A')}",
+            "",
+            "Special Features:",
+            f"  Sliding Window: {'Yes' if info.has_sliding_window else 'No'}",
+            f"  MoE: {'Yes' if info.has_moe else 'No'}",
+            f"  RoPE: {'Yes' if info.has_rope else 'No'}",
+            f"  QK Norm: {'Yes' if info.has_qk_norm else 'No'}",
+            "",
+            f"Attention Type: {info.attention_type}",
+            f"FFN Type: {info.ffn_type}",
+        ]
+        print("\n".join(lines))
 
         if args.output:
             output_path = Path(args.output)
