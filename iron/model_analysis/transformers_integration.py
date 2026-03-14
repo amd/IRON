@@ -24,15 +24,30 @@ logger = logging.getLogger(__name__)
 
 # Mapping of architecture names to transformers module paths
 ARCHITECTURE_MODULE_MAP = {
+    # Llama family
     "LlamaForCausalLM": "transformers.models.llama",
+
+    # Mistral family
     "MistralForCausalLM": "transformers.models.mistral",
     "MixtralForCausalLM": "transformers.models.mixtral",
+
+    # Qwen family
     "Qwen2ForCausalLM": "transformers.models.qwen2",
+    "Qwen3ForCausalLM": "transformers.models.qwen3",
+    "Qwen3MoeForCausalLM": "transformers.models.qwen3_moe",
+    "Qwen3_5ForCausalLM": "transformers.models.qwen3_5",
+    "Qwen3_5ForConditionalGeneration": "transformers.models.qwen3_5",
     "Qwen3_5_MoEForCausalLM": "transformers.models.qwen3_5_moe",
     "Qwen3OmniMoeForCausalLM": "transformers.models.qwen3_omni_moe",
+
+    # Gemma family
     "GemmaForCausalLM": "transformers.models.gemma",
+
+    # Phi family
     "PhiForCausalLM": "transformers.models.phi",
     "Phi3ForCausalLM": "transformers.models.phi3",
+
+    # Other architectures
     "GPT2LMHeadModel": "transformers.models.gpt2",
     "OPTForCausalLM": "transformers.models.opt",
     "FalconForCausalLM": "transformers.models.falcon",
@@ -156,17 +171,23 @@ class TransformersScanner:
     ) -> TransformerModelInfo:
         """Extract detailed info from a Transformers config object"""
 
+        # Handle multi-modal models (e.g., Qwen3.5) with sub-configs
+        # Store reference to original config for architecture name
+        original_config = config
+        if hasattr(config, "text_config") and config.text_config is not None:
+            config = config.text_config
+
         # Get architecture name
-        architectures = getattr(config, "architectures", [])
+        architectures = getattr(original_config, "architectures", [])
         arch_name = architectures[0] if architectures else "Unknown"
 
         # Get model type
-        model_type = getattr(config, "model_type", "unknown")
+        model_type = getattr(original_config, "model_type", "unknown")
 
         # Find the transformers module for this architecture
         modeling_module = self._get_modeling_module(arch_name)
 
-        # Extract config values
+        # Extract config values (uses the possibly-replaced config)
         config_dict = self._extract_config_values(config)
 
         # Create info object
@@ -180,7 +201,7 @@ class TransformersScanner:
 
         # Detect special features
         info.has_sliding_window = self._detect_sliding_window(config)
-        info.has_moe = self._detect_moe(config)
+        info.has_moe = self._detect_moe(original_config)  # Check original config for MoE
         info.has_rope = self._detect_rope(config)
         info.has_qk_norm = self._detect_qk_norm(config)
         info.attention_type = self._determine_attention_type(config)
@@ -198,6 +219,11 @@ class TransformersScanner:
     def _extract_config_values(self, config) -> Dict[str, Any]:
         """Extract relevant config values"""
         values = {}
+
+        # Handle multi-modal models (e.g., Qwen3.5) with sub-configs
+        # The text config contains the LLM parameters we need
+        if hasattr(config, "text_config") and config.text_config is not None:
+            config = config.text_config
 
         # Basic architecture
         for attr in [
@@ -260,7 +286,7 @@ class TransformersScanner:
             if "moe" in name.lower() or "MoE" in name:
                 return True
 
-        # Check for expert-related config
+        # Check for expert-related config in main config
         if hasattr(config, "num_experts") and config.num_experts > 1:
             return True
 
@@ -271,6 +297,17 @@ class TransformersScanner:
         model_type = getattr(config, "model_type", "")
         if "moe" in model_type.lower():
             return True
+
+        # Check sub-configs (for multi-modal models like Qwen3.5)
+        if hasattr(config, "text_config") and config.text_config is not None:
+            text_cfg = config.text_config
+            if hasattr(text_cfg, "num_experts") and text_cfg.num_experts > 1:
+                return True
+            if hasattr(text_cfg, "num_experts_per_tok"):
+                return True
+            text_model_type = getattr(text_cfg, "model_type", "")
+            if "moe" in text_model_type.lower():
+                return True
 
         return False
 
