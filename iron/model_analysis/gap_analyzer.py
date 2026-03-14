@@ -490,49 +490,63 @@ def generate_gap_report(
     """
     Convenience function to generate a gap report for a model.
 
+    Uses HuggingFace Transformers library to analyze models from HF Hub.
+    For local models, ensure they are cached by Transformers first.
+
     Args:
-        model_path: Path to model or HF model name
+        model_path: HuggingFace model name (e.g., "meta-llama/Llama-2-7b-hf")
         output_path: Optional path to save JSON report
 
     Returns:
         GapReport
+
+    Raises:
+        Exception: If model cannot be loaded via Transformers
     """
-    # Try Transformers integration first (works with HF Hub names)
-    try:
-        from .transformers_integration import scan_model_from_transformers
-        info = scan_model_from_transformers(model_path)
+    from .architecture_scanner import NormType
 
-        # Convert TransformerModelInfo to ArchitectureRequirements for gap analysis
-        from .architecture_scanner import ArchitectureRequirements, LayerInfo, LayerCategory
+    # Use Transformers integration (works with HF Hub model names)
+    from .transformers_integration import scan_model_from_transformers
+    info = scan_model_from_transformers(model_path)
 
-        requirements = ArchitectureRequirements(
-            model_name=info.architecture_name,
-            model_type=info.model_type,
-            discovered_layers=[
-                LayerInfo(
-                    name=layer['name'],
-                    category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
-                    module_path=layer.get('module', ''),
-                    is_supported=_is_layer_supported(layer['name'], layer['category']),
-                )
-                for layer in info.layer_classes
-            ] if info.layer_classes else [],
-            attention=AttentionInfo(
-                attention_type=info.attention_type,
-                num_heads=info.config_dict.get('num_attention_heads', 0),
-                num_kv_heads=info.config_dict.get('num_key_value_heads', info.config_dict.get('num_attention_heads', 0)),
-            ) if info.config_dict else None,
-            ffn=FFNInfo(
-                ffn_type=info.ffn_type,
-                hidden_dim=info.config_dict.get('intermediate_size', 0),
-            ) if info.config_dict else None,
-            has_custom_code=not info.is_known_architecture,
-        )
-    except Exception as e:
-        # Fall back to AST scanner for local files
-        from .architecture_scanner import ArchitectureScanner
-        scanner = ArchitectureScanner(model_path)
-        requirements = scanner.scan()
+    # Convert TransformerModelInfo to ArchitectureRequirements for gap analysis
+    from .architecture_scanner import ArchitectureRequirements, LayerInfo, LayerCategory
+
+    # Build discovered layers from config
+    discovered_layers = []
+    if info.layer_classes:
+        discovered_layers = [
+            LayerInfo(
+                name=layer['name'],
+                category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
+                module_path=layer.get('module', ''),
+                is_supported=_is_layer_supported(layer['name'], layer['category']),
+            )
+            for layer in info.layer_classes
+        ]
+    else:
+        # Infer layers from config - create representative layers
+        discovered_layers = _infer_layers_from_config(info)
+
+    requirements = ArchitectureRequirements(
+        model_name=model_path,
+        model_type=info.model_type,
+        architectures=[info.architecture_name],
+        hidden_size=info.config_dict.get('hidden_size', 0),
+        vocab_size=info.config_dict.get('vocab_size', 0),
+        max_position_embeddings=info.config_dict.get('max_position_embeddings', 0),
+        num_hidden_layers=info.config_dict.get('num_hidden_layers', 0),
+        discovered_layers=discovered_layers,
+        attention=AttentionInfo(
+            attention_type=info.attention_type,
+            num_heads=info.config_dict.get('num_attention_heads', 0),
+            num_kv_heads=info.config_dict.get('num_key_value_heads', info.config_dict.get('num_attention_heads', 0)),
+        ) if info.config_dict else None,
+        ffn=FFNInfo(
+            ffn_type=info.ffn_type,
+            intermediate_size=info.config_dict.get('intermediate_size', 0),
+        ) if info.config_dict else None,
+    )
 
     # Analyze gaps
     analyzer = GapAnalyzer()
@@ -567,6 +581,55 @@ def _is_layer_supported(name: str, category: str) -> bool:
             return True
 
     return True
+
+
+def _infer_layers_from_config(info) -> List[LayerInfo]:
+    """
+    Infer representative layers from config data when layer_classes is empty.
+
+    This creates a minimal set of layers based on the model type and features.
+    """
+    from .architecture_scanner import LayerInfo, LayerCategory
+
+    layers = []
+    model_type = info.model_type.lower()
+
+    # Standard transformer layers that most models have
+    standard_layers = [
+        ("Embedding", LayerCategory.EMBEDDING),
+        ("Attention", LayerCategory.ATTENTION),
+        ("RMSNorm", LayerCategory.NORMALIZATION),
+        ("MLP", LayerCategory.LINEAR),
+    ]
+
+    # Add standard layers
+    for name, category in standard_layers:
+        layers.append(LayerInfo(
+            name=name,
+            category=category,
+            module_path=f"transformers.models.{model_type}",
+            is_supported=True,
+        ))
+
+    # Add MoE layer if applicable
+    if info.has_moe:
+        layers.append(LayerInfo(
+            name="MoESparseTopK",
+            category=LayerCategory.UNKNOWN,
+            module_path=f"transformers.models.{model_type}",
+            is_supported=False,  # MoE not supported yet
+        ))
+
+    # Add positional encoding if RoPE
+    if info.has_rope:
+        layers.append(LayerInfo(
+            name="RotaryEmbedding",
+            category=LayerCategory.POSITIONAL,
+            module_path=f"transformers.models.{model_type}",
+            is_supported=True,  # RoPE is supported
+        ))
+
+    return layers
 
 
 def print_gap_summary(model_path: str) -> str:
@@ -643,12 +706,11 @@ def quick_check(model_name: str) -> bool:
     Uses Transformers library to fetch model config from HuggingFace Hub.
 
     Args:
-        model_name: HF model name or path
+        model_name: HF model name (e.g., "meta-llama/Llama-2-7b-hf")
 
     Returns:
         True if model is likely supported, False otherwise
     """
-    # Try Transformers integration first (works with HF Hub)
     try:
         from .transformers_integration import scan_model_from_transformers
         info = scan_model_from_transformers(model_name)
@@ -678,25 +740,5 @@ def quick_check(model_name: str) -> bool:
         return info.is_known_architecture
 
     except Exception as e:
-        # Fall back to AST scanner for local files
-        from .architecture_scanner import ArchitectureScanner
-        try:
-            scanner = ArchitectureScanner(model_name)
-            requirements = scanner.scan()
-
-            if requirements.model_type.lower() in ["llama", "mistral", "phi"]:
-                return True
-
-            # Check support percentage
-            if requirements.discovered_layers:
-                supported = len([l for l in requirements.discovered_layers if l.is_supported])
-                total = len(requirements.discovered_layers)
-                return (supported / total) >= 0.8
-
-            return False
-        except Exception:
-            return False
-        if supported / len(requirements.discovered_layers) >= 0.8:
-            return True
-
-    return False
+        logger.warning(f"Could not analyze model {model_name}: {e}")
+        return False
