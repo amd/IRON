@@ -81,6 +81,15 @@ from .extensibility import (
     quick_register_architecture,
 )
 
+from .operator_spec import (
+    OperatorSpec,
+    OperatorSpecGenerator,
+    TensorSpec,
+    HyperparameterSpec,
+    generate_operator_spec,
+    save_operator_spec,
+)
+
 
 # Convenience functions
 
@@ -190,4 +199,12 @@ __all__ = [
     "invoke_extension_point",
     "quick_register_operator",
     "quick_register_architecture",
+
+    # Operator specification
+    "OperatorSpec",
+    "OperatorSpecGenerator",
+    "TensorSpec",
+    "HyperparameterSpec",
+    "generate_operator_spec",
+    "save_operator_spec",
 ]

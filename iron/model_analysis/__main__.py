@@ -132,6 +132,45 @@ def cmd_analyze(args):
     return 0
 
 
+def cmd_spec(args):
+    """Generate operator specification for a layer"""
+    from .operator_spec import generate_operator_spec, save_operator_spec
+
+    print(f"Generating spec for: {args.layer} in {args.model}")
+    print("-" * 60)
+
+    try:
+        # Generate spec
+        spec = generate_operator_spec(args.model, args.layer, trust_remote_code=args.trust_remote_code)
+
+        # Output
+        if args.output:
+            save_operator_spec(spec, args.output)
+            print(f"\nSpec saved to: {args.output}")
+        else:
+            print()
+            print(spec.to_markdown())
+
+        # Generate skeleton if requested
+        if args.skeleton:
+            from .extensibility import generate_operator_skeleton
+            skeleton = generate_operator_skeleton(args.layer)
+            skeleton_path = Path(args.skeleton)
+            skeleton_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(skeleton_path, "w") as f:
+                f.write(skeleton)
+            print(f"\nOperator skeleton saved to: {skeleton_path}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="python -m iron.model_analysis",
@@ -159,6 +198,15 @@ def main():
     analyze_p.add_argument("model", help="HuggingFace model name or path")
     analyze_p.add_argument("--output", "-o", help="Output file (JSON)")
     analyze_p.set_defaults(func=cmd_analyze)
+
+    # spec - generate operator specification
+    spec_p = subparsers.add_parser("spec", help="Generate operator specification for a layer")
+    spec_p.add_argument("model", help="HuggingFace model name")
+    spec_p.add_argument("--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)")
+    spec_p.add_argument("--output", "-o", help="Output file (markdown)")
+    spec_p.add_argument("--skeleton", "-s", help="Generate operator skeleton code to file")
+    spec_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    spec_p.set_defaults(func=cmd_spec)
 
     args = parser.parse_args()
 
