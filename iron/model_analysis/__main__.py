@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+IRON Model Analysis CLI
+
+Usage:
+    python -m iron.model_analysis check <model>
+    python -m iron.model_analysis scan <model>
+    python -m iron.model_analysis analyze <model>
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from datetime import datetime
+
+
+def cmd_check(args):
+    """Quick check if model is supported"""
+    from . import quick_check
+
+    result = quick_check(args.model)
+
+    if result:
+        print(f"[+] {args.model}: Likely SUPPORTED")
+        return 0
+    else:
+        print(f"[?] {args.model}: Needs detailed analysis")
+        print("\nRun: python -m iron.model_analysis analyze <model>")
+        return 1
+
+
+def cmd_scan(args):
+    """Scan model architecture"""
+    from . import scan_model_from_transformers, get_architecture_summary
+
+    print(f"Scanning: {args.model}")
+    print("-" * 60)
+
+    try:
+        info = scan_model_from_transformers(args.model, trust_remote_code=args.trust_remote_code)
+
+        print(get_architecture_summary(info.architecture_name))
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            report = {
+                "model_name": info.architecture_name,
+                "model_type": info.model_type,
+                "config_dict": info.config_dict,
+                "layer_classes": info.layer_classes,
+                "special_features": {
+                    "has_sliding_window": info.has_sliding_window,
+                    "has_moe": info.has_moe,
+                    "has_rope": info.has_rope,
+                    "has_qk_norm": info.has_qk_norm,
+                    "attention_type": info.attention_type,
+                    "ffn_type": info.ffn_type,
+                },
+            }
+
+            with open(output_path, "w") as f:
+                json.dump(report, f, indent=2)
+
+            print(f"\nSaved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    return 0
+
+
+def cmd_analyze(args):
+    """Analyze model compatibility"""
+    from . import generate_gap_report, print_gap_summary
+
+    print(f"Analyzing: {args.model}")
+    print("-" * 60)
+
+    try:
+        # Generate report
+        report = generate_gap_report(args.model)
+
+        # Print summary
+        print(print_gap_summary(args.model))
+
+        # Save if requested
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            report.save(output_path)
+            print(f"\nReport saved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="python -m iron.model_analysis",
+        description="IRON Model Analysis - Cross-platform model compatibility checker",
+    )
+
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # check
+    check_p = subparsers.add_parser("check", help="Quick compatibility check")
+    check_p.add_argument("model", help="HuggingFace model name")
+    check_p.set_defaults(func=cmd_check)
+
+    # scan
+    scan_p = subparsers.add_parser("scan", help="Scan model architecture")
+    scan_p.add_argument("model", help="HuggingFace model name or path")
+    scan_p.add_argument("--output", "-o", help="Output file (JSON)")
+    scan_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    scan_p.set_defaults(func=cmd_scan)
+
+    # analyze
+    analyze_p = subparsers.add_parser("analyze", help="Analyze compatibility")
+    analyze_p.add_argument("model", help="HuggingFace model name or path")
+    analyze_p.add_argument("--output", "-o", help="Output file (JSON)")
+    analyze_p.set_defaults(func=cmd_analyze)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
