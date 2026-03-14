@@ -66,10 +66,12 @@ iron/
 │   ├── capability_registry.py       # Support tracking
 │   ├── gap_analyzer.py              # Gap analysis
 │   ├── extensibility.py             # Plugin system
-│   └── README.md
+│   ├── operator_spec.py             # Operator specification generator
+│   ├── README.md
+│   └── CREATING_OPERATORS.md        # Guide for custom operators
 │
 └── model_convert/           # Linux NPU conversion (REQUIRES AIE)
-    ├── __init__.py          # Main exports
+    ├── __init__.py          # Main exports (re-exports model_analysis)
     ├── __main__.py          # Module entry point
     ├── cli.py               # Full conversion CLI
     ├── converter.py         # HuggingFaceConverter
@@ -79,16 +81,13 @@ iron/
     ├── operator_factory.py  # Operator creation (AIE)
     ├── layer_builder.py     # Layer building (AIE)
     ├── model_assembler.py   # Model assembly (AIE)
-    ├── architecture_scanner.py      # Also available here
-    ├── capability_registry.py       # Also available here
-    ├── gap_analyzer.py              # Also available here
-    ├── extensibility.py             # Also available here
-    ├── transformers_integration.py  # Also available here
     ├── setup.py
     ├── usage_example.py
     ├── README.md
     └── archive/             # Deprecated files
 ```
+
+**Note:** `model_convert` re-exports all `model_analysis` modules in its `__init__.py` for convenience, but the actual implementation lives in `model_analysis/`. This avoids code duplication.
 
 ---
 

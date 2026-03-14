@@ -63,6 +63,28 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 > Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
 
+## Model Conversion Tools
+
+For converting HuggingFace models (Llama, Mistral, Qwen, Gemma, etc.) to IRON NPU format:
+
+| Tool | Platform | Purpose |
+|------|----------|---------|
+| [`iron.model_analysis`](./iron/model_analysis/README.md) | Windows, macOS, Linux | **Analysis** - Scan models, detect features, gap analysis |
+| [`iron.model_convert`](./iron/model_convert/README.md) | Linux (NPU only) | **Conversion** - Full model conversion to NPU format |
+
+**Quick workflow:**
+```bash
+# 1. Analyze any model (works on any platform)
+python -m iron.model_analysis check meta-llama/Llama-2-7b-hf
+python -m iron.model_analysis scan Qwen/Qwen3.5-27B -o scan.json
+python -m iron.model_analysis analyze Qwen/Qwen3.5-27B -o report.json
+
+# 2. Convert (Linux with NPU only)
+python -m iron.model_convert convert meta-llama/Llama-2-7b-hf -o ./iron_model
+```
+
+**Creating custom operators for new architectures?** See the complete guide: [`CREATING_OPERATORS.md`](./iron/model_analysis/CREATING_OPERATORS.md)
+
 #### 📌 Legend
 
 | Status | Meaning            |
