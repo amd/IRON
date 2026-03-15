@@ -55,7 +55,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Leaky RELU](./aie_kernels/aie2p/leaky_relu.cc) (WIP) | Leaky RELU kernel | bfloat16 | | ✓ | ⚪ | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
 | [GELU](./aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
 | [LayerNorm](./aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm/](./iron/operators/layer_norm/) |
-| [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
+| [Convolution](./aie_kernels/aie2/conv2d.cc) | Conv2D (standard, depthwise, pointwise) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/conv2d/](./iron/operators/conv2d/) |
 | [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
 | [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
 | [Tanh](./aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh/](./iron/operators/tanh/) |

@@ -15,6 +15,7 @@ from .mha.op import AIEMHA
 from .relu.op import AIEReLU
 from .reduction.op import AIEReduction
 from .rms_norm.op import AIERMSNorm
+from .conv2d.op import AIEConv2d
 from .rope.op import AIERope
 from .sigmoid.op import AIESigmoid
 from .silu.op import AIESiLU
