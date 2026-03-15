@@ -285,8 +285,8 @@ All Conv3D implementation files have been verified:
 | `iron/operators/conv3d/reference.py` | ✅ | Uses torch.nn.functional.conv3d |
 | `iron/operators/conv3d/test.py` | ✅ | Parametrized tests for all configurations |
 | `iron/operators/conv3d/__init__.py` | ✅ | Exports AIEConv3d |
-| `aie_kernels/aie2/conv3d.cc` | ✅ | vec_factor=8, 5 kernel variants (incl. large_kernel) |
-| `aie_kernels/aie2p/conv3d.cc` | ✅ | vec_factor=16, 5 kernel variants (incl. large_kernel) |
+| `aie_kernels/aie2/conv3d.cc` | ✅ | vec_factor=8, 5 kernel variants (incl. scalar, large_kernel) |
+| `aie_kernels/aie2p/conv3d.cc` | ✅ | vec_factor=16, 5 kernel variants (incl. scalar, large_kernel) |
 
 ---
 
@@ -316,12 +316,12 @@ The Conv3D operator has been fully implemented and verified for both AIE2 (NPU) 
    - Semantic video convolution (standard 5D tensors)
    - Compute primitive for text models (via shape manipulation)
 
-2. **Kernel Variants** (both AIE2 and AIE2P):
+2. **Kernel Variants** (both AIE2 and AIE2P - complete parity):
    - `conv3d_bf16_vector` - Standard vectorized convolution
+   - `conv3d_bf16_scalar` - Scalar reference implementation (both architectures)
    - `depthwise_conv3d_bf16_vector` - Channel-wise convolution
    - `pointwise_conv3d_bf16_vector` - 1x1x1 convolution (Linear layer equivalent)
    - `conv3d_bf16_large_kernel` - Optimized for large kernels
-   - `conv3d_bf16_scalar` - Scalar reference (AIE2 only)
 
 3. **Architecture Support**:
    - AIE2 (NPU): 4x4 array, vec_factor=8
