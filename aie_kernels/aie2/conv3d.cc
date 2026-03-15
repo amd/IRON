@@ -274,6 +274,102 @@ void conv3d_bf16_vector(
 }
 
 /**
+ * 3D Convolution Kernel - Optimized for large kernels
+ * Uses hierarchical accumulation for better performance on AIE2
+ *
+ * @param input - Input tensor [N, in_channels, in_t, in_h, in_w]
+ * @param weight - Weight tensor [out_channels, in_channels/groups, kernel_t, kernel_h, kernel_w]
+ * @param output - Output tensor [N, out_channels, out_t, out_h, out_w]
+ * @param bias - Optional bias tensor [out_channels]
+ */
+void conv3d_bf16_large_kernel(
+    bfloat16* input,
+    bfloat16* weight,
+    bfloat16* output,
+    bfloat16* bias,
+    int N,
+    int in_channels,
+    int in_t,
+    int in_h,
+    int in_w,
+    int out_channels,
+    int out_t,
+    int out_h,
+    int out_w,
+    int kernel_t,
+    int kernel_h,
+    int kernel_w,
+    int stride_t,
+    int stride_h,
+    int stride_w,
+    int pad_t,
+    int pad_h,
+    int pad_w,
+    int groups
+) {
+    int channels_per_group = in_channels / groups;
+    int out_channels_per_group = out_channels / groups;
+    int kernel_size = kernel_t * kernel_h * kernel_w;
+
+    // Precompute inverse kernel size for multiplication instead of division
+    float kernel_size_inv = 1.0f / static_cast<float>(kernel_size);
+
+    event0();
+
+    for (int n = 0; n < N; n++) {
+        for (int oc = 0; oc < out_channels; oc++) {
+            int group_id = oc / out_channels_per_group;
+            int ic_start = group_id * channels_per_group;
+
+            bfloat16* output_ptr = output + ((n * out_channels + oc) * out_t * out_h * out_w);
+
+            for (int ot = 0; ot < out_t; ot++) {
+                for (int oh = 0; oh < out_h; oh++) {
+                    for (int ow = 0; ow < out_w; ow++) {
+                        int it_start = ot * stride_t - pad_t;
+                        int ih_start = oh * stride_h - pad_h;
+                        int iw_start = ow * stride_w - pad_w;
+
+                        bfloat16 acc = bfloat16(0.0f);
+
+                        for (int kt = 0; kt < kernel_t; kt++) {
+                            for (int kh = 0; kh < kernel_h; kh++) {
+                                for (int kw = 0; kw < kernel_w; kw++) {
+                                    int it = it_start + kt;
+                                    int ih = ih_start + kh;
+                                    int iw = iw_start + kw;
+
+                                    if (it >= 0 && it < in_t &&
+                                        ih >= 0 && ih < in_h &&
+                                        iw >= 0 && iw < in_w) {
+                                        for (int ic = 0; ic < channels_per_group; ic++) {
+                                            int ic_global = ic_start + ic;
+                                            int input_idx = (((n * in_channels + ic_global) * in_t + it) * in_h + ih) * in_w + iw;
+                                            int weight_idx = ((((oc * channels_per_group + ic) * kernel_t + kt) * kernel_h + kh) * kernel_w + kw);
+
+                                            acc += input[input_idx] * weight[weight_idx];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (bias != NULL) {
+                            acc += bias[oc];
+                        }
+
+                        int out_idx = (ot * out_h + oh) * out_w + ow;
+                        output_ptr[out_idx] = acc;
+                    }
+                }
+            }
+        }
+    }
+
+    event1();
+}
+
+/**
  * Depthwise 3D Convolution Kernel - Specialized for depthwise conv
  * Each output channel depends only on one input channel
  *
@@ -430,6 +526,16 @@ void conv3d_bf16_scalar(
 );
 
 void conv3d_bf16_vector(
+    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
+    int N, int in_channels, int in_t, int in_h, int in_w,
+    int out_channels, int out_t, int out_h, int out_w,
+    int kernel_t, int kernel_h, int kernel_w,
+    int stride_t, int stride_h, int stride_w,
+    int pad_t, int pad_h, int pad_w,
+    int groups
+);
+
+void conv3d_bf16_large_kernel(
     bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
     int N, int in_channels, int in_t, int in_h, int in_w,
     int out_channels, int out_t, int out_h, int out_w,
