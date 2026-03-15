@@ -90,6 +90,12 @@ from .operator_spec import (
     save_operator_spec,
 )
 
+from .generate_master_doc import (
+    generate_master_document,
+    generate_skeleton_code,
+    get_operator_base_class,
+)
+
 
 # Convenience functions
 
@@ -207,4 +213,9 @@ __all__ = [
     "HyperparameterSpec",
     "generate_operator_spec",
     "save_operator_spec",
+
+    # Master document generator
+    "generate_master_document",
+    "generate_skeleton_code",
+    "get_operator_base_class",
 ]
