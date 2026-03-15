@@ -49,7 +49,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Copy](./aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/mem_copy/](./iron/operators/mem_copy/) |
 | [Transpose](./aie_kernels/generic/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose/](./iron/operators/transpose/) |
 | [AXPY](./aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy/](./iron/operators/axpy/) |
-| [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
+| [Reduction](./aie_kernels/aie2/reduction.cc) | Reduction (sum, max, min) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/reduction/](./iron/operators/reduction/) |
 | [Dequant](./aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant/](./iron/operators/dequant/) |
 | [RELU](./aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu/](./iron/operators/relu/) |
 | [Leaky RELU](./aie_kernels/aie2p/leaky_relu.cc) (WIP) | Leaky RELU kernel | bfloat16 | | ✓ | ⚪ | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
