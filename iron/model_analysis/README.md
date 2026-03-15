@@ -48,6 +48,23 @@ python -m iron.model_analysis spec mistralai/Mistral-7B-v0.1 \
 - `analyze` → Shows WHAT IRON CAN/CAN'T DO (gaps, support %, action items)
 - `spec` → Generates detailed spec for implementing a custom operator
 
+## Creating Custom Operators
+
+**Complete guide:** [`CREATING_OPERATORS.md`](CREATING_OPERATORS.md)
+
+**Data sources reference:** [`DATA_SOURCES_GUIDE.md`](DATA_SOURCES_GUIDE.md)
+
+The workflow for creating custom NPU operators:
+
+```
+1. ANALYZE    → python -m iron.model_analysis analyze <model>
+2. SPEC       → python -m iron.model_analysis spec <model> --layer <LayerName>
+3. SKELETON   → Add --skeleton operator_name.py to spec command
+4. IMPLEMENT  → Fill in AIE logic (see DATA_SOURCES_GUIDE.md for complete data flow)
+5. REGISTER   → Use @OperatorRegistry.register() decorator
+6. TEST       → Verify against Transformers reference
+```
+
 ## What This Does
 
 | Feature | Description |
@@ -139,7 +156,8 @@ iron/model_analysis/
 ├── operator_spec.py         # Operator specification generator
 ├── extensibility.py         # Plugin system
 ├── README.md                # This file
-└── CREATING_OPERATORS.md    # Guide for creating custom operators
+├── CREATING_OPERATORS.md    # Guide for creating custom operators
+└── DATA_SOURCES_GUIDE.md    # Complete data extraction reference
 ```
 
 ## Relationship to model_convert

@@ -4,6 +4,9 @@
 
 This guide shows you how to create new IRON operators for unsupported layers in new model architectures.
 
+**Need to know where ALL the data comes from?** See the comprehensive reference:
+[`DATA_SOURCES_GUIDE.md`](DATA_SOURCES_GUIDE.md) - Complete walkthrough of extracting hyperparameters, signatures, computation graphs, and AIE/MLIR patterns.
+
 ---
 
 ## The Complete Workflow
