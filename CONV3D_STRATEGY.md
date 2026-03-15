@@ -19,13 +19,13 @@ This document captures key insights about repurposing convolution operators (Con
 | MaxPool2D | ✅ Complete | ✓ | ✓ | `iron/operators/maxpool/` |
 | AveragePool2D | ✅ Complete | ✓ | ✓ | `iron/operators/avgpool/` |
 | Reduction | ✅ Complete | ✓ | ✓ | `iron/operators/reduction/` |
-| **Conv3D** | ❌ **TODO** | - | - | `iron/operators/conv3d/` |
+| **Conv3D** | ✅ **Complete** | ✓ | ✓ | `iron/operators/conv3d/` |
 
 ### Original Request Completion Status
 
 User's original list: **"CONVOLUTION, MAX POOL, AVERAGE POOL AND Reduction"**
 
-- ✅ Convolution (Conv2D only - Conv3D PENDING)
+- ✅ Convolution (Conv2D + Conv3D)
 - ✅ Max Pool (2D)
 - ✅ Average Pool (2D)
 - ✅ Reduction (sum, mean, max, min)
@@ -265,12 +265,28 @@ Once Conv3D is complete, consider these extensions:
 
 ## 8. Verification Checklist
 
-- [ ] Conv3D op.py follows Conv2D pattern
-- [ ] design.py generates correct MLIR for 5D tensors
-- [ ] Kernels use correct vec_factor per architecture
-- [ ] Test suite covers both video and text use cases
-- [ ] README.md updated with Conv3D entry
-- [ ] __init__.py exports AIEConv3d
+- [x] Conv3D op.py follows Conv2D pattern
+- [x] design.py generates correct MLIR for 5D tensors
+- [x] Kernels use correct vec_factor per architecture (8 for AIE2, 16 for AIE2P)
+- [x] Test suite covers both video and text use cases
+- [x] README.md updated with Conv3D entry
+- [x] __init__.py exports AIEConv3d
+- [x] Kernel files created for both AIE2 and AIE2P
+- [x] Syntax errors fixed and verified
+
+### Verification Summary (Completed)
+
+All Conv3D implementation files have been verified:
+
+| File | Status | Notes |
+|------|--------|-------|
+| `iron/operators/conv3d/op.py` | ✅ | Correct buffer calculations, kernel selection logic |
+| `iron/operators/conv3d/design.py` | ✅ | 21 parameters match C++ signatures |
+| `iron/operators/conv3d/reference.py` | ✅ | Uses torch.nn.functional.conv3d |
+| `iron/operators/conv3d/test.py` | ✅ | Parametrized tests for all configurations |
+| `iron/operators/conv3d/__init__.py` | ✅ | Exports AIEConv3d |
+| `aie_kernels/aie2/conv3d.cc` | ✅ | vec_factor=8, 4 kernel variants |
+| `aie_kernels/aie2p/conv3d.cc` | ✅ | vec_factor=16, 5 kernel variants (incl. large_kernel) |
 
 ---
 
@@ -278,6 +294,7 @@ Once Conv3D is complete, consider these extensions:
 
 ### Internal Documentation
 - [`iron/operators/conv2d/`](./iron/operators/conv2d/) - Conv2D implementation reference
+- [`iron/operators/conv3d/`](./iron/operators/conv3d/) - Conv3D implementation (complete)
 - [`iron/operators/reduction/`](./iron/operators/reduction/) - Reduction implementation
 - [README.md](./README.md) - Operator dashboard
 
@@ -286,6 +303,43 @@ Once Conv3D is complete, consider these extensions:
 - Qualcomm Hexagon 5D/6D tiled layouts
 - Huawei Ascend 5D fractal format
 - Grouped Query Attention (GQA) in Llama 3, Mistral
+
+---
+
+## 10. Implementation Complete - Summary
+
+The Conv3D operator has been fully implemented and verified for both AIE2 (NPU) and AIE2P (NPU2) architectures.
+
+### Key Achievements
+
+1. **Dual-Purpose Design**: Conv3D supports both:
+   - Semantic video convolution (standard 5D tensors)
+   - Compute primitive for text models (via shape manipulation)
+
+2. **Kernel Variants**:
+   - `conv3d_bf16_vector` - Standard vectorized convolution
+   - `depthwise_conv3d_bf16_vector` - Channel-wise convolution
+   - `pointwise_conv3d_bf16_vector` - 1x1x1 convolution (Linear layer equivalent)
+   - `conv3d_bf16_large_kernel` - Optimized for large kernels (AIE2P only)
+
+3. **Architecture Support**:
+   - AIE2 (NPU): 4x4 array, vec_factor=8
+   - AIE2P (NPU2): 4x8 array, vec_factor=16
+
+4. **Configuration Flexibility**:
+   - Configurable kernel_size, stride, padding (temporal, height, width)
+   - Grouped convolution support (including depthwise)
+   - Optional bias
+   - Scalable column allocation (1-8 columns)
+
+### Next Steps
+
+With Conv3D complete, the IRON project now has a comprehensive set of operators for both video and text model inference on AMD Ryzen AI NPUs. The Conv3D operator enables:
+
+- Video understanding models (video classification, action recognition)
+- Compute primitives for LLM operations via shape manipulation
+- Foundation for custom attention mechanisms
+- Building block for 3D vision transformers
 
 ---
 
