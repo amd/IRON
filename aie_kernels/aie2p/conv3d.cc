@@ -237,7 +237,7 @@ void conv3d_bf16_large_kernel(
                                         for (int ic = 0; ic < channels_per_group; ic++) {
                                             int ic_global = ic_start + ic;
                                             int input_idx = (((n * in_channels + ic_global) * in_t + it) * in_h + ih) * in_w + iw;
-                                            int weight_idx = ((((oc * channels_per_group + ic) * kernel_t + kt) * kernel_h + kh) * kernel_w + kw;
+                                            int weight_idx = ((((oc * channels_per_group + ic) * kernel_t + kt) * kernel_h + kh) * kernel_w + kw);
 
                                             acc += input[input_idx] * weight[weight_idx];
                                         }
