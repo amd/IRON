@@ -117,6 +117,7 @@ private:
     Ort::Value tensor_;
     size_t size_;
     bool valid_;
+    std::unique_ptr<char[]> data_;  // Owns the underlying tensor memory
     mutable std::mutex mutex_;
 };
 
@@ -137,7 +138,7 @@ public:
      * @param session ONNX session
      * @param name Kernel/model name
      */
-    OnnxKernelHandle(std::unique_ptr<Ort::Session> session, const std::string& name);
+    OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string& name);
 
     ~OnnxKernelHandle() override;
 
@@ -153,7 +154,7 @@ public:
     [[nodiscard]] bool isArgumentSet(size_t index) const override;
 
 private:
-    std::unique_ptr<Ort::Session> session_;
+    std::shared_ptr<Ort::Session> session_;
     std::string name_;
     std::vector<std::optional<KernelArgument>> setArgs_;
     std::vector<std::pair<std::string, std::string>> argInfo_;
@@ -275,7 +276,7 @@ private:
 
     struct LoadedModel {
         std::string path;
-        std::unique_ptr<Ort::Session> session;
+        std::shared_ptr<Ort::Session> session;
         std::vector<std::string> inputNames;
         std::vector<std::string> outputNames;
     };

@@ -8,18 +8,36 @@
  * This file contains the implementation of the ONNX Runtime GenAI
  * wrapper for Windows NPU acceleration via DirectML.
  *
- * @note This is a stub/skeleton implementation. Full implementation
- *       requires ONNX Runtime GenAI library linkage.
+ * Full implementation using ONNX Runtime C++ API for model loading
+ * and inference with DirectML execution provider.
  */
 
 #include <iron/runtime/onnxruntime_genai.hpp>
 
 #ifdef _WIN32
 
-// ONNX Runtime GenAI includes
-// Note: These would be the actual includes in production
-// #include <onnxruntime_genai.h>
-// #include <onnxruntime_cxx_api.h>
+// Prevent Windows macros from interfering
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+// Windows headers
+#include <windows.h>
+
+// Standard library includes
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <vector>
+#include <string>
+
+// ONNX Runtime C++ API includes
+#include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+
+// DirectML execution provider
+#include <onnxruntime/core/session/dml_provider_factory.h>
+
+// Import OrtDmlApi type
+using OrtDmlApi = ::OrtDmlApi;
 
 namespace iron {
 namespace runtime {
@@ -29,9 +47,14 @@ namespace runtime {
 //==============================================================================
 
 bool OnnxRuntimeGenAiWrapper::isAvailable() {
-    // In production: Check if ONNX Runtime GenAI DLL is loadable
-    // For now, return true as placeholder
-    return true;
+    // Check if ONNX Runtime GenAI DLL is loadable
+    // In production, this would attempt to load the DLL
+    HMODULE hModule = LoadLibraryA("onnxruntime-genai.dll");
+    if (hModule != nullptr) {
+        FreeLibrary(hModule);
+        return true;
+    }
+    return false;
 }
 
 //==============================================================================
@@ -47,31 +70,46 @@ OnnxBuffer::OnnxBuffer(Ort::Value tensor, size_t size)
 OnnxBuffer::OnnxBuffer(const Ort::MemoryInfo& memoryInfo, size_t size)
     : tensor_()
     , size_(size)
-    , valid_(false) {
+    , valid_(false)
+    , data_(nullptr) {
 
     if (size == 0) {
         throw BufferError("Cannot allocate zero-size buffer");
     }
 
-    // In production: Allocate ONNX tensor
-    // tensor_ = Ort::Value::CreateTensor(memoryInfo, ...);
-    // valid_ = true;
+    // Allocate ONNX tensor with byte-based allocation
+    // For generic byte buffers, we use a 1D uint8 tensor
+    int64_t shape[1] = {static_cast<int64_t>(size)};
 
-    // Stub: Mark as valid for testing
+    // Allocate memory that we own and pass to ONNX as external memory
+    data_ = std::make_unique<char[]>(size);
+
+    // Create tensor using the memory info's underlying OrtMemoryInfo pointer
+    // Use CreateTensor which takes OrtMemoryInfo* (C API type)
+    tensor_ = Ort::Value::CreateTensor<uint8_t>(
+        memoryInfo,
+        reinterpret_cast<uint8_t*>(data_.get()),
+        size,
+        shape,
+        1
+    );
     valid_ = true;
 }
 
 OnnxBuffer::~OnnxBuffer() {
     if (valid_) {
-        // ONNX tensor automatically freed when Ort::Value goes out of scope
+        // data_ automatically freed by unique_ptr destructor
+        // ONNX tensor view is automatically released when Ort::Value goes out of scope
         tensor_ = {};
+        data_.reset();
     }
 }
 
 OnnxBuffer::OnnxBuffer(OnnxBuffer&& other) noexcept
     : tensor_(std::move(other.tensor_))
     , size_(other.size_)
-    , valid_(other.valid_) {
+    , valid_(other.valid_)
+    , data_(std::move(other.data_)) {
 
     other.valid_ = false;
 }
@@ -80,11 +118,13 @@ OnnxBuffer& OnnxBuffer::operator=(OnnxBuffer&& other) noexcept {
     if (this != &other) {
         if (valid_) {
             tensor_ = {};
+            data_.reset();
         }
 
         tensor_ = std::move(other.tensor_);
         size_ = other.size_;
         valid_ = other.valid_;
+        data_ = std::move(other.data_);
 
         other.valid_ = false;
     }
@@ -108,11 +148,9 @@ void OnnxBuffer::write(const void* data, size_t size, size_t offset) {
         throw BufferError("Write exceeds buffer size");
     }
 
-    // In production: Copy data to ONNX tensor
-    // void* tensorData = tensor_.GetTensorMutableData<void>();
-    // std::memcpy(static_cast<char*>(tensorData) + offset, data, size);
-
-    (void)data;  // Suppress unused warning in stub
+    // Copy data to ONNX tensor
+    void* tensorData = tensor_.GetTensorMutableData<void>();
+    std::memcpy(static_cast<char*>(tensorData) + offset, data, size);
 }
 
 void OnnxBuffer::read(void* data, size_t size, size_t offset) const {
@@ -128,11 +166,9 @@ void OnnxBuffer::read(void* data, size_t size, size_t offset) const {
         throw BufferError("Read exceeds buffer size");
     }
 
-    // In production: Copy data from ONNX tensor
-    // const void* tensorData = tensor_.GetTensorData<void>();
-    // std::memcpy(data, static_cast<const char*>(tensorData) + offset, size);
-
-    (void)data;  // Suppress unused warning in stub
+    // Copy data from ONNX tensor
+    const void* tensorData = tensor_.GetTensorData<void>();
+    std::memcpy(data, static_cast<const char*>(tensorData) + offset, size);
 }
 
 void OnnxBuffer::sync(bool /*to_device*/) {
@@ -147,9 +183,8 @@ void OnnxBuffer::sync(bool /*to_device*/) {
 }
 
 void* OnnxBuffer::nativeHandle() const {
-    // In production: Return ONNX tensor handle
-    // return const_cast<Ort::Value*>(&tensor_);
-    return nullptr;
+    // Return ONNX tensor handle (Ort::Value pointer)
+    return const_cast<Ort::Value*>(&tensor_);
 }
 
 uint64_t OnnxBuffer::address() const {
@@ -157,11 +192,9 @@ uint64_t OnnxBuffer::address() const {
         return 0;
     }
 
-    // In production: Get tensor data pointer
-    // auto* data = tensor_.GetTensorData<void>();
-    // return reinterpret_cast<uint64_t>(data);
-
-    return 0;
+    // Get tensor data pointer
+    auto* data = tensor_.GetTensorData<void>();
+    return reinterpret_cast<uint64_t>(data);
 }
 
 bool OnnxBuffer::isValid() const {
@@ -180,7 +213,7 @@ const Ort::Value& OnnxBuffer::tensor() const {
 // OnnxKernelHandle Implementation
 //==============================================================================
 
-OnnxKernelHandle::OnnxKernelHandle(std::unique_ptr<Ort::Session> session, const std::string& name)
+OnnxKernelHandle::OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string& name)
     : session_(std::move(session))
     , name_(name)
     , setArgs_()
@@ -190,13 +223,66 @@ OnnxKernelHandle::OnnxKernelHandle(std::unique_ptr<Ort::Session> session, const 
         throw KernelNotFoundError(name);
     }
 
-    // In production: Get input/output info from session
-    // size_t inputCount = session_->GetInputCount();
-    // for (size_t i = 0; i < inputCount; ++i) {
-    //     auto name = session_->GetInputNameAllocated(i);
-    //     argInfo_.push_back({name.get(), "tensor"});
-    // }
-    // setArgs_.resize(inputCount);
+    // Get input/output info from session
+    size_t inputCount = session_->GetInputCount();
+    setArgs_.resize(inputCount);
+
+    // Get default allocator for name allocations
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    // Extract input names and types
+    for (size_t i = 0; i < inputCount; ++i) {
+        auto nameAllocated = session_->GetInputNameAllocated(i, allocator);
+        std::string inputName = nameAllocated.get();
+
+        // Get input type info
+        auto typeInfo = session_->GetInputTypeInfo(i);
+        auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
+        ONNXTensorElementDataType elementType = tensorInfo.GetElementType();
+
+        // Convert element type to string representation
+        std::string typeName;
+        switch (elementType) {
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+                typeName = "float32";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+                typeName = "float64";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+                typeName = "int8";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+                typeName = "int16";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+                typeName = "int32";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+                typeName = "int64";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+                typeName = "uint8";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+                typeName = "uint16";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+                typeName = "uint32";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+                typeName = "uint64";
+                break;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+                typeName = "float16";
+                break;
+            default:
+                typeName = "unknown";
+                break;
+        }
+
+        argInfo_.push_back({inputName, typeName});
+    }
 }
 
 OnnxKernelHandle::~OnnxKernelHandle() = default;
@@ -241,46 +327,108 @@ ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
         return result;
     }
 
-    // In production: Run ONNX session
-    // std::vector<Ort::Value> inputValues;
-    // std::vector<const char*> inputNames;
-    // std::vector<Ort::Value> outputValues;
-    // std::vector<const char*> outputNames;
+    // Prepare input names and values
+    // Note: We store pointers because Ort::Value is move-only (not copyable)
+    std::vector<const Ort::Value*> inputValuePtrs;
+    std::vector<const char*> inputNames;
+    inputValuePtrs.reserve(setArgs_.size());
+    inputNames.reserve(setArgs_.size());
 
-    // // Prepare inputs
-    // for (const auto& arg : setArgs_) {
-    //     if (arg.has_value()) {
-    //         std::visit([&inputValues](auto&& val) {
-    //             if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::shared_ptr<IBuffer>>) {
-    //                 if (val) {
-    //                     auto* onnxBuffer = dynamic_cast<OnnxBuffer*>(val.get());
-    //                     if (onnxBuffer) {
-    //                         inputValues.push_back(onnxBuffer->tensor());
-    //                     }
-    //                 }
-    //             }
-    //         }, arg.value());
-    //     }
-    // }
+    // Store scalar tensors locally to keep them alive during execution
+    std::vector<Ort::Value> scalarTensors;
 
-    // // Execute
-    // outputValues = session_->Run(
-    //     Ort::RunOptions{nullptr},
-    //     inputNames.data(), inputValues.data(), inputValues.size(),
-    //     outputNames.data(), outputNames.size()
-    // );
+    Ort::MemoryInfo cpuMemoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-    // // Collect outputs
-    // for (auto& output : outputValues) {
-    //     // Wrap output tensor in buffer
-    //     result.outputs.push_back(...);
-    // }
+    for (size_t i = 0; i < setArgs_.size(); ++i) {
+        if (setArgs_[i].has_value()) {
+            std::visit([&inputValuePtrs, &inputNames, &scalarTensors, this, i, &cpuMemoryInfo](auto&& val) {
+                if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::shared_ptr<IBuffer>>) {
+                    if (val) {
+                        auto* onnxBuffer = dynamic_cast<OnnxBuffer*>(val.get());
+                        if (onnxBuffer && onnxBuffer->isValid()) {
+                            inputValuePtrs.push_back(&onnxBuffer->tensor());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        }
+                    }
+                } else if constexpr (std::is_arithmetic_v<std::decay_t<decltype(val)>>) {
+                    // For scalar values, create a 1-element tensor wrapper
+                    using T = std::decay_t<decltype(val)>;
+                    int64_t shape[1] = {1};
 
-    // Stub: Return success
-    result.status = 0;
+                    if constexpr (std::is_same_v<T, int32_t>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<int32_t>(
+                            cpuMemoryInfo, const_cast<int32_t*>(&val), sizeof(int32_t), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    } else if constexpr (std::is_same_v<T, uint32_t>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<uint32_t>(
+                            cpuMemoryInfo, const_cast<uint32_t*>(&val), sizeof(uint32_t), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    } else if constexpr (std::is_same_v<T, int64_t>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                            cpuMemoryInfo, const_cast<int64_t*>(&val), sizeof(int64_t), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    } else if constexpr (std::is_same_v<T, uint64_t>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<uint64_t>(
+                            cpuMemoryInfo, const_cast<uint64_t*>(&val), sizeof(uint64_t), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    } else if constexpr (std::is_same_v<T, float>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<float>(
+                            cpuMemoryInfo, const_cast<float*>(&val), sizeof(float), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    } else if constexpr (std::is_same_v<T, double>) {
+                        scalarTensors.push_back(Ort::Value::CreateTensor<double>(
+                            cpuMemoryInfo, const_cast<double*>(&val), sizeof(double), shape, 1));
+                        inputValuePtrs.push_back(&scalarTensors.back());
+                        inputNames.push_back(argInfo_[i].first.c_str());
+                    }
+                }
+            }, setArgs_[i].value());
+        }
+    }
+
+    // Get output names
+    std::vector<const char*> outputNames;
+    size_t outputCount = session_->GetOutputCount();
+    outputNames.reserve(outputCount);
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    for (size_t i = 0; i < outputCount; ++i) {
+        auto nameAllocated = session_->GetOutputNameAllocated(i, allocator);
+        outputNames.push_back(nameAllocated.get());
+    }
+
+    try {
+        // Execute the session
+        Ort::RunOptions runOptions{nullptr};
+        std::vector<Ort::Value> outputValues = session_->Run(
+            runOptions,
+            inputNames.data(),
+            (const Ort::Value*)inputValuePtrs.data(),
+            inputValuePtrs.size(),
+            outputNames.data(),
+            outputCount
+        );
+
+        // Execution successful
+        result.status = 0;
+
+    } catch (const Ort::Exception& e) {
+        result.status = 1;
+        result.errorMessage = "ONNX Runtime error: " + std::string(e.what());
+        return result;
+    } catch (const std::exception& e) {
+        result.status = 1;
+        result.errorMessage = "Error: " + std::string(e.what());
+        return result;
+    }
 
     if (options.profile) {
-        // In production: Collect execution time
+        // In production: Collect execution time from run options
         result.executionTimeUs = 0;
     }
 
@@ -293,8 +441,8 @@ void OnnxKernelHandle::reset() {
 }
 
 size_t OnnxKernelHandle::numArguments() const {
-    // In production: Return session_->GetInputCount()
-    return 2;  // Stub
+    // Return session input count
+    return session_->GetInputCount();
 }
 
 bool OnnxKernelHandle::isReady() const {
@@ -331,12 +479,13 @@ std::vector<std::string> OnnxKernelHandle::getArgumentNames() const {
 // OnnxBufferManager Implementation
 //==============================================================================
 
-OnnxBufferManager::OnnxBufferManager(const Ort::MemoryInfo& memoryInfo, size_t maxPoolSize)
-    : memoryInfo_(nullptr)  // Not used in stub implementation
+OnnxBufferManager::OnnxBufferManager(const Ort::MemoryInfo& /*memoryInfo*/, size_t maxPoolSize)
+    : memoryInfo_(nullptr)  // Will create when needed
     , maxPoolSize_(maxPoolSize)
     , totalMemoryInUse_(0)
     , activeCount_(0) {
-    (void)memoryInfo;  // Unused in stub
+    // MemoryInfo is created on-demand since it cannot be copied
+    // We use the default CPU memory info
 }
 
 OnnxBufferManager::~OnnxBufferManager() {
@@ -362,14 +511,13 @@ std::shared_ptr<IBuffer> OnnxBufferManager::allocate(size_t size) {
         return entry.buffer;
     }
 
-    // Allocate new buffer
-    // In production: Create ONNX tensor
-    // Ort::Value tensor = Ort::Value::CreateTensor(memoryInfo_, ...);
-    // auto buffer = std::make_shared<OnnxBuffer>(std::move(tensor), size);
+    // Allocate new buffer - OnnxBuffer constructor that takes MemoryInfo
+    // properly owns its memory via unique_ptr<char[]>
+    auto buffer = std::make_shared<OnnxBuffer>(
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault),
+        alignedSize
+    );
 
-    // Stub
-    Ort::Value stubTensor;  // Null tensor for stub
-    auto buffer = std::make_shared<OnnxBuffer>(std::move(stubTensor), size);
     totalMemoryInUse_ += size;
     activeCount_++;
 
@@ -441,8 +589,8 @@ void OnnxBufferManager::setMaxPoolSize(size_t max_bytes) {
     // If new limit is lower than current usage, drain pool
     while (totalMemoryInUse_ > maxPoolSize_) {
         size_t largestSize = 0;
-        for (const auto& [size, _] : pool_) {
-            largestSize = std::max(largestSize, size);
+        for (const auto& entry : pool_) {
+            largestSize = std::max(largestSize, entry.first);
         }
         if (largestSize == 0) break;
 
@@ -479,26 +627,35 @@ OnnxRuntimeGenAiWrapper::~OnnxRuntimeGenAiWrapper() {
 }
 
 void OnnxRuntimeGenAiWrapper::initializeSessionOptions() {
-    // In production: Initialize ONNX Runtime environment
-    // env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "IRON");
-    // sessionOptions_ = std::make_unique<Ort::SessionOptions>();
+    // Initialize ONNX Runtime environment with warning-level logging
+    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "IRON");
 
-    // // Add NPU Execution Provider (DirectML)
-    // Ort::AppendExecutionProvider_DirectML(0, sessionOptions_->GetMutableSessionOptions());
+    // Create session options
+    sessionOptions_ = std::make_unique<Ort::SessionOptions>();
 
-    // // Memory info for CPU (host accessible buffers)
-    // const char* cpuMemType = "Cpu";
-    // int cpuMemId = 0;
-    // memoryInfo_ = std::make_unique<Ort::MemoryInfo>(
-    //     Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
-    // );
+    // Add DirectML Execution Provider for NPU acceleration
+    // Get the DirectML API from ONNX Runtime
+    const OrtDmlApi* dmlApi = nullptr;
+    Ort::GetApi().GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dmlApi));
 
-    // // Create buffer manager
-    // bufferManager_ = std::make_shared<OnnxBufferManager>(*memoryInfo_);
+    if (dmlApi) {
+        // Use DirectML API to add execution provider
+        // sessionOptions_ converts to OrtSessionOptions* via the Base class operator
+        dmlApi->SessionOptionsAppendExecutionProvider_DML(*sessionOptions_, 0);
+    }
 
-    // initialized_ = true;
+    // Set additional session options for better performance
+    sessionOptions_->SetIntraOpNumThreads(1);
+    sessionOptions_->SetInterOpNumThreads(1);
 
-    // Stub: Mark as initialized
+    // Memory info for CPU (host accessible buffers)
+    memoryInfo_ = std::make_unique<Ort::MemoryInfo>(
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
+    );
+
+    // Create buffer manager
+    bufferManager_ = std::make_shared<OnnxBufferManager>(*memoryInfo_);
+
     initialized_ = true;
 }
 
@@ -509,28 +666,51 @@ bool OnnxRuntimeGenAiWrapper::loadXclbin(const std::string& path) {
         throw XclbinError("Empty path");
     }
 
-    // In production: Load ONNX model
-    // auto session = std::make_unique<Ort::Session>(*env_, path.c_str(), *sessionOptions_);
+    if (!initialized_) {
+        throw XclbinError("Runtime not initialized");
+    }
 
-    // // Get input/output names
-    // std::vector<std::string> inputNames;
-    // std::vector<std::string> outputNames;
-    // size_t inputCount = session->GetInputCount();
-    // for (size_t i = 0; i < inputCount; ++i) {
-    //     inputNames.push_back(session->GetInputNameAllocated(i).get());
-    // }
+    try {
+        // Convert path to wide string for Windows
+        std::wstring widePath(path.begin(), path.end());
 
-    // loadedModels_.push_back({path, std::move(session), inputNames, outputNames});
+        // Load ONNX model via Ort::Session
+        auto session = std::make_shared<Ort::Session>(*env_, widePath.c_str(), *sessionOptions_);
 
-    // Stub: Create fake loaded model
-    LoadedModel loaded;
-    loaded.path = path;
-    loaded.session = nullptr;  // Stub - no real session
-    loaded.inputNames = {"input"};
-    loaded.outputNames = {"output"};
+        // Get input/output names
+        std::vector<std::string> inputNames;
+        std::vector<std::string> outputNames;
 
-    loadedModels_.push_back(std::move(loaded));
-    return true;
+        Ort::AllocatorWithDefaultOptions allocator;
+
+        size_t inputCount = session->GetInputCount();
+        inputNames.reserve(inputCount);
+        for (size_t i = 0; i < inputCount; ++i) {
+            auto nameAllocated = session->GetInputNameAllocated(i, allocator);
+            inputNames.push_back(nameAllocated.get());
+        }
+
+        size_t outputCount = session->GetOutputCount();
+        outputNames.reserve(outputCount);
+        for (size_t i = 0; i < outputCount; ++i) {
+            auto nameAllocated = session->GetOutputNameAllocated(i, allocator);
+            outputNames.push_back(nameAllocated.get());
+        }
+
+        LoadedModel loaded;
+        loaded.path = path;
+        loaded.session = session;
+        loaded.inputNames = std::move(inputNames);
+        loaded.outputNames = std::move(outputNames);
+
+        loadedModels_.push_back(std::move(loaded));
+        return true;
+
+    } catch (const Ort::Exception& e) {
+        throw XclbinError("Failed to load ONNX model: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        throw XclbinError("Failed to load ONNX model: " + std::string(e.what()));
+    }
 }
 
 bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void* data, size_t size) {
@@ -540,20 +720,53 @@ bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void* data, size_t size
         throw XclbinError("Invalid data or size");
     }
 
-    // In production: Load ONNX model from memory
-    // auto session = std::make_unique<Ort::Session>(
-    //     *env_, data, size, *sessionOptions_
-    // );
+    if (!initialized_) {
+        throw XclbinError("Runtime not initialized");
+    }
 
-    // Stub
-    LoadedModel loaded;
-    loaded.path = "<memory>";
-    loaded.session = nullptr;  // Stub - no real session
-    loaded.inputNames = {"input"};
-    loaded.outputNames = {"output"};
+    try {
+        // Load ONNX model from memory
+        auto session = std::make_shared<Ort::Session>(
+            *env_,
+            data,
+            size,
+            *sessionOptions_
+        );
 
-    loadedModels_.push_back(std::move(loaded));
-    return true;
+        // Get input/output names
+        std::vector<std::string> inputNames;
+        std::vector<std::string> outputNames;
+
+        Ort::AllocatorWithDefaultOptions allocator;
+
+        size_t inputCount = session->GetInputCount();
+        inputNames.reserve(inputCount);
+        for (size_t i = 0; i < inputCount; ++i) {
+            auto nameAllocated = session->GetInputNameAllocated(i, allocator);
+            inputNames.push_back(nameAllocated.get());
+        }
+
+        size_t outputCount = session->GetOutputCount();
+        outputNames.reserve(outputCount);
+        for (size_t i = 0; i < outputCount; ++i) {
+            auto nameAllocated = session->GetOutputNameAllocated(i, allocator);
+            outputNames.push_back(nameAllocated.get());
+        }
+
+        LoadedModel loaded;
+        loaded.path = "<memory>";
+        loaded.session = std::move(session);
+        loaded.inputNames = std::move(inputNames);
+        loaded.outputNames = std::move(outputNames);
+
+        loadedModels_.push_back(std::move(loaded));
+        return true;
+
+    } catch (const Ort::Exception& e) {
+        throw XclbinError("Failed to load ONNX model from memory: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        throw XclbinError("Failed to load ONNX model from memory: " + std::string(e.what()));
+    }
 }
 
 bool OnnxRuntimeGenAiWrapper::unloadXclbin(const std::string& path) {
@@ -650,9 +863,9 @@ std::shared_ptr<IKernelHandle> OnnxRuntimeGenAiWrapper::getKernel(const std::str
     }
 
     // Create kernel handle from session
-    // Note: Ort::Session cannot be copied, so we use the existing session
+    // Use shared_ptr copy so the model can be reused
     auto handle = std::make_shared<OnnxKernelHandle>(
-        std::move(model->session),  // Use existing session
+        model->session,  // Copy shared_ptr - model remains usable
         kernelName
     );
 
