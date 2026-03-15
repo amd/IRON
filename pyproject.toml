@@ -16,7 +16,20 @@ dependencies = [
     "numpy",
     "torch",
     "ml_dtypes",
+    "safetensors",
+    "huggingface_hub",
 ]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "transformers>=4.30.0",
+]
+
+[project.scripts]
+iron-server = "iron.api.server:main"
 
 [tool.setuptools.packages.find]
 include = ["iron*"]

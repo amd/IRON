@@ -19,5 +19,13 @@ torch
 pytest
 pytest-xdist
 
+# API server dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+transformers>=4.30.0
+huggingface_hub>=0.17.0
+safetensors>=0.3.0
+
 # Install the local python code as the package "iron"
 -e .
