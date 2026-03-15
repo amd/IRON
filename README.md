@@ -56,6 +56,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [GELU](./aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
 | [LayerNorm](./aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm/](./iron/operators/layer_norm/) |
 | [Convolution](./aie_kernels/aie2/conv2d.cc) | Conv2D (standard, depthwise, pointwise) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/conv2d/](./iron/operators/conv2d/) |
+| [Conv3D](./aie_kernels/aie2/conv3d.cc) | Conv3D (video + compute primitive for text) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/conv3d/](./iron/operators/conv3d/) |
 | [MaxPool](./aie_kernels/aie2/maxpool.cc) | MaxPool (2D max pooling) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/maxpool/](./iron/operators/maxpool/) |
 | [AveragePool](./aie_kernels/aie2/avgpool.cc) | AveragePool (2D average pooling) | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/avgpool/](./iron/operators/avgpool/) |
 | [Tanh](./aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh/](./iron/operators/tanh/) |
