@@ -168,6 +168,112 @@ void conv3d_bf16_vector(
 }
 
 /**
+ * 3D Convolution Kernel - AIE2P scalar reference
+ * Naive implementation for small kernels (3x3x3)
+ *
+ * @param input - Input tensor [N, in_channels, in_t, in_h, in_w] (flattened)
+ * @param weight - Weight tensor [out_channels, in_channels/groups, kernel_t, kernel_h, kernel_w]
+ * @param output - Output tensor [N, out_channels, out_t, out_h, out_w] (flattened)
+ * @param bias - Optional bias tensor [out_channels], can be NULL
+ * @param in_channels - Number of input channels
+ * @param in_t - Input temporal/depth dimension
+ * @param in_h - Input height
+ * @param in_w - Input width
+ * @param out_channels - Number of output channels
+ * @param out_t - Output temporal/depth dimension
+ * @param out_h - Output height
+ * @param out_w - Output width
+ * @param kernel_t - Kernel temporal depth
+ * @param kernel_h - Kernel height
+ * @param kernel_w - Kernel width
+ * @param stride_t - Stride in temporal dimension
+ * @param stride_h - Stride in height dimension
+ * @param stride_w - Stride in width dimension
+ * @param pad_t - Padding in temporal dimension
+ * @param pad_h - Padding in height dimension
+ * @param pad_w - Padding in width dimension
+ * @param groups - Number of groups for grouped convolution
+ */
+void conv3d_bf16_scalar(
+    bfloat16* input,
+    bfloat16* weight,
+    bfloat16* output,
+    bfloat16* bias,
+    int in_channels,
+    int in_t,
+    int in_h,
+    int in_w,
+    int out_channels,
+    int out_t,
+    int out_h,
+    int out_w,
+    int kernel_t,
+    int kernel_h,
+    int kernel_w,
+    int stride_t,
+    int stride_h,
+    int stride_w,
+    int pad_t,
+    int pad_h,
+    int pad_w,
+    int groups
+) {
+    int channels_per_group = in_channels / groups;
+    int out_channels_per_group = out_channels / groups;
+
+    for (int oc = 0; oc < out_channels; oc++) {
+        int group_id = oc / out_channels_per_group;
+        int oc_in_group = oc % out_channels_per_group;
+
+        for (int ot = 0; ot < out_t; ot++) {
+            for (int oh = 0; oh < out_h; oh++) {
+                for (int ow = 0; ow < out_w; ow++) {
+                    // Calculate input position
+                    int it_start = ot * stride_t - pad_t;
+                    int ih_start = oh * stride_h - pad_h;
+                    int iw_start = ow * stride_w - pad_w;
+
+                    bfloat16 acc = bfloat16(0.0f);
+
+                    // Sum over input channels in the group
+                    for (int ic = 0; ic < channels_per_group; ic++) {
+                        int ic_global = group_id * channels_per_group + ic;
+
+                        for (int kt = 0; kt < kernel_t; kt++) {
+                            for (int kh = 0; kh < kernel_h; kh++) {
+                                for (int kw = 0; kw < kernel_w; kw++) {
+                                    int it = it_start + kt;
+                                    int ih = ih_start + kh;
+                                    int iw = iw_start + kw;
+
+                                    // Check bounds (handle padding)
+                                    if (it >= 0 && it < in_t &&
+                                        ih >= 0 && ih < in_h &&
+                                        iw >= 0 && iw < in_w) {
+                                        int input_idx = (((ic_global * in_t + it) * in_h + ih) * in_w + iw);
+                                        int weight_idx = ((((oc * channels_per_group + ic) * kernel_t + kt) * kernel_h + kh) * kernel_w + kw);
+
+                                        acc += input[input_idx] * weight[weight_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Add bias if provided
+                    if (bias != NULL) {
+                        acc += bias[oc];
+                    }
+
+                    int output_idx = ((oc * out_t + ot) * out_h + oh) * out_w + ow;
+                    output[output_idx] = acc;
+                }
+            }
+        }
+    }
+}
+
+/**
  * 3D Convolution Kernel - Optimized for large kernels
  * Uses hierarchical accumulation for better performance on AIE2P
  *
@@ -435,6 +541,16 @@ extern "C" {
 void conv3d_bf16_vector(
     bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
     int N, int in_channels, int in_t, int in_h, int in_w,
+    int out_channels, int out_t, int out_h, int out_w,
+    int kernel_t, int kernel_h, int kernel_w,
+    int stride_t, int stride_h, int stride_w,
+    int pad_t, int pad_h, int pad_w,
+    int groups
+);
+
+void conv3d_bf16_scalar(
+    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
+    int in_channels, int in_t, int in_h, int in_w,
     int out_channels, int out_t, int out_h, int out_w,
     int kernel_t, int kernel_h, int kernel_w,
     int stride_t, int stride_h, int stride_w,
