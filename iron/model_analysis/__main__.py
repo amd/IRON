@@ -171,6 +171,39 @@ def cmd_spec(args):
     return 0
 
 
+def cmd_master(args):
+    """Generate master document for implementing an operator"""
+    from .generate_master_doc import generate_master_document
+
+    print(f"Generating master document for: {args.layer} in {args.model}")
+    print("-" * 60)
+
+    try:
+        # Generate document
+        doc = generate_master_document(args.model, args.layer)
+
+        # Output
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(doc)
+
+        print(f"\nMaster document saved to: {output_path.absolute()}")
+        print("\nNext steps:")
+        print(f"  1. Review {args.output}")
+        print(f"  2. Create operator directory: mkdir {args.layer.lower()}")
+        print(f"  3. Copy skeleton code from the document")
+        print(f"  4. Implement design.py based on the templates")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="python -m iron.model_analysis",
@@ -207,6 +240,14 @@ def main():
     spec_p.add_argument("--skeleton", "-s", help="Generate operator skeleton code to file")
     spec_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
     spec_p.set_defaults(func=cmd_spec)
+
+    # master - generate master document
+    master_p = subparsers.add_parser("master", help="Generate MASTER document with ALL data for implementing an operator")
+    master_p.add_argument("model", help="HuggingFace model name")
+    master_p.add_argument("--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)")
+    master_p.add_argument("--output", "-o", default="MASTER_DOC.md", help="Output file (default: MASTER_DOC.md)")
+    master_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    master_p.set_defaults(func=cmd_master)
 
     args = parser.parse_args()
 

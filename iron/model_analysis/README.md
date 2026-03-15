@@ -47,8 +47,31 @@ python -m iron.model_analysis spec mistralai/Mistral-7B-v0.1 \
 - `scan` → Shows WHAT the model has (architecture details)
 - `analyze` → Shows WHAT IRON CAN/CAN'T DO (gaps, support %, action items)
 - `spec` → Generates detailed spec for implementing a custom operator
+- `master` → **GENERATES MASTER DOCUMENT** with ALL data needed to implement an operator
 
 ## Creating Custom Operators
+
+**MASTER DOCUMENT GENERATOR (ONE COMMAND HAS EVERYTHING):**
+
+```bash
+python -m iron.model_analysis master mistralai/Mistral-7B-v0.1 \
+    --layer MistralAttention \
+    -o mistral_attention_master.md
+```
+
+This single command generates a **complete, self-contained document** with:
+1. All hyperparameters for the constructor
+2. Input/output tensor signatures
+3. Reference implementation (Transformers source code)
+4. Operations analysis
+5. Operator skeleton code (copy-paste ready)
+6. MLIR design template
+7. Implementation checklist
+8. Links to examples and resources
+
+**Just read the generated `MASTER_DOC.md` and fill in the TODOs.**
+
+---
 
 **Complete guide:** [`CREATING_OPERATORS.md`](CREATING_OPERATORS.md)
 
