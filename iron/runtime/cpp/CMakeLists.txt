@@ -295,12 +295,26 @@ set(IRON_RUNTIME_HEADERS
     include/iron/runtime/xrt_runtime_wrapper.hpp
     include/iron/runtime/onnxruntime_genai.hpp
     include/iron/runtime/platform_utils.hpp
+
+    # Week 1: Foundation Components (Phase 3)
+    include/iron/memory_budget.hpp
+    include/iron/rope_cache.hpp
+    include/iron/kv_cache.hpp
+    include/iron/sequence_state.hpp
+    include/iron/model_loader.hpp
 )
 
 # Source files
 set(IRON_RUNTIME_SOURCES
     src/npu_runtime.cpp
     src/platform_utils.cpp
+
+    # Week 1: Foundation Components (Phase 3)
+    src/memory_budget.cpp
+    src/rope_cache.cpp
+    src/kv_cache.cpp
+    src/sequence_state.cpp
+    src/model_loader.cpp
 )
 
 # Platform-specific sources
