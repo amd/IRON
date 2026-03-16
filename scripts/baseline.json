@@ -1,0 +1,158 @@
+{
+  "description": "Performance baseline for IRON Phase 1 operators",
+  "status": "UNINITIALIZED - Run validation to populate baseline",
+  "created_date": "2026-03-15",
+  "last_updated": null,
+  "created_from": {
+    "iterations": 50,
+    "warmup": 10,
+    "device": "TBD - Will be populated after first benchmark run"
+  },
+  "instructions": {
+    "how_to_initialize": "python -m iron.benchmarks.validate --iterations 100 --verbose",
+    "how_to_update": "python scripts/collect_benchmarks.py --runs 5 --update-baseline",
+    "expected_duration": "Approximately 2-3 minutes for full validation suite"
+  },
+  "results": [
+    {
+      "operator_name": "rope",
+      "input_shape": [1, 12, 128, 64],
+      "metrics": {
+        "mean_ms": null,
+        "median_ms": null,
+        "std_dev_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "min_ms": null,
+        "max_ms": null,
+        "throughput_ops_sec": null,
+        "memory_bandwidth_gbps": null
+      },
+      "notes": "NULL - Run benchmark to populate"
+    },
+    {
+      "operator_name": "rmsnorm",
+      "input_shape": [1, 128, 2048],
+      "metrics": {
+        "mean_ms": null,
+        "median_ms": null,
+        "std_dev_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "min_ms": null,
+        "max_ms": null,
+        "throughput_ops_sec": null,
+        "memory_bandwidth_gbps": null
+      },
+      "notes": "NULL - Run benchmark to populate"
+    },
+    {
+      "operator_name": "silu",
+      "input_shape": [1, 128, 8192],
+      "metrics": {
+        "mean_ms": null,
+        "median_ms": null,
+        "std_dev_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "min_ms": null,
+        "max_ms": null,
+        "throughput_ops_sec": null,
+        "memory_bandwidth_gbps": null
+      },
+      "notes": "NULL - Run benchmark to populate"
+    },
+    {
+      "operator_name": "softmax",
+      "input_shape": [1, 12, 128, 128],
+      "metrics": {
+        "mean_ms": null,
+        "median_ms": null,
+        "std_dev_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "min_ms": null,
+        "max_ms": null,
+        "throughput_ops_sec": null,
+        "memory_bandwidth_gbps": null
+      },
+      "notes": "NULL - Run benchmark to populate"
+    }
+  ],
+  "targets": {
+    "linux_npu": {
+      "rope": {
+        "target_latency_ms": 0.5,
+        "description": "RoPE for [1, 12, 128, 64] - Linux XRT/mlir-aie target"
+      },
+      "rmsnorm": {
+        "target_latency_ms": 1.0,
+        "description": "RMSNorm for [1, 128, 2048] - Linux XRT/mlir-aie target"
+      },
+      "silu": {
+        "target_latency_ms": 0.3,
+        "description": "SiLU for [1, 128, 8192] - Linux XRT/mlir-aie target"
+      },
+      "softmax": {
+        "target_latency_ms": 2.0,
+        "description": "Softmax for [1, 12, 128, 128] - Linux XRT/mlir-aie target"
+      }
+    },
+    "windows_npu": {
+      "rope": {
+        "target_latency_ms": 0.55,
+        "description": "RoPE for [1, 12, 128, 64] - Windows ONNX Runtime GenAI target (+10% overhead)"
+      },
+      "rmsnorm": {
+        "target_latency_ms": 1.1,
+        "description": "RMSNorm for [1, 128, 2048] - Windows ONNX Runtime GenAI target (+10% overhead)"
+      },
+      "silu": {
+        "target_latency_ms": 0.33,
+        "description": "SiLU for [1, 128, 8192] - Windows ONNX Runtime GenAI target (+10% overhead)"
+      },
+      "softmax": {
+        "target_latency_ms": 2.2,
+        "description": "Softmax for [1, 12, 128, 128] - Windows ONNX Runtime GenAI target (+10% overhead)"
+      }
+    },
+    "cpu_reference": {
+      "rope": {
+        "target_latency_ms": 5.0,
+        "description": "RoPE - CPU reference (theoretical, Linux target x10)"
+      },
+      "rmsnorm": {
+        "target_latency_ms": 10.0,
+        "description": "RMSNorm - CPU reference (theoretical, Linux target x10)"
+      },
+      "silu": {
+        "target_latency_ms": 3.0,
+        "description": "SiLU - CPU reference (theoretical, Linux target x10)"
+      },
+      "softmax": {
+        "target_latency_ms": 20.0,
+        "description": "Softmax - CPU reference (theoretical, Linux target x10)"
+      }
+    }
+  },
+  "platform_info": {
+    "development_platform": {
+      "os": "Windows 11 Pro 26200",
+      "npu": "AMD Ryzen AI (AIE2)",
+      "runtime": "ONNX Runtime GenAI",
+      "backend": "iron/runtime/onnxruntime_genai.hpp"
+    },
+    "target_platforms": {
+      "windows": {
+        "runtime": "ONNX Runtime GenAI with NPU EP",
+        "backend": "iron/runtime/onnxruntime_genai.hpp",
+        "overhead": "~10% vs raw hardware"
+      },
+      "linux": {
+        "runtime": "XRT / mlir-aie",
+        "backend": "iron/runtime/xrt_runtime.hpp",
+        "overhead": "Minimal (direct hardware access)"
+      }
+    }
+  }
+}

@@ -1,0 +1,198 @@
+{
+  "success": false,
+  "system_info": {
+    "platform": "Windows",
+    "platform_version": "10.0.26200",
+    "architecture": "AMD64",
+    "processor": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+    "python_version": "3.12.11",
+    "cpu_count": 24,
+    "total_memory_gb": 63.61802291870117,
+    "torch_version": "2.8.0+cpu",
+    "torch_cuda_available": false,
+    "numpy_version": "2.4.2",
+    "timestamp": "2026-03-15T21:19:37.618013",
+    "windows_edition": "Professional",
+    "windows_build": "26200",
+    "npu_detected": false,
+    "npu_driver_version": ""
+  },
+  "benchmark_results": [
+    {
+      "operator_name": "rope",
+      "input_shape": [
+        1,
+        12,
+        128,
+        64
+      ],
+      "metrics": {
+        "mean_ms": 0.2106099942466244,
+        "median_ms": 0.16564999532420188,
+        "std_dev_ms": 0.13703737948963568,
+        "p95_ms": 0.322499981848523,
+        "p99_ms": 0.322499981848523,
+        "min_ms": 0.10259999544359744,
+        "max_ms": 0.551999983144924,
+        "throughput_ops_sec": 4748.112754938873,
+        "memory_bandwidth_gbps": 1.8670339050460438
+      },
+      "targets": {
+        "linux_npu_ms": 0.5,
+        "windows_npu_ms": 0.55,
+        "cpu_baseline_ms": 5.0
+      },
+      "target_met": true,
+      "device_info": "CPU",
+      "timestamp": "2026-03-15T21:19:42.997513"
+    },
+    {
+      "operator_name": "rmsnorm",
+      "input_shape": [
+        1,
+        128,
+        2048
+      ],
+      "metrics": {
+        "mean_ms": 0.21167999948374927,
+        "median_ms": 0.19419999443925917,
+        "std_dev_ms": 0.06621176618365011,
+        "p95_ms": 0.30399998649954796,
+        "p99_ms": 0.30399998649954796,
+        "min_ms": 0.13849997776560485,
+        "max_ms": 0.33480001729913056,
+        "throughput_ops_sec": 4724.111878490297,
+        "memory_bandwidth_gbps": 4.953590337099842
+      },
+      "targets": {
+        "linux_npu_ms": 1.0,
+        "windows_npu_ms": 1.1,
+        "cpu_baseline_ms": 10.0
+      },
+      "target_met": true,
+      "device_info": "CPU",
+      "timestamp": "2026-03-15T21:19:43.029329"
+    },
+    {
+      "operator_name": "silu",
+      "input_shape": [
+        1,
+        128,
+        8192
+      ],
+      "metrics": {
+        "mean_ms": 0.20781999919563532,
+        "median_ms": 0.2043999993475154,
+        "std_dev_ms": 0.01667571809911703,
+        "p95_ms": 0.22170000011101365,
+        "p99_ms": 0.22170000011101365,
+        "min_ms": 0.18579998868517578,
+        "max_ms": 0.24349999148398638,
+        "throughput_ops_sec": 4811.856432828829,
+        "memory_bandwidth_gbps": 20.18238868363969
+      },
+      "targets": {
+        "linux_npu_ms": 0.3,
+        "windows_npu_ms": 0.33,
+        "cpu_baseline_ms": 3.0
+      },
+      "target_met": true,
+      "device_info": "CPU",
+      "timestamp": "2026-03-15T21:19:43.124695"
+    },
+    {
+      "operator_name": "softmax",
+      "input_shape": [
+        1,
+        12,
+        128,
+        128
+      ],
+      "metrics": {
+        "mean_ms": 0.14962000423111022,
+        "median_ms": 0.09244999091606587,
+        "std_dev_ms": 0.1139225829667063,
+        "p95_ms": 0.34630001755431294,
+        "p99_ms": 0.34630001755431294,
+        "min_ms": 0.06560000474564731,
+        "max_ms": 0.36630002432502806,
+        "throughput_ops_sec": 6683.598260399406,
+        "memory_bandwidth_gbps": 5.256195547122425
+      },
+      "targets": {
+        "linux_npu_ms": 2.0,
+        "windows_npu_ms": 2.2,
+        "cpu_baseline_ms": 20.0
+      },
+      "target_met": true,
+      "device_info": "CPU",
+      "timestamp": "2026-03-15T21:19:43.145237"
+    }
+  ],
+  "anomaly_reports": [
+    {
+      "operator_name": "rope",
+      "anomaly_type": "high_variance",
+      "severity": "CRITICAL",
+      "description": "Critical variance detected: CV=65.1%",
+      "actual_value": 0.6506689294581378,
+      "expected_value": 0.15,
+      "deviation_percent": 333.7792863054252,
+      "recommendation": "System may be under load or thermal throttling. Re-run benchmarks."
+    },
+    {
+      "operator_name": "rmsnorm",
+      "anomaly_type": "high_variance",
+      "severity": "CRITICAL",
+      "description": "Critical variance detected: CV=31.3%",
+      "actual_value": 0.3127917911240037,
+      "expected_value": 0.15,
+      "deviation_percent": 108.5278607493358,
+      "recommendation": "System may be under load or thermal throttling. Re-run benchmarks."
+    },
+    {
+      "operator_name": "softmax",
+      "anomaly_type": "high_variance",
+      "severity": "CRITICAL",
+      "description": "Critical variance detected: CV=76.1%",
+      "actual_value": 0.7614127773364853,
+      "expected_value": 0.15,
+      "deviation_percent": 407.6085182243236,
+      "recommendation": "System may be under load or thermal throttling. Re-run benchmarks."
+    }
+  ],
+  "targets_summary": {
+    "total_operators": 4,
+    "targets_met": 4,
+    "targets_missed": 0,
+    "errors": 0,
+    "operators": [
+      {
+        "name": "rope",
+        "status": "PASS",
+        "mean_ms": 0.2106099942466244,
+        "target_ms": 5.0
+      },
+      {
+        "name": "rmsnorm",
+        "status": "PASS",
+        "mean_ms": 0.21167999948374927,
+        "target_ms": 10.0
+      },
+      {
+        "name": "silu",
+        "status": "PASS",
+        "mean_ms": 0.20781999919563532,
+        "target_ms": 3.0
+      },
+      {
+        "name": "softmax",
+        "status": "PASS",
+        "mean_ms": 0.14962000423111022,
+        "target_ms": 20.0
+      }
+    ]
+  },
+  "timestamp": "2026-03-15T21:19:37.617488",
+  "duration_sec": 5.528900299977977
+}

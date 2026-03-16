@@ -1,0 +1,118 @@
+{
+  "success": false,
+  "system_info": {
+    "platform": "Windows",
+    "platform_version": "10.0.26200",
+    "architecture": "AMD64",
+    "processor": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+    "python_version": "3.12.11",
+    "cpu_count": 24,
+    "total_memory_gb": 63.61802291870117,
+    "torch_version": "2.8.0+cpu",
+    "torch_cuda_available": false,
+    "numpy_version": "2.4.2",
+    "timestamp": "2026-03-15T21:12:30.220478",
+    "windows_edition": "Professional",
+    "windows_build": "26200",
+    "npu_detected": false,
+    "npu_driver_version": ""
+  },
+  "benchmark_results": [
+    {
+      "operator_name": "rope",
+      "error": "Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "metrics": {}
+    },
+    {
+      "operator_name": "rmsnorm",
+      "error": "Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "metrics": {}
+    },
+    {
+      "operator_name": "silu",
+      "error": "Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "metrics": {}
+    },
+    {
+      "operator_name": "softmax",
+      "error": "Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "metrics": {}
+    }
+  ],
+  "anomaly_reports": [
+    {
+      "operator_name": "rope",
+      "anomaly_type": "execution_error",
+      "severity": "CRITICAL",
+      "description": "Benchmark execution failed: Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "actual_value": 0.0,
+      "expected_value": 0.55,
+      "deviation_percent": 100.0,
+      "recommendation": "Check operator implementation and system configuration"
+    },
+    {
+      "operator_name": "rmsnorm",
+      "anomaly_type": "execution_error",
+      "severity": "CRITICAL",
+      "description": "Benchmark execution failed: Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "actual_value": 0.0,
+      "expected_value": 1.1,
+      "deviation_percent": 100.0,
+      "recommendation": "Check operator implementation and system configuration"
+    },
+    {
+      "operator_name": "silu",
+      "anomaly_type": "execution_error",
+      "severity": "CRITICAL",
+      "description": "Benchmark execution failed: Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "actual_value": 0.0,
+      "expected_value": 0.33,
+      "deviation_percent": 100.0,
+      "recommendation": "Check operator implementation and system configuration"
+    },
+    {
+      "operator_name": "softmax",
+      "anomaly_type": "execution_error",
+      "severity": "CRITICAL",
+      "description": "Benchmark execution failed: Import error: cannot import name 'OPERATOR_MAP' from 'iron.benchmarks.baseline_bench' (C:\\Users\\antmi\\IRON\\iron\\benchmarks\\baseline_bench.py)",
+      "actual_value": 0.0,
+      "expected_value": 2.2,
+      "deviation_percent": 100.0,
+      "recommendation": "Check operator implementation and system configuration"
+    }
+  ],
+  "targets_summary": {
+    "total_operators": 4,
+    "targets_met": 0,
+    "targets_missed": 0,
+    "errors": 4,
+    "operators": [
+      {
+        "name": "rope",
+        "status": "ERROR",
+        "mean_ms": null,
+        "target_ms": null
+      },
+      {
+        "name": "rmsnorm",
+        "status": "ERROR",
+        "mean_ms": null,
+        "target_ms": null
+      },
+      {
+        "name": "silu",
+        "status": "ERROR",
+        "mean_ms": null,
+        "target_ms": null
+      },
+      {
+        "name": "softmax",
+        "status": "ERROR",
+        "mean_ms": null,
+        "target_ms": null
+      }
+    ]
+  },
+  "timestamp": "2026-03-15T21:12:30.220478",
+  "duration_sec": 4.610193200001959
+}

@@ -1,0 +1,1168 @@
+{
+  "timestamp": "2026-03-15T21:13:41.240427",
+  "runs": 5,
+  "results_per_run": [
+    {
+      "device_info": "CPU",
+      "results": [
+        {
+          "operator_name": "rope",
+          "input_shape": [
+            1,
+            12,
+            128,
+            64
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.10438400029670447,
+            "median_ms": 0.09800000407267362,
+            "std_dev_ms": 0.02125390322715171,
+            "p95_ms": 0.13530001160688698,
+            "p99_ms": 0.15810001059435308,
+            "min_ms": 0.09560000034980476,
+            "max_ms": 0.22650000755675137,
+            "throughput_ops_sec": 9580.012235185159,
+            "memory_bandwidth_gbps": 3.767014091070567
+          },
+          "target_latency_ms": 0.5,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 5.0,
+          "timestamp": "2026-03-15T21:12:47.067620",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "rmsnorm",
+          "input_shape": [
+            1,
+            128,
+            2048
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.12429800175596029,
+            "median_ms": 0.12024999887216836,
+            "std_dev_ms": 0.01563265108901029,
+            "p95_ms": 0.1475999888498336,
+            "p99_ms": 0.15669999993406236,
+            "min_ms": 0.10540001676417887,
+            "max_ms": 0.1776999852154404,
+            "throughput_ops_sec": 8045.181627001082,
+            "memory_bandwidth_gbps": 8.435984369714287
+          },
+          "target_latency_ms": 1.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 10.0,
+          "timestamp": "2026-03-15T21:12:47.081952",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "silu",
+          "input_shape": [
+            1,
+            128,
+            8192
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.16894399945158511,
+            "median_ms": 0.16575001063756645,
+            "std_dev_ms": 0.00871199545557054,
+            "p95_ms": 0.17739998293109238,
+            "p99_ms": 0.19450002582743764,
+            "min_ms": 0.16269998741336167,
+            "max_ms": 0.21349999587982893,
+            "throughput_ops_sec": 5919.121148109043,
+            "memory_bandwidth_gbps": 24.826593507998354
+          },
+          "target_latency_ms": 0.3,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 3.0,
+          "timestamp": "2026-03-15T21:12:47.104966",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "softmax",
+          "input_shape": [
+            1,
+            12,
+            128,
+            128
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.05673800187651068,
+            "median_ms": 0.05364998651202768,
+            "std_dev_ms": 0.009869578719094519,
+            "p95_ms": 0.07579999510198832,
+            "p99_ms": 0.08380002691410482,
+            "min_ms": 0.050000002374872565,
+            "max_ms": 0.09780001710169017,
+            "throughput_ops_sec": 17624.87163676443,
+            "memory_bandwidth_gbps": 13.860763051043925
+          },
+          "target_latency_ms": 2.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 20.0,
+          "timestamp": "2026-03-15T21:12:47.162073",
+          "error": null,
+          "device_info": "CPU"
+        }
+      ],
+      "start_time": "2026-03-15T21:12:47.067075",
+      "end_time": "2026-03-15T21:12:47.178234",
+      "total_duration_sec": 0.11085779999848455,
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "collection_metadata": {
+        "duration_sec": 2.211119699990377,
+        "exit_code": 0,
+        "operators_requested": [
+          "rope",
+          "rmsnorm",
+          "silu",
+          "softmax"
+        ]
+      }
+    },
+    {
+      "device_info": "CPU",
+      "results": [
+        {
+          "operator_name": "rope",
+          "input_shape": [
+            1,
+            12,
+            128,
+            64
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.11544799723196775,
+            "median_ms": 0.1160999818239361,
+            "std_dev_ms": 0.018905009654859133,
+            "p95_ms": 0.14879999798722565,
+            "p99_ms": 0.159099989105016,
+            "min_ms": 0.089599983766675,
+            "max_ms": 0.1899000199045986,
+            "throughput_ops_sec": 8661.908599338598,
+            "memory_bandwidth_gbps": 3.406001051797526
+          },
+          "target_latency_ms": 0.5,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 5.0,
+          "timestamp": "2026-03-15T21:12:59.803296",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "rmsnorm",
+          "input_shape": [
+            1,
+            128,
+            2048
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.12355199898593128,
+            "median_ms": 0.11915000504814088,
+            "std_dev_ms": 0.019424571317394966,
+            "p95_ms": 0.149200001033023,
+            "p99_ms": 0.17370001296512783,
+            "min_ms": 0.09239997598342597,
+            "max_ms": 0.2046999870799482,
+            "throughput_ops_sec": 8093.758160188641,
+            "memory_bandwidth_gbps": 8.486920556577964
+          },
+          "target_latency_ms": 1.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 10.0,
+          "timestamp": "2026-03-15T21:12:59.816846",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "silu",
+          "input_shape": [
+            1,
+            128,
+            8192
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.163040001061745,
+            "median_ms": 0.1637499954085797,
+            "std_dev_ms": 0.014012123586636248,
+            "p95_ms": 0.17419998766854405,
+            "p99_ms": 0.20910002058371902,
+            "min_ms": 0.1438999897800386,
+            "max_ms": 0.21729999571107328,
+            "throughput_ops_sec": 6133.464140626995,
+            "memory_bandwidth_gbps": 25.725613178888363
+          },
+          "target_latency_ms": 0.3,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 3.0,
+          "timestamp": "2026-03-15T21:12:59.838963",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "softmax",
+          "input_shape": [
+            1,
+            12,
+            128,
+            128
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.06424800027161837,
+            "median_ms": 0.06340000254567713,
+            "std_dev_ms": 0.0036621191629947537,
+            "p95_ms": 0.07160002132877707,
+            "p99_ms": 0.07469998672604561,
+            "min_ms": 0.06199997733347118,
+            "max_ms": 0.08120000711642206,
+            "throughput_ops_sec": 15564.686772698686,
+            "memory_bandwidth_gbps": 12.240567748026974
+          },
+          "target_latency_ms": 2.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 20.0,
+          "timestamp": "2026-03-15T21:12:59.902614",
+          "error": null,
+          "device_info": "CPU"
+        }
+      ],
+      "start_time": "2026-03-15T21:12:59.803296",
+      "end_time": "2026-03-15T21:12:59.918268",
+      "total_duration_sec": 0.11484100000234321,
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "collection_metadata": {
+        "duration_sec": 2.1110154999769293,
+        "exit_code": 0,
+        "operators_requested": [
+          "rope",
+          "rmsnorm",
+          "silu",
+          "softmax"
+        ]
+      }
+    },
+    {
+      "device_info": "CPU",
+      "results": [
+        {
+          "operator_name": "rope",
+          "input_shape": [
+            1,
+            12,
+            128,
+            64
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.1682980015175417,
+            "median_ms": 0.13860000763088465,
+            "std_dev_ms": 0.11798291152501013,
+            "p95_ms": 0.3023000026587397,
+            "p99_ms": 0.3797000099439174,
+            "min_ms": 0.09289997979067266,
+            "max_ms": 0.8718000026419759,
+            "throughput_ops_sec": 5941.8412041914235,
+            "memory_bandwidth_gbps": 2.336427030947335
+          },
+          "target_latency_ms": 0.5,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 5.0,
+          "timestamp": "2026-03-15T21:13:12.817382",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "rmsnorm",
+          "input_shape": [
+            1,
+            128,
+            2048
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.25210999767296016,
+            "median_ms": 0.15390000771731138,
+            "std_dev_ms": 0.24115658949288526,
+            "p95_ms": 0.5920999974478036,
+            "p99_ms": 1.0320000001229346,
+            "min_ms": 0.11709998943842947,
+            "max_ms": 1.4306999801192433,
+            "throughput_ops_sec": 3966.5225862927136,
+            "memory_bandwidth_gbps": 4.159200387444469
+          },
+          "target_latency_ms": 1.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 10.0,
+          "timestamp": "2026-03-15T21:13:12.836002",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "silu",
+          "input_shape": [
+            1,
+            128,
+            8192
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.18670199846383184,
+            "median_ms": 0.18065000767819583,
+            "std_dev_ms": 0.02565437726750506,
+            "p95_ms": 0.23689999943599105,
+            "p99_ms": 0.2514999941922724,
+            "min_ms": 0.1469000126235187,
+            "max_ms": 0.25389998336322606,
+            "throughput_ops_sec": 5356.12906250557,
+            "memory_bandwidth_gbps": 22.465233551383363
+          },
+          "target_latency_ms": 0.3,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 3.0,
+          "timestamp": "2026-03-15T21:13:12.872836",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "softmax",
+          "input_shape": [
+            1,
+            12,
+            128,
+            128
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.06720399775076658,
+            "median_ms": 0.05704999784938991,
+            "std_dev_ms": 0.03112322478768026,
+            "p95_ms": 0.1112000027205795,
+            "p99_ms": 0.1357999863103032,
+            "min_ms": 0.05400000372901559,
+            "max_ms": 0.24970000959001482,
+            "throughput_ops_sec": 14880.067160715796,
+            "memory_bandwidth_gbps": 11.702160977336046
+          },
+          "target_latency_ms": 2.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 20.0,
+          "timestamp": "2026-03-15T21:13:12.949474",
+          "error": null,
+          "device_info": "CPU"
+        }
+      ],
+      "start_time": "2026-03-15T21:13:12.816832",
+      "end_time": "2026-03-15T21:13:12.969355",
+      "total_duration_sec": 0.15264200000092387,
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "collection_metadata": {
+        "duration_sec": 2.349899799999548,
+        "exit_code": 0,
+        "operators_requested": [
+          "rope",
+          "rmsnorm",
+          "silu",
+          "softmax"
+        ]
+      }
+    },
+    {
+      "device_info": "CPU",
+      "results": [
+        {
+          "operator_name": "rope",
+          "input_shape": [
+            1,
+            12,
+            128,
+            64
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.10674800258129835,
+            "median_ms": 0.10220000694971532,
+            "std_dev_ms": 0.013884129621565358,
+            "p95_ms": 0.12920002336613834,
+            "p99_ms": 0.1480999926570803,
+            "min_ms": 0.09389998740516603,
+            "max_ms": 0.17139999545179307,
+            "throughput_ops_sec": 9367.85678250428,
+            "memory_bandwidth_gbps": 3.6835911725892023
+          },
+          "target_latency_ms": 0.5,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 5.0,
+          "timestamp": "2026-03-15T21:13:26.348151",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "rmsnorm",
+          "input_shape": [
+            1,
+            128,
+            2048
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.1460239995503798,
+            "median_ms": 0.12830000196117908,
+            "std_dev_ms": 0.06301273814350547,
+            "p95_ms": 0.21769999875687063,
+            "p99_ms": 0.41459998465143144,
+            "min_ms": 0.10800000745803118,
+            "max_ms": 0.4448999825399369,
+            "throughput_ops_sec": 6848.189359824989,
+            "memory_bandwidth_gbps": 7.1808470061678475
+          },
+          "target_latency_ms": 1.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 10.0,
+          "timestamp": "2026-03-15T21:13:26.361796",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "silu",
+          "input_shape": [
+            1,
+            128,
+            8192
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.15977600181940943,
+            "median_ms": 0.15550000534858555,
+            "std_dev_ms": 0.015335946811600075,
+            "p95_ms": 0.1942999952007085,
+            "p99_ms": 0.19829999655485153,
+            "min_ms": 0.14330001431517303,
+            "max_ms": 0.20180002320557833,
+            "throughput_ops_sec": 6258.762195903947,
+            "memory_bandwidth_gbps": 26.25115131332871
+          },
+          "target_latency_ms": 0.3,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 3.0,
+          "timestamp": "2026-03-15T21:13:26.386401",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "softmax",
+          "input_shape": [
+            1,
+            12,
+            128,
+            128
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.06524200027342886,
+            "median_ms": 0.06220000796020031,
+            "std_dev_ms": 0.007442488758532628,
+            "p95_ms": 0.07949999417178333,
+            "p99_ms": 0.09059999138116837,
+            "min_ms": 0.061400001868605614,
+            "max_ms": 0.09590000263415277,
+            "throughput_ops_sec": 15327.549673661224,
+            "memory_bandwidth_gbps": 12.054075544956744
+          },
+          "target_latency_ms": 2.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 20.0,
+          "timestamp": "2026-03-15T21:13:26.457715",
+          "error": null,
+          "device_info": "CPU"
+        }
+      ],
+      "start_time": "2026-03-15T21:13:26.347636",
+      "end_time": "2026-03-15T21:13:26.474440",
+      "total_duration_sec": 0.12646470000618137,
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "collection_metadata": {
+        "duration_sec": 3.1975173000246286,
+        "exit_code": 0,
+        "operators_requested": [
+          "rope",
+          "rmsnorm",
+          "silu",
+          "softmax"
+        ]
+      }
+    },
+    {
+      "device_info": "CPU",
+      "results": [
+        {
+          "operator_name": "rope",
+          "input_shape": [
+            1,
+            12,
+            128,
+            64
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.10392599855549634,
+            "median_ms": 0.09484999463893473,
+            "std_dev_ms": 0.022268507814933274,
+            "p95_ms": 0.14439999358728528,
+            "p99_ms": 0.17859999206848443,
+            "min_ms": 0.08980001439340413,
+            "max_ms": 0.19240000983700156,
+            "throughput_ops_sec": 9622.231336714089,
+            "memory_bandwidth_gbps": 3.783615317297367
+          },
+          "target_latency_ms": 0.5,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 5.0,
+          "timestamp": "2026-03-15T21:13:40.770311",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "rmsnorm",
+          "input_shape": [
+            1,
+            128,
+            2048
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.14625199837610126,
+            "median_ms": 0.12704999244306237,
+            "std_dev_ms": 0.0490783634413849,
+            "p95_ms": 0.20360000780783594,
+            "p99_ms": 0.2891999902203679,
+            "min_ms": 0.10909998673014343,
+            "max_ms": 0.3513999981805682,
+            "throughput_ops_sec": 6837.513409070846,
+            "memory_bandwidth_gbps": 7.169652460429871
+          },
+          "target_latency_ms": 1.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 10.0,
+          "timestamp": "2026-03-15T21:13:40.784374",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "silu",
+          "input_shape": [
+            1,
+            128,
+            8192
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.15245000075083226,
+            "median_ms": 0.146100006531924,
+            "std_dev_ms": 0.014017817158374985,
+            "p95_ms": 0.18289999570697546,
+            "p99_ms": 0.18499998259358108,
+            "min_ms": 0.1409000251442194,
+            "max_ms": 0.18619999173097312,
+            "throughput_ops_sec": 6559.527681698229,
+            "memory_bandwidth_gbps": 27.512653193457613
+          },
+          "target_latency_ms": 0.3,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 3.0,
+          "timestamp": "2026-03-15T21:13:40.810562",
+          "error": null,
+          "device_info": "CPU"
+        },
+        {
+          "operator_name": "softmax",
+          "input_shape": [
+            1,
+            12,
+            128,
+            128
+          ],
+          "config": {
+            "iterations": 50,
+            "warmup": 10,
+            "output_format": "json",
+            "output_file": null,
+            "verbose": true,
+            "operator": null,
+            "device": "cpu",
+            "dtype": "bfloat16"
+          },
+          "metrics": {
+            "mean_ms": 0.05306199949700385,
+            "median_ms": 0.05119999696034938,
+            "std_dev_ms": 0.007541498830075943,
+            "p95_ms": 0.05780000356025994,
+            "p99_ms": 0.0633999879937619,
+            "min_ms": 0.04919999628327787,
+            "max_ms": 0.10119998478330672,
+            "throughput_ops_sec": 18845.878585040224,
+            "memory_bandwidth_gbps": 14.821001987390353
+          },
+          "target_latency_ms": 2.0,
+          "target_met": true,
+          "cpu_baseline_latency_ms": 20.0,
+          "timestamp": "2026-03-15T21:13:40.876884",
+          "error": null,
+          "device_info": "CPU"
+        }
+      ],
+      "start_time": "2026-03-15T21:13:40.770311",
+      "end_time": "2026-03-15T21:13:40.891478",
+      "total_duration_sec": 0.12132939998991787,
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "collection_metadata": {
+        "duration_sec": 2.903908299980685,
+        "exit_code": 0,
+        "operators_requested": [
+          "rope",
+          "rmsnorm",
+          "silu",
+          "softmax"
+        ]
+      }
+    }
+  ],
+  "aggregated": {
+    "results": [
+      {
+        "operator_name": "rope",
+        "input_shape": [
+          1,
+          12,
+          128,
+          64
+        ],
+        "runs": 5,
+        "metrics": {
+          "mean_ms_mean": 0.11976080003660172,
+          "median_ms_mean": 0.10994999902322888,
+          "std_dev_ms_mean": 0.03885889236870392,
+          "p95_ms_mean": 0.1720000058412552,
+          "p99_ms_mean": 0.20471999887377024,
+          "min_ms_mean": 0.09235999314114451,
+          "max_ms_mean": 0.3304000070784241,
+          "throughput_ops_sec_mean": 8634.77003158671,
+          "memory_bandwidth_gbps_mean": 3.3953297327403993
+        },
+        "statistics": {
+          "mean_ms": {
+            "min": 0.10392599855549634,
+            "max": 0.1682980015175417,
+            "mean": 0.11976080003660172,
+            "range": 0.06437200296204537
+          },
+          "median_ms": {
+            "min": 0.09484999463893473,
+            "max": 0.13860000763088465,
+            "mean": 0.10994999902322888,
+            "range": 0.043750012991949916
+          },
+          "std_dev_ms": {
+            "min": 0.013884129621565358,
+            "max": 0.11798291152501013,
+            "mean": 0.03885889236870392,
+            "range": 0.10409878190344476
+          },
+          "p95_ms": {
+            "min": 0.12920002336613834,
+            "max": 0.3023000026587397,
+            "mean": 0.1720000058412552,
+            "range": 0.17309997929260135
+          },
+          "p99_ms": {
+            "min": 0.1480999926570803,
+            "max": 0.3797000099439174,
+            "mean": 0.20471999887377024,
+            "range": 0.2316000172868371
+          },
+          "min_ms": {
+            "min": 0.089599983766675,
+            "max": 0.09560000034980476,
+            "mean": 0.09235999314114451,
+            "range": 0.006000016583129764
+          },
+          "max_ms": {
+            "min": 0.17139999545179307,
+            "max": 0.8718000026419759,
+            "mean": 0.3304000070784241,
+            "range": 0.7004000071901828
+          },
+          "throughput_ops_sec": {
+            "min": 5941.8412041914235,
+            "max": 9622.231336714089,
+            "mean": 8634.77003158671,
+            "range": 3680.390132522665
+          },
+          "memory_bandwidth_gbps": {
+            "min": 2.336427030947335,
+            "max": 3.783615317297367,
+            "mean": 3.3953297327403993,
+            "range": 1.4471882863500323
+          }
+        }
+      },
+      {
+        "operator_name": "rmsnorm",
+        "input_shape": [
+          1,
+          128,
+          2048
+        ],
+        "runs": 5,
+        "metrics": {
+          "mean_ms_mean": 0.15844719926826656,
+          "median_ms_mean": 0.12973000120837241,
+          "std_dev_ms_mean": 0.07766098269683618,
+          "p95_ms_mean": 0.26203999877907336,
+          "p99_ms_mean": 0.4132399975787848,
+          "min_ms_mean": 0.10639999527484179,
+          "max_ms_mean": 0.5218799866270274,
+          "throughput_ops_sec_mean": 6758.233028475655,
+          "memory_bandwidth_gbps_mean": 7.086520956066887
+        },
+        "statistics": {
+          "mean_ms": {
+            "min": 0.12355199898593128,
+            "max": 0.25210999767296016,
+            "mean": 0.15844719926826656,
+            "range": 0.12855799868702888
+          },
+          "median_ms": {
+            "min": 0.11915000504814088,
+            "max": 0.15390000771731138,
+            "mean": 0.12973000120837241,
+            "range": 0.0347500026691705
+          },
+          "std_dev_ms": {
+            "min": 0.01563265108901029,
+            "max": 0.24115658949288526,
+            "mean": 0.07766098269683618,
+            "range": 0.22552393840387497
+          },
+          "p95_ms": {
+            "min": 0.1475999888498336,
+            "max": 0.5920999974478036,
+            "mean": 0.26203999877907336,
+            "range": 0.44450000859797
+          },
+          "p99_ms": {
+            "min": 0.15669999993406236,
+            "max": 1.0320000001229346,
+            "mean": 0.4132399975787848,
+            "range": 0.8753000001888722
+          },
+          "min_ms": {
+            "min": 0.09239997598342597,
+            "max": 0.11709998943842947,
+            "mean": 0.10639999527484179,
+            "range": 0.0247000134550035
+          },
+          "max_ms": {
+            "min": 0.1776999852154404,
+            "max": 1.4306999801192433,
+            "mean": 0.5218799866270274,
+            "range": 1.2529999949038029
+          },
+          "throughput_ops_sec": {
+            "min": 3966.5225862927136,
+            "max": 8093.758160188641,
+            "mean": 6758.233028475655,
+            "range": 4127.235573895928
+          },
+          "memory_bandwidth_gbps": {
+            "min": 4.159200387444469,
+            "max": 8.486920556577964,
+            "mean": 7.086520956066887,
+            "range": 4.327720169133495
+          }
+        }
+      },
+      {
+        "operator_name": "silu",
+        "input_shape": [
+          1,
+          128,
+          8192
+        ],
+        "runs": 5,
+        "metrics": {
+          "mean_ms_mean": 0.16618240030948073,
+          "median_ms_mean": 0.1623500051209703,
+          "std_dev_ms_mean": 0.015546452055937382,
+          "p95_ms_mean": 0.1931399921886623,
+          "p99_ms_mean": 0.20768000395037234,
+          "min_ms_mean": 0.14754000585526228,
+          "max_ms_mean": 0.21453999797813594,
+          "throughput_ops_sec_mean": 6045.400845768757,
+          "memory_bandwidth_gbps_mean": 25.35624894901128
+        },
+        "statistics": {
+          "mean_ms": {
+            "min": 0.15245000075083226,
+            "max": 0.18670199846383184,
+            "mean": 0.16618240030948073,
+            "range": 0.03425199771299958
+          },
+          "median_ms": {
+            "min": 0.146100006531924,
+            "max": 0.18065000767819583,
+            "mean": 0.1623500051209703,
+            "range": 0.034550001146271825
+          },
+          "std_dev_ms": {
+            "min": 0.00871199545557054,
+            "max": 0.02565437726750506,
+            "mean": 0.015546452055937382,
+            "range": 0.01694238181193452
+          },
+          "p95_ms": {
+            "min": 0.17419998766854405,
+            "max": 0.23689999943599105,
+            "mean": 0.1931399921886623,
+            "range": 0.062700011767447
+          },
+          "p99_ms": {
+            "min": 0.18499998259358108,
+            "max": 0.2514999941922724,
+            "mean": 0.20768000395037234,
+            "range": 0.06650001159869134
+          },
+          "min_ms": {
+            "min": 0.1409000251442194,
+            "max": 0.16269998741336167,
+            "mean": 0.14754000585526228,
+            "range": 0.02179996226914227
+          },
+          "max_ms": {
+            "min": 0.18619999173097312,
+            "max": 0.25389998336322606,
+            "mean": 0.21453999797813594,
+            "range": 0.06769999163225293
+          },
+          "throughput_ops_sec": {
+            "min": 5356.12906250557,
+            "max": 6559.527681698229,
+            "mean": 6045.400845768757,
+            "range": 1203.3986191926588
+          },
+          "memory_bandwidth_gbps": {
+            "min": 22.465233551383363,
+            "max": 27.512653193457613,
+            "mean": 25.35624894901128,
+            "range": 5.047419642074249
+          }
+        }
+      },
+      {
+        "operator_name": "softmax",
+        "input_shape": [
+          1,
+          12,
+          128,
+          128
+        ],
+        "runs": 5,
+        "metrics": {
+          "mean_ms_mean": 0.061298799933865666,
+          "median_ms_mean": 0.05749999836552888,
+          "std_dev_ms_mean": 0.01192778205167562,
+          "p95_ms_mean": 0.07918000337667763,
+          "p99_ms_mean": 0.08965999586507678,
+          "min_ms_mean": 0.05531999631784856,
+          "max_ms_mean": 0.1251600042451173,
+          "throughput_ops_sec_mean": 16448.610765776073,
+          "memory_bandwidth_gbps_mean": 12.93571386175081
+        },
+        "statistics": {
+          "mean_ms": {
+            "min": 0.05306199949700385,
+            "max": 0.06720399775076658,
+            "mean": 0.061298799933865666,
+            "range": 0.014141998253762722
+          },
+          "median_ms": {
+            "min": 0.05119999696034938,
+            "max": 0.06340000254567713,
+            "mean": 0.05749999836552888,
+            "range": 0.012200005585327744
+          },
+          "std_dev_ms": {
+            "min": 0.0036621191629947537,
+            "max": 0.03112322478768026,
+            "mean": 0.01192778205167562,
+            "range": 0.027461105624685504
+          },
+          "p95_ms": {
+            "min": 0.05780000356025994,
+            "max": 0.1112000027205795,
+            "mean": 0.07918000337667763,
+            "range": 0.05339999916031957
+          },
+          "p99_ms": {
+            "min": 0.0633999879937619,
+            "max": 0.1357999863103032,
+            "mean": 0.08965999586507678,
+            "range": 0.07239999831654131
+          },
+          "min_ms": {
+            "min": 0.04919999628327787,
+            "max": 0.06199997733347118,
+            "mean": 0.05531999631784856,
+            "range": 0.01279998105019331
+          },
+          "max_ms": {
+            "min": 0.08120000711642206,
+            "max": 0.24970000959001482,
+            "mean": 0.1251600042451173,
+            "range": 0.16850000247359276
+          },
+          "throughput_ops_sec": {
+            "min": 14880.067160715796,
+            "max": 18845.878585040224,
+            "mean": 16448.610765776073,
+            "range": 3965.811424324427
+          },
+          "memory_bandwidth_gbps": {
+            "min": 11.702160977336046,
+            "max": 14.821001987390353,
+            "mean": 12.93571386175081,
+            "range": 3.1188410100543074
+          }
+        }
+      }
+    ],
+    "timestamp": "2026-03-15T21:13:41.240943",
+    "total_runs": 5
+  }
+}

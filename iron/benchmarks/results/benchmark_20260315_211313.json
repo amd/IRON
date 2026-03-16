@@ -1,0 +1,170 @@
+{
+  "device_info": "CPU",
+  "results": [
+    {
+      "operator_name": "rope",
+      "input_shape": [
+        1,
+        12,
+        128,
+        64
+      ],
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.1682980015175417,
+        "median_ms": 0.13860000763088465,
+        "std_dev_ms": 0.11798291152501013,
+        "p95_ms": 0.3023000026587397,
+        "p99_ms": 0.3797000099439174,
+        "min_ms": 0.09289997979067266,
+        "max_ms": 0.8718000026419759,
+        "throughput_ops_sec": 5941.8412041914235,
+        "memory_bandwidth_gbps": 2.336427030947335
+      },
+      "target_latency_ms": 0.5,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 5.0,
+      "timestamp": "2026-03-15T21:13:12.817382",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "rmsnorm",
+      "input_shape": [
+        1,
+        128,
+        2048
+      ],
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.25210999767296016,
+        "median_ms": 0.15390000771731138,
+        "std_dev_ms": 0.24115658949288526,
+        "p95_ms": 0.5920999974478036,
+        "p99_ms": 1.0320000001229346,
+        "min_ms": 0.11709998943842947,
+        "max_ms": 1.4306999801192433,
+        "throughput_ops_sec": 3966.5225862927136,
+        "memory_bandwidth_gbps": 4.159200387444469
+      },
+      "target_latency_ms": 1.0,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 10.0,
+      "timestamp": "2026-03-15T21:13:12.836002",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "silu",
+      "input_shape": [
+        1,
+        128,
+        8192
+      ],
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.18670199846383184,
+        "median_ms": 0.18065000767819583,
+        "std_dev_ms": 0.02565437726750506,
+        "p95_ms": 0.23689999943599105,
+        "p99_ms": 0.2514999941922724,
+        "min_ms": 0.1469000126235187,
+        "max_ms": 0.25389998336322606,
+        "throughput_ops_sec": 5356.12906250557,
+        "memory_bandwidth_gbps": 22.465233551383363
+      },
+      "target_latency_ms": 0.3,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 3.0,
+      "timestamp": "2026-03-15T21:13:12.872836",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "softmax",
+      "input_shape": [
+        1,
+        12,
+        128,
+        128
+      ],
+      "config": {
+        "iterations": 50,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": null,
+        "verbose": true,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.06720399775076658,
+        "median_ms": 0.05704999784938991,
+        "std_dev_ms": 0.03112322478768026,
+        "p95_ms": 0.1112000027205795,
+        "p99_ms": 0.1357999863103032,
+        "min_ms": 0.05400000372901559,
+        "max_ms": 0.24970000959001482,
+        "throughput_ops_sec": 14880.067160715796,
+        "memory_bandwidth_gbps": 11.702160977336046
+      },
+      "target_latency_ms": 2.0,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 20.0,
+      "timestamp": "2026-03-15T21:13:12.949474",
+      "error": null,
+      "device_info": "CPU"
+    }
+  ],
+  "start_time": "2026-03-15T21:13:12.816832",
+  "end_time": "2026-03-15T21:13:12.969355",
+  "total_duration_sec": 0.15264200000092387,
+  "config": {
+    "iterations": 50,
+    "warmup": 10,
+    "output_format": "json",
+    "output_file": null,
+    "verbose": true,
+    "operator": null,
+    "device": "cpu",
+    "dtype": "bfloat16"
+  },
+  "collection_metadata": {
+    "duration_sec": 2.349899799999548,
+    "exit_code": 0,
+    "operators_requested": [
+      "rope",
+      "rmsnorm",
+      "silu",
+      "softmax"
+    ]
+  }
+}
