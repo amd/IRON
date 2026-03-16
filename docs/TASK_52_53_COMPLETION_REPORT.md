@@ -460,6 +460,65 @@ The C++ runtime with ONNX Runtime GenAI backend is now ready for integration tes
 
 ---
 
+## 10. Conv2D/Conv3D Relevance Note (Post-Implementation Analysis)
+
+**Date Added:** 2026-03-15
+**Reference:** `LLAMA32_OPERATOR_ANALYSIS.md`
+
+### 10.1 Key Finding
+
+**Conv2D and Conv3D operations are NOT used in standard Llama3.2 text inference.** The transformer architecture relies on:
+- GEMM (General Matrix Multiply) for all linear layers (QKV projection, MLP)
+- Attention mechanisms (scaled dot-product, softmax)
+- Normalization (RMSNorm)
+- Activation functions (SiLU)
+- Positional encoding (RoPE)
+
+### 10.2 Strategic Value of Conv2D/Conv3D Implementation
+
+While not needed for Llama3.2, the Conv2D/Conv3D kernels have strategic value for:
+
+| Use Case | Models | Conv Requirement |
+|----------|--------|------------------|
+| **Multimodal Vision** | Gemma3-VL, Qwen3-VL, LLaVA | Conv2D for ViT image encoder |
+| **Video Understanding** | LFM2, video models | Conv3D for spatiotemporal processing |
+| **Audio Processing** | Whisper, audio models | Conv2D over spectrograms |
+| **Pointwise Conv (1x1)** | All models | Linear layer alternative via 1x1 convolution |
+
+### 10.3 Pointwise Convolution as Linear Alternative
+
+**Important:** Pointwise convolution (kernel=1x1) with shape `[OC, IC, 1, 1]` is mathematically equivalent to a Linear layer:
+
+```
+PointwiseConv2D(input, IC, OC, kernel=1x1) ≡ Linear(IC, OC)
+
+For each spatial position (h, w):
+    output[h, w, :] = Linear(input[h, w, :])
+```
+
+IRON's `pointwise_conv2d_bf16_vector` can serve as a Linear layer kernel for projection layers.
+
+### 10.4 Critical Missing Operators for Llama3.2
+
+The following operators are needed for Llama3.2 support (NOT Conv2D/Conv3D):
+
+| Operator | Priority | Status | File |
+|----------|----------|--------|------|
+| RoPE | Critical | 🔴 Not Implemented | `iron/operators/rope/` |
+| RMSNorm | Critical | 🔴 Not Implemented | `iron/operators/normalization/` |
+| SiLU | Critical | 🔴 Not Implemented | `iron/operators/activations/` |
+| Softmax | Critical | 🔴 Not Implemented | `iron/operators/softmax/` |
+
+### 10.5 Recommendation
+
+**Maintain Conv2D/Conv3D** for multimodal model support (Gemma3-VL, video models) but **reprioritize development** to focus on transformer-specific operators (RoPE, RMSNorm, SiLU, Softmax) for Llama3.2 text inference support.
+
+See `LLAMA32_SUPPORT_PLAN.md` for the complete implementation roadmap.
+
+---
+
+---
+
 **Document Approval:**
 
 | Role | Name | Date |
