@@ -313,7 +313,7 @@ class ShellCompilationCommand(CompilationCommand):
             capture_output=True,
             text=True,
             cwd=self.cwd,
-            env={**self.env, 'PYTHONUNBUFFERED': '1'}
+            env={**self.env, "PYTHONUNBUFFERED": "1"},
         )
         if 0 != result.returncode:
             print("Return code: ", result.returncode)
