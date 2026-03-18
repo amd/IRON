@@ -4,6 +4,7 @@
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
+import pyxrt
 
 torch_dtype_map = {
     "bf16": torch.bfloat16,
@@ -46,3 +47,74 @@ def xrt_to_torch(xrttensor) -> torch.Tensor:
     mem = bo.map()
     t = torch.frombuffer(mem, dtype=torch_dtype)
     return t.reshape(xrttensor.shape)
+
+
+def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    """Convert a torch tensor to a numpy array, handling bfloat16."""
+    if tensor.dtype == torch.bfloat16:
+        return tensor.to(torch.float32).numpy().astype(bfloat16)
+    return tensor.numpy()
+
+
+def numpy_to_torch(arr: np.ndarray) -> torch.Tensor:
+    """Convert a numpy array to a torch tensor, handling bfloat16."""
+    if arr.dtype == bfloat16:
+        return torch.from_numpy(arr.astype(np.float32)).to(torch.bfloat16)
+    return torch.from_numpy(arr)
+
+
+class XRTSubBuffer:
+    """
+    A view into a sub-region of an XRTTensor's underlying pyxrt.bo buffer.
+
+    Provides the same interface as XRTTensor (buffer_object(), to(), shape, dtype,
+    data, to_torch()) so that it can be used in place of XRTTensor when passing
+    to NPUKernel callables or reading/writing sub-regions of a larger allocation.
+
+    The parent XRTTensor must remain alive as long as this sub-buffer is in use.
+    """
+
+    def __init__(self, parent_bo, offset_bytes, size_bytes, shape, dtype):
+        """
+        Args:
+            parent_bo: The parent pyxrt.bo object.
+            offset_bytes: Byte offset into the parent buffer.
+            size_bytes: Size of this sub-region in bytes.
+            shape: Tuple giving the logical shape of this sub-buffer.
+            dtype: numpy dtype for interpreting the buffer contents.
+        """
+        self._bo = parent_bo.sub_buffer(offset_bytes, size_bytes)
+        self._shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        ptr = self._bo.map()
+        self._data = np.frombuffer(ptr, dtype=self.dtype).reshape(self._shape)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def data(self) -> np.ndarray:
+        return self._data
+
+    def buffer_object(self):
+        """Return the underlying pyxrt.bo (required by NPUKernel)."""
+        return self._bo
+
+    def to(self, target_device: str) -> "XRTSubBuffer":
+        """Sync buffer to/from the NPU."""
+        if target_device == "npu":
+            self._bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+        elif target_device == "cpu":
+            self._bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+        else:
+            raise ValueError(f"Unknown device '{target_device}'")
+        return self
+
+    def to_torch(self) -> torch.Tensor:
+        """Return a torch tensor view of this sub-buffer's data (syncs from device first)."""
+        self.to("cpu")
+        torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
+        if torch_dtype is None:
+            raise ValueError(f"Unsupported dtype: {self.dtype}")
+        return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)

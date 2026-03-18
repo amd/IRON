@@ -34,8 +34,12 @@ mark the `SourceArtifact`s as available -- they cannot be generated.
 from abc import ABC, abstractmethod
 from pathlib import Path
 import os.path
+import zlib
 import logging
 import subprocess
+import importlib.util
+from contextlib import nullcontext
+from aie.extras.context import mlir_mod_ctx
 import sys
 
 # Global Functions
@@ -203,6 +207,82 @@ class SourceArtifact(CompilationArtifact):
     pass
 
 
+class FullElfArtifact(CompilationArtifact):
+    def __init__(self, filename, mlir_input, dependencies):
+        if mlir_input not in dependencies:
+            dependencies = dependencies + [mlir_input]
+        super().__init__(filename, dependencies)
+        self.mlir_input = mlir_input
+
+
+class XclbinArtifact(CompilationArtifact):
+    def __init__(
+        self,
+        filename,
+        mlir_input,
+        dependencies,
+        kernel_name="MLIR_AIE",
+        extra_flags=None,
+        xclbin_input=None,
+    ):
+        if mlir_input not in dependencies:
+            dependencies = dependencies + [mlir_input]
+        super().__init__(filename, dependencies)
+        self.mlir_input = mlir_input
+        self.kernel_name = kernel_name
+        self.extra_flags = extra_flags if extra_flags is not None else []
+        self.xclbin_input = xclbin_input
+
+
+class InstsBinArtifact(CompilationArtifact):
+    def __init__(self, filename, mlir_input, dependencies, extra_flags=None):
+        self.mlir_input = mlir_input
+        if mlir_input not in dependencies:
+            dependencies = dependencies + [mlir_input]
+        super().__init__(filename, dependencies)
+        self.extra_flags = extra_flags if extra_flags is not None else []
+
+
+class KernelObjectArtifact(CompilationArtifact):
+    def __init__(
+        self,
+        filename,
+        dependencies,
+        extra_flags=None,
+        rename_symbols=None,
+        prefix_symbols=None,
+    ):
+        super().__init__(filename, dependencies)
+        self.extra_flags = extra_flags if extra_flags is not None else []
+        self.rename_symbols = rename_symbols if rename_symbols is not None else {}
+        self.prefix_symbols = prefix_symbols
+
+
+class KernelArchiveArtifact(CompilationArtifact):
+    pass
+
+
+class PythonGeneratedMLIRArtifact(CompilationArtifact):
+    def __init__(
+        self,
+        filename,
+        import_path,
+        callback_fn,
+        callback_args=None,
+        callback_kwargs=None,
+        requires_context=False,
+        uses_kernel_archive=False,
+        kernel_archive=None,
+    ):
+        self.import_path = import_path
+        self.callback_fn = callback_fn
+        self.callback_args = callback_args if callback_args is not None else []
+        self.callback_kwargs = callback_kwargs if callback_kwargs is not None else {}
+        self.requires_context = requires_context
+        dependencies = [SourceArtifact(import_path)]
+        super().__init__(filename, dependencies=dependencies)
+
+
 # Compilation Command
 # ##########################################################################
 
@@ -233,9 +313,10 @@ class ShellCompilationCommand(CompilationCommand):
             capture_output=True,
             text=True,
             cwd=self.cwd,
-            env=self.env,
+            env={**self.env, "PYTHONUNBUFFERED": "1"},
         )
         if 0 != result.returncode:
+            print("Return code: ", result.returncode)
             print(result.stdout)
             print(result.stderr, file=sys.stderr)
         return 0 == result.returncode
@@ -274,31 +355,333 @@ class CompilationRule(ABC):
         pass
 
 
-class BatchRule(CompilationRule):
-    """
-    A helper class for rules that process all available artifacts of a certain type in one go.
-    Subclasses should define `artifact_type` and implement `create_commands`.
-    """
-
-    artifact_type = None
-
+class GenerateMLIRFromPythonCompilationRule(CompilationRule):
     def matches(self, graph):
-        if self.artifact_type is None:
-            raise NotImplementedError(
-                "Subclasses of BatchRule must define artifact_type"
-            )
-        return any(graph.get_worklist(self.artifact_type))
+        return any(graph.get_worklist(PythonGeneratedMLIRArtifact))
 
     def compile(self, graph):
-        worklist = graph.get_worklist(self.artifact_type)
-        commands = self.create_commands(worklist)
+        """Generate MLIR from a Python callback that uses the MLIR bindings"""
+        commands = []
+        worklist = graph.get_worklist(PythonGeneratedMLIRArtifact)
         for artifact in worklist:
-            artifact.available = True
+            new_artifact = SourceArtifact(artifact.filename)
+            # To make Python capture variables in this closure by value, not by reference, use default arguments
+            callback = lambda new_artifact=new_artifact, import_path=artifact.import_path, callback_fn=artifact.callback_fn, callback_args=artifact.callback_args, callback_kwargs=artifact.callback_kwargs, requires_context=artifact.requires_context: self.generate_mlir(
+                new_artifact,
+                import_path,
+                callback_fn,
+                callback_args,
+                callback_kwargs,
+                requires_context,
+            )
+            commands.append(PythonCallbackCompilationCommand(callback))
+            new_artifact.available = True
+            graph.replace(artifact, new_artifact)
         return commands
 
-    def create_commands(self, artifacts):
-        """
-        Create compilation commands for the given list of artifacts.
-        Must be implemented by subclasses.
-        """
-        raise NotImplementedError
+    @staticmethod
+    def generate_mlir(
+        output_artifact,
+        import_path,
+        callback_fn,
+        callback_args=None,
+        callback_kwargs=None,
+        requires_context=False,
+    ):
+        # Import the Python source file
+        spec = importlib.util.spec_from_file_location(
+            Path(import_path).name, import_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # We only initiate an MLIR context if requested; otherwise, it is expected that the callback creates the context
+        ctx_callback = lambda: (mlir_mod_ctx() if requires_context else nullcontext())
+        with ctx_callback() as ctx:
+            callback_function = getattr(module, callback_fn)
+            mlir_code = callback_function(*callback_args, **callback_kwargs)
+        # Stringify the generated MLIR
+        if requires_context:
+            mlir_code = str(ctx.module)
+        else:
+            mlir_code = str(mlir_code)
+
+        with open(output_artifact.filename, "w") as f:
+            f.write(mlir_code)
+
+
+class AieccCompilationRule(CompilationRule, ABC):
+    def __init__(self, build_dir, peano_dir, mlir_aie_dir, *args, **kwargs):
+        self.build_dir = build_dir
+        self.aiecc_path = Path(mlir_aie_dir) / "bin" / "aiecc.py"
+        self.peano_dir = peano_dir
+        super().__init__(*args, **kwargs)
+
+
+class AieccFullElfCompilationRule(AieccCompilationRule):
+    def matches(self, graph):
+        return any(graph.get_worklist(FullElfArtifact))
+
+    def compile(self, graph):
+        worklist = graph.get_worklist(FullElfArtifact)
+        commands = []
+
+        for artifact in worklist:
+            compile_cmd = [
+                sys.executable,
+                str(self.aiecc_path),
+                "-v",
+                "-j 1",
+                "--no-compile-host",
+                "--no-xchesscc",
+                "--no-xbridge",
+                "--peano",
+                str(self.peano_dir),
+                "--dynamic-objFifos",
+                "--expand-load-pdis",
+                "--generate-full-elf",
+                "--full-elf-name",
+                os.path.abspath(artifact.filename),
+                os.path.abspath(artifact.mlir_input.filename),
+            ]
+            commands.append(
+                ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
+            )
+            artifact.available = True
+
+        return commands
+
+
+class AieccXclbinInstsCompilationRule(AieccCompilationRule):
+    def matches(self, graph):
+        return any(graph.get_worklist((XclbinArtifact, InstsBinArtifact)))
+
+    def compile(self, graph):
+        # If there are both xclbin and insts.bin targets based on the same source MLIR code, we can combine them into one single `aiecc.py` invocation.
+        mlir_sources = set()
+        mlir_sources_to_xclbins = {}
+        mlir_sources_to_insts = {}
+        worklist = graph.get_worklist((XclbinArtifact, InstsBinArtifact))
+        for artifact in worklist:
+            mlir_dependency = artifact.mlir_input
+            mlir_sources.add(mlir_dependency)
+            if isinstance(artifact, XclbinArtifact):
+                mlir_sources_to_xclbins.setdefault(mlir_dependency, []).append(artifact)
+            elif isinstance(artifact, InstsBinArtifact):
+                mlir_sources_to_insts.setdefault(mlir_dependency, []).append(artifact)
+
+        commands = []
+        # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
+        for mlir_source in mlir_sources:
+            compile_cmd = [
+                sys.executable,
+                str(self.aiecc_path),
+                "-v",
+                "-j 1",
+                "--no-compile-host",
+                "--no-xchesscc",
+                "--no-xbridge",
+                "--peano",
+                str(self.peano_dir),
+                "--dynamic-objFifos",
+            ]
+            do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
+            do_compile_insts_bin = mlir_source in mlir_sources_to_insts
+            if do_compile_xclbin:
+                first_xclbin = mlir_sources_to_xclbins[mlir_source][
+                    0
+                ]  # TODO: this does not handle the case of multiple xclbins with different kernel names or flags from the same MLIR
+                compile_cmd += first_xclbin.extra_flags + [
+                    "--aie-generate-xclbin",
+                    "--xclbin-name=" + os.path.abspath(first_xclbin.filename),
+                    "--xclbin-kernel-name=" + first_xclbin.kernel_name,
+                ]
+                if first_xclbin.xclbin_input is not None:
+                    compile_cmd += [
+                        "--xclbin-input="
+                        + os.path.abspath(first_xclbin.xclbin_input.filename)
+                    ]
+            if do_compile_insts_bin:
+                first_insts_bin = mlir_sources_to_insts[mlir_source][
+                    0
+                ]  # TODO: this does not handle the case of multiple insts.bins with different flags from the same MLIR
+                if not do_compile_xclbin:
+                    compile_cmd += ["--no-compile"]
+                compile_cmd += first_insts_bin.extra_flags + [
+                    "--aie-generate-npu",
+                    "--npu-insts-name=" + os.path.abspath(first_insts_bin.filename),
+                ]
+            compile_cmd += [os.path.abspath(mlir_source.filename)]
+
+            # If the MLIR source depends on a kernel archive, pass it to aiecc.py so it can be linked
+            if (
+                isinstance(mlir_source, PythonGeneratedMLIRArtifact)
+                and "kernel_archive" in mlir_source.callback_kwargs
+            ):
+                compile_cmd.append(
+                    os.path.abspath(
+                        os.path.join(
+                            self.build_dir,
+                            mlir_source.callback_kwargs["kernel_archive"],
+                        )
+                    )
+                )
+
+            commands.append(
+                ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
+            )
+
+            # There may be multiple targets that require an xclbin/insts.bin from the same MLIR with different names; copy them
+            for sources_to in [mlir_sources_to_xclbins, mlir_sources_to_insts]:
+                if sources_to.get(mlir_source, [])[1:]:
+                    copy_src = sources_to[mlir_source][0]
+                    for copy_dest in sources_to[mlir_source][1:]:
+                        commands.append(
+                            ShellCompilationCommand(
+                                ["cp", copy_src.filename, copy_dest.filename]
+                            )
+                        )
+
+        # Update graph
+        for artifact in worklist:
+            artifact.available = True
+
+        return commands
+
+
+class PeanoCompilationRule(CompilationRule):
+    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
+        self.peano_dir = peano_dir
+        self.mlir_aie_dir = mlir_aie_dir
+        super().__init__(*args, **kwargs)
+
+    def matches(self, artifacts):
+        return any(artifacts.get_worklist(KernelObjectArtifact))
+
+    def compile(self, artifacts):
+        clang_path = Path(self.peano_dir) / "bin" / "clang++"
+        include_path = Path(self.mlir_aie_dir) / "include"
+        worklist = artifacts.get_worklist(KernelObjectArtifact)
+        commands = []
+        for artifact in worklist:
+            if len(artifact.dependencies) != 1:
+                raise RuntimeError(
+                    "Expected exactly one dependency (the C source code) for KernelObjectArtifact"
+                )
+            source_file = artifact.dependencies[0]
+            if not isinstance(source_file, SourceArtifact):
+                raise RuntimeError(
+                    "Expected KernelObject dependency to be a C source file"
+                )
+
+            cmd = (
+                [
+                    str(clang_path),
+                    "-O2",
+                    "-std=c++20",
+                    "--target=aie2p-none-unknown-elf",
+                    "-Wno-parentheses",
+                    "-Wno-attributes",
+                    "-Wno-macro-redefined",
+                    "-Wno-empty-body",
+                    "-Wno-missing-template-arg-list-after-template-kw",
+                    f"-I{str(include_path)}",
+                ]
+                + artifact.extra_flags
+                + ["-c", source_file.filename, "-o", artifact.filename]
+            )
+
+            commands.append(ShellCompilationCommand(cmd))
+            if artifact.rename_symbols:
+                commands.extend(self._rename_symbols(artifact))
+            if artifact.prefix_symbols:
+                commands.extend(self._prefix_symbols(artifact, artifact.prefix_symbols))
+            artifact.available = True
+
+        return commands
+
+    def _rename_symbols(self, artifact):
+        objcopy_path = "llvm-objcopy-18"
+        cmd = [
+            objcopy_path,
+        ]
+        for old_sym, new_sym in artifact.rename_symbols.items():
+            cmd += [
+                "--redefine-sym",
+                f"{old_sym}={new_sym}",
+            ]
+        cmd += [artifact.filename]
+        return [ShellCompilationCommand(cmd)]
+
+    def _prefix_symbols(self, artifact, prefix):
+        objcopy_path = "llvm-objcopy-18"
+        nm_path = "llvm-nm-18"
+        symbol_map_file = artifact.filename + ".symbol_map"
+
+        # Extract defined symbols and create symbol map
+        nm_cmd = [
+            "sh",
+            "-c",
+            f"{nm_path} --defined-only --extern-only {artifact.filename} | "
+            f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
+        ]
+
+        # Apply the renaming using the symbol map
+        objcopy_cmd = [
+            objcopy_path,
+            "--redefine-syms=" + symbol_map_file,
+            artifact.filename,
+        ]
+
+        return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
+
+
+class ArchiveCompilationRule(CompilationRule):
+    def __init__(self, peano_dir, *args, **kwargs):
+        self.peano_dir = peano_dir
+        super().__init__(*args, **kwargs)
+
+    def matches(self, artifacts):
+        return any(artifacts.get_worklist(KernelArchiveArtifact))
+
+    def compile(self, artifacts):
+        """Create an archive (.a) from compiled object files"""
+        worklist = artifacts.get_worklist(KernelArchiveArtifact)
+        commands = []
+        for artifact in worklist:
+            # Get archive filename from method
+            archive_path = artifact.filename
+            object_files = [
+                dep.filename
+                for dep in artifact.dependencies
+                if isinstance(dep, KernelObjectArtifact)
+            ]
+
+            # Try to find ar tool from PEANO, then system
+            ar_path = None
+
+            if self.peano_dir:
+                # Peano has llvm-ar for archiving
+                peano_ar = Path(self.peano_dir) / "bin" / "llvm-ar"
+                if os.path.exists(peano_ar):
+                    ar_path = peano_ar
+
+            if ar_path is None:
+                raise RuntimeError(
+                    "Could not find 'ar' tool in PEANO installation or system PATH"
+                )
+
+            cmd = [str(ar_path), "rcs", archive_path] + object_files
+            commands.append(ShellCompilationCommand(cmd))
+
+            # Check for duplicate symbol definitions in the archive
+            check_cmd = [
+                "sh",
+                "-c",
+                f"nm {archive_path} | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
+                f'if read sym; then echo "Error: Duplicate symbol in archive: $sym" >&2; exit 1; fi',
+            ]
+            commands.append(ShellCompilationCommand(check_cmd))
+
+            artifact.available = True
+
+        return commands
