@@ -412,7 +412,7 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
 class AieccCompilationRule(CompilationRule, ABC):
     def __init__(self, build_dir, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.build_dir = build_dir
-        self.aiecc_path = Path(mlir_aie_dir) / "bin" / "aiecc.py"
+        self.aiecc_path = Path(mlir_aie_dir) / "bin" / "aiecc"
         self.peano_dir = peano_dir
         super().__init__(*args, **kwargs)
 
@@ -427,10 +427,9 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
 
         for artifact in worklist:
             compile_cmd = [
-                sys.executable,
                 str(self.aiecc_path),
                 "-v",
-                "-j 1",
+                "-j1",
                 "--no-compile-host",
                 "--no-xchesscc",
                 "--no-xbridge",
@@ -473,10 +472,9 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
         for mlir_source in mlir_sources:
             compile_cmd = [
-                sys.executable,
                 str(self.aiecc_path),
                 "-v",
-                "-j 1",
+                "-j1",
                 "--no-compile-host",
                 "--no-xchesscc",
                 "--no-xbridge",
@@ -507,7 +505,7 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 if not do_compile_xclbin:
                     compile_cmd += ["--no-compile"]
                 compile_cmd += first_insts_bin.extra_flags + [
-                    "--aie-generate-npu",
+                    "--aie-generate-npu-insts",
                     "--npu-insts-name=" + os.path.abspath(first_insts_bin.filename),
                 ]
             compile_cmd += [os.path.abspath(mlir_source.filename)]
