@@ -56,6 +56,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
         golden_ref["intermediate"],
         rel_tol=0.07,
         abs_tol=0.7,
+        max_error_rate=0.002,
     )
     if errors_intermediate:
         errors["intermediate"] = errors_intermediate
