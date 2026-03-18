@@ -25,10 +25,6 @@ def get_params():
     return params
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
 @pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
 def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)

@@ -26,6 +26,10 @@ class AIERMSNorm(MLIROperator):
         context=None,
     ):
         # Note: epsilon is hardcoded to 1e-5 in the AIE kernel (rms_norm.cc) and cannot be changed at runtime.
+        if weighted and num_channels != 1:
+            raise ValueError(
+                f"Weighted RMS Norm only supports num_channels=1 (got {num_channels})"
+            )
         max_multiple = num_aie_columns * tile_size
         if size % max_multiple != 0:
             raise ValueError(

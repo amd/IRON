@@ -81,7 +81,6 @@ class AIELlamaOperators:
         self.prefill.rms_norm = (
             AIERMSNorm(
                 size=prompt_len * config.emb_dim,
-                eps=1e-5,
                 num_aie_columns=8,
                 num_channels=2,
                 tile_size=config.emb_dim,
@@ -396,7 +395,6 @@ class AIELlamaOperators:
 
         rms_norm_op = AIERMSNorm(
             size=config.emb_dim,
-            eps=1e-5,
             num_aie_columns=1,
             num_channels=2,
             tile_size=config.emb_dim,

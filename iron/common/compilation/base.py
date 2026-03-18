@@ -271,8 +271,6 @@ class PythonGeneratedMLIRArtifact(CompilationArtifact):
         callback_args=None,
         callback_kwargs=None,
         requires_context=False,
-        uses_kernel_archive=False,
-        kernel_archive=None,
     ):
         self.import_path = import_path
         self.callback_fn = callback_fn
@@ -598,7 +596,7 @@ class PeanoCompilationRule(CompilationRule):
         return commands
 
     def _rename_symbols(self, artifact):
-        objcopy_path = "llvm-objcopy-18"
+        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
         cmd = [
             objcopy_path,
         ]
@@ -611,16 +609,16 @@ class PeanoCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = "llvm-objcopy-18"
-        nm_path = "llvm-nm-18"
+        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
+        nm_path = str(Path(self.peano_dir) / "bin" / "llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
         # Extract defined symbols and create symbol map
         nm_cmd = [
             "sh",
             "-c",
-            f"{nm_path} --defined-only --extern-only {artifact.filename} | "
-            f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
+            f'"{nm_path}" --defined-only --extern-only "{artifact.filename}" | '
+            f'awk \'{{print $3 " {prefix}" $3}}\' > "{symbol_map_file}"',
         ]
 
         # Apply the renaming using the symbol map
@@ -672,10 +670,11 @@ class ArchiveCompilationRule(CompilationRule):
             commands.append(ShellCompilationCommand(cmd))
 
             # Check for duplicate symbol definitions in the archive
+            llvm_nm = str(Path(self.peano_dir) / "bin" / "llvm-nm")
             check_cmd = [
                 "sh",
                 "-c",
-                f"nm {archive_path} | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
+                f"\"{llvm_nm}\" \"{archive_path}\" | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
                 f'if read sym; then echo "Error: Duplicate symbol in archive: $sym" >&2; exit 1; fi',
             ]
             commands.append(ShellCompilationCommand(check_cmd))
