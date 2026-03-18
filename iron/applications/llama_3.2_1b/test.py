@@ -41,18 +41,6 @@ params, names = generate_test_params()
 )
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
-    # Print debug info about resource limits
-    print("\n=== Debug: Resource Limits ===")
-    print(f"TTY stdin: {os.isatty(0)}, stdout: {os.isatty(1)}, stderr: {os.isatty(2)}")
-    try:
-        stack_soft, stack_hard = resource.getrlimit(resource.RLIMIT_STACK)
-        print(f"Stack limit: soft={stack_soft}, hard={stack_hard}")
-        as_soft, as_hard = resource.getrlimit(resource.RLIMIT_AS)
-        print(f"Address space limit: soft={as_soft}, hard={as_hard}")
-    except Exception as e:
-        print(f"Error getting limits: {e}")
-    print("=" * 40)
-
     command = f"python3 {test_dir}/llama_npu.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --num-tokens {num_tokens} --prompt-len {prompt_len}"
 
     result = subprocess.run(
