@@ -77,7 +77,9 @@ def generate_golden_reference(
         input_tensor = torch.randn(input_shape, dtype=dtype) * 2.0
 
     # Compute expected output
-    expected_output = reduction_cpu(input_tensor, dim=dim, keepdim=False, reduction_op=reduction_op)
+    expected_output = reduction_cpu(
+        input_tensor, dim=dim, keepdim=False, reduction_op=reduction_op
+    )
 
     return {
         "input": input_tensor,

@@ -154,10 +154,7 @@ class GenerationConfig:
         return token_id in self.eos_tokens
 
     def should_stop(
-        self,
-        token_id: int,
-        current_length: int,
-        generated_text: str = ""
+        self, token_id: int, current_length: int, generated_text: str = ""
     ) -> Tuple[bool, str]:
         """Check if generation should stop.
 
@@ -275,9 +272,9 @@ class GenerationConfig:
         return cls.from_dict(json.loads(json_str))
 
 
-#==============================================================================
+# ==============================================================================
 # Preset Configurations
-#==============================================================================
+# ==============================================================================
 
 LLAMA3_CONFIG = GenerationConfig(
     model_type="llama3",

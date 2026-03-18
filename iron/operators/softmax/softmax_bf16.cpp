@@ -17,20 +17,25 @@
  */
 
 #include "softmax_bf16.hpp"
+
 #include "types.hpp"
+
 #include <cmath>
 #include <cstring>
 
-namespace iron {
-namespace operators {
-namespace softmax {
+namespace iron
+{
+namespace operators
+{
+namespace softmax
+{
 
 //==============================================================================
 // softmax_fwd Implementation
 //==============================================================================
 
-template<typename T>
-void softmax_fwd(const T* input, T* output, int N, int M) {
+template <typename T> void softmax_fwd(const T *input, T *output, int N, int M)
+{
     // Process each row
     for (int n = 0; n < N; ++n) {
         const int row_offset = n * M;
@@ -63,14 +68,14 @@ void softmax_fwd(const T* input, T* output, int N, int M) {
 }
 
 // Explicit template instantiation for bfloat16
-template void softmax_fwd<bfloat16>(const bfloat16*, bfloat16*, int, int);
+template void softmax_fwd<bfloat16>(const bfloat16 *, bfloat16 *, int, int);
 
 //==============================================================================
 // softmax_scaled_fwd Implementation
 //==============================================================================
 
-template<typename T>
-void softmax_scaled_fwd(const T* input, T* output, int N, int M, float scale) {
+template <typename T> void softmax_scaled_fwd(const T *input, T *output, int N, int M, float scale)
+{
     // Process each row
     for (int n = 0; n < N; ++n) {
         const int row_offset = n * M;
@@ -104,24 +109,18 @@ void softmax_scaled_fwd(const T* input, T* output, int N, int M, float scale) {
 }
 
 // Explicit template instantiation for bfloat16
-template void softmax_scaled_fwd<bfloat16>(const bfloat16*, bfloat16*, int, int, float);
+template void softmax_scaled_fwd<bfloat16>(const bfloat16 *, bfloat16 *, int, int, float);
 
 //==============================================================================
 // softmax_along_dim Implementation
 //==============================================================================
 
-template<typename T>
-void softmax_along_dim(
-    const T* input,
-    T* output,
-    const int* shape,
-    int dim,
-    int num_dims
-) {
+template <typename T> void softmax_along_dim(const T *input, T *output, const int *shape, int dim, int num_dims)
+{
     // Compute stride information
-    int outer_size = 1;  // Product of dimensions before 'dim'
+    int outer_size = 1; // Product of dimensions before 'dim'
     int dim_size = shape[dim];
-    int inner_size = 1;  // Product of dimensions after 'dim'
+    int inner_size = 1; // Product of dimensions after 'dim'
 
     for (int i = 0; i < dim; ++i) {
         outer_size *= shape[i];
@@ -170,7 +169,7 @@ void softmax_along_dim(
 }
 
 // Explicit template instantiation for bfloat16
-template void softmax_along_dim<bfloat16>(const bfloat16*, bfloat16*, const int*, int, int);
+template void softmax_along_dim<bfloat16>(const bfloat16 *, bfloat16 *, const int *, int, int);
 
 } // namespace softmax
 } // namespace operators

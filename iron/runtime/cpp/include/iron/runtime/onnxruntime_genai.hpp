@@ -50,11 +50,13 @@
 #ifdef _WIN32
 
 // ONNX Runtime GenAI headers
-#include <ort_genai.h>
 #include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+#include <ort_genai.h>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Forward Declarations
@@ -74,8 +76,9 @@ class OnnxBufferManager;
  * Wraps ONNX Runtime memory buffers with IBuffer interface.
  * Supports both CPU and NPU memory through DirectML.
  */
-class OnnxBuffer : public IBuffer {
-public:
+class OnnxBuffer : public IBuffer
+{
+  public:
     /**
      * @brief Create buffer from ONNX tensor
      * @param tensor ONNX tensor value
@@ -88,36 +91,36 @@ public:
      * @param memoryInfo ONNX memory info
      * @param size Buffer size in bytes
      */
-    OnnxBuffer(const Ort::MemoryInfo& memoryInfo, size_t size);
+    OnnxBuffer(const Ort::MemoryInfo &memoryInfo, size_t size);
 
     ~OnnxBuffer() override;
 
     // Move semantics
-    OnnxBuffer(OnnxBuffer&& other) noexcept;
-    OnnxBuffer& operator=(OnnxBuffer&& other) noexcept;
+    OnnxBuffer(OnnxBuffer &&other) noexcept;
+    OnnxBuffer &operator=(OnnxBuffer &&other) noexcept;
 
     // Disable copy
-    OnnxBuffer(const OnnxBuffer&) = delete;
-    OnnxBuffer& operator=(const OnnxBuffer&) = delete;
+    OnnxBuffer(const OnnxBuffer &) = delete;
+    OnnxBuffer &operator=(const OnnxBuffer &) = delete;
 
     // IBuffer interface
     [[nodiscard]] size_t size() const override;
-    void write(const void* data, size_t size, size_t offset = 0) override;
-    void read(void* data, size_t size, size_t offset = 0) const override;
+    void write(const void *data, size_t size, size_t offset = 0) override;
+    void read(void *data, size_t size, size_t offset = 0) const override;
     void sync(bool to_device) override;
-    [[nodiscard]] void* nativeHandle() const override;
+    [[nodiscard]] void *nativeHandle() const override;
     [[nodiscard]] uint64_t address() const override;
     [[nodiscard]] bool isValid() const override;
 
     // ONNX-specific access
-    Ort::Value& tensor();
-    const Ort::Value& tensor() const;
+    Ort::Value &tensor();
+    const Ort::Value &tensor() const;
 
-private:
+  private:
     Ort::Value tensor_;
     size_t size_;
     bool valid_;
-    std::unique_ptr<char[]> data_;  // Owns the underlying tensor memory
+    std::unique_ptr<char[]> data_; // Owns the underlying tensor memory
     mutable std::mutex mutex_;
 };
 
@@ -131,21 +134,22 @@ private:
  * Wraps ONNX Runtime session with IKernelHandle interface.
  * Supports incremental inference and streaming output.
  */
-class OnnxKernelHandle : public IKernelHandle {
-public:
+class OnnxKernelHandle : public IKernelHandle
+{
+  public:
     /**
      * @brief Create kernel handle from ONNX session
      * @param session ONNX session
      * @param name Kernel/model name
      */
-    OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string& name);
+    OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string &name);
 
     ~OnnxKernelHandle() override;
 
     // IKernelHandle interface
     [[nodiscard]] std::string name() const override;
-    void setArg(size_t index, const KernelArgument& arg) override;
-    ExecutionResult execute(const ExecutionOptions& options = ExecutionOptions()) override;
+    void setArg(size_t index, const KernelArgument &arg) override;
+    ExecutionResult execute(const ExecutionOptions &options = ExecutionOptions()) override;
     void reset() override;
     [[nodiscard]] size_t numArguments() const override;
     [[nodiscard]] bool isReady() const override;
@@ -153,7 +157,7 @@ public:
     [[nodiscard]] std::vector<std::string> getArgumentNames() const override;
     [[nodiscard]] bool isArgumentSet(size_t index) const override;
 
-private:
+  private:
     std::shared_ptr<Ort::Session> session_;
     std::string name_;
     std::vector<std::optional<KernelArgument>> setArgs_;
@@ -173,14 +177,15 @@ private:
  *
  * Manages a pool of ONNX tensors for efficient allocation.
  */
-class OnnxBufferManager : public IBufferManager {
-public:
+class OnnxBufferManager : public IBufferManager
+{
+  public:
     /**
      * @brief Create buffer manager
      * @param memoryInfo ONNX memory info
      * @param maxPoolSize Maximum pool size in bytes
      */
-    OnnxBufferManager(const Ort::MemoryInfo& memoryInfo, size_t maxPoolSize = 1024 * 1024 * 1024);
+    OnnxBufferManager(const Ort::MemoryInfo &memoryInfo, size_t maxPoolSize = 1024 * 1024 * 1024);
 
     ~OnnxBufferManager() override;
 
@@ -194,7 +199,7 @@ public:
     [[nodiscard]] size_t pooledBufferCount() const override;
     void setMaxPoolSize(size_t max_bytes) override;
 
-private:
+  private:
     std::unique_ptr<Ort::MemoryInfo> memoryInfo_;
     size_t maxPoolSize_;
     std::atomic<size_t> totalMemoryInUse_;
@@ -220,8 +225,9 @@ private:
  *
  * Windows NPU backend using ONNX Runtime GenAI with DirectML.
  */
-class OnnxRuntimeGenAiWrapper : public INpuRuntime {
-public:
+class OnnxRuntimeGenAiWrapper : public INpuRuntime
+{
+  public:
     /**
      * @brief Create ONNX Runtime GenAI wrapper
      * @param deviceId Device ID (reserved for future use)
@@ -231,30 +237,24 @@ public:
     ~OnnxRuntimeGenAiWrapper() override;
 
     // Xclbin loading (ONNX model loading instead)
-    bool loadXclbin(const std::string& path) override;
-    bool loadXclbinFromMemory(const void* data, size_t size) override;
-    bool unloadXclbin(const std::string& path) override;
+    bool loadXclbin(const std::string &path) override;
+    bool loadXclbinFromMemory(const void *data, size_t size) override;
+    bool unloadXclbin(const std::string &path) override;
 
     [[nodiscard]] std::vector<std::string> getKernelNames() const override;
-    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(
-        const std::string& xclbinPath) const override;
-    [[nodiscard]] bool hasKernel(const std::string& kernelName) const override;
+    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(const std::string &xclbinPath) const override;
+    [[nodiscard]] bool hasKernel(const std::string &kernelName) const override;
 
     // Kernel execution
-    ExecutionResult execute(
-        const std::string& kernelName,
-        const std::vector<KernelArgument>& arguments,
-        const ExecutionOptions& options = ExecutionOptions()) override;
+    ExecutionResult execute(const std::string &kernelName,
+                            const std::vector<KernelArgument> &arguments,
+                            const ExecutionOptions &options = ExecutionOptions()) override;
 
-    std::shared_ptr<IKernelHandle> getKernel(const std::string& kernelName) override;
+    std::shared_ptr<IKernelHandle> getKernel(const std::string &kernelName) override;
 
     // Buffer management
-    std::shared_ptr<IBuffer> allocateBuffer(
-        size_t size,
-        bool hostAccessible = true) override;
-    std::shared_ptr<IBuffer> allocateBufferFromData(
-        const void* data,
-        size_t size) override;
+    std::shared_ptr<IBuffer> allocateBuffer(size_t size, bool hostAccessible = true) override;
+    std::shared_ptr<IBuffer> allocateBufferFromData(const void *data, size_t size) override;
     std::shared_ptr<IBufferManager> getBufferManager() override;
 
     // Runtime management
@@ -268,7 +268,7 @@ public:
     // Static availability check
     static bool isAvailable();
 
-private:
+  private:
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;
     std::unique_ptr<Ort::MemoryInfo> memoryInfo_;
@@ -288,7 +288,7 @@ private:
 
     // Helper methods
     void initializeSessionOptions();
-    LoadedModel* findModel(const std::string& path);
+    LoadedModel *findModel(const std::string &path);
 };
 
 } // namespace runtime

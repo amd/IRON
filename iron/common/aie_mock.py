@@ -45,16 +45,17 @@ class AIEConfig:
     def get_device_info(index: int = 0) -> dict:
         """Return mock device info."""
         return {
-            'device_id': 0,
-            'device_name': 'Mock AIE Device',
-            'hardware_available': False,
-            'driver_version': 'mock-1.0.0'
+            "device_id": 0,
+            "device_name": "Mock AIE Device",
+            "hardware_available": False,
+            "driver_version": "mock-1.0.0",
         }
 
 
 # Create mock module structure
 class AIEUtils:
     """Mock AIE utilities module."""
+
     config = AIEConfig()
 
 
@@ -66,7 +67,7 @@ class MockXRTBuffer:
         self.size = size
         self.data = bytearray(size)
 
-    def sync(self, direction: str = 'to_device') -> None:
+    def sync(self, direction: str = "to_device") -> None:
         """Mock sync operation."""
         pass
 
@@ -76,13 +77,13 @@ class MockXRTBuffer:
 
     def read(self, size: int = 0, offset: int = 0) -> bytes:
         """Mock read operation."""
-        return bytes(self.data[offset:offset+size])
+        return bytes(self.data[offset : offset + size])
 
 
 class MockXRTKernel:
     """Mock XRT kernel object."""
 
-    def __init__(self, name: str = 'mock_kernel'):
+    def __init__(self, name: str = "mock_kernel"):
         self.name = name
 
     def __call__(self, *args, **kwargs):
@@ -96,11 +97,11 @@ class MockXRTDevice:
 
     def __init__(self, index: int = 0):
         self.index = index
-        self.name = f'Mock Device {index}'
+        self.name = f"Mock Device {index}"
 
     def get_xclbin_uuid(self) -> str:
         """Return mock XCLBIN UUID."""
-        return '00000000-0000-0000-0000-000000000000'
+        return "00000000-0000-0000-0000-000000000000"
 
     def alloc_bo(self, size: int, flags: int = 0) -> MockXRTBuffer:
         """Allocate mock buffer object."""
@@ -137,7 +138,7 @@ class pyxrt:
         return MockXRTContext(device)
 
     @staticmethod
-    def xclbuffer_sync(buffer: MockXRTBuffer, direction: str = 'to_device') -> None:
+    def xclbuffer_sync(buffer: MockXRTBuffer, direction: str = "to_device") -> None:
         """Mock buffer sync."""
         buffer.sync(direction)
 
@@ -148,6 +149,7 @@ config = AIEConfig()
 # Module exports for aie package
 utils = AIEUtils()
 pyxrt = pyxrt
+
 
 # Mock functions for direct import
 def get_device_count() -> int:
@@ -205,9 +207,9 @@ def setup_mock() -> None:
     aie_utils_config_mock.get_device_info = get_device_info
 
     # Register in sys.modules
-    sys.modules['aie'] = aie_mock_module
-    sys.modules['aie.utils'] = aie_utils_mock
-    sys.modules['aie.utils.config'] = aie_utils_config_mock
+    sys.modules["aie"] = aie_mock_module
+    sys.modules["aie.utils"] = aie_utils_mock
+    sys.modules["aie.utils.config"] = aie_utils_config_mock
 
     logger.info("AIE mock modules registered in sys.modules")
 
@@ -221,7 +223,7 @@ def teardown_mock() -> None:
     import sys
 
     for key in list(sys.modules.keys()):
-        if key.startswith('aie'):
+        if key.startswith("aie"):
             del sys.modules[key]
 
     logger.info("AIE mock modules removed from sys.modules")

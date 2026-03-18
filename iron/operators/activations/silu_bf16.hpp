@@ -27,12 +27,15 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
-namespace iron {
-namespace operators {
-namespace activations {
+namespace iron
+{
+namespace operators
+{
+namespace activations
+{
 
 /**
  * @brief Apply SiLU (Sigmoid Linear Unit) activation function
@@ -68,12 +71,7 @@ namespace activations {
  * silu_fwd(input, output, num_elements);
  * @endcode
  */
-template<typename T>
-void silu_fwd(
-    const T* input,
-    T* output,
-    int num_elements
-);
+template <typename T> void silu_fwd(const T *input, T *output, int num_elements);
 
 /**
  * @brief Apply SiLU activation in-place
@@ -86,11 +84,7 @@ void silu_fwd(
  * @param input_output Tensor to transform in-place
  * @param num_elements Total number of elements
  */
-template<typename T>
-void silu_inplace(
-    T* input_output,
-    int num_elements
-);
+template <typename T> void silu_inplace(T *input_output, int num_elements);
 
 /**
  * @brief Apply SiLU with gating for SwiGLU
@@ -105,13 +99,7 @@ void silu_inplace(
  * @param output Output tensor
  * @param num_elements Total number of elements
  */
-template<typename T>
-void silu_gate(
-    const T* input,
-    const T* gate,
-    T* output,
-    int num_elements
-);
+template <typename T> void silu_gate(const T *input, const T *gate, T *output, int num_elements);
 
 } // namespace activations
 } // namespace operators

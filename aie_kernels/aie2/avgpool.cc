@@ -19,28 +19,27 @@
  * @param input - Input tensor [N, channels, in_height, in_width] (flattened)
  * @param output - Output tensor [N, channels, out_height, out_width] (flattened)
  */
-void avg_pool2d_bf16_scalar(
-    bfloat16* input,
-    bfloat16* output,
-    int N,
-    int channels,
-    int in_height,
-    int in_width,
-    int out_height,
-    int out_width,
-    int kernel_h,
-    int kernel_w,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w
-) {
+void avg_pool2d_bf16_scalar(bfloat16 *input,
+                            bfloat16 *output,
+                            int N,
+                            int channels,
+                            int in_height,
+                            int in_width,
+                            int out_height,
+                            int out_width,
+                            int kernel_h,
+                            int kernel_w,
+                            int stride_h,
+                            int stride_w,
+                            int pad_h,
+                            int pad_w)
+{
     int spatial_size = out_height * out_width;
     float kernel_size_inv = 1.0f / static_cast<float>(kernel_h * kernel_w);
 
     for (int n = 0; n < N; n++) {
         for (int c = 0; c < channels; c++) {
-            bfloat16* output_channel_ptr = output + (n * channels + c) * spatial_size;
+            bfloat16 *output_channel_ptr = output + (n * channels + c) * spatial_size;
 
             for (int oh = 0; oh < out_height; oh++) {
                 for (int ow = 0; ow < out_width; ow++) {
@@ -83,23 +82,22 @@ void avg_pool2d_bf16_scalar(
  * @param input - Input tensor [N, channels, in_height, in_width] (flattened)
  * @param output - Output tensor [N, channels, out_height, out_width] (flattened)
  */
-void avg_pool2d_bf16_vector(
-    bfloat16* input,
-    bfloat16* output,
-    int N,
-    int channels,
-    int in_height,
-    int in_width,
-    int out_height,
-    int out_width,
-    int kernel_h,
-    int kernel_w,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w
-) {
-    constexpr int vec_factor = 8;  // AIE2 vector factor
+void avg_pool2d_bf16_vector(bfloat16 *input,
+                            bfloat16 *output,
+                            int N,
+                            int channels,
+                            int in_height,
+                            int in_width,
+                            int out_height,
+                            int out_width,
+                            int kernel_h,
+                            int kernel_w,
+                            int stride_h,
+                            int stride_w,
+                            int pad_h,
+                            int pad_w)
+{
+    constexpr int vec_factor = 8; // AIE2 vector factor
 
     event0();
 
@@ -108,7 +106,7 @@ void avg_pool2d_bf16_vector(
 
     for (int n = 0; n < N; n++) {
         for (int c = 0; c < channels; c++) {
-            bfloat16* output_channel_ptr = output + (n * channels + c) * spatial_size;
+            bfloat16 *output_channel_ptr = output + (n * channels + c) * spatial_size;
 
             for (int oh = 0; oh < out_height; oh++) {
                 for (int ow = 0; ow < out_width; ow++) {
@@ -175,22 +173,34 @@ void avg_pool2d_bf16_vector(
 
 extern "C" {
 
-void avg_pool2d_bf16_scalar(
-    bfloat16* input, bfloat16* output,
-    int N, int channels, int in_height, int in_width,
-    int out_height, int out_width,
-    int kernel_h, int kernel_w,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w
-);
+void avg_pool2d_bf16_scalar(bfloat16 *input,
+                            bfloat16 *output,
+                            int N,
+                            int channels,
+                            int in_height,
+                            int in_width,
+                            int out_height,
+                            int out_width,
+                            int kernel_h,
+                            int kernel_w,
+                            int stride_h,
+                            int stride_w,
+                            int pad_h,
+                            int pad_w);
 
-void avg_pool2d_bf16_vector(
-    bfloat16* input, bfloat16* output,
-    int N, int channels, int in_height, int in_width,
-    int out_height, int out_width,
-    int kernel_h, int kernel_w,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w
-);
+void avg_pool2d_bf16_vector(bfloat16 *input,
+                            bfloat16 *output,
+                            int N,
+                            int channels,
+                            int in_height,
+                            int in_width,
+                            int out_height,
+                            int out_width,
+                            int kernel_h,
+                            int kernel_w,
+                            int stride_h,
+                            int stride_w,
+                            int pad_h,
+                            int pad_w);
 
 } // extern "C"

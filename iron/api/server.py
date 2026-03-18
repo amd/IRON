@@ -70,27 +70,44 @@ loaded_tokenizers: Dict[str, TokenizerWrapper] = {}  # model_id -> TokenizerWrap
 
 class ChatMessage(BaseModel):
     """Chat message in OpenAI format"""
+
     role: str = Field(..., description="Role of the message (user, assistant, system)")
     content: str = Field(..., description="Content of the message")
 
 
 class ChatCompletionRequest(BaseModel):
     """Chat completion request (OpenAI-compatible)"""
+
     model: str = Field(..., description="Model ID to use")
     messages: List[ChatMessage] = Field(..., description="List of chat messages")
-    temperature: Optional[float] = Field(default=1.0, ge=0, le=2, description="Sampling temperature")
-    top_p: Optional[float] = Field(default=1.0, ge=0, le=1, description="Top-p sampling")
-    max_tokens: Optional[int] = Field(default=None, description="Maximum tokens to generate")
-    max_completion_tokens: Optional[int] = Field(default=None, description="Maximum completion tokens")
-    stop: Optional[Union[str, List[str]]] = Field(default=None, description="Stop sequences")
+    temperature: Optional[float] = Field(
+        default=1.0, ge=0, le=2, description="Sampling temperature"
+    )
+    top_p: Optional[float] = Field(
+        default=1.0, ge=0, le=1, description="Top-p sampling"
+    )
+    max_tokens: Optional[int] = Field(
+        default=None, description="Maximum tokens to generate"
+    )
+    max_completion_tokens: Optional[int] = Field(
+        default=None, description="Maximum completion tokens"
+    )
+    stop: Optional[Union[str, List[str]]] = Field(
+        default=None, description="Stop sequences"
+    )
     stream: Optional[bool] = Field(default=False, description="Enable streaming")
     n: Optional[int] = Field(default=1, description="Number of completions to generate")
-    presence_penalty: Optional[float] = Field(default=0.0, description="Presence penalty")
-    frequency_penalty: Optional[float] = Field(default=0.0, description="Frequency penalty")
+    presence_penalty: Optional[float] = Field(
+        default=0.0, description="Presence penalty"
+    )
+    frequency_penalty: Optional[float] = Field(
+        default=0.0, description="Frequency penalty"
+    )
 
 
 class UsageInfo(BaseModel):
     """Token usage information"""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -98,6 +115,7 @@ class UsageInfo(BaseModel):
 
 class ChatCompletionResponseChoice(BaseModel):
     """Chat completion response choice"""
+
     index: int
     message: ChatMessage
     finish_reason: Optional[str] = None
@@ -105,6 +123,7 @@ class ChatCompletionResponseChoice(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     """Chat completion response (OpenAI-compatible)"""
+
     id: str
     object: str = "chat.completion"
     created: int
@@ -115,6 +134,7 @@ class ChatCompletionResponse(BaseModel):
 
 class StreamingChoice(BaseModel):
     """Streaming choice chunk"""
+
     index: int
     delta: Dict[str, str] = Field(default_factory=dict)
     finish_reason: Optional[str] = None
@@ -122,6 +142,7 @@ class StreamingChoice(BaseModel):
 
 class ChatCompletionChunk(BaseModel):
     """Chat completion chunk (streaming)"""
+
     id: str
     object: str = "chat.completion.chunk"
     created: int
@@ -131,6 +152,7 @@ class ChatCompletionChunk(BaseModel):
 
 class ModelInfo(BaseModel):
     """Model information for /v1/models endpoint"""
+
     id: str
     object: str = "model"
     created: int
@@ -140,11 +162,13 @@ class ModelInfo(BaseModel):
 
 class ModelsResponse(BaseModel):
     """Response for /v1/models endpoint"""
+
     data: List[ModelInfo]
 
 
 class HealthResponse(BaseModel):
     """Health check response"""
+
     status: str
     version: str
     models: List[str]
@@ -181,12 +205,18 @@ async def list_models():
     models = []
     if model_registry:
         for entry in model_registry.list_models(status_filter="ready"):
-            models.append(ModelInfo(
-                id=entry.model_id,
-                created=int(entry.converted_at.timestamp()) if entry.converted_at else int(time.time()),
-                owned_by="iron",
-                architecture=entry.architecture,
-            ))
+            models.append(
+                ModelInfo(
+                    id=entry.model_id,
+                    created=(
+                        int(entry.converted_at.timestamp())
+                        if entry.converted_at
+                        else int(time.time())
+                    ),
+                    owned_by="iron",
+                    architecture=entry.architecture,
+                )
+            )
     return ModelsResponse(data=models)
 
 
@@ -264,11 +294,13 @@ async def chat_completions(request: ChatCompletionRequest):
             id=f"chatcmpl-{int(time.time())}",
             created=int(time.time()),
             model=model_id,
-            choices=[{
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
-            }],
+            choices=[
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
             usage=UsageInfo(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -422,11 +454,13 @@ async def stream_completion(
             id=f"chatcmpl-{int(time.time())}",
             created=int(time.time()),
             model=model_id,
-            choices=[{
-                "index": 0,
-                "delta": {"content": text},
-                "finish_reason": None,
-            }],
+            choices=[
+                {
+                    "index": 0,
+                    "delta": {"content": text},
+                    "finish_reason": None,
+                }
+            ],
         )
         yield f"data: {chunk.model_dump_json()}\n\n"
 
@@ -438,11 +472,13 @@ async def stream_completion(
         id=f"chatcmpl-{int(time.time())}",
         created=int(time.time()),
         model=model_id,
-        choices=[{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop",
-        }],
+        choices=[
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }
+        ],
     )
     yield f"data: {final_chunk.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"

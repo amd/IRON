@@ -22,17 +22,17 @@
 // #include <xrt/xrt_kernel.h>
 // #include <xrt/xrt_bo.h>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // XrtBuffer Implementation
 //==============================================================================
 
-XrtBuffer::XrtBuffer(xrt::buffer buffer)
-    : buffer_(std::move(buffer))
-    , size_(0)
-    , valid_(false) {
+XrtBuffer::XrtBuffer(xrt::buffer buffer) : buffer_(std::move(buffer)), size_(0), valid_(false)
+{
 
     if (buffer_) {
         // In production: size_ = buffer_.size();
@@ -40,10 +40,9 @@ XrtBuffer::XrtBuffer(xrt::buffer buffer)
     }
 }
 
-XrtBuffer::XrtBuffer(const xrt::device& device, size_t size, bool /*hostAccessible*/)
-    : buffer_()
-    , size_(size)
-    , valid_(false) {
+XrtBuffer::XrtBuffer(const xrt::device &device, size_t size, bool /*hostAccessible*/)
+    : buffer_(), size_(size), valid_(false)
+{
 
     if (size == 0) {
         throw BufferError("Cannot allocate zero-size buffer");
@@ -57,22 +56,23 @@ XrtBuffer::XrtBuffer(const xrt::device& device, size_t size, bool /*hostAccessib
     valid_ = true;
 }
 
-XrtBuffer::~XrtBuffer() {
+XrtBuffer::~XrtBuffer()
+{
     if (valid_.exchange(false)) {
         // XRT buffer is automatically freed when xrt::bo goes out of scope
         buffer_ = {};
     }
 }
 
-XrtBuffer::XrtBuffer(XrtBuffer&& other) noexcept
-    : buffer_(std::move(other.buffer_))
-    , size_(other.size_)
-    , valid_(other.valid_.load()) {
+XrtBuffer::XrtBuffer(XrtBuffer &&other) noexcept
+    : buffer_(std::move(other.buffer_)), size_(other.size_), valid_(other.valid_.load())
+{
 
     other.valid_ = false;
 }
 
-XrtBuffer& XrtBuffer::operator=(XrtBuffer&& other) noexcept {
+XrtBuffer &XrtBuffer::operator=(XrtBuffer &&other) noexcept
+{
     if (this != &other) {
         if (valid_.exchange(false)) {
             buffer_ = {};
@@ -87,11 +87,13 @@ XrtBuffer& XrtBuffer::operator=(XrtBuffer&& other) noexcept {
     return *this;
 }
 
-size_t XrtBuffer::size() const {
+size_t XrtBuffer::size() const
+{
     return size_;
 }
 
-void XrtBuffer::write(const void* data, size_t size, size_t offset) {
+void XrtBuffer::write(const void *data, size_t size, size_t offset)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -107,10 +109,11 @@ void XrtBuffer::write(const void* data, size_t size, size_t offset) {
     // In production: Use XRT buffer write
     // buffer_.write(data, size, offset);
 
-    (void)data;  // Suppress unused warning
+    (void)data; // Suppress unused warning
 }
 
-void XrtBuffer::read(void* data, size_t size, size_t offset) const {
+void XrtBuffer::read(void *data, size_t size, size_t offset) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -126,10 +129,11 @@ void XrtBuffer::read(void* data, size_t size, size_t offset) const {
     // In production: Use XRT buffer read
     // buffer_.read(data, size, offset);
 
-    (void)data;  // Suppress unused warning
+    (void)data; // Suppress unused warning
 }
 
-void XrtBuffer::sync(bool to_device) {
+void XrtBuffer::sync(bool to_device)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -144,13 +148,15 @@ void XrtBuffer::sync(bool to_device) {
     // }
 }
 
-void* XrtBuffer::nativeHandle() const {
+void *XrtBuffer::nativeHandle() const
+{
     // In production: Return XRT buffer handle
     // return const_cast<xrt::buffer*>(&buffer_);
     return nullptr;
 }
 
-uint64_t XrtBuffer::address() const {
+uint64_t XrtBuffer::address() const
+{
     if (!valid_) {
         return 0;
     }
@@ -161,15 +167,18 @@ uint64_t XrtBuffer::address() const {
     return 0;
 }
 
-bool XrtBuffer::isValid() const {
+bool XrtBuffer::isValid() const
+{
     return valid_.load();
 }
 
-xrt::buffer& XrtBuffer::xrtBuffer() {
+xrt::buffer &XrtBuffer::xrtBuffer()
+{
     return buffer_;
 }
 
-const xrt::buffer& XrtBuffer::xrtBuffer() const {
+const xrt::buffer &XrtBuffer::xrtBuffer() const
+{
     return buffer_;
 }
 
@@ -177,10 +186,9 @@ const xrt::buffer& XrtBuffer::xrtBuffer() const {
 // XrtKernelHandle Implementation
 //==============================================================================
 
-XrtKernelHandle::XrtKernelHandle(xrt::kernel kernel, const std::string& name)
-    : kernel_(std::move(kernel))
-    , name_(name)
-    , setArgs_(0) {
+XrtKernelHandle::XrtKernelHandle(xrt::kernel kernel, const std::string &name)
+    : kernel_(std::move(kernel)), name_(name), setArgs_(0)
+{
 
     if (!kernel_) {
         throw KernelNotFoundError(name);
@@ -199,15 +207,17 @@ XrtKernelHandle::XrtKernelHandle(xrt::kernel kernel, const std::string& name)
 
 XrtKernelHandle::~XrtKernelHandle() = default;
 
-std::string XrtKernelHandle::name() const {
+std::string XrtKernelHandle::name() const
+{
     return name_;
 }
 
-void XrtKernelHandle::setArg(size_t index, const KernelArgument& arg) {
+void XrtKernelHandle::setArg(size_t index, const KernelArgument &arg)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // In production: Validate index against numArgs_
-    if (index >= 16) {  // Stub limit
+    if (index >= 16) { // Stub limit
         throw ArgumentError("Argument index out of range: " + std::to_string(index), index);
     }
 
@@ -222,30 +232,34 @@ void XrtKernelHandle::setArg(size_t index, const KernelArgument& arg) {
     applyArgument(index, arg);
 }
 
-void XrtKernelHandle::applyArgument(size_t index, const KernelArgument& arg) {
+void XrtKernelHandle::applyArgument(size_t index, const KernelArgument &arg)
+{
     // In production: Set argument in XRT kernel
-    std::visit([this, index](auto&& val) {
-        using T = std::decay_t<decltype(val)>;
+    std::visit(
+        [this, index](auto &&val) {
+            using T = std::decay_t<decltype(val)>;
 
-        if constexpr (std::is_same_v<T, std::shared_ptr<IBuffer>>) {
-            // Buffer argument
-            if (val) {
-                auto* xrtBuffer = dynamic_cast<XrtBuffer*>(val.get());
-                if (xrtBuffer) {
-                    // kernel_.set_arg(index, xrtBuffer->xrtBuffer());
+            if constexpr (std::is_same_v<T, std::shared_ptr<IBuffer>>) {
+                // Buffer argument
+                if (val) {
+                    auto *xrtBuffer = dynamic_cast<XrtBuffer *>(val.get());
+                    if (xrtBuffer) {
+                        // kernel_.set_arg(index, xrtBuffer->xrtBuffer());
+                    }
                 }
+            } else if constexpr (std::is_integral_v<T>) {
+                // Integer argument
+                // kernel_.set_arg(index, val);
+            } else if constexpr (std::is_floating_point_v<T>) {
+                // Float argument
+                // kernel_.set_arg(index, val);
             }
-        } else if constexpr (std::is_integral_v<T>) {
-            // Integer argument
-            // kernel_.set_arg(index, val);
-        } else if constexpr (std::is_floating_point_v<T>) {
-            // Float argument
-            // kernel_.set_arg(index, val);
-        }
-    }, arg);
+        },
+        arg);
 }
 
-ExecutionResult XrtKernelHandle::execute(const ExecutionOptions& options) {
+ExecutionResult XrtKernelHandle::execute(const ExecutionOptions &options)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     ExecutionResult result;
@@ -270,19 +284,22 @@ ExecutionResult XrtKernelHandle::execute(const ExecutionOptions& options) {
     return result;
 }
 
-void XrtKernelHandle::reset() {
+void XrtKernelHandle::reset()
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::fill(setArgs_.begin(), setArgs_.end(), std::optional<KernelArgument>{});
 }
 
-size_t XrtKernelHandle::numArguments() const {
+size_t XrtKernelHandle::numArguments() const
+{
     // In production: Return kernel_.arg_count()
-    return 6;  // Stub
+    return 6; // Stub
 }
 
-bool XrtKernelHandle::isReady() const {
+bool XrtKernelHandle::isReady() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& arg : setArgs_) {
+    for (const auto &arg : setArgs_) {
         if (!arg.has_value()) {
             return false;
         }
@@ -290,7 +307,8 @@ bool XrtKernelHandle::isReady() const {
     return !setArgs_.empty();
 }
 
-bool XrtKernelHandle::isArgumentSet(size_t index) const {
+bool XrtKernelHandle::isArgumentSet(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= setArgs_.size()) {
         return false;
@@ -298,7 +316,8 @@ bool XrtKernelHandle::isArgumentSet(size_t index) const {
     return setArgs_[index].has_value();
 }
 
-std::pair<std::string, std::string> XrtKernelHandle::getArgumentInfo(size_t index) const {
+std::pair<std::string, std::string> XrtKernelHandle::getArgumentInfo(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= argInfo_.size()) {
         return {"", ""};
@@ -306,21 +325,24 @@ std::pair<std::string, std::string> XrtKernelHandle::getArgumentInfo(size_t inde
     return argInfo_[index];
 }
 
-std::vector<std::string> XrtKernelHandle::getArgumentNames() const {
+std::vector<std::string> XrtKernelHandle::getArgumentNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> names;
     names.reserve(argInfo_.size());
-    for (const auto& info : argInfo_) {
+    for (const auto &info : argInfo_) {
         names.push_back(info.first);
     }
     return names;
 }
 
-xrt::kernel& XrtKernelHandle::xrtKernel() {
+xrt::kernel &XrtKernelHandle::xrtKernel()
+{
     return kernel_;
 }
 
-const xrt::kernel& XrtKernelHandle::xrtKernel() const {
+const xrt::kernel &XrtKernelHandle::xrtKernel() const
+{
     return kernel_;
 }
 
@@ -328,18 +350,18 @@ const xrt::kernel& XrtKernelHandle::xrtKernel() const {
 // XrtBufferManager Implementation
 //==============================================================================
 
-XrtBufferManager::XrtBufferManager(const xrt::device& device, size_t maxPoolSize)
-    : device_(device)
-    , maxPoolSize_(maxPoolSize)
-    , totalMemoryInUse_(0)
-    , activeCount_(0) {
+XrtBufferManager::XrtBufferManager(const xrt::device &device, size_t maxPoolSize)
+    : device_(device), maxPoolSize_(maxPoolSize), totalMemoryInUse_(0), activeCount_(0)
+{
 }
 
-XrtBufferManager::~XrtBufferManager() {
+XrtBufferManager::~XrtBufferManager()
+{
     clear();
 }
 
-std::shared_ptr<IBuffer> XrtBufferManager::allocate(size_t size) {
+std::shared_ptr<IBuffer> XrtBufferManager::allocate(size_t size)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     if (size == 0) {
@@ -365,7 +387,7 @@ std::shared_ptr<IBuffer> XrtBufferManager::allocate(size_t size) {
     // auto buffer = std::make_shared<XrtBuffer>(std::move(xrtBuf));
 
     // Stub
-    xrt::buffer stubBuffer;  // Null buffer for stub
+    xrt::buffer stubBuffer; // Null buffer for stub
     auto buffer = std::make_shared<XrtBuffer>(stubBuffer);
     totalMemoryInUse_ += size;
     activeCount_++;
@@ -373,14 +395,16 @@ std::shared_ptr<IBuffer> XrtBufferManager::allocate(size_t size) {
     return buffer;
 }
 
-void XrtBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
-    if (!buffer) return;
+void XrtBufferManager::deallocate(std::shared_ptr<IBuffer> buffer)
+{
+    if (!buffer)
+        return;
 
     std::lock_guard<std::mutex> lock(poolMutex_);
 
-    auto* xrtBuffer = dynamic_cast<XrtBuffer*>(buffer.get());
+    auto *xrtBuffer = dynamic_cast<XrtBuffer *>(buffer.get());
     if (!xrtBuffer || !xrtBuffer->isValid()) {
-        return;  // Invalid or already freed
+        return; // Invalid or already freed
     }
 
     size_t size = xrtBuffer->size();
@@ -397,51 +421,58 @@ void XrtBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
     activeCount_--;
 }
 
-std::map<size_t, size_t> XrtBufferManager::getPoolStats() const {
+std::map<size_t, size_t> XrtBufferManager::getPoolStats() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     std::map<size_t, size_t> stats;
-    for (const auto& [size, entries] : pool_) {
+    for (const auto &[size, entries] : pool_) {
         stats[size] = entries.size();
     }
     return stats;
 }
 
-void XrtBufferManager::clear() {
+void XrtBufferManager::clear()
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     pool_.clear();
     totalMemoryInUse_ = 0;
     activeCount_ = 0;
 }
 
-size_t XrtBufferManager::totalMemoryInUse() const {
+size_t XrtBufferManager::totalMemoryInUse() const
+{
     return totalMemoryInUse_.load();
 }
 
-size_t XrtBufferManager::activeBufferCount() const {
+size_t XrtBufferManager::activeBufferCount() const
+{
     return activeCount_.load();
 }
 
-size_t XrtBufferManager::pooledBufferCount() const {
+size_t XrtBufferManager::pooledBufferCount() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     size_t count = 0;
-    for (const auto& [_, entries] : pool_) {
+    for (const auto &[_, entries] : pool_) {
         count += entries.size();
     }
     return count;
 }
 
-void XrtBufferManager::setMaxPoolSize(size_t max_bytes) {
+void XrtBufferManager::setMaxPoolSize(size_t max_bytes)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     maxPoolSize_ = max_bytes;
 
     // If new limit is lower than current usage, drain pool
     while (totalMemoryInUse_ > maxPoolSize_) {
         size_t largestSize = 0;
-        for (const auto& [size, _] : pool_) {
+        for (const auto &[size, _] : pool_) {
             largestSize = std::max(largestSize, size);
         }
-        if (largestSize == 0) break;
+        if (largestSize == 0)
+            break;
 
         auto it = pool_.find(largestSize);
         if (!it->second.empty()) {
@@ -451,8 +482,9 @@ void XrtBufferManager::setMaxPoolSize(size_t max_bytes) {
     }
 }
 
-size_t XrtBufferManager::roundToBucket(size_t size) {
-    constexpr size_t bucketSize = 4096;  // 4KB buckets
+size_t XrtBufferManager::roundToBucket(size_t size)
+{
+    constexpr size_t bucketSize = 4096; // 4KB buckets
     return ((size + bucketSize - 1) / bucketSize) * bucketSize;
 }
 
@@ -461,19 +493,19 @@ size_t XrtBufferManager::roundToBucket(size_t size) {
 //==============================================================================
 
 XrtRuntimeWrapper::XrtRuntimeWrapper(int deviceId)
-    : deviceId_(deviceId)
-    , device_(nullptr)
-    , bufferManager_(nullptr)
-    , initialized_(false) {
+    : deviceId_(deviceId), device_(nullptr), bufferManager_(nullptr), initialized_(false)
+{
 
     initializeDevice();
 }
 
-XrtRuntimeWrapper::~XrtRuntimeWrapper() {
+XrtRuntimeWrapper::~XrtRuntimeWrapper()
+{
     unload();
 }
 
-void XrtRuntimeWrapper::initializeDevice() {
+void XrtRuntimeWrapper::initializeDevice()
+{
     // In production: Initialize XRT device
     // device_ = std::make_unique<xrt::device>(deviceId_);
 
@@ -486,7 +518,8 @@ void XrtRuntimeWrapper::initializeDevice() {
     initialized_ = true;
 }
 
-bool XrtRuntimeWrapper::loadXclbin(const std::string& path) {
+bool XrtRuntimeWrapper::loadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (path.empty()) {
@@ -508,7 +541,8 @@ bool XrtRuntimeWrapper::loadXclbin(const std::string& path) {
     return true;
 }
 
-bool XrtRuntimeWrapper::loadXclbinFromMemory(const void* data, size_t size) {
+bool XrtRuntimeWrapper::loadXclbinFromMemory(const void *data, size_t size)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!data || size == 0) {
@@ -528,13 +562,13 @@ bool XrtRuntimeWrapper::loadXclbinFromMemory(const void* data, size_t size) {
     return true;
 }
 
-bool XrtRuntimeWrapper::unloadXclbin(const std::string& path) {
+bool XrtRuntimeWrapper::unloadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(),
-        [&path](const LoadedXclbin& xclbin) {
-            return xclbin.path == path;
-        });
+    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(), [&path](const LoadedXclbin &xclbin) {
+        return xclbin.path == path;
+    });
 
     if (it == loadedXclbins_.end()) {
         return false;
@@ -547,23 +581,24 @@ bool XrtRuntimeWrapper::unloadXclbin(const std::string& path) {
     return true;
 }
 
-std::vector<std::string> XrtRuntimeWrapper::getKernelNames() const {
+std::vector<std::string> XrtRuntimeWrapper::getKernelNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<std::string> names;
-    for (const auto& xclbin : loadedXclbins_) {
+    for (const auto &xclbin : loadedXclbins_) {
         names.insert(names.end(), xclbin.kernelNames.begin(), xclbin.kernelNames.end());
     }
     return names;
 }
 
-std::vector<std::string> XrtRuntimeWrapper::getKernelsFromXclbin(const std::string& xclbinPath) const {
+std::vector<std::string> XrtRuntimeWrapper::getKernelsFromXclbin(const std::string &xclbinPath) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(),
-        [&xclbinPath](const LoadedXclbin& xclbin) {
-            return xclbin.path == xclbinPath;
-        });
+    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(), [&xclbinPath](const LoadedXclbin &xclbin) {
+        return xclbin.path == xclbinPath;
+    });
 
     if (it == loadedXclbins_.end()) {
         return {};
@@ -572,22 +607,22 @@ std::vector<std::string> XrtRuntimeWrapper::getKernelsFromXclbin(const std::stri
     return it->kernelNames;
 }
 
-bool XrtRuntimeWrapper::hasKernel(const std::string& kernelName) const {
+bool XrtRuntimeWrapper::hasKernel(const std::string &kernelName) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (const auto& xclbin : loadedXclbins_) {
-        if (std::find(xclbin.kernelNames.begin(), xclbin.kernelNames.end(), kernelName)
-            != xclbin.kernelNames.end()) {
+    for (const auto &xclbin : loadedXclbins_) {
+        if (std::find(xclbin.kernelNames.begin(), xclbin.kernelNames.end(), kernelName) != xclbin.kernelNames.end()) {
             return true;
         }
     }
     return false;
 }
 
-ExecutionResult XrtRuntimeWrapper::execute(
-    const std::string& kernelName,
-    const std::vector<KernelArgument>& arguments,
-    const ExecutionOptions& options) {
+ExecutionResult XrtRuntimeWrapper::execute(const std::string &kernelName,
+                                           const std::vector<KernelArgument> &arguments,
+                                           const ExecutionOptions &options)
+{
 
     auto kernel = getKernel(kernelName);
     if (!kernel) {
@@ -606,39 +641,44 @@ ExecutionResult XrtRuntimeWrapper::execute(
     return kernel->execute(options);
 }
 
-std::shared_ptr<IKernelHandle> XrtRuntimeWrapper::getKernel(const std::string& kernelName) {
+std::shared_ptr<IKernelHandle> XrtRuntimeWrapper::getKernel(const std::string &kernelName)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // In production: Get kernel from hardware context
     // auto* handle = getKernelHandleInternal(kernelName);
 
     // Stub
-    xrt::kernel stubKernel;  // Null kernel
+    xrt::kernel stubKernel; // Null kernel
     auto handle = std::make_shared<XrtKernelHandle>(stubKernel, kernelName);
     return handle;
 }
 
-std::shared_ptr<IBuffer> XrtRuntimeWrapper::allocateBuffer(size_t size, bool /*hostAccessible*/) {
+std::shared_ptr<IBuffer> XrtRuntimeWrapper::allocateBuffer(size_t size, bool /*hostAccessible*/)
+{
     if (!bufferManager_) {
         throw BufferError("Runtime not initialized");
     }
     return bufferManager_->allocate(size);
 }
 
-std::shared_ptr<IBuffer> XrtRuntimeWrapper::allocateBufferFromData(const void* data, size_t size) {
+std::shared_ptr<IBuffer> XrtRuntimeWrapper::allocateBufferFromData(const void *data, size_t size)
+{
     auto buffer = allocateBuffer(size, true);
     buffer->write(data, size);
     return buffer;
 }
 
-std::shared_ptr<IBufferManager> XrtRuntimeWrapper::getBufferManager() {
+std::shared_ptr<IBufferManager> XrtRuntimeWrapper::getBufferManager()
+{
     return bufferManager_;
 }
 
-void XrtRuntimeWrapper::unload() {
+void XrtRuntimeWrapper::unload()
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (auto& xclbin : loadedXclbins_) {
+    for (auto &xclbin : loadedXclbins_) {
         xclbin.hwContext.reset();
     }
     loadedXclbins_.clear();
@@ -648,24 +688,29 @@ void XrtRuntimeWrapper::unload() {
     }
 }
 
-bool XrtRuntimeWrapper::isLoaded() const {
+bool XrtRuntimeWrapper::isLoaded() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     return !loadedXclbins_.empty();
 }
 
-std::string XrtRuntimeWrapper::getPlatformName() const {
+std::string XrtRuntimeWrapper::getPlatformName() const
+{
     return "XRT";
 }
 
-std::string XrtRuntimeWrapper::getVersion() const {
+std::string XrtRuntimeWrapper::getVersion() const
+{
     return "1.0.0";
 }
 
-std::string XrtRuntimeWrapper::getPlatformVersion() const {
+std::string XrtRuntimeWrapper::getPlatformVersion() const
+{
     return getXrtVersion();
 }
 
-std::string XrtRuntimeWrapper::getDeviceInfo() const {
+std::string XrtRuntimeWrapper::getDeviceInfo() const
+{
     // In production: Query device info from XRT
     return R"({"device_id":)" + std::to_string(deviceId_) + R"(, "platform": "XRT"})";
 }

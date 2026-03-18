@@ -24,17 +24,18 @@
 
 #pragma once
 
+#include <atomic>
 #include <iron/runtime/npu_runtime.hpp>
-
-#include <string>
-#include <vector>
 #include <memory>
 #include <mutex>
-#include <atomic>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Forward Declarations
@@ -45,13 +46,14 @@ class XdnaKernelHandle;
 class XdnaBufferManager;
 
 // Forward declare xDNA types (actual types depend on xDNA SDK)
-namespace xdna_detail {
-    // Opaque handles - actual types defined by xDNA SDK
-    using DeviceHandle = void*;
-    using BufferHandle = void*;
-    using KernelHandle = void*;
-    using ContextHandle = void*;
-}
+namespace xdna_detail
+{
+// Opaque handles - actual types defined by xDNA SDK
+using DeviceHandle = void *;
+using BufferHandle = void *;
+using KernelHandle = void *;
+using ContextHandle = void *;
+} // namespace xdna_detail
 
 //==============================================================================
 // XDNA Buffer Implementation
@@ -62,8 +64,9 @@ namespace xdna_detail {
  *
  * Wraps xDNA buffer handles for device memory operations.
  */
-class XdnaBuffer : public IBuffer {
-public:
+class XdnaBuffer : public IBuffer
+{
+  public:
     /**
      * @brief Construct from xDNA buffer handle
      * @param handle Native xDNA buffer handle
@@ -74,23 +77,23 @@ public:
     ~XdnaBuffer() override;
 
     // Prevent copying
-    XdnaBuffer(const XdnaBuffer&) = delete;
-    XdnaBuffer& operator=(const XdnaBuffer&) = delete;
+    XdnaBuffer(const XdnaBuffer &) = delete;
+    XdnaBuffer &operator=(const XdnaBuffer &) = delete;
 
     // Allow moving
-    XdnaBuffer(XdnaBuffer&& other) noexcept;
-    XdnaBuffer& operator=(XdnaBuffer&& other) noexcept;
+    XdnaBuffer(XdnaBuffer &&other) noexcept;
+    XdnaBuffer &operator=(XdnaBuffer &&other) noexcept;
 
     // IBuffer interface
     [[nodiscard]] size_t size() const override;
-    void write(const void* data, size_t size, size_t offset = 0) override;
-    void read(void* data, size_t size, size_t offset = 0) const override;
+    void write(const void *data, size_t size, size_t offset = 0) override;
+    void read(void *data, size_t size, size_t offset = 0) const override;
     void sync(bool to_device) override;
-    [[nodiscard]] void* nativeHandle() const override;
+    [[nodiscard]] void *nativeHandle() const override;
     [[nodiscard]] uint64_t address() const override;
     [[nodiscard]] bool isValid() const override;
 
-private:
+  private:
     xdna_detail::BufferHandle handle_;
     size_t size_;
     std::atomic<bool> valid_;
@@ -104,25 +107,23 @@ private:
 /**
  * @brief Windows xDNA kernel handle implementation
  */
-class XdnaKernelHandle : public IKernelHandle {
-public:
+class XdnaKernelHandle : public IKernelHandle
+{
+  public:
     /**
      * @brief Construct from xDNA kernel handle
      * @param handle Native xDNA kernel handle
      * @param name Kernel name
      * @param numArgs Number of kernel arguments
      */
-    XdnaKernelHandle(
-        xdna_detail::KernelHandle handle,
-        const std::string& name,
-        size_t numArgs);
+    XdnaKernelHandle(xdna_detail::KernelHandle handle, const std::string &name, size_t numArgs);
 
     ~XdnaKernelHandle() override;
 
     // IKernelHandle interface
     [[nodiscard]] std::string name() const override;
-    void setArg(size_t index, const KernelArgument& arg) override;
-    ExecutionResult execute(const ExecutionOptions& options = ExecutionOptions()) override;
+    void setArg(size_t index, const KernelArgument &arg) override;
+    ExecutionResult execute(const ExecutionOptions &options = ExecutionOptions()) override;
     void reset() override;
     [[nodiscard]] size_t numArguments() const override;
     [[nodiscard]] bool isReady() const override;
@@ -130,7 +131,7 @@ public:
     [[nodiscard]] std::vector<std::string> getArgumentNames() const override;
     [[nodiscard]] bool isArgumentSet(size_t index) const override;
 
-private:
+  private:
     xdna_detail::KernelHandle handle_;
     std::string name_;
     size_t numArgs_;
@@ -146,8 +147,9 @@ private:
 /**
  * @brief Windows xDNA buffer manager with pooling
  */
-class XdnaBufferManager : public IBufferManager {
-public:
+class XdnaBufferManager : public IBufferManager
+{
+  public:
     /**
      * @brief Construct buffer manager
      * @param maxPoolSize Maximum pool size in bytes
@@ -166,7 +168,7 @@ public:
     [[nodiscard]] size_t pooledBufferCount() const override;
     void setMaxPoolSize(size_t max_bytes) override;
 
-private:
+  private:
     struct PoolEntry {
         std::shared_ptr<XdnaBuffer> buffer;
         size_t size;
@@ -199,8 +201,9 @@ private:
  *
  * @note Requires AMD xDNA Runtime SDK to be installed
  */
-class XdnaRuntime : public INpuRuntime {
-public:
+class XdnaRuntime : public INpuRuntime
+{
+  public:
     /**
      * @brief Construct xDNA runtime
      * @param deviceId Device ID (default: 0)
@@ -213,43 +216,37 @@ public:
     ~XdnaRuntime() override;
 
     // Prevent copying
-    XdnaRuntime(const XdnaRuntime&) = delete;
-    XdnaRuntime& operator=(const XdnaRuntime&) = delete;
+    XdnaRuntime(const XdnaRuntime &) = delete;
+    XdnaRuntime &operator=(const XdnaRuntime &) = delete;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Xclbin Loading
     //--------------------------------------------------------------------------
 
-    bool loadXclbin(const std::string& path) override;
-    bool loadXclbinFromMemory(const void* data, size_t size) override;
-    bool unloadXclbin(const std::string& path) override;
+    bool loadXclbin(const std::string &path) override;
+    bool loadXclbinFromMemory(const void *data, size_t size) override;
+    bool unloadXclbin(const std::string &path) override;
     [[nodiscard]] std::vector<std::string> getKernelNames() const override;
-    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(
-        const std::string& xclbinPath) const override;
-    [[nodiscard]] bool hasKernel(const std::string& kernelName) const override;
+    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(const std::string &xclbinPath) const override;
+    [[nodiscard]] bool hasKernel(const std::string &kernelName) const override;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Kernel Execution
     //--------------------------------------------------------------------------
 
-    ExecutionResult execute(
-        const std::string& kernelName,
-        const std::vector<KernelArgument>& arguments,
-        const ExecutionOptions& options = ExecutionOptions()) override;
+    ExecutionResult execute(const std::string &kernelName,
+                            const std::vector<KernelArgument> &arguments,
+                            const ExecutionOptions &options = ExecutionOptions()) override;
 
-    std::shared_ptr<IKernelHandle> getKernel(const std::string& kernelName) override;
+    std::shared_ptr<IKernelHandle> getKernel(const std::string &kernelName) override;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Buffer Management
     //--------------------------------------------------------------------------
 
-    std::shared_ptr<IBuffer> allocateBuffer(
-        size_t size,
-        bool hostAccessible = true) override;
+    std::shared_ptr<IBuffer> allocateBuffer(size_t size, bool hostAccessible = true) override;
 
-    std::shared_ptr<IBuffer> allocateBufferFromData(
-        const void* data,
-        size_t size) override;
+    std::shared_ptr<IBuffer> allocateBufferFromData(const void *data, size_t size) override;
 
     std::shared_ptr<IBufferManager> getBufferManager() override;
 
@@ -280,7 +277,7 @@ public:
      */
     [[nodiscard]] static std::string getDriverVersion();
 
-private:
+  private:
     // Internal structure for loaded xclbin
     struct LoadedXclbin {
         std::string path;
@@ -297,20 +294,22 @@ private:
 
     // Helper methods
     void initializeDevice();
-    LoadedXclbin loadXclbinInternal(const void* data, size_t size, const std::string& path);
-    XdnaKernelHandle* getKernelHandleInternal(const std::string& kernelName);
+    LoadedXclbin loadXclbinInternal(const void *data, size_t size, const std::string &path);
+    XdnaKernelHandle *getKernelHandleInternal(const std::string &kernelName);
 };
 
 //==============================================================================
 // Inline Implementations
 //==============================================================================
 
-inline bool XdnaRuntime::isAvailable() {
+inline bool XdnaRuntime::isAvailable()
+{
     // Stub: In real implementation, check for xDNA SDK and device
     return true;
 }
 
-inline std::string XdnaRuntime::getDriverVersion() {
+inline std::string XdnaRuntime::getDriverVersion()
+{
     // Stub: In real implementation, query xDNA driver
     return "1.0.0-stub";
 }

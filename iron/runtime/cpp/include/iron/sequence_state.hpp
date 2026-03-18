@@ -25,18 +25,20 @@
 
 #pragma once
 
-#include <iron/kv_cache.hpp>
-#include <vector>
-#include <map>
-#include <mutex>
-#include <cstdint>
-#include <string>
-#include <memory>
 #include <atomic>
+#include <cstdint>
+#include <iron/kv_cache.hpp>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <random>
+#include <string>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 /**
  * @brief Tracks state for an autoregressive generation sequence
@@ -44,22 +46,23 @@ namespace runtime {
  * Manages the lifecycle of a generation sequence from start to completion,
  * tracking allocated KV cache blocks, generated tokens, and stop conditions.
  */
-class SequenceState {
-public:
+class SequenceState
+{
+  public:
     /**
      * @brief Sequence state information
      */
     struct State {
-        uint64_t sequenceId;                          ///< Unique sequence identifier
-        size_t currentLength = 0;                     ///< Current sequence length
-        size_t promptLength = 0;                      ///< Original prompt length
-        std::vector<PagedKVCache::BlockId> kvBlocks;  ///< Allocated KV blocks
-        std::vector<int32_t> generatedTokens;         ///< Generated token IDs
-        bool isComplete = false;                      ///< Generation finished
-        std::string stopReason;                       ///< Why generation stopped
+        uint64_t sequenceId;                         ///< Unique sequence identifier
+        size_t currentLength = 0;                    ///< Current sequence length
+        size_t promptLength = 0;                     ///< Original prompt length
+        std::vector<PagedKVCache::BlockId> kvBlocks; ///< Allocated KV blocks
+        std::vector<int32_t> generatedTokens;        ///< Generated token IDs
+        bool isComplete = false;                     ///< Generation finished
+        std::string stopReason;                      ///< Why generation stopped
 
         // For long-context resumption
-        std::vector<float> cachedPromptEmbeddings;    ///< Optional: cache embeddings
+        std::vector<float> cachedPromptEmbeddings; ///< Optional: cache embeddings
     };
 
     /**
@@ -75,12 +78,12 @@ public:
     ~SequenceState();
 
     // Prevent copying
-    SequenceState(const SequenceState&) = delete;
-    SequenceState& operator=(const SequenceState&) = delete;
+    SequenceState(const SequenceState &) = delete;
+    SequenceState &operator=(const SequenceState &) = delete;
 
     // Allow moving
-    SequenceState(SequenceState&& other) noexcept = default;
-    SequenceState& operator=(SequenceState&& other) noexcept = default;
+    SequenceState(SequenceState &&other) noexcept = default;
+    SequenceState &operator=(SequenceState &&other) noexcept = default;
 
     //==========================================================================
     // Sequence Lifecycle
@@ -93,9 +96,7 @@ public:
      * @return Sequence ID for tracking
      * @throws std::bad_alloc if KV blocks cannot be allocated
      */
-    uint64_t startSequence(
-        const std::vector<int32_t>& promptTokens,
-        size_t maxNewTokens);
+    uint64_t startSequence(const std::vector<int32_t> &promptTokens, size_t maxNewTokens);
 
     /**
      * @brief Append a generated token to sequence
@@ -111,7 +112,7 @@ public:
      * @param reason Stop reason (eos, max_length, stop_string)
      * @throws std::out_of_range if sequence not found
      */
-    void completeSequence(uint64_t sequenceId, const std::string& reason);
+    void completeSequence(uint64_t sequenceId, const std::string &reason);
 
     /**
      * @brief Remove sequence and free resources
@@ -188,11 +189,10 @@ public:
      * @return Restored SequenceState
      * @throws std::runtime_error if deserialization fails
      */
-    static std::unique_ptr<SequenceState> deserialize(
-        const std::vector<uint8_t>& data,
-        std::shared_ptr<PagedKVCache> kvCache);
+    static std::unique_ptr<SequenceState> deserialize(const std::vector<uint8_t> &data,
+                                                      std::shared_ptr<PagedKVCache> kvCache);
 
-private:
+  private:
     std::shared_ptr<PagedKVCache> kvCache_;
     std::map<uint64_t, State> sequences_;
     mutable std::mutex mutex_;

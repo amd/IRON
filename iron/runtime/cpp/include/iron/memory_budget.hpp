@@ -27,14 +27,15 @@
 
 #pragma once
 
-#include <string>
 #include <atomic>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 /**
  * @brief Memory budget enforcement and validation
@@ -42,16 +43,17 @@ namespace runtime {
  * Tracks memory usage across components and enforces hard limits
  * to prevent OOM conditions on resource-constrained devices.
  */
-class MemoryBudget {
-public:
+class MemoryBudget
+{
+  public:
     /**
      * @brief Component types for budget tracking
      */
     enum class Component {
-        WEIGHTS,      ///< Model weights
-        KV_CACHE,     ///< KV cache for attention
-        ACTIVATIONS,  ///< Temporary activations
-        MISC          ///< Miscellaneous allocations
+        WEIGHTS,     ///< Model weights
+        KV_CACHE,    ///< KV cache for attention
+        ACTIVATIONS, ///< Temporary activations
+        MISC         ///< Miscellaneous allocations
     };
 
     /**
@@ -60,17 +62,18 @@ public:
      * Default values target a 4GB total budget suitable for most NPU devices.
      */
     struct Limits {
-        size_t totalBudget = 4ULL * 1024 * 1024 * 1024;    ///< 4 GB total
-        size_t weightBudget = 2ULL * 1024 * 1024 * 1024;   ///< 2 GB weights
-        size_t kvCacheBudget = 1ULL * 1024 * 1024 * 1024;  ///< 1 GB KV cache
-        size_t activationBudget = 512ULL * 1024 * 1024;    ///< 512 MB activations
-        size_t headroom = 512ULL * 1024 * 1024;            ///< 512 MB safety
+        size_t totalBudget = 4ULL * 1024 * 1024 * 1024;   ///< 4 GB total
+        size_t weightBudget = 2ULL * 1024 * 1024 * 1024;  ///< 2 GB weights
+        size_t kvCacheBudget = 1ULL * 1024 * 1024 * 1024; ///< 1 GB KV cache
+        size_t activationBudget = 512ULL * 1024 * 1024;   ///< 512 MB activations
+        size_t headroom = 512ULL * 1024 * 1024;           ///< 512 MB safety
 
         /**
          * @brief Validate limits are consistent
          * @return true if sum of component budgets + headroom <= totalBudget
          */
-        bool isValid() const {
+        bool isValid() const
+        {
             return weightBudget + kvCacheBudget + activationBudget + headroom <= totalBudget;
         }
     };
@@ -79,18 +82,19 @@ public:
      * @brief Memory allocation result
      */
     struct AllocationResult {
-        bool success;                  ///< Allocation succeeded
-        std::string errorMessage;      ///< Error message if failed
-        size_t requestedSize;          ///< Bytes requested
-        size_t availableSize;          ///< Bytes available
+        bool success;             ///< Allocation succeeded
+        std::string errorMessage; ///< Error message if failed
+        size_t requestedSize;     ///< Bytes requested
+        size_t availableSize;     ///< Bytes available
 
         /**
          * @brief Convert to human-readable string
          */
-        std::string toString() const {
-            if (success) return "Allocation OK";
-            return errorMessage +
-                   " (requested: " + std::to_string(requestedSize) +
+        std::string toString() const
+        {
+            if (success)
+                return "Allocation OK";
+            return errorMessage + " (requested: " + std::to_string(requestedSize) +
                    " bytes, available: " + std::to_string(availableSize) + " bytes)";
         }
     };
@@ -100,7 +104,7 @@ public:
      * @param limits Memory limits (uses defaults if not provided)
      * @throws std::invalid_argument if limits are invalid
      */
-    explicit MemoryBudget(const Limits& limits = Limits());
+    explicit MemoryBudget(const Limits &limits = Limits());
 
     /**
      * @brief Destructor
@@ -108,12 +112,12 @@ public:
     ~MemoryBudget() = default;
 
     // Prevent copying
-    MemoryBudget(const MemoryBudget&) = delete;
-    MemoryBudget& operator=(const MemoryBudget&) = delete;
+    MemoryBudget(const MemoryBudget &) = delete;
+    MemoryBudget &operator=(const MemoryBudget &) = delete;
 
     // Allow moving
-    MemoryBudget(MemoryBudget&& other) noexcept = default;
-    MemoryBudget& operator=(MemoryBudget&& other) noexcept = default;
+    MemoryBudget(MemoryBudget &&other) noexcept = default;
+    MemoryBudget &operator=(MemoryBudget &&other) noexcept = default;
 
     //==========================================================================
     // Validation
@@ -126,10 +130,7 @@ public:
      * @param requiredActivations Memory needed for activations in bytes
      * @return AllocationResult with success/failure details
      */
-    AllocationResult validateModelLoad(
-        size_t requiredWeights,
-        size_t requiredKV,
-        size_t requiredActivations) const;
+    AllocationResult validateModelLoad(size_t requiredWeights, size_t requiredKV, size_t requiredActivations) const;
 
     /**
      * @brief Check if KV allocation is possible
@@ -141,13 +142,12 @@ public:
      * @param blockSize KV cache block size in tokens (default: 32)
      * @return true if allocation would succeed
      */
-    bool canAllocateKV(
-        size_t sequenceLength,
-        size_t batchSize,
-        size_t numLayers,
-        size_t numHeads,
-        size_t headDim,
-        size_t blockSize = 32) const;
+    bool canAllocateKV(size_t sequenceLength,
+                       size_t batchSize,
+                       size_t numLayers,
+                       size_t numHeads,
+                       size_t headDim,
+                       size_t blockSize = 32) const;
 
     //==========================================================================
     // Budget Queries
@@ -177,7 +177,10 @@ public:
      * @brief Get total budget
      * @return Total configured budget in bytes
      */
-    size_t getTotalBudget() const { return limits_.totalBudget; }
+    size_t getTotalBudget() const
+    {
+        return limits_.totalBudget;
+    }
 
     /**
      * @brief Get budget utilization percentage
@@ -189,7 +192,10 @@ public:
      * @brief Get limits
      * @return Current limits
      */
-    const Limits& getLimits() const { return limits_; }
+    const Limits &getLimits() const
+    {
+        return limits_;
+    }
 
     //==========================================================================
     // Allocation/Deallocation
@@ -201,7 +207,7 @@ public:
      * @param component Component requesting allocation
      * @return Pointer to allocated memory, or nullptr if budget exceeded
      */
-    void* allocateWithBudget(size_t size, Component component);
+    void *allocateWithBudget(size_t size, Component component);
 
     /**
      * @brief Free memory and update budget
@@ -209,7 +215,7 @@ public:
      * @param size Size of allocation in bytes
      * @param component Component that allocated
      */
-    void freeWithBudget(void* ptr, size_t size, Component component);
+    void freeWithBudget(void *ptr, size_t size, Component component);
 
     /**
      * @brief Reserve budget for upcoming allocation
@@ -235,7 +241,7 @@ public:
      */
     void reset();
 
-private:
+  private:
     Limits limits_;
 
     // Atomic usage counters (bytes)
@@ -271,13 +277,13 @@ private:
  * Formula: 2 (key + value) * numLayers * numHeads * totalTokens * sizeof(float)
  * Where totalTokens is rounded up to block boundaries
  */
-inline size_t calculateKVCacheMemory(
-    size_t sequenceLength,
-    size_t batchSize,
-    size_t numLayers,
-    size_t numHeads,
-    size_t headDim,
-    size_t blockSize = 32) {
+inline size_t calculateKVCacheMemory(size_t sequenceLength,
+                                     size_t batchSize,
+                                     size_t numLayers,
+                                     size_t numHeads,
+                                     size_t headDim,
+                                     size_t blockSize = 32)
+{
 
     // Round up to block size
     size_t blocksPerSequence = (sequenceLength + blockSize - 1) / blockSize;

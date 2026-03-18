@@ -23,22 +23,24 @@
  *   offset = head * (blockSize * headDim) + tokenOffset * headDim
  */
 
-#include <iron/kv_cache.hpp>
-#include <stdexcept>
-#include <cstring>
 #include <algorithm>
-#include <string>
+#include <cstring>
+#include <iron/kv_cache.hpp>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Construction/Destruction
 //==============================================================================
 
-PagedKVCache::PagedKVCache(const Config& config)
-    : config_(config) {
+PagedKVCache::PagedKVCache(const Config &config) : config_(config)
+{
     // Validate configuration
     if (!config.isValid()) {
         throw std::invalid_argument("Invalid PagedKVCache configuration");
@@ -53,14 +55,16 @@ PagedKVCache::PagedKVCache(const Config& config)
 
 PagedKVCache::~PagedKVCache() = default;
 
-PagedKVCache::PagedKVCache(PagedKVCache&& other) noexcept
+PagedKVCache::PagedKVCache(PagedKVCache &&other) noexcept
     : config_(std::move(other.config_)),
       blocks_(std::move(other.blocks_)),
-      allocatedBlocks_(other.allocatedBlocks_.load()) {
+      allocatedBlocks_(other.allocatedBlocks_.load())
+{
     other.allocatedBlocks_ = 0;
 }
 
-PagedKVCache& PagedKVCache::operator=(PagedKVCache&& other) noexcept {
+PagedKVCache &PagedKVCache::operator=(PagedKVCache &&other) noexcept
+{
     if (this != &other) {
         config_ = std::move(other.config_);
         blocks_ = std::move(other.blocks_);
@@ -74,7 +78,8 @@ PagedKVCache& PagedKVCache::operator=(PagedKVCache&& other) noexcept {
 // Block Allocation
 //==============================================================================
 
-std::vector<PagedKVCache::BlockId> PagedKVCache::allocateBlocks(size_t numBlocks) {
+std::vector<PagedKVCache::BlockId> PagedKVCache::allocateBlocks(size_t numBlocks)
+{
     std::vector<BlockId> allocated;
     allocated.reserve(numBlocks);
 
@@ -86,7 +91,7 @@ std::vector<PagedKVCache::BlockId> PagedKVCache::allocateBlocks(size_t numBlocks
             for (BlockId id : allocated) {
                 freeBlockInternal(id);
             }
-            return {};  // Return empty to indicate failure
+            return {}; // Return empty to indicate failure
         }
 
         BlockId id = allocateBlockInternal();
@@ -96,14 +101,16 @@ std::vector<PagedKVCache::BlockId> PagedKVCache::allocateBlocks(size_t numBlocks
     return allocated;
 }
 
-void PagedKVCache::freeBlocks(const std::vector<BlockId>& blocks) {
+void PagedKVCache::freeBlocks(const std::vector<BlockId> &blocks)
+{
     std::lock_guard<std::mutex> lock(mutex_);
     for (BlockId blockId : blocks) {
         freeBlockInternal(blockId);
     }
 }
 
-PagedKVCache::BlockId PagedKVCache::allocateBlockInternal() {
+PagedKVCache::BlockId PagedKVCache::allocateBlockInternal()
+{
     // Find first free block (simple first-fit strategy)
     for (BlockId i = 0; i < static_cast<BlockId>(blocks_.size()); ++i) {
         if (!blocks_[i].inUse) {
@@ -112,10 +119,11 @@ PagedKVCache::BlockId PagedKVCache::allocateBlockInternal() {
             return i;
         }
     }
-    return static_cast<BlockId>(-1);  // No free blocks
+    return static_cast<BlockId>(-1); // No free blocks
 }
 
-void PagedKVCache::freeBlockInternal(BlockId blockId) {
+void PagedKVCache::freeBlockInternal(BlockId blockId)
+{
     if (blockId < blocks_.size() && blocks_[blockId].inUse) {
         blocks_[blockId].inUse = false;
         // Note: We don't zero out the cache data for performance
@@ -128,12 +136,8 @@ void PagedKVCache::freeBlockInternal(BlockId blockId) {
 // KV Operations
 //==============================================================================
 
-void PagedKVCache::writeKey(
-    size_t layer,
-    BlockId blockId,
-    size_t tokenOffset,
-    size_t head,
-    const float* key) {
+void PagedKVCache::writeKey(size_t layer, BlockId blockId, size_t tokenOffset, size_t head, const float *key)
+{
 
     // Validate all indices
     validateLayer(layer);
@@ -149,17 +153,11 @@ void PagedKVCache::writeKey(
     std::lock_guard<std::mutex> lock(mutex_);
 
     size_t offset = getBlockOffset(blockId, tokenOffset, head);
-    std::memcpy(blocks_[blockId].keyCache.get() + offset,
-                key,
-                config_.headDim * sizeof(float));
+    std::memcpy(blocks_[blockId].keyCache.get() + offset, key, config_.headDim * sizeof(float));
 }
 
-void PagedKVCache::writeValue(
-    size_t layer,
-    BlockId blockId,
-    size_t tokenOffset,
-    size_t head,
-    const float* value) {
+void PagedKVCache::writeValue(size_t layer, BlockId blockId, size_t tokenOffset, size_t head, const float *value)
+{
 
     // Validate all indices
     validateLayer(layer);
@@ -175,18 +173,16 @@ void PagedKVCache::writeValue(
     std::lock_guard<std::mutex> lock(mutex_);
 
     size_t offset = getBlockOffset(blockId, tokenOffset, head);
-    std::memcpy(blocks_[blockId].valueCache.get() + offset,
-                value,
-                config_.headDim * sizeof(float));
+    std::memcpy(blocks_[blockId].valueCache.get() + offset, value, config_.headDim * sizeof(float));
 }
 
-void PagedKVCache::readKeyValue(
-    size_t layer,
-    BlockId blockId,
-    size_t tokenOffset,
-    size_t head,
-    float* key,
-    float* value) const {
+void PagedKVCache::readKeyValue(size_t layer,
+                                BlockId blockId,
+                                size_t tokenOffset,
+                                size_t head,
+                                float *key,
+                                float *value) const
+{
 
     // Validate all indices
     validateLayer(layer);
@@ -197,25 +193,21 @@ void PagedKVCache::readKeyValue(
     std::lock_guard<std::mutex> lock(mutex_);
 
     size_t offset = getBlockOffset(blockId, tokenOffset, head);
-    std::memcpy(key,
-                blocks_[blockId].keyCache.get() + offset,
-                config_.headDim * sizeof(float));
-    std::memcpy(value,
-                blocks_[blockId].valueCache.get() + offset,
-                config_.headDim * sizeof(float));
+    std::memcpy(key, blocks_[blockId].keyCache.get() + offset, config_.headDim * sizeof(float));
+    std::memcpy(value, blocks_[blockId].valueCache.get() + offset, config_.headDim * sizeof(float));
 }
 
 //==============================================================================
 // Contiguous Block Access
 //==============================================================================
 
-void PagedKVCache::getContiguousBlocks(
-    size_t layer,
-    BlockId startBlock,
-    size_t numBlocks,
-    size_t head,
-    float* outKeys,
-    float* outValues) const {
+void PagedKVCache::getContiguousBlocks(size_t layer,
+                                       BlockId startBlock,
+                                       size_t numBlocks,
+                                       size_t head,
+                                       float *outKeys,
+                                       float *outValues) const
+{
 
     validateLayer(layer);
     validateHead(head);
@@ -251,19 +243,23 @@ void PagedKVCache::getContiguousBlocks(
 // Query Methods
 //==============================================================================
 
-size_t PagedKVCache::getAvailableBlocks() const {
+size_t PagedKVCache::getAvailableBlocks() const
+{
     return config_.maxBlocks - allocatedBlocks_.load(std::memory_order_relaxed);
 }
 
-size_t PagedKVCache::getTotalBlocks() const {
+size_t PagedKVCache::getTotalBlocks() const
+{
     return config_.maxBlocks;
 }
 
-bool PagedKVCache::canAllocate(size_t requiredBlocks) const {
+bool PagedKVCache::canAllocate(size_t requiredBlocks) const
+{
     return getAvailableBlocks() >= requiredBlocks;
 }
 
-size_t PagedKVCache::getMemoryUsage() const {
+size_t PagedKVCache::getMemoryUsage() const
+{
     // All blocks are pre-allocated, so return total
     return config_.totalBytes();
 }
@@ -272,39 +268,43 @@ size_t PagedKVCache::getMemoryUsage() const {
 // Helper Methods
 //==============================================================================
 
-size_t PagedKVCache::getBlockOffset(BlockId /* blockId */, size_t tokenOffset, size_t head) const {
+size_t PagedKVCache::getBlockOffset(BlockId /* blockId */, size_t tokenOffset, size_t head) const
+{
     // Layout: [head0_block0, head0_block1, ..., head1_block0, ...]
     // Within a head: [token0, token1, ..., tokenN] where each token is headDim floats
     // Note: blockId is not used in offset calculation since each block has the same layout
-    return head * config_.blockSize * config_.headDim +
-           tokenOffset * config_.headDim;
+    return head * config_.blockSize * config_.headDim + tokenOffset * config_.headDim;
 }
 
-void PagedKVCache::validateLayer(size_t layer) const {
+void PagedKVCache::validateLayer(size_t layer) const
+{
     if (layer >= config_.numLayers) {
-        throw std::out_of_range("Layer index " + std::to_string(layer) +
-                                " >= numLayers " + std::to_string(config_.numLayers));
+        throw std::out_of_range("Layer index " + std::to_string(layer) + " >= numLayers " +
+                                std::to_string(config_.numLayers));
     }
 }
 
-void PagedKVCache::validateHead(size_t head) const {
+void PagedKVCache::validateHead(size_t head) const
+{
     if (head >= config_.numHeads) {
-        throw std::out_of_range("Head index " + std::to_string(head) +
-                                " >= numHeads " + std::to_string(config_.numHeads));
+        throw std::out_of_range("Head index " + std::to_string(head) + " >= numHeads " +
+                                std::to_string(config_.numHeads));
     }
 }
 
-void PagedKVCache::validateBlockId(BlockId blockId) const {
+void PagedKVCache::validateBlockId(BlockId blockId) const
+{
     if (blockId >= blocks_.size()) {
-        throw std::out_of_range("Block ID " + std::to_string(blockId) +
-                                " >= total blocks " + std::to_string(blocks_.size()));
+        throw std::out_of_range("Block ID " + std::to_string(blockId) + " >= total blocks " +
+                                std::to_string(blocks_.size()));
     }
 }
 
-void PagedKVCache::validateTokenOffset(size_t offset) const {
+void PagedKVCache::validateTokenOffset(size_t offset) const
+{
     if (offset >= config_.blockSize) {
-        throw std::out_of_range("Token offset " + std::to_string(offset) +
-                                " >= blockSize " + std::to_string(config_.blockSize));
+        throw std::out_of_range("Token offset " + std::to_string(offset) + " >= blockSize " +
+                                std::to_string(config_.blockSize));
     }
 }
 

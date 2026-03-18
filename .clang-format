@@ -40,3 +40,4 @@ AllowAllParametersOfDeclarationOnNextLine: false
 BinPackParameters: false
 BinPackArguments: false
 ConstructorInitializerAllOnOneLineOrOnePerLine: true
+UseCRLF: true

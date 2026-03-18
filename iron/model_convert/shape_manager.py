@@ -170,7 +170,9 @@ class ShapeManager:
         # Calculate padded dimensions
         M_padded = self.pad_to_multiple(M, min_M)
         K_padded = self.pad_to_multiple(K, min_K)
-        N_padded = self.pad_to_multiple(N // partition_N, min_N_per_partition) * partition_N
+        N_padded = (
+            self.pad_to_multiple(N // partition_N, min_N_per_partition) * partition_N
+        )
 
         original = (M, K, N)
         padded = (M_padded, K_padded, N_padded)
@@ -463,7 +465,9 @@ class ShapeManager:
         Returns:
             Dictionary with memory requirements in bytes
         """
-        intermediate = intermediate_size or (self.hidden_size * 4)  # Default 4x expansion
+        intermediate = intermediate_size or (
+            self.hidden_size * 4
+        )  # Default 4x expansion
 
         # KV Cache
         kv_cache = self.calculate_kv_cache_size(max_seq_len, batch_size)

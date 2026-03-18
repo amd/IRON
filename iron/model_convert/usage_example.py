@@ -15,6 +15,7 @@ This file demonstrates the complete workflow for:
 # EXAMPLE 1: Quick Check if a Model is Supported
 # ============================================================================
 
+
 def example_quick_check():
     """Quick check if a model architecture is likely supported."""
     from iron.model_convert import quick_check
@@ -35,6 +36,7 @@ def example_quick_check():
 # ============================================================================
 # EXAMPLE 2: Scan Model Architecture
 # ============================================================================
+
 
 def example_scan_architecture():
     """Scan a model's architecture to understand what layers it uses."""
@@ -60,6 +62,7 @@ def example_scan_architecture():
 # ============================================================================
 # EXAMPLE 3: Generate Gap Analysis Report
 # ============================================================================
+
 
 def example_gap_analysis():
     """Generate a detailed gap analysis report."""
@@ -91,6 +94,7 @@ def example_gap_analysis():
 # EXAMPLE 4: Print Human-Readable Gap Summary
 # ============================================================================
 
+
 def example_print_summary():
     """Print a formatted gap analysis summary."""
     from iron.model_convert import print_gap_summary
@@ -102,6 +106,7 @@ def example_print_summary():
 # ============================================================================
 # EXAMPLE 5: Register Custom Operator for Unsupported Layer
 # ============================================================================
+
 
 def example_register_custom_operator():
     """Register support for a custom operator."""
@@ -132,6 +137,7 @@ def example_register_custom_operator():
 # EXAMPLE 6: Use Operator Templates
 # ============================================================================
 
+
 def example_operator_templates():
     """Use pre-built templates for common custom operators."""
     from iron.model_convert import get_operator_template, TEMPLATES
@@ -155,6 +161,7 @@ def example_operator_templates():
 # ============================================================================
 # EXAMPLE 7: Compare Multiple Models
 # ============================================================================
+
 
 def example_compare_models():
     """Compare support across multiple model architectures."""
@@ -192,6 +199,7 @@ def example_compare_models():
 # EXAMPLE 8: Full Conversion Workflow (for supported models)
 # ============================================================================
 
+
 def example_full_conversion():
     """Complete workflow for converting a supported model."""
     from iron.model_convert import (
@@ -222,6 +230,7 @@ def example_full_conversion():
 
     # Step 4: Run inference
     import torch
+
     input_ids = torch.tensor([[1, 2, 3, 4, 5]])
     output = model.generate(input_ids, max_new_tokens=100)
     print(f"Generated: {output}")
@@ -230,6 +239,7 @@ def example_full_conversion():
 # ============================================================================
 # EXAMPLE 9: Using Extension Points
 # ============================================================================
+
 
 def example_extension_points():
     """Use extension points to hook into the conversion pipeline."""
@@ -255,6 +265,7 @@ def example_extension_points():
 # ============================================================================
 # EXAMPLE 10: Architecture-Specific Handler
 # ============================================================================
+
 
 def example_architecture_handler():
     """Register a custom architecture handler."""

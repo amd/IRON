@@ -40,7 +40,9 @@ def cmd_scan(args):
     print("-" * 60)
 
     try:
-        info = scan_model_from_transformers(args.model, trust_remote_code=args.trust_remote_code)
+        info = scan_model_from_transformers(
+            args.model, trust_remote_code=args.trust_remote_code
+        )
 
         # Print summary directly from info object
         lines = [
@@ -95,6 +97,7 @@ def cmd_scan(args):
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -126,6 +129,7 @@ def cmd_analyze(args):
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -141,7 +145,9 @@ def cmd_spec(args):
 
     try:
         # Generate spec
-        spec = generate_operator_spec(args.model, args.layer, trust_remote_code=args.trust_remote_code)
+        spec = generate_operator_spec(
+            args.model, args.layer, trust_remote_code=args.trust_remote_code
+        )
 
         # Output
         if args.output:
@@ -154,6 +160,7 @@ def cmd_spec(args):
         # Generate skeleton if requested
         if args.skeleton:
             from .extensibility import generate_operator_skeleton
+
             skeleton = generate_operator_skeleton(args.layer)
             skeleton_path = Path(args.skeleton)
             skeleton_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +172,7 @@ def cmd_spec(args):
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -198,6 +206,7 @@ def cmd_master(args):
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -223,7 +232,9 @@ def main():
     scan_p = subparsers.add_parser("scan", help="Scan model architecture")
     scan_p.add_argument("model", help="HuggingFace model name or path")
     scan_p.add_argument("--output", "-o", help="Output file (JSON)")
-    scan_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    scan_p.add_argument(
+        "--trust-remote-code", action="store_true", help="Trust remote code"
+    )
     scan_p.set_defaults(func=cmd_scan)
 
     # analyze
@@ -233,20 +244,40 @@ def main():
     analyze_p.set_defaults(func=cmd_analyze)
 
     # spec - generate operator specification
-    spec_p = subparsers.add_parser("spec", help="Generate operator specification for a layer")
+    spec_p = subparsers.add_parser(
+        "spec", help="Generate operator specification for a layer"
+    )
     spec_p.add_argument("model", help="HuggingFace model name")
-    spec_p.add_argument("--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)")
+    spec_p.add_argument(
+        "--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)"
+    )
     spec_p.add_argument("--output", "-o", help="Output file (markdown)")
-    spec_p.add_argument("--skeleton", "-s", help="Generate operator skeleton code to file")
-    spec_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    spec_p.add_argument(
+        "--skeleton", "-s", help="Generate operator skeleton code to file"
+    )
+    spec_p.add_argument(
+        "--trust-remote-code", action="store_true", help="Trust remote code"
+    )
     spec_p.set_defaults(func=cmd_spec)
 
     # master - generate master document
-    master_p = subparsers.add_parser("master", help="Generate MASTER document with ALL data for implementing an operator")
+    master_p = subparsers.add_parser(
+        "master",
+        help="Generate MASTER document with ALL data for implementing an operator",
+    )
     master_p.add_argument("model", help="HuggingFace model name")
-    master_p.add_argument("--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)")
-    master_p.add_argument("--output", "-o", default="MASTER_DOC.md", help="Output file (default: MASTER_DOC.md)")
-    master_p.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
+    master_p.add_argument(
+        "--layer", "-l", required=True, help="Layer class name (e.g., MistralAttention)"
+    )
+    master_p.add_argument(
+        "--output",
+        "-o",
+        default="MASTER_DOC.md",
+        help="Output file (default: MASTER_DOC.md)",
+    )
+    master_p.add_argument(
+        "--trust-remote-code", action="store_true", help="Trust remote code"
+    )
     master_p.set_defaults(func=cmd_master)
 
     args = parser.parse_args()

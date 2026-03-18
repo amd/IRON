@@ -42,6 +42,7 @@ from iron.models.llama32.config import Llama32Config
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def loader() -> WeightLoader:
     """Create a WeightLoader with temporary cache directory."""
@@ -88,22 +89,22 @@ def sample_weights_dict(sample_config: Llama32Config) -> Dict[str, np.ndarray]:
         # Attention
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = np.random.randn(
             sample_config.hidden_size,
-            sample_config.num_attention_heads * sample_config.head_dim
+            sample_config.num_attention_heads * sample_config.head_dim,
         ).astype(np.float32)
 
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = np.random.randn(
             sample_config.hidden_size,
-            sample_config.num_key_value_heads * sample_config.head_dim
+            sample_config.num_key_value_heads * sample_config.head_dim,
         ).astype(np.float32)
 
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = np.random.randn(
             sample_config.hidden_size,
-            sample_config.num_key_value_heads * sample_config.head_dim
+            sample_config.num_key_value_heads * sample_config.head_dim,
         ).astype(np.float32)
 
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = np.random.randn(
             sample_config.num_attention_heads * sample_config.head_dim,
-            sample_config.hidden_size
+            sample_config.hidden_size,
         ).astype(np.float32)
 
         # MLP
@@ -124,14 +125,14 @@ def sample_weights_dict(sample_config: Llama32Config) -> Dict[str, np.ndarray]:
             sample_config.hidden_size
         ).astype(np.float32)
 
-        weights[
-            f"{layer_prefix}.post_attention_layernorm.weight"
-        ] = np.random.randn(sample_config.hidden_size).astype(np.float32)
+        weights[f"{layer_prefix}.post_attention_layernorm.weight"] = np.random.randn(
+            sample_config.hidden_size
+        ).astype(np.float32)
 
     # Final norm
-    weights["model.norm.weight"] = np.random.randn(
-        sample_config.hidden_size
-    ).astype(np.float32)
+    weights["model.norm.weight"] = np.random.randn(sample_config.hidden_size).astype(
+        np.float32
+    )
 
     return weights
 
@@ -144,10 +145,7 @@ def safetensors_file(sample_weights_dict: Dict[str, np.ndarray]) -> Path:
     except ImportError:
         pytest.skip("safetensors not installed")
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".safetensors",
-        delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
         temp_path = Path(f.name)
 
     save_file(sample_weights_dict, temp_path)
@@ -160,16 +158,14 @@ def safetensors_file(sample_weights_dict: Dict[str, np.ndarray]) -> Path:
 
 
 @pytest.fixture
-def mock_model_directory(
-    safetensors_file: Path,
-    sample_config: Llama32Config
-) -> Path:
+def mock_model_directory(safetensors_file: Path, sample_config: Llama32Config) -> Path:
     """Create a mock model directory with safetensors and config."""
     with tempfile.TemporaryDirectory() as tmpdir:
         model_dir = Path(tmpdir)
 
         # Copy safetensors file
         import shutil
+
         shutil.copy(safetensors_file, model_dir / "model.safetensors")
 
         # Create config.json
@@ -184,6 +180,7 @@ def mock_model_directory(
 # Test: WeightInfo Dataclass
 # =============================================================================
 
+
 class TestWeightInfo:
     """Test WeightInfo dataclass."""
 
@@ -194,7 +191,7 @@ class TestWeightInfo:
             file_size=1000000,
             num_tensors=100,
             total_tensor_size=900000,
-            checksum="abc123"
+            checksum="abc123",
         )
 
         assert info.file_path == Path("/test/model")
@@ -209,7 +206,7 @@ class TestWeightInfo:
             file_size=1048576,  # 1 MB
             num_tensors=10,
             total_tensor_size=1000,
-            checksum="abc"
+            checksum="abc",
         )
 
         assert info.file_size_mb == 1.0
@@ -221,7 +218,7 @@ class TestWeightInfo:
             file_size=1073741824,  # 1 GB
             num_tensors=100,
             total_tensor_size=1000,
-            checksum="abc"
+            checksum="abc",
         )
 
         assert info.file_size_gb == 1.0
@@ -233,7 +230,7 @@ class TestWeightInfo:
             file_size=1000000,
             num_tensors=100,
             total_tensor_size=900000,
-            checksum="abc123def456"
+            checksum="abc123def456",
         )
 
         str_repr = str(info)
@@ -249,7 +246,7 @@ class TestWeightInfo:
             file_size=1000,
             num_tensors=10,
             total_tensor_size=900,
-            checksum="abc"
+            checksum="abc",
         )
 
         assert info.safetensors_files == []
@@ -258,6 +255,7 @@ class TestWeightInfo:
 # =============================================================================
 # Test: WeightLoader Initialization
 # =============================================================================
+
 
 class TestWeightLoaderInit:
     """Test WeightLoader initialization."""
@@ -299,6 +297,7 @@ class TestWeightLoaderInit:
 # Test: Download Functionality
 # =============================================================================
 
+
 class TestDownloadFunctionality:
     """Test WeightLoader download functionality."""
 
@@ -307,10 +306,7 @@ class TestDownloadFunctionality:
     ) -> None:
         """Test download_model uses default model ID."""
         mock_download = Mock(return_value="/tmp/model")
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         loader.download_model()
 
@@ -323,10 +319,7 @@ class TestDownloadFunctionality:
     ) -> None:
         """Test download_model with custom model ID."""
         mock_download = Mock(return_value="/tmp/model")
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         loader.download_model("custom/model")
 
@@ -339,10 +332,7 @@ class TestDownloadFunctionality:
     ) -> None:
         """Test download_model passes cache directory."""
         mock_download = Mock(return_value="/tmp/model")
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         loader.download_model()
 
@@ -354,10 +344,7 @@ class TestDownloadFunctionality:
     ) -> None:
         """Test download_model with force_download."""
         mock_download = Mock(return_value="/tmp/model")
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         loader.download_model(force_download=True)
 
@@ -369,10 +356,7 @@ class TestDownloadFunctionality:
     ) -> None:
         """Test download_model returns Path object."""
         mock_download = Mock(return_value="/tmp/model")
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         result = loader.download_model()
 
@@ -382,6 +366,7 @@ class TestDownloadFunctionality:
         self, loader: WeightLoader, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test download_model handles missing huggingface_hub."""
+
         def mock_import(name, *args, **kwargs):
             if name == "huggingface_hub":
                 raise ImportError("No module named 'huggingface_hub'")
@@ -411,12 +396,11 @@ class TestDownloadFunctionality:
 # Test: Validation Functionality
 # =============================================================================
 
+
 class TestValidationFunctionality:
     """Test WeightLoader validation functionality."""
 
-    def test_validate_weights_file_not_found(
-        self, loader: WeightLoader
-    ) -> None:
+    def test_validate_weights_file_not_found(self, loader: WeightLoader) -> None:
         """Test validate_weights with non-existent path."""
         with pytest.raises(FileNotFoundError):
             loader.validate_weights(Path("/nonexistent/path"))
@@ -470,7 +454,9 @@ class TestValidationFunctionality:
 
         assert info.validation_time_ms >= 0
 
-    def test_calculate_checksum(self, loader: WeightLoader, temp_model_dir: Path) -> None:
+    def test_calculate_checksum(
+        self, loader: WeightLoader, temp_model_dir: Path
+    ) -> None:
         """Test _calculate_checksum method."""
         # Create a test file with known content
         test_file = temp_model_dir / "test.bin"
@@ -506,6 +492,7 @@ class TestValidationFunctionality:
 # Test: Memory Validation
 # =============================================================================
 
+
 class TestMemoryValidation:
     """Test WeightLoader memory validation."""
 
@@ -519,9 +506,7 @@ class TestMemoryValidation:
 
         assert result is True
 
-    def test_validate_memory_with_mock_budget(
-        self, temp_model_dir: Path
-    ) -> None:
+    def test_validate_memory_with_mock_budget(self, temp_model_dir: Path) -> None:
         """Test validate_memory with mock memory budget."""
         try:
             from safetensors.numpy import save_file
@@ -564,7 +549,7 @@ class TestMemoryValidation:
             file_size=1000,
             num_tensors=10,
             total_tensor_size=2000,
-            checksum="abc"
+            checksum="abc",
         )
 
         with pytest.raises(MemoryError, match="exceed memory budget"):
@@ -574,6 +559,7 @@ class TestMemoryValidation:
 # =============================================================================
 # Test: Disk Space Check
 # =============================================================================
+
 
 class TestDiskSpaceCheck:
     """Test WeightLoader disk space checking."""
@@ -598,6 +584,7 @@ class TestDiskSpaceCheck:
 # =============================================================================
 # Test: Loading Functionality
 # =============================================================================
+
 
 class TestLoadingFunctionality:
     """Test WeightLoader loading functionality."""
@@ -636,8 +623,10 @@ class TestLoadingFunctionality:
             loader.load_weights_mmap(temp_model_dir)
 
     def test_load_weights_import_error(
-        self, loader: WeightLoader, temp_model_dir: Path,
-        monkeypatch: pytest.MonkeyPatch
+        self,
+        loader: WeightLoader,
+        temp_model_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test load_weights handles missing safetensors."""
         # Create a dummy safetensors file
@@ -658,8 +647,7 @@ class TestLoadingFunctionality:
     ) -> None:
         """Test load_specific_weights."""
         weights = loader.load_specific_weights(
-            mock_model_directory,
-            ["model.embed_tokens.weight", "model.norm.weight"]
+            mock_model_directory, ["model.embed_tokens.weight", "model.norm.weight"]
         )
 
         assert len(weights) == 2
@@ -671,29 +659,26 @@ class TestLoadingFunctionality:
     ) -> None:
         """Test load_specific_weights with missing key."""
         with pytest.raises(KeyError, match="Weights not found"):
-            loader.load_specific_weights(
-                mock_model_directory,
-                ["nonexistent.weight"]
-            )
+            loader.load_specific_weights(mock_model_directory, ["nonexistent.weight"])
 
 
 # =============================================================================
 # Test: Convenience Methods
 # =============================================================================
 
+
 class TestConvenienceMethods:
     """Test WeightLoader convenience methods."""
 
     def test_download_and_validate(
-        self, loader: WeightLoader, monkeypatch: pytest.MonkeyPatch,
-        mock_model_directory: Path
+        self,
+        loader: WeightLoader,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_model_directory: Path,
     ) -> None:
         """Test download_and_validate."""
         mock_download = Mock(return_value=str(mock_model_directory))
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         model_path, weight_info = loader.download_and_validate(
             "test/model", check_memory=False
@@ -739,6 +724,7 @@ class TestConvenienceMethods:
 # Test: Error Handling
 # =============================================================================
 
+
 class TestErrorHandling:
     """Test WeightLoader error handling."""
 
@@ -746,13 +732,8 @@ class TestErrorHandling:
         self, loader: WeightLoader, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test that partial downloads are cleaned up."""
-        mock_download = Mock(
-            side_effect=ConnectionError("Network error")
-        )
-        monkeypatch.setattr(
-            "huggingface_hub.snapshot_download",
-            mock_download
-        )
+        mock_download = Mock(side_effect=ConnectionError("Network error"))
+        monkeypatch.setattr("huggingface_hub.snapshot_download", mock_download)
 
         with pytest.raises(RuntimeError):
             loader.download_model()
@@ -769,8 +750,9 @@ class TestErrorHandling:
         from tenacity import Retrying
 
         # Verify the download_model method has retry configuration
-        assert hasattr(loader.download_model, '__wrapped__') or \
-               hasattr(loader.download_model, 'retry')
+        assert hasattr(loader.download_model, "__wrapped__") or hasattr(
+            loader.download_model, "retry"
+        )
 
         # We can't easily test actual retry behavior with mocks because
         # tenacity wraps the function at decoration time. Instead, verify
@@ -795,6 +777,7 @@ class TestErrorHandling:
 # Test: Integration Tests
 # =============================================================================
 
+
 class TestIntegration:
     """Integration tests for WeightLoader."""
 
@@ -817,9 +800,7 @@ class TestIntegration:
         embed_weight = weights["model.embed_tokens.weight"]
         assert len(embed_weight.shape) == 2
 
-    def test_config_and_loader_integration(
-        self, mock_model_directory: Path
-    ) -> None:
+    def test_config_and_loader_integration(self, mock_model_directory: Path) -> None:
         """Test config and loader work together."""
         config = Llama32Config.from_json(mock_model_directory / "config.json")
 
@@ -830,9 +811,7 @@ class TestIntegration:
         assert config.num_hidden_layers == 2
         assert weight_info.num_tensors > config.num_hidden_layers
 
-    def test_memory_budget_integration(
-        self, mock_model_directory: Path
-    ) -> None:
+    def test_memory_budget_integration(self, mock_model_directory: Path) -> None:
         """Test memory budget integration."""
         try:
             from iron.runtime.cpp.memory_budget import MemoryBudget
@@ -853,6 +832,7 @@ class TestIntegration:
 # =============================================================================
 # Test: Edge Cases
 # =============================================================================
+
 
 class TestEdgeCases:
     """Test edge cases for WeightLoader."""
@@ -893,9 +873,7 @@ class TestEdgeCases:
         # 1000 * 2500 * 4 bytes (float32) = 10,000,000 bytes
         assert info.total_tensor_size >= 10_000_000
 
-    def test_special_characters_in_path(
-        self, loader: WeightLoader
-    ) -> None:
+    def test_special_characters_in_path(self, loader: WeightLoader) -> None:
         """Test handling of special characters in path."""
         with tempfile.TemporaryDirectory(suffix=" test-model") as tmpdir:
             model_dir = Path(tmpdir)
@@ -905,10 +883,7 @@ class TestEdgeCases:
             except ImportError:
                 pytest.skip("safetensors not installed")
 
-            save_file(
-                {"test": np.array([1.0])},
-                model_dir / "model.safetensors"
-            )
+            save_file({"test": np.array([1.0])}, model_dir / "model.safetensors")
 
             info = loader.validate_weights(model_dir)
 

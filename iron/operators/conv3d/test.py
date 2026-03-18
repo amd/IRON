@@ -30,14 +30,18 @@ def generate_test_params(extensive=False):
         (16, 32, 3, 2, 1, 1),  # Strided conv
     ]
 
-    input_sizes = [(1, 8, 16, 16)] if not extensive else [(1, 8, 16, 16), (1, 16, 32, 32)]
+    input_sizes = (
+        [(1, 8, 16, 16)] if not extensive else [(1, 8, 16, 16), (1, 16, 32, 32)]
+    )
 
     for batch, in_t, in_h, in_w in input_sizes:
         for in_ch, out_ch, kernel, stride, pad, groups in configs:
             names.append(
                 f"conv3d_{in_ch}x{out_ch}_k{kernel}_s{stride}_p{pad}_g{groups}_{in_t}x{in_h}x{in_w}"
             )
-            params.append((in_ch, out_ch, kernel, stride, pad, groups, batch, in_t, in_h, in_w))
+            params.append(
+                (in_ch, out_ch, kernel, stride, pad, groups, batch, in_t, in_h, in_w)
+            )
 
     return params, names
 
@@ -64,8 +68,17 @@ all_params = [
     all_params,
 )
 def test_conv3d(
-    in_channels, out_channels, kernel_size, stride, padding, groups, batch, in_t, in_h, in_w,
-    aie_context
+    in_channels,
+    out_channels,
+    kernel_size,
+    stride,
+    padding,
+    groups,
+    batch,
+    in_t,
+    in_h,
+    in_w,
+    aie_context,
 ):
     """Test conv3d operator against CPU reference."""
 
@@ -112,7 +125,9 @@ def test_conv3d(
 
     # Note: Full test execution requires NPU hardware
     # This test validates the operator setup and configuration
-    print(f"\nConv3D Test: in={in_channels}, out={out_channels}, k={kernel_size}, s={stride}")
+    print(
+        f"\nConv3D Test: in={in_channels}, out={out_channels}, k={kernel_size}, s={stride}"
+    )
     print(f"  Input shape: {golden_ref['input'].shape}")
     print(f"  Weight shape: {golden_ref['weight'].shape}")
     print(f"  Output shape: {golden_ref['output'].shape}")
@@ -123,8 +138,17 @@ def test_conv3d(
     regular_params[:3],  # Test first few cases
 )
 def test_conv3d_forward(
-    in_channels, out_channels, kernel_size, stride, padding, groups, batch, in_t, in_h, in_w,
-    aie_context
+    in_channels,
+    out_channels,
+    kernel_size,
+    stride,
+    padding,
+    groups,
+    batch,
+    in_t,
+    in_h,
+    in_w,
+    aie_context,
 ):
     """Test conv3d operator forward pass."""
 
@@ -166,8 +190,9 @@ def test_conv3d_forward(
     expected = golden_ref["output"]
 
     # Check shape
-    assert result.shape == expected.shape, \
-        f"Shape mismatch: got {result.shape}, expected {expected.shape}"
+    assert (
+        result.shape == expected.shape
+    ), f"Shape mismatch: got {result.shape}, expected {expected.shape}"
 
     # Check values with relaxed tolerance for AIE
     rel_tol = 0.05

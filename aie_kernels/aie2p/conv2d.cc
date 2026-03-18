@@ -23,26 +23,25 @@
  * @param output - Output tensor [N, out_channels, out_height, out_width] (flattened)
  * @param bias - Optional bias tensor [out_channels]
  */
-void conv2d_bf16_scalar(
-    bfloat16* input,
-    bfloat16* weight,
-    bfloat16* output,
-    bfloat16* bias,
-    int N,              // batch size
-    int in_channels,
-    int in_height,
-    int in_width,
-    int out_channels,
-    int out_height,
-    int out_width,
-    int kernel_h,
-    int kernel_w,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w,
-    int groups
-) {
+void conv2d_bf16_scalar(bfloat16 *input,
+                        bfloat16 *weight,
+                        bfloat16 *output,
+                        bfloat16 *bias,
+                        int N, // batch size
+                        int in_channels,
+                        int in_height,
+                        int in_width,
+                        int out_channels,
+                        int out_height,
+                        int out_width,
+                        int kernel_h,
+                        int kernel_w,
+                        int stride_h,
+                        int stride_w,
+                        int pad_h,
+                        int pad_w,
+                        int groups)
+{
     int channels_per_group = in_channels / groups;
     int out_channels_per_group = out_channels / groups;
 
@@ -97,27 +96,26 @@ void conv2d_bf16_scalar(
  * @param output - Output tensor [N, out_channels, out_height, out_width] (flattened)
  * @param bias - Optional bias tensor [out_channels]
  */
-void conv2d_bf16_vector(
-    bfloat16* input,
-    bfloat16* weight,
-    bfloat16* output,
-    bfloat16* bias,
-    int N,              // batch size
-    int in_channels,
-    int in_height,
-    int in_width,
-    int out_channels,
-    int out_height,
-    int out_width,
-    int kernel_h,
-    int kernel_w,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w,
-    int groups
-) {
-    constexpr int vec_factor = 16;  // AIE2P supports larger vectors
+void conv2d_bf16_vector(bfloat16 *input,
+                        bfloat16 *weight,
+                        bfloat16 *output,
+                        bfloat16 *bias,
+                        int N, // batch size
+                        int in_channels,
+                        int in_height,
+                        int in_width,
+                        int out_channels,
+                        int out_height,
+                        int out_width,
+                        int kernel_h,
+                        int kernel_w,
+                        int stride_h,
+                        int stride_w,
+                        int pad_h,
+                        int pad_w,
+                        int groups)
+{
+    constexpr int vec_factor = 16; // AIE2P supports larger vectors
 
     event0();
 
@@ -130,7 +128,7 @@ void conv2d_bf16_vector(
             int group_id = oc / out_channels_per_group;
             int ic_start = group_id * channels_per_group;
 
-            bfloat16* output_channel_ptr = output + (n * out_channels + oc) * spatial_size;
+            bfloat16 *output_channel_ptr = output + (n * out_channels + oc) * spatial_size;
 
             for (int oh = 0; oh < out_height; oh++) {
                 for (int ow = 0; ow < out_width; ow++) {
@@ -157,8 +155,10 @@ void conv2d_bf16_vector(
                                     for (int i = 0; i < vec_factor; i++) {
                                         int ic = v * vec_factor + i;
                                         int ic_global = ic_start + ic;
-                                        int input_idx = ((n * in_channels + ic_global) * in_height + ih) * in_width + iw;
-                                        int weight_idx = ((oc * channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
+                                        int input_idx =
+                                            ((n * in_channels + ic_global) * in_height + ih) * in_width + iw;
+                                        int weight_idx =
+                                            ((oc * channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
 
                                         in_vec[i] = input[input_idx];
                                         w_vec[i] = weight[weight_idx];
@@ -213,24 +213,23 @@ void conv2d_bf16_vector(
  * @param output - Output tensor [N, channels, out_height, out_width]
  * @param bias - Optional bias tensor [channels]
  */
-void depthwise_conv2d_bf16_vector(
-    bfloat16* input,
-    bfloat16* weight,
-    bfloat16* output,
-    bfloat16* bias,
-    int N,
-    int channels,
-    int in_height,
-    int in_width,
-    int out_height,
-    int out_width,
-    int kernel_h,
-    int kernel_w,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w
-) {
+void depthwise_conv2d_bf16_vector(bfloat16 *input,
+                                  bfloat16 *weight,
+                                  bfloat16 *output,
+                                  bfloat16 *bias,
+                                  int N,
+                                  int channels,
+                                  int in_height,
+                                  int in_width,
+                                  int out_height,
+                                  int out_width,
+                                  int kernel_h,
+                                  int kernel_w,
+                                  int stride_h,
+                                  int stride_w,
+                                  int pad_h,
+                                  int pad_w)
+{
     constexpr int vec_factor = 16;
 
     event0();
@@ -239,7 +238,7 @@ void depthwise_conv2d_bf16_vector(
 
     for (int n = 0; n < N; n++) {
         for (int c = 0; c < channels; c++) {
-            bfloat16* output_channel_ptr = output + (n * channels + c) * spatial_size;
+            bfloat16 *output_channel_ptr = output + (n * channels + c) * spatial_size;
 
             for (int oh = 0; oh < out_height; oh++) {
                 for (int ow = 0; ow < out_width; ow++) {
@@ -311,17 +310,16 @@ void depthwise_conv2d_bf16_vector(
  * @param output - Output tensor [N, out_channels, H, W]
  * @param bias - Optional bias tensor [out_channels]
  */
-void pointwise_conv2d_bf16_vector(
-    bfloat16* input,
-    bfloat16* weight,
-    bfloat16* output,
-    bfloat16* bias,
-    int N,
-    int in_channels,
-    int out_channels,
-    int height,
-    int width
-) {
+void pointwise_conv2d_bf16_vector(bfloat16 *input,
+                                  bfloat16 *weight,
+                                  bfloat16 *output,
+                                  bfloat16 *bias,
+                                  int N,
+                                  int in_channels,
+                                  int out_channels,
+                                  int height,
+                                  int width)
+{
     constexpr int vec_factor = 16;
 
     event0();
@@ -330,7 +328,7 @@ void pointwise_conv2d_bf16_vector(
 
     for (int n = 0; n < N; n++) {
         for (int oc = 0; oc < out_channels; oc++) {
-            bfloat16* output_channel_ptr = output + (n * out_channels + oc) * spatial_size;
+            bfloat16 *output_channel_ptr = output + (n * out_channels + oc) * spatial_size;
 
             for (int sp = 0; sp < spatial_size; sp++) {
                 bfloat16 acc = bfloat16(0.0f);
@@ -369,40 +367,71 @@ void pointwise_conv2d_bf16_vector(
 extern "C" {
 
 // Standard conv2d kernels
-void conv2d_bf16_scalar(
-    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
-    int N, int in_channels, int in_height, int in_width,
-    int out_channels, int out_height, int out_width,
-    int kernel_h, int kernel_w,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w,
-    int groups
-);
+void conv2d_bf16_scalar(bfloat16 *input,
+                        bfloat16 *weight,
+                        bfloat16 *output,
+                        bfloat16 *bias,
+                        int N,
+                        int in_channels,
+                        int in_height,
+                        int in_width,
+                        int out_channels,
+                        int out_height,
+                        int out_width,
+                        int kernel_h,
+                        int kernel_w,
+                        int stride_h,
+                        int stride_w,
+                        int pad_h,
+                        int pad_w,
+                        int groups);
 
-void conv2d_bf16_vector(
-    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
-    int N, int in_channels, int in_height, int in_width,
-    int out_channels, int out_height, int out_width,
-    int kernel_h, int kernel_w,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w,
-    int groups
-);
+void conv2d_bf16_vector(bfloat16 *input,
+                        bfloat16 *weight,
+                        bfloat16 *output,
+                        bfloat16 *bias,
+                        int N,
+                        int in_channels,
+                        int in_height,
+                        int in_width,
+                        int out_channels,
+                        int out_height,
+                        int out_width,
+                        int kernel_h,
+                        int kernel_w,
+                        int stride_h,
+                        int stride_w,
+                        int pad_h,
+                        int pad_w,
+                        int groups);
 
 // Depthwise conv2d
-void depthwise_conv2d_bf16_vector(
-    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
-    int N, int channels, int in_height, int in_width,
-    int out_height, int out_width,
-    int kernel_h, int kernel_w,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w
-);
+void depthwise_conv2d_bf16_vector(bfloat16 *input,
+                                  bfloat16 *weight,
+                                  bfloat16 *output,
+                                  bfloat16 *bias,
+                                  int N,
+                                  int channels,
+                                  int in_height,
+                                  int in_width,
+                                  int out_height,
+                                  int out_width,
+                                  int kernel_h,
+                                  int kernel_w,
+                                  int stride_h,
+                                  int stride_w,
+                                  int pad_h,
+                                  int pad_w);
 
 // Pointwise (1x1) conv2d
-void pointwise_conv2d_bf16_vector(
-    bfloat16* input, bfloat16* weight, bfloat16* output, bfloat16* bias,
-    int N, int in_channels, int out_channels, int height, int width
-);
+void pointwise_conv2d_bf16_vector(bfloat16 *input,
+                                  bfloat16 *weight,
+                                  bfloat16 *output,
+                                  bfloat16 *bias,
+                                  int N,
+                                  int in_channels,
+                                  int out_channels,
+                                  int height,
+                                  int width);
 
 } // extern "C"

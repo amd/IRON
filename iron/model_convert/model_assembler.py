@@ -86,7 +86,9 @@ class ModelAssembler:
         if isinstance(config, dict):
             adapter = ConfigAdapter(config)
             self.norm_config = adapter.normalize()
-            self.assembly_config = ModelAssemblyConfig(normalized_config=self.norm_config)
+            self.assembly_config = ModelAssemblyConfig(
+                normalized_config=self.norm_config
+            )
         elif isinstance(config, NormalizedConfig):
             self.norm_config = config
             self.assembly_config = ModelAssemblyConfig(normalized_config=config)
@@ -223,14 +225,18 @@ class ModelAssembler:
                 eps=self.norm_config.norm_eps,
             )
         else:
-            return nn.RMSNorm(self.norm_config.hidden_size, eps=self.norm_config.norm_eps)
+            return nn.RMSNorm(
+                self.norm_config.hidden_size, eps=self.norm_config.norm_eps
+            )
 
     def _create_lm_head(self):
         """Create LM head (output projection)"""
         if self.assembly_config.use_aie_gemm:
             # Use AIE GEMM for large vocab projection
             batch_tokens = self.assembly_config.batch_size * (
-                1 if self.assembly_config.is_decode else self.assembly_config.max_seq_len
+                1
+                if self.assembly_config.is_decode
+                else self.assembly_config.max_seq_len
             )
 
             return self.factory.create_gemm(
@@ -277,7 +283,9 @@ class ModelAssembler:
             elif list(weights_path.glob("*.pt")) or list(weights_path.glob("*.bin")):
                 weights_format = "pytorch"
             else:
-                raise ValueError(f"Could not determine weights format in {weights_path}")
+                raise ValueError(
+                    f"Could not determine weights format in {weights_path}"
+                )
 
         # Load weights
         if weights_format == "safetensors":
@@ -303,7 +311,9 @@ class ModelAssembler:
         # Embedding
         if "tok_emb.weight" in wm:
             if isinstance(self.embedding, nn.Embedding):
-                self.embedding.weight.data = torch.from_numpy(wm["tok_emb.weight"].tensor)
+                self.embedding.weight.data = torch.from_numpy(
+                    wm["tok_emb.weight"].tensor
+                )
 
         # Transformer blocks
         for i, layer in enumerate(self.layers):
@@ -518,7 +528,9 @@ class ModelAssembler:
 
         for i in range(max_new_tokens):
             # Forward pass
-            logits = self.forward(all_tokens, input_pos=input_pos, use_kv_cache=use_kv_cache)
+            logits = self.forward(
+                all_tokens, input_pos=input_pos, use_kv_cache=use_kv_cache
+            )
 
             # Get last token logits
             next_token_logits = logits[:, -1, :]
@@ -529,9 +541,10 @@ class ModelAssembler:
 
             # Top-k sampling
             if top_k is not None:
-                indices_to_remove = next_token_logits < torch.topk(
-                    next_token_logits, top_k
-                )[0][..., -1, None]
+                indices_to_remove = (
+                    next_token_logits
+                    < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                )
                 next_token_logits[indices_to_remove] = float("-inf")
 
             # Sample

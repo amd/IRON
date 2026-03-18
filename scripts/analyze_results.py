@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # Optional imports
 try:
     import numpy as np
+
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
@@ -58,9 +59,11 @@ except ImportError:
 
 try:
     import matplotlib
-    matplotlib.use('Agg')  # Non-interactive backend
+
+    matplotlib.use("Agg")  # Non-interactive backend
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -87,6 +90,7 @@ TARGETS = {
 # =============================================================================
 # Data Loading
 # =============================================================================
+
 
 def load_results(file_path: str) -> dict:
     """Load benchmark results from JSON file"""
@@ -120,7 +124,7 @@ def load_latest_results() -> Optional[dict]:
     benchmark_files = sorted(
         RESULTS_DIR.glob("benchmark_*.json"),
         key=lambda p: p.stat().st_mtime,
-        reverse=True
+        reverse=True,
     )
 
     if benchmark_files:
@@ -132,6 +136,7 @@ def load_latest_results() -> Optional[dict]:
 # =============================================================================
 # Statistical Analysis
 # =============================================================================
+
 
 def analyze_distribution(results: dict) -> dict:
     """Analyze latency distribution for each operator"""
@@ -157,7 +162,9 @@ def analyze_distribution(results: dict) -> dict:
 
         # Calculate coefficient of variation
         if op_analysis["mean"] > 0:
-            op_analysis["cv_percent"] = (op_analysis["std_dev"] / op_analysis["mean"]) * 100
+            op_analysis["cv_percent"] = (
+                op_analysis["std_dev"] / op_analysis["mean"]
+            ) * 100
         else:
             op_analysis["cv_percent"] = 0
 
@@ -200,17 +207,27 @@ def compare_against_targets(results: dict) -> dict:
             "measured": mean_ms,
             "linux_npu": {
                 "target": targets["linux_npu"],
-                "ratio": mean_ms / targets["linux_npu"] if targets["linux_npu"] > 0 else 0,
+                "ratio": (
+                    mean_ms / targets["linux_npu"] if targets["linux_npu"] > 0 else 0
+                ),
                 "passed": mean_ms <= targets["linux_npu"],
             },
             "windows_npu": {
                 "target": targets["windows_npu"],
-                "ratio": mean_ms / targets["windows_npu"] if targets["windows_npu"] > 0 else 0,
+                "ratio": (
+                    mean_ms / targets["windows_npu"]
+                    if targets["windows_npu"] > 0
+                    else 0
+                ),
                 "passed": mean_ms <= targets["windows_npu"],
             },
             "cpu_baseline": {
                 "target": targets["cpu_baseline"],
-                "ratio": mean_ms / targets["cpu_baseline"] if targets["cpu_baseline"] > 0 else 0,
+                "ratio": (
+                    mean_ms / targets["cpu_baseline"]
+                    if targets["cpu_baseline"] > 0
+                    else 0
+                ),
                 "passed": mean_ms <= targets["cpu_baseline"],
             },
         }
@@ -242,10 +259,12 @@ def analyze_trends(history: List[dict]) -> dict:
             if op_name not in operator_data:
                 operator_data[op_name] = []
 
-            operator_data[op_name].append({
-                "timestamp": timestamp,
-                "mean_ms": mean_ms,
-            })
+            operator_data[op_name].append(
+                {
+                    "timestamp": timestamp,
+                    "mean_ms": mean_ms,
+                }
+            )
 
     # Analyze each operator
     trends = {}
@@ -282,7 +301,9 @@ def analyze_trends(history: List[dict]) -> dict:
             "direction": direction,
             "first_value": values[0],
             "last_value": values[-1],
-            "change_percent": ((values[-1] - values[0]) / values[0]) * 100 if values[0] > 0 else 0,
+            "change_percent": (
+                ((values[-1] - values[0]) / values[0]) * 100 if values[0] > 0 else 0
+            ),
         }
 
     return trends
@@ -291,6 +312,7 @@ def analyze_trends(history: List[dict]) -> dict:
 # =============================================================================
 # Chart Generation
 # =============================================================================
+
 
 def generate_latency_comparison_chart(results: dict, output_path: Path):
     """Generate latency comparison bar chart"""
@@ -313,37 +335,56 @@ def generate_latency_comparison_chart(results: dict, output_path: Path):
     width = 0.35
 
     # Bars for mean and p99
-    bars1 = ax.bar([i - width/2 for i in x], means, width, label='Mean', color='steelblue')
-    bars2 = ax.bar([i + width/2 for i in x], p99s, width, label='P99', color='coral')
+    bars1 = ax.bar(
+        [i - width / 2 for i in x], means, width, label="Mean", color="steelblue"
+    )
+    bars2 = ax.bar([i + width / 2 for i in x], p99s, width, label="P99", color="coral")
 
     # Target lines
     for i, op in enumerate(operators):
         if op in TARGETS:
-            ax.axvline(x=i - 0.5, color='gray', linestyle='--', alpha=0.3)
-            ax.text(i, max(means[i], p99s[i]) * 1.05,
-                   f'Target: {TARGETS[op]["cpu_baseline"]:.1f}ms',
-                   ha='center', fontsize=8, rotation=45)
+            ax.axvline(x=i - 0.5, color="gray", linestyle="--", alpha=0.3)
+            ax.text(
+                i,
+                max(means[i], p99s[i]) * 1.05,
+                f'Target: {TARGETS[op]["cpu_baseline"]:.1f}ms',
+                ha="center",
+                fontsize=8,
+                rotation=45,
+            )
 
-    ax.set_ylabel('Latency (ms)')
-    ax.set_title('Operator Latency Comparison')
+    ax.set_ylabel("Latency (ms)")
+    ax.set_title("Operator Latency Comparison")
     ax.set_xticks(x)
     ax.set_xticklabels([op.upper() for op in operators])
     ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     # Add value labels
     for bar in bars1:
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.3f}', ha='center', va='bottom', fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height,
+            f"{height:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     for bar in bars2:
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.3f}', ha='center', va='bottom', fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height,
+            f"{height:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Chart saved: {output_path}")
@@ -367,29 +408,35 @@ def generate_target_achievement_chart(results: dict, output_path: Path):
     x = range(len(operators))
 
     # Color based on pass/fail
-    colors = ['green' if m <= t else 'red' for m, t in zip(means, targets)]
+    colors = ["green" if m <= t else "red" for m, t in zip(means, targets)]
 
-    bars = ax.bar(x, means, color=colors, alpha=0.7, label='Measured')
+    bars = ax.bar(x, means, color=colors, alpha=0.7, label="Measured")
 
     # Target line
-    ax.plot(x, targets, 'r--', linewidth=2, label='Target')
+    ax.plot(x, targets, "r--", linewidth=2, label="Target")
 
-    ax.set_ylabel('Latency (ms)')
-    ax.set_title('Target Achievement (Green=PASS, Red=FAIL)')
+    ax.set_ylabel("Latency (ms)")
+    ax.set_title("Target Achievement (Green=PASS, Red=FAIL)")
     ax.set_xticks(x)
     ax.set_xticklabels([op.upper() for op in operators])
     ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     # Add value labels
     for bar, target in zip(bars, targets):
         height = bar.get_height()
-        status = 'PASS' if height <= target else 'FAIL'
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.3f}\n{status}', ha='center', va='bottom', fontsize=9)
+        status = "PASS" if height <= target else "FAIL"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height,
+            f"{height:.3f}\n{status}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Chart saved: {output_path}")
@@ -411,22 +458,28 @@ def generate_throughput_chart(results: dict, output_path: Path):
     fig, ax = plt.subplots(figsize=(10, 6))
     x = range(len(operators))
 
-    bars = ax.bar(x, throughputs, color='mediumpurple', alpha=0.7)
+    bars = ax.bar(x, throughputs, color="mediumpurple", alpha=0.7)
 
-    ax.set_ylabel('Throughput (ops/sec)')
-    ax.set_title('Operator Throughput')
+    ax.set_ylabel("Throughput (ops/sec)")
+    ax.set_title("Operator Throughput")
     ax.set_xticks(x)
     ax.set_xticklabels([op.upper() for op in operators])
-    ax.grid(axis='y', alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     # Add value labels
     for bar, val in zip(bars, throughputs):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{val:.0f}', ha='center', va='bottom', fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height,
+            f"{val:.0f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Chart saved: {output_path}")
@@ -447,19 +500,19 @@ def generate_variance_chart(results: dict, output_path: Path):
     std_devs = [r["metrics"]["std_dev_ms"] for r in valid_results]
 
     # Calculate CV percentage
-    cv_percent = [(s/m)*100 if m > 0 else 0 for s, m in zip(std_devs, means)]
+    cv_percent = [(s / m) * 100 if m > 0 else 0 for s, m in zip(std_devs, means)]
 
     # Color based on CV
     colors = []
     for cv in cv_percent:
         if cv < 5:
-            colors.append('green')
+            colors.append("green")
         elif cv < 10:
-            colors.append('yellowgreen')
+            colors.append("yellowgreen")
         elif cv < 20:
-            colors.append('orange')
+            colors.append("orange")
         else:
-            colors.append('red')
+            colors.append("red")
 
     fig, ax = plt.subplots(figsize=(10, 6))
     x = range(len(operators))
@@ -467,25 +520,33 @@ def generate_variance_chart(results: dict, output_path: Path):
     bars = ax.bar(x, cv_percent, color=colors, alpha=0.7)
 
     # Threshold lines
-    ax.axhline(y=5, color='green', linestyle='--', alpha=0.5, label='Excellent (<5%)')
-    ax.axhline(y=10, color='orange', linestyle='--', alpha=0.5, label='Acceptable (<10%)')
-    ax.axhline(y=20, color='red', linestyle='--', alpha=0.5, label='Poor (>20%)')
+    ax.axhline(y=5, color="green", linestyle="--", alpha=0.5, label="Excellent (<5%)")
+    ax.axhline(
+        y=10, color="orange", linestyle="--", alpha=0.5, label="Acceptable (<10%)"
+    )
+    ax.axhline(y=20, color="red", linestyle="--", alpha=0.5, label="Poor (>20%)")
 
-    ax.set_ylabel('Coefficient of Variation (%)')
-    ax.set_title('Result Variance by Operator (Lower is Better)')
+    ax.set_ylabel("Coefficient of Variation (%)")
+    ax.set_title("Result Variance by Operator (Lower is Better)")
     ax.set_xticks(x)
     ax.set_xticklabels([op.upper() for op in operators])
     ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     # Add value labels
     for bar, val in zip(bars, cv_percent):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{val:.1f}%', ha='center', va='bottom', fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height,
+            f"{val:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Chart saved: {output_path}")
@@ -521,7 +582,7 @@ def generate_trend_chart(history: List[dict], output_path: Path):
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    colors = {'rope': 'blue', 'rmsnorm': 'green', 'silu': 'red', 'softmax': 'purple'}
+    colors = {"rope": "blue", "rmsnorm": "green", "silu": "red", "softmax": "purple"}
 
     for op_name, data_points in operator_data.items():
         if len(data_points) < 2:
@@ -532,7 +593,7 @@ def generate_trend_chart(history: List[dict], output_path: Path):
         values = []
         for ts, val in data_points:
             try:
-                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 timestamps.append(dt)
                 values.append(val)
             except:
@@ -541,21 +602,23 @@ def generate_trend_chart(history: List[dict], output_path: Path):
         if len(timestamps) < 2:
             continue
 
-        color = colors.get(op_name, 'gray')
-        ax.plot(timestamps, values, 'o-', color=color, label=op_name.upper(), markersize=6)
+        color = colors.get(op_name, "gray")
+        ax.plot(
+            timestamps, values, "o-", color=color, label=op_name.upper(), markersize=6
+        )
 
-    ax.set_xlabel('Time')
-    ax.set_ylabel('Mean Latency (ms)')
-    ax.set_title('Performance Trend Over Time')
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Mean Latency (ms)")
+    ax.set_title("Performance Trend Over Time")
     ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    ax.grid(axis="y", alpha=0.3)
 
     # Format x-axis dates
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
     plt.xticks(rotation=45)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Chart saved: {output_path}")
@@ -596,7 +659,7 @@ def generate_all_charts(results: dict, history: List[dict]) -> List[Path]:
         latest_dir.mkdir(exist_ok=True)
 
         for chart in charts:
-            chart_name = chart.stem.split('_')[0]
+            chart_name = chart.stem.split("_")[0]
             latest_path = latest_dir / f"{chart_name}.png"
             try:
                 if latest_path.exists():
@@ -611,6 +674,7 @@ def generate_all_charts(results: dict, history: List[dict]) -> List[Path]:
 # =============================================================================
 # Report Generation
 # =============================================================================
+
 
 def generate_text_report(
     results: dict,
@@ -705,10 +769,14 @@ def generate_markdown_report(
     if system_info:
         plat = system_info.get("platform", {})
         hw = system_info.get("hardware", {})
-        lines.append(f"- **Platform:** {plat.get('system', 'Unknown')} {plat.get('windows_edition', '')}")
+        lines.append(
+            f"- **Platform:** {plat.get('system', 'Unknown')} {plat.get('windows_edition', '')}"
+        )
         lines.append(f"- **Processor:** {plat.get('processor', 'Unknown')}")
         lines.append(f"- **Python:** {plat.get('python_version', 'Unknown')}")
-        lines.append(f"- **NPU:** {hw.get('npu', hw.get('amd_device', 'Not detected'))}")
+        lines.append(
+            f"- **NPU:** {hw.get('npu', hw.get('amd_device', 'Not detected'))}"
+        )
     lines.append("")
 
     # Summary
@@ -796,6 +864,7 @@ def generate_markdown_report(
 # =============================================================================
 # CLI
 # =============================================================================
+
 
 def parse_args():
     """Parse command-line arguments"""

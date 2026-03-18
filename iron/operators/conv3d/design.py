@@ -299,13 +299,19 @@ if __name__ == "__main__":
     p.add_argument("-N", "--batch", type=int, default=1, help="Batch size")
 
     # Input dimensions
-    p.add_argument("-ic", "--in-channels", type=int, required=True, help="Input channels")
-    p.add_argument("-it", "--in-t", type=int, required=True, help="Input temporal dimension")
+    p.add_argument(
+        "-ic", "--in-channels", type=int, required=True, help="Input channels"
+    )
+    p.add_argument(
+        "-it", "--in-t", type=int, required=True, help="Input temporal dimension"
+    )
     p.add_argument("-ih", "--in-h", type=int, required=True, help="Input height")
     p.add_argument("-iw", "--in-w", type=int, required=True, help="Input width")
 
     # Output channels
-    p.add_argument("-oc", "--out-channels", type=int, required=True, help="Output channels")
+    p.add_argument(
+        "-oc", "--out-channels", type=int, required=True, help="Output channels"
+    )
 
     # Kernel parameters
     p.add_argument("-kt", "--kernel-t", type=int, default=3, help="Kernel temporal")
@@ -329,7 +335,9 @@ if __name__ == "__main__":
     p.add_argument("--use-bias", action="store_true", help="Use bias")
 
     # Number of columns
-    p.add_argument("-co", "--columns", type=int, default=4, help="Number of AIE columns")
+    p.add_argument(
+        "-co", "--columns", type=int, default=4, help="Number of AIE columns"
+    )
 
     # Tile size
     p.add_argument("-ts", "--tile-size", type=int, default=1024, help="Tile size")

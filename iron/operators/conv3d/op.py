@@ -122,7 +122,9 @@ class AIEConv3d(AIEOperatorBase):
         operator_dir = Path(__file__).parent
 
         # Determine kernel directory based on device
-        kernel_dir = "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        kernel_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
 
         file_name_base = (
             f"conv3d_{self.in_channels}_{self.out_channels}_"
@@ -173,7 +175,10 @@ class AIEConv3d(AIEOperatorBase):
                     extra_flags=[],
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / kernel_dir / "conv3d.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / kernel_dir
+                            / "conv3d.cc"
                         )
                     ],
                 ),
@@ -207,8 +212,14 @@ class AIEConv3d(AIEOperatorBase):
 
         # Calculate buffer sizes
         input_size = self.in_channels * in_t * in_h * in_w
-        weight_size = (self.out_channels * self.in_channels // self.groups *
-                       self.kernel_size[0] * self.kernel_size[1] * self.kernel_size[2])
+        weight_size = (
+            self.out_channels
+            * self.in_channels
+            // self.groups
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+            * self.kernel_size[2]
+        )
         output_size = self.out_channels * out_t * out_h * out_w
 
         self.input_size = input_size
@@ -337,7 +348,7 @@ class AIEConv3d(AIEOperatorBase):
         result = self.read_buffer_as_torch(
             "output",
             shape=(self.out_channels, self.out_t, self.out_h, self.out_w),
-            dtype=bfloat16
+            dtype=bfloat16,
         )
 
         return result

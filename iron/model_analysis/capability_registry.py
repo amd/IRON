@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 class SupportLevel(Enum):
     """Levels of support for a component"""
+
     FULL = "full"  # Fully supported with NPU operator
     PARTIAL = "partial"  # Partially supported, some limitations
     FALLBACK = "fallback"  # CPU fallback only
@@ -40,6 +41,7 @@ class SupportLevel(Enum):
 
 class FallbackStrategy(Enum):
     """Strategies for handling unsupported components"""
+
     CPU_FALLBACK = "cpu_fallback"  # Run on CPU
     DECOMPOSE = "decompose"  # Break into supported ops
     APPROXIMATE = "approximate"  # Use approximate version
@@ -50,6 +52,7 @@ class FallbackStrategy(Enum):
 @dataclass
 class OperatorCapability:
     """Describes a supported operator"""
+
     name: str
     category: LayerCategory
     support_level: SupportLevel
@@ -66,6 +69,7 @@ class OperatorCapability:
 @dataclass
 class ArchitectureSupport:
     """Describes support for a complete architecture"""
+
     architecture_name: str
     model_types: List[str] = field(default_factory=list)
     support_level: SupportLevel = SupportLevel.FULL
@@ -78,6 +82,7 @@ class ArchitectureSupport:
 @dataclass
 class ConversionRecipe:
     """Complete recipe for converting a model"""
+
     model_name: str
     architecture: str
     required_operators: List[str]
@@ -115,205 +120,229 @@ class CapabilityRegistry:
         # === Core Operators ===
 
         # GEMM
-        self.register_operator(OperatorCapability(
-            name="AIEGEMM",
-            category=LayerCategory.LINEAR,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "torch.nn.Linear",
-                "iron.operators.AIEGEMM",
-            ],
-            name_patterns=["gemm", "linear", "dense", "proj", "fc"],
-            description="General Matrix Multiply for linear projections",
-            limitations=[
-                "Requires dimensions to be multiples of tile sizes",
-                "Weight must be transposed for column-major layout",
-            ],
-            fallback_strategy=FallbackStrategy.DECOMPOSE,
-            fallback_operator="torch.nn.functional.linear",
-            config_requirements={"tile_m": 64, "tile_k": 64, "tile_n": 64},
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEGEMM",
+                category=LayerCategory.LINEAR,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "torch.nn.Linear",
+                    "iron.operators.AIEGEMM",
+                ],
+                name_patterns=["gemm", "linear", "dense", "proj", "fc"],
+                description="General Matrix Multiply for linear projections",
+                limitations=[
+                    "Requires dimensions to be multiples of tile sizes",
+                    "Weight must be transposed for column-major layout",
+                ],
+                fallback_strategy=FallbackStrategy.DECOMPOSE,
+                fallback_operator="torch.nn.functional.linear",
+                config_requirements={"tile_m": 64, "tile_k": 64, "tile_n": 64},
+            )
+        )
 
         # GEMV
-        self.register_operator(OperatorCapability(
-            name="AIEGEMV",
-            category=LayerCategory.LINEAR,
-            support_level=SupportLevel.PARTIAL,
-            module_patterns=[
-                "torch.nn.Linear",
-                "iron.operators.AIEGEMV",
-            ],
-            name_patterns=["gemv", "mv"],
-            description="General Matrix-Vector for decode phase",
-            limitations=[
-                "Only efficient for single-token (decode) inference",
-                "Limited tile size configurations",
-            ],
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.functional.linear",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEGEMV",
+                category=LayerCategory.LINEAR,
+                support_level=SupportLevel.PARTIAL,
+                module_patterns=[
+                    "torch.nn.Linear",
+                    "iron.operators.AIEGEMV",
+                ],
+                name_patterns=["gemv", "mv"],
+                description="General Matrix-Vector for decode phase",
+                limitations=[
+                    "Only efficient for single-token (decode) inference",
+                    "Limited tile size configurations",
+                ],
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.functional.linear",
+            )
+        )
 
         # RMSNorm
-        self.register_operator(OperatorCapability(
-            name="AIERMSNorm",
-            category=LayerCategory.NORMALIZATION,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "torch.nn.RMSNorm",
-                "iron.operators.AIERMSNorm",
-            ],
-            name_patterns=["rmsnorm", "rms_norm"],
-            description="Root Mean Square Layer Normalization",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.RMSNorm",
-            config_requirements={"eps": 1e-6},
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIERMSNorm",
+                category=LayerCategory.NORMALIZATION,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "torch.nn.RMSNorm",
+                    "iron.operators.AIERMSNorm",
+                ],
+                name_patterns=["rmsnorm", "rms_norm"],
+                description="Root Mean Square Layer Normalization",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.RMSNorm",
+                config_requirements={"eps": 1e-6},
+            )
+        )
 
         # LayerNorm
-        self.register_operator(OperatorCapability(
-            name="AIELayerNorm",
-            category=LayerCategory.NORMALIZATION,
-            support_level=SupportLevel.PARTIAL,
-            module_patterns=[
-                "torch.nn.LayerNorm",
-                "iron.operators.AIELayerNorm",
-            ],
-            name_patterns=["layernorm", "layer_norm", "ln"],
-            description="Layer Normalization",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.LayerNorm",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIELayerNorm",
+                category=LayerCategory.NORMALIZATION,
+                support_level=SupportLevel.PARTIAL,
+                module_patterns=[
+                    "torch.nn.LayerNorm",
+                    "iron.operators.AIELayerNorm",
+                ],
+                name_patterns=["layernorm", "layer_norm", "ln"],
+                description="Layer Normalization",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.LayerNorm",
+            )
+        )
 
         # RoPE
-        self.register_operator(OperatorCapability(
-            name="AIERoPE",
-            category=LayerCategory.POSITIONAL,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "iron.operators.AIERope",
-            ],
-            name_patterns=["rope", "rotary"],
-            description="Rotary Positional Embeddings",
-            limitations=[
-                "Requires precomputed angle tables",
-                "Limited to certain head dimensions",
-            ],
-            fallback_strategy=FallbackStrategy.DECOMPOSE,
-            fallback_operator="apply_rotary_pos_emb",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIERoPE",
+                category=LayerCategory.POSITIONAL,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "iron.operators.AIERope",
+                ],
+                name_patterns=["rope", "rotary"],
+                description="Rotary Positional Embeddings",
+                limitations=[
+                    "Requires precomputed angle tables",
+                    "Limited to certain head dimensions",
+                ],
+                fallback_strategy=FallbackStrategy.DECOMPOSE,
+                fallback_operator="apply_rotary_pos_emb",
+            )
+        )
 
         # Multi-Head Attention
-        self.register_operator(OperatorCapability(
-            name="AIEMHA",
-            category=LayerCategory.ATTENTION,
-            support_level=SupportLevel.PARTIAL,
-            module_patterns=[
-                "torch.nn.MultiheadAttention",
-                "iron.operators.AIEMHA",
-            ],
-            name_patterns=["mha", "multihead", "self_attention"],
-            description="Multi-Head Attention (fused)",
-            limitations=[
-                "Requires sequence length multiple of 64",
-                "Head dimension must be 64",
-                "Limited pipeline configurations",
-            ],
-            fallback_strategy=FallbackStrategy.DECOMPOSE,
-            fallback_operator="torch.nn.functional.scaled_dot_product_attention",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEMHA",
+                category=LayerCategory.ATTENTION,
+                support_level=SupportLevel.PARTIAL,
+                module_patterns=[
+                    "torch.nn.MultiheadAttention",
+                    "iron.operators.AIEMHA",
+                ],
+                name_patterns=["mha", "multihead", "self_attention"],
+                description="Multi-Head Attention (fused)",
+                limitations=[
+                    "Requires sequence length multiple of 64",
+                    "Head dimension must be 64",
+                    "Limited pipeline configurations",
+                ],
+                fallback_strategy=FallbackStrategy.DECOMPOSE,
+                fallback_operator="torch.nn.functional.scaled_dot_product_attention",
+            )
+        )
 
         # Softmax
-        self.register_operator(OperatorCapability(
-            name="AIESoftmax",
-            category=LayerCategory.ACTIVATION,
-            support_level=SupportLevel.PARTIAL,
-            module_patterns=[
-                "torch.nn.Softmax",
-                "iron.operators.AIESoftmax",
-            ],
-            name_patterns=["softmax"],
-            description="Softmax activation",
-            limitations=[
-                "Size must be multiple of 16",
-            ],
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.functional.softmax",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIESoftmax",
+                category=LayerCategory.ACTIVATION,
+                support_level=SupportLevel.PARTIAL,
+                module_patterns=[
+                    "torch.nn.Softmax",
+                    "iron.operators.AIESoftmax",
+                ],
+                name_patterns=["softmax"],
+                description="Softmax activation",
+                limitations=[
+                    "Size must be multiple of 16",
+                ],
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.functional.softmax",
+            )
+        )
 
         # SiLU
-        self.register_operator(OperatorCapability(
-            name="AIESiLU",
-            category=LayerCategory.ACTIVATION,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "torch.nn.SiLU",
-                "iron.operators.AIESiLU",
-            ],
-            name_patterns=["silu"],
-            description="Sigmoid Linear Unit activation",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.functional.silu",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIESiLU",
+                category=LayerCategory.ACTIVATION,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "torch.nn.SiLU",
+                    "iron.operators.AIESiLU",
+                ],
+                name_patterns=["silu"],
+                description="Sigmoid Linear Unit activation",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.functional.silu",
+            )
+        )
 
         # GELU
-        self.register_operator(OperatorCapability(
-            name="AIEGELU",
-            category=LayerCategory.ACTIVATION,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "torch.nn.GELU",
-                "iron.operators.AIEGELU",
-            ],
-            name_patterns=["gelu"],
-            description="Gaussian Error Linear Unit activation",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.nn.functional.gelu",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEGELU",
+                category=LayerCategory.ACTIVATION,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "torch.nn.GELU",
+                    "iron.operators.AIEGELU",
+                ],
+                name_patterns=["gelu"],
+                description="Gaussian Error Linear Unit activation",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.nn.functional.gelu",
+            )
+        )
 
         # SwiGLU (fused)
-        self.register_operator(OperatorCapability(
-            name="AIESwiGLU",
-            category=LayerCategory.ACTIVATION,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "iron.operators.AIESwiGLUPrefill",
-                "iron.operators.AIESwiGLUDecode",
-            ],
-            name_patterns=["swiglu", "swi_glu"],
-            description="Fused SwiGLU activation (silu(x) * y)",
-            limitations=[
-                "Separate operators for prefill and decode",
-            ],
-            fallback_strategy=FallbackStrategy.DECOMPOSE,
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIESwiGLU",
+                category=LayerCategory.ACTIVATION,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "iron.operators.AIESwiGLUPrefill",
+                    "iron.operators.AIESwiGLUDecode",
+                ],
+                name_patterns=["swiglu", "swi_glu"],
+                description="Fused SwiGLU activation (silu(x) * y)",
+                limitations=[
+                    "Separate operators for prefill and decode",
+                ],
+                fallback_strategy=FallbackStrategy.DECOMPOSE,
+            )
+        )
 
         # Element-wise Add
-        self.register_operator(OperatorCapability(
-            name="AIEElementwiseAdd",
-            category=LayerCategory.NORMALIZATION_SEQUENCE,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "iron.operators.AIEElementwiseAdd",
-            ],
-            name_patterns=["add", "residual"],
-            description="Element-wise addition for residual connections",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.add",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEElementwiseAdd",
+                category=LayerCategory.NORMALIZATION_SEQUENCE,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "iron.operators.AIEElementwiseAdd",
+                ],
+                name_patterns=["add", "residual"],
+                description="Element-wise addition for residual connections",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.add",
+            )
+        )
 
         # Element-wise Mul
-        self.register_operator(OperatorCapability(
-            name="AIEElementwiseMul",
-            category=LayerCategory.ACTIVATION,
-            support_level=SupportLevel.FULL,
-            module_patterns=[
-                "iron.operators.AIEElementwiseMul",
-            ],
-            name_patterns=["mul", "multiply"],
-            description="Element-wise multiplication",
-            fallback_strategy=FallbackStrategy.CPU_FALLBACK,
-            fallback_operator="torch.mul",
-        ))
+        self.register_operator(
+            OperatorCapability(
+                name="AIEElementwiseMul",
+                category=LayerCategory.ACTIVATION,
+                support_level=SupportLevel.FULL,
+                module_patterns=[
+                    "iron.operators.AIEElementwiseMul",
+                ],
+                name_patterns=["mul", "multiply"],
+                description="Element-wise multiplication",
+                fallback_strategy=FallbackStrategy.CPU_FALLBACK,
+                fallback_operator="torch.mul",
+            )
+        )
 
         # === Category-level support ===
         self._category_support = {
@@ -341,37 +370,48 @@ class CapabilityRegistry:
         }
 
         # === Architecture support ===
-        self._register_architecture(ArchitectureSupport(
-            architecture_name="Llama",
-            model_types=["llama", "llama2", "llama3", "codellama"],
-            support_level=SupportLevel.FULL,
-            supported_layers=[
-                "RMSNorm", "GEMM", "RoPE", "GQA", "SiLU", "SwiGLU",
-            ],
-            unsupported_layers=[],
-            notes="Full support via AIEGEMM, AIERMSNorm, AIERoPE, AIESwiGLU",
-            example_models=["meta-llama/Llama-2-7b", "meta-llama/Llama-3-8B"],
-        ))
+        self._register_architecture(
+            ArchitectureSupport(
+                architecture_name="Llama",
+                model_types=["llama", "llama2", "llama3", "codellama"],
+                support_level=SupportLevel.FULL,
+                supported_layers=[
+                    "RMSNorm",
+                    "GEMM",
+                    "RoPE",
+                    "GQA",
+                    "SiLU",
+                    "SwiGLU",
+                ],
+                unsupported_layers=[],
+                notes="Full support via AIEGEMM, AIERMSNorm, AIERoPE, AIESwiGLU",
+                example_models=["meta-llama/Llama-2-7b", "meta-llama/Llama-3-8B"],
+            )
+        )
 
-        self._register_architecture(ArchitectureSupport(
-            architecture_name="Mistral",
-            model_types=["mistral", "mixtral"],
-            support_level=SupportLevel.PARTIAL,
-            supported_layers=["RMSNorm", "GEMM", "RoPE", "GQA", "SiLU", "SwiGLU"],
-            unsupported_layers=["SlidingWindowAttention"],
-            notes="Sliding window attention requires custom implementation",
-            example_models=["mistralai/Mistral-7B-v0.1"],
-        ))
+        self._register_architecture(
+            ArchitectureSupport(
+                architecture_name="Mistral",
+                model_types=["mistral", "mixtral"],
+                support_level=SupportLevel.PARTIAL,
+                supported_layers=["RMSNorm", "GEMM", "RoPE", "GQA", "SiLU", "SwiGLU"],
+                unsupported_layers=["SlidingWindowAttention"],
+                notes="Sliding window attention requires custom implementation",
+                example_models=["mistralai/Mistral-7B-v0.1"],
+            )
+        )
 
-        self._register_architecture(ArchitectureSupport(
-            architecture_name="Phi",
-            model_types=["phi", "phi3"],
-            support_level=SupportLevel.PARTIAL,
-            supported_layers=["LayerNorm", "GEMM", "RoPE", "GELU"],
-            unsupported_layers=[],
-            notes="Uses LayerNorm instead of RMSNorm",
-            example_models=["microsoft/phi-2", "microsoft/Phi-3-mini-4k"],
-        ))
+        self._register_architecture(
+            ArchitectureSupport(
+                architecture_name="Phi",
+                model_types=["phi", "phi3"],
+                support_level=SupportLevel.PARTIAL,
+                supported_layers=["LayerNorm", "GEMM", "RoPE", "GELU"],
+                unsupported_layers=[],
+                notes="Uses LayerNorm instead of RMSNorm",
+                example_models=["microsoft/phi-2", "microsoft/Phi-3-mini-4k"],
+            )
+        )
 
     def register_operator(self, capability: OperatorCapability) -> None:
         """Register an operator capability"""
@@ -425,7 +465,9 @@ class CapabilityRegistry:
                 return op.support_level in [SupportLevel.FULL, SupportLevel.PARTIAL]
         return False
 
-    def get_architecture_support(self, architecture_name: str) -> Optional[ArchitectureSupport]:
+    def get_architecture_support(
+        self, architecture_name: str
+    ) -> Optional[ArchitectureSupport]:
         """Get architecture support info"""
         return self._architectures.get(architecture_name)
 
@@ -500,13 +542,15 @@ def register_custom_operator(
         **kwargs: Additional OperatorCapability arguments
     """
     registry = get_capability_registry()
-    registry.register_operator(OperatorCapability(
-        name=name,
-        category=category,
-        support_level=support_level,
-        module_patterns=module_patterns,
-        **kwargs,
-    ))
+    registry.register_operator(
+        OperatorCapability(
+            name=name,
+            category=category,
+            support_level=support_level,
+            module_patterns=module_patterns,
+            **kwargs,
+        )
+    )
 
 
 def register_architecture_support(
@@ -529,14 +573,16 @@ def register_architecture_support(
         notes: Additional notes
     """
     registry = get_capability_registry()
-    registry._register_architecture(ArchitectureSupport(
-        architecture_name=architecture_name,
-        model_types=model_types,
-        supported_layers=supported_layers,
-        unsupported_layers=unsupported_layers or [],
-        support_level=support_level,
-        notes=notes,
-    ))
+    registry._register_architecture(
+        ArchitectureSupport(
+            architecture_name=architecture_name,
+            model_types=model_types,
+            supported_layers=supported_layers,
+            unsupported_layers=unsupported_layers or [],
+            support_level=support_level,
+            notes=notes,
+        )
+    )
 
 
 def analyze_model_support(requirements: ArchitectureRequirements) -> ConversionRecipe:
@@ -565,12 +611,18 @@ def analyze_model_support(requirements: ArchitectureRequirements) -> ConversionR
                     break
         else:
             unsupported_components.append(f"{layer.name} ({layer.module_path})")
-            fallback_plan[layer.name] = registry.get_fallback_strategy(layer.module_path)
+            fallback_plan[layer.name] = registry.get_fallback_strategy(
+                layer.module_path
+            )
 
     # Calculate support percentage
     total_layers = len(requirements.discovered_layers)
-    supported_layers = len([l for l in requirements.discovered_layers if l.is_supported])
-    support_percentage = (supported_layers / total_layers * 100) if total_layers > 0 else 0
+    supported_layers = len(
+        [l for l in requirements.discovered_layers if l.is_supported]
+    )
+    support_percentage = (
+        (supported_layers / total_layers * 100) if total_layers > 0 else 0
+    )
 
     # Determine custom components needed
     custom_components = []
@@ -587,10 +639,14 @@ def analyze_model_support(requirements: ArchitectureRequirements) -> ConversionR
     ]
 
     if unsupported_components:
-        steps.append(f"4. Implement fallback for {len(unsupported_components)} unsupported components")
+        steps.append(
+            f"4. Implement fallback for {len(unsupported_components)} unsupported components"
+        )
 
     if custom_components:
-        steps.append(f"5. Implement custom NPU operators for: {', '.join(custom_components[:3])}")
+        steps.append(
+            f"5. Implement custom NPU operators for: {', '.join(custom_components[:3])}"
+        )
 
     steps.append(f"6. Compile AIE artifacts")
     steps.append(f"7. Test inference against reference implementation")

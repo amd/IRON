@@ -235,8 +235,8 @@ def _register_builtin_models() -> None:
                 "meta-llama/Llama-3.2-3B",
                 "meta-llama/Llama-3.2-3B-Instruct",
             ],
-            default_variant="meta-llama/Llama-3.2-1B"
-        )
+            default_variant="meta-llama/Llama-3.2-1B",
+        ),
     )
 
 

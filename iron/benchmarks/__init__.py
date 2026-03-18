@@ -18,10 +18,16 @@ This package provides:
 
 __version__ = "1.1.0"
 
+
 # Lazy imports to avoid requiring AIE stack for baseline benchmarks
 def __getattr__(name):
-    if name in ("BenchmarkRunner", "OperatorBenchmark", "BenchmarkConfig",
-                "BenchmarkResults", "run_benchmark"):
+    if name in (
+        "BenchmarkRunner",
+        "OperatorBenchmark",
+        "BenchmarkConfig",
+        "BenchmarkResults",
+        "run_benchmark",
+    ):
         try:
             from .run import (
                 BenchmarkRunner,
@@ -30,6 +36,7 @@ def __getattr__(name):
                 BenchmarkResults,
                 run_benchmark,
             )
+
             return globals().get(name) or locals().get(name)
         except ImportError as e:
             raise ImportError(
@@ -42,6 +49,7 @@ def __getattr__(name):
             ValidationResult,
             run_validation,
         )
+
         return globals().get(name) or locals().get(name)
     elif name in ("VerificationReport", "compare_results", "verify_targets"):
         from .verify import (
@@ -49,6 +57,7 @@ def __getattr__(name):
             compare_results,
             verify_targets,
         )
+
         return globals().get(name) or locals().get(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

@@ -1,0 +1,160 @@
+{
+  "device_info": "CPU",
+  "results": [
+    {
+      "operator_name": "rope",
+      "input_shape": [
+        1,
+        12,
+        128,
+        64
+      ],
+      "config": {
+        "iterations": 100,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": "baseline_results.json",
+        "verbose": false,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.08709999936399981,
+        "median_ms": 0.08629998774267733,
+        "std_dev_ms": 0.002562039295985272,
+        "p95_ms": 0.09210000280290842,
+        "p99_ms": 0.09660000796429813,
+        "min_ms": 0.08450000314041972,
+        "max_ms": 0.09839999256655574,
+        "throughput_ops_sec": 11481.056341009804,
+        "memory_bandwidth_gbps": 4.514535050186511
+      },
+      "target_latency_ms": 0.5,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 5.0,
+      "timestamp": "2026-03-15T20:07:18.720996",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "rmsnorm",
+      "input_shape": [
+        1,
+        128,
+        2048
+      ],
+      "config": {
+        "iterations": 100,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": "baseline_results.json",
+        "verbose": false,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.10727399931056425,
+        "median_ms": 0.10800000745803118,
+        "std_dev_ms": 0.0071505111128345195,
+        "p95_ms": 0.11909997556358576,
+        "p99_ms": 0.12769998284056783,
+        "min_ms": 0.09730001329444349,
+        "max_ms": 0.13440000475384295,
+        "throughput_ops_sec": 9321.923359125858,
+        "memory_bandwidth_gbps": 9.774745108218756
+      },
+      "target_latency_ms": 1.0,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 10.0,
+      "timestamp": "2026-03-15T20:07:18.793779",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "silu",
+      "input_shape": [
+        1,
+        128,
+        8192
+      ],
+      "config": {
+        "iterations": 100,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": "baseline_results.json",
+        "verbose": false,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.16640500020002946,
+        "median_ms": 0.1553000183776021,
+        "std_dev_ms": 0.02588997308310689,
+        "p95_ms": 0.21630001720041037,
+        "p99_ms": 0.23720000172033906,
+        "min_ms": 0.15169999096542597,
+        "max_ms": 0.3192000149283558,
+        "throughput_ops_sec": 6009.4348054321445,
+        "memory_bandwidth_gbps": 25.205396442163266
+      },
+      "target_latency_ms": 0.3,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 3.0,
+      "timestamp": "2026-03-15T20:07:18.828561",
+      "error": null,
+      "device_info": "CPU"
+    },
+    {
+      "operator_name": "softmax",
+      "input_shape": [
+        1,
+        12,
+        128,
+        128
+      ],
+      "config": {
+        "iterations": 100,
+        "warmup": 10,
+        "output_format": "json",
+        "output_file": "baseline_results.json",
+        "verbose": false,
+        "operator": null,
+        "device": "cpu",
+        "dtype": "bfloat16"
+      },
+      "metrics": {
+        "mean_ms": 0.05787700152723119,
+        "median_ms": 0.05400000372901559,
+        "std_dev_ms": 0.01644935033624619,
+        "p95_ms": 0.07499998901039362,
+        "p99_ms": 0.14089999604038894,
+        "min_ms": 0.04779998562298715,
+        "max_ms": 0.16289998893626034,
+        "throughput_ops_sec": 17278.020174032325,
+        "memory_bandwidth_gbps": 13.58798796150459
+      },
+      "target_latency_ms": 2.0,
+      "target_met": true,
+      "cpu_baseline_latency_ms": 20.0,
+      "timestamp": "2026-03-15T20:07:18.918337",
+      "error": null,
+      "device_info": "CPU"
+    }
+  ],
+  "start_time": "2026-03-15T20:07:18.720996",
+  "end_time": "2026-03-15T20:07:18.940186",
+  "total_duration_sec": 0.21897639997769147,
+  "config": {
+    "iterations": 100,
+    "warmup": 10,
+    "output_format": "json",
+    "output_file": "baseline_results.json",
+    "verbose": false,
+    "operator": null,
+    "device": "cpu",
+    "dtype": "bfloat16"
+  }
+}

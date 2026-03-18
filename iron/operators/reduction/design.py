@@ -255,7 +255,9 @@ if __name__ == "__main__":
 
     # Mean is only supported on AIE2P
     if reduction_op == "mean" and isinstance(dev, NPU1):
-        print("[WARNING] Mean reduction is only supported on AIE2P (npu2). Falling back to sum.")
+        print(
+            "[WARNING] Mean reduction is only supported on AIE2P (npu2). Falling back to sum."
+        )
         reduction_op = "sum"
 
     if input_size % (tile_size * columns) != 0:

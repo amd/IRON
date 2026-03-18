@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TensorSpec:
     """Specification for a tensor input/output"""
+
     name: str
     shape: str
     dtype: str
@@ -36,6 +37,7 @@ class TensorSpec:
 @dataclass
 class HyperparameterSpec:
     """Specification for a hyperparameter"""
+
     name: str
     value: Any
     dtype: str
@@ -45,6 +47,7 @@ class HyperparameterSpec:
 @dataclass
 class OperatorSpec:
     """Complete specification for a custom operator"""
+
     # Identification
     layer_name: str
     model_name: str
@@ -90,121 +93,151 @@ class OperatorSpec:
 
         # Purpose
         if self.purpose or self.description:
-            lines.extend([
-                "## Purpose",
-                f"",
-                self.purpose,
-                self.description,
-                f"",
-            ])
+            lines.extend(
+                [
+                    "## Purpose",
+                    f"",
+                    self.purpose,
+                    self.description,
+                    f"",
+                ]
+            )
 
         # Mathematical formulation
-        lines.extend([
-            "## Mathematical Formulation",
-            f"",
-            "*TODO: Add mathematical description based on forward() analysis*",
-            f"",
-        ])
+        lines.extend(
+            [
+                "## Mathematical Formulation",
+                f"",
+                "*TODO: Add mathematical description based on forward() analysis*",
+                f"",
+            ]
+        )
 
         # Inputs
         if self.inputs:
-            lines.extend([
-                "## Inputs",
-                f"",
-                "| Name | Shape | Dtype | Description |",
-                "|------|-------|-------|-------------|",
-            ])
+            lines.extend(
+                [
+                    "## Inputs",
+                    f"",
+                    "| Name | Shape | Dtype | Description |",
+                    "|------|-------|-------|-------------|",
+                ]
+            )
             for inp in self.inputs:
-                lines.append(f"| {inp.name} | {inp.shape} | {inp.dtype} | {inp.description} |")
+                lines.append(
+                    f"| {inp.name} | {inp.shape} | {inp.dtype} | {inp.description} |"
+                )
             lines.append("")
 
         # Outputs
         if self.outputs:
-            lines.extend([
-                "## Outputs",
-                f"",
-                "| Name | Shape | Dtype | Description |",
-                "|------|-------|-------|-------------|",
-            ])
+            lines.extend(
+                [
+                    "## Outputs",
+                    f"",
+                    "| Name | Shape | Dtype | Description |",
+                    "|------|-------|-------|-------------|",
+                ]
+            )
             for out in self.outputs:
-                lines.append(f"| {out.name} | {out.shape} | {out.dtype} | {out.description} |")
+                lines.append(
+                    f"| {out.name} | {out.shape} | {out.dtype} | {out.description} |"
+                )
             lines.append("")
 
         # Hyperparameters
         if self.hyperparameters:
-            lines.extend([
-                "## Hyperparameters (from config)",
-                f"",
-                "| Name | Value | Dtype | Description |",
-                "|------|-------|-------|-------------|",
-            ])
+            lines.extend(
+                [
+                    "## Hyperparameters (from config)",
+                    f"",
+                    "| Name | Value | Dtype | Description |",
+                    "|------|-------|-------|-------------|",
+                ]
+            )
             for hp in self.hyperparameters:
-                lines.append(f"| {hp.name} | {hp.value} | {hp.dtype} | {hp.description} |")
+                lines.append(
+                    f"| {hp.name} | {hp.value} | {hp.dtype} | {hp.description} |"
+                )
             lines.append("")
 
         # Operations
         if self.operations:
-            lines.extend([
-                "## Operations Used",
-                f"",
-            ])
+            lines.extend(
+                [
+                    "## Operations Used",
+                    f"",
+                ]
+            )
             for op in self.operations:
                 lines.append(f"- `{op}`")
             lines.append("")
 
         # IRON Integration
-        lines.extend([
-            "## IRON Integration",
-            f"",
-            f"**Suggested Base Class:** `{self.suggested_base_class}`",
-            f"",
-        ])
+        lines.extend(
+            [
+                "## IRON Integration",
+                f"",
+                f"**Suggested Base Class:** `{self.suggested_base_class}`",
+                f"",
+            ]
+        )
 
         if self.iron_integration_notes:
-            lines.extend([
-                "**Integration Notes:**",
-                self.iron_integration_notes,
-                f"",
-            ])
+            lines.extend(
+                [
+                    "**Integration Notes:**",
+                    self.iron_integration_notes,
+                    f"",
+                ]
+            )
 
         if self.special_handling:
-            lines.extend([
-                "**Special Handling Required:**",
-            ])
+            lines.extend(
+                [
+                    "**Special Handling Required:**",
+                ]
+            )
             for note in self.special_handling:
                 lines.append(f"- {note}")
             lines.append("")
 
         # Source code
         if self.forward_source:
-            lines.extend([
-                "## Reference Implementation (Transformers)",
-                f"",
-                "```python",
-                self.forward_source,
-                "```",
-                f"",
-            ])
+            lines.extend(
+                [
+                    "## Reference Implementation (Transformers)",
+                    f"",
+                    "```python",
+                    self.forward_source,
+                    "```",
+                    f"",
+                ]
+            )
 
         # Action items
-        lines.extend([
-            "## Implementation Checklist",
-            f"",
-            f"- [ ] Create `{self.layer_name}NPU` class extending `{self.suggested_base_class}`",
-            f"- [ ] Implement forward pass matching signature",
-            f"- [ ] Add AIE memory mapping for inputs/outputs",
-            f"- [ ] Implement tiling strategy for NPU",
-            f"- [ ] Write unit tests against Transformers reference",
-            f"- [ ] Add to operator registry",
-            f"",
-        ])
+        lines.extend(
+            [
+                "## Implementation Checklist",
+                f"",
+                f"- [ ] Create `{self.layer_name}NPU` class extending `{self.suggested_base_class}`",
+                f"- [ ] Implement forward pass matching signature",
+                f"- [ ] Add AIE memory mapping for inputs/outputs",
+                f"- [ ] Implement tiling strategy for NPU",
+                f"- [ ] Write unit tests against Transformers reference",
+                f"- [ ] Add to operator registry",
+                f"",
+            ]
+        )
 
         # References
         if self.references:
-            lines.extend([
-                "## References",
-                f"",
-            ])
+            lines.extend(
+                [
+                    "## References",
+                    f"",
+                ]
+            )
             for ref in self.references:
                 lines.append(f"- {ref}")
             lines.append("")
@@ -228,28 +261,23 @@ class OperatorSpecGenerator:
         "selfattention": "AIEGEMM + custom attention mask",
         "multihead": "AIEMHA",
         "sliding": "AIEGEMM (needs sliding window extension)",
-
         # Normalization patterns
         "norm": "AIERMSNorm",
         "layernorm": "AIELayerNorm",
         "rmsnorm": "AIERMSNorm",
-
         # FFN patterns
         "mlp": "AIEGEMM",
         "ffn": "AIEGEMM",
         "dense": "AIEGEMM",
         "linear": "AIEGEMM",
-
         # MoE patterns
         "moe": "AIEGEMM + custom routing",
         "expert": "AIEGEMM + custom routing",
         "switch": "AIEGEMM + custom routing",
-
         # Positional patterns
         "rope": "AIERoPE",
         "rotary": "AIERoPE",
         "positional": "AIEEmbedding",
-
         # Embedding patterns
         "embedding": "AIEEmbedding",
     }
@@ -257,20 +285,31 @@ class OperatorSpecGenerator:
     # Config keys relevant to different layer types
     CONFIG_KEY_MAP = {
         "attention": [
-            "hidden_size", "num_attention_heads", "num_key_value_heads",
-            "head_dim", "attention_dropout", "sliding_window",
+            "hidden_size",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "attention_dropout",
+            "sliding_window",
         ],
         "norm": [
-            "rms_norm_eps", "layer_norm_eps", "norm_eps",
+            "rms_norm_eps",
+            "layer_norm_eps",
+            "norm_eps",
         ],
         "mlp": [
-            "intermediate_size", "hidden_size",
+            "intermediate_size",
+            "hidden_size",
         ],
         "rope": [
-            "rope_theta", "rope_scaling", "max_position_embeddings",
+            "rope_theta",
+            "rope_scaling",
+            "max_position_embeddings",
         ],
         "moe": [
-            "num_experts", "num_experts_per_tok", "expert_intermediate_size",
+            "num_experts",
+            "num_experts_per_tok",
+            "expert_intermediate_size",
             "moe_aux_loss_coeff",
         ],
     }
@@ -318,10 +357,14 @@ class OperatorSpecGenerator:
         spec.purpose, spec.description = self._extract_docstring(layer_class)
 
         # Extract inputs/outputs from signature
-        spec.inputs, spec.outputs = self._extract_signature(layer_class, info.config_dict)
+        spec.inputs, spec.outputs = self._extract_signature(
+            layer_class, info.config_dict
+        )
 
         # Extract hyperparameters from config
-        spec.hyperparameters = self._extract_hyperparameters(layer_name, info.config_dict)
+        spec.hyperparameters = self._extract_hyperparameters(
+            layer_name, info.config_dict
+        )
 
         # Extract source code
         spec.forward_signature, spec.forward_source = self._extract_source(layer_class)
@@ -373,6 +416,7 @@ class OperatorSpecGenerator:
         # Last resort: search all transformers.models submodules
         try:
             import transformers.models
+
             for attr_name in dir(transformers.models):
                 try:
                     submodule = getattr(transformers.models, attr_name)
@@ -447,64 +491,78 @@ class OperatorSpecGenerator:
                     description = "KV cache (optional)"
 
                 if shape != "unknown":
-                    inputs.append(TensorSpec(
-                        name=name,
-                        shape=shape,
-                        dtype=dtype,
-                        description=description,
-                    ))
+                    inputs.append(
+                        TensorSpec(
+                            name=name,
+                            shape=shape,
+                            dtype=dtype,
+                            description=description,
+                        )
+                    )
 
             # Infer outputs from return annotation
             return_annotation = sig.return_annotation
             if return_annotation != inspect.Signature.empty:
                 return_str = str(return_annotation)
                 if "tuple" in return_str.lower():
-                    outputs.append(TensorSpec(
-                        name="hidden_states",
-                        shape=f"[batch, seq_len, {hidden_size}]",
-                        dtype="torch.float16",
-                        description="Output hidden states",
-                    ))
+                    outputs.append(
+                        TensorSpec(
+                            name="hidden_states",
+                            shape=f"[batch, seq_len, {hidden_size}]",
+                            dtype="torch.float16",
+                            description="Output hidden states",
+                        )
+                    )
                     if "attention" in return_str.lower():
-                        outputs.append(TensorSpec(
-                            name="attention_weights",
-                            shape="[batch, heads, seq_len, seq_len]",
-                            dtype="torch.float32",
-                            description="Attention weights (optional)",
-                        ))
+                        outputs.append(
+                            TensorSpec(
+                                name="attention_weights",
+                                shape="[batch, heads, seq_len, seq_len]",
+                                dtype="torch.float32",
+                                description="Attention weights (optional)",
+                            )
+                        )
                 else:
-                    outputs.append(TensorSpec(
+                    outputs.append(
+                        TensorSpec(
+                            name="output",
+                            shape=f"[batch, seq_len, {hidden_size}]",
+                            dtype="torch.float16",
+                            description="Layer output",
+                        )
+                    )
+            else:
+                # Default output
+                outputs.append(
+                    TensorSpec(
                         name="output",
                         shape=f"[batch, seq_len, {hidden_size}]",
                         dtype="torch.float16",
                         description="Layer output",
-                    ))
-            else:
-                # Default output
-                outputs.append(TensorSpec(
-                    name="output",
-                    shape=f"[batch, seq_len, {hidden_size}]",
-                    dtype="torch.float16",
-                    description="Layer output",
-                ))
+                    )
+                )
 
         except Exception as e:
             logger.warning(f"Could not extract signature: {e}")
 
             # Fallback: create generic specs
             hidden_size = config_dict.get("hidden_size", "unknown")
-            inputs.append(TensorSpec(
-                name="hidden_states",
-                shape=f"[batch, seq_len, {hidden_size}]",
-                dtype="torch.float16",
-                description="Input tensor",
-            ))
-            outputs.append(TensorSpec(
-                name="output",
-                shape=f"[batch, seq_len, {hidden_size}]",
-                dtype="torch.float16",
-                description="Output tensor",
-            ))
+            inputs.append(
+                TensorSpec(
+                    name="hidden_states",
+                    shape=f"[batch, seq_len, {hidden_size}]",
+                    dtype="torch.float16",
+                    description="Input tensor",
+                )
+            )
+            outputs.append(
+                TensorSpec(
+                    name="output",
+                    shape=f"[batch, seq_len, {hidden_size}]",
+                    dtype="torch.float16",
+                    description="Output tensor",
+                )
+            )
 
         return inputs, outputs
 
@@ -533,11 +591,13 @@ class OperatorSpecGenerator:
             if key in config_dict:
                 value = config_dict[key]
                 dtype = type(value).__name__
-                hyperparams.append(HyperparameterSpec(
-                    name=key,
-                    value=value,
-                    dtype=dtype,
-                ))
+                hyperparams.append(
+                    HyperparameterSpec(
+                        name=key,
+                        value=value,
+                        dtype=dtype,
+                    )
+                )
 
         return hyperparams
 
@@ -560,16 +620,18 @@ class OperatorSpecGenerator:
                 source_lines.pop(0)
 
             # Get minimum indentation
-            min_indent = float('inf')
+            min_indent = float("inf")
             for line in source_lines:
                 if line.strip():
                     indent = len(line) - len(line.lstrip())
                     min_indent = min(min_indent, indent)
 
             # Remove common indentation
-            if min_indent < float('inf'):
-                source_lines = [line[min_indent:] if len(line) >= min_indent else line
-                               for line in source_lines]
+            if min_indent < float("inf"):
+                source_lines = [
+                    line[min_indent:] if len(line) >= min_indent else line
+                    for line in source_lines
+                ]
 
             source = "\n".join(source_lines)
 
@@ -586,20 +648,45 @@ class OperatorSpecGenerator:
         # Common PyTorch operations to look for
         torch_ops = [
             # Linear operations
-            "linear", "conv2d", "conv1d", "embedding",
+            "linear",
+            "conv2d",
+            "conv1d",
+            "embedding",
             # Activation functions
-            "relu", "gelu", "silu", "swiglu", "sigmoid", "tanh",
+            "relu",
+            "gelu",
+            "silu",
+            "swiglu",
+            "sigmoid",
+            "tanh",
             # Normalization
-            "layer_norm", "rms_norm", "batch_norm",
+            "layer_norm",
+            "rms_norm",
+            "batch_norm",
             # Attention
-            "softmax", "scaled_dot_product_attention", "einsum",
+            "softmax",
+            "scaled_dot_product_attention",
+            "einsum",
             # Tensor operations
-            "transpose", "reshape", "view", "permute", "contiguous",
-            "cat", "stack", "split", "chunk",
+            "transpose",
+            "reshape",
+            "view",
+            "permute",
+            "contiguous",
+            "cat",
+            "stack",
+            "split",
+            "chunk",
             # Math
-            "matmul", "bmm", "mm", "add", "mul", "div",
+            "matmul",
+            "bmm",
+            "mm",
+            "add",
+            "mul",
+            "div",
             # RoPE
-            "apply_rotary_pos_emb", "rotate_half",
+            "apply_rotary_pos_emb",
+            "rotate_half",
         ]
 
         source_lower = source.lower()
@@ -609,11 +696,11 @@ class OperatorSpecGenerator:
 
         # Look for custom/external function calls
         # Match patterns like "func_name(" or "module.func_name("
-        func_pattern = r'(\w+)\('
+        func_pattern = r"(\w+)\("
         matches = re.findall(func_pattern, source)
         for match in matches:
-            if match not in ['if', 'for', 'while', 'with', 'def', 'return', 'self']:
-                if match not in torch_ops and match.startswith('apply_'):
+            if match not in ["if", "for", "while", "with", "def", "return", "self"]:
+                if match not in torch_ops and match.startswith("apply_"):
                     operations.append(match)
 
         return sorted(set(operations))
@@ -653,16 +740,24 @@ class OperatorSpecGenerator:
         for hp in spec.hyperparameters:
             if hp.name == "num_key_value_heads":
                 if hp.value == 1:
-                    notes.append("Multi-Query Attention (MQA) - single KV head, optimize memory access.")
+                    notes.append(
+                        "Multi-Query Attention (MQA) - single KV head, optimize memory access."
+                    )
                 else:
-                    notes.append(f"Grouped Query Attention (GQA) with {hp.value} KV heads.")
+                    notes.append(
+                        f"Grouped Query Attention (GQA) with {hp.value} KV heads."
+                    )
 
         # Check for RoPE
         has_rope = any("rope" in op.lower() for op in spec.operations)
         if has_rope:
             notes.append("Uses RoPE - integrate with AIE RoPE operator.")
 
-        return "\n".join(notes) if notes else "Standard implementation should work with existing IRON operators."
+        return (
+            "\n".join(notes)
+            if notes
+            else "Standard implementation should work with existing IRON operators."
+        )
 
     def _check_special_handling(
         self,
@@ -676,7 +771,9 @@ class OperatorSpecGenerator:
 
         # Check for sliding window
         if info.has_sliding_window and "attention" in layer_lower:
-            special.append("CRITICAL: Sliding window attention requires custom implementation")
+            special.append(
+                "CRITICAL: Sliding window attention requires custom implementation"
+            )
 
         # Check for MoE
         if info.has_moe and ("moe" in layer_lower or "expert" in layer_lower):
@@ -684,7 +781,9 @@ class OperatorSpecGenerator:
 
         # Check for QK norm
         if info.has_qk_norm and "attention" in layer_lower:
-            special.append("QK normalization required - ensure RMSNorm is applied to Q/K before attention")
+            special.append(
+                "QK normalization required - ensure RMSNorm is applied to Q/K before attention"
+            )
 
         return special
 

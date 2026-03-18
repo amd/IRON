@@ -71,17 +71,47 @@ def cmd_scan(args):
                     }
                     for layer in requirements.discovered_layers
                 ],
-                "attention": {
-                    "type": requirements.attention.type.value if requirements.attention else None,
-                    "num_heads": requirements.attention.num_heads if requirements.attention else None,
-                    "num_kv_heads": requirements.attention.num_kv_heads if requirements.attention else None,
-                    "sliding_window": requirements.attention.sliding_window if requirements.attention else None,
-                } if requirements.attention else None,
-                "ffn": {
-                    "type": requirements.ffn.type.value if requirements.ffn else None,
-                    "hidden_dim": requirements.ffn.hidden_dim if requirements.ffn else None,
-                    "num_experts": requirements.ffn.num_experts if requirements.ffn else None,
-                } if requirements.ffn else None,
+                "attention": (
+                    {
+                        "type": (
+                            requirements.attention.type.value
+                            if requirements.attention
+                            else None
+                        ),
+                        "num_heads": (
+                            requirements.attention.num_heads
+                            if requirements.attention
+                            else None
+                        ),
+                        "num_kv_heads": (
+                            requirements.attention.num_kv_heads
+                            if requirements.attention
+                            else None
+                        ),
+                        "sliding_window": (
+                            requirements.attention.sliding_window
+                            if requirements.attention
+                            else None
+                        ),
+                    }
+                    if requirements.attention
+                    else None
+                ),
+                "ffn": (
+                    {
+                        "type": (
+                            requirements.ffn.type.value if requirements.ffn else None
+                        ),
+                        "hidden_dim": (
+                            requirements.ffn.hidden_dim if requirements.ffn else None
+                        ),
+                        "num_experts": (
+                            requirements.ffn.num_experts if requirements.ffn else None
+                        ),
+                    }
+                    if requirements.ffn
+                    else None
+                ),
             }
 
             with open(output_path, "w") as f:
@@ -93,6 +123,7 @@ def cmd_scan(args):
         print(f"Error scanning model: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -111,7 +142,9 @@ def cmd_scan_transformers(args):
     print("-" * 60)
 
     try:
-        info = scan_model_from_transformers(args.model, trust_remote_code=args.trust_remote_code)
+        info = scan_model_from_transformers(
+            args.model, trust_remote_code=args.trust_remote_code
+        )
 
         # Print summary
         print(get_architecture_summary(info.architecture_name))
@@ -148,6 +181,7 @@ def cmd_scan_transformers(args):
         print(f"Error scanning with Transformers: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -170,6 +204,7 @@ def cmd_analyze(args):
         if args.quick:
             # Quick analysis
             from iron.model_convert import quick_check
+
             is_supported = quick_check(args.model)
 
             if is_supported:
@@ -195,13 +230,16 @@ def cmd_analyze(args):
 
         # Return non-zero if not feasible
         if report.conversion_feasibility == "not_feasible":
-            print("\nWARNING: Conversion is NOT FEASIBLE without significant custom development")
+            print(
+                "\nWARNING: Conversion is NOT FEASIBLE without significant custom development"
+            )
             return 1
 
     except Exception as e:
         print(f"Error analyzing model: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -305,8 +343,12 @@ def cmd_convert(args):
         mem_info = assembler.get_memory_info()
         print(f"\nMemory Requirements:")
         print(f"  KV Cache: {mem_info['kv_cache_bytes'] / 1024 / 1024:.1f} MB")
-        print(f"  Prefill activations: {mem_info['prefill_activation_bytes'] / 1024 / 1024:.1f} MB")
-        print(f"  Total decode memory: {mem_info['total_decode_bytes'] / 1024 / 1024:.1f} MB")
+        print(
+            f"  Prefill activations: {mem_info['prefill_activation_bytes'] / 1024 / 1024:.1f} MB"
+        )
+        print(
+            f"  Total decode memory: {mem_info['total_decode_bytes'] / 1024 / 1024:.1f} MB"
+        )
 
         # Save model info
         model_info_path = Path(output_dir) / "model_info.json"
@@ -328,6 +370,7 @@ def cmd_convert(args):
         print(f"\nError during conversion: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -358,6 +401,7 @@ def cmd_compile(args):
         print(f"Error during compilation: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -378,6 +422,7 @@ def cmd_infer(args):
         print(f"Error during inference: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -410,6 +455,7 @@ def cmd_skeleton(args):
         print(f"Error generating skeleton: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -438,7 +484,8 @@ def main():
     )
 
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose output",
     )
@@ -456,16 +503,19 @@ def main():
         help="HuggingFace model name or path to model directory",
     )
     scan_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output path for scan results (JSON)",
     )
     scan_parser.add_argument(
-        "--transformers", "-t",
+        "--transformers",
+        "-t",
         action="store_true",
         help="Use Transformers library directly (more accurate)",
     )
     scan_parser.add_argument(
-        "--auto", "-a",
+        "--auto",
+        "-a",
         action="store_true",
         help="Try Transformers first, fall back to AST scanner",
     )
@@ -487,11 +537,13 @@ def main():
         help="HuggingFace model name or path to model directory",
     )
     analyze_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output path for gap report (JSON)",
     )
     analyze_parser.add_argument(
-        "--quick", "-q",
+        "--quick",
+        "-q",
         action="store_true",
         help="Quick check only",
     )
@@ -525,7 +577,8 @@ def main():
         help="HuggingFace model name or path",
     )
     convert_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output directory for converted model",
     )
     convert_parser.add_argument(
@@ -692,7 +745,8 @@ def main():
         help="Name of the operator",
     )
     skeleton_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output file path",
     )
     skeleton_parser.set_defaults(func=cmd_skeleton)

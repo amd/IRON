@@ -48,9 +48,11 @@ logger = logging.getLogger(__name__)
 # Performance Targets
 # =============================================================================
 
+
 @dataclass
 class TargetSpec:
     """Performance target specification"""
+
     operator_name: str
     linux_npu_ms: float
     windows_npu_ms: float
@@ -94,9 +96,11 @@ TARGETS = {
 # Data Classes
 # =============================================================================
 
+
 @dataclass
 class ComparisonResult:
     """Result of comparing two benchmark runs"""
+
     operator_name: str
     baseline_mean_ms: float
     current_mean_ms: float
@@ -112,6 +116,7 @@ class ComparisonResult:
 @dataclass
 class TargetVerificationResult:
     """Result of target verification"""
+
     operator_name: str
     measured_mean_ms: float
     target_type: str  # "linux_npu", "windows_npu", "cpu_baseline"
@@ -127,6 +132,7 @@ class TargetVerificationResult:
 @dataclass
 class TrendAnalysis:
     """Trend analysis across multiple runs"""
+
     operator_name: str
     metric_name: str
     values: List[float]
@@ -145,6 +151,7 @@ class TrendAnalysis:
 @dataclass
 class VerificationReport:
     """Complete verification report"""
+
     timestamp: str
     current_file: str
     baseline_file: Optional[str]
@@ -169,6 +176,7 @@ class VerificationReport:
 # Verification Functions
 # =============================================================================
 
+
 def load_results(file_path: str) -> dict:
     """Load benchmark results from JSON file"""
     path = Path(file_path)
@@ -180,9 +188,7 @@ def load_results(file_path: str) -> dict:
 
 
 def compare_results(
-    current: dict,
-    baseline: dict,
-    threshold: float = 0.10
+    current: dict, baseline: dict, threshold: float = 0.10
 ) -> List[ComparisonResult]:
     """
     Compare current results against baseline.
@@ -209,15 +215,17 @@ def compare_results(
 
         # Skip if either has errors
         if current_data.get("error") or baseline_data.get("error"):
-            comparisons.append(ComparisonResult(
-                operator_name=op_name,
-                baseline_mean_ms=0.0,
-                current_mean_ms=0.0,
-                change_ms=0.0,
-                change_percent=0.0,
-                regression=False,
-                severity="NONE",
-            ))
+            comparisons.append(
+                ComparisonResult(
+                    operator_name=op_name,
+                    baseline_mean_ms=0.0,
+                    current_mean_ms=0.0,
+                    change_ms=0.0,
+                    change_percent=0.0,
+                    regression=False,
+                    severity="NONE",
+                )
+            )
             continue
 
         current_mean = current_data.get("metrics", {}).get("mean_ms", 0)
@@ -242,22 +250,23 @@ def compare_results(
         else:
             severity = "CRITICAL"
 
-        comparisons.append(ComparisonResult(
-            operator_name=op_name,
-            baseline_mean_ms=baseline_mean,
-            current_mean_ms=current_mean,
-            change_ms=change_ms,
-            change_percent=change_percent,
-            regression=regression,
-            severity=severity,
-        ))
+        comparisons.append(
+            ComparisonResult(
+                operator_name=op_name,
+                baseline_mean_ms=baseline_mean,
+                current_mean_ms=current_mean,
+                change_ms=change_ms,
+                change_percent=change_percent,
+                regression=regression,
+                severity=severity,
+            )
+        )
 
     return comparisons
 
 
 def verify_targets(
-    results: dict,
-    target_type: str = "windows_npu"
+    results: dict, target_type: str = "windows_npu"
 ) -> List[TargetVerificationResult]:
     """
     Verify results against performance targets.
@@ -288,22 +297,23 @@ def verify_targets(
         margin_ms = target_value - mean_ms
         margin_percent = (margin_ms / target_value) * 100 if target_value > 0 else 0
 
-        verifications.append(TargetVerificationResult(
-            operator_name=op_name,
-            measured_mean_ms=mean_ms,
-            target_type=target_type,
-            target_value_ms=target_value,
-            passed=passed,
-            margin_ms=margin_ms,
-            margin_percent=margin_percent,
-        ))
+        verifications.append(
+            TargetVerificationResult(
+                operator_name=op_name,
+                measured_mean_ms=mean_ms,
+                target_type=target_type,
+                target_value_ms=target_value,
+                passed=passed,
+                margin_ms=margin_ms,
+                margin_percent=margin_percent,
+            )
+        )
 
     return verifications
 
 
 def analyze_trends(
-    results_dir: str,
-    metric_name: str = "mean_ms"
+    results_dir: str, metric_name: str = "mean_ms"
 ) -> List[TrendAnalysis]:
     """
     Analyze trends across multiple result files.
@@ -321,8 +331,7 @@ def analyze_trends(
 
     # Collect all result files sorted by timestamp
     result_files = sorted(
-        dir_path.glob("validation_*.json"),
-        key=lambda p: p.stat().st_mtime
+        dir_path.glob("validation_*.json"), key=lambda p: p.stat().st_mtime
     )
 
     if not result_files:
@@ -378,7 +387,9 @@ def analyze_trends(
         x_mean = n / 2
         y_mean = mean_val
 
-        numerator = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(numeric_values))
+        numerator = sum(
+            (i - x_mean) * (v - y_mean) for i, v in enumerate(numeric_values)
+        )
         denominator = sum((i - x_mean) ** 2 for i in range(n))
 
         slope = numerator / denominator if denominator != 0 else 0
@@ -392,20 +403,24 @@ def analyze_trends(
             direction = "DEGRADING"
 
         # Detect outliers (values > 2 std dev from mean)
-        outlier_count = sum(1 for v in numeric_values if abs(v - mean_val) > 2 * std_val)
+        outlier_count = sum(
+            1 for v in numeric_values if abs(v - mean_val) > 2 * std_val
+        )
 
-        trends.append(TrendAnalysis(
-            operator_name=op_name,
-            metric_name=metric_name,
-            values=numeric_values,
-            trend_direction=direction,
-            trend_slope=slope,
-            min_value=min_val,
-            max_value=max_val,
-            mean_value=mean_val,
-            std_dev=std_val,
-            outlier_count=outlier_count,
-        ))
+        trends.append(
+            TrendAnalysis(
+                operator_name=op_name,
+                metric_name=metric_name,
+                values=numeric_values,
+                trend_direction=direction,
+                trend_slope=slope,
+                min_value=min_val,
+                max_value=max_val,
+                mean_value=mean_val,
+                std_dev=std_val,
+                outlier_count=outlier_count,
+            )
+        )
 
     return trends
 
@@ -414,10 +429,9 @@ def analyze_trends(
 # Report Generation
 # =============================================================================
 
+
 def format_comparison_report(
-    comparisons: List[ComparisonResult],
-    current: dict,
-    baseline: dict
+    comparisons: List[ComparisonResult], current: dict, baseline: dict
 ) -> str:
     """Format comparison results as text report"""
     lines = []
@@ -447,11 +461,15 @@ def format_comparison_report(
         if comp.severity == "NONE":
             lines.append(f"  Baseline: {comp.baseline_mean_ms:.4f} ms")
             lines.append(f"  Current:  {comp.current_mean_ms:.4f} ms")
-            lines.append(f"  Change:   {comp.change_percent:+.1f}% (No significant change)")
+            lines.append(
+                f"  Change:   {comp.change_percent:+.1f}% (No significant change)"
+            )
         elif comp.regression:
             lines.append(f"  Baseline: {comp.baseline_mean_ms:.4f} ms")
             lines.append(f"  Current:  {comp.current_mean_ms:.4f} ms")
-            lines.append(f"  Change:   {comp.change_percent:+.1f}% [{comp.severity}] REGRESSION")
+            lines.append(
+                f"  Change:   {comp.change_percent:+.1f}% [{comp.severity}] REGRESSION"
+            )
         else:
             lines.append(f"  Baseline: {comp.baseline_mean_ms:.4f} ms")
             lines.append(f"  Current:  {comp.current_mean_ms:.4f} ms")
@@ -463,8 +481,7 @@ def format_comparison_report(
 
 
 def format_target_report(
-    verifications: List[TargetVerificationResult],
-    target_type: str
+    verifications: List[TargetVerificationResult], target_type: str
 ) -> str:
     """Format target verification as text report"""
     lines = []
@@ -482,7 +499,11 @@ def format_target_report(
     lines.append(f"Total operators: {len(verifications)}")
     lines.append(f"Targets met: {len(passed)}")
     lines.append(f"Targets missed: {len(failed)}")
-    lines.append(f"Pass rate: {len(passed)/len(verifications)*100:.1f}%" if verifications else "N/A")
+    lines.append(
+        f"Pass rate: {len(passed)/len(verifications)*100:.1f}%"
+        if verifications
+        else "N/A"
+    )
     lines.append("")
 
     # Detailed results
@@ -522,7 +543,9 @@ def format_trend_report(trends: List[TrendAnalysis]) -> str:
         lines.append(f"  Outliers:   {trend.outlier_count}")
 
         if trend.values:
-            lines.append(f"  Values:     {' -> '.join(f'{v:.4f}' for v in trend.values)}")
+            lines.append(
+                f"  Values:     {' -> '.join(f'{v:.4f}' for v in trend.values)}"
+            )
         lines.append("")
 
     lines.append("=" * 70)
@@ -532,6 +555,7 @@ def format_trend_report(trends: List[TrendAnalysis]) -> str:
 # =============================================================================
 # CLI Functions
 # =============================================================================
+
 
 def cmd_compare(args):
     """Handle compare command"""
@@ -556,7 +580,9 @@ def cmd_compare(args):
         print(report)
 
     # Exit with error if regressions found
-    regressions = [c for c in comparisons if c.regression and c.severity in ("HIGH", "CRITICAL")]
+    regressions = [
+        c for c in comparisons if c.regression and c.severity in ("HIGH", "CRITICAL")
+    ]
     if args.exit_on_regression and regressions:
         logger.error(f"Found {len(regressions)} significant regressions")
         sys.exit(1)
@@ -648,7 +674,9 @@ def cmd_summary(args):
             throughput = metrics.get("throughput_ops_sec", 0)
 
             print(f"{op_name.upper()}:")
-            print(f"  Mean: {mean_ms:.4f} ms | P99: {p99_ms:.4f} ms | Throughput: {throughput:.0f} ops/s")
+            print(
+                f"  Mean: {mean_ms:.4f} ms | P99: {p99_ms:.4f} ms | Throughput: {throughput:.0f} ops/s"
+            )
 
     print("=" * 50)
     sys.exit(0)
@@ -665,30 +693,38 @@ def parse_args():
     # Compare command
     compare_parser = subparsers.add_parser("compare", help="Compare two result files")
     compare_parser.add_argument("--current", required=True, help="Current results file")
-    compare_parser.add_argument("--baseline", required=True, help="Baseline results file")
-    compare_parser.add_argument("--threshold", type=float, default=0.10, help="Regression threshold")
+    compare_parser.add_argument(
+        "--baseline", required=True, help="Baseline results file"
+    )
+    compare_parser.add_argument(
+        "--threshold", type=float, default=0.10, help="Regression threshold"
+    )
     compare_parser.add_argument("--output", help="Output file for report")
-    compare_parser.add_argument("--exit-on-regression", action="store_true", help="Exit 1 on regression")
+    compare_parser.add_argument(
+        "--exit-on-regression", action="store_true", help="Exit 1 on regression"
+    )
 
     # Verify-targets command
-    verify_parser = subparsers.add_parser("verify-targets", help="Verify against targets")
+    verify_parser = subparsers.add_parser(
+        "verify-targets", help="Verify against targets"
+    )
     verify_parser.add_argument("results_file", help="Results file to verify")
     verify_parser.add_argument(
         "--target-type",
         choices=["linux_npu", "windows_npu", "cpu_baseline"],
         default="windows_npu",
-        help="Target type to verify against"
+        help="Target type to verify against",
     )
     verify_parser.add_argument("--output", help="Output file for report")
-    verify_parser.add_argument("--exit-on-failure", action="store_true", help="Exit 1 on failure")
+    verify_parser.add_argument(
+        "--exit-on-failure", action="store_true", help="Exit 1 on failure"
+    )
 
     # Trend-analysis command
     trend_parser = subparsers.add_parser("trend-analysis", help="Analyze trends")
     trend_parser.add_argument("results_dir", help="Directory with result files")
     trend_parser.add_argument(
-        "--metric",
-        default="mean_ms",
-        help="Metric to analyze (default: mean_ms)"
+        "--metric", default="mean_ms", help="Metric to analyze (default: mean_ms)"
     )
     trend_parser.add_argument("--output", help="Output file for report")
 

@@ -26,11 +26,9 @@ logger = logging.getLogger(__name__)
 ARCHITECTURE_MODULE_MAP = {
     # Llama family
     "LlamaForCausalLM": "transformers.models.llama",
-
     # Mistral family
     "MistralForCausalLM": "transformers.models.mistral",
     "MixtralForCausalLM": "transformers.models.mixtral",
-
     # Qwen family
     "Qwen2ForCausalLM": "transformers.models.qwen2",
     "Qwen3ForCausalLM": "transformers.models.qwen3",
@@ -39,14 +37,11 @@ ARCHITECTURE_MODULE_MAP = {
     "Qwen3_5ForConditionalGeneration": "transformers.models.qwen3_5",
     "Qwen3_5_MoEForCausalLM": "transformers.models.qwen3_5_moe",
     "Qwen3OmniMoeForCausalLM": "transformers.models.qwen3_omni_moe",
-
     # Gemma family
     "GemmaForCausalLM": "transformers.models.gemma",
-
     # Phi family
     "PhiForCausalLM": "transformers.models.phi",
     "Phi3ForCausalLM": "transformers.models.phi3",
-
     # Other architectures
     "GPT2LMHeadModel": "transformers.models.gpt2",
     "OPTForCausalLM": "transformers.models.opt",
@@ -59,6 +54,7 @@ ARCHITECTURE_MODULE_MAP = {
 @dataclass
 class TransformerModelInfo:
     """Information extracted from Transformers library"""
+
     model_type: str
     architecture_name: str
     config_class: str
@@ -201,7 +197,9 @@ class TransformersScanner:
 
         # Detect special features
         info.has_sliding_window = self._detect_sliding_window(config)
-        info.has_moe = self._detect_moe(original_config)  # Check original config for MoE
+        info.has_moe = self._detect_moe(
+            original_config
+        )  # Check original config for MoE
         info.has_rope = self._detect_rope(config)
         info.has_qk_norm = self._detect_qk_norm(config)
         info.attention_type = self._determine_attention_type(config)
@@ -227,9 +225,14 @@ class TransformersScanner:
 
         # Basic architecture
         for attr in [
-            "hidden_size", "num_attention_heads", "num_hidden_layers",
-            "intermediate_size", "vocab_size", "max_position_embeddings",
-            "num_key_value_heads", "head_dim",
+            "hidden_size",
+            "num_attention_heads",
+            "num_hidden_layers",
+            "intermediate_size",
+            "vocab_size",
+            "max_position_embeddings",
+            "num_key_value_heads",
+            "head_dim",
         ]:
             if hasattr(config, attr):
                 values[attr] = getattr(config, attr)
@@ -392,18 +395,22 @@ class TransformersScanner:
         layers = []
 
         try:
-            modeling = importlib.import_module(f"{module_path}.modeling_{module_path.split('.')[-1]}")
+            modeling = importlib.import_module(
+                f"{module_path}.modeling_{module_path.split('.')[-1]}"
+            )
 
             # Find all classes in the module
             for name, obj in inspect.getmembers(modeling, inspect.isclass):
                 # Check if it's a layer class
                 if self._is_layer_class(obj):
-                    layers.append({
-                        "name": name,
-                        "module": module_path,
-                        "category": self._categorize_layer(name),
-                        "signature": self._get_class_signature(obj),
-                    })
+                    layers.append(
+                        {
+                            "name": name,
+                            "module": module_path,
+                            "category": self._categorize_layer(name),
+                            "signature": self._get_class_signature(obj),
+                        }
+                    )
 
         except Exception as e:
             logger.warning(f"Could not extract layers from {module_path}: {e}")
@@ -419,7 +426,18 @@ class TransformersScanner:
             if issubclass(cls, nn.Module):
                 # Filter out base classes
                 name = cls.__name__
-                if any(x in name.lower() for x in ["layer", "attention", "norm", "embedding", "block", "mlp", "mo"]):
+                if any(
+                    x in name.lower()
+                    for x in [
+                        "layer",
+                        "attention",
+                        "norm",
+                        "embedding",
+                        "block",
+                        "mlp",
+                        "mo",
+                    ]
+                ):
                     return True
         except TypeError:
             pass
@@ -454,8 +472,16 @@ class TransformersScanner:
                 if name == "self":
                     continue
                 params[name] = {
-                    "default": str(param.default) if param.default != inspect.Parameter.empty else None,
-                    "annotation": str(param.annotation) if param.annotation != inspect.Parameter.empty else None,
+                    "default": (
+                        str(param.default)
+                        if param.default != inspect.Parameter.empty
+                        else None
+                    ),
+                    "annotation": (
+                        str(param.annotation)
+                        if param.annotation != inspect.Parameter.empty
+                        else None
+                    ),
                 }
             return params
         except Exception:

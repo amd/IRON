@@ -37,6 +37,7 @@ from iron.api.generation_config import GenerationConfig
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def sample_config() -> Llama32Config:
     """Create a small test configuration."""
@@ -49,7 +50,7 @@ def sample_config() -> Llama32Config:
         num_key_value_heads=2,
         head_dim=32,
         max_position_embeddings=512,
-        rms_norm_eps=1e-5
+        rms_norm_eps=1e-5,
     )
 
 
@@ -61,67 +62,58 @@ def sample_weights(sample_config: Llama32Config) -> LlamaWeights:
         layer = TransformerWeights(
             wq=np.random.randn(
                 sample_config.hidden_size,
-                sample_config.num_attention_heads * sample_config.head_dim
+                sample_config.num_attention_heads * sample_config.head_dim,
             ).astype(np.float32),
             wk=np.random.randn(
                 sample_config.hidden_size,
-                sample_config.num_key_value_heads * sample_config.head_dim
+                sample_config.num_key_value_heads * sample_config.head_dim,
             ).astype(np.float32),
             wv=np.random.randn(
                 sample_config.hidden_size,
-                sample_config.num_key_value_heads * sample_config.head_dim
+                sample_config.num_key_value_heads * sample_config.head_dim,
             ).astype(np.float32),
             wo=np.random.randn(
                 sample_config.num_attention_heads * sample_config.head_dim,
-                sample_config.hidden_size
+                sample_config.hidden_size,
             ).astype(np.float32),
             w1=np.random.randn(
-                sample_config.hidden_size,
-                sample_config.intermediate_size
+                sample_config.hidden_size, sample_config.intermediate_size
             ).astype(np.float32),
             w2=np.random.randn(
-                sample_config.intermediate_size,
-                sample_config.hidden_size
+                sample_config.intermediate_size, sample_config.hidden_size
             ).astype(np.float32),
             w3=np.random.randn(
-                sample_config.hidden_size,
-                sample_config.intermediate_size
+                sample_config.hidden_size, sample_config.intermediate_size
             ).astype(np.float32),
             attn_norm=np.random.randn(sample_config.hidden_size).astype(np.float32),
-            ffn_norm=np.random.randn(sample_config.hidden_size).astype(np.float32)
+            ffn_norm=np.random.randn(sample_config.hidden_size).astype(np.float32),
         )
         layers.append(layer)
 
     return LlamaWeights(
         token_embd=np.random.randn(
-            sample_config.vocab_size,
-            sample_config.hidden_size
+            sample_config.vocab_size, sample_config.hidden_size
         ).astype(np.float32),
         layers=layers,
         output_norm=np.random.randn(sample_config.hidden_size).astype(np.float32),
         output=None,  # Tied embeddings
         vocab_size=sample_config.vocab_size,
         hidden_size=sample_config.hidden_size,
-        num_layers=sample_config.num_hidden_layers
+        num_layers=sample_config.num_hidden_layers,
     )
 
 
 @pytest.fixture
 def gen_config() -> GenerationConfig:
     """Create default generation config."""
-    return GenerationConfig(
-        temperature=0.7,
-        top_k=50,
-        top_p=0.9,
-        max_new_tokens=100
-    )
+    return GenerationConfig(temperature=0.7, top_k=50, top_p=0.9, max_new_tokens=100)
 
 
 @pytest.fixture
 def generation_loop(
     sample_config: Llama32Config,
     sample_weights: LlamaWeights,
-    gen_config: GenerationConfig
+    gen_config: GenerationConfig,
 ) -> GenerationLoop:
     """Create a GenerationLoop for testing."""
     return GenerationLoop(sample_config, sample_weights, gen_config)
@@ -140,6 +132,7 @@ def sample_prompt() -> List[int]:
 # -----------------------------------------------------------------------------
 # Category 1: Initialization Tests
 # -----------------------------------------------------------------------------
+
 
 class TestInitialization:
     """Tests for GenerationLoop initialization."""
@@ -174,6 +167,7 @@ class TestInitialization:
 # -----------------------------------------------------------------------------
 # Category 2: Prefill Phase Tests
 # -----------------------------------------------------------------------------
+
 
 class TestPrefill:
     """Tests for the prefill phase."""
@@ -212,6 +206,7 @@ class TestPrefill:
 # Category 3: Decode Phase Tests
 # -----------------------------------------------------------------------------
 
+
 class TestDecode:
     """Tests for the decode phase."""
 
@@ -245,6 +240,7 @@ class TestDecode:
 # Category 4: Sampling Tests
 # -----------------------------------------------------------------------------
 
+
 class TestSampling:
     """Tests for the sampling functionality."""
 
@@ -275,6 +271,7 @@ class TestSampling:
 # Category 5: Generation Integration Tests
 # -----------------------------------------------------------------------------
 
+
 class TestGeneration:
     """Tests for the full generation loop."""
 
@@ -299,8 +296,8 @@ class TestGeneration:
         results = list(generation_loop.generate(sample_prompt, max_tokens=1))
         result = results[0]
         assert isinstance(result, GenerationResult)
-        assert hasattr(result, 'token_id')
-        assert hasattr(result, 'position')
+        assert hasattr(result, "token_id")
+        assert hasattr(result, "position")
 
     def test_generate_increments_position(self, generation_loop, sample_prompt):
         """Test that generate increments position for each token."""
@@ -312,10 +309,7 @@ class TestGeneration:
         self, sample_config, sample_weights, sample_prompt
     ):
         """Test generation with EOS token in config."""
-        config = GenerationConfig(
-            eos_tokens=[999],
-            max_new_tokens=100
-        )
+        config = GenerationConfig(eos_tokens=[999], max_new_tokens=100)
         loop = GenerationLoop(sample_config, sample_weights, config)
 
         # This test verifies the stop condition integration
@@ -327,6 +321,7 @@ class TestGeneration:
 # -----------------------------------------------------------------------------
 # Category 6: Edge Case Tests
 # -----------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
@@ -349,8 +344,8 @@ class TestEdgeCases:
         generation_loop.prefill(sample_prompt)
         stats = generation_loop.get_kv_cache_stats()
         assert isinstance(stats, dict)
-        assert 'current_position' in stats
-        assert 'sequence_id' in stats
+        assert "current_position" in stats
+        assert "sequence_id" in stats
 
     def test_generate_batch(self, generation_loop):
         """Test batch generation."""
@@ -368,9 +363,7 @@ class TestEdgeCases:
 
     def test_output_projection(self, generation_loop):
         """Test output projection."""
-        hidden = np.random.randn(
-            generation_loop.config.hidden_size
-        ).astype(np.float32)
+        hidden = np.random.randn(generation_loop.config.hidden_size).astype(np.float32)
         logits = generation_loop._output_projection(hidden)
         # With tied embeddings, shape is vocab_size
 
@@ -379,17 +372,14 @@ class TestEdgeCases:
 # Category 7: GenerationResult Tests
 # -----------------------------------------------------------------------------
 
+
 class TestGenerationResult:
     """Tests for GenerationResult dataclass."""
 
     def test_result_creation(self):
         """Test creating a GenerationResult."""
         result = GenerationResult(
-            token_id=42,
-            token_text="hello",
-            logit_prob=-0.5,
-            is_eos=False,
-            position=0
+            token_id=42, token_text="hello", logit_prob=-0.5, is_eos=False, position=0
         )
         assert result.token_id == 42
         assert result.token_text == "hello"
@@ -397,11 +387,7 @@ class TestGenerationResult:
 
     def test_result_with_eos(self):
         """Test GenerationResult with EOS."""
-        result = GenerationResult(
-            token_id=128001,
-            is_eos=True,
-            stop_reason="eos_token"
-        )
+        result = GenerationResult(token_id=128001, is_eos=True, stop_reason="eos_token")
         assert result.is_eos is True
         assert result.stop_reason == "eos_token"
 
@@ -416,6 +402,7 @@ class TestGenerationResult:
 # -----------------------------------------------------------------------------
 # Category 8: TokenSampler Integration Tests
 # -----------------------------------------------------------------------------
+
 
 class TestTokenSamplerIntegration:
     """Tests for TokenSampler integration."""

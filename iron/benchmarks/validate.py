@@ -66,9 +66,11 @@ logger = logging.getLogger(__name__)
 # System Diagnostics
 # =============================================================================
 
+
 @dataclass
 class SystemInfo:
     """System information for benchmark context"""
+
     platform: str = ""
     platform_version: str = ""
     architecture: str = ""
@@ -103,26 +105,27 @@ class SystemInfo:
         try:
             if self.platform == "Windows":
                 import ctypes
+
                 kernel32 = ctypes.windll.kernel32
                 c_ulonglong = ctypes.c_ulonglong
 
                 class MEMORYSTATUSEX(ctypes.Structure):
                     _fields_ = [
-                        ('dwLength', ctypes.c_ulong),
-                        ('dwMemoryLoad', ctypes.c_ulong),
-                        ('ullTotalPhys', c_ulonglong),
-                        ('ullAvailPhys', c_ulonglong),
-                        ('ullTotalPageFile', c_ulonglong),
-                        ('ullAvailPageFile', c_ulonglong),
-                        ('ullTotalVirtual', c_ulonglong),
-                        ('ullAvailVirtual', c_ulonglong),
-                        ('ullAvailExtendedVirtual', c_ulonglong),
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", c_ulonglong),
+                        ("ullAvailPhys", c_ulonglong),
+                        ("ullTotalPageFile", c_ulonglong),
+                        ("ullAvailPageFile", c_ulonglong),
+                        ("ullTotalVirtual", c_ulonglong),
+                        ("ullAvailVirtual", c_ulonglong),
+                        ("ullAvailExtendedVirtual", c_ulonglong),
                     ]
 
                 memoryStatus = MEMORYSTATUSEX()
                 memoryStatus.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
                 if kernel32.GlobalMemoryStatusEx(ctypes.byref(memoryStatus)):
-                    self.total_memory_gb = memoryStatus.ullTotalPhys / (1024 ** 3)
+                    self.total_memory_gb = memoryStatus.ullTotalPhys / (1024**3)
         except Exception as e:
             logger.debug(f"Could not detect total memory: {e}")
             self.total_memory_gb = 0.0
@@ -130,6 +133,7 @@ class SystemInfo:
         # PyTorch info
         try:
             import torch
+
             self.torch_version = torch.__version__
             self.torch_cuda_available = torch.cuda.is_available()
         except ImportError:
@@ -139,6 +143,7 @@ class SystemInfo:
         # NumPy info
         try:
             import numpy
+
             self.numpy_version = numpy.__version__
         except ImportError:
             self.numpy_version = "not installed"
@@ -148,9 +153,10 @@ class SystemInfo:
             try:
                 # Get Windows edition
                 import winreg
+
                 with winreg.OpenKey(
                     winreg.HKEY_LOCAL_MACHINE,
-                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
                 ) as key:
                     self.windows_edition, _ = winreg.QueryValueEx(key, "EditionId")
                     self.windows_build, _ = winreg.QueryValueEx(key, "CurrentBuild")
@@ -168,15 +174,18 @@ class SystemInfo:
         try:
             # Try to detect AMD Ryzen AI NPU via PnP
             result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-PnpDevice -Class 'System' -Status 'OK' | "
-                 "Where-Object {$_.FriendlyName -like '*Ryzen*AI*' -or "
-                 "$_.FriendlyName -like '*NPU*' -or "
-                 "$_.FriendlyName -like '*AMD*AI*'} | "
-                 "Select-Object -First 1 -ExpandProperty FriendlyName"],
+                [
+                    "powershell",
+                    "-Command",
+                    "Get-PnpDevice -Class 'System' -Status 'OK' | "
+                    "Where-Object {$_.FriendlyName -like '*Ryzen*AI*' -or "
+                    "$_.FriendlyName -like '*NPU*' -or "
+                    "$_.FriendlyName -like '*AMD*AI*'} | "
+                    "Select-Object -First 1 -ExpandProperty FriendlyName",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.stdout.strip():
                 self.npu_detected = True
@@ -193,9 +202,11 @@ class SystemInfo:
 # Performance Targets
 # =============================================================================
 
+
 @dataclass
 class PerformanceTarget:
     """Performance target specification"""
+
     operator_name: str
     input_shape: Tuple[int, ...]
     linux_target_ms: float
@@ -211,7 +222,7 @@ PERFORMANCE_TARGETS = {
         input_shape=(1, 12, 128, 64),
         linux_target_ms=0.5,
         windows_target_ms=0.55,  # ~10% overhead for ONNX Runtime
-        cpu_baseline_ms=5.0,     # 10x slower than NPU
+        cpu_baseline_ms=5.0,  # 10x slower than NPU
         description="RoPE (Rotary Positional Embedding)",
     ),
     "rmsnorm": PerformanceTarget(
@@ -245,9 +256,11 @@ PERFORMANCE_TARGETS = {
 # Anomaly Detection
 # =============================================================================
 
+
 @dataclass
 class AnomalyReport:
     """Report of detected anomalies in benchmark results"""
+
     operator_name: str
     anomaly_type: str  # "high_latency", "high_variance", "target_miss", "regression"
     severity: str  # "LOW", "MEDIUM", "HIGH", "CRITICAL"
@@ -271,7 +284,9 @@ class AnomalyDetector:
     def __init__(self, targets: Dict[str, PerformanceTarget]):
         self.targets = targets
 
-    def detect(self, result: dict, baseline: Optional[dict] = None) -> List[AnomalyReport]:
+    def detect(
+        self, result: dict, baseline: Optional[dict] = None
+    ) -> List[AnomalyReport]:
         """Detect anomalies in a benchmark result"""
         anomalies = []
 
@@ -280,18 +295,20 @@ class AnomalyDetector:
         error = result.get("error")
 
         if error:
-            anomalies.append(AnomalyReport(
-                operator_name=operator_name,
-                anomaly_type="execution_error",
-                severity="CRITICAL",
-                description=f"Benchmark execution failed: {error}",
-                actual_value=0.0,
-                expected_value=self.targets.get(operator_name, PerformanceTarget(
-                    operator_name, (), 0, 0, 0, ""
-                )).windows_target_ms,
-                deviation_percent=100.0,
-                recommendation="Check operator implementation and system configuration",
-            ))
+            anomalies.append(
+                AnomalyReport(
+                    operator_name=operator_name,
+                    anomaly_type="execution_error",
+                    severity="CRITICAL",
+                    description=f"Benchmark execution failed: {error}",
+                    actual_value=0.0,
+                    expected_value=self.targets.get(
+                        operator_name, PerformanceTarget(operator_name, (), 0, 0, 0, "")
+                    ).windows_target_ms,
+                    deviation_percent=100.0,
+                    recommendation="Check operator implementation and system configuration",
+                )
+            )
             return anomalies
 
         mean_ms = metrics.get("mean_ms", 0)
@@ -307,72 +324,90 @@ class AnomalyDetector:
         if mean_ms > 0:
             cv = std_dev_ms / mean_ms
             if cv >= self.CRITICAL_VARIANCE_THRESHOLD:
-                anomalies.append(AnomalyReport(
-                    operator_name=operator_name,
-                    anomaly_type="high_variance",
-                    severity="CRITICAL",
-                    description=f"Critical variance detected: CV={cv*100:.1f}%",
-                    actual_value=cv,
-                    expected_value=self.HIGH_VARIANCE_THRESHOLD,
-                    deviation_percent=(cv - self.HIGH_VARIANCE_THRESHOLD) / self.HIGH_VARIANCE_THRESHOLD * 100,
-                    recommendation="System may be under load or thermal throttling. Re-run benchmarks.",
-                ))
+                anomalies.append(
+                    AnomalyReport(
+                        operator_name=operator_name,
+                        anomaly_type="high_variance",
+                        severity="CRITICAL",
+                        description=f"Critical variance detected: CV={cv*100:.1f}%",
+                        actual_value=cv,
+                        expected_value=self.HIGH_VARIANCE_THRESHOLD,
+                        deviation_percent=(cv - self.HIGH_VARIANCE_THRESHOLD)
+                        / self.HIGH_VARIANCE_THRESHOLD
+                        * 100,
+                        recommendation="System may be under load or thermal throttling. Re-run benchmarks.",
+                    )
+                )
             elif cv >= self.HIGH_VARIANCE_THRESHOLD:
-                anomalies.append(AnomalyReport(
-                    operator_name=operator_name,
-                    anomaly_type="high_variance",
-                    severity="MEDIUM",
-                    description=f"High variance detected: CV={cv*100:.1f}%",
-                    actual_value=cv,
-                    expected_value=self.HIGH_VARIANCE_THRESHOLD,
-                    deviation_percent=(cv - self.HIGH_VARIANCE_THRESHOLD) / self.HIGH_VARIANCE_THRESHOLD * 100,
-                    recommendation="Consider running more iterations for stable results.",
-                ))
+                anomalies.append(
+                    AnomalyReport(
+                        operator_name=operator_name,
+                        anomaly_type="high_variance",
+                        severity="MEDIUM",
+                        description=f"High variance detected: CV={cv*100:.1f}%",
+                        actual_value=cv,
+                        expected_value=self.HIGH_VARIANCE_THRESHOLD,
+                        deviation_percent=(cv - self.HIGH_VARIANCE_THRESHOLD)
+                        / self.HIGH_VARIANCE_THRESHOLD
+                        * 100,
+                        recommendation="Consider running more iterations for stable results.",
+                    )
+                )
 
         # Check for high latency vs target
         if mean_ms > 0 and target.windows_target_ms > 0:
             latency_ratio = mean_ms / target.windows_target_ms
             if latency_ratio >= self.CRITICAL_LATENCY_FACTOR:
-                anomalies.append(AnomalyReport(
-                    operator_name=operator_name,
-                    anomaly_type="high_latency",
-                    severity="CRITICAL",
-                    description=f"Critical: Latency {latency_ratio:.1f}x above Windows NPU target",
-                    actual_value=mean_ms,
-                    expected_value=target.windows_target_ms,
-                    deviation_percent=(latency_ratio - 1) * 100,
-                    recommendation="Verify NPU runtime is being used, not CPU fallback.",
-                ))
+                anomalies.append(
+                    AnomalyReport(
+                        operator_name=operator_name,
+                        anomaly_type="high_latency",
+                        severity="CRITICAL",
+                        description=f"Critical: Latency {latency_ratio:.1f}x above Windows NPU target",
+                        actual_value=mean_ms,
+                        expected_value=target.windows_target_ms,
+                        deviation_percent=(latency_ratio - 1) * 100,
+                        recommendation="Verify NPU runtime is being used, not CPU fallback.",
+                    )
+                )
             elif latency_ratio >= self.HIGH_LATENCY_FACTOR:
-                anomalies.append(AnomalyReport(
-                    operator_name=operator_name,
-                    anomaly_type="high_latency",
-                    severity="HIGH",
-                    description=f"Latency {latency_ratio:.1f}x above Windows NPU target",
-                    actual_value=mean_ms,
-                    expected_value=target.windows_target_ms,
-                    deviation_percent=(latency_ratio - 1) * 100,
-                    recommendation="Check if NPU execution provider is properly configured.",
-                ))
+                anomalies.append(
+                    AnomalyReport(
+                        operator_name=operator_name,
+                        anomaly_type="high_latency",
+                        severity="HIGH",
+                        description=f"Latency {latency_ratio:.1f}x above Windows NPU target",
+                        actual_value=mean_ms,
+                        expected_value=target.windows_target_ms,
+                        deviation_percent=(latency_ratio - 1) * 100,
+                        recommendation="Check if NPU execution provider is properly configured.",
+                    )
+                )
 
         # Check against baseline (regression detection)
         if baseline:
-            baseline_results = {r["operator_name"]: r for r in baseline.get("results", [])}
+            baseline_results = {
+                r["operator_name"]: r for r in baseline.get("results", [])
+            }
             if operator_name in baseline_results:
-                baseline_mean = baseline_results[operator_name].get("metrics", {}).get("mean_ms")
+                baseline_mean = (
+                    baseline_results[operator_name].get("metrics", {}).get("mean_ms")
+                )
                 if baseline_mean is not None and baseline_mean > 0 and mean_ms > 0:
                     regression = (mean_ms - baseline_mean) / baseline_mean
                     if regression >= self.REGRESSION_THRESHOLD:
-                        anomalies.append(AnomalyReport(
-                            operator_name=operator_name,
-                            anomaly_type="regression",
-                            severity="HIGH" if regression > 0.20 else "MEDIUM",
-                            description=f"Performance regression: {regression*100:.1f}% slower than baseline",
-                            actual_value=mean_ms,
-                            expected_value=baseline_mean,
-                            deviation_percent=regression * 100,
-                            recommendation="Investigate recent changes or system configuration.",
-                        ))
+                        anomalies.append(
+                            AnomalyReport(
+                                operator_name=operator_name,
+                                anomaly_type="regression",
+                                severity="HIGH" if regression > 0.20 else "MEDIUM",
+                                description=f"Performance regression: {regression*100:.1f}% slower than baseline",
+                                actual_value=mean_ms,
+                                expected_value=baseline_mean,
+                                deviation_percent=regression * 100,
+                                recommendation="Investigate recent changes or system configuration.",
+                            )
+                        )
 
         return anomalies
 
@@ -381,9 +416,11 @@ class AnomalyDetector:
 # Benchmark Validation Runner
 # =============================================================================
 
+
 @dataclass
 class ValidationResult:
     """Result of a validation run"""
+
     success: bool
     system_info: SystemInfo
     benchmark_results: List[dict]
@@ -419,7 +456,9 @@ class BenchmarkValidator:
         self.iterations = iterations
         self.warmup = warmup
         self.operators = operators or list(PERFORMANCE_TARGETS.keys())
-        self.output_dir = Path(output_dir) if output_dir else Path(__file__).parent / "results"
+        self.output_dir = (
+            Path(output_dir) if output_dir else Path(__file__).parent / "results"
+        )
         self.compare_baseline = compare_baseline
         self.generate_charts = generate_charts
         self.anomaly_detector = AnomalyDetector(PERFORMANCE_TARGETS)
@@ -482,7 +521,8 @@ class BenchmarkValidator:
         # Save results
         duration_sec = time.perf_counter() - start_time
         validation_result = ValidationResult(
-            success=len(all_anomalies) == 0 or all(a.severity != "CRITICAL" for a in all_anomalies),
+            success=len(all_anomalies) == 0
+            or all(a.severity != "CRITICAL" for a in all_anomalies),
             system_info=system_info,
             benchmark_results=benchmark_results,
             anomaly_reports=all_anomalies,
@@ -645,7 +685,8 @@ class BenchmarkValidator:
         """Generate visualization charts"""
         try:
             import matplotlib
-            matplotlib.use('Agg')  # Non-interactive backend
+
+            matplotlib.use("Agg")  # Non-interactive backend
             import matplotlib.pyplot as plt
 
             # Filter out errored results
@@ -666,7 +707,7 @@ class BenchmarkValidator:
             fig.suptitle(
                 f"IRON Benchmark Validation Results\n"
                 f"{system_info.platform} - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                fontsize=14
+                fontsize=14,
             )
 
             # Plot 1: Mean latency comparison
@@ -674,70 +715,98 @@ class BenchmarkValidator:
             x = range(len(operators))
             width = 0.25
 
-            ax1.bar([i - width for i in x], means, width, label='Mean Latency', color='steelblue')
-            ax1.bar(x, p99s, width, label='P99 Latency', color='coral')
-            ax1.bar([i + width for i in x], targets, width, label='CPU Target', color='lightgreen', linestyle='--')
+            ax1.bar(
+                [i - width for i in x],
+                means,
+                width,
+                label="Mean Latency",
+                color="steelblue",
+            )
+            ax1.bar(x, p99s, width, label="P99 Latency", color="coral")
+            ax1.bar(
+                [i + width for i in x],
+                targets,
+                width,
+                label="CPU Target",
+                color="lightgreen",
+                linestyle="--",
+            )
 
-            ax1.set_ylabel('Latency (ms)')
-            ax1.set_title('Latency Comparison')
+            ax1.set_ylabel("Latency (ms)")
+            ax1.set_title("Latency Comparison")
             ax1.set_xticks(x)
             ax1.set_xticklabels([op.upper() for op in operators], rotation=45)
             ax1.legend()
-            ax1.grid(axis='y', alpha=0.3)
+            ax1.grid(axis="y", alpha=0.3)
 
             # Plot 2: Target achievement
             ax2 = axes[0, 1]
-            colors = ['green' if r.get('target_met') else 'red' for r in valid_results]
+            colors = ["green" if r.get("target_met") else "red" for r in valid_results]
             ax2.bar(operators, means, color=colors, alpha=0.7)
-            ax2.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-            ax2.set_ylabel('Mean Latency (ms)')
-            ax2.set_title('Target Achievement (Green=PASS, Red=FAIL)')
+            ax2.axhline(y=1, color="gray", linestyle="--", alpha=0.5)
+            ax2.set_ylabel("Mean Latency (ms)")
+            ax2.set_title("Target Achievement (Green=PASS, Red=FAIL)")
             ax2.set_xticklabels([op.upper() for op in operators], rotation=45)
-            ax2.grid(axis='y', alpha=0.3)
+            ax2.grid(axis="y", alpha=0.3)
 
             # Plot 3: Throughput
             ax3 = axes[1, 0]
             throughputs = [r["metrics"]["throughput_ops_sec"] for r in valid_results]
-            bars = ax3.bar(operators, throughputs, color='mediumpurple', alpha=0.7)
-            ax3.set_ylabel('Throughput (ops/sec)')
-            ax3.set_title('Operator Throughput')
+            bars = ax3.bar(operators, throughputs, color="mediumpurple", alpha=0.7)
+            ax3.set_ylabel("Throughput (ops/sec)")
+            ax3.set_title("Operator Throughput")
             ax3.set_xticklabels([op.upper() for op in operators], rotation=45)
-            ax3.grid(axis='y', alpha=0.3)
+            ax3.grid(axis="y", alpha=0.3)
 
             # Add value labels
             for bar, val in zip(bars, throughputs):
                 ax3.text(
-                    bar.get_x() + bar.get_width()/2, bar.get_height(),
-                    f'{val:.0f}', ha='center', va='bottom', fontsize=9
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{val:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
                 )
 
             # Plot 4: Variance (std dev / mean)
             ax4 = axes[1, 1]
             std_devs = [r["metrics"]["std_dev_ms"] for r in valid_results]
-            variance_pct = [(s/m)*100 if m > 0 else 0 for s, m in zip(std_devs, means)]
+            variance_pct = [
+                (s / m) * 100 if m > 0 else 0 for s, m in zip(std_devs, means)
+            ]
 
             colors = []
             for v in variance_pct:
                 if v < 5:
-                    colors.append('green')
+                    colors.append("green")
                 elif v < 15:
-                    colors.append('yellow')
+                    colors.append("yellow")
                 else:
-                    colors.append('red')
+                    colors.append("red")
 
             ax4.bar(operators, variance_pct, color=colors, alpha=0.7)
-            ax4.axhline(y=15, color='red', linestyle='--', alpha=0.7, label='High variance threshold')
-            ax4.set_ylabel('Coefficient of Variation (%)')
-            ax4.set_title('Result Variance (Lower is Better)')
+            ax4.axhline(
+                y=15,
+                color="red",
+                linestyle="--",
+                alpha=0.7,
+                label="High variance threshold",
+            )
+            ax4.set_ylabel("Coefficient of Variation (%)")
+            ax4.set_title("Result Variance (Lower is Better)")
             ax4.set_xticklabels([op.upper() for op in operators], rotation=45)
             ax4.legend()
-            ax4.grid(axis='y', alpha=0.3)
+            ax4.grid(axis="y", alpha=0.3)
 
             plt.tight_layout()
 
             # Save chart
-            chart_path = self.output_dir / f"validation_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+            chart_path = (
+                self.output_dir
+                / f"validation_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            )
+            plt.savefig(chart_path, dpi=150, bbox_inches="tight")
             logger.info(f"Chart saved to: {chart_path}")
 
             plt.close()
@@ -750,13 +819,17 @@ class BenchmarkValidator:
     def _save_results(self, result: ValidationResult):
         """Save validation results to file"""
         # Save JSON results
-        json_path = self.output_dir / f"validation_{result.timestamp.replace(':', '-')}.json"
+        json_path = (
+            self.output_dir / f"validation_{result.timestamp.replace(':', '-')}.json"
+        )
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(result.to_dict(), f, indent=2, default=str)
         logger.info(f"Results saved to: {json_path}")
 
         # Save Markdown summary
-        md_path = self.output_dir / f"validation_{result.timestamp.replace(':', '-')}.md"
+        md_path = (
+            self.output_dir / f"validation_{result.timestamp.replace(':', '-')}.md"
+        )
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(self._format_markdown(result))
         logger.info(f"Markdown summary saved to: {md_path}")
@@ -783,7 +856,9 @@ class BenchmarkValidator:
         lines.append("## System Information")
         lines.append("")
         si = result.system_info
-        lines.append(f"- **Platform:** {si.platform} {si.windows_edition} (Build {si.windows_build})")
+        lines.append(
+            f"- **Platform:** {si.platform} {si.windows_edition} (Build {si.windows_build})"
+        )
         lines.append(f"- **Processor:** {si.processor}")
         lines.append(f"- **Memory:** {si.total_memory_gb:.1f} GB")
         lines.append(f"- **Python:** {si.python_version}")
@@ -809,9 +884,13 @@ class BenchmarkValidator:
         lines.append("| Operator | Mean (ms) | Target (ms) | Status |")
         lines.append("|----------|-----------|-------------|--------|")
         for op in ts["operators"]:
-            status_icon = "OK" if op["status"] == "PASS" else ("FAIL" if op["status"] == "MISS" else "ERR")
-            mean_str = f"{op['mean_ms']:.4f}" if op['mean_ms'] else 'N/A'
-            target_str = f"{op['target_ms']:.2f}" if op['target_ms'] else 'N/A'
+            status_icon = (
+                "OK"
+                if op["status"] == "PASS"
+                else ("FAIL" if op["status"] == "MISS" else "ERR")
+            )
+            mean_str = f"{op['mean_ms']:.4f}" if op["mean_ms"] else "N/A"
+            target_str = f"{op['target_ms']:.2f}" if op["target_ms"] else "N/A"
             lines.append(
                 f"| {op['name'].upper()} | {mean_str} | {target_str} | {status_icon} |"
             )
@@ -828,7 +907,9 @@ class BenchmarkValidator:
                     "HIGH": "!!",
                     "CRITICAL": "!!!",
                 }.get(anomaly.severity, "")
-                lines.append(f"### {severity_icon} {anomaly.operator_name}: {anomaly.anomaly_type}")
+                lines.append(
+                    f"### {severity_icon} {anomaly.operator_name}: {anomaly.anomaly_type}"
+                )
                 lines.append(f"- **Severity:** {anomaly.severity}")
                 lines.append(f"- **Description:** {anomaly.description}")
                 lines.append(f"- **Actual:** {anomaly.actual_value:.4f}")
@@ -860,8 +941,12 @@ class BenchmarkValidator:
                 lines.append(f"| Std Dev | {metrics.get('std_dev_ms', 0):.4f} ms |")
                 lines.append(f"| P95 | {metrics.get('p95_ms', 0):.4f} ms |")
                 lines.append(f"| P99 | {metrics.get('p99_ms', 0):.4f} ms |")
-                lines.append(f"| Throughput | {metrics.get('throughput_ops_sec', 0):.2f} ops/sec |")
-                lines.append(f"| Bandwidth | {metrics.get('memory_bandwidth_gbps', 0):.4f} GB/s |")
+                lines.append(
+                    f"| Throughput | {metrics.get('throughput_ops_sec', 0):.2f} ops/sec |"
+                )
+                lines.append(
+                    f"| Bandwidth | {metrics.get('memory_bandwidth_gbps', 0):.4f} GB/s |"
+                )
             lines.append("")
 
         lines.append("---")
@@ -878,7 +963,9 @@ class BenchmarkValidator:
         ts = result.targets_summary
         status = "PASS" if result.success else "FAIL"
         print(f"Overall Status: {status}")
-        print(f"Operators: {ts['total_operators']} | Met: {ts['targets_met']} | Missed: {ts['targets_missed']} | Errors: {ts['errors']}")
+        print(
+            f"Operators: {ts['total_operators']} | Met: {ts['targets_met']} | Missed: {ts['targets_missed']} | Errors: {ts['errors']}"
+        )
 
         if result.anomaly_reports:
             print(f"\nAnomalies: {len(result.anomaly_reports)}")

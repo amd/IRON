@@ -27,8 +27,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <vector>
 #include <string>
+#include <vector>
 
 // ONNX Runtime C++ API includes
 #include <onnxruntime/core/session/onnxruntime_cxx_api.h>
@@ -39,14 +39,17 @@
 // Import OrtDmlApi type
 using OrtDmlApi = ::OrtDmlApi;
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Helper: Check ONNX Runtime GenAI availability
 //==============================================================================
 
-bool OnnxRuntimeGenAiWrapper::isAvailable() {
+bool OnnxRuntimeGenAiWrapper::isAvailable()
+{
     // Check if ONNX Runtime GenAI DLL is loadable
     // In production, this would attempt to load the DLL
     HMODULE hModule = LoadLibraryA("onnxruntime-genai.dll");
@@ -61,17 +64,11 @@ bool OnnxRuntimeGenAiWrapper::isAvailable() {
 // OnnxBuffer Implementation
 //==============================================================================
 
-OnnxBuffer::OnnxBuffer(Ort::Value tensor, size_t size)
-    : tensor_(std::move(tensor))
-    , size_(size)
-    , valid_(true) {
-}
+OnnxBuffer::OnnxBuffer(Ort::Value tensor, size_t size) : tensor_(std::move(tensor)), size_(size), valid_(true) {}
 
-OnnxBuffer::OnnxBuffer(const Ort::MemoryInfo& memoryInfo, size_t size)
-    : tensor_()
-    , size_(size)
-    , valid_(false)
-    , data_(nullptr) {
+OnnxBuffer::OnnxBuffer(const Ort::MemoryInfo &memoryInfo, size_t size)
+    : tensor_(), size_(size), valid_(false), data_(nullptr)
+{
 
     if (size == 0) {
         throw BufferError("Cannot allocate zero-size buffer");
@@ -86,17 +83,12 @@ OnnxBuffer::OnnxBuffer(const Ort::MemoryInfo& memoryInfo, size_t size)
 
     // Create tensor using the memory info's underlying OrtMemoryInfo pointer
     // Use CreateTensor which takes OrtMemoryInfo* (C API type)
-    tensor_ = Ort::Value::CreateTensor<uint8_t>(
-        memoryInfo,
-        reinterpret_cast<uint8_t*>(data_.get()),
-        size,
-        shape,
-        1
-    );
+    tensor_ = Ort::Value::CreateTensor<uint8_t>(memoryInfo, reinterpret_cast<uint8_t *>(data_.get()), size, shape, 1);
     valid_ = true;
 }
 
-OnnxBuffer::~OnnxBuffer() {
+OnnxBuffer::~OnnxBuffer()
+{
     if (valid_) {
         // data_ automatically freed by unique_ptr destructor
         // ONNX tensor view is automatically released when Ort::Value goes out of scope
@@ -105,16 +97,15 @@ OnnxBuffer::~OnnxBuffer() {
     }
 }
 
-OnnxBuffer::OnnxBuffer(OnnxBuffer&& other) noexcept
-    : tensor_(std::move(other.tensor_))
-    , size_(other.size_)
-    , valid_(other.valid_)
-    , data_(std::move(other.data_)) {
+OnnxBuffer::OnnxBuffer(OnnxBuffer &&other) noexcept
+    : tensor_(std::move(other.tensor_)), size_(other.size_), valid_(other.valid_), data_(std::move(other.data_))
+{
 
     other.valid_ = false;
 }
 
-OnnxBuffer& OnnxBuffer::operator=(OnnxBuffer&& other) noexcept {
+OnnxBuffer &OnnxBuffer::operator=(OnnxBuffer &&other) noexcept
+{
     if (this != &other) {
         if (valid_) {
             tensor_ = {};
@@ -131,11 +122,13 @@ OnnxBuffer& OnnxBuffer::operator=(OnnxBuffer&& other) noexcept {
     return *this;
 }
 
-size_t OnnxBuffer::size() const {
+size_t OnnxBuffer::size() const
+{
     return size_;
 }
 
-void OnnxBuffer::write(const void* data, size_t size, size_t offset) {
+void OnnxBuffer::write(const void *data, size_t size, size_t offset)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -149,11 +142,12 @@ void OnnxBuffer::write(const void* data, size_t size, size_t offset) {
     }
 
     // Copy data to ONNX tensor
-    void* tensorData = tensor_.GetTensorMutableData<void>();
-    std::memcpy(static_cast<char*>(tensorData) + offset, data, size);
+    void *tensorData = tensor_.GetTensorMutableData<void>();
+    std::memcpy(static_cast<char *>(tensorData) + offset, data, size);
 }
 
-void OnnxBuffer::read(void* data, size_t size, size_t offset) const {
+void OnnxBuffer::read(void *data, size_t size, size_t offset) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -167,11 +161,12 @@ void OnnxBuffer::read(void* data, size_t size, size_t offset) const {
     }
 
     // Copy data from ONNX tensor
-    const void* tensorData = tensor_.GetTensorData<void>();
-    std::memcpy(data, static_cast<const char*>(tensorData) + offset, size);
+    const void *tensorData = tensor_.GetTensorData<void>();
+    std::memcpy(data, static_cast<const char *>(tensorData) + offset, size);
 }
 
-void OnnxBuffer::sync(bool /*to_device*/) {
+void OnnxBuffer::sync(bool /*to_device*/)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -182,30 +177,35 @@ void OnnxBuffer::sync(bool /*to_device*/) {
     // In production: May need explicit sync for DirectML
 }
 
-void* OnnxBuffer::nativeHandle() const {
+void *OnnxBuffer::nativeHandle() const
+{
     // Return ONNX tensor handle (Ort::Value pointer)
-    return const_cast<Ort::Value*>(&tensor_);
+    return const_cast<Ort::Value *>(&tensor_);
 }
 
-uint64_t OnnxBuffer::address() const {
+uint64_t OnnxBuffer::address() const
+{
     if (!valid_) {
         return 0;
     }
 
     // Get tensor data pointer
-    auto* data = tensor_.GetTensorData<void>();
+    auto *data = tensor_.GetTensorData<void>();
     return reinterpret_cast<uint64_t>(data);
 }
 
-bool OnnxBuffer::isValid() const {
+bool OnnxBuffer::isValid() const
+{
     return valid_;
 }
 
-Ort::Value& OnnxBuffer::tensor() {
+Ort::Value &OnnxBuffer::tensor()
+{
     return tensor_;
 }
 
-const Ort::Value& OnnxBuffer::tensor() const {
+const Ort::Value &OnnxBuffer::tensor() const
+{
     return tensor_;
 }
 
@@ -213,11 +213,9 @@ const Ort::Value& OnnxBuffer::tensor() const {
 // OnnxKernelHandle Implementation
 //==============================================================================
 
-OnnxKernelHandle::OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string& name)
-    : session_(std::move(session))
-    , name_(name)
-    , setArgs_()
-    , argInfo_() {
+OnnxKernelHandle::OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const std::string &name)
+    : session_(std::move(session)), name_(name), setArgs_(), argInfo_()
+{
 
     if (!session_) {
         throw KernelNotFoundError(name);
@@ -243,42 +241,42 @@ OnnxKernelHandle::OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const 
         // Convert element type to string representation
         std::string typeName;
         switch (elementType) {
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-                typeName = "float32";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-                typeName = "float64";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-                typeName = "int8";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-                typeName = "int16";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-                typeName = "int32";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-                typeName = "int64";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-                typeName = "uint8";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-                typeName = "uint16";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-                typeName = "uint32";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-                typeName = "uint64";
-                break;
-            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-                typeName = "float16";
-                break;
-            default:
-                typeName = "unknown";
-                break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+            typeName = "float32";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+            typeName = "float64";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+            typeName = "int8";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+            typeName = "int16";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+            typeName = "int32";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+            typeName = "int64";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+            typeName = "uint8";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+            typeName = "uint16";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+            typeName = "uint32";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+            typeName = "uint64";
+            break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+            typeName = "float16";
+            break;
+        default:
+            typeName = "unknown";
+            break;
         }
 
         argInfo_.push_back({inputName, typeName});
@@ -287,15 +285,17 @@ OnnxKernelHandle::OnnxKernelHandle(std::shared_ptr<Ort::Session> session, const 
 
 OnnxKernelHandle::~OnnxKernelHandle() = default;
 
-std::string OnnxKernelHandle::name() const {
+std::string OnnxKernelHandle::name() const
+{
     return name_;
 }
 
-void OnnxKernelHandle::setArg(size_t index, const KernelArgument& arg) {
+void OnnxKernelHandle::setArg(size_t index, const KernelArgument &arg)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Validate index
-    if (index >= 64) {  // Stub limit
+    if (index >= 64) { // Stub limit
         throw ArgumentError("Argument index out of range: " + std::to_string(index), index);
     }
 
@@ -307,8 +307,9 @@ void OnnxKernelHandle::setArg(size_t index, const KernelArgument& arg) {
     setArgs_[index] = arg;
 }
 
-bool OnnxKernelHandle::validateArguments() const {
-    for (const auto& arg : setArgs_) {
+bool OnnxKernelHandle::validateArguments() const
+{
+    for (const auto &arg : setArgs_) {
         if (!arg.has_value()) {
             return false;
         }
@@ -316,7 +317,8 @@ bool OnnxKernelHandle::validateArguments() const {
     return !setArgs_.empty();
 }
 
-ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
+ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions &options)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     ExecutionResult result;
@@ -329,8 +331,8 @@ ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
 
     // Prepare input names and values
     // Note: We store pointers because Ort::Value is move-only (not copyable)
-    std::vector<const Ort::Value*> inputValuePtrs;
-    std::vector<const char*> inputNames;
+    std::vector<const Ort::Value *> inputValuePtrs;
+    std::vector<const char *> inputNames;
     inputValuePtrs.reserve(setArgs_.size());
     inputNames.reserve(setArgs_.size());
 
@@ -341,58 +343,60 @@ ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
 
     for (size_t i = 0; i < setArgs_.size(); ++i) {
         if (setArgs_[i].has_value()) {
-            std::visit([&inputValuePtrs, &inputNames, &scalarTensors, this, i, &cpuMemoryInfo](auto&& val) {
-                if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::shared_ptr<IBuffer>>) {
-                    if (val) {
-                        auto* onnxBuffer = dynamic_cast<OnnxBuffer*>(val.get());
-                        if (onnxBuffer && onnxBuffer->isValid()) {
-                            inputValuePtrs.push_back(&onnxBuffer->tensor());
+            std::visit(
+                [&inputValuePtrs, &inputNames, &scalarTensors, this, i, &cpuMemoryInfo](auto &&val) {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::shared_ptr<IBuffer>>) {
+                        if (val) {
+                            auto *onnxBuffer = dynamic_cast<OnnxBuffer *>(val.get());
+                            if (onnxBuffer && onnxBuffer->isValid()) {
+                                inputValuePtrs.push_back(&onnxBuffer->tensor());
+                                inputNames.push_back(argInfo_[i].first.c_str());
+                            }
+                        }
+                    } else if constexpr (std::is_arithmetic_v<std::decay_t<decltype(val)>>) {
+                        // For scalar values, create a 1-element tensor wrapper
+                        using T = std::decay_t<decltype(val)>;
+                        int64_t shape[1] = {1};
+
+                        if constexpr (std::is_same_v<T, int32_t>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<int32_t>(
+                                cpuMemoryInfo, const_cast<int32_t *>(&val), sizeof(int32_t), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        } else if constexpr (std::is_same_v<T, uint32_t>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<uint32_t>(
+                                cpuMemoryInfo, const_cast<uint32_t *>(&val), sizeof(uint32_t), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        } else if constexpr (std::is_same_v<T, int64_t>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                                cpuMemoryInfo, const_cast<int64_t *>(&val), sizeof(int64_t), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        } else if constexpr (std::is_same_v<T, uint64_t>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<uint64_t>(
+                                cpuMemoryInfo, const_cast<uint64_t *>(&val), sizeof(uint64_t), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        } else if constexpr (std::is_same_v<T, float>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<float>(
+                                cpuMemoryInfo, const_cast<float *>(&val), sizeof(float), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
+                            inputNames.push_back(argInfo_[i].first.c_str());
+                        } else if constexpr (std::is_same_v<T, double>) {
+                            scalarTensors.push_back(Ort::Value::CreateTensor<double>(
+                                cpuMemoryInfo, const_cast<double *>(&val), sizeof(double), shape, 1));
+                            inputValuePtrs.push_back(&scalarTensors.back());
                             inputNames.push_back(argInfo_[i].first.c_str());
                         }
                     }
-                } else if constexpr (std::is_arithmetic_v<std::decay_t<decltype(val)>>) {
-                    // For scalar values, create a 1-element tensor wrapper
-                    using T = std::decay_t<decltype(val)>;
-                    int64_t shape[1] = {1};
-
-                    if constexpr (std::is_same_v<T, int32_t>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<int32_t>(
-                            cpuMemoryInfo, const_cast<int32_t*>(&val), sizeof(int32_t), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    } else if constexpr (std::is_same_v<T, uint32_t>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<uint32_t>(
-                            cpuMemoryInfo, const_cast<uint32_t*>(&val), sizeof(uint32_t), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    } else if constexpr (std::is_same_v<T, int64_t>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<int64_t>(
-                            cpuMemoryInfo, const_cast<int64_t*>(&val), sizeof(int64_t), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    } else if constexpr (std::is_same_v<T, uint64_t>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<uint64_t>(
-                            cpuMemoryInfo, const_cast<uint64_t*>(&val), sizeof(uint64_t), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    } else if constexpr (std::is_same_v<T, float>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<float>(
-                            cpuMemoryInfo, const_cast<float*>(&val), sizeof(float), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    } else if constexpr (std::is_same_v<T, double>) {
-                        scalarTensors.push_back(Ort::Value::CreateTensor<double>(
-                            cpuMemoryInfo, const_cast<double*>(&val), sizeof(double), shape, 1));
-                        inputValuePtrs.push_back(&scalarTensors.back());
-                        inputNames.push_back(argInfo_[i].first.c_str());
-                    }
-                }
-            }, setArgs_[i].value());
+                },
+                setArgs_[i].value());
         }
     }
 
     // Get output names
-    std::vector<const char*> outputNames;
+    std::vector<const char *> outputNames;
     size_t outputCount = session_->GetOutputCount();
     outputNames.reserve(outputCount);
 
@@ -405,23 +409,21 @@ ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
     try {
         // Execute the session
         Ort::RunOptions runOptions{nullptr};
-        std::vector<Ort::Value> outputValues = session_->Run(
-            runOptions,
-            inputNames.data(),
-            (const Ort::Value*)inputValuePtrs.data(),
-            inputValuePtrs.size(),
-            outputNames.data(),
-            outputCount
-        );
+        std::vector<Ort::Value> outputValues = session_->Run(runOptions,
+                                                             inputNames.data(),
+                                                             (const Ort::Value *)inputValuePtrs.data(),
+                                                             inputValuePtrs.size(),
+                                                             outputNames.data(),
+                                                             outputCount);
 
         // Execution successful
         result.status = 0;
 
-    } catch (const Ort::Exception& e) {
+    } catch (const Ort::Exception &e) {
         result.status = 1;
         result.errorMessage = "ONNX Runtime error: " + std::string(e.what());
         return result;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         result.status = 1;
         result.errorMessage = "Error: " + std::string(e.what());
         return result;
@@ -435,21 +437,25 @@ ExecutionResult OnnxKernelHandle::execute(const ExecutionOptions& options) {
     return result;
 }
 
-void OnnxKernelHandle::reset() {
+void OnnxKernelHandle::reset()
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::fill(setArgs_.begin(), setArgs_.end(), std::optional<KernelArgument>{});
 }
 
-size_t OnnxKernelHandle::numArguments() const {
+size_t OnnxKernelHandle::numArguments() const
+{
     // Return session input count
     return session_->GetInputCount();
 }
 
-bool OnnxKernelHandle::isReady() const {
+bool OnnxKernelHandle::isReady() const
+{
     return validateArguments();
 }
 
-bool OnnxKernelHandle::isArgumentSet(size_t index) const {
+bool OnnxKernelHandle::isArgumentSet(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= setArgs_.size()) {
         return false;
@@ -457,7 +463,8 @@ bool OnnxKernelHandle::isArgumentSet(size_t index) const {
     return setArgs_[index].has_value();
 }
 
-std::pair<std::string, std::string> OnnxKernelHandle::getArgumentInfo(size_t index) const {
+std::pair<std::string, std::string> OnnxKernelHandle::getArgumentInfo(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= argInfo_.size()) {
         return {"", ""};
@@ -465,11 +472,12 @@ std::pair<std::string, std::string> OnnxKernelHandle::getArgumentInfo(size_t ind
     return argInfo_[index];
 }
 
-std::vector<std::string> OnnxKernelHandle::getArgumentNames() const {
+std::vector<std::string> OnnxKernelHandle::getArgumentNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> names;
     names.reserve(argInfo_.size());
-    for (const auto& info : argInfo_) {
+    for (const auto &info : argInfo_) {
         names.push_back(info.first);
     }
     return names;
@@ -479,20 +487,24 @@ std::vector<std::string> OnnxKernelHandle::getArgumentNames() const {
 // OnnxBufferManager Implementation
 //==============================================================================
 
-OnnxBufferManager::OnnxBufferManager(const Ort::MemoryInfo& /*memoryInfo*/, size_t maxPoolSize)
-    : memoryInfo_(nullptr)  // Will create when needed
-    , maxPoolSize_(maxPoolSize)
-    , totalMemoryInUse_(0)
-    , activeCount_(0) {
+OnnxBufferManager::OnnxBufferManager(const Ort::MemoryInfo & /*memoryInfo*/, size_t maxPoolSize)
+    : memoryInfo_(nullptr) // Will create when needed
+      ,
+      maxPoolSize_(maxPoolSize),
+      totalMemoryInUse_(0),
+      activeCount_(0)
+{
     // MemoryInfo is created on-demand since it cannot be copied
     // We use the default CPU memory info
 }
 
-OnnxBufferManager::~OnnxBufferManager() {
+OnnxBufferManager::~OnnxBufferManager()
+{
     clear();
 }
 
-std::shared_ptr<IBuffer> OnnxBufferManager::allocate(size_t size) {
+std::shared_ptr<IBuffer> OnnxBufferManager::allocate(size_t size)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     if (size == 0) {
@@ -513,10 +525,8 @@ std::shared_ptr<IBuffer> OnnxBufferManager::allocate(size_t size) {
 
     // Allocate new buffer - OnnxBuffer constructor that takes MemoryInfo
     // properly owns its memory via unique_ptr<char[]>
-    auto buffer = std::make_shared<OnnxBuffer>(
-        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault),
-        alignedSize
-    );
+    auto buffer =
+        std::make_shared<OnnxBuffer>(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault), alignedSize);
 
     totalMemoryInUse_ += size;
     activeCount_++;
@@ -524,14 +534,16 @@ std::shared_ptr<IBuffer> OnnxBufferManager::allocate(size_t size) {
     return buffer;
 }
 
-void OnnxBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
-    if (!buffer) return;
+void OnnxBufferManager::deallocate(std::shared_ptr<IBuffer> buffer)
+{
+    if (!buffer)
+        return;
 
     std::lock_guard<std::mutex> lock(poolMutex_);
 
-    auto* onnxBuffer = dynamic_cast<OnnxBuffer*>(buffer.get());
+    auto *onnxBuffer = dynamic_cast<OnnxBuffer *>(buffer.get());
     if (!onnxBuffer || !onnxBuffer->isValid()) {
-        return;  // Invalid or already freed
+        return; // Invalid or already freed
     }
 
     size_t size = onnxBuffer->size();
@@ -548,51 +560,58 @@ void OnnxBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
     activeCount_--;
 }
 
-std::map<size_t, size_t> OnnxBufferManager::getPoolStats() const {
+std::map<size_t, size_t> OnnxBufferManager::getPoolStats() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     std::map<size_t, size_t> stats;
-    for (const auto& [size, entries] : pool_) {
+    for (const auto &[size, entries] : pool_) {
         stats[size] = entries.size();
     }
     return stats;
 }
 
-void OnnxBufferManager::clear() {
+void OnnxBufferManager::clear()
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     pool_.clear();
     totalMemoryInUse_ = 0;
     activeCount_ = 0;
 }
 
-size_t OnnxBufferManager::totalMemoryInUse() const {
+size_t OnnxBufferManager::totalMemoryInUse() const
+{
     return totalMemoryInUse_.load();
 }
 
-size_t OnnxBufferManager::activeBufferCount() const {
+size_t OnnxBufferManager::activeBufferCount() const
+{
     return activeCount_.load();
 }
 
-size_t OnnxBufferManager::pooledBufferCount() const {
+size_t OnnxBufferManager::pooledBufferCount() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     size_t count = 0;
-    for (const auto& [_, entries] : pool_) {
+    for (const auto &[_, entries] : pool_) {
         count += entries.size();
     }
     return count;
 }
 
-void OnnxBufferManager::setMaxPoolSize(size_t max_bytes) {
+void OnnxBufferManager::setMaxPoolSize(size_t max_bytes)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     maxPoolSize_ = max_bytes;
 
     // If new limit is lower than current usage, drain pool
     while (totalMemoryInUse_ > maxPoolSize_) {
         size_t largestSize = 0;
-        for (const auto& entry : pool_) {
+        for (const auto &entry : pool_) {
             largestSize = std::max(largestSize, entry.first);
         }
-        if (largestSize == 0) break;
+        if (largestSize == 0)
+            break;
 
         auto it = pool_.find(largestSize);
         if (!it->second.empty()) {
@@ -602,8 +621,9 @@ void OnnxBufferManager::setMaxPoolSize(size_t max_bytes) {
     }
 }
 
-size_t OnnxBufferManager::roundToBucket(size_t size) {
-    constexpr size_t bucketSize = 4096;  // 4KB buckets
+size_t OnnxBufferManager::roundToBucket(size_t size)
+{
+    constexpr size_t bucketSize = 4096; // 4KB buckets
     return ((size + bucketSize - 1) / bucketSize) * bucketSize;
 }
 
@@ -612,21 +632,19 @@ size_t OnnxBufferManager::roundToBucket(size_t size) {
 //==============================================================================
 
 OnnxRuntimeGenAiWrapper::OnnxRuntimeGenAiWrapper(int /*deviceId*/)
-    : env_()
-    , sessionOptions_()
-    , memoryInfo_()
-    , bufferManager_()
-    , loadedModels_()
-    , initialized_(false) {
+    : env_(), sessionOptions_(), memoryInfo_(), bufferManager_(), loadedModels_(), initialized_(false)
+{
 
     initializeSessionOptions();
 }
 
-OnnxRuntimeGenAiWrapper::~OnnxRuntimeGenAiWrapper() {
+OnnxRuntimeGenAiWrapper::~OnnxRuntimeGenAiWrapper()
+{
     unload();
 }
 
-void OnnxRuntimeGenAiWrapper::initializeSessionOptions() {
+void OnnxRuntimeGenAiWrapper::initializeSessionOptions()
+{
     // Initialize ONNX Runtime environment with warning-level logging
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "IRON");
 
@@ -635,8 +653,8 @@ void OnnxRuntimeGenAiWrapper::initializeSessionOptions() {
 
     // Add DirectML Execution Provider for NPU acceleration
     // Get the DirectML API from ONNX Runtime
-    const OrtDmlApi* dmlApi = nullptr;
-    Ort::GetApi().GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dmlApi));
+    const OrtDmlApi *dmlApi = nullptr;
+    Ort::GetApi().GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void **>(&dmlApi));
 
     if (dmlApi) {
         // Use DirectML API to add execution provider
@@ -649,9 +667,7 @@ void OnnxRuntimeGenAiWrapper::initializeSessionOptions() {
     sessionOptions_->SetInterOpNumThreads(1);
 
     // Memory info for CPU (host accessible buffers)
-    memoryInfo_ = std::make_unique<Ort::MemoryInfo>(
-        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
-    );
+    memoryInfo_ = std::make_unique<Ort::MemoryInfo>(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
     // Create buffer manager
     bufferManager_ = std::make_shared<OnnxBufferManager>(*memoryInfo_);
@@ -659,7 +675,8 @@ void OnnxRuntimeGenAiWrapper::initializeSessionOptions() {
     initialized_ = true;
 }
 
-bool OnnxRuntimeGenAiWrapper::loadXclbin(const std::string& path) {
+bool OnnxRuntimeGenAiWrapper::loadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (path.empty()) {
@@ -706,14 +723,15 @@ bool OnnxRuntimeGenAiWrapper::loadXclbin(const std::string& path) {
         loadedModels_.push_back(std::move(loaded));
         return true;
 
-    } catch (const Ort::Exception& e) {
+    } catch (const Ort::Exception &e) {
         throw XclbinError("Failed to load ONNX model: " + std::string(e.what()));
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         throw XclbinError("Failed to load ONNX model: " + std::string(e.what()));
     }
 }
 
-bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void* data, size_t size) {
+bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void *data, size_t size)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!data || size == 0) {
@@ -726,12 +744,7 @@ bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void* data, size_t size
 
     try {
         // Load ONNX model from memory
-        auto session = std::make_shared<Ort::Session>(
-            *env_,
-            data,
-            size,
-            *sessionOptions_
-        );
+        auto session = std::make_shared<Ort::Session>(*env_, data, size, *sessionOptions_);
 
         // Get input/output names
         std::vector<std::string> inputNames;
@@ -762,20 +775,19 @@ bool OnnxRuntimeGenAiWrapper::loadXclbinFromMemory(const void* data, size_t size
         loadedModels_.push_back(std::move(loaded));
         return true;
 
-    } catch (const Ort::Exception& e) {
+    } catch (const Ort::Exception &e) {
         throw XclbinError("Failed to load ONNX model from memory: " + std::string(e.what()));
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         throw XclbinError("Failed to load ONNX model from memory: " + std::string(e.what()));
     }
 }
 
-bool OnnxRuntimeGenAiWrapper::unloadXclbin(const std::string& path) {
+bool OnnxRuntimeGenAiWrapper::unloadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedModels_.begin(), loadedModels_.end(),
-        [&path](const LoadedModel& model) {
-            return model.path == path;
-        });
+    auto it = std::find_if(
+        loadedModels_.begin(), loadedModels_.end(), [&path](const LoadedModel &model) { return model.path == path; });
 
     if (it == loadedModels_.end()) {
         return false;
@@ -787,26 +799,26 @@ bool OnnxRuntimeGenAiWrapper::unloadXclbin(const std::string& path) {
     return true;
 }
 
-std::vector<std::string> OnnxRuntimeGenAiWrapper::getKernelNames() const {
+std::vector<std::string> OnnxRuntimeGenAiWrapper::getKernelNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<std::string> names;
-    for (const auto& model : loadedModels_) {
+    for (const auto &model : loadedModels_) {
         // In production: Use model name or derive from path
         names.push_back(model.path);
     }
     return names;
 }
 
-std::vector<std::string> OnnxRuntimeGenAiWrapper::getKernelsFromXclbin(
-    const std::string& xclbinPath) const {
+std::vector<std::string> OnnxRuntimeGenAiWrapper::getKernelsFromXclbin(const std::string &xclbinPath) const
+{
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedModels_.begin(), loadedModels_.end(),
-        [&xclbinPath](const LoadedModel& model) {
-            return model.path == xclbinPath;
-        });
+    auto it = std::find_if(loadedModels_.begin(), loadedModels_.end(), [&xclbinPath](const LoadedModel &model) {
+        return model.path == xclbinPath;
+    });
 
     if (it == loadedModels_.end()) {
         return {};
@@ -819,11 +831,12 @@ std::vector<std::string> OnnxRuntimeGenAiWrapper::getKernelsFromXclbin(
     return names;
 }
 
-bool OnnxRuntimeGenAiWrapper::hasKernel(const std::string& kernelName) const {
+bool OnnxRuntimeGenAiWrapper::hasKernel(const std::string &kernelName) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Check if any loaded model matches the kernel name
-    for (const auto& model : loadedModels_) {
+    for (const auto &model : loadedModels_) {
         if (model.path == kernelName) {
             return true;
         }
@@ -831,10 +844,10 @@ bool OnnxRuntimeGenAiWrapper::hasKernel(const std::string& kernelName) const {
     return false;
 }
 
-ExecutionResult OnnxRuntimeGenAiWrapper::execute(
-    const std::string& kernelName,
-    const std::vector<KernelArgument>& arguments,
-    const ExecutionOptions& options) {
+ExecutionResult OnnxRuntimeGenAiWrapper::execute(const std::string &kernelName,
+                                                 const std::vector<KernelArgument> &arguments,
+                                                 const ExecutionOptions &options)
+{
 
     auto kernel = getKernel(kernelName);
     if (!kernel) {
@@ -853,46 +866,49 @@ ExecutionResult OnnxRuntimeGenAiWrapper::execute(
     return kernel->execute(options);
 }
 
-std::shared_ptr<IKernelHandle> OnnxRuntimeGenAiWrapper::getKernel(const std::string& kernelName) {
+std::shared_ptr<IKernelHandle> OnnxRuntimeGenAiWrapper::getKernel(const std::string &kernelName)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Find model
-    auto* model = findModel(kernelName);
+    auto *model = findModel(kernelName);
     if (!model) {
         return nullptr;
     }
 
     // Create kernel handle from session
     // Use shared_ptr copy so the model can be reused
-    auto handle = std::make_shared<OnnxKernelHandle>(
-        model->session,  // Copy shared_ptr - model remains usable
-        kernelName
-    );
+    auto handle = std::make_shared<OnnxKernelHandle>(model->session, // Copy shared_ptr - model remains usable
+                                                     kernelName);
 
     return handle;
 }
 
-std::shared_ptr<IBuffer> OnnxRuntimeGenAiWrapper::allocateBuffer(size_t size, bool /*hostAccessible*/) {
+std::shared_ptr<IBuffer> OnnxRuntimeGenAiWrapper::allocateBuffer(size_t size, bool /*hostAccessible*/)
+{
     if (!bufferManager_) {
         throw BufferError("Runtime not initialized");
     }
     return bufferManager_->allocate(size);
 }
 
-std::shared_ptr<IBuffer> OnnxRuntimeGenAiWrapper::allocateBufferFromData(const void* data, size_t size) {
+std::shared_ptr<IBuffer> OnnxRuntimeGenAiWrapper::allocateBufferFromData(const void *data, size_t size)
+{
     auto buffer = allocateBuffer(size, true);
     buffer->write(data, size);
     return buffer;
 }
 
-std::shared_ptr<IBufferManager> OnnxRuntimeGenAiWrapper::getBufferManager() {
+std::shared_ptr<IBufferManager> OnnxRuntimeGenAiWrapper::getBufferManager()
+{
     return bufferManager_;
 }
 
-void OnnxRuntimeGenAiWrapper::unload() {
+void OnnxRuntimeGenAiWrapper::unload()
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (auto& model : loadedModels_) {
+    for (auto &model : loadedModels_) {
         model.session.reset();
     }
     loadedModels_.clear();
@@ -902,31 +918,37 @@ void OnnxRuntimeGenAiWrapper::unload() {
     }
 }
 
-bool OnnxRuntimeGenAiWrapper::isLoaded() const {
+bool OnnxRuntimeGenAiWrapper::isLoaded() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     return !loadedModels_.empty();
 }
 
-std::string OnnxRuntimeGenAiWrapper::getPlatformName() const {
+std::string OnnxRuntimeGenAiWrapper::getPlatformName() const
+{
     return "ONNX";
 }
 
-std::string OnnxRuntimeGenAiWrapper::getVersion() const {
+std::string OnnxRuntimeGenAiWrapper::getVersion() const
+{
     return "1.0.0";
 }
 
-std::string OnnxRuntimeGenAiWrapper::getPlatformVersion() const {
+std::string OnnxRuntimeGenAiWrapper::getPlatformVersion() const
+{
     // In production: Return ONNX Runtime version
     // return Ort::GetVersionString();
-    return "0.11.2";  // Stub: Known available version
+    return "0.11.2"; // Stub: Known available version
 }
 
-std::string OnnxRuntimeGenAiWrapper::getDeviceInfo() const {
+std::string OnnxRuntimeGenAiWrapper::getDeviceInfo() const
+{
     return R"({"platform": "ONNX Runtime GenAI", "execution_provider": "DirectML"})";
 }
 
-OnnxRuntimeGenAiWrapper::LoadedModel* OnnxRuntimeGenAiWrapper::findModel(const std::string& path) {
-    for (auto& model : loadedModels_) {
+OnnxRuntimeGenAiWrapper::LoadedModel *OnnxRuntimeGenAiWrapper::findModel(const std::string &path)
+{
+    for (auto &model : loadedModels_) {
         if (model.path == path) {
             return &model;
         }

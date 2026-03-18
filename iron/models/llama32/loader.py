@@ -37,7 +37,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
-    before_sleep_log
+    before_sleep_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,9 +156,7 @@ class WeightLoader:
     RETRY_MAX_WAIT = 10  # seconds
 
     def __init__(
-        self,
-        cache_dir: Optional[str] = None,
-        memory_budget: Optional[Any] = None
+        self, cache_dir: Optional[str] = None, memory_budget: Optional[Any] = None
     ):
         """Initialize weight loader.
 
@@ -188,20 +186,16 @@ class WeightLoader:
 
     @retry(
         stop=stop_after_attempt(MAX_DOWNLOAD_ATTEMPTS),
-        wait=wait_exponential(
-            multiplier=1,
-            min=RETRY_MIN_WAIT,
-            max=RETRY_MAX_WAIT
-        ),
+        wait=wait_exponential(multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
         retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING)
+        before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def download_model(
         self,
         model_id: Optional[str] = None,
         variant: str = "1B",
         force_download: bool = False,
-        local_files_only: bool = False
+        local_files_only: bool = False,
     ) -> Path:
         """Download model weights from HuggingFace Hub.
 
@@ -251,13 +245,11 @@ class WeightLoader:
                 cache_dir=str(self.cache_dir) if self.cache_dir else None,
                 force_download=force_download,
                 local_files_only=local_files_only,
-                allow_patterns=["*.safetensors", "config.json"]
+                allow_patterns=["*.safetensors", "config.json"],
             )
 
             elapsed = time.time() - start_time
-            logger.info(
-                f"Downloaded {model_id} to {model_path} ({elapsed:.1f}s)"
-            )
+            logger.info(f"Downloaded {model_id} to {model_path} ({elapsed:.1f}s)")
 
             return Path(model_path)
 
@@ -293,7 +285,9 @@ class WeightLoader:
                     if snapshot_path.is_dir():
                         complete_flag = snapshot_path / ".commit_*.complete"
                         if not any(complete_flag.glob("*")):
-                            logger.debug(f"Removing incomplete snapshot: {snapshot_path}")
+                            logger.debug(
+                                f"Removing incomplete snapshot: {snapshot_path}"
+                            )
                             try:
                                 shutil.rmtree(snapshot_path)
                             except OSError as e:
@@ -394,6 +388,7 @@ class WeightLoader:
             # Count tensors
             try:
                 from safetensors import safe_open
+
                 with safe_open(file_path, framework="numpy") as f:
                     file_num_tensors = len(f.keys())
                     num_tensors += file_num_tensors
@@ -427,11 +422,7 @@ class WeightLoader:
 
         return weight_info
 
-    def _calculate_checksum(
-        self,
-        file_path: Path,
-        chunk_size: int = 8192
-    ) -> str:
+    def _calculate_checksum(self, file_path: Path, chunk_size: int = 8192) -> str:
         """Calculate SHA256 checksum of file.
 
         Reads the file in chunks to handle large files efficiently.
@@ -459,7 +450,7 @@ class WeightLoader:
         self,
         weight_info: WeightInfo,
         required_kv: int = 0,
-        required_activations: int = 0
+        required_activations: int = 0,
     ) -> bool:
         """Validate weight loading fits within memory budget.
 
@@ -491,18 +482,22 @@ class WeightLoader:
             result = self.memory_budget.validateModelLoad(
                 requiredWeights=weight_info.total_tensor_size,
                 requiredKV=required_kv,
-                requiredActivations=required_activations
+                requiredActivations=required_activations,
             )
 
             # Handle both Python object result and C++ result
-            success = result.success if hasattr(result, 'success') else result.get('success', True)
+            success = (
+                result.success
+                if hasattr(result, "success")
+                else result.get("success", True)
+            )
 
             if not success:
                 error_msg = ""
-                if hasattr(result, 'errorMessage'):
+                if hasattr(result, "errorMessage"):
                     error_msg = result.errorMessage
                 elif isinstance(result, dict):
-                    error_msg = result.get('errorMessage', 'Memory validation failed')
+                    error_msg = result.get("errorMessage", "Memory validation failed")
 
                 raise MemoryError(
                     f"Weight loading would exceed memory budget: "
@@ -522,10 +517,7 @@ class WeightLoader:
             return True
 
     def check_disk_space(
-        self,
-        model_path: Path,
-        required_bytes: int,
-        safety_margin: float = 0.1
+        self, model_path: Path, required_bytes: int, safety_margin: float = 0.1
     ) -> bool:
         """Check if sufficient disk space is available.
 
@@ -578,11 +570,7 @@ class WeightLoader:
     # Loading Methods
     # =========================================================================
 
-    def load_weights(
-        self,
-        model_path: Path,
-        device: str = "cpu"
-    ) -> Dict[str, Any]:
+    def load_weights(self, model_path: Path, device: str = "cpu") -> Dict[str, Any]:
         """Load weights into memory.
 
         Loads all weight tensors from safetensors files into memory.
@@ -635,10 +623,7 @@ class WeightLoader:
 
         return weights
 
-    def load_weights_mmap(
-        self,
-        model_path: Path
-    ) -> Dict[str, Any]:
+    def load_weights_mmap(self, model_path: Path) -> Dict[str, Any]:
         """Load weights using memory mapping.
 
         Loads weight tensors using memory mapping, which allows
@@ -698,9 +683,7 @@ class WeightLoader:
         return weights
 
     def load_specific_weights(
-        self,
-        model_path: Path,
-        weight_names: List[str]
+        self, model_path: Path, weight_names: List[str]
     ) -> Dict[str, Any]:
         """Load only specified weights.
 
@@ -748,9 +731,7 @@ class WeightLoader:
     # =========================================================================
 
     def download_and_validate(
-        self,
-        model_id: Optional[str] = None,
-        check_memory: bool = True
+        self, model_id: Optional[str] = None, check_memory: bool = True
     ) -> Tuple[Path, WeightInfo]:
         """Download and validate model weights.
 

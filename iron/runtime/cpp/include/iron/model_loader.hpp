@@ -30,20 +30,22 @@
 
 #pragma once
 
-#include <string>
-#include <queue>
-#include <map>
-#include <mutex>
-#include <condition_variable>
-#include <memory>
 #include <atomic>
-#include <vector>
-#include <thread>
-#include <functional>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 // Forward declaration
 class MemoryBudget;
@@ -55,24 +57,26 @@ class MemoryBudget;
  * and memory issues. Uses a worker thread to process load requests
  * from a FIFO queue.
  */
-class ThreadSafeModelLoader {
-public:
+class ThreadSafeModelLoader
+{
+  public:
     /**
      * @brief Loaded model information
      */
     struct LoadedModel {
-        std::string path;                          ///< Model path
-        std::shared_ptr<void> session;             ///< Type-erased session
-        size_t memoryUsage = 0;                    ///< Memory used by model
-        std::atomic<int> referenceCount{1};        ///< Reference count
-        bool isLoading = false;                    ///< Currently loading
-        std::string errorMessage;                  ///< Error if load failed
+        std::string path;                   ///< Model path
+        std::shared_ptr<void> session;      ///< Type-erased session
+        size_t memoryUsage = 0;             ///< Memory used by model
+        std::atomic<int> referenceCount{1}; ///< Reference count
+        bool isLoading = false;             ///< Currently loading
+        std::string errorMessage;           ///< Error if load failed
 
         /**
          * @brief Check if model is ready for use
          * @return true if session is valid and not loading
          */
-        bool isReady() const {
+        bool isReady() const
+        {
             return session != nullptr && !isLoading && errorMessage.empty();
         }
     };
@@ -81,17 +85,18 @@ public:
      * @brief Load result
      */
     struct LoadResult {
-        bool success;                              ///< Load succeeded
-        std::shared_ptr<LoadedModel> model;        ///< Loaded model
-        std::string errorMessage;                  ///< Error message if failed
-        bool wasCached;                            ///< True if model was already loaded
+        bool success;                       ///< Load succeeded
+        std::shared_ptr<LoadedModel> model; ///< Loaded model
+        std::string errorMessage;           ///< Error message if failed
+        bool wasCached;                     ///< True if model was already loaded
 
         /**
          * @brief Get model or throw exception
          * @return Shared pointer to loaded model
          * @throws std::runtime_error if load failed
          */
-        std::shared_ptr<LoadedModel> getOrThrow() const {
+        std::shared_ptr<LoadedModel> getOrThrow() const
+        {
             if (!success) {
                 throw std::runtime_error(errorMessage);
             }
@@ -105,16 +110,15 @@ public:
      * The callback is responsible for actually loading the model
      * (e.g., using ONNX Runtime, xDNA, or other backend).
      */
-    using LoadCallback = std::function<std::shared_ptr<LoadedModel>(const std::string&)>;
+    using LoadCallback = std::function<std::shared_ptr<LoadedModel>(const std::string &)>;
 
     /**
      * @brief Construct model loader
      * @param memoryBudget Memory budget for validation (optional)
      * @param loadCallback Callback to perform actual loading
      */
-    explicit ThreadSafeModelLoader(
-        std::shared_ptr<MemoryBudget> memoryBudget = nullptr,
-        LoadCallback loadCallback = nullptr);
+    explicit ThreadSafeModelLoader(std::shared_ptr<MemoryBudget> memoryBudget = nullptr,
+                                   LoadCallback loadCallback = nullptr);
 
     /**
      * @brief Destructor - stops worker thread and cleans up
@@ -122,8 +126,8 @@ public:
     ~ThreadSafeModelLoader();
 
     // Prevent copying
-    ThreadSafeModelLoader(const ThreadSafeModelLoader&) = delete;
-    ThreadSafeModelLoader& operator=(const ThreadSafeModelLoader&) = delete;
+    ThreadSafeModelLoader(const ThreadSafeModelLoader &) = delete;
+    ThreadSafeModelLoader &operator=(const ThreadSafeModelLoader &) = delete;
 
     //==========================================================================
     // Model Loading
@@ -139,28 +143,28 @@ public:
      * @param path Path to model
      * @return LoadResult with model or error
      */
-    LoadResult load(const std::string& path);
+    LoadResult load(const std::string &path);
 
     /**
      * @brief Get loaded model
      * @param path Path to model
      * @return Loaded model or nullptr if not loaded/ready
      */
-    std::shared_ptr<LoadedModel> getLoadedModel(const std::string& path) const;
+    std::shared_ptr<LoadedModel> getLoadedModel(const std::string &path) const;
 
     /**
      * @brief Check if model is loaded and ready
      * @param path Path to model
      * @return true if model is loaded and ready
      */
-    bool isLoaded(const std::string& path) const;
+    bool isLoaded(const std::string &path) const;
 
     /**
      * @brief Unload model
      * @param path Path to model
      * @return true if unloaded successfully
      */
-    bool unload(const std::string& path);
+    bool unload(const std::string &path);
 
     /**
      * @brief Get all loaded model paths
@@ -176,20 +180,20 @@ public:
      * @brief Increment reference count
      * @param path Path to model
      */
-    void incrementReference(const std::string& path);
+    void incrementReference(const std::string &path);
 
     /**
      * @brief Decrement reference count and unload if zero
      * @param path Path to model
      */
-    void decrementReference(const std::string& path);
+    void decrementReference(const std::string &path);
 
     /**
      * @brief Get reference count
      * @param path Path to model
      * @return Reference count or 0 if not loaded
      */
-    int getReferenceCount(const std::string& path) const;
+    int getReferenceCount(const std::string &path) const;
 
     //==========================================================================
     // Status Queries
@@ -205,9 +209,12 @@ public:
      * @brief Check if loader is processing a request
      * @return true if currently processing
      */
-    bool isProcessing() const { return processing_.load(std::memory_order_relaxed); }
+    bool isProcessing() const
+    {
+        return processing_.load(std::memory_order_relaxed);
+    }
 
-private:
+  private:
     std::shared_ptr<MemoryBudget> memoryBudget_;
     LoadCallback loadCallback_;
 
@@ -228,8 +235,8 @@ private:
     void startWorker();
     void stopWorker();
     void processQueue();
-    LoadResult loadInternal(const std::string& path);
-    LoadResult waitForLoading(const std::string& path);
+    LoadResult loadInternal(const std::string &path);
+    LoadResult waitForLoading(const std::string &path);
 };
 
 } // namespace runtime

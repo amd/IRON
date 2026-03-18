@@ -108,7 +108,9 @@ class AttentionLayerBuilder:
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads or config.num_attention_heads
-        self.head_dim = config.head_dim or (config.hidden_size // config.num_attention_heads)
+        self.head_dim = config.head_dim or (
+            config.hidden_size // config.num_attention_heads
+        )
 
         # Operators (created during build)
         self.q_proj = None
@@ -504,6 +506,7 @@ class FeedForwardBuilder:
 
         # GELU activation
         from iron.operators import AIEGELU
+
         self.gelu = AIEGELU(
             size=total_tokens * self.intermediate_size,
             context=self.context,

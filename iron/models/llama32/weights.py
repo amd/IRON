@@ -85,11 +85,20 @@ class TransformerWeights:
             >>> layer_weights = TransformerWeights(...)
             >>> print(f"Layer has {layer_weights.total_params} params")
         """
-        return sum(w.size for w in [
-            self.wq, self.wk, self.wv, self.wo,
-            self.w1, self.w2, self.w3,
-            self.attn_norm, self.ffn_norm
-        ])
+        return sum(
+            w.size
+            for w in [
+                self.wq,
+                self.wk,
+                self.wv,
+                self.wo,
+                self.w1,
+                self.w2,
+                self.w3,
+                self.attn_norm,
+                self.ffn_norm,
+            ]
+        )
 
     @property
     def memory_bytes(self) -> int:
@@ -101,11 +110,20 @@ class TransformerWeights:
         Example:
             >>> print(f"Layer uses {layer_weights.memory_bytes / 1e6:.1f}MB")
         """
-        return sum(w.size * w.itemsize for w in [
-            self.wq, self.wk, self.wv, self.wo,
-            self.w1, self.w2, self.w3,
-            self.attn_norm, self.ffn_norm
-        ])
+        return sum(
+            w.size * w.itemsize
+            for w in [
+                self.wq,
+                self.wk,
+                self.wv,
+                self.wo,
+                self.w1,
+                self.w2,
+                self.w3,
+                self.attn_norm,
+                self.ffn_norm,
+            ]
+        )
 
     def get_attention_weights(self) -> Dict[str, WeightTensor]:
         """Get all attention-related weights.
@@ -232,8 +250,7 @@ class LlamaWeights:
         embedding_bytes = self.token_embd.size * self.token_embd.itemsize
         norm_bytes = self.output_norm.size * self.output_norm.itemsize
         output_bytes = (
-            self.output.size * self.output.itemsize
-            if self.output is not None else 0
+            self.output.size * self.output.itemsize if self.output is not None else 0
         )
 
         return embedding_bytes + layer_bytes + norm_bytes + output_bytes
@@ -307,17 +324,19 @@ class LlamaWeights:
         names = ["token_embd"]
 
         for i, layer in enumerate(self.layers):
-            names.extend([
-                f"layers.{i}.wq",
-                f"layers.{i}.wk",
-                f"layers.{i}.wv",
-                f"layers.{i}.wo",
-                f"layers.{i}.w1",
-                f"layers.{i}.w2",
-                f"layers.{i}.w3",
-                f"layers.{i}.attn_norm",
-                f"layers.{i}.ffn_norm",
-            ])
+            names.extend(
+                [
+                    f"layers.{i}.wq",
+                    f"layers.{i}.wk",
+                    f"layers.{i}.wv",
+                    f"layers.{i}.wo",
+                    f"layers.{i}.w1",
+                    f"layers.{i}.w2",
+                    f"layers.{i}.w3",
+                    f"layers.{i}.attn_norm",
+                    f"layers.{i}.ffn_norm",
+                ]
+            )
 
         names.append("output_norm")
 
@@ -328,9 +347,7 @@ class LlamaWeights:
 
     @classmethod
     def from_raw_weights(
-        cls,
-        raw_weights: Dict[str, WeightTensor],
-        config: Any
+        cls, raw_weights: Dict[str, WeightTensor], config: Any
     ) -> "LlamaWeights":
         """Construct LlamaWeights from raw weight dictionary.
 
@@ -403,11 +420,7 @@ class LlamaWeights:
         )
 
     @classmethod
-    def from_safetensors(
-        cls,
-        model_path: Path,
-        config: Any
-    ) -> "LlamaWeights":
+    def from_safetensors(cls, model_path: Path, config: Any) -> "LlamaWeights":
         """Load weights from safetensors files.
 
         This method loads all safetensors files from a model directory
@@ -442,11 +455,11 @@ class LlamaWeights:
         safetensors_files = sorted(model_path.glob("*.safetensors"))
 
         if not safetensors_files:
-            raise FileNotFoundError(
-                f"No safetensors files found in {model_path}"
-            )
+            raise FileNotFoundError(f"No safetensors files found in {model_path}")
 
-        logger.info(f"Loading weights from {len(safetensors_files)} safetensors file(s)...")
+        logger.info(
+            f"Loading weights from {len(safetensors_files)} safetensors file(s)..."
+        )
 
         # Collect all weights from all files
         raw_weights: Dict[str, WeightTensor] = {}

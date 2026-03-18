@@ -66,8 +66,12 @@ class AIEReduction(AIEOperatorBase):
             num_aie_columns = 4  # Default to 4 columns
 
         # Validate reduction_op
-        assert reduction_op in ["sum", "mean", "max", "min"], \
-            f"Unknown reduction op: {reduction_op}"
+        assert reduction_op in [
+            "sum",
+            "mean",
+            "max",
+            "min",
+        ], f"Unknown reduction op: {reduction_op}"
 
         # Mean is only supported on AIE2P
         self.supports_mean = True  # Will be checked at runtime
@@ -100,7 +104,9 @@ class AIEReduction(AIEOperatorBase):
         )
 
         # Determine which kernel archive to use based on device
-        kernel_dir = "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        kernel_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
 
         mlir_artifact = PythonGeneratedMLIRArtifact.new(
             f"{file_name_base}.mlir",
@@ -126,7 +132,10 @@ class AIEReduction(AIEOperatorBase):
                     extra_flags=[],
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / kernel_dir / "reduction.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / kernel_dir
+                            / "reduction.cc"
                         )
                     ],
                 ),
@@ -205,7 +214,9 @@ class AIEReduction(AIEOperatorBase):
         expected_output_shape = list(original_shape)
         expected_output_shape[dim] = 1  # Reduced dimension becomes 1
         # Then squeeze out the reduced dimension
-        expected_output_shape = [s for i, s in enumerate(expected_output_shape) if i != dim or s != 1]
+        expected_output_shape = [
+            s for i, s in enumerate(expected_output_shape) if i != dim or s != 1
+        ]
 
         # Actually compute output size
         total_elements = x.numel() // self.reduction_size
@@ -241,6 +252,8 @@ class AIEReduction(AIEOperatorBase):
         self.run_runlist()
 
         # Read result
-        result = self.read_buffer_as_torch("output", shape=(self.output_size,), dtype=bfloat16)
+        result = self.read_buffer_as_torch(
+            "output", shape=(self.output_size,), dtype=bfloat16
+        )
 
         return result

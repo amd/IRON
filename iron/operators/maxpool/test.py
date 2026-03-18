@@ -61,10 +61,7 @@ all_params = [
     "kernel_size,stride,padding,batch,in_h,in_w",
     all_params,
 )
-def test_maxpool2d(
-    kernel_size, stride, padding, batch, in_h, in_w,
-    aie_context
-):
+def test_maxpool2d(kernel_size, stride, padding, batch, in_h, in_w, aie_context):
     """Test maxpool2d operator against CPU reference."""
 
     # Generate golden reference
@@ -104,8 +101,7 @@ def test_maxpool2d(
     regular_params[:3],  # Test first few cases
 )
 def test_maxpool2d_forward(
-    kernel_size, stride, padding, batch, in_h, in_w,
-    aie_context
+    kernel_size, stride, padding, batch, in_h, in_w, aie_context
 ):
     """Test maxpool2d operator forward pass."""
 
@@ -135,8 +131,9 @@ def test_maxpool2d_forward(
     expected = golden_ref["output"]
 
     # Check shape
-    assert result.shape == expected.shape, \
-        f"Shape mismatch: got {result.shape}, expected {expected.shape}"
+    assert (
+        result.shape == expected.shape
+    ), f"Shape mismatch: got {result.shape}, expected {expected.shape}"
 
     # Check values with relaxed tolerance for AIE
     rel_tol = 0.05

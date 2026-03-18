@@ -245,7 +245,9 @@ if __name__ == "__main__":
     p.add_argument("-pw", "--pad-w", type=int, default=0, help="Padding width")
 
     # Number of columns
-    p.add_argument("-co", "--columns", type=int, default=4, help="Number of AIE columns")
+    p.add_argument(
+        "-co", "--columns", type=int, default=4, help="Number of AIE columns"
+    )
 
     # Tile size
     p.add_argument("-ts", "--tile-size", type=int, default=1024, help="Tile size")

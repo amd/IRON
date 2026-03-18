@@ -99,6 +99,7 @@ from .generate_master_doc import (
 
 # Convenience functions
 
+
 def scan_model(model_name: str, use_transformers: bool = True) -> TransformerModelInfo:
     """
     Scan a model using Transformers library (preferred) or AST.
@@ -148,14 +149,12 @@ __version__ = "0.1.0"
 __all__ = [
     # Version
     "__version__",
-
     # Transformers integration (PREFERRED)
     "TransformersScanner",
     "TransformerModelInfo",
     "scan_model_from_transformers",
     "get_architecture_summary",
     "ARCHITECTURE_MODULE_MAP",
-
     # AST scanning (fallback)
     "ArchitectureScanner",
     "ModelCodeAnalyzer",
@@ -166,7 +165,6 @@ __all__ = [
     "LayerCategory",
     "scan_model_architecture",
     "get_model_info_summary",
-
     # Capability registry
     "CapabilityRegistry",
     "OperatorCapability",
@@ -178,7 +176,6 @@ __all__ = [
     "register_custom_operator",
     "register_architecture_support",
     "analyze_model_support",
-
     # Gap analysis
     "GapAnalyzer",
     "GapItem",
@@ -190,7 +187,6 @@ __all__ = [
     "analyze_model",
     "is_model_supported",
     "scan_model",
-
     # Extensibility
     "CustomOperatorBase",
     "OperatorRegistry",
@@ -205,7 +201,6 @@ __all__ = [
     "invoke_extension_point",
     "quick_register_operator",
     "quick_register_architecture",
-
     # Operator specification
     "OperatorSpec",
     "OperatorSpecGenerator",
@@ -213,7 +208,6 @@ __all__ = [
     "HyperparameterSpec",
     "generate_operator_spec",
     "save_operator_spec",
-
     # Master document generator
     "generate_master_document",
     "generate_skeleton_code",

@@ -23,7 +23,8 @@
  * @param output - Output scalar (sum of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     bfloat16 acc = bfloat16(0.0f);
 
     for (int i = 0; i < reduction_size; i++) {
@@ -41,13 +42,14 @@ void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (sum of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size) {
-    constexpr int vec_factor = 32;  // AIE2P supports larger vectors
+void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
+    constexpr int vec_factor = 32; // AIE2P supports larger vectors
 
     event0();
 
-    bfloat16 * __restrict pIn = input;
-    bfloat16 * __restrict pOut = output;
+    bfloat16 *__restrict pIn = input;
+    bfloat16 *__restrict pOut = output;
 
     // Initialize accumulator vector
     aie::vector<bfloat16, vec_factor> acc_vec = aie::zeros<bfloat16, vec_factor>();
@@ -83,7 +85,8 @@ void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (max of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     bfloat16 max_val = input[0];
 
     for (int i = 1; i < reduction_size; i++) {
@@ -100,13 +103,14 @@ void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (max of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     constexpr int vec_factor = 32;
 
     event0();
 
-    bfloat16 * __restrict pIn = input;
-    bfloat16 * __restrict pOut = output;
+    bfloat16 *__restrict pIn = input;
+    bfloat16 *__restrict pOut = output;
 
     // Initialize with negative infinity for max
     bfloat16 max_val = bfloat16(-3.4e38f);
@@ -143,7 +147,8 @@ void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (min of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     bfloat16 min_val = input[0];
 
     for (int i = 1; i < reduction_size; i++) {
@@ -160,13 +165,14 @@ void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (min of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     constexpr int vec_factor = 32;
 
     event0();
 
-    bfloat16 * __restrict pIn = input;
-    bfloat16 * __restrict pOut = output;
+    bfloat16 *__restrict pIn = input;
+    bfloat16 *__restrict pOut = output;
 
     // Initialize with positive infinity for min
     bfloat16 min_val = bfloat16(3.4e38f);
@@ -204,13 +210,14 @@ void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
  * @param output - Output scalar (mean of all elements)
  * @param reduction_size - Size of the reduction dimension
  */
-void reduction_mean_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size) {
+void reduction_mean_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
+{
     constexpr int vec_factor = 32;
 
     event0();
 
-    bfloat16 * __restrict pIn = input;
-    bfloat16 * __restrict pOut = output;
+    bfloat16 *__restrict pIn = input;
+    bfloat16 *__restrict pOut = output;
 
     // Initialize accumulator vector
     aie::vector<bfloat16, vec_factor> acc_vec = aie::zeros<bfloat16, vec_factor>();

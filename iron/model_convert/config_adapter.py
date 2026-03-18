@@ -18,6 +18,7 @@ from enum import Enum
 
 class ModelArchitecture(Enum):
     """Supported model architectures"""
+
     LLAMA = "llama"
     MISTRAL = "mistral"
     PHI = "phi"
@@ -28,12 +29,14 @@ class ModelArchitecture(Enum):
 
 class NormType(Enum):
     """Normalization types"""
+
     RMS_NORM = "rms_norm"
     LAYER_NORM = "layer_norm"
 
 
 class FFNType(Enum):
     """Feed-forward network types"""
+
     SWIGLU = "swiglu"
     GEGEU = "geglu"
     MLP = "mlp"
@@ -42,6 +45,7 @@ class FFNType(Enum):
 
 class AttentionType(Enum):
     """Attention mechanism types"""
+
     MHA = "mha"  # Multi-head attention
     GQA = "gqa"  # Grouped query attention
     MQA = "mqa"  # Multi-query attention
@@ -55,6 +59,7 @@ class NormalizedConfig:
     This provides a consistent interface regardless of the original
     HuggingFace config format.
     """
+
     # Model identification
     architecture: ModelArchitecture = ModelArchitecture.UNKNOWN
     model_type: str = ""
@@ -167,9 +172,25 @@ class ConfigAdapter:
     VOCAB_SIZE_KEYS = ["vocab_size", "padded_vocab_size", "n_vocab"]
     NUM_LAYERS_KEYS = ["num_hidden_layers", "n_layers", "num_layers", "n_layer"]
     NUM_HEADS_KEYS = ["num_attention_heads", "n_heads", "num_heads", "n_head"]
-    NUM_KV_HEADS_KEYS = ["num_key_value_heads", "n_kv_heads", "num_kv_heads", "num_kv_groups"]
-    INTERMEDIATE_SIZE_KEYS = ["intermediate_size", "ffn_hidden_size", "n_inner", "hidden_dim"]
-    NORM_EPS_KEYS = ["rms_norm_eps", "layer_norm_eps", "norm_eps", "layernorm_epsilon", "layer_norm_epsilon"]
+    NUM_KV_HEADS_KEYS = [
+        "num_key_value_heads",
+        "n_kv_heads",
+        "num_kv_heads",
+        "num_kv_groups",
+    ]
+    INTERMEDIATE_SIZE_KEYS = [
+        "intermediate_size",
+        "ffn_hidden_size",
+        "n_inner",
+        "hidden_dim",
+    ]
+    NORM_EPS_KEYS = [
+        "rms_norm_eps",
+        "layer_norm_eps",
+        "norm_eps",
+        "layernorm_epsilon",
+        "layer_norm_epsilon",
+    ]
     ROPE_THETA_KEYS = ["rope_theta", "rotary_emb_base", "rope_base", "theta"]
     MAX_POS_KEYS = ["max_position_embeddings", "n_ctx", "max_seq_len", "context_length"]
 
@@ -239,7 +260,9 @@ class ConfigAdapter:
             return NormType.RMS_NORM
 
         # Check for LayerNorm indicators
-        if any(key in self.raw_config for key in ["layer_norm_eps", "layernorm_epsilon"]):
+        if any(
+            key in self.raw_config for key in ["layer_norm_eps", "layernorm_epsilon"]
+        ):
             return NormType.LAYER_NORM
 
         # Architecture-based defaults
@@ -320,7 +343,9 @@ class ConfigAdapter:
             norm_type=self._detect_norm_type(),
             norm_eps=self._get_value(self.NORM_EPS_KEYS, 1e-6),
             norm_bias=False,
-            tie_word_embeddings=self._get_value(["tie_word_embeddings", "tie_embeddings"], False),
+            tie_word_embeddings=self._get_value(
+                ["tie_word_embeddings", "tie_embeddings"], False
+            ),
             use_cache=True,
             original_config=self.raw_config.copy(),
         )
@@ -349,7 +374,6 @@ class ConfigAdapter:
             "context_length": normalized.max_position_embeddings,
             "rope_base": normalized.rope_theta,
             "dtype": "bfloat16",
-
             # Default NPU operator settings (all disabled by default)
             "use_aie_rope": False,
             "use_aie_attn_projection_gemm": False,
@@ -362,7 +386,6 @@ class ConfigAdapter:
             "use_aie_norm2": False,
             "use_aie_final_norm": False,
             "use_aie_final_gemm": False,
-
             # Apply NPU overrides
             **npu_overrides,
         }
@@ -388,7 +411,9 @@ def load_hf_config(config_path: Union[str, Path, Dict]) -> NormalizedConfig:
     return adapter.normalize()
 
 
-def get_iron_ready_config(config_path: Union[str, Path, Dict], **kwargs) -> Dict[str, Any]:
+def get_iron_ready_config(
+    config_path: Union[str, Path, Dict], **kwargs
+) -> Dict[str, Any]:
     """
     Convenience function to get an IRON-ready configuration.
 

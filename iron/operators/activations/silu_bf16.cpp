@@ -17,20 +17,25 @@
  */
 
 #include "silu_bf16.hpp"
+
 #include "types.hpp"
+
 #include <cmath>
 #include <cstring>
 
-namespace iron {
-namespace operators {
-namespace activations {
+namespace iron
+{
+namespace operators
+{
+namespace activations
+{
 
 //==============================================================================
 // silu_fwd Implementation
 //==============================================================================
 
-template<typename T>
-void silu_fwd(const T* input, T* output, int num_elements) {
+template <typename T> void silu_fwd(const T *input, T *output, int num_elements)
+{
     // Constants for sigmoid approximation using tanh
     constexpr float kHalf = 0.5f;
     constexpr float kOne = 1.0f;
@@ -52,14 +57,14 @@ void silu_fwd(const T* input, T* output, int num_elements) {
 }
 
 // Explicit template instantiation for bfloat16
-template void silu_fwd<bfloat16>(const bfloat16*, bfloat16*, int);
+template void silu_fwd<bfloat16>(const bfloat16 *, bfloat16 *, int);
 
 //==============================================================================
 // silu_inplace Implementation
 //==============================================================================
 
-template<typename T>
-void silu_inplace(T* input_output, int num_elements) {
+template <typename T> void silu_inplace(T *input_output, int num_elements)
+{
     // Separate implementation to avoid potential aliasing issues
     // when the same pointer is passed as both input and output
     constexpr float kHalf = 0.5f;
@@ -82,14 +87,14 @@ void silu_inplace(T* input_output, int num_elements) {
 }
 
 // Explicit template instantiation for bfloat16
-template void silu_inplace<bfloat16>(bfloat16*, int);
+template void silu_inplace<bfloat16>(bfloat16 *, int);
 
 //==============================================================================
 // silu_gate Implementation (for SwiGLU)
 //==============================================================================
 
-template<typename T>
-void silu_gate(const T* input, const T* gate, T* output, int num_elements) {
+template <typename T> void silu_gate(const T *input, const T *gate, T *output, int num_elements)
+{
     constexpr float kHalf = 0.5f;
     constexpr float kOne = 1.0f;
 
@@ -113,7 +118,7 @@ void silu_gate(const T* input, const T* gate, T* output, int num_elements) {
 }
 
 // Explicit template instantiation for bfloat16
-template void silu_gate<bfloat16>(const bfloat16*, const bfloat16*, bfloat16*, int);
+template void silu_gate<bfloat16>(const bfloat16 *, const bfloat16 *, bfloat16 *, int);
 
 } // namespace activations
 } // namespace operators

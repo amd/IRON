@@ -32,7 +32,7 @@ Calls into the mv.cc kernel code. That kernel computes `m_input` output rows per
 """
 
 
-def my_matvec(dev, cols, M, K, m_input, m_output=None, verbose=False):
+def my_matvec(dev, cols, M, K, m_input, m_output=None, fifo_depth=4, verbose=False):
     if m_output is None:
         m_output = m_input
 
@@ -41,6 +41,7 @@ def my_matvec(dev, cols, M, K, m_input, m_output=None, verbose=False):
         print(f"Matrix dimensions: M={M}, K={K}")
         print(f"Tiling: m_input={m_input}, m_output={m_output}")
         print(f"Columns: {cols}")
+        print(f"FIFO Depth: {fifo_depth}")
 
     # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
     assert (
@@ -90,14 +91,16 @@ def my_matvec(dev, cols, M, K, m_input, m_output=None, verbose=False):
         [np.int32, np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 
+    # P0 FIX: Increased FIFO depths from (2,1,2) to 4 for all fifos to address swiglu_decode +3298% stddev instability
+    # Deeper FIFOs prevent underflow/overflow conditions that cause numerical instability
     A_L3L1_fifos = [
-        ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
+        ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=fifo_depth) for i in range(cols)
     ]
     B_L3L1_fifos = [
-        ObjectFifo(L1_B_ty, name=f"B_L3L1_{i}", depth=1) for i in range(cols)
+        ObjectFifo(L1_B_ty, name=f"B_L3L1_{i}", depth=fifo_depth) for i in range(cols)
     ]
     C_L1L3_fifos = [
-        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(cols)
+        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=fifo_depth) for i in range(cols)
     ]
 
     def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec):
@@ -186,8 +189,14 @@ def main():
         type=str,
         help="Output file path for the generated MLIR module",
     )
+    argparser.add_argument(
+        "--fifo-depth",
+        type=int,
+        default=4,
+        help="ObjectFifo depth for A, B, C FIFOs (default=4 for stability)",
+    )
     args = argparser.parse_args()
-    module = my_matvec(args.dev, args.cols, args.M, args.K, args.m)
+    module = my_matvec(args.dev, args.cols, args.M, args.K, args.m, fifo_depth=args.fifo_depth)
 
     output_file_path = Path(args.output_file_path)
 

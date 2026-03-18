@@ -53,7 +53,11 @@ from .layer_builder import (
     create_transformer_block,
 )
 from .model_assembler import ModelAssembler, ModelAssemblyConfig, create_model
-from .gap_analyzer import GapAnalyzer, generate_gap_report, quick_check as quick_compatibility_check
+from .gap_analyzer import (
+    GapAnalyzer,
+    generate_gap_report,
+    quick_check as quick_compatibility_check,
+)
 from .architecture_scanner import ArchitectureScanner
 
 
@@ -164,9 +168,7 @@ class HuggingFaceConverter:
             try:
                 from huggingface_hub import hf_hub_download
 
-                config_path = hf_hub_download(
-                    self.model_name_or_path, "config.json"
-                )
+                config_path = hf_hub_download(self.model_name_or_path, "config.json")
                 self.config_adapter = ConfigAdapter(config_path)
                 self.norm_config = self.config_adapter.normalize()
                 self.iron_config = self.config_adapter.get_iron_config()
@@ -175,7 +177,9 @@ class HuggingFaceConverter:
                     "Please install huggingface_hub: pip install huggingface_hub"
                 )
             except Exception as e:
-                raise RuntimeError(f"Could not load config for {self.model_name_or_path}: {e}")
+                raise RuntimeError(
+                    f"Could not load config for {self.model_name_or_path}: {e}"
+                )
 
         logger.info(f"Loaded config for {self.norm_config.architecture.value} model")
         logger.info(f"  Hidden size: {self.norm_config.hidden_size}")
@@ -208,6 +212,7 @@ class HuggingFaceConverter:
         """Get or create operator factory"""
         if self._operator_factory is None:
             from iron.common import AIEContext
+
             self._operator_factory = create_operator_factory(
                 context=AIEContext(),
                 num_aie_columns=self.config.num_aie_columns,
@@ -252,6 +257,7 @@ class HuggingFaceConverter:
 
             if output_format == "numpy":
                 import numpy as np
+
                 for name, weight in converted_weights.items():
                     safe_name = name.replace(".", "_").replace("/", "_")
                     np.save(output_path / f"{safe_name}.npy", weight)
@@ -305,7 +311,9 @@ class HuggingFaceConverter:
         mem_info = assembler.get_memory_info()
         logger.info(f"Estimated memory requirements:")
         logger.info(f"  KV Cache: {mem_info['kv_cache_bytes'] / 1024 / 1024:.1f} MB")
-        logger.info(f"  Prefill activations: {mem_info['prefill_activation_bytes'] / 1024 / 1024:.1f} MB")
+        logger.info(
+            f"  Prefill activations: {mem_info['prefill_activation_bytes'] / 1024 / 1024:.1f} MB"
+        )
 
         return assembler
 
@@ -520,30 +528,25 @@ __all__ = [
     "ConversionConfig",
     "ModelAssembler",
     "ModelAssemblyConfig",
-
     # Config adapter
     "ConfigAdapter",
     "NormalizedConfig",
     "ModelArchitecture",
     "load_hf_config",
     "get_iron_ready_config",
-
     # Weight mapper
     "WeightMapper",
     "QuantizedWeightMapper",
     "create_weight_mapper",
-
     # Shape manager
     "ShapeManager",
     "TilingConfig",
     "create_shape_manager",
-
     # Operator factory
     "OperatorFactory",
     "OperatorType",
     "create_operator_factory",
     "OperatorBuilder",
-
     # Layer builder
     "LayerConfig",
     "AttentionLayerBuilder",
@@ -552,7 +555,6 @@ __all__ = [
     "create_attention_layer",
     "create_ffn_layer",
     "create_transformer_block",
-
     # Convenience functions
     "convert_model",
     "load_iron_model",

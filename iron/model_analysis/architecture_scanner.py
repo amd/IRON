@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 class LayerCategory(Enum):
     """Categories of neural network layers"""
+
     ATTENTION = "attention"
     NORMALIZATION = "normalization"
     ACTIVATION = "activation"
@@ -45,6 +46,7 @@ class LayerCategory(Enum):
 
 class AttentionType(Enum):
     """Types of attention mechanisms"""
+
     MHA = "mha"  # Multi-head attention
     GQA = "gqa"  # Grouped query attention
     MQA = "mqa"  # Multi-query attention
@@ -57,6 +59,7 @@ class AttentionType(Enum):
 
 class NormType(Enum):
     """Types of normalization"""
+
     LAYER_NORM = "layer_norm"
     RMS_NORM = "rms_norm"
     BATCH_NORM = "batch_norm"
@@ -67,6 +70,7 @@ class NormType(Enum):
 
 class ActivationType(Enum):
     """Types of activation functions"""
+
     RELU = "relu"
     GELU = "gelu"
     SILU = "silu"
@@ -80,6 +84,7 @@ class ActivationType(Enum):
 @dataclass
 class LayerInfo:
     """Information about a specific layer type"""
+
     name: str
     category: LayerCategory
     module_path: str
@@ -92,6 +97,7 @@ class LayerInfo:
 @dataclass
 class AttentionInfo:
     """Information about attention mechanism"""
+
     attention_type: AttentionType
     num_heads: int = 0
     num_kv_heads: int = 0
@@ -108,6 +114,7 @@ class AttentionInfo:
 @dataclass
 class FFNInfo:
     """Information about feed-forward network"""
+
     ffn_type: str = "mlp"  # mlp, swiglu, geglu, moe
     hidden_size: int = 0
     intermediate_size: int = 0
@@ -122,6 +129,7 @@ class FFNInfo:
 @dataclass
 class ArchitectureRequirements:
     """Complete architectural requirements for a model"""
+
     # Model identification
     model_name: str = ""
     model_type: str = ""
@@ -263,12 +271,14 @@ class ModelCodeAnalyzer(ast.NodeVisitor):
             # Categorize the layer
             category = self._categorize_module(module_type)
             if category != LayerCategory.UNKNOWN:
-                self.layers.append(LayerInfo(
-                    name=attr_name,
-                    category=category,
-                    module_path=module_type,
-                    parameters=kwargs,
-                ))
+                self.layers.append(
+                    LayerInfo(
+                        name=attr_name,
+                        category=category,
+                        module_path=module_type,
+                        parameters=kwargs,
+                    )
+                )
 
     def _analyze_method(self, node):
         """Analyze method for layer usage patterns"""
@@ -313,11 +323,16 @@ class ModelCodeAnalyzer(ast.NodeVisitor):
             return LayerCategory.ATTENTION
 
         # Normalization
-        if any(x in module_lower for x in ["norm", "layernorm", "rmsnorm", "batchnorm"]):
+        if any(
+            x in module_lower for x in ["norm", "layernorm", "rmsnorm", "batchnorm"]
+        ):
             return LayerCategory.NORMALIZATION
 
         # Activation
-        if any(x in module_lower for x in ["relu", "gelu", "silu", "swish", "tanh", "softmax", "sigmoid"]):
+        if any(
+            x in module_lower
+            for x in ["relu", "gelu", "silu", "swish", "tanh", "softmax", "sigmoid"]
+        ):
             return LayerCategory.ACTIVATION
 
         # Linear
@@ -465,7 +480,9 @@ class ArchitectureScanner:
         logger.info(f"  Model type: {self.requirements.model_type}")
         logger.info(f"  Hidden size: {self.requirements.hidden_size}")
         logger.info(f"  Layers: {self.requirements.num_hidden_layers}")
-        logger.info(f"  Attention heads: {self.requirements.attention.num_heads if self.requirements.attention else 'N/A'}")
+        logger.info(
+            f"  Attention heads: {self.requirements.attention.num_heads if self.requirements.attention else 'N/A'}"
+        )
 
     def _get_config_value(self, config: Dict, keys: List[str], default: Any = None):
         """Get config value trying multiple possible keys"""
@@ -480,12 +497,14 @@ class ArchitectureScanner:
             config, ["num_attention_heads", "n_heads", "num_heads"]
         )
         num_kv_heads = self._get_config_value(
-            config, ["num_key_value_heads", "n_kv_heads", "num_kv_heads"],
-            num_heads  # Default to same as num_heads (MHA)
+            config,
+            ["num_key_value_heads", "n_kv_heads", "num_kv_heads"],
+            num_heads,  # Default to same as num_heads (MHA)
         )
         head_dim = self._get_config_value(
-            config, ["head_dim", "d_head"],
-            self.requirements.hidden_size // num_heads if num_heads else 0
+            config,
+            ["head_dim", "d_head"],
+            self.requirements.hidden_size // num_heads if num_heads else 0,
         )
 
         # Detect attention type
@@ -559,7 +578,9 @@ class ArchitectureScanner:
             self.requirements.norm_eps = config["rms_norm_eps"]
         elif "layer_norm_eps" in config or "layernorm_epsilon" in config:
             self.requirements.norm_type = NormType.LAYER_NORM
-            self.requirements.norm_eps = config.get("layer_norm_eps", config.get("layernorm_epsilon", 1e-5))
+            self.requirements.norm_eps = config.get(
+                "layer_norm_eps", config.get("layernorm_epsilon", 1e-5)
+            )
         elif "norm_epsilon" in config:
             self.requirements.norm_type = NormType.LAYER_NORM
             self.requirements.norm_eps = config["norm_epsilon"]
@@ -584,7 +605,8 @@ class ArchitectureScanner:
 
         # Filter out special files
         modeling_files = [
-            f for f in modeling_files
+            f
+            for f in modeling_files
             if not f.name.endswith("_flash.py")  # Separate flash attention
             and "tokenization" not in f.name
         ]
@@ -663,7 +685,9 @@ class ArchitectureScanner:
 
         # Check for sliding window attention
         if self.requirements.attention and self.requirements.attention.sliding_window:
-            features.append(f"Sliding window attention (size={self.requirements.attention.sliding_window})")
+            features.append(
+                f"Sliding window attention (size={self.requirements.attention.sliding_window})"
+            )
 
         # Check for attention sinks
         func_calls = " ".join(self.code_analyzer.function_calls)
@@ -672,11 +696,15 @@ class ArchitectureScanner:
 
         # Check for multi-token prediction
         if self.requirements.raw_config.get("num_predict_tokens", 1) > 1:
-            features.append(f"Multi-token prediction ({self.requirements.raw_config['num_predict_tokens']} tokens)")
+            features.append(
+                f"Multi-token prediction ({self.requirements.raw_config['num_predict_tokens']} tokens)"
+            )
 
         # Check for custom RoPE scaling
         if self.requirements.rotary_config.get("scaling"):
-            features.append(f"Custom RoPE scaling: {self.requirements.rotary_config['scaling']}")
+            features.append(
+                f"Custom RoPE scaling: {self.requirements.rotary_config['scaling']}"
+            )
 
         # Check for tied embeddings
         if self.requirements.raw_config.get("tie_word_embeddings", False):
@@ -752,13 +780,17 @@ def get_model_info_summary(model_path: str) -> str:
         lines.append(f"  - {feature}")
 
     if requirements.unsupported_components:
-        lines.extend([
-            f"",
-            f"Potentially Unsupported Components:",
-        ])
+        lines.extend(
+            [
+                f"",
+                f"Potentially Unsupported Components:",
+            ]
+        )
         for comp in requirements.unsupported_components[:10]:
             lines.append(f"  - {comp}")
         if len(requirements.unsupported_components) > 10:
-            lines.append(f"  ... and {len(requirements.unsupported_components) - 10} more")
+            lines.append(
+                f"  ... and {len(requirements.unsupported_components) - 10} more"
+            )
 
     return "\n".join(lines)

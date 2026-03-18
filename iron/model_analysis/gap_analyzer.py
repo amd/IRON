@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GapItem:
     """A single gap item"""
+
     component_name: str
     component_type: str
     module_path: str
@@ -56,6 +57,7 @@ class GapItem:
 @dataclass
 class GapReport:
     """Complete gap analysis report"""
+
     # Model info
     model_name: str
     model_type: str
@@ -120,6 +122,7 @@ class GapReport:
 @dataclass
 class ComparativeAnalysis:
     """Comparison between multiple models"""
+
     models: List[str]
     support_percentages: Dict[str, float]
     common_gaps: List[str]
@@ -220,7 +223,9 @@ class GapAnalyzer:
 
         # Determine feasibility
         report.conversion_feasibility = self._assess_feasibility(report)
-        report.recommended_approach = self._generate_recommendation(report, requirements)
+        report.recommended_approach = self._generate_recommendation(
+            report, requirements
+        )
 
         # Generate action items
         report.action_items = self._generate_action_items(report)
@@ -324,7 +329,9 @@ class GapAnalyzer:
         if requirements.attention:
             if requirements.attention.sliding_window:
                 if "attention" in layer.name.lower():
-                    reasons.append("Sliding window attention requires custom implementation")
+                    reasons.append(
+                        "Sliding window attention requires custom implementation"
+                    )
 
         if requirements.ffn and requirements.ffn.num_experts > 0:
             if "moe" not in layer.name.lower():
@@ -372,8 +379,10 @@ class GapAnalyzer:
                     f"Priority: {len(report.recipe.custom_components_needed)} custom components needed"
                 )
 
-            return " | ".join(recommendations) if recommendations else (
-                "Consider hybrid CPU/NPU execution for unsupported components"
+            return (
+                " | ".join(recommendations)
+                if recommendations
+                else ("Consider hybrid CPU/NPU execution for unsupported components")
             )
 
         else:  # not_feasible
@@ -460,7 +469,11 @@ class GapAnalyzer:
         # Find unique gaps per model
         unique_gaps = {}
         for model, gaps in all_gaps.items():
-            other_gaps = set.union(*[all_gaps[m] for m in all_gaps if m != model]) if len(all_gaps) > 1 else set()
+            other_gaps = (
+                set.union(*[all_gaps[m] for m in all_gaps if m != model])
+                if len(all_gaps) > 1
+                else set()
+            )
             unique_gaps[model] = list(gaps - other_gaps)
 
         # Generate recommendations
@@ -507,6 +520,7 @@ def generate_gap_report(
 
     # Use Transformers integration (works with HF Hub model names)
     from .transformers_integration import scan_model_from_transformers
+
     info = scan_model_from_transformers(model_path)
 
     # Convert TransformerModelInfo to ArchitectureRequirements for gap analysis
@@ -517,12 +531,16 @@ def generate_gap_report(
     if info.layer_classes:
         for layer in info.layer_classes:
             # Check if this is attention layer with sliding window
-            is_supported = _is_layer_supported(layer['name'], layer['category'], info)
+            is_supported = _is_layer_supported(layer["name"], layer["category"], info)
             discovered_layers.append(
                 LayerInfo(
-                    name=layer['name'],
-                    category=LayerCategory(layer['category']) if layer['category'] in [c.value for c in LayerCategory] else LayerCategory.UNKNOWN,
-                    module_path=layer.get('module', ''),
+                    name=layer["name"],
+                    category=(
+                        LayerCategory(layer["category"])
+                        if layer["category"] in [c.value for c in LayerCategory]
+                        else LayerCategory.UNKNOWN
+                    ),
+                    module_path=layer.get("module", ""),
                     is_supported=is_supported,
                 )
             )
@@ -534,20 +552,31 @@ def generate_gap_report(
         model_name=model_path,
         model_type=info.model_type,
         architectures=[info.architecture_name],
-        hidden_size=info.config_dict.get('hidden_size', 0),
-        vocab_size=info.config_dict.get('vocab_size', 0),
-        max_position_embeddings=info.config_dict.get('max_position_embeddings', 0),
-        num_hidden_layers=info.config_dict.get('num_hidden_layers', 0),
+        hidden_size=info.config_dict.get("hidden_size", 0),
+        vocab_size=info.config_dict.get("vocab_size", 0),
+        max_position_embeddings=info.config_dict.get("max_position_embeddings", 0),
+        num_hidden_layers=info.config_dict.get("num_hidden_layers", 0),
         discovered_layers=discovered_layers,
-        attention=AttentionInfo(
-            attention_type=info.attention_type,
-            num_heads=info.config_dict.get('num_attention_heads', 0),
-            num_kv_heads=info.config_dict.get('num_key_value_heads', info.config_dict.get('num_attention_heads', 0)),
-        ) if info.config_dict else None,
-        ffn=FFNInfo(
-            ffn_type=info.ffn_type,
-            intermediate_size=info.config_dict.get('intermediate_size', 0),
-        ) if info.config_dict else None,
+        attention=(
+            AttentionInfo(
+                attention_type=info.attention_type,
+                num_heads=info.config_dict.get("num_attention_heads", 0),
+                num_kv_heads=info.config_dict.get(
+                    "num_key_value_heads",
+                    info.config_dict.get("num_attention_heads", 0),
+                ),
+            )
+            if info.config_dict
+            else None
+        ),
+        ffn=(
+            FFNInfo(
+                ffn_type=info.ffn_type,
+                intermediate_size=info.config_dict.get("intermediate_size", 0),
+            )
+            if info.config_dict
+            else None
+        ),
     )
 
     # Analyze gaps
@@ -564,13 +593,22 @@ def generate_gap_report(
 def _is_layer_supported(name: str, category: str, info=None) -> bool:
     """Check if a layer is likely supported"""
     supported_patterns = [
-        'attention', 'norm', 'rmsnorm', 'layernorm', 'linear', 'dense',
-        'embedding', 'mlp', 'ffn', 'rms_norm', 'layer_norm'
+        "attention",
+        "norm",
+        "rmsnorm",
+        "layernorm",
+        "linear",
+        "dense",
+        "embedding",
+        "mlp",
+        "ffn",
+        "rms_norm",
+        "layer_norm",
     ]
-    unsupported_patterns = ['moe', 'expert', 'mixtral', 'switch']
+    unsupported_patterns = ["moe", "expert", "mixtral", "switch"]
 
     name_lower = name.lower()
-    category_lower = category.lower() if category else ''
+    category_lower = category.lower() if category else ""
 
     # Check unsupported first
     for pattern in unsupported_patterns:
@@ -581,7 +619,7 @@ def _is_layer_supported(name: str, category: str, info=None) -> bool:
     for pattern in supported_patterns:
         if pattern in name_lower or pattern in category_lower:
             # Special case: attention layers with sliding window are not supported
-            if pattern == 'attention' and info and info.has_sliding_window:
+            if pattern == "attention" and info and info.has_sliding_window:
                 return False
             return True
 
@@ -609,39 +647,47 @@ def _infer_layers_from_config(info) -> List[LayerInfo]:
 
     # Add standard layers
     for name, category in standard_layers:
-        layers.append(LayerInfo(
-            name=name,
-            category=category,
-            module_path=f"transformers.models.{model_type}",
-            is_supported=True,
-        ))
+        layers.append(
+            LayerInfo(
+                name=name,
+                category=category,
+                module_path=f"transformers.models.{model_type}",
+                is_supported=True,
+            )
+        )
 
     # Add MoE layer if applicable
     if info.has_moe:
-        layers.append(LayerInfo(
-            name="MoESparseTopK",
-            category=LayerCategory.UNKNOWN,
-            module_path=f"transformers.models.{model_type}",
-            is_supported=False,  # MoE not supported yet
-        ))
+        layers.append(
+            LayerInfo(
+                name="MoESparseTopK",
+                category=LayerCategory.UNKNOWN,
+                module_path=f"transformers.models.{model_type}",
+                is_supported=False,  # MoE not supported yet
+            )
+        )
 
     # Add sliding window attention if applicable
     if info.has_sliding_window:
-        layers.append(LayerInfo(
-            name="SlidingWindowAttention",
-            category=LayerCategory.ATTENTION,
-            module_path=f"transformers.models.{model_type}",
-            is_supported=False,  # Sliding window not supported yet
-        ))
+        layers.append(
+            LayerInfo(
+                name="SlidingWindowAttention",
+                category=LayerCategory.ATTENTION,
+                module_path=f"transformers.models.{model_type}",
+                is_supported=False,  # Sliding window not supported yet
+            )
+        )
 
     # Add positional encoding if RoPE
     if info.has_rope:
-        layers.append(LayerInfo(
-            name="RotaryEmbedding",
-            category=LayerCategory.POSITIONAL,
-            module_path=f"transformers.models.{model_type}",
-            is_supported=True,  # RoPE is supported
-        ))
+        layers.append(
+            LayerInfo(
+                name="RotaryEmbedding",
+                category=LayerCategory.POSITIONAL,
+                module_path=f"transformers.models.{model_type}",
+                is_supported=True,  # RoPE is supported
+            )
+        )
 
     return layers
 
@@ -682,11 +728,13 @@ def print_gap_summary(model_path: str) -> str:
     else:
         lines.append("  None")
 
-    lines.extend([
-        "",
-        "MODERATE GAPS (Performance Impact)",
-        "-" * 40,
-    ])
+    lines.extend(
+        [
+            "",
+            "MODERATE GAPS (Performance Impact)",
+            "-" * 40,
+        ]
+    )
 
     if report.moderate_gaps:
         for gap in report.moderate_gaps[:5]:
@@ -694,15 +742,17 @@ def print_gap_summary(model_path: str) -> str:
     else:
         lines.append("  None")
 
-    lines.extend([
-        "",
-        "RECOMMENDED APPROACH",
-        "-" * 40,
-        f"  {report.recommended_approach}",
-        "",
-        "ACTION ITEMS",
-        "-" * 40,
-    ])
+    lines.extend(
+        [
+            "",
+            "RECOMMENDED APPROACH",
+            "-" * 40,
+            f"  {report.recommended_approach}",
+            "",
+            "ACTION ITEMS",
+            "-" * 40,
+        ]
+    )
 
     for item in report.action_items[:15]:
         lines.append(item)
@@ -727,10 +777,11 @@ def quick_check(model_name: str) -> bool:
     """
     try:
         from .transformers_integration import scan_model_from_transformers
+
         info = scan_model_from_transformers(model_name)
 
         # Check if model type is known/supported
-        supported_types = ['llama', 'mistral', 'phi', 'gemma', 'qwen', 'qwen2']
+        supported_types = ["llama", "mistral", "phi", "gemma", "qwen", "qwen2"]
         model_type = info.model_type.lower()
 
         # Check for MoE - needs custom implementation

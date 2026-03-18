@@ -30,13 +30,14 @@ from iron.generation.sampling import (
     TokenSampler,
     greedy_sampler,
     creative_sampler,
-    balanced_sampler
+    balanced_sampler,
 )
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def sample_logits() -> np.ndarray:
@@ -66,6 +67,7 @@ def sparse_logits() -> np.ndarray:
 # Category 1: Initialization Tests
 # -----------------------------------------------------------------------------
 
+
 class TestInitialization:
     """Tests for TokenSampler initialization."""
 
@@ -80,10 +82,7 @@ class TestInitialization:
     def test_init_with_custom_params(self):
         """Test initialization with custom parameters."""
         sampler = TokenSampler(
-            temperature=0.5,
-            top_k=40,
-            top_p=0.85,
-            repetition_penalty=1.1
+            temperature=0.5, top_k=40, top_p=0.85, repetition_penalty=1.1
         )
         assert sampler.temperature == 0.5
         assert sampler.top_k == 40
@@ -114,6 +113,7 @@ class TestInitialization:
 # -----------------------------------------------------------------------------
 # Category 2: Temperature Tests
 # -----------------------------------------------------------------------------
+
 
 class TestTemperature:
     """Tests for temperature scaling."""
@@ -154,6 +154,7 @@ class TestTemperature:
 # Category 3: Top-k Filtering Tests
 # -----------------------------------------------------------------------------
 
+
 class TestTopK:
     """Tests for top-k filtering."""
 
@@ -180,8 +181,8 @@ class TestTopK:
         assert result[9] == 10.0
 
         # Others should be -inf
-        assert result[0] == float('-inf')
-        assert result[5] == float('-inf')
+        assert result[0] == float("-inf")
+        assert result[5] == float("-inf")
 
     def test_top_k_with_k_parameter(self, sample_logits):
         """Test top-k with explicit k parameter."""
@@ -191,12 +192,13 @@ class TestTopK:
         # Should keep only top 2
         assert result[8] == 9.0
         assert result[9] == 10.0
-        assert result[7] == float('-inf')
+        assert result[7] == float("-inf")
 
 
 # -----------------------------------------------------------------------------
 # Category 4: Top-p Filtering Tests
 # -----------------------------------------------------------------------------
+
 
 class TestTopP:
     """Tests for top-p (nucleus) filtering."""
@@ -219,7 +221,7 @@ class TestTopP:
         result = sampler.apply_top_p(sample_logits)
 
         # Some low probability tokens should be filtered
-        num_filtered = np.sum(result == float('-inf'))
+        num_filtered = np.sum(result == float("-inf"))
         assert num_filtered > 0
 
     def test_top_p_with_uniform_logits(self, uniform_logits):
@@ -228,13 +230,14 @@ class TestTopP:
         result = sampler.apply_top_p(uniform_logits)
 
         # With uniform probs (0.2 each), 3 tokens should be kept (0.6 total)
-        num_kept = np.sum(result != float('-inf'))
+        num_kept = np.sum(result != float("-inf"))
         assert 2 <= num_kept <= 4  # Allow some variance
 
 
 # -----------------------------------------------------------------------------
 # Category 5: Repetition Penalty Tests
 # -----------------------------------------------------------------------------
+
 
 class TestRepetitionPenalty:
     """Tests for repetition penalty."""
@@ -281,6 +284,7 @@ class TestRepetitionPenalty:
 # Category 6: Sample Integration Tests
 # -----------------------------------------------------------------------------
 
+
 class TestSample:
     """Tests for the main sample method."""
 
@@ -305,8 +309,7 @@ class TestSample:
     def test_sample_with_repetition_penalty(self, sample_logits):
         """Test sampling with repetition penalty."""
         sampler = TokenSampler(
-            temperature=0.0,  # Greedy for predictability
-            repetition_penalty=10.0
+            temperature=0.0, repetition_penalty=10.0  # Greedy for predictability
         )
         input_ids = np.array([9])  # Highest logit token
         token = sampler.sample(sample_logits, input_ids=input_ids)
@@ -342,6 +345,7 @@ class TestSample:
 # Category 7: Batch Sampling Tests
 # -----------------------------------------------------------------------------
 
+
 class TestBatchSampling:
     """Tests for batch sampling."""
 
@@ -366,30 +370,25 @@ class TestBatchSampling:
 # Category 8: Config Tests
 # -----------------------------------------------------------------------------
 
+
 class TestConfig:
     """Tests for configuration methods."""
 
     def test_get_config(self):
         """Test getting configuration."""
         sampler = TokenSampler(
-            temperature=0.8,
-            top_k=40,
-            top_p=0.92,
-            repetition_penalty=1.1
+            temperature=0.8, top_k=40, top_p=0.92, repetition_penalty=1.1
         )
         config = sampler.get_config()
-        assert config['temperature'] == 0.8
-        assert config['top_k'] == 40
-        assert config['top_p'] == 0.92
-        assert config['repetition_penalty'] == 1.1
+        assert config["temperature"] == 0.8
+        assert config["top_k"] == 40
+        assert config["top_p"] == 0.92
+        assert config["repetition_penalty"] == 1.1
 
     def test_set_config(self):
         """Test setting configuration."""
         sampler = TokenSampler()
-        sampler.set_config({
-            'temperature': 0.5,
-            'top_k': 30
-        })
+        sampler.set_config({"temperature": 0.5, "top_k": 30})
         assert sampler.temperature == 0.5
         assert sampler.top_k == 30
 
@@ -397,12 +396,13 @@ class TestConfig:
         """Test that invalid config raises error."""
         sampler = TokenSampler()
         with pytest.raises(ValueError):
-            sampler.set_config({'temperature': -1.0})
+            sampler.set_config({"temperature": -1.0})
 
 
 # -----------------------------------------------------------------------------
 # Category 9: Convenience Function Tests
 # -----------------------------------------------------------------------------
+
 
 class TestConvenienceFunctions:
     """Tests for convenience functions."""
@@ -421,11 +421,7 @@ class TestConvenienceFunctions:
 
     def test_balanced_sampler(self):
         """Test balanced_sampler function."""
-        sampler = balanced_sampler(
-            temperature=0.7,
-            top_k=50,
-            top_p=0.9
-        )
+        sampler = balanced_sampler(temperature=0.7, top_k=50, top_p=0.9)
         assert sampler.temperature == 0.7
         assert sampler.top_k == 50
         assert sampler.top_p == 0.9
@@ -434,6 +430,7 @@ class TestConvenienceFunctions:
 # -----------------------------------------------------------------------------
 # Category 10: Edge Case Tests
 # -----------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     """Tests for edge cases."""
@@ -464,7 +461,7 @@ class TestEdgeCases:
         logits = np.array([5.0, 5.0, 5.0, 5.0, 5.0])
         result = sampler.apply_top_k(logits)
         # Should keep exactly 3 tokens
-        num_kept = np.sum(result != float('-inf'))
+        num_kept = np.sum(result != float("-inf"))
         assert num_kept == 3
 
 

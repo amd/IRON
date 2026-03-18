@@ -22,6 +22,7 @@ from iron.common.utils import torch_to_numpy
 
 class WeightTransform(Enum):
     """Types of weight transformations"""
+
     NONE = "none"
     TRANSPOSE = "transpose"  # Standard transpose
     TRANSPOSE_KV = "transpose_kv"  # Transpose for K/V weights in GQA
@@ -32,6 +33,7 @@ class WeightTransform(Enum):
 @dataclass
 class MappedWeight:
     """Represents a mapped weight tensor"""
+
     name: str  # IRON internal name
     original_name: str  # Original HF name
     tensor: np.ndarray  # Weight data
@@ -57,15 +59,42 @@ class WeightMapper:
         r"model\.embed_tokens\.weight": ("tok_emb.weight", WeightTransform.NONE),
         r"model\.norm\.weight": ("final_norm.weight", WeightTransform.NONE),
         r"lm_head\.weight": ("out_head.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.input_layernorm\.weight": ("layers.{0}.norm1.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": ("layers.{0}.norm2.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": ("layers.{0}.attention.wq.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": ("layers.{0}.attention.wk.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": ("layers.{0}.attention.wv.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": ("layers.{0}.attention.wo.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": ("layers.{0}.feed_forward.w1.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": ("layers.{0}.feed_forward.w3.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": ("layers.{0}.feed_forward.w2.weight", WeightTransform.TRANSPOSE),
+        r"model\.layers\.(\d+)\.input_layernorm\.weight": (
+            "layers.{0}.norm1.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": (
+            "layers.{0}.norm2.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": (
+            "layers.{0}.attention.wq.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": (
+            "layers.{0}.attention.wk.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": (
+            "layers.{0}.attention.wv.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": (
+            "layers.{0}.attention.wo.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": (
+            "layers.{0}.feed_forward.w1.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": (
+            "layers.{0}.feed_forward.w3.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": (
+            "layers.{0}.feed_forward.w2.weight",
+            WeightTransform.TRANSPOSE,
+        ),
     }
 
     MISTRAL_PATTERNS = {
@@ -73,41 +102,110 @@ class WeightMapper:
         r"model\.embed_tokens\.weight": ("tok_emb.weight", WeightTransform.NONE),
         r"model\.norm\.weight": ("final_norm.weight", WeightTransform.NONE),
         r"lm_head\.weight": ("out_head.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.input_layernorm\.weight": ("layers.{0}.norm1.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": ("layers.{0}.norm2.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": ("layers.{0}.attention.wq.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": ("layers.{0}.attention.wk.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": ("layers.{0}.attention.wv.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": ("layers.{0}.attention.wo.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": ("layers.{0}.feed_forward.w1.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": ("layers.{0}.feed_forward.w3.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": ("layers.{0}.feed_forward.w2.weight", WeightTransform.TRANSPOSE),
+        r"model\.layers\.(\d+)\.input_layernorm\.weight": (
+            "layers.{0}.norm1.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": (
+            "layers.{0}.norm2.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": (
+            "layers.{0}.attention.wq.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": (
+            "layers.{0}.attention.wk.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": (
+            "layers.{0}.attention.wv.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": (
+            "layers.{0}.attention.wo.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": (
+            "layers.{0}.feed_forward.w1.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": (
+            "layers.{0}.feed_forward.w3.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": (
+            "layers.{0}.feed_forward.w2.weight",
+            WeightTransform.TRANSPOSE,
+        ),
     }
 
     PHI_PATTERNS = {
         r"model\.embed_tokens\.weight": ("tok_emb.weight", WeightTransform.NONE),
         r"model\.norm\.weight": ("final_norm.weight", WeightTransform.NONE),
         r"lm_head\.weight": ("out_head.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.ln\.weight": ("layers.{0}.norm.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.qkv_proj\.weight": ("layers.{0}.attention.wqkv.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.out_proj\.weight": ("layers.{0}.attention.wo.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.fc1\.weight": ("layers.{0}.feed_forward.w1.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.fc2\.weight": ("layers.{0}.feed_forward.w2.weight", WeightTransform.TRANSPOSE),
+        r"model\.layers\.(\d+)\.ln\.weight": (
+            "layers.{0}.norm.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.qkv_proj\.weight": (
+            "layers.{0}.attention.wqkv.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.out_proj\.weight": (
+            "layers.{0}.attention.wo.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.fc1\.weight": (
+            "layers.{0}.feed_forward.w1.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.fc2\.weight": (
+            "layers.{0}.feed_forward.w2.weight",
+            WeightTransform.TRANSPOSE,
+        ),
     }
 
     GEMMA_PATTERNS = {
         r"model\.embed_tokens\.weight": ("tok_emb.weight", WeightTransform.NONE),
         r"model\.norm\.weight": ("final_norm.weight", WeightTransform.NONE),
         r"lm_head\.weight": ("out_head.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.input_layernorm\.weight": ("layers.{0}.norm1.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": ("layers.{0}.norm2.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": ("layers.{0}.attention.wq.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": ("layers.{0}.attention.wk.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": ("layers.{0}.attention.wv.weight", WeightTransform.NONE),
-        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": ("layers.{0}.attention.wo.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": ("layers.{0}.feed_forward.w1.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": ("layers.{0}.feed_forward.w3.weight", WeightTransform.TRANSPOSE),
-        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": ("layers.{0}.feed_forward.w2.weight", WeightTransform.TRANSPOSE),
+        r"model\.layers\.(\d+)\.input_layernorm\.weight": (
+            "layers.{0}.norm1.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.post_attention_layernorm\.weight": (
+            "layers.{0}.norm2.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight": (
+            "layers.{0}.attention.wq.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight": (
+            "layers.{0}.attention.wk.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight": (
+            "layers.{0}.attention.wv.weight",
+            WeightTransform.NONE,
+        ),
+        r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight": (
+            "layers.{0}.attention.wo.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight": (
+            "layers.{0}.feed_forward.w1.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.up_proj\.weight": (
+            "layers.{0}.feed_forward.w3.weight",
+            WeightTransform.TRANSPOSE,
+        ),
+        r"model\.layers\.(\d+)\.mlp\.down_proj\.weight": (
+            "layers.{0}.feed_forward.w2.weight",
+            WeightTransform.TRANSPOSE,
+        ),
     }
 
     # Architecture to pattern mapping
@@ -225,9 +323,7 @@ class WeightMapper:
         """Dequantize INT8/INT4 weights to bfloat16"""
         # This is a placeholder - actual dequantization requires
         # additional scale and zero-point tensors
-        raise NotImplementedError(
-            f"Dequantization not yet implemented for {hf_name}"
-        )
+        raise NotImplementedError(f"Dequantization not yet implemented for {hf_name}")
 
     def map_weights(
         self,
@@ -361,14 +457,10 @@ class WeightMapper:
 
                 return state_dict
 
-            raise FileNotFoundError(
-                f"No safetensors found in {model_path}"
-            )
+            raise FileNotFoundError(f"No safetensors found in {model_path}")
 
         except ImportError:
-            raise ImportError(
-                "Please install safetensors: pip install safetensors"
-            )
+            raise ImportError("Please install safetensors: pip install safetensors")
 
     def load_pytorch(
         self,
@@ -393,9 +485,7 @@ class WeightMapper:
         )
 
         if not checkpoint_files:
-            raise FileNotFoundError(
-                f"No PyTorch checkpoint found in {model_path}"
-            )
+            raise FileNotFoundError(f"No PyTorch checkpoint found in {model_path}")
 
         # Load first checkpoint (for sharded checkpoints, this would need extension)
         checkpoint_path = checkpoint_files[0]
@@ -429,9 +519,7 @@ class QuantizedWeightMapper(WeightMapper):
         zero_name = hf_name.replace(".weight", ".zeros")
 
         if scale_name not in self.scales or zero_name not in self.zeros:
-            raise ValueError(
-                f"Missing quantization parameters for {hf_name}"
-            )
+            raise ValueError(f"Missing quantization parameters for {hf_name}")
 
         scales = self.scales[scale_name]
         zeros = self.zeros[zero_name]

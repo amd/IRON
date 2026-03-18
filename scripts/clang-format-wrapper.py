@@ -53,21 +53,24 @@ def run_clang_format_diff(files: List[str]) -> str:
     diff_output = ""
     for file in files:
         try:
-            # Get formatted output
+            # Get formatted output as bytes
             result = subprocess.run(
-                ["clang-format", file], capture_output=True, text=True, check=True
+                ["clang-format", file], capture_output=True, check=True
             )
             formatted_content = result.stdout
 
-            # Read original file
-            with open(file, "r", encoding="utf-8") as f:
+            # Read original file as bytes
+            with open(file, "rb") as f:
                 original_content = f.read()
 
             # Generate diff if there are differences
             if formatted_content != original_content:
+                # Decode for diff output
+                formatted_decoded = formatted_content.decode("utf-8")
+                original_decoded = original_content.decode("utf-8")
                 diff_result = subprocess.run(
                     ["diff", "-u", file, "-"],
-                    input=formatted_content,
+                    input=formatted_decoded,
                     capture_output=True,
                     text=True,
                 )
@@ -97,14 +100,14 @@ def check_formatting(files: List[str]) -> bool:
 
     for file in files:
         try:
-            # Get formatted output
+            # Get formatted output as bytes
             result = subprocess.run(
-                ["clang-format", file], capture_output=True, text=True, check=True
+                ["clang-format", file], capture_output=True, check=True
             )
             formatted_content = result.stdout
 
-            # Read original file
-            with open(file, "r", encoding="utf-8") as f:
+            # Read original file as bytes
+            with open(file, "rb") as f:
                 original_content = f.read()
 
             # Check if formatting would change the file
@@ -123,14 +126,14 @@ def check_formatting(files: List[str]) -> bool:
             sys.exit(1)
 
     if not all_formatted:
-        print("❌ The following files are not properly formatted:", file=sys.stderr)
+        print("[FAIL] The following files are not properly formatted:", file=sys.stderr)
         for file in unformatted_files:
             print(f"  - {file}", file=sys.stderr)
         print("\nRun the following command to fix formatting:", file=sys.stderr)
-        print("python scripts/format_cpp.py --fix", file=sys.stderr)
+        print("python scripts/clang-format-wrapper.py --fix", file=sys.stderr)
         return False
 
-    print("✅ All C/C++ files are properly formatted")
+    print("[PASS] All C/C++ files are properly formatted")
     return True
 
 

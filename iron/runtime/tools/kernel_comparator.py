@@ -23,6 +23,7 @@ from enum import Enum
 
 class MatchType(Enum):
     """Kernel match classification"""
+
     EXACT = "EXACT"  # Drop-in replacement possible
     COMPATIBLE = "COMPATIBLE"  # Wrapper/adaptation needed
     INCOMPATIBLE = "INCOMPATIBLE"  # Significant changes required
@@ -32,6 +33,7 @@ class MatchType(Enum):
 @dataclass
 class SignatureMatch:
     """Result of signature comparison"""
+
     iron_operator: str
     fastflowlm_kernel: str
     match_type: str
@@ -45,6 +47,7 @@ class SignatureMatch:
 @dataclass
 class CompatibilityReport:
     """Complete compatibility analysis report"""
+
     fastflowlm_file: str
     iron_operators_analyzed: int
     kernels_found: int
@@ -64,18 +67,33 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
             "description": "General Matrix Multiplication",
             "category": "linear",
             "inputs": [
-                {"name": "A", "type": "bfloat16*", "direction": "input", "layout": "row-major"},
-                {"name": "B", "type": "bfloat16*", "direction": "input", "layout": "col-major"},
+                {
+                    "name": "A",
+                    "type": "bfloat16*",
+                    "direction": "input",
+                    "layout": "row-major",
+                },
+                {
+                    "name": "B",
+                    "type": "bfloat16*",
+                    "direction": "input",
+                    "layout": "col-major",
+                },
             ],
             "outputs": [
-                {"name": "C", "type": "bfloat16*", "direction": "output", "layout": "row-major"},
+                {
+                    "name": "C",
+                    "type": "bfloat16*",
+                    "direction": "output",
+                    "layout": "row-major",
+                },
             ],
             "scalars": [
                 {"name": "M", "type": "uint32", "description": "Rows of A, C"},
                 {"name": "K", "type": "uint32", "description": "Cols of A, rows of B"},
                 {"name": "N", "type": "uint32", "description": "Cols of B, C"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIEGEMV": {
             "description": "General Matrix-Vector Multiplication",
@@ -91,7 +109,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "M", "type": "uint32"},
                 {"name": "N", "type": "uint32"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIERMSNorm": {
             "description": "RMS Layer Normalization",
@@ -107,7 +125,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "hidden_size", "type": "uint32"},
                 {"name": "epsilon", "type": "float32", "default": 1e-6},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIERoPE": {
             "description": "Rotary Position Embeddings",
@@ -126,7 +144,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "seq_len", "type": "uint32"},
                 {"name": "head_dim", "type": "uint32"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIESoftmax": {
             "description": "Softmax activation",
@@ -138,10 +156,14 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "output", "type": "bfloat16*", "direction": "output"},
             ],
             "scalars": [
-                {"name": "dim", "type": "int32", "description": "Dimension to apply softmax"},
+                {
+                    "name": "dim",
+                    "type": "int32",
+                    "description": "Dimension to apply softmax",
+                },
                 {"name": "scale", "type": "float32", "default": 1.0},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIESwiGLU": {
             "description": "SwiGLU activation for MLP",
@@ -158,7 +180,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "hidden_size", "type": "uint32"},
                 {"name": "intermediate_size", "type": "uint32"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIELayerNorm": {
             "description": "Layer Normalization",
@@ -175,7 +197,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "hidden_size", "type": "uint32"},
                 {"name": "epsilon", "type": "float32", "default": 1e-5},
             ],
-            "critical": False
+            "critical": False,
         },
         "AIEDequant": {
             "description": "Weight dequantization",
@@ -190,7 +212,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
             "scalars": [
                 {"name": "size", "type": "uint32"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIEMHA": {
             "description": "Multi-Head Attention (fused)",
@@ -209,7 +231,7 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "num_heads", "type": "uint32"},
                 {"name": "head_dim", "type": "uint32"},
             ],
-            "critical": True
+            "critical": True,
         },
         "AIETranspose": {
             "description": "Tensor transpose",
@@ -225,22 +247,22 @@ def load_default_iron_signatures() -> Dict[str, Dict]:
                 {"name": "dim1", "type": "int32"},
                 {"name": "rank", "type": "uint32"},
             ],
-            "critical": False
+            "critical": False,
         },
     }
 
 
 def load_ff_kernels(ff_kernel_json: str) -> List[Dict]:
     """Load FastFlowLM kernel data from JSON file"""
-    with open(ff_kernel_json, 'r') as f:
+    with open(ff_kernel_json, "r") as f:
         data = json.load(f)
 
     # Handle both direct kernel list and wrapped format
     if isinstance(data, list):
         return data
     elif isinstance(data, dict):
-        if 'kernels' in data:
-            return data['kernels']
+        if "kernels" in data:
+            return data["kernels"]
         else:
             # Single kernel info
             return [data]
@@ -254,12 +276,12 @@ def normalize_type(type_str: str) -> str:
 
     # Common aliases
     type_map = {
-        'bfloat16': ['bfloat16', 'bf16', 'bf16_t', 'ml_dtypes.bfloat16'],
-        'float32': ['float32', 'float', 'fp32', 'float32_t'],
-        'float16': ['float16', 'half', 'fp16', 'float16_t'],
-        'int8': ['int8', 'int8_t', 'char'],
-        'int32': ['int32', 'int', 'int32_t'],
-        'uint32': ['uint32', 'uint', 'uint32_t', 'size_t'],
+        "bfloat16": ["bfloat16", "bf16", "bf16_t", "ml_dtypes.bfloat16"],
+        "float32": ["float32", "float", "fp32", "float32_t"],
+        "float16": ["float16", "half", "fp16", "float16_t"],
+        "int8": ["int8", "int8_t", "char"],
+        "int32": ["int32", "int", "int32_t"],
+        "uint32": ["uint32", "uint", "uint32_t", "size_t"],
     }
 
     for canonical, aliases in type_map.items():
@@ -279,13 +301,15 @@ def types_compatible(iron_type: str, ff_type: str) -> bool:
         return True
 
     # Pointer stripping (handle "bfloat16*" vs "bfloat16")
-    iron_base = iron_norm.rstrip('*').strip()
-    ff_base = ff_norm.rstrip('*').strip()
+    iron_base = iron_norm.rstrip("*").strip()
+    ff_base = ff_norm.rstrip("*").strip()
 
     return iron_base == ff_base
 
 
-def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType, List[str], List[str], List[str]]:
+def _score_kernel_match(
+    iron_sig: Dict, ff_kernel: Dict
+) -> Tuple[int, MatchType, List[str], List[str], List[str]]:
     """
     Score how well a FastFlowLM kernel matches an IRON operator.
 
@@ -296,15 +320,15 @@ def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType
     similarities = []
     adaptation_notes = []
 
-    iron_inputs = iron_sig.get('inputs', [])
-    iron_outputs = iron_sig.get('outputs', [])
-    iron_scalars = iron_sig.get('scalars', [])
+    iron_inputs = iron_sig.get("inputs", [])
+    iron_outputs = iron_sig.get("outputs", [])
+    iron_scalars = iron_sig.get("scalars", [])
 
-    ff_args = ff_kernel.get('arguments', [])
+    ff_args = ff_kernel.get("arguments", [])
 
     # Separate FF arguments by type (buffer vs scalar)
-    ff_buffers = [a for a in ff_args if a.get('address_qualifier') == 1]
-    ff_scalars = [a for a in ff_args if a.get('address_qualifier') == 0]
+    ff_buffers = [a for a in ff_args if a.get("address_qualifier") == 1]
+    ff_scalars = [a for a in ff_args if a.get("address_qualifier") == 0]
 
     # Score input buffer count match
     iron_buffer_count = len(iron_inputs)
@@ -314,7 +338,9 @@ def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType
         score += 3
         similarities.append(f"Input/output buffer count matches ({iron_buffer_count})")
     else:
-        differences.append(f"Buffer count mismatch: IRON={iron_buffer_count}, FF={ff_buffer_count}")
+        differences.append(
+            f"Buffer count mismatch: IRON={iron_buffer_count}, FF={ff_buffer_count}"
+        )
         adaptation_notes.append(f"Need adapter for buffer count difference")
 
     # Score output buffer count match
@@ -327,18 +353,24 @@ def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType
 
     for i, iron_arg in enumerate(iron_inputs):
         if i < len(ff_buffers):
-            ff_type = ff_buffers[i].get('type_name', '')
-            if types_compatible(iron_arg['type'], ff_type):
+            ff_type = ff_buffers[i].get("type_name", "")
+            if types_compatible(iron_arg["type"], ff_type):
                 type_matches += 1
-                similarities.append(f"Argument {i} ({iron_arg['name']}) type compatible")
+                similarities.append(
+                    f"Argument {i} ({iron_arg['name']}) type compatible"
+                )
             else:
                 type_mismatches += 1
-                differences.append(f"Type mismatch on arg {i}: {iron_arg['type']} vs {ff_type}")
-                adaptation_notes.append(f"May need type conversion for {iron_arg['name']}")
+                differences.append(
+                    f"Type mismatch on arg {i}: {iron_arg['type']} vs {ff_type}"
+                )
+                adaptation_notes.append(
+                    f"May need type conversion for {iron_arg['name']}"
+                )
 
     # Score scalar parameters
-    iron_scalar_names = {s['name'].lower() for s in iron_scalars}
-    ff_scalar_names = {s.get('name', '').lower() for s in ff_scalars}
+    iron_scalar_names = {s["name"].lower() for s in iron_scalars}
+    ff_scalar_names = {s.get("name", "").lower() for s in ff_scalars}
 
     scalar_matches = iron_scalar_names & ff_scalar_names
     scalar_missing = iron_scalar_names - ff_scalar_names
@@ -356,8 +388,8 @@ def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType
         similarities.append(f"Additional FF scalars: {', '.join(scalar_extra)}")
 
     # Score work group size (indicates compute pattern)
-    iron_wg = iron_sig.get('work_group_size', [1, 1, 1])
-    ff_wg = ff_kernel.get('work_group_size', [1, 1, 1])
+    iron_wg = iron_sig.get("work_group_size", [1, 1, 1])
+    ff_wg = ff_kernel.get("work_group_size", [1, 1, 1])
 
     if iron_wg == ff_wg:
         similarities.append("Work group size matches")
@@ -378,7 +410,9 @@ def _score_kernel_match(iron_sig: Dict, ff_kernel: Dict) -> Tuple[int, MatchType
     return score, match_type, differences, similarities, adaptation_notes
 
 
-def find_best_match(iron_op_name: str, iron_sig: Dict, ff_kernels: List[Dict]) -> SignatureMatch:
+def find_best_match(
+    iron_op_name: str, iron_sig: Dict, ff_kernels: List[Dict]
+) -> SignatureMatch:
     """Find the best matching FastFlowLM kernel for an IRON operator"""
 
     best_match = None
@@ -389,12 +423,14 @@ def find_best_match(iron_op_name: str, iron_sig: Dict, ff_kernels: List[Dict]) -
     best_adaptation = []
 
     for ff_kernel in ff_kernels:
-        ff_name = ff_kernel.get('name', 'unknown')
+        ff_name = ff_kernel.get("name", "unknown")
 
         # Quick name-based heuristic
         name_similarity = _name_similarity(iron_op_name, ff_name)
 
-        score, match_type, differences, similarities, adaptation = _score_kernel_match(iron_sig, ff_kernel)
+        score, match_type, differences, similarities, adaptation = _score_kernel_match(
+            iron_sig, ff_kernel
+        )
 
         # Boost score for name similarity
         if name_similarity > 0.5:
@@ -411,8 +447,12 @@ def find_best_match(iron_op_name: str, iron_sig: Dict, ff_kernels: List[Dict]) -
 
     # Generate recommendation
     recommendation = _generate_recommendation(
-        iron_op_name, best_match, best_match_type,
-        best_score, best_differences, best_adaptation
+        iron_op_name,
+        best_match,
+        best_match_type,
+        best_score,
+        best_differences,
+        best_adaptation,
     )
 
     return SignatureMatch(
@@ -423,7 +463,7 @@ def find_best_match(iron_op_name: str, iron_sig: Dict, ff_kernels: List[Dict]) -
         differences=best_differences,
         similarities=best_similarities,
         adaptation_notes=best_adaptation,
-        recommendation=recommendation
+        recommendation=recommendation,
     )
 
 
@@ -433,15 +473,27 @@ def _name_similarity(iron_name: str, ff_name: str) -> float:
     ff_lower = ff_name.lower()
 
     # Remove common prefixes
-    iron_lower = iron_lower.replace('aie', '').replace('gpu', '')
-    ff_lower = ff_lower.replace('kernel', '').replace('_kernel', '')
+    iron_lower = iron_lower.replace("aie", "").replace("gpu", "")
+    ff_lower = ff_lower.replace("kernel", "").replace("_kernel", "")
 
     # Direct substring match
     if iron_lower in ff_lower or ff_lower in iron_lower:
         return 0.8
 
     # Key operation matching
-    operations = ['gemm', 'gemv', 'norm', 'rms', 'softmax', 'rope', 'swiglu', 'transpose', 'dequant', 'mha', 'attention']
+    operations = [
+        "gemm",
+        "gemv",
+        "norm",
+        "rms",
+        "softmax",
+        "rope",
+        "swiglu",
+        "transpose",
+        "dequant",
+        "mha",
+        "attention",
+    ]
 
     for op in operations:
         if op in iron_lower and op in ff_lower:
@@ -450,12 +502,20 @@ def _name_similarity(iron_name: str, ff_name: str) -> float:
     return 0.0
 
 
-def _generate_recommendation(iron_op: str, ff_kernel: str, match_type: MatchType,
-                            score: int, differences: List[str], adaptation: List[str]) -> str:
+def _generate_recommendation(
+    iron_op: str,
+    ff_kernel: str,
+    match_type: MatchType,
+    score: int,
+    differences: List[str],
+    adaptation: List[str],
+) -> str:
     """Generate actionable recommendation"""
 
     if match_type == MatchType.EXACT:
-        return f"DIRECT USE: {ff_kernel} can be used as drop-in replacement for {iron_op}"
+        return (
+            f"DIRECT USE: {ff_kernel} can be used as drop-in replacement for {iron_op}"
+        )
 
     elif match_type == MatchType.COMPATIBLE:
         return f"WRAPPER NEEDED: {ff_kernel} can work with {iron_op} with adaptation layer. Issues: {'; '.join(adaptation[:3])}"
@@ -467,7 +527,9 @@ def _generate_recommendation(iron_op: str, ff_kernel: str, match_type: MatchType
         return f"UNKNOWN: No suitable kernel match found for {iron_op} in FastFlowLM. Must use IRON implementation."
 
 
-def compare_signatures(iron_sigs: Dict[str, Dict], ff_kernels: List[Dict]) -> List[SignatureMatch]:
+def compare_signatures(
+    iron_sigs: Dict[str, Dict], ff_kernels: List[Dict]
+) -> List[SignatureMatch]:
     """Compare all IRON operators with FastFlowLM kernels"""
 
     matches = []
@@ -489,11 +551,16 @@ def generate_report(matches: List[SignatureMatch], ff_file: str) -> Compatibilit
     incompatible = sum(1 for m in matches if m.match_type == "INCOMPATIBLE")
     unknown = sum(1 for m in matches if m.match_type == "UNKNOWN")
 
-    critical_ops = [m for m in matches if m.iron_operator in [
-        "AIEGEMM", "AIERMSNorm", "AIERoPE", "AIESwiGLU", "AIESoftmax"
-    ]]
+    critical_ops = [
+        m
+        for m in matches
+        if m.iron_operator
+        in ["AIEGEMM", "AIERMSNorm", "AIERoPE", "AIESwiGLU", "AIESoftmax"]
+    ]
 
-    critical_compatible = sum(1 for m in critical_ops if m.match_type in ["EXACT", "COMPATIBLE"])
+    critical_compatible = sum(
+        1 for m in critical_ops if m.match_type in ["EXACT", "COMPATIBLE"]
+    )
 
     report = CompatibilityReport(
         fastflowlm_file=ff_file,
@@ -508,9 +575,13 @@ def generate_report(matches: List[SignatureMatch], ff_file: str) -> Compatibilit
             "unknown_matches": unknown,
             "critical_operators_analyzed": len(critical_ops),
             "critical_operators_compatible": critical_compatible,
-            "compatibility_percentage": (exact + compatible) / total * 100 if total > 0 else 0,
-            "critical_compatibility_percentage": critical_compatible / len(critical_ops) * 100 if critical_ops else 0
-        }
+            "compatibility_percentage": (
+                (exact + compatible) / total * 100 if total > 0 else 0
+            ),
+            "critical_compatibility_percentage": (
+                critical_compatible / len(critical_ops) * 100 if critical_ops else 0
+            ),
+        },
     )
 
     return report
@@ -541,22 +612,36 @@ def format_markdown_report(report: CompatibilityReport) -> str:
     # Critical operators
     lines.append("## Critical Operators Status")
     lines.append("")
-    lines.append(f"- **Critical operators analyzed:** {s['critical_operators_analyzed']}")
-    lines.append(f"- **Critical operators compatible:** {s['critical_compatibility_percentage']:.1f}%")
+    lines.append(
+        f"- **Critical operators analyzed:** {s['critical_operators_analyzed']}"
+    )
+    lines.append(
+        f"- **Critical operators compatible:** {s['critical_compatibility_percentage']:.1f}%"
+    )
     lines.append("")
 
     # GO/NO-GO recommendation
     critical_threshold = 80  # Need 80% of critical ops compatible
-    go_no_go = "GO" if s['critical_compatibility_percentage'] >= critical_threshold else "NO-GO"
+    go_no_go = (
+        "GO"
+        if s["critical_compatibility_percentage"] >= critical_threshold
+        else "NO-GO"
+    )
 
     lines.append(f"### GO/NO-GO Recommendation: **{go_no_go}**")
     lines.append("")
     if go_no_go == "GO":
-        lines.append(f"Critical operator compatibility ({s['critical_compatibility_percentage']:.1f}%) meets threshold ({critical_threshold}%).")
+        lines.append(
+            f"Critical operator compatibility ({s['critical_compatibility_percentage']:.1f}%) meets threshold ({critical_threshold}%)."
+        )
         lines.append("Proceed with C++ runtime abstraction development.")
     else:
-        lines.append(f"Critical operator compatibility ({s['critical_compatibility_percentage']:.1f}%) below threshold ({critical_threshold}%).")
-        lines.append("Significant technical blockers identified. Consider alternative approach.")
+        lines.append(
+            f"Critical operator compatibility ({s['critical_compatibility_percentage']:.1f}%) below threshold ({critical_threshold}%)."
+        )
+        lines.append(
+            "Significant technical blockers identified. Consider alternative approach."
+        )
     lines.append("")
 
     # Detailed matches
@@ -566,8 +651,14 @@ def format_markdown_report(report: CompatibilityReport) -> str:
     lines.append("|--------------|-----------|-----------|-------|----------------|")
 
     for match in report.matches:
-        rec_short = match.recommendation[:60] + "..." if len(match.recommendation) > 60 else match.recommendation
-        lines.append(f"| {match.iron_operator} | {match.fastflowlm_kernel} | {match.match_type} | {match.compatibility_score}/10 | {rec_short} |")
+        rec_short = (
+            match.recommendation[:60] + "..."
+            if len(match.recommendation) > 60
+            else match.recommendation
+        )
+        lines.append(
+            f"| {match.iron_operator} | {match.fastflowlm_kernel} | {match.match_type} | {match.compatibility_score}/10 | {rec_short} |"
+        )
 
     lines.append("")
 
@@ -611,10 +702,16 @@ def main():
         print("Kernel Compatibility Comparator")
         print("=" * 50)
         print("\nCompares FastFlowLM kernel interfaces with IRON operator signatures.")
-        print("\nUsage: python kernel_comparator.py <ff_kernel.json> [iron_signatures.json] [output.md]")
+        print(
+            "\nUsage: python kernel_comparator.py <ff_kernel.json> [iron_signatures.json] [output.md]"
+        )
         print("\nArguments:")
-        print("  ff_kernel.json       - FastFlowLM kernel JSON from xclbin_inspector.py")
-        print("  iron_signatures.json - Optional custom IRON signatures (uses defaults if omitted)")
+        print(
+            "  ff_kernel.json       - FastFlowLM kernel JSON from xclbin_inspector.py"
+        )
+        print(
+            "  iron_signatures.json - Optional custom IRON signatures (uses defaults if omitted)"
+        )
         print("  output.md            - Optional output file for Markdown report")
         sys.exit(1)
 
@@ -630,7 +727,7 @@ def main():
     # Load IRON signatures
     if iron_sig_file:
         print(f"Loading IRON signatures from {iron_sig_file}...")
-        with open(iron_sig_file, 'r') as f:
+        with open(iron_sig_file, "r") as f:
             iron_sigs = json.load(f)
     else:
         print("Using default IRON operator signatures...")
@@ -648,7 +745,7 @@ def main():
     md_report = format_markdown_report(report)
 
     if output_file:
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             f.write(md_report)
         print(f"\nReport written to {output_file}")
     else:
@@ -663,9 +760,9 @@ def main():
     print(f"Compatibility: {s['compatibility_percentage']:.1f}%")
     print(f"Critical ops: {s['critical_compatibility_percentage']:.1f}% compatible")
 
-    go_no_go = "GO" if s['critical_compatibility_percentage'] >= 80 else "NO-GO"
+    go_no_go = "GO" if s["critical_compatibility_percentage"] >= 80 else "NO-GO"
     print(f"\nRecommendation: {go_no_go}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

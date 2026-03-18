@@ -115,7 +115,9 @@ class AIEConv2d(AIEOperatorBase):
         operator_dir = Path(__file__).parent
 
         # Determine kernel directory based on device
-        kernel_dir = "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        kernel_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_"
@@ -161,7 +163,10 @@ class AIEConv2d(AIEOperatorBase):
                     extra_flags=[],
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / kernel_dir / "conv2d.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / kernel_dir
+                            / "conv2d.cc"
                         )
                     ],
                 ),
@@ -188,12 +193,22 @@ class AIEConv2d(AIEOperatorBase):
             in_width: Input width
         """
         # Calculate output dimensions
-        out_height = (in_height + 2 * self.padding[0] - self.kernel_size[0]) // self.stride[0] + 1
-        out_width = (in_width + 2 * self.padding[1] - self.kernel_size[1]) // self.stride[1] + 1
+        out_height = (
+            in_height + 2 * self.padding[0] - self.kernel_size[0]
+        ) // self.stride[0] + 1
+        out_width = (
+            in_width + 2 * self.padding[1] - self.kernel_size[1]
+        ) // self.stride[1] + 1
 
         # Calculate buffer sizes
         input_size = self.in_channels * in_height * in_width
-        weight_size = self.out_channels * self.in_channels // self.groups * self.kernel_size[0] * self.kernel_size[1]
+        weight_size = (
+            self.out_channels
+            * self.in_channels
+            // self.groups
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
         output_size = self.out_channels * out_height * out_width
 
         self.input_size = input_size
@@ -317,6 +332,10 @@ class AIEConv2d(AIEOperatorBase):
         self.run_runlist()
 
         # Read result
-        result = self.read_buffer_as_torch("output", shape=(self.out_channels, self.out_height, self.out_width), dtype=bfloat16)
+        result = self.read_buffer_as_torch(
+            "output",
+            shape=(self.out_channels, self.out_height, self.out_width),
+            dtype=bfloat16,
+        )
 
         return result

@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GapItem:
     """A single gap item"""
+
     component_name: str
     component_type: str
     module_path: str
@@ -56,6 +57,7 @@ class GapItem:
 @dataclass
 class GapReport:
     """Complete gap analysis report"""
+
     # Model info
     model_name: str
     model_type: str
@@ -120,6 +122,7 @@ class GapReport:
 @dataclass
 class ComparativeAnalysis:
     """Comparison between multiple models"""
+
     models: List[str]
     support_percentages: Dict[str, float]
     common_gaps: List[str]
@@ -220,7 +223,9 @@ class GapAnalyzer:
 
         # Determine feasibility
         report.conversion_feasibility = self._assess_feasibility(report)
-        report.recommended_approach = self._generate_recommendation(report, requirements)
+        report.recommended_approach = self._generate_recommendation(
+            report, requirements
+        )
 
         # Generate action items
         report.action_items = self._generate_action_items(report)
@@ -324,7 +329,9 @@ class GapAnalyzer:
         if requirements.attention:
             if requirements.attention.sliding_window:
                 if "attention" in layer.name.lower():
-                    reasons.append("Sliding window attention requires custom implementation")
+                    reasons.append(
+                        "Sliding window attention requires custom implementation"
+                    )
 
         if requirements.ffn and requirements.ffn.num_experts > 0:
             if "moe" not in layer.name.lower():
@@ -372,8 +379,10 @@ class GapAnalyzer:
                     f"Priority: {len(report.recipe.custom_components_needed)} custom components needed"
                 )
 
-            return " | ".join(recommendations) if recommendations else (
-                "Consider hybrid CPU/NPU execution for unsupported components"
+            return (
+                " | ".join(recommendations)
+                if recommendations
+                else ("Consider hybrid CPU/NPU execution for unsupported components")
             )
 
         else:  # not_feasible
@@ -460,7 +469,11 @@ class GapAnalyzer:
         # Find unique gaps per model
         unique_gaps = {}
         for model, gaps in all_gaps.items():
-            other_gaps = set.union(*[all_gaps[m] for m in all_gaps if m != model]) if len(all_gaps) > 1 else set()
+            other_gaps = (
+                set.union(*[all_gaps[m] for m in all_gaps if m != model])
+                if len(all_gaps) > 1
+                else set()
+            )
             unique_gaps[model] = list(gaps - other_gaps)
 
         # Generate recommendations
@@ -550,11 +563,13 @@ def print_gap_summary(model_path: str) -> str:
     else:
         lines.append("  None")
 
-    lines.extend([
-        "",
-        "MODERATE GAPS (Performance Impact)",
-        "-" * 40,
-    ])
+    lines.extend(
+        [
+            "",
+            "MODERATE GAPS (Performance Impact)",
+            "-" * 40,
+        ]
+    )
 
     if report.moderate_gaps:
         for gap in report.moderate_gaps[:5]:
@@ -562,15 +577,17 @@ def print_gap_summary(model_path: str) -> str:
     else:
         lines.append("  None")
 
-    lines.extend([
-        "",
-        "RECOMMENDED APPROACH",
-        "-" * 40,
-        f"  {report.recommended_approach}",
-        "",
-        "ACTION ITEMS",
-        "-" * 40,
-    ])
+    lines.extend(
+        [
+            "",
+            "RECOMMENDED APPROACH",
+            "-" * 40,
+            f"  {report.recommended_approach}",
+            "",
+            "ACTION ITEMS",
+            "-" * 40,
+        ]
+    )
 
     for item in report.action_items[:15]:
         lines.append(item)

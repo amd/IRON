@@ -35,6 +35,7 @@ from iron.models.llama32.config import Llama32Config
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def sample_config() -> Llama32Config:
     """Create a small test configuration."""
@@ -48,7 +49,7 @@ def sample_config() -> Llama32Config:
         head_dim=32,
         max_position_embeddings=512,
         block_size=16,
-        rms_norm_eps=1e-5
+        rms_norm_eps=1e-5,
     )
 
 
@@ -68,12 +69,10 @@ def sample_prompt() -> list[int]:
 def sample_kv_vectors(sample_config: Llama32Config) -> tuple[np.ndarray, np.ndarray]:
     """Create sample KV vectors."""
     key = np.random.randn(
-        sample_config.num_attention_heads,
-        sample_config.head_dim
+        sample_config.num_attention_heads, sample_config.head_dim
     ).astype(np.float32)
     value = np.random.randn(
-        sample_config.num_attention_heads,
-        sample_config.head_dim
+        sample_config.num_attention_heads, sample_config.head_dim
     ).astype(np.float32)
     return key, value
 
@@ -85,6 +84,7 @@ def sample_kv_vectors(sample_config: Llama32Config) -> tuple[np.ndarray, np.ndar
 # -----------------------------------------------------------------------------
 # Category 1: Initialization Tests
 # -----------------------------------------------------------------------------
+
 
 class TestInitialization:
     """Tests for KVCacheManager initialization."""
@@ -99,9 +99,7 @@ class TestInitialization:
     def test_init_with_custom_params(self, sample_config):
         """Test initialization with custom parameters."""
         manager = KVCacheManager(
-            sample_config,
-            max_sequences=4,
-            max_blocks_per_sequence=16
+            sample_config, max_sequences=4, max_blocks_per_sequence=16
         )
         assert manager.max_sequences == 4
         assert manager.max_blocks_per_sequence == 16
@@ -115,6 +113,7 @@ class TestInitialization:
 # -----------------------------------------------------------------------------
 # Category 2: Sequence Lifecycle Tests
 # -----------------------------------------------------------------------------
+
 
 class TestSequenceLifecycle:
     """Tests for sequence lifecycle management."""
@@ -165,7 +164,9 @@ class TestSequenceLifecycle:
         # Should not raise, just log warning
         kv_manager.end_sequence(99999)
 
-    def test_append_token_updates_length(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_append_token_updates_length(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test that append_token updates sequence length."""
         seq_id = kv_manager.start_sequence(sample_prompt)
         initial_length = kv_manager.get_sequence_info(seq_id).current_length
@@ -176,7 +177,9 @@ class TestSequenceLifecycle:
         new_length = kv_manager.get_sequence_info(seq_id).current_length
         assert new_length == initial_length + 1
 
-    def test_append_token_records_token(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_append_token_records_token(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test that append_token records the token."""
         seq_id = kv_manager.start_sequence(sample_prompt)
         key, value = sample_kv_vectors
@@ -190,6 +193,7 @@ class TestSequenceLifecycle:
 # -----------------------------------------------------------------------------
 # Category 3: KV Write/Read Tests
 # -----------------------------------------------------------------------------
+
 
 class TestKVWriteRead:
     """Tests for KV write and read operations."""
@@ -212,7 +216,9 @@ class TestKVWriteRead:
         with pytest.raises(ValueError, match="Unknown sequence"):
             kv_manager.write_kv(99999, position=0, key=key, value=value, layer=0)
 
-    def test_write_kv_invalid_layer_raises(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_write_kv_invalid_layer_raises(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test that write_kv with invalid layer raises."""
         seq_id = kv_manager.start_sequence(sample_prompt)
         key, value = sample_kv_vectors
@@ -232,17 +238,23 @@ class TestKVWriteRead:
         with pytest.raises(KeyError):
             kv_manager.read_kv(seq_id, position=0, layer=0)
 
-    def test_write_kv_multiple_layers(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_write_kv_multiple_layers(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test writing KV to multiple layers."""
         seq_id = kv_manager.start_sequence(sample_prompt)
         key, value = sample_kv_vectors
 
         for layer in range(kv_manager.config.num_hidden_layers):
-            kv_manager.write_kv(seq_id, position=layer, key=key, value=value, layer=layer)
+            kv_manager.write_kv(
+                seq_id, position=layer, key=key, value=value, layer=layer
+            )
 
         # Verify all layers
         for layer in range(kv_manager.config.num_hidden_layers):
-            stored_key, stored_value = kv_manager.read_kv(seq_id, position=layer, layer=layer)
+            stored_key, stored_value = kv_manager.read_kv(
+                seq_id, position=layer, layer=layer
+            )
             np.testing.assert_array_almost_equal(key, stored_key)
 
 
@@ -250,10 +262,13 @@ class TestKVWriteRead:
 # Category 4: Context Reading Tests
 # -----------------------------------------------------------------------------
 
+
 class TestContextReading:
     """Tests for KV context reading."""
 
-    def test_read_kv_context_returns_arrays(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_read_kv_context_returns_arrays(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test that read_kv_context returns arrays."""
         seq_id = kv_manager.start_sequence(sample_prompt)
         key, value = sample_kv_vectors
@@ -283,7 +298,11 @@ class TestContextReading:
 
         keys, values = kv_manager.read_kv_context(seq_id, context_length=10, layer=0)
 
-        expected_shape = (10, kv_manager.config.num_attention_heads, kv_manager.config.head_dim)
+        expected_shape = (
+            10,
+            kv_manager.config.num_attention_heads,
+            kv_manager.config.head_dim,
+        )
         assert keys.shape == expected_shape
         assert values.shape == expected_shape
 
@@ -298,6 +317,7 @@ class TestContextReading:
 # -----------------------------------------------------------------------------
 # Category 5: Block Management Tests
 # -----------------------------------------------------------------------------
+
 
 class TestBlockManagement:
     """Tests for block allocation and management."""
@@ -349,6 +369,7 @@ class TestBlockManagement:
 # Category 6: Statistics Tests
 # -----------------------------------------------------------------------------
 
+
 class TestStatistics:
     """Tests for cache statistics."""
 
@@ -358,26 +379,26 @@ class TestStatistics:
         stats = kv_manager.get_stats()
 
         assert isinstance(stats, dict)
-        assert 'active_sequences' in stats
-        assert 'allocated_blocks' in stats
+        assert "active_sequences" in stats
+        assert "allocated_blocks" in stats
 
     def test_get_stats_active_sequences(self, kv_manager, sample_prompt):
         """Test that stats track active sequences."""
-        assert kv_manager.get_stats()['active_sequences'] == 0
+        assert kv_manager.get_stats()["active_sequences"] == 0
 
         kv_manager.start_sequence(sample_prompt)
-        assert kv_manager.get_stats()['active_sequences'] == 1
+        assert kv_manager.get_stats()["active_sequences"] == 1
 
         kv_manager.start_sequence(sample_prompt)
-        assert kv_manager.get_stats()['active_sequences'] == 2
+        assert kv_manager.get_stats()["active_sequences"] == 2
 
     def test_get_stats_peak_blocks(self, kv_manager, sample_prompt):
         """Test that stats track peak blocks."""
         seq_id = kv_manager.start_sequence(sample_prompt)
-        peak_before = kv_manager.get_stats()['peak_blocks']
+        peak_before = kv_manager.get_stats()["peak_blocks"]
 
         kv_manager.end_sequence(seq_id)
-        peak_after = kv_manager.get_stats()['peak_blocks']
+        peak_after = kv_manager.get_stats()["peak_blocks"]
 
         # Peak should remain the same
         assert peak_after >= peak_before
@@ -387,10 +408,13 @@ class TestStatistics:
 # Category 7: Multi-Sequence Tests
 # -----------------------------------------------------------------------------
 
+
 class TestMultiSequence:
     """Tests for multi-sequence management."""
 
-    def test_multiple_sequences_independent(self, kv_manager, sample_prompt, sample_kv_vectors):
+    def test_multiple_sequences_independent(
+        self, kv_manager, sample_prompt, sample_kv_vectors
+    ):
         """Test that multiple sequences are independent."""
         id1 = kv_manager.start_sequence(sample_prompt)
         id2 = kv_manager.start_sequence([100, 200, 300])
@@ -432,6 +456,7 @@ class TestMultiSequence:
 # -----------------------------------------------------------------------------
 # Category 8: Edge Case Tests
 # -----------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     """Tests for edge cases."""
@@ -501,23 +526,18 @@ class TestEdgeCases:
 # Category 9: SequenceInfo Tests
 # -----------------------------------------------------------------------------
 
+
 class TestSequenceInfo:
     """Tests for SequenceInfo dataclass."""
 
     def test_num_generated(self):
         """Test num_generated property."""
-        info = SequenceInfo(
-            sequence_id=1,
-            generated_tokens=[1, 2, 3, 4, 5]
-        )
+        info = SequenceInfo(sequence_id=1, generated_tokens=[1, 2, 3, 4, 5])
         assert info.num_generated == 5
 
     def test_total_blocks(self):
         """Test total_blocks property."""
-        info = SequenceInfo(
-            sequence_id=1,
-            kv_blocks=[0, 1, 2, 3]
-        )
+        info = SequenceInfo(sequence_id=1, kv_blocks=[0, 1, 2, 3])
         assert info.total_blocks == 4
 
     def test_default_values(self):

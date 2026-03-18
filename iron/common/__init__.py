@@ -14,10 +14,12 @@ The mock is automatically used when the real 'aie' package is unavailable.
 try:
     # Attempt to import real AIE package (production mode)
     import aie  # noqa: F401
+
     _AIE_MOCK_ENABLED = False
 except ImportError:
     # No hardware available - use mock (testing mode)
     from . import aie_mock
+
     aie_mock.setup_mock()
     _AIE_MOCK_ENABLED = True
 

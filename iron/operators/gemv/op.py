@@ -31,6 +31,7 @@ class AIEGEMV(AIEOperatorBase):
         tile_size_output=None,
         is_mv=True,
         use_static_weight=False,
+        fifo_depth=4,  # P0 FIX: Default to 4 for swiglu_decode stability
         context=None,
     ):
         if tile_size_output is None:
@@ -46,6 +47,7 @@ class AIEGEMV(AIEOperatorBase):
         self.tile_size_input = tile_size_input
         self.tile_size_output = tile_size_output
         self.is_mv = is_mv
+        self.fifo_depth = fifo_depth  # P0 FIX: Configurable FIFO depth for stability
         if use_static_weight:
             self.weight = torch.zeros(
                 (M, K) if is_mv else (K, M), dtype=torch.bfloat16
@@ -75,6 +77,7 @@ class AIEGEMV(AIEOperatorBase):
                 self.K,
                 self.tile_size_input,
                 self.tile_size_output,
+                self.fifo_depth,  # P0 FIX: Pass configurable FIFO depth
                 mlir_verbose,
             ],
         )

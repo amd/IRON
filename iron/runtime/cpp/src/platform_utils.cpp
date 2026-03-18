@@ -18,37 +18,39 @@
  * - Minimizes external dependencies
  */
 
-#include <iron/runtime/platform_utils.hpp>
-#include <iron/runtime/npu_runtime.hpp>
-
+#include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <sstream>
-#include <chrono>
 #include <iomanip>
-#include <cctype>
-#include <algorithm>
 #include <iostream>
+#include <iron/runtime/npu_runtime.hpp>
+#include <iron/runtime/platform_utils.hpp>
+#include <sstream>
 
 // Platform-specific headers
 #if defined(_WIN32) || defined(_WIN64)
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
-    #endif
-    #include <windows.h>
-    #include <direct.h>
-    #define IRON_PATH_SEPARATOR '\\'
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <direct.h>
+#include <windows.h>
+#define IRON_PATH_SEPARATOR '\\'
 #else
-    #include <unistd.h>
-    #include <sys/stat.h>
-    #include <dlfcn.h>
-    #define IRON_PATH_SEPARATOR '/'
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define IRON_PATH_SEPARATOR '/'
 #endif
 
-namespace iron {
-namespace runtime {
-namespace platform {
+namespace iron
+{
+namespace runtime
+{
+namespace platform
+{
 
 //==============================================================================
 // Platform Detection
@@ -57,7 +59,8 @@ namespace platform {
 /**
  * @brief Detect current operating system
  */
-OperatingSystem getOperatingSystem() {
+OperatingSystem getOperatingSystem()
+{
 #if defined(_WIN32) || defined(_WIN64)
     return OperatingSystem::Windows;
 #elif defined(__linux__)
@@ -74,25 +77,27 @@ OperatingSystem getOperatingSystem() {
 /**
  * @brief Get OS name as string
  */
-const char* getOperatingSystemName() {
+const char *getOperatingSystemName()
+{
     switch (getOperatingSystem()) {
-        case OperatingSystem::Windows:
-            return "Windows";
-        case OperatingSystem::Linux:
-            return "Linux";
-        case OperatingSystem::MacOS:
-            return "macOS";
-        case OperatingSystem::Unix:
-            return "Unix";
-        default:
-            return "Unknown";
+    case OperatingSystem::Windows:
+        return "Windows";
+    case OperatingSystem::Linux:
+        return "Linux";
+    case OperatingSystem::MacOS:
+        return "macOS";
+    case OperatingSystem::Unix:
+        return "Unix";
+    default:
+        return "Unknown";
     }
 }
 
 /**
  * @brief Check if running on 64-bit system
  */
-bool is64Bit() {
+bool is64Bit()
+{
 #if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
     return true;
 #else
@@ -107,7 +112,8 @@ bool is64Bit() {
 /**
  * @brief Check if file exists
  */
-bool fileExists(const std::string& path) {
+bool fileExists(const std::string &path)
+{
     if (path.empty()) {
         return false;
     }
@@ -124,7 +130,8 @@ bool fileExists(const std::string& path) {
 /**
  * @brief Check if path is a directory
  */
-bool isDirectory(const std::string& path) {
+bool isDirectory(const std::string &path)
+{
     if (path.empty()) {
         return false;
     }
@@ -147,7 +154,8 @@ bool isDirectory(const std::string& path) {
 /**
  * @brief Get file size in bytes
  */
-size_t getFileSize(const std::string& path) {
+size_t getFileSize(const std::string &path)
+{
     if (path.empty() || !fileExists(path)) {
         return 0;
     }
@@ -166,7 +174,8 @@ size_t getFileSize(const std::string& path) {
 /**
  * @brief Read entire file into memory
  */
-std::vector<uint8_t> readFile(const std::string& path) {
+std::vector<uint8_t> readFile(const std::string &path)
+{
     std::vector<uint8_t> data;
 
     if (!fileExists(path)) {
@@ -182,7 +191,7 @@ std::vector<uint8_t> readFile(const std::string& path) {
     file.seekg(0, std::ios::beg);
 
     data.resize(static_cast<size_t>(size));
-    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+    if (!file.read(reinterpret_cast<char *>(data.data()), size)) {
         throw RuntimeError("Failed to read file: " + path);
     }
 
@@ -192,7 +201,8 @@ std::vector<uint8_t> readFile(const std::string& path) {
 /**
  * @brief Get absolute path
  */
-std::string getAbsolutePath(const std::string& path) {
+std::string getAbsolutePath(const std::string &path)
+{
     if (path.empty()) {
         return "";
     }
@@ -203,7 +213,7 @@ std::string getAbsolutePath(const std::string& path) {
         return std::string(absPath);
     }
 #else
-    char* absPath = realpath(path.c_str(), nullptr);
+    char *absPath = realpath(path.c_str(), nullptr);
     if (absPath != nullptr) {
         std::string result(absPath);
         free(absPath);
@@ -218,7 +228,8 @@ std::string getAbsolutePath(const std::string& path) {
 /**
  * @brief Get directory component of path
  */
-std::string getDirectory(const std::string& path) {
+std::string getDirectory(const std::string &path)
+{
     size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
         return "";
@@ -229,7 +240,8 @@ std::string getDirectory(const std::string& path) {
 /**
  * @brief Get filename component of path
  */
-std::string getFilename(const std::string& path) {
+std::string getFilename(const std::string &path)
+{
     size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
         return path;
@@ -240,7 +252,8 @@ std::string getFilename(const std::string& path) {
 /**
  * @brief Get filename without extension
  */
-std::string getStem(const std::string& path) {
+std::string getStem(const std::string &path)
+{
     std::string filename = getFilename(path);
     size_t pos = filename.find_last_of('.');
     if (pos == std::string::npos) {
@@ -252,7 +265,8 @@ std::string getStem(const std::string& path) {
 /**
  * @brief Get file extension (including dot)
  */
-std::string getExtension(const std::string& path) {
+std::string getExtension(const std::string &path)
+{
     std::string filename = getFilename(path);
     size_t pos = filename.find_last_of('.');
     if (pos == std::string::npos) {
@@ -264,9 +278,12 @@ std::string getExtension(const std::string& path) {
 /**
  * @brief Join path components
  */
-std::string joinPath(const std::string& base, const std::string& path) {
-    if (base.empty()) return path;
-    if (path.empty()) return base;
+std::string joinPath(const std::string &base, const std::string &path)
+{
+    if (base.empty())
+        return path;
+    if (path.empty())
+        return base;
 
     // Check if path is already absolute
     if (isAbsolutePath(path)) {
@@ -284,7 +301,8 @@ std::string joinPath(const std::string& base, const std::string& path) {
 /**
  * @brief Check if path is absolute
  */
-bool isAbsolutePath(const std::string& path) {
+bool isAbsolutePath(const std::string &path)
+{
     if (path.empty()) {
         return false;
     }
@@ -295,7 +313,7 @@ bool isAbsolutePath(const std::string& path) {
         return true;
     }
     if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
-        return true;  // UNC path
+        return true; // UNC path
     }
     return false;
 #else
@@ -311,13 +329,14 @@ bool isAbsolutePath(const std::string& path) {
 /**
  * @brief Get environment variable value
  */
-std::optional<std::string> getEnvVar(const char* name) {
+std::optional<std::string> getEnvVar(const char *name)
+{
     if (!name) {
         return std::nullopt;
     }
 
 #if defined(_WIN32) || defined(_WIN64)
-    char* value = nullptr;
+    char *value = nullptr;
     size_t len = 0;
     if (_dupenv_s(&value, &len, name) == 0 && value != nullptr) {
         std::string result(value);
@@ -325,7 +344,7 @@ std::optional<std::string> getEnvVar(const char* name) {
         return result;
     }
 #else
-    const char* value = std::getenv(name);
+    const char *value = std::getenv(name);
     if (value != nullptr) {
         return std::string(value);
     }
@@ -337,7 +356,8 @@ std::optional<std::string> getEnvVar(const char* name) {
 /**
  * @brief Set environment variable
  */
-bool setEnvVar(const char* name, const std::string& value) {
+bool setEnvVar(const char *name, const std::string &value)
+{
     if (!name) {
         return false;
     }
@@ -352,15 +372,15 @@ bool setEnvVar(const char* name, const std::string& value) {
 /**
  * @brief Check if environment variable is truthy
  */
-bool isEnvVarTruthy(const char* name) {
+bool isEnvVarTruthy(const char *name)
+{
     auto value = getEnvVar(name);
     if (!value.has_value()) {
         return false;
     }
 
     std::string val = value.value();
-    std::transform(val.begin(), val.end(), val.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) { return std::tolower(c); });
 
     return (val == "1" || val == "true" || val == "yes" || val == "on");
 }
@@ -372,7 +392,8 @@ bool isEnvVarTruthy(const char* name) {
 /**
  * @brief Get current time in microseconds
  */
-uint64_t getCurrentTimeMicros() {
+uint64_t getCurrentTimeMicros()
+{
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
@@ -381,7 +402,8 @@ uint64_t getCurrentTimeMicros() {
 /**
  * @brief Get current time in milliseconds
  */
-uint64_t getCurrentTimeMillis() {
+uint64_t getCurrentTimeMillis()
+{
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
@@ -390,18 +412,18 @@ uint64_t getCurrentTimeMillis() {
 /**
  * @brief Scope timer for performance measurement
  */
-ScopeTimer::ScopeTimer(const std::string& label)
-    : label_(label)
-    , start_(getCurrentTimeMicros()) {}
+ScopeTimer::ScopeTimer(const std::string &label) : label_(label), start_(getCurrentTimeMicros()) {}
 
-ScopeTimer::~ScopeTimer() {
+ScopeTimer::~ScopeTimer()
+{
     auto end = getCurrentTimeMicros();
     auto elapsed = end - start_;
     // In production, this would log to a profiling system
     // For now, just provide the infrastructure
 }
 
-uint64_t ScopeTimer::elapsed() const {
+uint64_t ScopeTimer::elapsed() const
+{
     return getCurrentTimeMicros() - start_;
 }
 
@@ -412,18 +434,18 @@ uint64_t ScopeTimer::elapsed() const {
 /**
  * @brief Trim whitespace from string
  */
-std::string trim(const std::string& str) {
-    auto start = std::find_if_not(str.begin(), str.end(),
-                                  [](unsigned char c) { return std::isspace(c); });
-    auto end = std::find_if_not(str.rbegin(), str.rend(),
-                                [](unsigned char c) { return std::isspace(c); }).base();
+std::string trim(const std::string &str)
+{
+    auto start = std::find_if_not(str.begin(), str.end(), [](unsigned char c) { return std::isspace(c); });
+    auto end = std::find_if_not(str.rbegin(), str.rend(), [](unsigned char c) { return std::isspace(c); }).base();
     return (start < end) ? std::string(start, end) : "";
 }
 
 /**
  * @brief Split string by delimiter
  */
-std::vector<std::string> split(const std::string& str, char delimiter) {
+std::vector<std::string> split(const std::string &str, char delimiter)
+{
     std::vector<std::string> tokens;
     std::istringstream iss(str);
     std::string token;
@@ -440,8 +462,10 @@ std::vector<std::string> split(const std::string& str, char delimiter) {
 /**
  * @brief Join strings with delimiter
  */
-std::string join(const std::vector<std::string>& parts, const std::string& delimiter) {
-    if (parts.empty()) return "";
+std::string join(const std::vector<std::string> &parts, const std::string &delimiter)
+{
+    if (parts.empty())
+        return "";
 
     std::ostringstream oss;
     oss << parts[0];
@@ -456,20 +480,20 @@ std::string join(const std::vector<std::string>& parts, const std::string& delim
 /**
  * @brief Convert string to lowercase
  */
-std::string toLower(const std::string& str) {
+std::string toLower(const std::string &str)
+{
     std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
     return result;
 }
 
 /**
  * @brief Convert string to uppercase
  */
-std::string toUpper(const std::string& str) {
+std::string toUpper(const std::string &str)
+{
     std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::toupper(c); });
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::toupper(c); });
     return result;
 }
 
@@ -477,34 +501,45 @@ std::string toUpper(const std::string& str) {
 // Logging Utilities
 //==============================================================================
 
-namespace log {
+namespace log
+{
 
 static LogLevel gCurrentLogLevel = LogLevel::Info;
 static LogCallback gLogCallback = nullptr;
 
-void setLogLevel(LogLevel level) {
+void setLogLevel(LogLevel level)
+{
     gCurrentLogLevel = level;
 }
 
-LogLevel getLogLevel() {
+LogLevel getLogLevel()
+{
     return gCurrentLogLevel;
 }
 
-void setLogCallback(LogCallback callback) {
+void setLogCallback(LogCallback callback)
+{
     gLogCallback = callback;
 }
 
-const char* levelToString(LogLevel level) {
+const char *levelToString(LogLevel level)
+{
     switch (level) {
-        case LogLevel::Debug: return "DEBUG";
-        case LogLevel::Info:  return "INFO";
-        case LogLevel::Warning: return "WARNING";
-        case LogLevel::Error: return "ERROR";
-        default: return "UNKNOWN";
+    case LogLevel::Debug:
+        return "DEBUG";
+    case LogLevel::Info:
+        return "INFO";
+    case LogLevel::Warning:
+        return "WARNING";
+    case LogLevel::Error:
+        return "ERROR";
+    default:
+        return "UNKNOWN";
     }
 }
 
-void log(LogLevel level, const std::string& message) {
+void log(LogLevel level, const std::string &message)
+{
     if (level < gCurrentLogLevel) {
         return;
     }
@@ -512,8 +547,7 @@ void log(LogLevel level, const std::string& message) {
     auto timestamp = getCurrentTimeMillis();
     std::ostringstream oss;
     oss << "[" << levelToString(level) << "] "
-        << "[" << timestamp << "ms] "
-        << message;
+        << "[" << timestamp << "ms] " << message;
 
     if (gLogCallback) {
         gLogCallback(level, oss.str());
@@ -538,23 +572,26 @@ void log(LogLevel level, const std::string& message) {
 // Library Handle Implementation
 //==============================================================================
 
-namespace iron {
-namespace runtime {
-namespace platform {
+namespace iron
+{
+namespace runtime
+{
+namespace platform
+{
 
-LibraryHandle::LibraryHandle(const std::string& path)
-    : handle_(nullptr)
-    , valid_(false) {
+LibraryHandle::LibraryHandle(const std::string &path) : handle_(nullptr), valid_(false)
+{
 
 #if defined(_WIN32) || defined(_WIN64)
-        handle_ = LoadLibraryA(path.c_str());
+    handle_ = LoadLibraryA(path.c_str());
 #else
-        handle_ = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    handle_ = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
 #endif
     valid_ = (handle_ != nullptr);
 }
 
-LibraryHandle::~LibraryHandle() {
+LibraryHandle::~LibraryHandle()
+{
     if (handle_) {
 #if defined(_WIN32) || defined(_WIN64)
         FreeLibrary(static_cast<HMODULE>(handle_));
@@ -564,14 +601,14 @@ LibraryHandle::~LibraryHandle() {
     }
 }
 
-LibraryHandle::LibraryHandle(LibraryHandle&& other) noexcept
-    : handle_(other.handle_)
-    , valid_(other.valid_) {
+LibraryHandle::LibraryHandle(LibraryHandle &&other) noexcept : handle_(other.handle_), valid_(other.valid_)
+{
     other.handle_ = nullptr;
     other.valid_ = false;
 }
 
-LibraryHandle& LibraryHandle::operator=(LibraryHandle&& other) noexcept {
+LibraryHandle &LibraryHandle::operator=(LibraryHandle &&other) noexcept
+{
     if (this != &other) {
         if (handle_) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -588,10 +625,13 @@ LibraryHandle& LibraryHandle::operator=(LibraryHandle&& other) noexcept {
     return *this;
 }
 
-[[nodiscard]] bool LibraryHandle::isValid() const { return valid_; }
+[[nodiscard]] bool LibraryHandle::isValid() const
+{
+    return valid_;
+}
 
-template<typename T>
-T LibraryHandle::getSymbol(const char* name) const {
+template <typename T> T LibraryHandle::getSymbol(const char *name) const
+{
     if (!valid_ || !handle_) {
         return nullptr;
     }
@@ -603,21 +643,23 @@ T LibraryHandle::getSymbol(const char* name) const {
 #endif
 }
 
-[[nodiscard]] std::string LibraryHandle::getError() const {
-    if (valid_) return "";
+[[nodiscard]] std::string LibraryHandle::getError() const
+{
+    if (valid_)
+        return "";
 
 #if defined(_WIN32) || defined(_WIN64)
     DWORD error = GetLastError();
     return "LoadLibrary failed with error " + std::to_string(error);
 #else
-    const char* error = dlerror();
+    const char *error = dlerror();
     return error ? std::string(error) : "dlopen failed";
 #endif
 }
 
 // Explicit template instantiations for common symbol types
-template void* LibraryHandle::getSymbol<void*>(const char*) const;
-template void(*LibraryHandle::getSymbol<void(*)()>(const char*) const)(void);
+template void *LibraryHandle::getSymbol<void *>(const char *) const;
+template void (*LibraryHandle::getSymbol<void (*)()>(const char *) const)(void);
 
 } // namespace platform
 } // namespace runtime

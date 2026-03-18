@@ -30,11 +30,7 @@ def load_results(file_path: str) -> dict:
         return json.load(f)
 
 
-def compare_metrics(
-    current: dict,
-    baseline: dict,
-    threshold: float
-) -> List[Dict]:
+def compare_metrics(current: dict, baseline: dict, threshold: float) -> List[Dict]:
     """
     Compare current metrics against baseline.
 
@@ -71,14 +67,16 @@ def compare_metrics(
         if current_mean > 0 and baseline_mean > 0:
             change = (current_mean - baseline_mean) / baseline_mean
             if change > threshold:
-                regressions.append({
-                    "operator": op_name,
-                    "metric": "mean_ms",
-                    "current": current_mean,
-                    "baseline": baseline_mean,
-                    "change_percent": change * 100,
-                    "severity": "HIGH" if change > 0.20 else "MEDIUM",
-                })
+                regressions.append(
+                    {
+                        "operator": op_name,
+                        "metric": "mean_ms",
+                        "current": current_mean,
+                        "baseline": baseline_mean,
+                        "change_percent": change * 100,
+                        "severity": "HIGH" if change > 0.20 else "MEDIUM",
+                    }
+                )
 
         # Compare P99 latency (important for tail latency)
         current_p99 = current_metrics.get("p99_ms", 0)
@@ -87,14 +85,16 @@ def compare_metrics(
         if current_p99 > 0 and baseline_p99 > 0:
             change = (current_p99 - baseline_p99) / baseline_p99
             if change > threshold:
-                regressions.append({
-                    "operator": op_name,
-                    "metric": "p99_ms",
-                    "current": current_p99,
-                    "baseline": baseline_p99,
-                    "change_percent": change * 100,
-                    "severity": "HIGH" if change > 0.20 else "MEDIUM",
-                })
+                regressions.append(
+                    {
+                        "operator": op_name,
+                        "metric": "p99_ms",
+                        "current": current_p99,
+                        "baseline": baseline_p99,
+                        "change_percent": change * 100,
+                        "severity": "HIGH" if change > 0.20 else "MEDIUM",
+                    }
+                )
 
         # Compare throughput (inverse - lower is worse)
         current_throughput = current_metrics.get("throughput_ops_sec", 0)
@@ -103,14 +103,16 @@ def compare_metrics(
         if current_throughput > 0 and baseline_throughput > 0:
             change = (baseline_throughput - current_throughput) / baseline_throughput
             if change > threshold:
-                regressions.append({
-                    "operator": op_name,
-                    "metric": "throughput_ops_sec",
-                    "current": current_throughput,
-                    "baseline": baseline_throughput,
-                    "change_percent": change * 100,
-                    "severity": "HIGH" if change > 0.20 else "MEDIUM",
-                })
+                regressions.append(
+                    {
+                        "operator": op_name,
+                        "metric": "throughput_ops_sec",
+                        "current": current_throughput,
+                        "baseline": baseline_throughput,
+                        "change_percent": change * 100,
+                        "severity": "HIGH" if change > 0.20 else "MEDIUM",
+                    }
+                )
 
     return regressions
 
@@ -129,30 +131,31 @@ def check_targets(results: dict) -> List[Dict]:
 
     for result in results.get("results", []):
         if result.get("error"):
-            failures.append({
-                "operator": result["operator_name"],
-                "reason": f"Benchmark failed: {result['error']}",
-            })
+            failures.append(
+                {
+                    "operator": result["operator_name"],
+                    "reason": f"Benchmark failed: {result['error']}",
+                }
+            )
             continue
 
         if result.get("target_latency_ms") is not None:
             if not result.get("target_met", False):
-                failures.append({
-                    "operator": result["operator_name"],
-                    "reason": (
-                        f"Target not met: {result['metrics']['mean_ms']:.4f}ms > "
-                        f"{result['target_latency_ms']:.2f}ms"
-                    ),
-                })
+                failures.append(
+                    {
+                        "operator": result["operator_name"],
+                        "reason": (
+                            f"Target not met: {result['metrics']['mean_ms']:.4f}ms > "
+                            f"{result['target_latency_ms']:.2f}ms"
+                        ),
+                    }
+                )
 
     return failures
 
 
 def format_report(
-    regressions: List[Dict],
-    target_failures: List[Dict],
-    current: dict,
-    baseline: dict
+    regressions: List[Dict], target_failures: List[Dict], current: dict, baseline: dict
 ) -> str:
     """Format a human-readable report"""
     lines = []
@@ -226,7 +229,9 @@ def format_report(
 
             if result.get("target_latency_ms"):
                 status = "PASS" if result.get("target_met") else "FAIL"
-                lines.append(f"  Target: {result['target_latency_ms']:.2f}ms - {status}")
+                lines.append(
+                    f"  Target: {result['target_latency_ms']:.2f}ms - {status}"
+                )
 
         lines.append("")
 
@@ -240,15 +245,17 @@ def create_baseline(results: dict, output_path: str):
     baseline = {
         "description": "Performance baseline for IRON operators",
         "created_from": results.get("config", {}),
-        "results": []
+        "results": [],
     }
 
     for result in results.get("results", []):
         if not result.get("error"):
-            baseline["results"].append({
-                "operator_name": result["operator_name"],
-                "metrics": result["metrics"],
-            })
+            baseline["results"].append(
+                {
+                    "operator_name": result["operator_name"],
+                    "metrics": result["metrics"],
+                }
+            )
 
     with open(output_path, "w") as f:
         json.dump(baseline, f, indent=2)
@@ -265,39 +272,32 @@ def main():
         "--current",
         type=str,
         required=True,
-        help="Path to current benchmark results JSON"
+        help="Path to current benchmark results JSON",
     )
 
     parser.add_argument(
-        "--baseline",
-        type=str,
-        required=True,
-        help="Path to baseline results JSON"
+        "--baseline", type=str, required=True, help="Path to baseline results JSON"
     )
 
     parser.add_argument(
         "--threshold",
         type=float,
         default=0.10,
-        help="Maximum acceptable regression (default: 0.10 = 10%%)"
+        help="Maximum acceptable regression (default: 0.10 = 10%%)",
     )
 
     parser.add_argument(
-        "--create-baseline",
-        type=str,
-        help="Create baseline from current results"
+        "--create-baseline", type=str, help="Create baseline from current results"
     )
 
     parser.add_argument(
-        "--output",
-        type=str,
-        help="Write report to file instead of stdout"
+        "--output", type=str, help="Write report to file instead of stdout"
     )
 
     parser.add_argument(
         "--exit-on-regression",
         action="store_true",
-        help="Exit with code 1 if any regressions detected"
+        help="Exit with code 1 if any regressions detected",
     )
 
     args = parser.parse_args()

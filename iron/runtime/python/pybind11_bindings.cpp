@@ -34,12 +34,11 @@
  * - DeviceNotAvailableError -> iron.runtime.DeviceNotAvailableError
  */
 
+#include <iron/runtime/npu_runtime.hpp>
+#include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/stl_bind.h>
-#include <pybind11/operators.h>
-
-#include <iron/runtime/npu_runtime.hpp>
 
 namespace py = pybind11;
 using namespace iron::runtime;
@@ -50,7 +49,8 @@ using namespace iron::runtime;
  * Registers exception translators for all IRON runtime exception types.
  * Each C++ exception is re-raised as a corresponding Python exception.
  */
-void register_exception_translators(py::module_& m) {
+void register_exception_translators(py::module_ &m)
+{
     // Base RuntimeError
     py::register_exception<RuntimeError>(m, "RuntimeError");
 
@@ -75,14 +75,16 @@ void register_exception_translators(py::module_& m) {
  *
  * Allows Python code to write/read buffer data as bytes
  */
-py::bytes buffer_to_bytes(IBuffer& buffer) {
+py::bytes buffer_to_bytes(IBuffer &buffer)
+{
     auto size = buffer.size();
     std::vector<char> data(size);
     buffer.read(data.data(), size);
     return py::bytes(data.data(), size);
 }
 
-PYBIND11_MODULE(iron_runtime, m) {
+PYBIND11_MODULE(iron_runtime, m)
+{
     // Module documentation
     m.doc() = R"pbdoc(
         IRON NPU Runtime Python Bindings
@@ -112,8 +114,9 @@ PYBIND11_MODULE(iron_runtime, m) {
     // ==========================================================================
     // ExecutionOptions struct
     // ==========================================================================
-    py::class_<ExecutionOptions>(m, "ExecutionOptions",
-        R"pbdoc(
+    py::class_<ExecutionOptions>(m,
+                                 "ExecutionOptions",
+                                 R"pbdoc(
             Kernel execution options.
 
             Attributes:
@@ -131,32 +134,28 @@ PYBIND11_MODULE(iron_runtime, m) {
                 >>> opts.synchronous = True
         )pbdoc")
         .def(py::init<>())
-        .def_readwrite("timeout_ms", &ExecutionOptions::timeoutMs,
-            "Timeout in milliseconds (0 = use default)")
-        .def_readwrite("profile", &ExecutionOptions::profile,
-            "Enable profiling to collect execution time")
-        .def_readwrite("synchronous", &ExecutionOptions::synchronous,
-            "Wait for completion if True")
-        .def_readwrite("priority", &ExecutionOptions::priority,
-            "Priority level (0 = normal, higher = more priority)")
-        .def_readwrite("platform_options", &ExecutionOptions::platformOptions,
-            "Platform-specific JSON options")
+        .def_readwrite("timeout_ms", &ExecutionOptions::timeoutMs, "Timeout in milliseconds (0 = use default)")
+        .def_readwrite("profile", &ExecutionOptions::profile, "Enable profiling to collect execution time")
+        .def_readwrite("synchronous", &ExecutionOptions::synchronous, "Wait for completion if True")
+        .def_readwrite("priority", &ExecutionOptions::priority, "Priority level (0 = normal, higher = more priority)")
+        .def_readwrite("platform_options", &ExecutionOptions::platformOptions, "Platform-specific JSON options")
         // Fluent interface methods
-        .def("with_timeout", &ExecutionOptions::withTimeout,
-            py::arg("ms"),
-            "Set timeout and return self for chaining")
-        .def("with_profiling", &ExecutionOptions::withProfiling,
-            py::arg("enable") = true,
-            "Enable profiling and return self for chaining")
-        .def("with_synchronous", &ExecutionOptions::withSynchronous,
-            py::arg("sync") = true,
-            "Set execution mode and return self for chaining");
+        .def("with_timeout", &ExecutionOptions::withTimeout, py::arg("ms"), "Set timeout and return self for chaining")
+        .def("with_profiling",
+             &ExecutionOptions::withProfiling,
+             py::arg("enable") = true,
+             "Enable profiling and return self for chaining")
+        .def("with_synchronous",
+             &ExecutionOptions::withSynchronous,
+             py::arg("sync") = true,
+             "Set execution mode and return self for chaining");
 
     // ==========================================================================
     // ExecutionResult struct
     // ==========================================================================
-    py::class_<ExecutionResult>(m, "ExecutionResult",
-        R"pbdoc(
+    py::class_<ExecutionResult>(m,
+                                "ExecutionResult",
+                                R"pbdoc(
             Result of kernel execution.
 
             Attributes:
@@ -174,30 +173,24 @@ PYBIND11_MODULE(iron_runtime, m) {
                 ...     data = result.outputs[0].read()
         )pbdoc")
         .def(py::init<>())
-        .def_readwrite("status", &ExecutionResult::status,
-            "Execution status code (0 = success, non-zero = error)")
-        .def_readwrite("execution_time_us", &ExecutionResult::executionTimeUs,
-            "Execution time in microseconds")
-        .def_readwrite("error_message", &ExecutionResult::errorMessage,
-            "Error message if execution failed")
-        .def_readwrite("outputs", &ExecutionResult::outputs,
-            "Output buffers if any")
-        .def_readwrite("platform_data", &ExecutionResult::platformData,
-            "Platform-specific data")
-        .def_readwrite("execution_id", &ExecutionResult::executionId,
-            "Execution ID for tracing")
-        .def_property_readonly("success", &ExecutionResult::success,
-            "Check if execution was successful (status == 0)")
-        .def("get_error_message", &ExecutionResult::getErrorMessage,
-            "Get error message or empty string")
-        .def("get_execution_time_us", &ExecutionResult::getExecutionTimeUs,
-            "Get execution time in microseconds (0 if not profiled)");
+        .def_readwrite("status", &ExecutionResult::status, "Execution status code (0 = success, non-zero = error)")
+        .def_readwrite("execution_time_us", &ExecutionResult::executionTimeUs, "Execution time in microseconds")
+        .def_readwrite("error_message", &ExecutionResult::errorMessage, "Error message if execution failed")
+        .def_readwrite("outputs", &ExecutionResult::outputs, "Output buffers if any")
+        .def_readwrite("platform_data", &ExecutionResult::platformData, "Platform-specific data")
+        .def_readwrite("execution_id", &ExecutionResult::executionId, "Execution ID for tracing")
+        .def_property_readonly("success", &ExecutionResult::success, "Check if execution was successful (status == 0)")
+        .def("get_error_message", &ExecutionResult::getErrorMessage, "Get error message or empty string")
+        .def("get_execution_time_us",
+             &ExecutionResult::getExecutionTimeUs,
+             "Get execution time in microseconds (0 if not profiled)");
 
     // ==========================================================================
     // IBuffer class
     // ==========================================================================
-    py::class_<IBuffer, std::shared_ptr<IBuffer>>(m, "Buffer",
-        R"pbdoc(
+    py::class_<IBuffer, std::shared_ptr<IBuffer>>(m,
+                                                  "Buffer",
+                                                  R"pbdoc(
             Device memory buffer for NPU operations.
 
             Represents a buffer object (BO) in the NPU's memory space.
@@ -210,11 +203,13 @@ PYBIND11_MODULE(iron_runtime, m) {
                 >>> data = buffer.read(4)  # Read 4 bytes
                 >>> buffer.sync(False)  # Sync from device
         )pbdoc")
-        .def("size", &IBuffer::size,
-            "Get buffer size in bytes")
-        .def("write", &IBuffer::write,
-            py::arg("data"), py::arg("size"), py::arg("offset") = 0,
-            R"pbdoc(
+        .def("size", &IBuffer::size, "Get buffer size in bytes")
+        .def("write",
+             &IBuffer::write,
+             py::arg("data"),
+             py::arg("size"),
+             py::arg("offset") = 0,
+             R"pbdoc(
                 Write data to buffer (host-to-device).
 
                 Args:
@@ -225,13 +220,15 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     BufferError: If write fails
             )pbdoc")
-        .def("read",
-            [](IBuffer& self, size_t size, size_t offset) -> py::bytes {
+        .def(
+            "read",
+            [](IBuffer &self, size_t size, size_t offset) -> py::bytes {
                 std::vector<char> data(size);
                 self.read(data.data(), size, offset);
                 return py::bytes(data.data(), size);
             },
-            py::arg("size"), py::arg("offset") = 0,
+            py::arg("size"),
+            py::arg("offset") = 0,
             R"pbdoc(
                 Read data from buffer (device-to-host).
 
@@ -245,9 +242,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     BufferError: If read fails
             )pbdoc")
-        .def("sync", &IBuffer::sync,
-            py::arg("to_device"),
-            R"pbdoc(
+        .def("sync",
+             &IBuffer::sync,
+             py::arg("to_device"),
+             R"pbdoc(
                 Sync buffer with device.
 
                 Args:
@@ -256,8 +254,9 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     BufferError: If sync fails
             )pbdoc")
-        .def("native_handle", &IBuffer::nativeHandle,
-            R"pbdoc(
+        .def("native_handle",
+             &IBuffer::nativeHandle,
+             R"pbdoc(
                 Get native buffer handle (platform-specific).
 
                 Returns:
@@ -267,13 +266,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                     Use this only for platform-specific operations
                     not covered by this interface.
             )pbdoc")
-        .def("address", &IBuffer::address,
-            "Get buffer address for kernel argument")
-        .def("is_valid", &IBuffer::isValid,
-            "Check if buffer is allocated and accessible")
-        .def("__len__", &IBuffer::size,
-            "Get buffer size in bytes")
-        .def("__repr__", [](const IBuffer& self) {
+        .def("address", &IBuffer::address, "Get buffer address for kernel argument")
+        .def("is_valid", &IBuffer::isValid, "Check if buffer is allocated and accessible")
+        .def("__len__", &IBuffer::size, "Get buffer size in bytes")
+        .def("__repr__", [](const IBuffer &self) {
             return "<Buffer size=" + std::to_string(self.size()) +
                    " valid=" + std::string(self.isValid() ? "True" : "False") + ">";
         });
@@ -281,8 +277,9 @@ PYBIND11_MODULE(iron_runtime, m) {
     // ==========================================================================
     // IKernelHandle class
     // ==========================================================================
-    py::class_<IKernelHandle, std::shared_ptr<IKernelHandle>>(m, "KernelHandle",
-        R"pbdoc(
+    py::class_<IKernelHandle, std::shared_ptr<IKernelHandle>>(m,
+                                                              "KernelHandle",
+                                                              R"pbdoc(
             Handle for repeated kernel execution.
 
             Provides an efficient interface for kernels that need to be executed
@@ -297,11 +294,12 @@ PYBIND11_MODULE(iron_runtime, m) {
                 >>> result = kernel.execute()
                 >>> kernel.reset()  # Clear arguments for reuse
         )pbdoc")
-        .def("name", &IKernelHandle::name,
-            "Get kernel name")
-        .def("set_arg", &IKernelHandle::setArg,
-            py::arg("index"), py::arg("arg"),
-            R"pbdoc(
+        .def("name", &IKernelHandle::name, "Get kernel name")
+        .def("set_arg",
+             &IKernelHandle::setArg,
+             py::arg("index"),
+             py::arg("arg"),
+             R"pbdoc(
                 Set kernel argument.
 
                 Args:
@@ -311,9 +309,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     ArgumentError: If index is invalid or type mismatch
             )pbdoc")
-        .def("execute", &IKernelHandle::execute,
-            py::arg("options") = ExecutionOptions(),
-            R"pbdoc(
+        .def("execute",
+             &IKernelHandle::execute,
+             py::arg("options") = ExecutionOptions(),
+             R"pbdoc(
                 Execute kernel with set arguments.
 
                 Args:
@@ -325,9 +324,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     RuntimeError: If execution fails
             )pbdoc")
-        .def("executeAndWait", &IKernelHandle::executeAndWait,
-            py::arg("timeout_ms") = 0,
-            R"pbdoc(
+        .def("executeAndWait",
+             &IKernelHandle::executeAndWait,
+             py::arg("timeout_ms") = 0,
+             R"pbdoc(
                 Execute and wait for completion.
 
                 Args:
@@ -336,30 +336,26 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Returns:
                     ExecutionResult: Status and metadata
             )pbdoc")
-        .def("reset", &IKernelHandle::reset,
-            "Reset all arguments to default state")
-        .def("num_arguments", &IKernelHandle::numArguments,
-            "Get number of kernel arguments")
-        .def("is_ready", &IKernelHandle::isReady,
-            "Check if all required arguments are set")
-        .def("get_argument_info", &IKernelHandle::getArgumentInfo,
-            py::arg("index"),
-            "Get argument info (name, type) for debugging")
-        .def("get_argument_names", &IKernelHandle::getArgumentNames,
-            "Get all argument names")
-        .def("is_argument_set", &IKernelHandle::isArgumentSet,
-            py::arg("index"),
-            "Check if specific argument is set")
-        .def("__repr__", [](const IKernelHandle& self) {
-            return "<KernelHandle name='" + self.name() +
-                   "' ready=" + std::string(self.isReady() ? "True" : "False") + ">";
+        .def("reset", &IKernelHandle::reset, "Reset all arguments to default state")
+        .def("num_arguments", &IKernelHandle::numArguments, "Get number of kernel arguments")
+        .def("is_ready", &IKernelHandle::isReady, "Check if all required arguments are set")
+        .def("get_argument_info",
+             &IKernelHandle::getArgumentInfo,
+             py::arg("index"),
+             "Get argument info (name, type) for debugging")
+        .def("get_argument_names", &IKernelHandle::getArgumentNames, "Get all argument names")
+        .def("is_argument_set", &IKernelHandle::isArgumentSet, py::arg("index"), "Check if specific argument is set")
+        .def("__repr__", [](const IKernelHandle &self) {
+            return "<KernelHandle name='" + self.name() + "' ready=" + std::string(self.isReady() ? "True" : "False") +
+                   ">";
         });
 
     // ==========================================================================
     // IBufferManager class
     // ==========================================================================
-    py::class_<IBufferManager, std::shared_ptr<IBufferManager>>(m, "BufferManager",
-        R"pbdoc(
+    py::class_<IBufferManager, std::shared_ptr<IBufferManager>>(m,
+                                                                "BufferManager",
+                                                                R"pbdoc(
             Buffer manager for efficient memory allocation.
 
             Manages a pool of buffers to avoid repeated allocation/deallocation
@@ -372,9 +368,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 >>> manager.deallocate(buf1)  # Return to pool
                 >>> buf2 = manager.allocate(1024 * 1024)  # Reuses pooled buffer
         )pbdoc")
-        .def("allocate", &IBufferManager::allocate,
-            py::arg("size"),
-            R"pbdoc(
+        .def("allocate",
+             &IBufferManager::allocate,
+             py::arg("size"),
+             R"pbdoc(
                 Allocate buffer from pool.
 
                 Args:
@@ -383,38 +380,38 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Returns:
                     Buffer: Shared pointer to buffer
             )pbdoc")
-        .def("deallocate", &IBufferManager::deallocate,
-            py::arg("buffer"),
-            R"pbdoc(
+        .def("deallocate",
+             &IBufferManager::deallocate,
+             py::arg("buffer"),
+             R"pbdoc(
                 Return buffer to pool for reuse.
 
                 Args:
                     buffer: Buffer to return
             )pbdoc")
-        .def("get_pool_stats", &IBufferManager::getPoolStats,
-            R"pbdoc(
+        .def("get_pool_stats",
+             &IBufferManager::getPoolStats,
+             R"pbdoc(
                 Get pool statistics.
 
                 Returns:
                     Dict[int, int]: Map of buffer size to count of available buffers
             )pbdoc")
-        .def("clear", &IBufferManager::clear,
-            "Clear all buffers from pool")
-        .def("total_memory_in_use", &IBufferManager::totalMemoryInUse,
-            "Get total memory in use (pooled + allocated)")
-        .def("active_buffer_count", &IBufferManager::activeBufferCount,
-            "Get number of active (non-pooled) buffers")
-        .def("pooled_buffer_count", &IBufferManager::pooledBufferCount,
-            "Get number of pooled (available) buffers")
-        .def("set_max_pool_size", &IBufferManager::setMaxPoolSize,
-            py::arg("max_bytes"),
-            "Set maximum pool size in bytes");
+        .def("clear", &IBufferManager::clear, "Clear all buffers from pool")
+        .def("total_memory_in_use", &IBufferManager::totalMemoryInUse, "Get total memory in use (pooled + allocated)")
+        .def("active_buffer_count", &IBufferManager::activeBufferCount, "Get number of active (non-pooled) buffers")
+        .def("pooled_buffer_count", &IBufferManager::pooledBufferCount, "Get number of pooled (available) buffers")
+        .def("set_max_pool_size",
+             &IBufferManager::setMaxPoolSize,
+             py::arg("max_bytes"),
+             "Set maximum pool size in bytes");
 
     // ==========================================================================
     // INpuRuntime class
     // ==========================================================================
-    py::class_<INpuRuntime, std::unique_ptr<INpuRuntime>>(m, "NpuRuntime",
-        R"pbdoc(
+    py::class_<INpuRuntime, std::unique_ptr<INpuRuntime>>(m,
+                                                          "NpuRuntime",
+                                                          R"pbdoc(
             Main NPU runtime interface.
 
             This class provides platform-agnostic kernel loading and execution.
@@ -432,9 +429,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 ['kernel_1', 'kernel_2']
         )pbdoc")
         // Xclbin loading methods
-        .def("load_xclbin", &INpuRuntime::loadXclbin,
-            py::arg("path"),
-            R"pbdoc(
+        .def("load_xclbin",
+             &INpuRuntime::loadXclbin,
+             py::arg("path"),
+             R"pbdoc(
                 Load .xclbin kernel package.
 
                 Loads all kernels contained in the .xclbin file.
@@ -448,9 +446,11 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     XclbinError: If file is invalid or loading fails
             )pbdoc")
-        .def("load_xclbin_from_memory", &INpuRuntime::loadXclbinFromMemory,
-            py::arg("data"), py::arg("size"),
-            R"pbdoc(
+        .def("load_xclbin_from_memory",
+             &INpuRuntime::loadXclbinFromMemory,
+             py::arg("data"),
+             py::arg("size"),
+             R"pbdoc(
                 Load .xclbin from memory buffer.
 
                 Args:
@@ -463,9 +463,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     XclbinError: If data is invalid or loading fails
             )pbdoc")
-        .def("unload_xclbin", &INpuRuntime::unloadXclbin,
-            py::arg("path"),
-            R"pbdoc(
+        .def("unload_xclbin",
+             &INpuRuntime::unloadXclbin,
+             py::arg("path"),
+             R"pbdoc(
                 Unload specific .xclbin package.
 
                 Args:
@@ -474,22 +475,21 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Returns:
                     bool: True if unloaded successfully
             )pbdoc")
-        .def_property_readonly("kernel_names", &INpuRuntime::getKernelNames,
-            "Get list of available kernel names")
-        .def("get_kernels_from_xclbin", &INpuRuntime::getKernelsFromXclbin,
-            py::arg("xclbin_path"),
-            "Get kernels from a specific .xclbin")
-        .def("has_kernel", &INpuRuntime::hasKernel,
-            py::arg("kernel_name"),
-            "Check if a specific kernel is available")
+        .def_property_readonly("kernel_names", &INpuRuntime::getKernelNames, "Get list of available kernel names")
+        .def("get_kernels_from_xclbin",
+             &INpuRuntime::getKernelsFromXclbin,
+             py::arg("xclbin_path"),
+             "Get kernels from a specific .xclbin")
+        .def("has_kernel", &INpuRuntime::hasKernel, py::arg("kernel_name"), "Check if a specific kernel is available")
         // Kernel execution methods
-        .def("execute",
-            [](INpuRuntime& self, const std::string& kernel_name,
-               const std::vector<KernelArgument>& args,
-               const ExecutionOptions& options) {
-                return self.execute(kernel_name, args, options);
-            },
-            py::arg("kernel_name"), py::arg("arguments"),
+        .def(
+            "execute",
+            [](INpuRuntime &self,
+               const std::string &kernel_name,
+               const std::vector<KernelArgument> &args,
+               const ExecutionOptions &options) { return self.execute(kernel_name, args, options); },
+            py::arg("kernel_name"),
+            py::arg("arguments"),
             py::arg("options") = ExecutionOptions(),
             R"pbdoc(
                 Execute kernel with provided arguments.
@@ -509,9 +509,10 @@ PYBIND11_MODULE(iron_runtime, m) {
                     KernelNotFoundError: If kernel not found
                     RuntimeError: If execution fails
             )pbdoc")
-        .def("get_kernel", &INpuRuntime::getKernel,
-            py::arg("kernel_name"),
-            R"pbdoc(
+        .def("get_kernel",
+             &INpuRuntime::getKernel,
+             py::arg("kernel_name"),
+             R"pbdoc(
                 Create a kernel execution handle.
 
                 Returns a handle for repeated kernel execution with
@@ -528,9 +529,11 @@ PYBIND11_MODULE(iron_runtime, m) {
                     Returned handle is NOT thread-safe.
             )pbdoc")
         // Buffer management methods
-        .def("allocate_buffer", &INpuRuntime::allocateBuffer,
-            py::arg("size"), py::arg("host_accessible") = true,
-            R"pbdoc(
+        .def("allocate_buffer",
+             &INpuRuntime::allocateBuffer,
+             py::arg("size"),
+             py::arg("host_accessible") = true,
+             R"pbdoc(
                 Allocate buffer for kernel I/O.
 
                 Args:
@@ -543,8 +546,9 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     BufferError: If allocation fails
             )pbdoc")
-        .def("allocate_buffer_from_data",
-            [](INpuRuntime& self, const py::bytes& data) {
+        .def(
+            "allocate_buffer_from_data",
+            [](INpuRuntime &self, const py::bytes &data) {
                 auto buffer_info = py::buffer::ensure_object(data).request();
                 return self.allocateBufferFromData(buffer_info.ptr, buffer_info.size);
             },
@@ -563,30 +567,26 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     BufferError: If allocation fails
             )pbdoc")
-        .def("get_buffer_manager", &INpuRuntime::getBufferManager,
-            R"pbdoc(
+        .def("get_buffer_manager",
+             &INpuRuntime::getBufferManager,
+             R"pbdoc(
                 Get buffer manager for efficient allocation.
 
                 Returns:
                     BufferManager: Shared pointer to buffer manager
             )pbdoc")
         // Runtime management methods
-        .def("unload", &INpuRuntime::unload,
-            "Unload all kernels and free resources")
-        .def_property_readonly("is_loaded", &INpuRuntime::isLoaded,
-            "Check if runtime has loaded kernels")
-        .def("get_platform_name", &INpuRuntime::getPlatformName,
-            "Get platform name (XRT for Linux, xDNA for Windows)")
-        .def("get_version", &INpuRuntime::getVersion,
-            "Get IRON runtime version string")
-        .def("get_platform_version", &INpuRuntime::getPlatformVersion,
-            "Get underlying runtime version (XRT/xDNA)")
-        .def("get_device_info", &INpuRuntime::getDeviceInfo,
-            "Get device information as JSON string")
+        .def("unload", &INpuRuntime::unload, "Unload all kernels and free resources")
+        .def_property_readonly("is_loaded", &INpuRuntime::isLoaded, "Check if runtime has loaded kernels")
+        .def("get_platform_name", &INpuRuntime::getPlatformName, "Get platform name (XRT for Linux, xDNA for Windows)")
+        .def("get_version", &INpuRuntime::getVersion, "Get IRON runtime version string")
+        .def("get_platform_version", &INpuRuntime::getPlatformVersion, "Get underlying runtime version (XRT/xDNA)")
+        .def("get_device_info", &INpuRuntime::getDeviceInfo, "Get device information as JSON string")
         // Static factory methods
-        .def_static("create", &INpuRuntime::create,
-            py::arg("device_id") = 0,
-            R"pbdoc(
+        .def_static("create",
+                    &INpuRuntime::create,
+                    py::arg("device_id") = 0,
+                    R"pbdoc(
                 Create platform-appropriate runtime implementation.
 
                 Factory method that returns XrtRuntimeWrapper on Linux
@@ -601,9 +601,11 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     DeviceNotAvailableError: If no NPU device available
             )pbdoc")
-        .def_static("create_for_platform", &INpuRuntime::createForPlatform,
-            py::arg("platform"), py::arg("device_id") = 0,
-            R"pbdoc(
+        .def_static("create_for_platform",
+                    &INpuRuntime::createForPlatform,
+                    py::arg("platform"),
+                    py::arg("device_id") = 0,
+                    R"pbdoc(
                 Create runtime with explicit platform selection.
 
                 Force a specific platform implementation (for testing).
@@ -618,35 +620,33 @@ PYBIND11_MODULE(iron_runtime, m) {
                 Raises:
                     RuntimeError: If platform not supported
             )pbdoc")
-        .def_static_property_readonly("current_platform", &INpuRuntime::getCurrentPlatform,
-            "Get current platform string ('linux', 'windows', or 'unknown')")
-        .def_static_property_readonly("is_linux", &INpuRuntime::isLinux,
-            "Check if running on Linux")
-        .def_static_property_readonly("is_windows", &INpuRuntime::isWindows,
-            "Check if running on Windows")
-        .def_static("is_device_available", &INpuRuntime::isDeviceAvailable,
-            "Check if NPU device is available")
-        .def_static("get_available_devices", &INpuRuntime::getAvailableDevices,
-            "Get list of available NPU devices")
-        .def("__repr__", [](const INpuRuntime& self) {
-            return "<NpuRuntime platform='" + self.getPlatformName() +
-                   "' version='" + self.getVersion() +
+        .def_static_property_readonly("current_platform",
+                                      &INpuRuntime::getCurrentPlatform,
+                                      "Get current platform string ('linux', 'windows', or 'unknown')")
+        .def_static_property_readonly("is_linux", &INpuRuntime::isLinux, "Check if running on Linux")
+        .def_static_property_readonly("is_windows", &INpuRuntime::isWindows, "Check if running on Windows")
+        .def_static("is_device_available", &INpuRuntime::isDeviceAvailable, "Check if NPU device is available")
+        .def_static("get_available_devices", &INpuRuntime::getAvailableDevices, "Get list of available NPU devices")
+        .def("__repr__", [](const INpuRuntime &self) {
+            return "<NpuRuntime platform='" + self.getPlatformName() + "' version='" + self.getVersion() +
                    "' loaded=" + std::string(self.isLoaded() ? "True" : "False") + ">";
         });
 
     // ==========================================================================
     // Module-level functions
     // ==========================================================================
-    m.def("get_version", &getIronRuntimeVersion,
-        R"pbdoc(
+    m.def("get_version",
+          &getIronRuntimeVersion,
+          R"pbdoc(
             Get IRON runtime version.
 
             Returns:
                 str: Version string (e.g., "1.0.0")
         )pbdoc");
 
-    m.def("get_version_tuple",
-        [](int& major, int& minor, int& patch) {
+    m.def(
+        "get_version_tuple",
+        [](int &major, int &minor, int &patch) {
             getIronRuntimeVersion(major, minor, patch);
             return std::make_tuple(major, minor, patch);
         },

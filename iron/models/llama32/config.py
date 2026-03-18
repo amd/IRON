@@ -163,15 +163,21 @@ class Llama32Config:
         if self.hidden_size < 1:
             raise ValueError(f"hidden_size must be >= 1, got {self.hidden_size}")
         if self.num_hidden_layers < 1:
-            raise ValueError(f"num_hidden_layers must be >= 1, got {self.num_hidden_layers}")
+            raise ValueError(
+                f"num_hidden_layers must be >= 1, got {self.num_hidden_layers}"
+            )
         if self.num_attention_heads < 1:
-            raise ValueError(f"num_attention_heads must be >= 1, got {self.num_attention_heads}")
+            raise ValueError(
+                f"num_attention_heads must be >= 1, got {self.num_attention_heads}"
+            )
         if self.head_dim < 1:
             raise ValueError(f"head_dim must be >= 1, got {self.head_dim}")
         if self.rms_norm_eps <= 0:
             raise ValueError(f"rms_norm_eps must be > 0, got {self.rms_norm_eps}")
         if self.intermediate_size < 1:
-            raise ValueError(f"intermediate_size must be >= 1, got {self.intermediate_size}")
+            raise ValueError(
+                f"intermediate_size must be >= 1, got {self.intermediate_size}"
+            )
         if self.max_position_embeddings < 1:
             raise ValueError(
                 f"max_position_embeddings must be >= 1, got {self.max_position_embeddings}"
@@ -205,7 +211,7 @@ class Llama32Config:
         model_id: str = "meta-llama/Llama-3.2-1B",
         cache_dir: Optional[str] = None,
         force_download: bool = False,
-        local_files_only: bool = False
+        local_files_only: bool = False,
     ) -> "Llama32Config":
         """Load configuration from HuggingFace Hub.
 
@@ -250,7 +256,7 @@ class Llama32Config:
                 filename="config.json",
                 cache_dir=cache_dir,
                 force_download=force_download,
-                local_files_only=local_files_only
+                local_files_only=local_files_only,
             )
         except Exception as e:
             logger.error(f"Failed to download config from {model_id}: {e}")
@@ -315,16 +321,27 @@ class Llama32Config:
         """
         # Filter out unknown keys that might be in the dict
         known_keys = {
-            "vocab_size", "hidden_size", "intermediate_size",
-            "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
-            "head_dim", "max_position_embeddings", "rope_theta",
-            "rms_norm_eps", "model_type", "architectures", "hidden_act",
-            "tie_word_embeddings", "rope_scaling", "attention_bias", "mlp_bias"
+            "vocab_size",
+            "hidden_size",
+            "intermediate_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "max_position_embeddings",
+            "rope_theta",
+            "rms_norm_eps",
+            "model_type",
+            "architectures",
+            "hidden_act",
+            "tie_word_embeddings",
+            "rope_scaling",
+            "attention_bias",
+            "mlp_bias",
         }
 
         filtered_dict = {
-            k: v for k, v in config_dict.items()
-            if k in known_keys or k == "model_path"
+            k: v for k, v in config_dict.items() if k in known_keys or k == "model_path"
         }
 
         # Handle model_path specially
@@ -434,14 +451,14 @@ class Llama32Config:
         # Note: This is approximate; actual count may vary
 
         params_per_layer = (
-            4 * self.hidden_size * self.hidden_size +  # Attention (QKV + O)
-            2 * self.hidden_size * self.intermediate_size  # MLP (gate/up + down)
+            4 * self.hidden_size * self.hidden_size  # Attention (QKV + O)
+            + 2 * self.hidden_size * self.intermediate_size  # MLP (gate/up + down)
         )
 
         total_params = (
-            self.vocab_size * self.hidden_size +  # Embeddings
-            self.num_hidden_layers * params_per_layer +  # Transformer layers
-            self.hidden_size * self.vocab_size  # Output projection (if not tied)
+            self.vocab_size * self.hidden_size  # Embeddings
+            + self.num_hidden_layers * params_per_layer  # Transformer layers
+            + self.hidden_size * self.vocab_size  # Output projection (if not tied)
         )
 
         if total_params >= 1e9:
@@ -482,10 +499,11 @@ class Llama32Config:
         """
         # 2 (key + value) * num_layers * num_kv_heads * head_dim * sizeof(float32)
         return (
-            2 * self.num_hidden_layers *
-            self.num_key_value_heads *
-            self.head_dim *
-            4  # float32 = 4 bytes
+            2
+            * self.num_hidden_layers
+            * self.num_key_value_heads
+            * self.head_dim
+            * 4  # float32 = 4 bytes
         )
 
     @property
@@ -505,10 +523,11 @@ class Llama32Config:
         """
         # 2 (key + value) * num_layers * num_kv_heads * head_dim * sizeof(bfloat16)
         return (
-            2 * self.num_hidden_layers *
-            self.num_key_value_heads *
-            self.head_dim *
-            2  # bfloat16 = 2 bytes
+            2
+            * self.num_hidden_layers
+            * self.num_key_value_heads
+            * self.head_dim
+            * 2  # bfloat16 = 2 bytes
         )
 
     @property
@@ -564,23 +583,20 @@ class Llama32Config:
 
         # Approximate parameter count
         params_per_layer = (
-            4 * self.hidden_size * self.hidden_size +  # Attention
-            2 * self.hidden_size * self.intermediate_size  # MLP
+            4 * self.hidden_size * self.hidden_size  # Attention
+            + 2 * self.hidden_size * self.intermediate_size  # MLP
         )
 
         total_params = (
-            self.vocab_size * self.hidden_size +  # Embeddings
-            self.num_hidden_layers * params_per_layer +  # Layers
-            self.hidden_size * self.vocab_size  # Output
+            self.vocab_size * self.hidden_size  # Embeddings
+            + self.num_hidden_layers * params_per_layer  # Layers
+            + self.hidden_size * self.vocab_size  # Output
         )
 
         return total_params * bytes_per_param
 
     def estimate_kv_cache_memory(
-        self,
-        batch_size: int,
-        seq_len: int,
-        dtype: str = "float32"
+        self, batch_size: int, seq_len: int, dtype: str = "float32"
     ) -> int:
         """Estimate memory required for KV cache.
 
@@ -599,13 +615,13 @@ class Llama32Config:
         bytes_per_param = {"float32": 4, "float16": 2, "bfloat16": 2}.get(dtype, 4)
 
         return (
-            2 *  # key + value
-            self.num_hidden_layers *
-            self.num_key_value_heads *
-            self.head_dim *
-            batch_size *
-            seq_len *
-            bytes_per_param
+            2  # key + value
+            * self.num_hidden_layers
+            * self.num_key_value_heads
+            * self.head_dim
+            * batch_size
+            * seq_len
+            * bytes_per_param
         )
 
     # =========================================================================

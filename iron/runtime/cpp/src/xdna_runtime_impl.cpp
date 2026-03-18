@@ -21,24 +21,25 @@
 // #include <xdna/xdna.h>
 // #include <xdna/xdna_runtime.h>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // XdnaBuffer Implementation
 //==============================================================================
 
-XdnaBuffer::XdnaBuffer(xdna_detail::BufferHandle handle, size_t size)
-    : handle_(handle)
-    , size_(size)
-    , valid_(true) {
+XdnaBuffer::XdnaBuffer(xdna_detail::BufferHandle handle, size_t size) : handle_(handle), size_(size), valid_(true)
+{
 
     if (!handle_ || size == 0) {
         throw BufferError("Invalid buffer handle or size");
     }
 }
 
-XdnaBuffer::~XdnaBuffer() {
+XdnaBuffer::~XdnaBuffer()
+{
     if (valid_.exchange(false)) {
         // In production: Release xDNA buffer handle
         // xdnaReleaseBuffer(handle_);
@@ -46,16 +47,16 @@ XdnaBuffer::~XdnaBuffer() {
     }
 }
 
-XdnaBuffer::XdnaBuffer(XdnaBuffer&& other) noexcept
-    : handle_(other.handle_)
-    , size_(other.size_)
-    , valid_(other.valid_.load()) {
+XdnaBuffer::XdnaBuffer(XdnaBuffer &&other) noexcept
+    : handle_(other.handle_), size_(other.size_), valid_(other.valid_.load())
+{
 
     other.handle_ = nullptr;
     other.valid_ = false;
 }
 
-XdnaBuffer& XdnaBuffer::operator=(XdnaBuffer&& other) noexcept {
+XdnaBuffer &XdnaBuffer::operator=(XdnaBuffer &&other) noexcept
+{
     if (this != &other) {
         if (valid_.exchange(false)) {
             // Release current buffer
@@ -72,11 +73,13 @@ XdnaBuffer& XdnaBuffer::operator=(XdnaBuffer&& other) noexcept {
     return *this;
 }
 
-size_t XdnaBuffer::size() const {
+size_t XdnaBuffer::size() const
+{
     return size_;
 }
 
-void XdnaBuffer::write(const void* data, size_t size, size_t offset) {
+void XdnaBuffer::write(const void *data, size_t size, size_t offset)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -93,10 +96,11 @@ void XdnaBuffer::write(const void* data, size_t size, size_t offset) {
     // xdnaBufferWrite(handle_, data, size, offset);
 
     // Stub: Just copy to temporary storage
-    (void)data;  // Suppress unused warning
+    (void)data; // Suppress unused warning
 }
 
-void XdnaBuffer::read(void* data, size_t size, size_t offset) const {
+void XdnaBuffer::read(void *data, size_t size, size_t offset) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -113,10 +117,11 @@ void XdnaBuffer::read(void* data, size_t size, size_t offset) const {
     // xdnaBufferRead(handle_, data, size, offset);
 
     // Stub: Just copy from temporary storage
-    (void)data;  // Suppress unused warning
+    (void)data; // Suppress unused warning
 }
 
-void XdnaBuffer::sync(bool to_device) {
+void XdnaBuffer::sync(bool to_device)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!valid_) {
@@ -127,11 +132,13 @@ void XdnaBuffer::sync(bool to_device) {
     // xdnaBufferSync(handle_, to_device ? XDNA_SYNC_TO_DEVICE : XDNA_SYNC_TO_HOST);
 }
 
-void* XdnaBuffer::nativeHandle() const {
+void *XdnaBuffer::nativeHandle() const
+{
     return handle_;
 }
 
-uint64_t XdnaBuffer::address() const {
+uint64_t XdnaBuffer::address() const
+{
     if (!valid_) {
         return 0;
     }
@@ -142,7 +149,8 @@ uint64_t XdnaBuffer::address() const {
     return reinterpret_cast<uint64_t>(handle_);
 }
 
-bool XdnaBuffer::isValid() const {
+bool XdnaBuffer::isValid() const
+{
     return valid_.load();
 }
 
@@ -150,14 +158,9 @@ bool XdnaBuffer::isValid() const {
 // XdnaKernelHandle Implementation
 //==============================================================================
 
-XdnaKernelHandle::XdnaKernelHandle(
-    xdna_detail::KernelHandle handle,
-    const std::string& name,
-    size_t numArgs)
-    : handle_(handle)
-    , name_(name)
-    , numArgs_(numArgs)
-    , setArgs_(numArgs) {
+XdnaKernelHandle::XdnaKernelHandle(xdna_detail::KernelHandle handle, const std::string &name, size_t numArgs)
+    : handle_(handle), name_(name), numArgs_(numArgs), setArgs_(numArgs)
+{
 
     if (!handle_) {
         throw KernelNotFoundError(name);
@@ -172,11 +175,13 @@ XdnaKernelHandle::XdnaKernelHandle(
 
 XdnaKernelHandle::~XdnaKernelHandle() = default;
 
-std::string XdnaKernelHandle::name() const {
+std::string XdnaKernelHandle::name() const
+{
     return name_;
 }
 
-void XdnaKernelHandle::setArg(size_t index, const KernelArgument& arg) {
+void XdnaKernelHandle::setArg(size_t index, const KernelArgument &arg)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (index >= numArgs_) {
@@ -194,7 +199,8 @@ void XdnaKernelHandle::setArg(size_t index, const KernelArgument& arg) {
     // }, arg);
 }
 
-ExecutionResult XdnaKernelHandle::execute(const ExecutionOptions& options) {
+ExecutionResult XdnaKernelHandle::execute(const ExecutionOptions &options)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     ExecutionResult result;
@@ -223,18 +229,21 @@ ExecutionResult XdnaKernelHandle::execute(const ExecutionOptions& options) {
     return result;
 }
 
-void XdnaKernelHandle::reset() {
+void XdnaKernelHandle::reset()
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::fill(setArgs_.begin(), setArgs_.end(), std::optional<KernelArgument>{});
 }
 
-size_t XdnaKernelHandle::numArguments() const {
+size_t XdnaKernelHandle::numArguments() const
+{
     return numArgs_;
 }
 
-bool XdnaKernelHandle::isReady() const {
+bool XdnaKernelHandle::isReady() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& arg : setArgs_) {
+    for (const auto &arg : setArgs_) {
         if (!arg.has_value()) {
             return false;
         }
@@ -242,7 +251,8 @@ bool XdnaKernelHandle::isReady() const {
     return true;
 }
 
-bool XdnaKernelHandle::isArgumentSet(size_t index) const {
+bool XdnaKernelHandle::isArgumentSet(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= setArgs_.size()) {
         return false;
@@ -250,7 +260,8 @@ bool XdnaKernelHandle::isArgumentSet(size_t index) const {
     return setArgs_[index].has_value();
 }
 
-std::pair<std::string, std::string> XdnaKernelHandle::getArgumentInfo(size_t index) const {
+std::pair<std::string, std::string> XdnaKernelHandle::getArgumentInfo(size_t index) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= argInfo_.size()) {
         return {"", ""};
@@ -258,11 +269,12 @@ std::pair<std::string, std::string> XdnaKernelHandle::getArgumentInfo(size_t ind
     return argInfo_[index];
 }
 
-std::vector<std::string> XdnaKernelHandle::getArgumentNames() const {
+std::vector<std::string> XdnaKernelHandle::getArgumentNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> names;
     names.reserve(argInfo_.size());
-    for (const auto& info : argInfo_) {
+    for (const auto &info : argInfo_) {
         names.push_back(info.first);
     }
     return names;
@@ -273,16 +285,17 @@ std::vector<std::string> XdnaKernelHandle::getArgumentNames() const {
 //==============================================================================
 
 XdnaBufferManager::XdnaBufferManager(size_t maxPoolSize)
-    : maxPoolSize_(maxPoolSize)
-    , totalMemoryInUse_(0)
-    , activeCount_(0) {
+    : maxPoolSize_(maxPoolSize), totalMemoryInUse_(0), activeCount_(0)
+{
 }
 
-XdnaBufferManager::~XdnaBufferManager() {
+XdnaBufferManager::~XdnaBufferManager()
+{
     clear();
 }
 
-std::shared_ptr<IBuffer> XdnaBufferManager::allocate(size_t size) {
+std::shared_ptr<IBuffer> XdnaBufferManager::allocate(size_t size)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     if (size == 0) {
@@ -315,14 +328,16 @@ std::shared_ptr<IBuffer> XdnaBufferManager::allocate(size_t size) {
     return buffer;
 }
 
-void XdnaBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
-    if (!buffer) return;
+void XdnaBufferManager::deallocate(std::shared_ptr<IBuffer> buffer)
+{
+    if (!buffer)
+        return;
 
     std::lock_guard<std::mutex> lock(poolMutex_);
 
-    auto* xdnaBuffer = dynamic_cast<XdnaBuffer*>(buffer.get());
+    auto *xdnaBuffer = dynamic_cast<XdnaBuffer *>(buffer.get());
     if (!xdnaBuffer || !xdnaBuffer->isValid()) {
-        return;  // Invalid or already freed
+        return; // Invalid or already freed
     }
 
     size_t size = xdnaBuffer->size();
@@ -340,41 +355,47 @@ void XdnaBufferManager::deallocate(std::shared_ptr<IBuffer> buffer) {
     activeCount_--;
 }
 
-std::map<size_t, size_t> XdnaBufferManager::getPoolStats() const {
+std::map<size_t, size_t> XdnaBufferManager::getPoolStats() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
 
     std::map<size_t, size_t> stats;
-    for (const auto& [size, entries] : pool_) {
+    for (const auto &[size, entries] : pool_) {
         stats[size] = entries.size();
     }
     return stats;
 }
 
-void XdnaBufferManager::clear() {
+void XdnaBufferManager::clear()
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     pool_.clear();
     totalMemoryInUse_ = 0;
     activeCount_ = 0;
 }
 
-size_t XdnaBufferManager::totalMemoryInUse() const {
+size_t XdnaBufferManager::totalMemoryInUse() const
+{
     return totalMemoryInUse_.load();
 }
 
-size_t XdnaBufferManager::activeBufferCount() const {
+size_t XdnaBufferManager::activeBufferCount() const
+{
     return activeCount_.load();
 }
 
-size_t XdnaBufferManager::pooledBufferCount() const {
+size_t XdnaBufferManager::pooledBufferCount() const
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     size_t count = 0;
-    for (const auto& [_, entries] : pool_) {
+    for (const auto &[_, entries] : pool_) {
         count += entries.size();
     }
     return count;
 }
 
-void XdnaBufferManager::setMaxPoolSize(size_t max_bytes) {
+void XdnaBufferManager::setMaxPoolSize(size_t max_bytes)
+{
     std::lock_guard<std::mutex> lock(poolMutex_);
     maxPoolSize_ = max_bytes;
 
@@ -382,10 +403,11 @@ void XdnaBufferManager::setMaxPoolSize(size_t max_bytes) {
     while (totalMemoryInUse_ > maxPoolSize_) {
         // Find largest pool entry and remove it
         size_t largestSize = 0;
-        for (const auto& [size, _] : pool_) {
+        for (const auto &[size, _] : pool_) {
             largestSize = std::max(largestSize, size);
         }
-        if (largestSize == 0) break;
+        if (largestSize == 0)
+            break;
 
         auto it = pool_.find(largestSize);
         if (!it->second.empty()) {
@@ -400,19 +422,19 @@ void XdnaBufferManager::setMaxPoolSize(size_t max_bytes) {
 //==============================================================================
 
 XdnaRuntime::XdnaRuntime(int deviceId)
-    : deviceId_(deviceId)
-    , device_(nullptr)
-    , bufferManager_(std::make_shared<XdnaBufferManager>())
-    , initialized_(false) {
+    : deviceId_(deviceId), device_(nullptr), bufferManager_(std::make_shared<XdnaBufferManager>()), initialized_(false)
+{
 
     initializeDevice();
 }
 
-XdnaRuntime::~XdnaRuntime() {
+XdnaRuntime::~XdnaRuntime()
+{
     unload();
 }
 
-void XdnaRuntime::initializeDevice() {
+void XdnaRuntime::initializeDevice()
+{
     // In production: Initialize xDNA device
     // xdna_device_t* device;
     // xdna_result_t result = xdnaDeviceOpen(&device, deviceId_);
@@ -425,7 +447,8 @@ void XdnaRuntime::initializeDevice() {
     initialized_ = true;
 }
 
-bool XdnaRuntime::loadXclbin(const std::string& path) {
+bool XdnaRuntime::loadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (path.empty()) {
@@ -438,14 +461,15 @@ bool XdnaRuntime::loadXclbin(const std::string& path) {
     // Stub: Create fake loaded xclbin
     LoadedXclbin loaded;
     loaded.path = path;
-    loaded.kernelNames = {"kernel_stub"};  // Placeholder
+    loaded.kernelNames = {"kernel_stub"}; // Placeholder
     loaded.context = nullptr;
 
     loadedXclbins_.push_back(std::move(loaded));
     return true;
 }
 
-bool XdnaRuntime::loadXclbinFromMemory(const void* data, size_t size) {
+bool XdnaRuntime::loadXclbinFromMemory(const void *data, size_t size)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!data || size == 0) {
@@ -465,13 +489,13 @@ bool XdnaRuntime::loadXclbinFromMemory(const void* data, size_t size) {
     return true;
 }
 
-bool XdnaRuntime::unloadXclbin(const std::string& path) {
+bool XdnaRuntime::unloadXclbin(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(),
-        [&path](const LoadedXclbin& xclbin) {
-            return xclbin.path == path;
-        });
+    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(), [&path](const LoadedXclbin &xclbin) {
+        return xclbin.path == path;
+    });
 
     if (it == loadedXclbins_.end()) {
         return false;
@@ -484,23 +508,24 @@ bool XdnaRuntime::unloadXclbin(const std::string& path) {
     return true;
 }
 
-std::vector<std::string> XdnaRuntime::getKernelNames() const {
+std::vector<std::string> XdnaRuntime::getKernelNames() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<std::string> names;
-    for (const auto& xclbin : loadedXclbins_) {
+    for (const auto &xclbin : loadedXclbins_) {
         names.insert(names.end(), xclbin.kernelNames.begin(), xclbin.kernelNames.end());
     }
     return names;
 }
 
-std::vector<std::string> XdnaRuntime::getKernelsFromXclbin(const std::string& xclbinPath) const {
+std::vector<std::string> XdnaRuntime::getKernelsFromXclbin(const std::string &xclbinPath) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(),
-        [&xclbinPath](const LoadedXclbin& xclbin) {
-            return xclbin.path == xclbinPath;
-        });
+    auto it = std::find_if(loadedXclbins_.begin(), loadedXclbins_.end(), [&xclbinPath](const LoadedXclbin &xclbin) {
+        return xclbin.path == xclbinPath;
+    });
 
     if (it == loadedXclbins_.end()) {
         return {};
@@ -509,22 +534,22 @@ std::vector<std::string> XdnaRuntime::getKernelsFromXclbin(const std::string& xc
     return it->kernelNames;
 }
 
-bool XdnaRuntime::hasKernel(const std::string& kernelName) const {
+bool XdnaRuntime::hasKernel(const std::string &kernelName) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (const auto& xclbin : loadedXclbins_) {
-        if (std::find(xclbin.kernelNames.begin(), xclbin.kernelNames.end(), kernelName)
-            != xclbin.kernelNames.end()) {
+    for (const auto &xclbin : loadedXclbins_) {
+        if (std::find(xclbin.kernelNames.begin(), xclbin.kernelNames.end(), kernelName) != xclbin.kernelNames.end()) {
             return true;
         }
     }
     return false;
 }
 
-ExecutionResult XdnaRuntime::execute(
-    const std::string& kernelName,
-    const std::vector<KernelArgument>& arguments,
-    const ExecutionOptions& options) {
+ExecutionResult XdnaRuntime::execute(const std::string &kernelName,
+                                     const std::vector<KernelArgument> &arguments,
+                                     const ExecutionOptions &options)
+{
 
     auto kernel = getKernel(kernelName);
     if (!kernel) {
@@ -543,7 +568,8 @@ ExecutionResult XdnaRuntime::execute(
     return kernel->execute(options);
 }
 
-std::shared_ptr<IKernelHandle> XdnaRuntime::getKernel(const std::string& kernelName) {
+std::shared_ptr<IKernelHandle> XdnaRuntime::getKernel(const std::string &kernelName)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     // In production: Get kernel from loaded xclbins
@@ -551,32 +577,35 @@ std::shared_ptr<IKernelHandle> XdnaRuntime::getKernel(const std::string& kernelN
     // return std::make_shared<XdnaKernelHandle>(handle, kernelName, numArgs);
 
     // Stub
-    auto handle = std::make_shared<XdnaKernelHandle>(
-        reinterpret_cast<xdna_detail::KernelHandle>(0x1),
-        kernelName,
-        6  // Default arg count
+    auto handle = std::make_shared<XdnaKernelHandle>(reinterpret_cast<xdna_detail::KernelHandle>(0x1),
+                                                     kernelName,
+                                                     6 // Default arg count
     );
     return handle;
 }
 
-std::shared_ptr<IBuffer> XdnaRuntime::allocateBuffer(size_t size, bool /*hostAccessible*/) {
+std::shared_ptr<IBuffer> XdnaRuntime::allocateBuffer(size_t size, bool /*hostAccessible*/)
+{
     return bufferManager_->allocate(size);
 }
 
-std::shared_ptr<IBuffer> XdnaRuntime::allocateBufferFromData(const void* data, size_t size) {
+std::shared_ptr<IBuffer> XdnaRuntime::allocateBufferFromData(const void *data, size_t size)
+{
     auto buffer = allocateBuffer(size, true);
     buffer->write(data, size);
     return buffer;
 }
 
-std::shared_ptr<IBufferManager> XdnaRuntime::getBufferManager() {
+std::shared_ptr<IBufferManager> XdnaRuntime::getBufferManager()
+{
     return bufferManager_;
 }
 
-void XdnaRuntime::unload() {
+void XdnaRuntime::unload()
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (auto& xclbin : loadedXclbins_) {
+    for (auto &xclbin : loadedXclbins_) {
         // In production: xdnaReleaseContext(xclbin.context);
     }
     loadedXclbins_.clear();
@@ -586,24 +615,29 @@ void XdnaRuntime::unload() {
     }
 }
 
-bool XdnaRuntime::isLoaded() const {
+bool XdnaRuntime::isLoaded() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     return !loadedXclbins_.empty();
 }
 
-std::string XdnaRuntime::getPlatformName() const {
+std::string XdnaRuntime::getPlatformName() const
+{
     return "xDNA";
 }
 
-std::string XdnaRuntime::getVersion() const {
+std::string XdnaRuntime::getVersion() const
+{
     return "1.0.0";
 }
 
-std::string XdnaRuntime::getPlatformVersion() const {
+std::string XdnaRuntime::getPlatformVersion() const
+{
     return getDriverVersion();
 }
 
-std::string XdnaRuntime::getDeviceInfo() const {
+std::string XdnaRuntime::getDeviceInfo() const
+{
     // In production: Query device info from xDNA
     return R"({"device_id":)" + std::to_string(deviceId_) + R"(, "platform": "xDNA"})";
 }

@@ -42,9 +42,11 @@ logger = logging.getLogger(__name__)
 # Target Performance Specifications (NPU Targets)
 # =============================================================================
 
+
 @dataclass
 class PerformanceTarget:
     """Target performance specification for an operator"""
+
     operator_name: str
     input_shape: tuple
     target_latency_ms: float
@@ -88,9 +90,11 @@ PERFORMANCE_TARGETS = {
 # Data Classes
 # =============================================================================
 
+
 @dataclass
 class BenchmarkConfig:
     """Configuration for benchmark execution"""
+
     iterations: int = 50
     warmup: int = 10
     output_format: str = "console"
@@ -112,6 +116,7 @@ class BenchmarkConfig:
 @dataclass
 class BenchmarkMetrics:
     """Performance metrics for a single benchmark run"""
+
     latencies_ms: List[float] = field(default_factory=list)
     throughput_ops_sec: float = 0.0
     memory_bandwidth_gbps: float = 0.0
@@ -135,8 +140,16 @@ class BenchmarkMetrics:
         self.mean_ms = statistics.mean(sorted_latencies)
         self.median_ms = statistics.median(sorted_latencies)
         self.std_dev_ms = statistics.stdev(sorted_latencies) if n > 1 else 0.0
-        self.p95_ms = sorted_latencies[min(int((n - 1) * 0.95), n - 1)] if n > 1 else sorted_latencies[-1]
-        self.p99_ms = sorted_latencies[min(int((n - 1) * 0.99), n - 1)] if n > 1 else sorted_latencies[-1]
+        self.p95_ms = (
+            sorted_latencies[min(int((n - 1) * 0.95), n - 1)]
+            if n > 1
+            else sorted_latencies[-1]
+        )
+        self.p99_ms = (
+            sorted_latencies[min(int((n - 1) * 0.99), n - 1)]
+            if n > 1
+            else sorted_latencies[-1]
+        )
         self.min_ms = min(sorted_latencies)
         self.max_ms = max(sorted_latencies)
 
@@ -144,6 +157,7 @@ class BenchmarkMetrics:
 @dataclass
 class OperatorBenchmarkResult:
     """Results for a single operator benchmark"""
+
     operator_name: str
     input_shape: tuple
     config: dict
@@ -184,6 +198,7 @@ class OperatorBenchmarkResult:
 @dataclass
 class BenchmarkResults:
     """Complete benchmark results"""
+
     results: List[OperatorBenchmarkResult] = field(default_factory=list)
     start_time: str = ""
     end_time: str = ""
@@ -206,6 +221,7 @@ class BenchmarkResults:
 # =============================================================================
 # Reference Operator Implementations (Optimized CPU/PyTorch)
 # =============================================================================
+
 
 class OperatorBenchmark:
     """Base class for operator benchmarks"""
@@ -241,8 +257,12 @@ class RoPEBenchmark(OperatorBenchmark):
 
         # Create input tensor
         self.input_tensor = torch.randn(
-            self.batch_size, self.num_heads, self.seq_len, self.head_dim,
-            dtype=self.dtype, device=self.device
+            self.batch_size,
+            self.num_heads,
+            self.seq_len,
+            self.head_dim,
+            dtype=self.dtype,
+            device=self.device,
         )
 
         # Precompute RoPE parameters
@@ -256,7 +276,10 @@ class RoPEBenchmark(OperatorBenchmark):
 
         inv_freq = 1.0 / (
             theta_base
-            ** (torch.arange(0, head_dim, 2, dtype=torch.float32)[: (head_dim // 2)] / head_dim)
+            ** (
+                torch.arange(0, head_dim, 2, dtype=torch.float32)[: (head_dim // 2)]
+                / head_dim
+            )
         )
 
         positions = torch.arange(context_length, dtype=torch.float32)
@@ -307,8 +330,11 @@ class RMSNormBenchmark(OperatorBenchmark):
 
         # Create input tensor and weight
         self.input_tensor = torch.randn(
-            self.batch_size, self.seq_len, self.hidden_dim,
-            dtype=self.dtype, device=self.device
+            self.batch_size,
+            self.seq_len,
+            self.hidden_dim,
+            dtype=self.dtype,
+            device=self.device,
         )
         self.weight = torch.ones(self.hidden_dim, dtype=self.dtype, device=self.device)
 
@@ -342,8 +368,11 @@ class SiLUBenchmark(OperatorBenchmark):
 
         # Create input tensor
         self.input_tensor = torch.randn(
-            self.batch_size, self.seq_len, self.hidden_dim,
-            dtype=self.dtype, device=self.device
+            self.batch_size,
+            self.seq_len,
+            self.hidden_dim,
+            dtype=self.dtype,
+            device=self.device,
         )
 
     def run(self) -> torch.Tensor:
@@ -373,8 +402,12 @@ class SoftmaxBenchmark(OperatorBenchmark):
 
         # Create input tensor
         self.input_tensor = torch.randn(
-            self.batch_size, self.num_heads, self.seq_len, self.key_len,
-            dtype=self.dtype, device=self.device
+            self.batch_size,
+            self.num_heads,
+            self.seq_len,
+            self.key_len,
+            dtype=self.dtype,
+            device=self.device,
         )
 
     def run(self) -> torch.Tensor:
@@ -408,6 +441,7 @@ OPERATOR_MAP = {
 # Benchmark Runner
 # =============================================================================
 
+
 class BenchmarkRunner:
     """Main benchmark runner that orchestrates all benchmarks"""
 
@@ -423,7 +457,11 @@ class BenchmarkRunner:
         if self.config.device == "cuda" and torch.cuda.is_available():
             return f"CUDA: {torch.cuda.get_device_name(0)}"
         elif self.config.device == "cpu":
-            return f"CPU: {torch.get_cpu_name()}" if hasattr(torch, 'get_cpu_name') else "CPU"
+            return (
+                f"CPU: {torch.get_cpu_name()}"
+                if hasattr(torch, "get_cpu_name")
+                else "CPU"
+            )
         return "Unknown device"
 
     def run_operator_benchmark(
@@ -455,9 +493,12 @@ class BenchmarkRunner:
 
             # Get target latency
             if operator_name in PERFORMANCE_TARGETS:
-                result.target_latency_ms = PERFORMANCE_TARGETS[operator_name].target_latency_ms
+                result.target_latency_ms = PERFORMANCE_TARGETS[
+                    operator_name
+                ].target_latency_ms
                 result.cpu_baseline_latency_ms = (
-                    result.target_latency_ms * PERFORMANCE_TARGETS[operator_name].cpu_baseline_factor
+                    result.target_latency_ms
+                    * PERFORMANCE_TARGETS[operator_name].cpu_baseline_factor
                 )
 
             # Warmup runs
@@ -482,7 +523,9 @@ class BenchmarkRunner:
                 latencies_ms.append(latency_ms)
 
                 if self.config.verbose and (i + 1) % 10 == 0:
-                    logger.info(f"  Iteration {i + 1}/{self.config.iterations}: {latency_ms:.4f} ms")
+                    logger.info(
+                        f"  Iteration {i + 1}/{self.config.iterations}: {latency_ms:.4f} ms"
+                    )
 
             # Compute metrics
             result.metrics.latencies_ms = latencies_ms
@@ -499,7 +542,9 @@ class BenchmarkRunner:
 
             # Check target (using CPU baseline target, not NPU target)
             if result.cpu_baseline_latency_ms is not None:
-                result.target_met = result.metrics.mean_ms <= result.cpu_baseline_latency_ms
+                result.target_met = (
+                    result.metrics.mean_ms <= result.cpu_baseline_latency_ms
+                )
 
             # Log results
             status = "PASS" if result.target_met else "FAIL"
@@ -516,6 +561,7 @@ class BenchmarkRunner:
             result.target_met = None
             if self.config.verbose:
                 import traceback
+
                 logger.error(traceback.format_exc())
 
         return result
@@ -589,10 +635,14 @@ class BenchmarkRunner:
             if result.target_latency_ms is not None:
                 lines.append("Performance Targets:")
                 lines.append(f"  NPU Target:       {result.target_latency_ms:.2f}ms")
-                lines.append(f"  CPU Baseline:     {result.cpu_baseline_latency_ms:.2f}ms (expected)")
+                lines.append(
+                    f"  CPU Baseline:     {result.cpu_baseline_latency_ms:.2f}ms (expected)"
+                )
                 status = "PASS" if result.target_met else "FAIL"
                 status_icon = "[OK]" if result.target_met else "[!!]"
-                lines.append(f"  CPU Result:       {m.mean_ms:.4f}ms | {status_icon} {status} (vs CPU baseline)")
+                lines.append(
+                    f"  CPU Result:       {m.mean_ms:.4f}ms | {status_icon} {status} (vs CPU baseline)"
+                )
 
             lines.append("")
 
@@ -640,8 +690,16 @@ class BenchmarkRunner:
                 continue
 
             m = result.metrics
-            target_str = f"{result.target_latency_ms:.2f}ms (NPU)" if result.target_latency_ms else "N/A"
-            status = "[OK]" if result.target_met else "[FAIL]" if result.target_met is not None else ""
+            target_str = (
+                f"{result.target_latency_ms:.2f}ms (NPU)"
+                if result.target_latency_ms
+                else "N/A"
+            )
+            status = (
+                "[OK]"
+                if result.target_met
+                else "[FAIL]" if result.target_met is not None else ""
+            )
             target_str += f" {status}" if status else ""
 
             shape_str = "x".join(map(str, result.input_shape))
@@ -685,7 +743,9 @@ class BenchmarkRunner:
             if result.target_latency_ms is not None:
                 status = "PASS" if result.target_met else "FAIL"
                 lines.append(f"| NPU Target | {result.target_latency_ms:.2f}ms |")
-                lines.append(f"| CPU Baseline | {result.cpu_baseline_latency_ms:.2f}ms |")
+                lines.append(
+                    f"| CPU Baseline | {result.cpu_baseline_latency_ms:.2f}ms |"
+                )
                 lines.append(f"| CPU Result | {m.mean_ms:.4f}ms - {status} |")
 
             lines.append("")
@@ -693,7 +753,9 @@ class BenchmarkRunner:
         lines.append("")
         lines.append("## Notes")
         lines.append("")
-        lines.append("- These benchmarks use **CPU reference implementations** in PyTorch")
+        lines.append(
+            "- These benchmarks use **CPU reference implementations** in PyTorch"
+        )
         lines.append("- NPU hardware benchmarks are expected to be ~10x faster")
         lines.append("- NPU Target = hardware performance goal")
         lines.append("- CPU Baseline = expected CPU performance (10x NPU target)")

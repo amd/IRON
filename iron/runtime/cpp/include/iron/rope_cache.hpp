@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <vector>
-#include <memory>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 /**
  * @brief Pre-computed RoPE angle cache for fast inference
@@ -43,8 +45,9 @@ namespace runtime {
  * Stores sin/cos angle tables pre-computed at model load time.
  * Supports sequence lengths up to 131K (Llama3.2 max context).
  */
-class RoPECache {
-public:
+class RoPECache
+{
+  public:
     /**
      * @brief Configuration for RoPE cache
      *
@@ -52,15 +55,16 @@ public:
      * and up to 128K context length.
      */
     struct Config {
-        size_t maxSeqLen = 131072;   ///< Llama3.2 max context (128K)
-        size_t headDim = 64;         ///< Head dimension
-        float theta = 10000.0f;      ///< RoPE theta parameter
+        size_t maxSeqLen = 131072; ///< Llama3.2 max context (128K)
+        size_t headDim = 64;       ///< Head dimension
+        float theta = 10000.0f;    ///< RoPE theta parameter
 
         /**
          * @brief Calculate cache size in elements
          * @return Number of float elements per cache (cos or sin)
          */
-        size_t cacheElements() const {
+        size_t cacheElements() const
+        {
             return maxSeqLen * (headDim / 2);
         }
 
@@ -68,15 +72,17 @@ public:
          * @brief Calculate total cache size in bytes
          * @return Total bytes for both cos and sin caches
          */
-        size_t totalBytes() const {
-            return cacheElements() * 2 * sizeof(float);  // cos + sin
+        size_t totalBytes() const
+        {
+            return cacheElements() * 2 * sizeof(float); // cos + sin
         }
 
         /**
          * @brief Validate configuration
          * @return true if valid
          */
-        bool isValid() const {
+        bool isValid() const
+        {
             return maxSeqLen > 0 && headDim > 0 && headDim % 2 == 0 && theta > 0.0f;
         }
     };
@@ -87,7 +93,7 @@ public:
      * @throws std::invalid_argument if config is invalid
      * @throws std::bad_alloc if memory allocation fails
      */
-    explicit RoPECache(const Config& config = Config());
+    explicit RoPECache(const Config &config = Config());
 
     /**
      * @brief Destructor
@@ -95,12 +101,12 @@ public:
     ~RoPECache();
 
     // Prevent copying (large object)
-    RoPECache(const RoPECache&) = delete;
-    RoPECache& operator=(const RoPECache&) = delete;
+    RoPECache(const RoPECache &) = delete;
+    RoPECache &operator=(const RoPECache &) = delete;
 
     // Allow moving
-    RoPECache(RoPECache&& other) noexcept = default;
-    RoPECache& operator=(RoPECache&& other) noexcept = default;
+    RoPECache(RoPECache &&other) noexcept = default;
+    RoPECache &operator=(RoPECache &&other) noexcept = default;
 
     //==========================================================================
     // Table Access
@@ -113,7 +119,7 @@ public:
      * @throws std::runtime_error if not initialized
      * @throws std::out_of_range if seqLen > maxSeqLen
      */
-    const float* getCosTable(size_t seqLen) const;
+    const float *getCosTable(size_t seqLen) const;
 
     /**
      * @brief Get pre-computed sin table for sequence length
@@ -122,7 +128,7 @@ public:
      * @throws std::runtime_error if not initialized
      * @throws std::out_of_range if seqLen > maxSeqLen
      */
-    const float* getSinTable(size_t seqLen) const;
+    const float *getSinTable(size_t seqLen) const;
 
     /**
      * @brief Get combined cache in NPU-accessible format
@@ -133,7 +139,7 @@ public:
      * @return Pointer to interleaved buffer
      * @throws std::runtime_error if not initialized
      */
-    const void* getDeviceBuffer() const;
+    const void *getDeviceBuffer() const;
 
     /**
      * @brief Get device buffer size in bytes
@@ -145,21 +151,30 @@ public:
      * @brief Get configuration
      * @return Current configuration
      */
-    const Config& getConfig() const { return config_; }
+    const Config &getConfig() const
+    {
+        return config_;
+    }
 
     /**
      * @brief Check if cache is initialized
      * @return true if initialization complete
      */
-    bool isInitialized() const { return initialized_; }
+    bool isInitialized() const
+    {
+        return initialized_;
+    }
 
     /**
      * @brief Get pre-computation time (for profiling)
      * @return Initialization time in milliseconds
      */
-    double getInitializationTimeMs() const { return initializationTimeMs_; }
+    double getInitializationTimeMs() const
+    {
+        return initializationTimeMs_;
+    }
 
-private:
+  private:
     Config config_;
 
     // Cosine cache: [maxSeqLen, headDim/2]

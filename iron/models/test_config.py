@@ -35,6 +35,7 @@ from iron.models.registry import ModelRegistry
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def default_config() -> Llama32Config:
     """Create a default Llama3.2 config."""
@@ -80,11 +81,7 @@ def temp_config_file() -> Path:
         "mlp_bias": False,
     }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".json",
-        delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_dict, f)
         temp_path = Path(f.name)
 
@@ -111,6 +108,7 @@ def invalid_config_dict() -> Dict[str, Any]:
 # =============================================================================
 # Test: Basic Configuration
 # =============================================================================
+
 
 class TestConfigInitialization:
     """Test Llama32Config initialization."""
@@ -149,12 +147,11 @@ class TestConfigInitialization:
 # Test: Validation
 # =============================================================================
 
+
 class TestConfigValidation:
     """Test Llama32Config validation."""
 
-    def test_valid_config_no_exception(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_valid_config_no_exception(self, default_config: Llama32Config) -> None:
         """Test that valid config doesn't raise exceptions."""
         # If we got here without exception, validation passed
         assert default_config.hidden_size > 0
@@ -196,9 +193,7 @@ class TestConfigValidation:
 
     def test_invalid_max_position_embeddings(self) -> None:
         """Test that non-positive max_position_embeddings raises ValueError."""
-        with pytest.raises(
-            ValueError, match="max_position_embeddings must be >= 1"
-        ):
+        with pytest.raises(ValueError, match="max_position_embeddings must be >= 1"):
             Llama32Config(max_position_embeddings=0)
 
     def test_invalid_rope_theta(self) -> None:
@@ -213,38 +208,29 @@ class TestConfigValidation:
         """
         with pytest.raises(ValueError, match="must be divisible"):
             Llama32Config(
-                num_attention_heads=32,
-                num_key_value_heads=7  # 32 % 7 = 4 != 0
+                num_attention_heads=32, num_key_value_heads=7  # 32 % 7 = 4 != 0
             )
 
     def test_gqa_compatibility_valid(self) -> None:
         """Test valid GQA configurations."""
         # 32 / 8 = 4 groups
-        config = Llama32Config(
-            num_attention_heads=32,
-            num_key_value_heads=8
-        )
+        config = Llama32Config(num_attention_heads=32, num_key_value_heads=8)
         assert config.gqa_groups == 4
 
         # 16 / 4 = 4 groups
-        config = Llama32Config(
-            num_attention_heads=16,
-            num_key_value_heads=4
-        )
+        config = Llama32Config(num_attention_heads=16, num_key_value_heads=4)
         assert config.gqa_groups == 4
 
     def test_gqa_single_kv_head(self) -> None:
         """Test single KV head (multi-query attention)."""
-        config = Llama32Config(
-            num_attention_heads=32,
-            num_key_value_heads=1
-        )
+        config = Llama32Config(num_attention_heads=32, num_key_value_heads=1)
         assert config.gqa_groups == 32
 
 
 # =============================================================================
 # Test: JSON Loading/Saving
 # =============================================================================
+
 
 class TestConfigSerialization:
     """Test Llama32Config JSON serialization."""
@@ -336,6 +322,7 @@ class TestConfigSerialization:
 # Test: Computed Properties
 # =============================================================================
 
+
 class TestConfigProperties:
     """Test Llama32Config computed properties."""
 
@@ -363,9 +350,7 @@ class TestConfigProperties:
         expected = 2 * 16 * 8 * 64 * 4
         assert default_config.kv_cache_size_per_token == expected
 
-    def test_kv_cache_size_per_token_bf16(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_kv_cache_size_per_token_bf16(self, default_config: Llama32Config) -> None:
         """Test KV cache size calculation for bfloat16."""
         # 2 * 16 layers * 8 KV heads * 64 head_dim * 2 bytes (bfloat16)
         expected = 2 * 16 * 8 * 64 * 2
@@ -376,9 +361,7 @@ class TestConfigProperties:
         # 32 attention heads / 8 KV heads = 4 groups
         assert default_config.gqa_groups == 4
 
-    def test_hidden_per_layer_bytes(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_hidden_per_layer_bytes(self, default_config: Llama32Config) -> None:
         """Test hidden state bytes calculation."""
         # 2048 * 4 bytes (float32)
         expected = 2048 * 4
@@ -393,6 +376,7 @@ class TestConfigProperties:
 # Test: Memory Estimation
 # =============================================================================
 
+
 class TestConfigMemoryEstimation:
     """Test Llama32Config memory estimation methods."""
 
@@ -406,9 +390,7 @@ class TestConfigMemoryEstimation:
         assert memory > 0
         assert memory < 10e9  # Less than 10GB
 
-    def test_estimate_weight_memory_bf16(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_estimate_weight_memory_bf16(self, default_config: Llama32Config) -> None:
         """Test weight memory estimation for bfloat16."""
         memory_bf16 = default_config.estimate_weight_memory("bfloat16")
         memory_f32 = default_config.estimate_weight_memory("float32")
@@ -425,14 +407,10 @@ class TestConfigMemoryEstimation:
         # Should default to 4 bytes per param
         assert memory > 0
 
-    def test_estimate_kv_cache_memory(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_estimate_kv_cache_memory(self, default_config: Llama32Config) -> None:
         """Test KV cache memory estimation."""
         memory = default_config.estimate_kv_cache_memory(
-            batch_size=1,
-            seq_len=1024,
-            dtype="float32"
+            batch_size=1, seq_len=1024, dtype="float32"
         )
 
         # Should be positive and reasonable
@@ -470,6 +448,7 @@ class TestConfigMemoryEstimation:
 # Test: String Representations
 # =============================================================================
 
+
 class TestConfigStringRepresentation:
     """Test Llama32Config string representations."""
 
@@ -494,6 +473,7 @@ class TestConfigStringRepresentation:
 # Test: Model Registry Integration
 # =============================================================================
 
+
 class TestModelRegistryIntegration:
     """Test integration with ModelRegistry."""
 
@@ -508,9 +488,7 @@ class TestModelRegistryIntegration:
 
     def test_llama_variants(self) -> None:
         """Test that Llama3.2 variants are registered."""
-        assert ModelRegistry.validate_variant(
-            "llama", "meta-llama/Llama-3.2-1B"
-        )
+        assert ModelRegistry.validate_variant("llama", "meta-llama/Llama-3.2-1B")
 
     def test_llama_default_variant(self) -> None:
         """Test default variant for Llama3.2."""
@@ -522,6 +500,7 @@ class TestModelRegistryIntegration:
 # =============================================================================
 # Test: Edge Cases
 # =============================================================================
+
 
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
@@ -556,35 +535,25 @@ class TestEdgeCases:
         # Should not raise
         assert config.vocab_size == 1000000
 
-    def test_rope_scaling_none_by_default(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_rope_scaling_none_by_default(self, default_config: Llama32Config) -> None:
         """Test that rope_scaling is None by default."""
         assert default_config.rope_scaling is None
 
     def test_rope_scaling_with_dict(self) -> None:
         """Test config with rope_scaling dictionary."""
-        config = Llama32Config(
-            rope_scaling={"type": "linear", "factor": 2.0}
-        )
+        config = Llama32Config(rope_scaling={"type": "linear", "factor": 2.0})
         assert config.rope_scaling is not None
         assert config.rope_scaling["type"] == "linear"
 
-    def test_architectures_list_default(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_architectures_list_default(self, default_config: Llama32Config) -> None:
         """Test default architectures list."""
         assert default_config.architectures == ["LlamaForCausalLM"]
 
-    def test_tie_word_embeddings_default(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_tie_word_embeddings_default(self, default_config: Llama32Config) -> None:
         """Test default tie_word_embeddings value."""
         assert default_config.tie_word_embeddings is False
 
-    def test_attention_bias_default(
-        self, default_config: Llama32Config
-    ) -> None:
+    def test_attention_bias_default(self, default_config: Llama32Config) -> None:
         """Test default attention_bias value."""
         assert default_config.attention_bias is False
 
@@ -597,11 +566,15 @@ class TestEdgeCases:
 # Test: HuggingFace Integration (Mocked)
 # =============================================================================
 
+
 class TestHuggingFaceIntegration:
     """Test HuggingFace Hub integration (mocked)."""
 
-    def test_from_pretrained_import_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_from_pretrained_import_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test from_pretrained handles missing huggingface_hub."""
+
         # Mock the import to fail
         def mock_import(name, *args, **kwargs):
             if name == "huggingface_hub":

@@ -27,10 +27,14 @@ from pathlib import Path
 from datetime import datetime
 
 # Import the analysis modules directly (they have no AIE dependencies)
-exec(open(Path(__file__).parent / "architecture_scanner.py").read().replace(
-    "from .architecture_scanner import",
-    "#"  # Skip relative imports - we're running standalone
-))
+exec(
+    open(Path(__file__).parent / "architecture_scanner.py")
+    .read()
+    .replace(
+        "from .architecture_scanner import",
+        "#",  # Skip relative imports - we're running standalone
+    )
+)
 
 # Re-define necessary imports for standalone mode
 import ast
@@ -60,7 +64,13 @@ class LayerCategory(Enum):
 
 # Known IRON-supported patterns
 SUPPORTED_PATTERNS = {
-    "attention": [".*Attention.*", ".*MHA.*", ".*MultiHead.*", ".*GQA.*", ".*GroupedQuery.*"],
+    "attention": [
+        ".*Attention.*",
+        ".*MHA.*",
+        ".*MultiHead.*",
+        ".*GQA.*",
+        ".*GroupedQuery.*",
+    ],
     "normalization": [".*Norm.*", ".*LayerNorm.*", ".*RMSNorm.*", ".*BatchNorm.*"],
     "activation": [".*ReLU.*", ".*GELU.*", ".*SiLU.*", ".*SwiGLU.*", ".*Softmax.*"],
     "linear": [".*Linear.*", ".*Dense.*", ".*Projection.*", ".*FFN.*", ".*MLP.*"],
@@ -106,7 +116,7 @@ def scan_model_simple(model_path: str) -> dict:
             "total": 0,
             "supported": 0,
             "unsupported": 0,
-        }
+        },
     }
 
     # Try to load config.json
@@ -138,10 +148,17 @@ def scan_model_simple(model_path: str) -> dict:
                     class_name = node.name
 
                     # Check if it's a layer class
-                    if any("layer" in base.id.lower() or "attention" in base.id.lower() or "norm" in base.id.lower()
-                           for base in node.bases if isinstance(base, ast.Attribute | ast.Name)):
+                    if any(
+                        "layer" in base.id.lower()
+                        or "attention" in base.id.lower()
+                        or "norm" in base.id.lower()
+                        for base in node.bases
+                        if isinstance(base, ast.Attribute | ast.Name)
+                    ):
 
-                        is_supported, note = check_layer_support(class_name, py_file.name)
+                        is_supported, note = check_layer_support(
+                            class_name, py_file.name
+                        )
 
                         layer_info = {
                             "name": class_name,
@@ -259,7 +276,11 @@ def cmd_report(args):
     }
 
     # Save report
-    output_path = Path(args.output) if args.output else Path(f"{result['model_name']}_report.json")
+    output_path = (
+        Path(args.output)
+        if args.output
+        else Path(f"{result['model_name']}_report.json")
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w") as f:

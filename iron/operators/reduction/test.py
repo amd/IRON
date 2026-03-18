@@ -36,7 +36,9 @@ def generate_test_params(extensive=False):
                         f"reduction_{op}_{input_size}_{reduction_size}_"
                         f"{num_aie_columns}cols_{tile_size}tile"
                     )
-                    params.append((input_size, reduction_size, op, num_aie_columns, tile_size))
+                    params.append(
+                        (input_size, reduction_size, op, num_aie_columns, tile_size)
+                    )
     return params, names
 
 
@@ -129,8 +131,9 @@ def test_reduction_forward(
     expected = reduction_cpu(x, dim=-1, reduction_op=reduction_op)
 
     # Check shape
-    assert result.shape == expected.shape, \
-        f"Shape mismatch: got {result.shape}, expected {expected.shape}"
+    assert (
+        result.shape == expected.shape
+    ), f"Shape mismatch: got {result.shape}, expected {expected.shape}"
 
     # Check values with relaxed tolerance for AIE
     rel_tol = 0.05

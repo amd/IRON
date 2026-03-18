@@ -301,6 +301,7 @@ def run_all_tests():
         except Exception as e:
             results.append((name, False, str(e)))
             import traceback
+
             traceback.print_exc()
 
     # Summary
@@ -332,7 +333,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test IRON Model Converter")
     parser.add_argument(
         "--test",
-        choices=["all", "quick", "scan", "gap", "registry", "extensibility", "converter", "cli", "skeleton"],
+        choices=[
+            "all",
+            "quick",
+            "scan",
+            "gap",
+            "registry",
+            "extensibility",
+            "converter",
+            "cli",
+            "skeleton",
+        ],
         default="all",
         help="Run specific test",
     )

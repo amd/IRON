@@ -17,39 +17,48 @@
  */
 
 #include "rope_bf16.hpp"
+
 #include "types.hpp"
+
 #include <cmath>
 #include <cstring>
 
-namespace iron {
-namespace operators {
-namespace rope {
+namespace iron
+{
+namespace operators
+{
+namespace rope
+{
 
 /**
  * @brief Internal helper: compute negative of bfloat16
  */
-inline bfloat16 bf16_neg(bfloat16 x) {
+inline bfloat16 bf16_neg(bfloat16 x)
+{
     return bfloat16(-static_cast<float>(x));
 }
 
 /**
  * @brief Internal helper: multiply two bfloat16 values with FP32 accumulation
  */
-inline bfloat16 bf16_mul(bfloat16 a, bfloat16 b) {
+inline bfloat16 bf16_mul(bfloat16 a, bfloat16 b)
+{
     return bfloat16(static_cast<float>(a) * static_cast<float>(b));
 }
 
 /**
  * @brief Internal helper: add two bfloat16 values with FP32 accumulation
  */
-inline bfloat16 bf16_add(bfloat16 a, bfloat16 b) {
+inline bfloat16 bf16_add(bfloat16 a, bfloat16 b)
+{
     return bfloat16(static_cast<float>(a) + static_cast<float>(b));
 }
 
 /**
  * @brief Internal helper: subtract two bfloat16 values
  */
-inline bfloat16 bf16_sub(bfloat16 a, bfloat16 b) {
+inline bfloat16 bf16_sub(bfloat16 a, bfloat16 b)
+{
     return bfloat16(static_cast<float>(a) - static_cast<float>(b));
 }
 
@@ -57,8 +66,8 @@ inline bfloat16 bf16_sub(bfloat16 a, bfloat16 b) {
 // rotate_half Implementation
 //==============================================================================
 
-template<typename T>
-void rotate_half(const T* x, T* out, int num_elements, int head_dim) {
+template <typename T> void rotate_half(const T *x, T *out, int num_elements, int head_dim)
+{
     const int half_dim = head_dim / 2;
 
     // Process each sequence position
@@ -75,25 +84,24 @@ void rotate_half(const T* x, T* out, int num_elements, int head_dim) {
 }
 
 // Explicit template instantiation for bfloat16
-template void rotate_half<bfloat16>(const bfloat16*, bfloat16*, int, int);
+template void rotate_half<bfloat16>(const bfloat16 *, bfloat16 *, int, int);
 
 //==============================================================================
 // rope_fwd Implementation - Two Halves Method
 //==============================================================================
 
-template<typename T>
-void rope_fwd_two_halves(
-    const T* q,
-    const T* k,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    T* k_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim
-) {
+template <typename T>
+void rope_fwd_two_halves(const T *q,
+                         const T *k,
+                         const T *cos,
+                         const T *sin,
+                         T *q_out,
+                         T *k_out,
+                         int batch,
+                         int heads,
+                         int seq,
+                         int head_dim)
+{
     const int half_dim = head_dim / 2;
     const int total_tokens = batch * heads * seq;
 
@@ -135,19 +143,18 @@ void rope_fwd_two_halves(
 // rope_fwd Implementation - Interleaved Method
 //==============================================================================
 
-template<typename T>
-void rope_fwd_interleaved(
-    const T* q,
-    const T* k,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    T* k_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim
-) {
+template <typename T>
+void rope_fwd_interleaved(const T *q,
+                          const T *k,
+                          const T *cos,
+                          const T *sin,
+                          T *q_out,
+                          T *k_out,
+                          int batch,
+                          int heads,
+                          int seq,
+                          int head_dim)
+{
     const int half_dim = head_dim / 2;
     const int total_tokens = batch * heads * seq;
 
@@ -159,8 +166,8 @@ void rope_fwd_interleaved(
 
         // Process query embeddings (interleaved pattern)
         for (int d = 0; d < half_dim; ++d) {
-            const int even_idx = d * 2;       // Even position: 2*d
-            const int odd_idx = d * 2 + 1;    // Odd position: 2*d + 1
+            const int even_idx = d * 2;    // Even position: 2*d
+            const int odd_idx = d * 2 + 1; // Odd position: 2*d + 1
 
             const float q_even = static_cast<float>(q[token_offset + even_idx]);
             const float q_odd = static_cast<float>(q[token_offset + odd_idx]);
@@ -195,20 +202,19 @@ void rope_fwd_interleaved(
 // Main rope_fwd Template Implementation
 //==============================================================================
 
-template<typename T>
-void rope_fwd(
-    const T* q,
-    const T* k,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    T* k_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim,
-    RotationMethod method
-) {
+template <typename T>
+void rope_fwd(const T *q,
+              const T *k,
+              const T *cos,
+              const T *sin,
+              T *q_out,
+              T *k_out,
+              int batch,
+              int heads,
+              int seq,
+              int head_dim,
+              RotationMethod method)
+{
     // Validate inputs
     if (head_dim <= 0 || head_dim % 2 != 0) {
         // Invalid head dimension - head_dim must be positive and even
@@ -217,43 +223,47 @@ void rope_fwd(
     }
 
     switch (method) {
-        case RotationMethod::TWO_HALVES:
-            rope_fwd_two_halves(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
-            break;
-        case RotationMethod::INTERLEAVED:
-            rope_fwd_interleaved(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
-            break;
-        default:
-            // Default to two-halves method
-            rope_fwd_two_halves(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
-            break;
+    case RotationMethod::TWO_HALVES:
+        rope_fwd_two_halves(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
+        break;
+    case RotationMethod::INTERLEAVED:
+        rope_fwd_interleaved(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
+        break;
+    default:
+        // Default to two-halves method
+        rope_fwd_two_halves(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
+        break;
     }
 }
 
 // Explicit template instantiation for bfloat16
-template void rope_fwd<bfloat16>(
-    const bfloat16*, const bfloat16*,
-    const bfloat16*, const bfloat16*,
-    bfloat16*, bfloat16*,
-    int, int, int, int, RotationMethod
-);
+template void rope_fwd<bfloat16>(const bfloat16 *,
+                                 const bfloat16 *,
+                                 const bfloat16 *,
+                                 const bfloat16 *,
+                                 bfloat16 *,
+                                 bfloat16 *,
+                                 int,
+                                 int,
+                                 int,
+                                 int,
+                                 RotationMethod);
 
 //==============================================================================
 // rope_query_only Implementation
 //==============================================================================
 
-template<typename T>
-void rope_query_only(
-    const T* q,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim,
-    RotationMethod method
-) {
+template <typename T>
+void rope_query_only(const T *q,
+                     const T *cos,
+                     const T *sin,
+                     T *q_out,
+                     int batch,
+                     int heads,
+                     int seq,
+                     int head_dim,
+                     RotationMethod method)
+{
     const int half_dim = head_dim / 2;
     const int total_tokens = batch * heads * seq;
 
@@ -298,12 +308,15 @@ void rope_query_only(
 }
 
 // Explicit template instantiation for bfloat16
-template void rope_query_only<bfloat16>(
-    const bfloat16*,
-    const bfloat16*, const bfloat16*,
-    bfloat16*,
-    int, int, int, int, RotationMethod
-);
+template void rope_query_only<bfloat16>(const bfloat16 *,
+                                        const bfloat16 *,
+                                        const bfloat16 *,
+                                        bfloat16 *,
+                                        int,
+                                        int,
+                                        int,
+                                        int,
+                                        RotationMethod);
 
 } // namespace rope
 } // namespace operators

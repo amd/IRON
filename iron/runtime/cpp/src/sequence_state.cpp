@@ -20,21 +20,23 @@
  * - Reads can proceed concurrently when not modifying state
  */
 
+#include <algorithm>
+#include <cstring>
 #include <iron/sequence_state.hpp>
 #include <stdexcept>
-#include <cstring>
-#include <algorithm>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Construction/Destruction
 //==============================================================================
 
 SequenceState::SequenceState(std::shared_ptr<PagedKVCache> kvCache)
-    : kvCache_(std::move(kvCache)),
-      rng_(std::random_device{}()) {
+    : kvCache_(std::move(kvCache)), rng_(std::random_device{}())
+{
     if (!kvCache_) {
         throw std::invalid_argument("SequenceState requires a valid KV cache");
     }
@@ -46,9 +48,8 @@ SequenceState::~SequenceState() = default;
 // Sequence Lifecycle
 //==============================================================================
 
-uint64_t SequenceState::startSequence(
-    const std::vector<int32_t>& promptTokens,
-    size_t maxNewTokens) {
+uint64_t SequenceState::startSequence(const std::vector<int32_t> &promptTokens, size_t maxNewTokens)
+{
     if (promptTokens.empty()) {
         throw std::invalid_argument("Prompt tokens cannot be empty");
     }
@@ -70,21 +71,20 @@ uint64_t SequenceState::startSequence(
     const uint64_t seqId = generateSequenceId();
 
     std::lock_guard<std::mutex> lock(mutex_);
-    State& state = sequences_[seqId];
+    State &state = sequences_[seqId];
     state.sequenceId = seqId;
     state.promptLength = promptTokens.size();
     state.currentLength = promptTokens.size();
     state.kvBlocks = std::move(blocks);
     state.generatedTokens.reserve(totalTokens);
-    state.generatedTokens.insert(state.generatedTokens.end(),
-                                  promptTokens.begin(),
-                                  promptTokens.end());
+    state.generatedTokens.insert(state.generatedTokens.end(), promptTokens.begin(), promptTokens.end());
     state.isComplete = false;
 
     return seqId;
 }
 
-void SequenceState::appendToken(uint64_t sequenceId, int32_t tokenId) {
+void SequenceState::appendToken(uint64_t sequenceId, int32_t tokenId)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -92,7 +92,7 @@ void SequenceState::appendToken(uint64_t sequenceId, int32_t tokenId) {
         throw std::out_of_range("Sequence " + std::to_string(sequenceId) + " not found");
     }
 
-    State& state = it->second;
+    State &state = it->second;
     if (state.isComplete) {
         throw std::runtime_error("Cannot append token to completed sequence");
     }
@@ -107,15 +107,14 @@ void SequenceState::appendToken(uint64_t sequenceId, int32_t tokenId) {
         const size_t additionalBlocks = blocksNeeded - state.kvBlocks.size();
         auto newBlocks = kvCache_->allocateBlocks(additionalBlocks);
         if (!newBlocks.empty()) {
-            state.kvBlocks.insert(state.kvBlocks.end(),
-                                   newBlocks.begin(),
-                                   newBlocks.end());
+            state.kvBlocks.insert(state.kvBlocks.end(), newBlocks.begin(), newBlocks.end());
         }
         // If allocation fails, we continue anyway - the KV cache will handle it
     }
 }
 
-void SequenceState::completeSequence(uint64_t sequenceId, const std::string& reason) {
+void SequenceState::completeSequence(uint64_t sequenceId, const std::string &reason)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -127,7 +126,8 @@ void SequenceState::completeSequence(uint64_t sequenceId, const std::string& rea
     it->second.stopReason = reason;
 }
 
-void SequenceState::removeSequence(uint64_t sequenceId) {
+void SequenceState::removeSequence(uint64_t sequenceId)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -146,7 +146,8 @@ void SequenceState::removeSequence(uint64_t sequenceId) {
 // State Queries
 //==============================================================================
 
-SequenceState::State SequenceState::getState(uint64_t sequenceId) const {
+SequenceState::State SequenceState::getState(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -157,17 +158,19 @@ SequenceState::State SequenceState::getState(uint64_t sequenceId) const {
     return it->second;
 }
 
-bool SequenceState::hasSequence(uint64_t sequenceId) const {
+bool SequenceState::hasSequence(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
     return sequences_.find(sequenceId) != sequences_.end();
 }
 
-std::vector<uint64_t> SequenceState::getActiveSequences() const {
+std::vector<uint64_t> SequenceState::getActiveSequences() const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<uint64_t> active;
     active.reserve(sequences_.size());
-    for (const auto& [id, state] : sequences_) {
+    for (const auto &[id, state] : sequences_) {
         if (!state.isComplete) {
             active.push_back(id);
         }
@@ -175,7 +178,8 @@ std::vector<uint64_t> SequenceState::getActiveSequences() const {
     return active;
 }
 
-size_t SequenceState::getNextTokenPosition(uint64_t sequenceId) const {
+size_t SequenceState::getNextTokenPosition(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -186,7 +190,8 @@ size_t SequenceState::getNextTokenPosition(uint64_t sequenceId) const {
     return it->second.currentLength;
 }
 
-std::vector<int32_t> SequenceState::getGeneratedTokens(uint64_t sequenceId) const {
+std::vector<int32_t> SequenceState::getGeneratedTokens(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -197,7 +202,8 @@ std::vector<int32_t> SequenceState::getGeneratedTokens(uint64_t sequenceId) cons
     return it->second.generatedTokens;
 }
 
-std::vector<PagedKVCache::BlockId> SequenceState::getKVBlocks(uint64_t sequenceId) const {
+std::vector<PagedKVCache::BlockId> SequenceState::getKVBlocks(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -212,7 +218,8 @@ std::vector<PagedKVCache::BlockId> SequenceState::getKVBlocks(uint64_t sequenceI
 // Serialization
 //==============================================================================
 
-std::vector<uint8_t> SequenceState::serialize(uint64_t sequenceId) const {
+std::vector<uint8_t> SequenceState::serialize(uint64_t sequenceId) const
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = sequences_.find(sequenceId);
@@ -220,7 +227,7 @@ std::vector<uint8_t> SequenceState::serialize(uint64_t sequenceId) const {
         throw std::out_of_range("Sequence " + std::to_string(sequenceId) + " not found");
     }
 
-    const State& state = it->second;
+    const State &state = it->second;
 
     // Simple binary serialization format:
     // [sequenceId:8][currentLength:8][promptLength:8][isComplete:1]
@@ -230,7 +237,7 @@ std::vector<uint8_t> SequenceState::serialize(uint64_t sequenceId) const {
     std::vector<uint8_t> data;
 
     // Helper to append data
-    auto append = [&data](const void* ptr, size_t len) {
+    auto append = [&data](const void *ptr, size_t len) {
         const size_t offset = data.size();
         data.resize(offset + len);
         std::memcpy(data.data() + offset, ptr, len);
@@ -267,18 +274,17 @@ std::vector<uint8_t> SequenceState::serialize(uint64_t sequenceId) const {
     uint32_t numEmbeds = static_cast<uint32_t>(state.cachedPromptEmbeddings.size());
     append(&numEmbeds, sizeof(numEmbeds));
     if (numEmbeds > 0) {
-        append(state.cachedPromptEmbeddings.data(),
-               numEmbeds * sizeof(float));
+        append(state.cachedPromptEmbeddings.data(), numEmbeds * sizeof(float));
     }
 
     return data;
 }
 
-std::unique_ptr<SequenceState> SequenceState::deserialize(
-    const std::vector<uint8_t>& data,
-    std::shared_ptr<PagedKVCache> kvCache) {
+std::unique_ptr<SequenceState> SequenceState::deserialize(const std::vector<uint8_t> &data,
+                                                          std::shared_ptr<PagedKVCache> kvCache)
+{
 
-    if (data.size() < 25) {  // Minimum size for header
+    if (data.size() < 25) { // Minimum size for header
         throw std::runtime_error("Invalid serialized data: too short");
     }
 
@@ -287,7 +293,7 @@ std::unique_ptr<SequenceState> SequenceState::deserialize(
     size_t offset = 0;
 
     // Helper to read data
-    auto read = [&data, &offset](void* dest, size_t len) {
+    auto read = [&data, &offset](void *dest, size_t len) {
         if (offset + len > data.size()) {
             throw std::runtime_error("Invalid serialized data: read past end");
         }
@@ -340,8 +346,7 @@ std::unique_ptr<SequenceState> SequenceState::deserialize(
             throw std::runtime_error("Invalid serialized data: invalid embeddings length");
         }
         reconstructed.cachedPromptEmbeddings.resize(numEmbeds);
-        read(reconstructed.cachedPromptEmbeddings.data(),
-             numEmbeds * sizeof(float));
+        read(reconstructed.cachedPromptEmbeddings.data(), numEmbeds * sizeof(float));
     }
 
     // Insert into state map
@@ -355,15 +360,17 @@ std::unique_ptr<SequenceState> SequenceState::deserialize(
 // Private Helpers
 //==============================================================================
 
-uint64_t SequenceState::generateSequenceId() {
+uint64_t SequenceState::generateSequenceId()
+{
     // Use atomic increment for unique IDs
     // Add randomness to prevent predictable IDs across restarts
     const uint64_t base = nextSequenceId_.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t random = rng_() & 0xFFFF;  // 16 bits of randomness
+    const uint64_t random = rng_() & 0xFFFF; // 16 bits of randomness
     return (base << 16) | random;
 }
 
-size_t SequenceState::calculateBlocksNeeded(size_t tokenCount) const {
+size_t SequenceState::calculateBlocksNeeded(size_t tokenCount) const
+{
     const size_t blockSize = kvCache_->getConfig().blockSize;
     return (tokenCount + blockSize - 1) / blockSize;
 }

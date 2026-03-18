@@ -18,6 +18,7 @@ from typing import Dict, Any
 
 # Setup AIE mock before importing iron modules
 from ..common.aie_mock import setup_mock
+
 setup_mock()
 
 from ..models.llama32.config import Llama32Config
@@ -41,34 +42,34 @@ def create_test_weights(config: Llama32Config) -> LlamaWeights:
         layer = TransformerWeights(
             # Attention projections
             wq=np.random.randn(
-                config.hidden_size,
-                config.num_attention_heads * config.head_dim
-            ).astype(np.float32) * 0.02,
+                config.hidden_size, config.num_attention_heads * config.head_dim
+            ).astype(np.float32)
+            * 0.02,
             wk=np.random.randn(
-                config.hidden_size,
-                config.num_key_value_heads * config.head_dim
-            ).astype(np.float32) * 0.02,
+                config.hidden_size, config.num_key_value_heads * config.head_dim
+            ).astype(np.float32)
+            * 0.02,
             wv=np.random.randn(
-                config.hidden_size,
-                config.num_key_value_heads * config.head_dim
-            ).astype(np.float32) * 0.02,
+                config.hidden_size, config.num_key_value_heads * config.head_dim
+            ).astype(np.float32)
+            * 0.02,
             wo=np.random.randn(
-                config.num_attention_heads * config.head_dim,
-                config.hidden_size
-            ).astype(np.float32) * 0.02,
+                config.num_attention_heads * config.head_dim, config.hidden_size
+            ).astype(np.float32)
+            * 0.02,
             # MLP projections (SwiGLU)
-            w1=np.random.randn(
-                config.hidden_size,
-                config.intermediate_size
-            ).astype(np.float32) * 0.02,
-            w2=np.random.randn(
-                config.intermediate_size,
-                config.hidden_size
-            ).astype(np.float32) * 0.02,
-            w3=np.random.randn(
-                config.hidden_size,
-                config.intermediate_size
-            ).astype(np.float32) * 0.02,
+            w1=np.random.randn(config.hidden_size, config.intermediate_size).astype(
+                np.float32
+            )
+            * 0.02,
+            w2=np.random.randn(config.intermediate_size, config.hidden_size).astype(
+                np.float32
+            )
+            * 0.02,
+            w3=np.random.randn(config.hidden_size, config.intermediate_size).astype(
+                np.float32
+            )
+            * 0.02,
             # Normalization
             attn_norm=np.ones(config.hidden_size, dtype=np.float32),
             ffn_norm=np.ones(config.hidden_size, dtype=np.float32),
@@ -76,10 +77,10 @@ def create_test_weights(config: Llama32Config) -> LlamaWeights:
         layers.append(layer)
 
     return LlamaWeights(
-        token_embd=np.random.randn(
-            config.vocab_size,
-            config.hidden_size
-        ).astype(np.float32) * 0.02,
+        token_embd=np.random.randn(config.vocab_size, config.hidden_size).astype(
+            np.float32
+        )
+        * 0.02,
         layers=layers,
         output_norm=np.ones(config.hidden_size, dtype=np.float32),
         output=None,  # Tied embeddings
@@ -119,13 +120,13 @@ def test_forward_layer_basic():
         layer_weights=weights.layers[0],
         layer_idx=0,
         positions=positions,
-        is_prefill=True
+        is_prefill=True,
     )
 
     # Validate output shape
-    assert output.shape == hidden.shape, (
-        f"Output shape {output.shape} != input shape {hidden.shape}"
-    )
+    assert (
+        output.shape == hidden.shape
+    ), f"Output shape {output.shape} != input shape {hidden.shape}"
 
     # Validate no NaN or Inf
     assert not np.isnan(output).any(), "Output contains NaN"
@@ -159,9 +160,9 @@ def test_forward_layer_prefill_vs_decode():
 
     # Prefill: Process 4 tokens in parallel
     seq_len_prefill = 4
-    hidden_prefill = np.random.randn(
-        seq_len_prefill, config.hidden_size
-    ).astype(np.float32) * 0.1
+    hidden_prefill = (
+        np.random.randn(seq_len_prefill, config.hidden_size).astype(np.float32) * 0.1
+    )
     positions_prefill = list(range(seq_len_prefill))
 
     output_prefill = loop._forward_layer(
@@ -169,16 +170,16 @@ def test_forward_layer_prefill_vs_decode():
         layer_weights=weights.layers[0],
         layer_idx=0,
         positions=positions_prefill,
-        is_prefill=True
+        is_prefill=True,
     )
 
     assert output_prefill.shape[0] == seq_len_prefill
 
     # Decode: Process single token
     seq_len_decode = 1
-    hidden_decode = np.random.randn(
-        seq_len_decode, config.hidden_size
-    ).astype(np.float32) * 0.1
+    hidden_decode = (
+        np.random.randn(seq_len_decode, config.hidden_size).astype(np.float32) * 0.1
+    )
     positions_decode = [seq_len_prefill]  # Next position
 
     output_decode = loop._forward_layer(
@@ -186,7 +187,7 @@ def test_forward_layer_prefill_vs_decode():
         layer_weights=weights.layers[0],
         layer_idx=0,
         positions=positions_decode,
-        is_prefill=False
+        is_prefill=False,
     )
 
     assert output_decode.shape[0] == seq_len_decode
@@ -223,16 +224,15 @@ def test_forward_layer_all_layers():
             layer_weights=weights.layers[layer_idx],
             layer_idx=layer_idx,
             positions=positions,
-            is_prefill=True
+            is_prefill=True,
         )
 
         # Validate each layer output
-        assert not np.isnan(hidden).any(), (
-            f"Layer {layer_idx} output contains NaN"
-        )
-        assert hidden.shape == (seq_len, config.hidden_size), (
-            f"Layer {layer_idx} output shape mismatch"
-        )
+        assert not np.isnan(hidden).any(), f"Layer {layer_idx} output contains NaN"
+        assert hidden.shape == (
+            seq_len,
+            config.hidden_size,
+        ), f"Layer {layer_idx} output shape mismatch"
 
     print(f"  ✓ All {config.num_hidden_layers} layers executed successfully")
     print(f"  ✓ Final output shape: {hidden.shape}")
@@ -263,7 +263,7 @@ def test_rms_norm():
     normalized = loop._rms_norm(hidden, weight)
 
     # Verify normalization (RMS should be ~1.0)
-    rms = np.sqrt(np.mean(normalized ** 2, axis=-1))
+    rms = np.sqrt(np.mean(normalized**2, axis=-1))
     assert np.allclose(rms, 1.0, atol=1e-5), f"RMS not normalized: {rms}"
 
     print(f"  ✓ RMS after normalization: {rms.mean():.6f} (expected: 1.0)")
@@ -371,9 +371,7 @@ def test_rope():
     # Verify RoPE preserves norm (rotation is norm-preserving)
     q_norm_orig = np.linalg.norm(q, axis=-1)
     q_norm_rot = np.linalg.norm(q_rot, axis=-1)
-    assert np.allclose(q_norm_orig, q_norm_rot, rtol=1e-5), (
-        "RoPE should preserve norm"
-    )
+    assert np.allclose(q_norm_orig, q_norm_rot, rtol=1e-5), "RoPE should preserve norm"
 
     print(f"  ✓ RoPE preserves norm")
     print(f"  ✓ Q shape: {q.shape} -> {q_rot.shape}")
@@ -399,23 +397,19 @@ def test_causal_mask():
     # Test attention scores
     num_heads = config.num_attention_heads
     seq_len = 4
-    attn_scores = np.random.randn(
-        num_heads, seq_len, seq_len
-    ).astype(np.float32)
+    attn_scores = np.random.randn(num_heads, seq_len, seq_len).astype(np.float32)
     positions = list(range(seq_len))
 
     # Apply causal mask
-    masked = loop._apply_causal_mask(
-        attn_scores, positions, is_prefill=True
-    )
+    masked = loop._apply_causal_mask(attn_scores, positions, is_prefill=True)
 
     # Verify upper triangle is -inf
     for h in range(num_heads):
         for i in range(seq_len):
             for j in range(i + 1, seq_len):
-                assert masked[h, i, j] == -np.inf, (
-                    f"Position ({i},{j}) should be masked"
-                )
+                assert (
+                    masked[h, i, j] == -np.inf
+                ), f"Position ({i},{j}) should be masked"
 
     print(f"  ✓ Causal mask applied correctly")
     print(f"  ✓ Upper triangle masked with -inf")
@@ -470,6 +464,7 @@ def run_all_tests():
 
 if __name__ == "__main__":
     import logging
+
     logging.basicConfig(level=logging.WARNING)  # Suppress debug logs
 
     success = run_all_tests()

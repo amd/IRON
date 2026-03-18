@@ -38,16 +38,19 @@ class OperatorTemplate:
 
     Provides the structure needed to implement a custom operator.
     """
+
     name: str
     category: LayerCategory
     description: str = ""
 
     # Required methods to implement
-    required_methods: List[str] = field(default_factory=lambda: [
-        "set_up_artifacts",
-        "set_up_runtime",
-        "forward",
-    ])
+    required_methods: List[str] = field(
+        default_factory=lambda: [
+            "set_up_artifacts",
+            "set_up_runtime",
+            "forward",
+        ]
+    )
 
     # Base class to inherit from
     base_class: str = "AIEOperatorBase"
@@ -67,6 +70,7 @@ class ArchitectureHandler:
 
     Defines how to convert a specific architecture to IRON.
     """
+
     architecture_name: str
     model_types: List[str]
 
@@ -144,11 +148,13 @@ class OperatorRegistry:
             class MyCustomOp(CustomOperatorBase):
                 ...
         """
+
         def decorator(op_class: Type[CustomOperatorBase]) -> Type[CustomOperatorBase]:
             op_name = name or op_class.__name__
             cls._operators[op_name] = op_class
             logger.info(f"Registered custom operator: {op_name}")
             return op_class
+
         return decorator
 
     @classmethod
@@ -162,7 +168,9 @@ class OperatorRegistry:
         return list(cls._operators.keys())
 
     @classmethod
-    def create_operator(cls, name: str, *args, **kwargs) -> Optional[CustomOperatorBase]:
+    def create_operator(
+        cls, name: str, *args, **kwargs
+    ) -> Optional[CustomOperatorBase]:
         """Create an instance of a registered operator"""
         op_class = cls.get_operator(name)
         if op_class:
@@ -269,9 +277,7 @@ class ExtensionLoader:
     def _load_module(self, path: Path) -> Optional[Dict[str, Any]]:
         """Load a Python module and extract extensions"""
         try:
-            spec = importlib.util.spec_from_file_location(
-                path.stem, str(path)
-            )
+            spec = importlib.util.spec_from_file_location(path.stem, str(path))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
@@ -339,7 +345,6 @@ class AIESlidingWindowAttention(AIEOperatorBase):
         pass
 """,
     ),
-
     "moe_layer": OperatorTemplate(
         name="AIEMoELayer",
         category=LayerCategory.LINEAR,
@@ -375,7 +380,6 @@ class AIEMoELayer(AIEOperatorBase):
         pass
 """,
     ),
-
     "multi_token_head": OperatorTemplate(
         name="AIMultiTokenHead",
         category=LayerCategory.LINEAR,
@@ -562,6 +566,7 @@ def generate_mlir(**kwargs):
 
 # === Extension Points ===
 
+
 def register_extension_point(
     name: str,
     hook: Callable[[ArchitectureRequirements], Dict[str, Any]],
@@ -620,6 +625,7 @@ def invoke_extension_point(
 
 
 # === Quick Registration Utilities ===
+
 
 def quick_register_operator(
     name: str,
@@ -688,23 +694,18 @@ __all__ = [
     "CustomOperatorBase",
     "OperatorTemplate",
     "ArchitectureHandler",
-
     # Registries
     "OperatorRegistry",
     "ArchitectureRegistry",
-
     # Loader
     "ExtensionLoader",
-
     # Templates
     "TEMPLATES",
     "get_operator_template",
     "generate_operator_skeleton",
-
     # Extension points
     "register_extension_point",
     "invoke_extension_point",
-
     # Quick registration
     "quick_register_operator",
     "quick_register_architecture",

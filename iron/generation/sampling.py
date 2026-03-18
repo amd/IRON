@@ -78,7 +78,7 @@ class TokenSampler:
         temperature: float = 0.7,
         top_k: int = 50,
         top_p: float = 0.9,
-        repetition_penalty: float = 1.0
+        repetition_penalty: float = 1.0,
     ) -> None:
         """Initialize token sampler.
 
@@ -114,7 +114,9 @@ class TokenSampler:
         if not (0 <= top_p <= 1):
             raise ValueError(f"top_p must be in [0, 1], got {top_p}")
         if repetition_penalty < 0:
-            raise ValueError(f"repetition_penalty must be >= 0, got {repetition_penalty}")
+            raise ValueError(
+                f"repetition_penalty must be >= 0, got {repetition_penalty}"
+            )
 
         self.temperature = temperature
         self.top_k = top_k
@@ -154,11 +156,7 @@ class TokenSampler:
 
         return logits / self.temperature
 
-    def apply_top_k(
-        self,
-        logits: np.ndarray,
-        k: Optional[int] = None
-    ) -> np.ndarray:
+    def apply_top_k(self, logits: np.ndarray, k: Optional[int] = None) -> np.ndarray:
         """Filter logits to keep only top-k tokens.
 
         All tokens not in the top-k have their logits set to -inf,
@@ -199,15 +197,11 @@ class TokenSampler:
 
         # Set non-top-k logits to -inf
         result = logits.copy()
-        result[mask] = float('-inf')
+        result[mask] = float("-inf")
 
         return result
 
-    def apply_top_p(
-        self,
-        logits: np.ndarray,
-        p: Optional[float] = None
-    ) -> np.ndarray:
+    def apply_top_p(self, logits: np.ndarray, p: Optional[float] = None) -> np.ndarray:
         """Apply nucleus (top-p) sampling filter.
 
         Nucleus sampling keeps only the smallest set of tokens whose
@@ -256,14 +250,12 @@ class TokenSampler:
         # Create result with -inf for removed tokens
         result = logits.copy()
         removed_indices = sorted_indices[~cutoff_mask]
-        result[removed_indices] = float('-inf')
+        result[removed_indices] = float("-inf")
 
         return result
 
     def apply_repetition_penalty(
-        self,
-        logits: np.ndarray,
-        input_ids: Optional[np.ndarray] = None
+        self, logits: np.ndarray, input_ids: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """Apply repetition penalty to logits.
 
@@ -313,7 +305,7 @@ class TokenSampler:
         self,
         logits: np.ndarray,
         input_ids: Optional[np.ndarray] = None,
-        return_probs: bool = False
+        return_probs: bool = False,
     ) -> int | Tuple[int, np.ndarray]:
         """Sample next token from logits.
 
@@ -356,7 +348,9 @@ class TokenSampler:
 
         # Step 1: Apply repetition penalty
         if self.repetition_penalty != 1.0 and input_ids is not None:
-            processed_logits = self.apply_repetition_penalty(processed_logits, input_ids)
+            processed_logits = self.apply_repetition_penalty(
+                processed_logits, input_ids
+            )
 
         # Step 2: Apply temperature
         if self.temperature > 0:
@@ -371,7 +365,7 @@ class TokenSampler:
             processed_logits = self.apply_top_p(processed_logits)
 
         # Handle edge case: all logits are -inf
-        if np.all(processed_logits == float('-inf')):
+        if np.all(processed_logits == float("-inf")):
             logger.warning("All logits are -inf after filtering, using original logits")
             processed_logits = logits.copy()
 
@@ -401,7 +395,7 @@ class TokenSampler:
         self,
         logits_batch: np.ndarray,
         input_ids_batch: Optional[np.ndarray] = None,
-        return_probs: bool = False
+        return_probs: bool = False,
     ) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
         """Sample multiple tokens from a batch of logits.
 
@@ -479,7 +473,7 @@ class TokenSampler:
             temperature=self.temperature,
             top_k=self.top_k,
             top_p=self.top_p,
-            repetition_penalty=self.repetition_penalty
+            repetition_penalty=self.repetition_penalty,
         )
 
     def __repr__(self) -> str:
@@ -492,6 +486,7 @@ class TokenSampler:
 
 
 # Convenience functions for common sampling configurations
+
 
 def greedy_sampler() -> TokenSampler:
     """Create a greedy (deterministic) sampler.
@@ -506,10 +501,7 @@ def greedy_sampler() -> TokenSampler:
     return TokenSampler(temperature=0.0)
 
 
-def creative_sampler(
-    temperature: float = 1.0,
-    top_p: float = 0.95
-) -> TokenSampler:
+def creative_sampler(temperature: float = 1.0, top_p: float = 0.95) -> TokenSampler:
     """Create a high-creativity sampler.
 
     Args:
@@ -527,9 +519,7 @@ def creative_sampler(
 
 
 def balanced_sampler(
-    temperature: float = 0.7,
-    top_k: int = 50,
-    top_p: float = 0.9
+    temperature: float = 0.7, top_k: int = 50, top_p: float = 0.9
 ) -> TokenSampler:
     """Create a balanced sampler.
 
@@ -546,8 +536,5 @@ def balanced_sampler(
         >>> token = sampler.sample(logits)  # Balanced creativity/coherence
     """
     return TokenSampler(
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        repetition_penalty=1.0
+        temperature=temperature, top_k=top_k, top_p=top_p, repetition_penalty=1.0
     )

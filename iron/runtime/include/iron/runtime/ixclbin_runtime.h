@@ -53,17 +53,19 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-#include <memory>
 #include <cstdint>
-#include <optional>
-#include <variant>
 #include <map>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <variant>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 /**
  * @brief Forward declarations
@@ -81,8 +83,9 @@ class IKernelHandle;
  * THREAD SAFETY: Implementations should be thread-safe for
  * concurrent read/write operations.
  */
-class IBuffer {
-public:
+class IBuffer
+{
+  public:
     virtual ~IBuffer() = default;
 
     /**
@@ -100,7 +103,7 @@ public:
      *
      * @throws std::runtime_error if write fails
      */
-    virtual void write(const void* data, size_t size, size_t offset = 0) = 0;
+    virtual void write(const void *data, size_t size, size_t offset = 0) = 0;
 
     /**
      * @brief Read data from buffer (device-to-host)
@@ -111,7 +114,7 @@ public:
      *
      * @throws std::runtime_error if read fails
      */
-    virtual void read(void* data, size_t size, size_t offset = 0) const = 0;
+    virtual void read(void *data, size_t size, size_t offset = 0) const = 0;
 
     /**
      * @brief Sync buffer with device
@@ -130,7 +133,7 @@ public:
      * @note Use this only for platform-specific operations
      *       not covered by this interface.
      */
-    virtual void* native_handle() = 0;
+    virtual void *native_handle() = 0;
 
     /**
      * @brief Get buffer address for kernel argument
@@ -163,13 +166,17 @@ struct ExecutionResult {
      * @brief Check if execution was successful
      * @return true if status == 0
      */
-    bool success() const { return status == 0; }
+    bool success() const
+    {
+        return status == 0;
+    }
 
     /**
      * @brief Get error message or empty string
      * @return Error message if available
      */
-    std::string get_error_message() const {
+    std::string get_error_message() const
+    {
         return error_message.value_or("");
     }
 };
@@ -182,14 +189,13 @@ struct ExecutionResult {
  * - Scalar integers (sizes, counts)
  * - Scalar floats (parameters like epsilon, scale)
  */
-using KernelArgument = std::variant<
-    std::shared_ptr<IBuffer>,  // Buffer argument (address_qualifier=1)
-    int32_t,                    // Scalar signed integer
-    float,                      // Scalar float
-    uint32_t,                   // Scalar unsigned integer
-    int64_t,                    // Scalar 64-bit signed integer
-    uint64_t                    // Scalar 64-bit unsigned integer
->;
+using KernelArgument = std::variant<std::shared_ptr<IBuffer>, // Buffer argument (address_qualifier=1)
+                                    int32_t,                  // Scalar signed integer
+                                    float,                    // Scalar float
+                                    uint32_t,                 // Scalar unsigned integer
+                                    int64_t,                  // Scalar 64-bit signed integer
+                                    uint64_t                  // Scalar 64-bit unsigned integer
+                                    >;
 
 /**
  * @brief Kernel execution options
@@ -222,8 +228,9 @@ struct ExecutionOptions {
  * THREAD SAFETY: Not thread-safe. Create separate handles
  * for concurrent execution.
  */
-class IKernelHandle {
-public:
+class IKernelHandle
+{
+  public:
     virtual ~IKernelHandle() = default;
 
     /**
@@ -241,7 +248,7 @@ public:
      * @throws std::out_of_range if index is invalid
      * @throws std::invalid_argument if argument type doesn't match
      */
-    virtual void set_arg(size_t index, const KernelArgument& arg) = 0;
+    virtual void set_arg(size_t index, const KernelArgument &arg) = 0;
 
     /**
      * @brief Execute kernel with set arguments
@@ -251,7 +258,7 @@ public:
      *
      * @throws std::runtime_error if execution fails
      */
-    virtual ExecutionResult execute(const ExecutionOptions& options = ExecutionOptions()) = 0;
+    virtual ExecutionResult execute(const ExecutionOptions &options = ExecutionOptions()) = 0;
 
     /**
      * @brief Execute and wait for completion (convenience method)
@@ -259,7 +266,8 @@ public:
      * @param timeout_ms Timeout in milliseconds
      * @return ExecutionResult
      */
-    ExecutionResult executeAndWait(uint32_t timeout_ms = 0) {
+    ExecutionResult executeAndWait(uint32_t timeout_ms = 0)
+    {
         ExecutionOptions opts;
         opts.timeout_ms = timeout_ms;
         opts.synchronous = true;
@@ -316,8 +324,9 @@ public:
  * auto buf2 = manager->allocate(1024 * 1024);  // Gets same buffer
  * @endcode
  */
-class IBufferManager {
-public:
+class IBufferManager
+{
+  public:
     virtual ~IBufferManager() = default;
 
     /**
@@ -369,8 +378,9 @@ public:
  * Use IXclbinRuntime::create() to get the appropriate implementation
  * for the current platform.
  */
-class IXclbinRuntime {
-public:
+class IXclbinRuntime
+{
+  public:
     virtual ~IXclbinRuntime() = default;
 
     /**
@@ -384,7 +394,7 @@ public:
      *
      * @throws std::runtime_error if file is invalid or loading fails
      */
-    virtual bool load_xclbin(const std::string& path) = 0;
+    virtual bool load_xclbin(const std::string &path) = 0;
 
     /**
      * @brief Load .xclbin from memory buffer
@@ -398,7 +408,7 @@ public:
      *
      * @throws std::runtime_error if data is invalid or loading fails
      */
-    virtual bool load_xclbin_from_memory(const void* data, size_t size) = 0;
+    virtual bool load_xclbin_from_memory(const void *data, size_t size) = 0;
 
     /**
      * @brief Unload specific .xclbin package
@@ -409,7 +419,7 @@ public:
      * @param path Path to .xclbin (must match load path)
      * @return true if unloaded successfully
      */
-    virtual bool unload_xclbin(const std::string& path) = 0;
+    virtual bool unload_xclbin(const std::string &path) = 0;
 
     /**
      * @brief Get list of available kernel names
@@ -423,14 +433,14 @@ public:
      * @param xclbin_path Path to .xclbin file
      * @return Vector of kernel names from that file
      */
-    virtual std::vector<std::string> get_kernels_from_xclbin(const std::string& xclbin_path) const = 0;
+    virtual std::vector<std::string> get_kernels_from_xclbin(const std::string &xclbin_path) const = 0;
 
     /**
      * @brief Check if a specific kernel is available
      * @param kernel_name Name of kernel to check
      * @return true if kernel is loaded and available
      */
-    virtual bool has_kernel(const std::string& kernel_name) const = 0;
+    virtual bool has_kernel(const std::string &kernel_name) const = 0;
 
     /**
      * @brief Execute kernel with provided arguments
@@ -445,11 +455,9 @@ public:
      *
      * @throws std::runtime_error if kernel not found or execution fails
      */
-    virtual ExecutionResult execute(
-        const std::string& kernel_name,
-        const std::vector<KernelArgument>& arguments,
-        const ExecutionOptions& options = ExecutionOptions()
-    ) = 0;
+    virtual ExecutionResult execute(const std::string &kernel_name,
+                                    const std::vector<KernelArgument> &arguments,
+                                    const ExecutionOptions &options = ExecutionOptions()) = 0;
 
     /**
      * @brief Create a kernel execution handle
@@ -461,7 +469,7 @@ public:
      * @param kernel_name Name of kernel
      * @return Kernel handle, or nullptr if kernel not found
      */
-    virtual std::shared_ptr<IKernelHandle> get_kernel(const std::string& kernel_name) = 0;
+    virtual std::shared_ptr<IKernelHandle> get_kernel(const std::string &kernel_name) = 0;
 
     /**
      * @brief Allocate buffer for kernel I/O
@@ -472,10 +480,7 @@ public:
      *
      * @throws std::runtime_error if allocation fails
      */
-    virtual std::shared_ptr<IBuffer> allocate_buffer(
-        size_t size,
-        bool host_accessible = true
-    ) = 0;
+    virtual std::shared_ptr<IBuffer> allocate_buffer(size_t size, bool host_accessible = true) = 0;
 
     /**
      * @brief Allocate buffer from existing host data
@@ -488,10 +493,7 @@ public:
      *
      * @throws std::runtime_error if allocation fails
      */
-    virtual std::shared_ptr<IBuffer> allocate_buffer_from_data(
-        const void* data,
-        size_t size
-    ) = 0;
+    virtual std::shared_ptr<IBuffer> allocate_buffer_from_data(const void *data, size_t size) = 0;
 
     /**
      * @brief Get buffer manager for efficient allocation
@@ -562,55 +564,62 @@ public:
      * @param device_id Device ID
      * @return Unique pointer to runtime instance
      */
-    static std::unique_ptr<IXclbinRuntime> create_for_platform(
-        const std::string& platform,
-        int device_id = 0
-    );
+    static std::unique_ptr<IXclbinRuntime> create_for_platform(const std::string &platform, int device_id = 0);
 };
 
 /**
  * @brief Exception for runtime errors
  */
-class RuntimeError : public std::runtime_error {
-public:
-    explicit RuntimeError(const std::string& msg)
-        : std::runtime_error(msg) {}
+class RuntimeError : public std::runtime_error
+{
+  public:
+    explicit RuntimeError(const std::string &msg) : std::runtime_error(msg) {}
 
-    RuntimeError(const std::string& msg, int error_code)
-        : std::runtime_error(msg), error_code_(error_code) {}
+    RuntimeError(const std::string &msg, int error_code) : std::runtime_error(msg), error_code_(error_code) {}
 
-    int error_code() const { return error_code_.value_or(-1); }
+    int error_code() const
+    {
+        return error_code_.value_or(-1);
+    }
 
-private:
+  private:
     std::optional<int> error_code_;
 };
 
 /**
  * @brief Exception for kernel not found
  */
-class KernelNotFoundError : public RuntimeError {
-public:
-    explicit KernelNotFoundError(const std::string& kernel_name)
-        : RuntimeError("Kernel not found: " + kernel_name),
-          kernel_name_(kernel_name) {}
+class KernelNotFoundError : public RuntimeError
+{
+  public:
+    explicit KernelNotFoundError(const std::string &kernel_name)
+        : RuntimeError("Kernel not found: " + kernel_name), kernel_name_(kernel_name)
+    {
+    }
 
-    const std::string& kernel_name() const { return kernel_name_; }
+    const std::string &kernel_name() const
+    {
+        return kernel_name_;
+    }
 
-private:
+  private:
     std::string kernel_name_;
 };
 
 /**
  * @brief Exception for argument type mismatch
  */
-class ArgumentError : public RuntimeError {
-public:
-    ArgumentError(const std::string& msg, size_t arg_index)
-        : RuntimeError(msg), arg_index_(arg_index) {}
+class ArgumentError : public RuntimeError
+{
+  public:
+    ArgumentError(const std::string &msg, size_t arg_index) : RuntimeError(msg), arg_index_(arg_index) {}
 
-    size_t argument_index() const { return arg_index_.value_or(0); }
+    size_t argument_index() const
+    {
+        return arg_index_.value_or(0);
+    }
 
-private:
+  private:
     std::optional<size_t> arg_index_;
 };
 

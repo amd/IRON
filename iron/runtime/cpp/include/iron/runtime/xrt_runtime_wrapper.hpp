@@ -28,26 +28,28 @@
 
 #pragma once
 
+#include <atomic>
 #include <iron/runtime/npu_runtime.hpp>
-
-#include <string>
-#include <vector>
 #include <memory>
 #include <mutex>
-#include <atomic>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 // Forward declare XRT types to avoid heavy include dependency
 // Actual XRT headers included in implementation file
-namespace xrt {
-    class device;
-    class kernel;
-    class buffer;
-    class hw_context;
-}
+namespace xrt
+{
+class device;
+class kernel;
+class buffer;
+class hw_context;
+} // namespace xrt
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Forward Declarations
@@ -67,8 +69,9 @@ class XrtBufferManager;
  * Wraps XRT buffer objects for device memory operations.
  * Provides host-to-device and device-to-host transfers.
  */
-class XrtBuffer : public IBuffer {
-public:
+class XrtBuffer : public IBuffer
+{
+  public:
     /**
      * @brief Construct from XRT buffer
      * @param buffer XRT buffer object
@@ -81,24 +84,24 @@ public:
      * @param size Buffer size in bytes
      * @param hostAccessible If true, buffer is host-accessible
      */
-    XrtBuffer(const xrt::device& device, size_t size, bool hostAccessible = true);
+    XrtBuffer(const xrt::device &device, size_t size, bool hostAccessible = true);
 
     ~XrtBuffer() override;
 
     // Prevent copying (XRT buffers are move-only)
-    XrtBuffer(const XrtBuffer&) = delete;
-    XrtBuffer& operator=(const XrtBuffer&) = delete;
+    XrtBuffer(const XrtBuffer &) = delete;
+    XrtBuffer &operator=(const XrtBuffer &) = delete;
 
     // Allow moving
-    XrtBuffer(XrtBuffer&& other) noexcept;
-    XrtBuffer& operator=(XrtBuffer&& other) noexcept;
+    XrtBuffer(XrtBuffer &&other) noexcept;
+    XrtBuffer &operator=(XrtBuffer &&other) noexcept;
 
     // IBuffer interface
     [[nodiscard]] size_t size() const override;
-    void write(const void* data, size_t size, size_t offset = 0) override;
-    void read(void* data, size_t size, size_t offset = 0) const override;
+    void write(const void *data, size_t size, size_t offset = 0) override;
+    void read(void *data, size_t size, size_t offset = 0) const override;
     void sync(bool to_device) override;
-    [[nodiscard]] void* nativeHandle() const override;
+    [[nodiscard]] void *nativeHandle() const override;
     [[nodiscard]] uint64_t address() const override;
     [[nodiscard]] bool isValid() const override;
 
@@ -106,10 +109,10 @@ public:
      * @brief Get underlying XRT buffer
      * @return Reference to XRT buffer
      */
-    [[nodiscard]] xrt::buffer& xrtBuffer();
-    [[nodiscard]] const xrt::buffer& xrtBuffer() const;
+    [[nodiscard]] xrt::buffer &xrtBuffer();
+    [[nodiscard]] const xrt::buffer &xrtBuffer() const;
 
-private:
+  private:
     xrt::buffer buffer_;
     size_t size_;
     std::atomic<bool> valid_;
@@ -125,21 +128,22 @@ private:
  *
  * Wraps XRT kernel objects for repeated execution.
  */
-class XrtKernelHandle : public IKernelHandle {
-public:
+class XrtKernelHandle : public IKernelHandle
+{
+  public:
     /**
      * @brief Construct from XRT kernel
      * @param kernel XRT kernel object
      * @param name Kernel name
      */
-    XrtKernelHandle(xrt::kernel kernel, const std::string& name);
+    XrtKernelHandle(xrt::kernel kernel, const std::string &name);
 
     ~XrtKernelHandle() override;
 
     // IKernelHandle interface
     [[nodiscard]] std::string name() const override;
-    void setArg(size_t index, const KernelArgument& arg) override;
-    ExecutionResult execute(const ExecutionOptions& options = ExecutionOptions()) override;
+    void setArg(size_t index, const KernelArgument &arg) override;
+    ExecutionResult execute(const ExecutionOptions &options = ExecutionOptions()) override;
     void reset() override;
     [[nodiscard]] size_t numArguments() const override;
     [[nodiscard]] bool isReady() const override;
@@ -151,10 +155,10 @@ public:
      * @brief Get underlying XRT kernel
      * @return Reference to XRT kernel
      */
-    [[nodiscard]] xrt::kernel& xrtKernel();
-    [[nodiscard]] const xrt::kernel& xrtKernel() const;
+    [[nodiscard]] xrt::kernel &xrtKernel();
+    [[nodiscard]] const xrt::kernel &xrtKernel() const;
 
-private:
+  private:
     xrt::kernel kernel_;
     std::string name_;
     std::vector<std::optional<KernelArgument>> setArgs_;
@@ -162,7 +166,7 @@ private:
     mutable std::mutex mutex_;
 
     // Helper to convert KernelArgument to XRT format
-    void applyArgument(size_t index, const KernelArgument& arg);
+    void applyArgument(size_t index, const KernelArgument &arg);
 };
 
 //==============================================================================
@@ -174,14 +178,15 @@ private:
  *
  * Manages a pool of XRT buffers to reduce allocation overhead.
  */
-class XrtBufferManager : public IBufferManager {
-public:
+class XrtBufferManager : public IBufferManager
+{
+  public:
     /**
      * @brief Construct buffer manager
      * @param device XRT device for buffer allocation
      * @param maxPoolSize Maximum pool size in bytes
      */
-    XrtBufferManager(const xrt::device& device, size_t maxPoolSize = 256 * 1024 * 1024);
+    XrtBufferManager(const xrt::device &device, size_t maxPoolSize = 256 * 1024 * 1024);
 
     ~XrtBufferManager() override;
 
@@ -195,7 +200,7 @@ public:
     [[nodiscard]] size_t pooledBufferCount() const override;
     void setMaxPoolSize(size_t max_bytes) override;
 
-private:
+  private:
     struct PoolEntry {
         std::shared_ptr<XrtBuffer> buffer;
         size_t size;
@@ -240,8 +245,9 @@ private:
  * // ... set arguments and execute
  * @endcode
  */
-class XrtRuntimeWrapper : public INpuRuntime {
-public:
+class XrtRuntimeWrapper : public INpuRuntime
+{
+  public:
     /**
      * @brief Construct XRT runtime wrapper
      * @param deviceId Device ID (default: 0)
@@ -254,43 +260,37 @@ public:
     ~XrtRuntimeWrapper() override;
 
     // Prevent copying
-    XrtRuntimeWrapper(const XrtRuntimeWrapper&) = delete;
-    XrtRuntimeWrapper& operator=(const XrtRuntimeWrapper&) = delete;
+    XrtRuntimeWrapper(const XrtRuntimeWrapper &) = delete;
+    XrtRuntimeWrapper &operator=(const XrtRuntimeWrapper &) = delete;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Xclbin Loading
     //--------------------------------------------------------------------------
 
-    bool loadXclbin(const std::string& path) override;
-    bool loadXclbinFromMemory(const void* data, size_t size) override;
-    bool unloadXclbin(const std::string& path) override;
+    bool loadXclbin(const std::string &path) override;
+    bool loadXclbinFromMemory(const void *data, size_t size) override;
+    bool unloadXclbin(const std::string &path) override;
     [[nodiscard]] std::vector<std::string> getKernelNames() const override;
-    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(
-        const std::string& xclbinPath) const override;
-    [[nodiscard]] bool hasKernel(const std::string& kernelName) const override;
+    [[nodiscard]] std::vector<std::string> getKernelsFromXclbin(const std::string &xclbinPath) const override;
+    [[nodiscard]] bool hasKernel(const std::string &kernelName) const override;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Kernel Execution
     //--------------------------------------------------------------------------
 
-    ExecutionResult execute(
-        const std::string& kernelName,
-        const std::vector<KernelArgument>& arguments,
-        const ExecutionOptions& options = ExecutionOptions()) override;
+    ExecutionResult execute(const std::string &kernelName,
+                            const std::vector<KernelArgument> &arguments,
+                            const ExecutionOptions &options = ExecutionOptions()) override;
 
-    std::shared_ptr<IKernelHandle> getKernel(const std::string& kernelName) override;
+    std::shared_ptr<IKernelHandle> getKernel(const std::string &kernelName) override;
 
     //--------------------------------------------------------------------------
     // INpuRuntime Interface - Buffer Management
     //--------------------------------------------------------------------------
 
-    std::shared_ptr<IBuffer> allocateBuffer(
-        size_t size,
-        bool hostAccessible = true) override;
+    std::shared_ptr<IBuffer> allocateBuffer(size_t size, bool hostAccessible = true) override;
 
-    std::shared_ptr<IBuffer> allocateBufferFromData(
-        const void* data,
-        size_t size) override;
+    std::shared_ptr<IBuffer> allocateBufferFromData(const void *data, size_t size) override;
 
     std::shared_ptr<IBufferManager> getBufferManager() override;
 
@@ -328,7 +328,7 @@ public:
      */
     [[nodiscard]] static std::unique_ptr<XrtRuntimeWrapper> create(int deviceId = 0);
 
-private:
+  private:
     // Internal structure for loaded xclbin
     struct LoadedXclbin {
         std::string path;
@@ -346,25 +346,28 @@ private:
 
     // Helper methods
     void initializeDevice();
-    LoadedXclbin loadXclbinInternal(const void* data, size_t size, const std::string& path);
-    XrtKernelHandle* getKernelHandleInternal(const std::string& kernelName);
+    LoadedXclbin loadXclbinInternal(const void *data, size_t size, const std::string &path);
+    XrtKernelHandle *getKernelHandleInternal(const std::string &kernelName);
 };
 
 //==============================================================================
 // Inline Implementations
 //==============================================================================
 
-inline bool XrtRuntimeWrapper::isAvailable() {
+inline bool XrtRuntimeWrapper::isAvailable()
+{
     // Stub: In real implementation, check for XRT library and device
     return true;
 }
 
-inline std::string XrtRuntimeWrapper::getXrtVersion() {
+inline std::string XrtRuntimeWrapper::getXrtVersion()
+{
     // Stub: In real implementation, query XRT version
     return "2.15.0-stub";
 }
 
-inline std::unique_ptr<XrtRuntimeWrapper> XrtRuntimeWrapper::create(int deviceId) {
+inline std::unique_ptr<XrtRuntimeWrapper> XrtRuntimeWrapper::create(int deviceId)
+{
     return std::make_unique<XrtRuntimeWrapper>(deviceId);
 }
 

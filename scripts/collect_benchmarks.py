@@ -70,6 +70,7 @@ DEFAULT_OPERATORS = ["rope", "rmsnorm", "silu", "softmax"]
 # System Information Collection
 # =============================================================================
 
+
 def get_system_info() -> dict:
     """Collect comprehensive system information"""
     info = {
@@ -91,37 +92,43 @@ def get_system_info() -> dict:
     if platform.system() == "Windows":
         try:
             import winreg
+
             with winreg.OpenKey(
                 winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
             ) as key:
-                info["platform"]["windows_edition"] = winreg.QueryValueEx(key, "EditionId")[0]
-                info["platform"]["windows_build"] = winreg.QueryValueEx(key, "CurrentBuild")[0]
+                info["platform"]["windows_edition"] = winreg.QueryValueEx(
+                    key, "EditionId"
+                )[0]
+                info["platform"]["windows_build"] = winreg.QueryValueEx(
+                    key, "CurrentBuild"
+                )[0]
         except Exception as e:
             logger.debug(f"Could not get Windows edition: {e}")
 
         # Get memory info
         try:
             import ctypes
+
             kernel32 = ctypes.windll.kernel32
             c_ulonglong = ctypes.c_ulonglong
 
             class MEMORYSTATUSEX(ctypes.Structure):
                 _fields_ = [
-                    ('dwLength', ctypes.c_ulong),
-                    ('dwMemoryLoad', ctypes.c_ulong),
-                    ('ullTotalPhys', c_ulonglong),
-                    ('ullAvailPhys', c_ulonglong),
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", c_ulonglong),
+                    ("ullAvailPhys", c_ulonglong),
                 ]
 
             memoryStatus = MEMORYSTATUSEX()
             memoryStatus.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
             if kernel32.GlobalMemoryStatusEx(ctypes.byref(memoryStatus)):
                 info["hardware"]["total_memory_gb"] = round(
-                    memoryStatus.ullTotalPhys / (1024 ** 3), 2
+                    memoryStatus.ullTotalPhys / (1024**3), 2
                 )
                 info["hardware"]["available_memory_gb"] = round(
-                    memoryStatus.ullAvailPhys / (1024 ** 3), 2
+                    memoryStatus.ullAvailPhys / (1024**3), 2
                 )
         except Exception as e:
             logger.debug(f"Could not get memory info: {e}")
@@ -129,27 +136,33 @@ def get_system_info() -> dict:
         # Detect NPU
         try:
             result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-PnpDevice -Class 'System' -Status 'OK' | "
-                 "Where-Object {$_.FriendlyName -like '*Ryzen*AI*' -or "
-                 "$_.FriendlyName -like '*NPU*'} | "
-                 "Select-Object -First 1 -ExpandProperty FriendlyName"],
+                [
+                    "powershell",
+                    "-Command",
+                    "Get-PnpDevice -Class 'System' -Status 'OK' | "
+                    "Where-Object {$_.FriendlyName -like '*Ryzen*AI*' -or "
+                    "$_.FriendlyName -like '*NPU*'} | "
+                    "Select-Object -First 1 -ExpandProperty FriendlyName",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.stdout.strip():
                 info["hardware"]["npu"] = result.stdout.strip()
             else:
                 # Try alternative method
                 result = subprocess.run(
-                    ["powershell", "-Command",
-                     "Get-ChildItem Win32_PnPEntity | "
-                     "Where-Object {$_.Name -like '*AMD*'} | "
-                     "Select-Object -First 1 -ExpandProperty Name"],
+                    [
+                        "powershell",
+                        "-Command",
+                        "Get-ChildItem Win32_PnPEntity | "
+                        "Where-Object {$_.Name -like '*AMD*'} | "
+                        "Select-Object -First 1 -ExpandProperty Name",
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
                 )
                 if result.stdout.strip():
                     info["hardware"]["amd_device"] = result.stdout.strip()
@@ -159,6 +172,7 @@ def get_system_info() -> dict:
     # PyTorch info
     try:
         import torch
+
         info["software"]["torch"] = {
             "version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
@@ -172,6 +186,7 @@ def get_system_info() -> dict:
     # NumPy info
     try:
         import numpy
+
         info["software"]["numpy"] = {"version": numpy.__version__}
     except ImportError:
         info["software"]["numpy"] = {"error": "not installed"}
@@ -179,6 +194,7 @@ def get_system_info() -> dict:
     # ML dtypes info
     try:
         import ml_dtypes
+
         info["software"]["ml_dtypes"] = {"version": ml_dtypes.__version__}
     except ImportError:
         info["software"]["ml_dtypes"] = {"error": "not installed"}
@@ -189,6 +205,7 @@ def get_system_info() -> dict:
 def get_process_info() -> dict:
     """Get current process information"""
     import os
+
     process = os.getpid()
 
     info = {
@@ -199,6 +216,7 @@ def get_process_info() -> dict:
 
     try:
         import psutil
+
         p = psutil.Process(process)
         info["cpu_percent"] = p.cpu_percent()
         info["memory_mb"] = p.memory_info().rss / (1024 * 1024)
@@ -211,6 +229,7 @@ def get_process_info() -> dict:
 # =============================================================================
 # Benchmark Execution
 # =============================================================================
+
 
 def run_benchmark(
     operators: Optional[List[str]] = None,
@@ -240,9 +259,12 @@ def run_benchmark(
         sys.executable,
         "-m",
         "iron.benchmarks.baseline_bench",
-        "--iterations", str(iterations),
-        "--warmup", str(warmup),
-        "--output", "json",
+        "--iterations",
+        str(iterations),
+        "--warmup",
+        str(warmup),
+        "--output",
+        "json",
     ]
 
     if len(operators) == 1:
@@ -268,15 +290,21 @@ def run_benchmark(
         # Parse JSON output
         if result.stdout:
             # Find JSON in output
-            json_start = result.stdout.find('{')
-            json_end = result.stdout.rfind('}') + 1
+            json_start = result.stdout.find("{")
+            json_end = result.stdout.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 json_str = result.stdout[json_start:json_end]
                 benchmark_data = json.loads(json_str)
             else:
-                benchmark_data = {"error": "Could not parse JSON output", "raw_output": result.stdout}
+                benchmark_data = {
+                    "error": "Could not parse JSON output",
+                    "raw_output": result.stdout,
+                }
         else:
-            benchmark_data = {"error": "No output from benchmark", "stderr": result.stderr}
+            benchmark_data = {
+                "error": "No output from benchmark",
+                "stderr": result.stderr,
+            }
 
         # Add metadata
         benchmark_data["collection_metadata"] = {
@@ -298,6 +326,7 @@ def run_benchmark(
 # =============================================================================
 # Result Management
 # =============================================================================
+
 
 def save_results(results: dict, output_path: Optional[Path] = None) -> Path:
     """Save benchmark results to file"""
@@ -359,16 +388,18 @@ def update_baseline(results: dict):
         "created_date": datetime.now().strftime("%Y-%m-%d"),
         "created_from": results.get("collection_metadata", {}),
         "results": [],
-        "targets": {}
+        "targets": {},
     }
 
     for result in results.get("results", []):
         if not result.get("error"):
-            baseline["results"].append({
-                "operator_name": result["operator_name"],
-                "input_shape": result.get("input_shape", []),
-                "metrics": result.get("metrics", {}),
-            })
+            baseline["results"].append(
+                {
+                    "operator_name": result["operator_name"],
+                    "input_shape": result.get("input_shape", []),
+                    "metrics": result.get("metrics", {}),
+                }
+            )
 
             # Add targets
             op_name = result["operator_name"]
@@ -412,7 +443,9 @@ def export_results(
         csv_path = output_dir / f"export_{timestamp}.csv"
         with open(csv_path, "w", encoding="utf-8") as f:
             # Header
-            f.write("Operator,Mean_ms,Median_ms,P99_ms,Throughput_ops,Bandwidth_Gbps,Target_met\n")
+            f.write(
+                "Operator,Mean_ms,Median_ms,P99_ms,Throughput_ops,Bandwidth_Gbps,Target_met\n"
+            )
 
             # Data rows
             for result in results.get("results", []):
@@ -434,7 +467,9 @@ def export_results(
         md_path = output_dir / f"export_{timestamp}.md"
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("# IRON Benchmark Results\n\n")
-            f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(
+                f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            )
 
             # System info
             f.write("## System Information\n\n")
@@ -446,12 +481,18 @@ def export_results(
 
             # Results table
             f.write("## Results\n\n")
-            f.write("| Operator | Mean (ms) | Median (ms) | P99 (ms) | Throughput (ops/s) | Target |\n")
-            f.write("|----------|-----------|-------------|----------|-------------------|--------|\n")
+            f.write(
+                "| Operator | Mean (ms) | Median (ms) | P99 (ms) | Throughput (ops/s) | Target |\n"
+            )
+            f.write(
+                "|----------|-----------|-------------|----------|-------------------|--------|\n"
+            )
 
             for result in results.get("results", []):
                 if result.get("error"):
-                    f.write(f"| {result['operator_name']} | ERROR: {result['error']} | | | | |\n")
+                    f.write(
+                        f"| {result['operator_name']} | ERROR: {result['error']} | | | | |\n"
+                    )
                     continue
 
                 metrics = result.get("metrics", {})
@@ -473,6 +514,7 @@ def export_results(
 # =============================================================================
 # Main Collection Functions
 # =============================================================================
+
 
 def collect_single(
     operators: Optional[List[str]] = None,
@@ -649,6 +691,7 @@ def aggregate_results(results_list: List[dict]) -> dict:
 # =============================================================================
 # CLI
 # =============================================================================
+
 
 def parse_args():
     """Parse command-line arguments"""

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelEntry:
     """Represents a converted model in the registry"""
+
     model_id: str  # User-facing ID (e.g., "meta-llama/Llama-3.2-1B")
     iron_name: str  # Internal IRON name
     status: str  # "pending", "converting", "ready", "error"
@@ -43,7 +44,9 @@ class ModelEntry:
             "hidden_size": self.hidden_size,
             "num_layers": self.num_layers,
             "vocab_size": self.vocab_size,
-            "converted_at": self.converted_at.isoformat() if self.converted_at else None,
+            "converted_at": (
+                self.converted_at.isoformat() if self.converted_at else None
+            ),
             "error_message": self.error_message,
             "last_used": self.last_used.isoformat() if self.last_used else None,
             "use_count": self.use_count,
@@ -246,9 +249,7 @@ class ModelRegistry:
             try:
                 with open(self.registry_file, "r") as f:
                     data = json.load(f)
-                    self.models = {
-                        k: ModelEntry.from_dict(v) for k, v in data.items()
-                    }
+                    self.models = {k: ModelEntry.from_dict(v) for k, v in data.items()}
                 logger.info(f"Loaded registry with {len(self.models)} models")
             except Exception as e:
                 logger.warning(f"Could not load registry: {e}")

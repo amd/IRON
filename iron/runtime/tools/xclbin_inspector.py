@@ -18,13 +18,14 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict, field
 
 # .xclbin binary format constants
-XCLBIN_MAGIC = b'xclbin2\x00'  # 8 bytes
+XCLBIN_MAGIC = b"xclbin2\x00"  # 8 bytes
 XCLBIN_HEADER_SIZE = 64
 
 
 @dataclass
 class KernelArgument:
     """Represents a single kernel argument"""
+
     name: str
     address_qualifier: int  # 0=value, 1=pointer to global, 2=pointer to constant
     size: int
@@ -37,6 +38,7 @@ class KernelArgument:
 @dataclass
 class KernelInterface:
     """Represents a kernel's interface"""
+
     name: str
     language: str  # "C", "RTL", etc.
     arguments: List[KernelArgument] = field(default_factory=list)
@@ -49,6 +51,7 @@ class KernelInterface:
 @dataclass
 class XclbinInfo:
     """Complete .xclbin file information"""
+
     path: str
     file_size: int
     kernels: List[KernelInterface] = field(default_factory=list)
@@ -73,14 +76,16 @@ class XclbinInspector:
             sections={},
             uuid="",
             version=0,
-            platform_indicators=[]
+            platform_indicators=[],
         )
 
     def parse(self) -> XclbinInfo:
         """Parse .xclbin and extract all information"""
         # Verify magic number
         if len(self.data) < 64:
-            raise ValueError(f"File too small to be valid .xclbin: {len(self.data)} bytes")
+            raise ValueError(
+                f"File too small to be valid .xclbin: {len(self.data)} bytes"
+            )
 
         if self.data[:8] != XCLBIN_MAGIC:
             raise ValueError(
@@ -90,12 +95,12 @@ class XclbinInspector:
 
         # Parse header
         header = self._parse_header()
-        self.info.uuid = header['uuid']
-        self.info.version = header['version']
+        self.info.uuid = header["uuid"]
+        self.info.version = header["version"]
 
         # Find and parse sections
         sections = self._find_sections()
-        self.info.sections = {s['name']: s['size'] for s in sections}
+        self.info.sections = {s["name"]: s["size"] for s in sections}
 
         # Parse XML metadata for kernel information
         self._parse_xml_metadata()
@@ -119,17 +124,17 @@ class XclbinInspector:
         uuid_bytes = self.data[8:24]
         uuid = uuid_bytes.hex()
 
-        version = struct.unpack('<Q', self.data[24:32])[0]
-        num_sections = struct.unpack('<Q', self.data[32:40])[0]
-        header_len = struct.unpack('<Q', self.data[40:48])[0]
-        checksum = struct.unpack('<Q', self.data[48:56])[0]
+        version = struct.unpack("<Q", self.data[24:32])[0]
+        num_sections = struct.unpack("<Q", self.data[32:40])[0]
+        header_len = struct.unpack("<Q", self.data[40:48])[0]
+        checksum = struct.unpack("<Q", self.data[48:56])[0]
 
         return {
-            'uuid': uuid,
-            'version': version,
-            'num_sections': num_sections,
-            'header_len': header_len,
-            'checksum': checksum
+            "uuid": uuid,
+            "version": version,
+            "num_sections": num_sections,
+            "header_len": header_len,
+            "checksum": checksum,
         }
 
     def _find_sections(self) -> List[dict]:
@@ -149,26 +154,42 @@ class XclbinInspector:
         iteration = 0
         while offset + 92 <= len(self.data) and iteration < 100:
             try:
-                section_type = struct.unpack('<I', self.data[offset:offset+4])[0]
-                section_offset = struct.unpack('<Q', self.data[offset+8:offset+16])[0]
-                section_size = struct.unpack('<Q', self.data[offset+16:offset+24])[0]
-                section_kind = struct.unpack('<I', self.data[offset+24:offset+28])[0]
+                section_type = struct.unpack("<I", self.data[offset : offset + 4])[0]
+                section_offset = struct.unpack(
+                    "<Q", self.data[offset + 8 : offset + 16]
+                )[0]
+                section_size = struct.unpack(
+                    "<Q", self.data[offset + 16 : offset + 24]
+                )[0]
+                section_kind = struct.unpack(
+                    "<I", self.data[offset + 24 : offset + 28]
+                )[0]
 
                 try:
-                    section_name = self.data[offset+28:offset+92].rstrip(b'\x00').decode('ascii')
+                    section_name = (
+                        self.data[offset + 28 : offset + 92]
+                        .rstrip(b"\x00")
+                        .decode("ascii")
+                    )
                 except UnicodeDecodeError:
                     section_name = f"SECTION_{section_kind}"
 
-                if section_size == 0 or section_offset == 0 or section_offset >= len(self.data):
+                if (
+                    section_size == 0
+                    or section_offset == 0
+                    or section_offset >= len(self.data)
+                ):
                     break
 
-                sections.append({
-                    'name': section_name or f"UNKNOWN_{section_kind}",
-                    'type': section_type,
-                    'offset': section_offset,
-                    'size': section_size,
-                    'kind': section_kind
-                })
+                sections.append(
+                    {
+                        "name": section_name or f"UNKNOWN_{section_kind}",
+                        "type": section_type,
+                        "offset": section_offset,
+                        "size": section_size,
+                        "kind": section_kind,
+                    }
+                )
 
                 offset += 92
                 iteration += 1
@@ -180,49 +201,50 @@ class XclbinInspector:
     def _parse_xml_metadata(self):
         """Parse embedded XML metadata to extract kernel information"""
         # Search for XML start
-        xml_start = self.data.find(b'<?xml')
+        xml_start = self.data.find(b"<?xml")
         if xml_start == -1:
             # Try alternative XML markers
-            xml_start = self.data.find(b'<xcl:root')
+            xml_start = self.data.find(b"<xcl:root")
             if xml_start == -1:
                 self.info.platform_indicators.append("No XML metadata found")
                 return
 
         # Find XML end
-        xml_end_marker = b'</xcl:root>'
+        xml_end_marker = b"</xcl:root>"
         xml_end = self.data.find(xml_end_marker, xml_start)
         if xml_end == -1:
             return
         xml_end += len(xml_end_marker)
 
-        xml_data = self.data[xml_start:xml_end].decode('utf-8', errors='ignore')
+        xml_data = self.data[xml_start:xml_end].decode("utf-8", errors="ignore")
 
         # Parse XML
         try:
             import xml.etree.ElementTree as ET
+
             root = ET.fromstring(xml_data)
 
             # Handle namespaces
             namespaces = {}
-            if 'xcl' in xml_data:
-                namespaces['xcl'] = 'http://www.xilinx.com'
-            if 'api' in xml_data:
-                namespaces['api'] = 'http://www.xilinx.com/api'
+            if "xcl" in xml_data:
+                namespaces["xcl"] = "http://www.xilinx.com"
+            if "api" in xml_data:
+                namespaces["api"] = "http://www.xilinx.com/api"
 
             # Use namespace-aware or namespace-agnostic search
             def find_all(elem, tag):
                 # Try with namespace
-                result = elem.findall(f'.//xcl:{tag}', namespaces)
+                result = elem.findall(f".//xcl:{tag}", namespaces)
                 if not result:
                     # Try without namespace
-                    result = elem.findall(f'.//{tag}')
+                    result = elem.findall(f".//{tag}")
                 if not result:
                     # Try wildcard namespace
-                    result = elem.findall(f'.//{{*}}{tag}')
+                    result = elem.findall(f".//{{*}}{tag}")
                 return result
 
             # Find kernel entries
-            kernel_elems = find_all(root, 'kernel')
+            kernel_elems = find_all(root, "kernel")
 
             for kernel_elem in kernel_elems:
                 kernel_info = self._parse_kernel_xml(kernel_elem, find_all)
@@ -236,35 +258,36 @@ class XclbinInspector:
 
     def _parse_kernel_xml(self, kernel_elem, find_all) -> Optional[KernelInterface]:
         """Parse kernel XML element"""
-        def get_attr(elem, attr, default=''):
+
+        def get_attr(elem, attr, default=""):
             """Get attribute with namespace handling"""
             val = elem.get(attr)
             if val is None:
                 # Try with namespace prefix variations
-                for prefix in ['xcl:', 'api:', '']:
-                    val = elem.get(f'{prefix}{attr}')
+                for prefix in ["xcl:", "api:", ""]:
+                    val = elem.get(f"{prefix}{attr}")
                     if val is not None:
                         break
             return val if val else default
 
-        name = get_attr(kernel_elem, 'name', 'unknown')
-        if name == 'unknown':
+        name = get_attr(kernel_elem, "name", "unknown")
+        if name == "unknown":
             return None  # Skip unnamed kernels
 
-        language = get_attr(kernel_elem, 'language', 'C')
-        compile_options = get_attr(kernel_elem, 'compileOptions', '')
+        language = get_attr(kernel_elem, "language", "C")
+        compile_options = get_attr(kernel_elem, "compileOptions", "")
 
         arguments = []
-        arg_elems = find_all(kernel_elem, 'arg')
+        arg_elems = find_all(kernel_elem, "arg")
 
         for i, arg_elem in enumerate(arg_elems):
-            arg_name = get_attr(arg_elem, 'name', f'arg_{i}')
-            addr_qual = get_attr(arg_elem, 'addressQualifier', '0')
-            size = get_attr(arg_elem, 'size', '0')
-            arg_type = get_attr(arg_elem, 'type', 'unknown')
-            offset = get_attr(arg_elem, 'offset', '0')
-            port = get_attr(arg_elem, 'port', '0')
-            arg_index = get_attr(arg_elem, 'index', str(i))
+            arg_name = get_attr(arg_elem, "name", f"arg_{i}")
+            addr_qual = get_attr(arg_elem, "addressQualifier", "0")
+            size = get_attr(arg_elem, "size", "0")
+            arg_type = get_attr(arg_elem, "type", "unknown")
+            offset = get_attr(arg_elem, "offset", "0")
+            port = get_attr(arg_elem, "port", "0")
+            arg_index = get_attr(arg_elem, "index", str(i))
 
             try:
                 arg_info = KernelArgument(
@@ -274,7 +297,7 @@ class XclbinInspector:
                     type_name=arg_type,
                     offset=int(offset),
                     port=int(port),
-                    arg_index=int(arg_index)
+                    arg_index=int(arg_index),
                 )
                 arguments.append(arg_info)
             except ValueError:
@@ -282,10 +305,10 @@ class XclbinInspector:
 
         # Work group size
         work_group_size = [1, 1, 1]
-        wg_elems = find_all(kernel_elem, 'workGroupSize')
+        wg_elems = find_all(kernel_elem, "workGroupSize")
         if wg_elems:
             wg_elem = wg_elems[0]
-            for i, dim in enumerate(['dim1', 'dim2', 'dim3']):
+            for i, dim in enumerate(["dim1", "dim2", "dim3"]):
                 val = get_attr(wg_elem, dim)
                 if val:
                     try:
@@ -295,17 +318,17 @@ class XclbinInspector:
 
         # Hardware control protocols
         hw_protocols = []
-        proto_elems = find_all(kernel_elem, 'hwControlProtocol')
+        proto_elems = find_all(kernel_elem, "hwControlProtocol")
         for proto_elem in proto_elems:
-            protocol = get_attr(proto_elem, 'protocol')
+            protocol = get_attr(proto_elem, "protocol")
             if protocol:
                 hw_protocols.append(protocol)
 
         # Memory connections
         memory_connections = []
-        conn_elems = find_all(kernel_elem, 'memoryConnection')
+        conn_elems = find_all(kernel_elem, "memoryConnection")
         for conn_elem in conn_elems:
-            memory = get_attr(conn_elem, 'memory')
+            memory = get_attr(conn_elem, "memory")
             if memory:
                 memory_connections.append(memory)
 
@@ -316,7 +339,7 @@ class XclbinInspector:
             work_group_size=work_group_size,
             compile_options=compile_options,
             hw_control_protocols=hw_protocols,
-            memory_connections=memory_connections
+            memory_connections=memory_connections,
         )
 
     def _detect_platform_indicators(self) -> List[str]:
@@ -324,29 +347,29 @@ class XclbinInspector:
         indicators = []
 
         # Check for Windows-specific strings
-        if b'\\' in self.data[:2000]:
+        if b"\\" in self.data[:2000]:
             indicators.append("Windows path separators detected")
 
         # Check for Linux-specific strings
-        if b'/opt/' in self.data or b'/usr/' in self.data or b'/home/' in self.data:
+        if b"/opt/" in self.data or b"/usr/" in self.data or b"/home/" in self.data:
             indicators.append("Linux path references found")
 
         # Check for xrt references
-        if b'xrt' in self.data.lower():
+        if b"xrt" in self.data.lower():
             indicators.append("XRT references detected")
 
         # Check for xdna references
-        if b'xdna' in self.data.lower():
+        if b"xdna" in self.data.lower():
             indicators.append("xDNA references detected")
 
         # Check for aie references
-        if b'aie' in self.data.lower():
+        if b"aie" in self.data.lower():
             indicators.append("AIE (AI Engine) references detected")
 
         # Check for target device
-        if b'npu' in self.data.lower():
+        if b"npu" in self.data.lower():
             indicators.append("NPU target detected")
-        if b'ryzen' in self.data.lower():
+        if b"ryzen" in self.data.lower():
             indicators.append("Ryzen AI target detected")
 
         self.info.platform_indicators.extend(indicators)
@@ -354,7 +377,7 @@ class XclbinInspector:
 
     def export_json(self, output_path: str):
         """Export parsed information as JSON"""
-        with open(output_path, 'w') as f:
+        with open(output_path, "w") as f:
             json.dump(asdict(self.info), f, indent=2, default=str)
 
 
@@ -392,7 +415,11 @@ def main():
 
         print(f"\n--- Sections ({len(info.sections)}) ---")
         for name, size in info.sections.items():
-            size_str = f"{size:,} bytes" if size < 1024 * 1024 else f"{size / 1024 / 1024:.2f} MB"
+            size_str = (
+                f"{size:,} bytes"
+                if size < 1024 * 1024
+                else f"{size / 1024 / 1024:.2f} MB"
+            )
             print(f"  {name}: {size_str}")
 
         print(f"\n--- Platform Indicators ---")
@@ -412,12 +439,16 @@ def main():
                 for arg in kernel.arguments:
                     arg_str = format_argument(arg)
                     print(f"        [{arg.arg_index}] {arg_str}")
-                    print(f"            offset={arg.offset}, size={arg.size}, addr_qual={arg.address_qual}")
+                    print(
+                        f"            offset={arg.offset}, size={arg.size}, addr_qual={arg.address_qual}"
+                    )
 
             if kernel.hw_control_protocols:
                 print(f"      HW protocols: {', '.join(kernel.hw_control_protocols)}")
             if kernel.memory_connections:
-                print(f"      Memory connections: {', '.join(kernel.memory_connections)}")
+                print(
+                    f"      Memory connections: {', '.join(kernel.memory_connections)}"
+                )
 
         if not info.kernels:
             print("\n  No kernels found in .xclbin file.")
@@ -442,9 +473,10 @@ def main():
     except Exception as e:
         print(f"Unexpected error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

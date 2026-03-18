@@ -173,7 +173,10 @@ def my_mem_copy(dev, size, num_cores, num_channels, bypass, tile_size, trace_siz
     # --------------------------------------------------------------------------
     xfr_dtype = bfloat16
     line_size = 8192 if tile_size > 8192 else tile_size
-    fifodepth = 1 if line_size > 4096 else 2
+    # P0 FIX: Explicit ObjectFifo depth calculation for stability
+    # Depth=4 for 8+ columns, depth=1 for large tiles (>4096), depth=2 otherwise
+    # This fixes the -25% bandwidth, +61% latency regression in mem_copy_8_cols_1_channels_2048_tile_256
+    fifodepth = 4 if num_cores >= 8 else (1 if line_size > 4096 else 2)
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 

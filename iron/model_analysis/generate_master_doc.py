@@ -28,6 +28,7 @@ from .operator_spec import generate_operator_spec, OperatorSpec
 def extract_layer_source(model_name: str, layer_name: str) -> str:
     """Extract the actual forward() source code for a layer."""
     from .operator_spec import OperatorSpecGenerator
+
     generator = OperatorSpecGenerator()
     info = scan_model_from_transformers(model_name)
 
@@ -37,14 +38,19 @@ def extract_layer_source(model_name: str, layer_name: str) -> str:
 
     try:
         import inspect
+
         source = inspect.getsource(layer_class.forward)
         # Clean up indentation
-        lines = source.split('\n')
+        lines = source.split("\n")
         while lines and not lines[0].strip():
             lines.pop(0)
-        min_indent = min((len(line) - len(line.lstrip())) for line in lines if line.strip())
-        lines = [line[min_indent:] if len(line) >= min_indent else line for line in lines]
-        return '\n'.join(lines)
+        min_indent = min(
+            (len(line) - len(line.lstrip())) for line in lines if line.strip()
+        )
+        lines = [
+            line[min_indent:] if len(line) >= min_indent else line for line in lines
+        ]
+        return "\n".join(lines)
     except Exception as e:
         return f"# Could not extract source: {e}"
 
@@ -79,14 +85,16 @@ def get_operator_base_class(layer_name: str) -> str:
     return "AIEOperatorBase (custom)"
 
 
-def generate_skeleton_code(layer_name: str, config: Dict[str, Any], base_class: str) -> str:
+def generate_skeleton_code(
+    layer_name: str, config: Dict[str, Any], base_class: str
+) -> str:
     """Generate Python skeleton code for the operator."""
 
     # Extract key hyperparameters
-    hidden_size = config.get('hidden_size', 4096)
-    num_heads = config.get('num_attention_heads', 32)
-    num_kv_heads = config.get('num_key_value_heads', num_heads)
-    intermediate_size = config.get('intermediate_size', 11008)
+    hidden_size = config.get("hidden_size", 4096)
+    num_heads = config.get("num_attention_heads", 32)
+    num_kv_heads = config.get("num_key_value_heads", num_heads)
+    intermediate_size = config.get("intermediate_size", 11008)
 
     return f'''# SPDX-FileCopyrightText: Copyright (C) 2025 AMD
 # SPDX-License-Identifier: Apache-2.0
@@ -325,145 +333,177 @@ def generate_master_document(model_name: str, layer_name: str) -> str:
     # Special features
     special_features = []
     if info.has_sliding_window:
-        special_features.append(f"Sliding Window: {config.get('sliding_window', 'enabled')}")
+        special_features.append(
+            f"Sliding Window: {config.get('sliding_window', 'enabled')}"
+        )
     if info.has_moe:
-        special_features.append(f"MoE: {config.get('num_experts', 'N/A')} experts, {config.get('num_experts_per_tok', 'N/A')} per token")
+        special_features.append(
+            f"MoE: {config.get('num_experts', 'N/A')} experts, {config.get('num_experts_per_tok', 'N/A')} per token"
+        )
     if info.has_rope:
         special_features.append(f"RoPE: theta={config.get('rope_theta', 'N/A')}")
     if info.has_qk_norm:
         special_features.append(f"QK Norm: enabled")
 
     if special_features:
-        doc_lines.extend([
-            "**Special Features:**",
-            "",
-        ])
+        doc_lines.extend(
+            [
+                "**Special Features:**",
+                "",
+            ]
+        )
         for feature in special_features:
             doc_lines.append(f"- {feature}")
         doc_lines.append("")
 
     # Attention type
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 1. Hyperparameters",
-        "",
-        "These values must be passed to the operator constructor:",
-        "",
-        "| Name | Value | Dtype | Description |",
-        "|------|-------|-------|-------------|",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 1. Hyperparameters",
+            "",
+            "These values must be passed to the operator constructor:",
+            "",
+            "| Name | Value | Dtype | Description |",
+            "|------|-------|-------|-------------|",
+        ]
+    )
 
     for hp in hyperparams[:15]:  # Limit to top 15
         doc_lines.append(f"| `{hp.name}` | `{hp.value}` | {hp.dtype} | |")
 
-    doc_lines.extend([
-        "",
-        "### Constructor Template",
-        "",
-        "```python",
-        f"class AIE{layer_name.replace('ForCausalLM', '').replace('Model', '')}(AIEOperatorBase):",
-        "    def __init__(",
-        "        self,",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "### Constructor Template",
+            "",
+            "```python",
+            f"class AIE{layer_name.replace('ForCausalLM', '').replace('Model', '')}(AIEOperatorBase):",
+            "    def __init__(",
+            "        self,",
+        ]
+    )
 
     for hp in hyperparams[:10]:
         default = hp.value if hp.value is not None else "None"
         doc_lines.append(f"        {hp.name}: {hp.dtype} = {default},")
 
-    doc_lines.extend([
-        "    ):",
-        "        # Store hyperparameters",
-        "        pass",
-        "```",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "    ):",
+            "        # Store hyperparameters",
+            "        pass",
+            "```",
+            "",
+        ]
+    )
 
     # Input/Output signatures
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 2. Forward Signature",
-        "",
-        "### Inputs",
-        "",
-        "| Name | Shape | Dtype | Description |",
-        "|------|-------|-------|-------------|",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 2. Forward Signature",
+            "",
+            "### Inputs",
+            "",
+            "| Name | Shape | Dtype | Description |",
+            "|------|-------|-------|-------------|",
+        ]
+    )
 
     for inp in inputs:
-        doc_lines.append(f"| `{inp.name}` | {inp.shape} | {inp.dtype} | {inp.description} |")
+        doc_lines.append(
+            f"| `{inp.name}` | {inp.shape} | {inp.dtype} | {inp.description} |"
+        )
 
     if not inputs:
-        doc_lines.append(f"| `hidden_states` | `[batch, seq_len, {config.get('hidden_size', '?')}]` | torch.float16 | Input tensor |")
+        doc_lines.append(
+            f"| `hidden_states` | `[batch, seq_len, {config.get('hidden_size', '?')}]` | torch.float16 | Input tensor |"
+        )
 
-    doc_lines.extend([
-        "",
-        "### Outputs",
-        "",
-        "| Name | Shape | Dtype | Description |",
-        "|------|-------|-------|-------------|",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "### Outputs",
+            "",
+            "| Name | Shape | Dtype | Description |",
+            "|------|-------|-------|-------------|",
+        ]
+    )
 
     for out in outputs:
-        doc_lines.append(f"| `{out.name}` | {out.shape} | {out.dtype} | {out.description} |")
+        doc_lines.append(
+            f"| `{out.name}` | {out.shape} | {out.dtype} | {out.description} |"
+        )
 
     if not outputs:
-        doc_lines.append(f"| `output` | `[batch, seq_len, {config.get('hidden_size', '?')}]` | torch.float16 | Output tensor |")
+        doc_lines.append(
+            f"| `output` | `[batch, seq_len, {config.get('hidden_size', '?')}]` | torch.float16 | Output tensor |"
+        )
 
-    doc_lines.extend([
-        "",
-        "### forward() Method Template",
-        "",
-        "```python",
-        "def forward(self, hidden_states, attention_mask=None, position_embeddings=None, **kwargs):",
-        "    \"\"\"",
-        "    Forward pass for " + layer_name + ".",
-        "    ",
-        "    Args:",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "### forward() Method Template",
+            "",
+            "```python",
+            "def forward(self, hidden_states, attention_mask=None, position_embeddings=None, **kwargs):",
+            '    """',
+            "    Forward pass for " + layer_name + ".",
+            "    ",
+            "    Args:",
+        ]
+    )
 
     for inp in inputs[:5]:
         doc_lines.append(f"        {inp.name}: {inp.description} (shape: {inp.shape})")
 
-    doc_lines.extend([
-        "    ",
-        "    Returns:",
-        "        Output tensor [batch, seq_len, hidden_size]",
-        "    \"\"\"",
-        "    # Implementation below",
-        "```",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "    ",
+            "    Returns:",
+            "        Output tensor [batch, seq_len, hidden_size]",
+            '    """',
+            "    # Implementation below",
+            "```",
+            "",
+        ]
+    )
 
     # Reference implementation
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 3. Reference Implementation (Transformers)",
-        "",
-        "**Source:** This is the EXACT code from Transformers that your NPU operator must replicate.",
-        "",
-        "```python",
-        layer_source,
-        "```",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 3. Reference Implementation (Transformers)",
+            "",
+            "**Source:** This is the EXACT code from Transformers that your NPU operator must replicate.",
+            "",
+            "```python",
+            layer_source,
+            "```",
+            "",
+        ]
+    )
 
     # Operations analysis
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 4. Operations Analysis",
-        "",
-        "These PyTorch operations are used in the forward() method.",
-        "Each must be translated to AIE/MLIR equivalents:",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 4. Operations Analysis",
+            "",
+            "These PyTorch operations are used in the forward() method.",
+            "Each must be translated to AIE/MLIR equivalents:",
+            "",
+        ]
+    )
 
     if operations:
         for op in set(operations):
@@ -471,96 +511,107 @@ def generate_master_document(model_name: str, layer_name: str) -> str:
     else:
         doc_lines.append("- (Could not analyze - review source code above)")
 
-    doc_lines.extend([
-        "",
-        "### Computation Flow",
-        "",
-        "Based on the reference implementation above, the computation flow is:",
-        "",
-        "1. **Input processing** - Receive hidden_states tensor",
-        "2. **Projection** - Apply QKV linear projections",
-        "3. **Reshape** - Restructure tensors for multi-head attention",
-        "4. **Position embeddings** - Apply RoPE if present",
-        "5. **Attention computation** - Compute attention weights and apply",
-        "6. **Output projection** - Final linear projection",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "### Computation Flow",
+            "",
+            "Based on the reference implementation above, the computation flow is:",
+            "",
+            "1. **Input processing** - Receive hidden_states tensor",
+            "2. **Projection** - Apply QKV linear projections",
+            "3. **Reshape** - Restructure tensors for multi-head attention",
+            "4. **Position embeddings** - Apply RoPE if present",
+            "5. **Attention computation** - Compute attention weights and apply",
+            "6. **Output projection** - Final linear projection",
+            "",
+        ]
+    )
 
     # Special handling
     if special_handling:
-        doc_lines.extend([
-            "",
-            "---",
-            "",
-            "## 5. Special Handling Required",
-            "",
-            "**CRITICAL:** This layer has special requirements:",
-            "",
-        ])
+        doc_lines.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 5. Special Handling Required",
+                "",
+                "**CRITICAL:** This layer has special requirements:",
+                "",
+            ]
+        )
         for handling in special_handling:
             doc_lines.append(f"- {handling}")
         doc_lines.append("")
 
     # Implementation checklist
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 6. Implementation Checklist",
-        "",
-        "### Files to Create",
-        "",
-        "```\n",
-        f"{layer_name.lower()}/",
-        f"├── {layer_name.lower()}.py      # Operator class (skeleton below)",
-        f"├── design.py               # MLIR generation",
-        f"├── test.py                 # Unit tests",
-        f"└── MASTER_DOC.md           # This document",
-        "```",
-        "",
-        "### Steps",
-        "",
-        "- [ ] Review reference implementation (Section 3)",
-        "- [ ] Understand operations needed (Section 4)",
-        "- [ ] Fill in operator skeleton (Section 7)",
-        "- [ ] Implement design.py MLIR generation",
-        "- [ ] Define input/output buffers matching signatures (Section 2)",
-        "- [ ] Implement tiling strategy for tensor sizes",
-        "- [ ] Write unit tests against Transformers reference",
-        "- [ ] Compare outputs for correctness",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 6. Implementation Checklist",
+            "",
+            "### Files to Create",
+            "",
+            "```\n",
+            f"{layer_name.lower()}/",
+            f"├── {layer_name.lower()}.py      # Operator class (skeleton below)",
+            f"├── design.py               # MLIR generation",
+            f"├── test.py                 # Unit tests",
+            f"└── MASTER_DOC.md           # This document",
+            "```",
+            "",
+            "### Steps",
+            "",
+            "- [ ] Review reference implementation (Section 3)",
+            "- [ ] Understand operations needed (Section 4)",
+            "- [ ] Fill in operator skeleton (Section 7)",
+            "- [ ] Implement design.py MLIR generation",
+            "- [ ] Define input/output buffers matching signatures (Section 2)",
+            "- [ ] Implement tiling strategy for tensor sizes",
+            "- [ ] Write unit tests against Transformers reference",
+            "- [ ] Compare outputs for correctness",
+            "",
+        ]
+    )
 
     # Skeleton code
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 7. Operator Skeleton (Copy This Code)",
-        "",
-        f"**File:** `{layer_name.lower()}/{layer_name.lower()}.py`",
-        "",
-        "```python",
-        skeleton_code,
-        "```",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 7. Operator Skeleton (Copy This Code)",
+            "",
+            f"**File:** `{layer_name.lower()}/{layer_name.lower()}.py`",
+            "",
+            "```python",
+            skeleton_code,
+            "```",
+            "",
+        ]
+    )
 
     # MLIR design template
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 8. MLIR Design Template",
-        "",
-        f"**File:** `{layer_name.lower()}/design.py`",
-        "",
-        "```python",
-        """# SPDX-FileCopyrightText: Copyright (C) 2025 AMD
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 8. MLIR Design Template",
+            "",
+            f"**File:** `{layer_name.lower()}/design.py`",
+            "",
+            "```python",
+            """# SPDX-FileCopyrightText: Copyright (C) 2025 AMD
 # SPDX-License-Identifier: Apache-2.0
 
 \"\"\"
-MLIR Generation for """ + layer_name + """
+MLIR Generation for """
+            + layer_name
+            + """
 \"\"\"
 
 import aie
@@ -570,7 +621,9 @@ from aie.iron.placers import SequentialPlacer
 
 def generate_mlir(hidden_size, num_heads, num_kv_heads):
     \"\"\"
-    Generate MLIR for """ + layer_name + """.
+    Generate MLIR for """
+            + layer_name
+            + """.
 
     TODO: Study the reference implementation in MASTER_DOC.md Section 3
     and translate each operation to AIE/MLIR.
@@ -593,45 +646,50 @@ def generate_mlir(hidden_size, num_heads, num_kv_heads):
     module = program.resolve_program(SequentialPlacer())
     return module
 """,
-        "```",
-        "",
-    ])
+            "```",
+            "",
+        ]
+    )
 
     # Resources
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "## 9. Resources",
-        "",
-        "### Documentation",
-        "",
-        f"- [IRON CREATING_OPERATORS.md](../CREATING_OPERATORS.md) - Complete workflow guide",
-        f"- [IRON DATA_SOURCES_GUIDE.md](../DATA_SOURCES_GUIDE.md) - Data extraction reference",
-        "- [mlir-aie docs](https://github.com/Xilinx/mlir-aie/tree/main/docs) - AIE/MLIR reference",
-        "",
-        "### Example Operators",
-        "",
-        "- `iron/operators/gemm/` - Matrix multiplication",
-        "- `iron/operators/rms_norm/` - Normalization",
-        "- `iron/operators/rope/` - RoPE embeddings",
-        "- `iron/operators/mha/` - Multi-head attention",
-        "",
-        "### HuggingFace References",
-        "",
-        f"- Model: https://huggingface.co/{model_name}",
-        f"- Config: https://huggingface.co/{model_name}/raw/main/config.json",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 9. Resources",
+            "",
+            "### Documentation",
+            "",
+            f"- [IRON CREATING_OPERATORS.md](../CREATING_OPERATORS.md) - Complete workflow guide",
+            f"- [IRON DATA_SOURCES_GUIDE.md](../DATA_SOURCES_GUIDE.md) - Data extraction reference",
+            "- [mlir-aie docs](https://github.com/Xilinx/mlir-aie/tree/main/docs) - AIE/MLIR reference",
+            "",
+            "### Example Operators",
+            "",
+            "- `iron/operators/gemm/` - Matrix multiplication",
+            "- `iron/operators/rms_norm/` - Normalization",
+            "- `iron/operators/rope/` - RoPE embeddings",
+            "- `iron/operators/mha/` - Multi-head attention",
+            "",
+            "### HuggingFace References",
+            "",
+            f"- Model: https://huggingface.co/{model_name}",
+            f"- Config: https://huggingface.co/{model_name}/raw/main/config.json",
+            "",
+        ]
+    )
 
     # Footer
-    doc_lines.extend([
-        "",
-        "---",
-        "",
-        "*Generated by `python -m iron.model_analysis.generate_master_doc`*",
-        "",
-    ])
+    doc_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "*Generated by `python -m iron.model_analysis.generate_master_doc`*",
+            "",
+        ]
+    )
 
     return "\n".join(doc_lines)
 
@@ -640,12 +698,21 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate master document for implementing a custom IRON operator"
     )
-    parser.add_argument("model_name", help="HuggingFace model name (e.g., mistralai/Mistral-7B-v0.1)")
+    parser.add_argument(
+        "model_name", help="HuggingFace model name (e.g., mistralai/Mistral-7B-v0.1)"
+    )
     parser.add_argument("layer_name", help="Layer class name (e.g., MistralAttention)")
-    parser.add_argument("-o", "--output", default="MASTER_DOC.md",
-                       help="Output file path (default: MASTER_DOC.md)")
-    parser.add_argument("--trust-remote-code", action="store_true",
-                       help="Trust remote code from HuggingFace Hub")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="MASTER_DOC.md",
+        help="Output file path (default: MASTER_DOC.md)",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code from HuggingFace Hub",
+    )
 
     args = parser.parse_args()
 

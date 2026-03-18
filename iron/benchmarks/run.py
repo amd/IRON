@@ -65,9 +65,11 @@ logger = logging.getLogger(__name__)
 # Target Performance Specifications
 # =============================================================================
 
+
 @dataclass
 class PerformanceTarget:
     """Target performance specification for an operator"""
+
     operator_name: str
     input_shape: tuple
     target_latency_ms: float
@@ -106,9 +108,11 @@ PERFORMANCE_TARGETS = {
 # Data Classes
 # =============================================================================
 
+
 @dataclass
 class BenchmarkConfig:
     """Configuration for benchmark execution"""
+
     iterations: int = 50
     warmup: int = 10  # Increased for NPU thermal stabilization
     output_format: str = "console"  # console, json, markdown
@@ -130,6 +134,7 @@ class BenchmarkConfig:
 @dataclass
 class BenchmarkMetrics:
     """Performance metrics for a single benchmark run"""
+
     latencies_ms: List[float] = field(default_factory=list)
     throughput_ops_sec: float = 0.0
     memory_bandwidth_gbps: float = 0.0
@@ -156,8 +161,16 @@ class BenchmarkMetrics:
         self.median_ms = statistics.median(sorted_latencies)
         self.std_dev_ms = statistics.stdev(sorted_latencies) if n > 1 else 0.0
         # Proper percentile calculation for small sample sizes
-        self.p95_ms = sorted_latencies[min(int((n - 1) * 0.95), n - 1)] if n > 1 else sorted_latencies[-1]
-        self.p99_ms = sorted_latencies[min(int((n - 1) * 0.99), n - 1)] if n > 1 else sorted_latencies[-1]
+        self.p95_ms = (
+            sorted_latencies[min(int((n - 1) * 0.95), n - 1)]
+            if n > 1
+            else sorted_latencies[-1]
+        )
+        self.p99_ms = (
+            sorted_latencies[min(int((n - 1) * 0.99), n - 1)]
+            if n > 1
+            else sorted_latencies[-1]
+        )
         self.min_ms = min(sorted_latencies)
         self.max_ms = max(sorted_latencies)
 
@@ -165,6 +178,7 @@ class BenchmarkMetrics:
 @dataclass
 class OperatorBenchmarkResult:
     """Results for a single operator benchmark"""
+
     operator_name: str
     input_shape: tuple
     config: dict
@@ -202,6 +216,7 @@ class OperatorBenchmarkResult:
 @dataclass
 class BenchmarkResults:
     """Complete benchmark results"""
+
     results: List[OperatorBenchmarkResult] = field(default_factory=list)
     start_time: str = ""
     end_time: str = ""
@@ -222,6 +237,7 @@ class BenchmarkResults:
 # =============================================================================
 # Operator Benchmark Implementations
 # =============================================================================
+
 
 class OperatorBenchmark:
     """Base class for operator benchmarks"""
@@ -289,9 +305,7 @@ class RoPEBenchmark(OperatorBenchmark):
         )
 
         # Create angles tensor
-        self.angles = torch.randn(
-            self.angle_rows, self.cols, dtype=torch.bfloat16
-        )
+        self.angles = torch.randn(self.angle_rows, self.cols, dtype=torch.bfloat16)
 
     def run(self) -> tuple:
         """Run RoPE operator and return timing"""
@@ -334,7 +348,9 @@ class RMSNormBenchmark(OperatorBenchmark):
 
         # Calculate padded size
         max_multiple = self.num_aie_columns * self.tile_size
-        self.padded_size = ((self.size + max_multiple - 1) // max_multiple) * max_multiple
+        self.padded_size = (
+            (self.size + max_multiple - 1) // max_multiple
+        ) * max_multiple
 
         # Create operator
         self.operator = AIERMSNorm(
@@ -389,7 +405,9 @@ class SiLUBenchmark(OperatorBenchmark):
 
         # Calculate padded size
         max_multiple = self.num_aie_columns * self.tile_size
-        self.padded_size = ((self.size + max_multiple - 1) // max_multiple) * max_multiple
+        self.padded_size = (
+            (self.size + max_multiple - 1) // max_multiple
+        ) * max_multiple
 
         # Create operator
         self.operator = AIESiLU(
@@ -451,8 +469,11 @@ class SoftmaxBenchmark(OperatorBenchmark):
 
         # Create input tensor
         self.input_tensor = torch.randn(
-            self.batch_size, self.num_heads, self.seq_len, self.key_len,
-            dtype=torch.bfloat16
+            self.batch_size,
+            self.num_heads,
+            self.seq_len,
+            self.key_len,
+            dtype=torch.bfloat16,
         )
 
     def run(self) -> tuple:
@@ -478,6 +499,7 @@ class SoftmaxBenchmark(OperatorBenchmark):
 # =============================================================================
 # Benchmark Runner
 # =============================================================================
+
 
 class BenchmarkRunner:
     """Main benchmark runner that orchestrates all benchmarks"""
@@ -548,9 +570,7 @@ class BenchmarkRunner:
                 benchmark.run()
 
             # Timed runs
-            logger.info(
-                f"Running {self.config.iterations} timed iterations..."
-            )
+            logger.info(f"Running {self.config.iterations} timed iterations...")
             latencies_ms = []
 
             for i in range(self.config.iterations):
@@ -585,7 +605,11 @@ class BenchmarkRunner:
                 result.target_met = result.metrics.mean_ms <= result.target_latency_ms
 
             # Log results
-            status = "PASS" if result.target_met else "FAIL" if result.target_latency_ms else "N/A"
+            status = (
+                "PASS"
+                if result.target_met
+                else "FAIL" if result.target_latency_ms else "N/A"
+            )
             logger.info(
                 f"{operator_name} benchmark complete: "
                 f"mean={result.metrics.mean_ms:.4f}ms, "
@@ -599,6 +623,7 @@ class BenchmarkRunner:
             result.target_met = None  # Explicitly set to None on error
             if self.config.verbose:
                 import traceback
+
                 logger.error(traceback.format_exc())
 
         return result
@@ -714,7 +739,11 @@ class BenchmarkRunner:
                 continue
 
             m = result.metrics
-            target_str = f"{result.target_latency_ms:.2f}ms" if result.target_latency_ms else "N/A"
+            target_str = (
+                f"{result.target_latency_ms:.2f}ms"
+                if result.target_latency_ms
+                else "N/A"
+            )
             if result.target_met is not None:
                 target_str += " [OK]" if result.target_met else " [FAIL]"
 
@@ -940,13 +969,9 @@ def main():
         print(f"Total duration: {results.total_duration_sec:.2f}s")
 
         # Check targets
-        targets_met = sum(
-            1 for r in results.results
-            if r.target_met is True
-        )
+        targets_met = sum(1 for r in results.results if r.target_met is True)
         targets_total = sum(
-            1 for r in results.results
-            if r.target_latency_ms is not None
+            1 for r in results.results if r.target_latency_ms is not None
         )
 
         if targets_total > 0:
@@ -958,6 +983,7 @@ def main():
         logger.error(f"Benchmark failed: {str(e)}")
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         sys.exit(1)
     finally:

@@ -107,14 +107,17 @@ def generate_golden_reference(
 
     # Create input tensor
     if dtype == torch.bfloat16:
-        input_tensor = torch.randn(
-            batch_size, in_channels, in_height, in_width, dtype=torch.float32
-        ) * 2.0
+        input_tensor = (
+            torch.randn(
+                batch_size, in_channels, in_height, in_width, dtype=torch.float32
+            )
+            * 2.0
+        )
         input_tensor = input_tensor.to(dtype)
     else:
-        input_tensor = torch.randn(
-            batch_size, in_channels, in_height, in_width, dtype=dtype
-        ) * 2.0
+        input_tensor = (
+            torch.randn(batch_size, in_channels, in_height, in_width, dtype=dtype) * 2.0
+        )
 
     # Create weight tensor
     weight_shape = (out_channels, in_channels // groups, kernel_size[0], kernel_size[1])

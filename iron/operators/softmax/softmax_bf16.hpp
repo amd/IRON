@@ -24,12 +24,15 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
-namespace iron {
-namespace operators {
-namespace softmax {
+namespace iron
+{
+namespace operators
+{
+namespace softmax
+{
 
 /**
  * @brief Apply Softmax activation function
@@ -64,13 +67,7 @@ namespace softmax {
  * softmax_fwd(input, output, N, M);
  * @endcode
  */
-template<typename T>
-void softmax_fwd(
-    const T* input,
-    T* output,
-    int N,
-    int M
-);
+template <typename T> void softmax_fwd(const T *input, T *output, int N, int M);
 
 /**
  * @brief Apply Softmax with scale factor (for attention scores)
@@ -87,14 +84,7 @@ void softmax_fwd(
  * @param M Number of columns
  * @param scale Scale factor (typically 1/sqrt(head_dim))
  */
-template<typename T>
-void softmax_scaled_fwd(
-    const T* input,
-    T* output,
-    int N,
-    int M,
-    float scale
-);
+template <typename T> void softmax_scaled_fwd(const T *input, T *output, int N, int M, float scale);
 
 /**
  * @brief Apply Softmax along a specific dimension
@@ -110,14 +100,7 @@ void softmax_scaled_fwd(
  * @param dim Dimension along which to compute softmax (0-indexed)
  * @param num_dims Number of dimensions
  */
-template<typename T>
-void softmax_along_dim(
-    const T* input,
-    T* output,
-    const int* shape,
-    int dim,
-    int num_dims
-);
+template <typename T> void softmax_along_dim(const T *input, T *output, const int *shape, int dim, int num_dims);
 
 } // namespace softmax
 } // namespace operators

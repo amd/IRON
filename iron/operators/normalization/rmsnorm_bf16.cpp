@@ -17,18 +17,24 @@
  */
 
 #include "rmsnorm_bf16.hpp"
+
 #include "types.hpp"
+
 #include <cmath>
 #include <cstring>
 
-namespace iron {
-namespace operators {
-namespace normalization {
+namespace iron
+{
+namespace operators
+{
+namespace normalization
+{
 
 /**
  * @brief Internal helper: square of bfloat16 as float
  */
-inline float bf16_square(bfloat16 x) {
+inline float bf16_square(bfloat16 x)
+{
     float fx = static_cast<float>(x);
     return fx * fx;
 }
@@ -36,14 +42,16 @@ inline float bf16_square(bfloat16 x) {
 /**
  * @brief Internal helper: multiply bfloat16 by float
  */
-inline bfloat16 bf16_mul_float(bfloat16 a, float b) {
+inline bfloat16 bf16_mul_float(bfloat16 a, float b)
+{
     return bfloat16(static_cast<float>(a) * b);
 }
 
 /**
  * @brief Internal helper: divide bfloat16 by float
  */
-inline bfloat16 bf16_div_float(bfloat16 a, float b) {
+inline bfloat16 bf16_div_float(bfloat16 a, float b)
+{
     return bfloat16(static_cast<float>(a) / b);
 }
 
@@ -51,17 +59,9 @@ inline bfloat16 bf16_div_float(bfloat16 a, float b) {
 // rms_norm_fwd Implementation - Full Version
 //==============================================================================
 
-template<typename T>
-void rms_norm_fwd(
-    const T* input,
-    const T* weight,
-    const T* bias,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps
-) {
+template <typename T>
+void rms_norm_fwd(const T *input, const T *weight, const T *bias, T *output, int batch, int seq, int hidden, float eps)
+{
     const int total_rows = batch * seq;
 
     // Process each row (each token position)
@@ -116,55 +116,35 @@ void rms_norm_fwd(
 }
 
 // Explicit template instantiation for bfloat16
-template void rms_norm_fwd<bfloat16>(
-    const bfloat16*, const bfloat16*, const bfloat16*,
-    bfloat16*, int, int, int, float
-);
+template void
+rms_norm_fwd<bfloat16>(const bfloat16 *, const bfloat16 *, const bfloat16 *, bfloat16 *, int, int, int, float);
 
 //==============================================================================
 // rms_norm_fwd Overload - Without Bias
 //==============================================================================
 
-template<typename T>
-void rms_norm_fwd(
-    const T* input,
-    const T* weight,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps
-) {
+template <typename T>
+void rms_norm_fwd(const T *input, const T *weight, T *output, int batch, int seq, int hidden, float eps)
+{
     // Delegate to full version with nullptr bias
     rms_norm_fwd(input, weight, nullptr, output, batch, seq, hidden, eps);
 }
 
 // Explicit template instantiation for bfloat16
-template void rms_norm_fwd<bfloat16>(
-    const bfloat16*, const bfloat16*, bfloat16*, int, int, int, float
-);
+template void rms_norm_fwd<bfloat16>(const bfloat16 *, const bfloat16 *, bfloat16 *, int, int, int, float);
 
 //==============================================================================
 // rms_norm_fwd_simple Implementation - Without Weight and Bias
 //==============================================================================
 
-template<typename T>
-void rms_norm_fwd_simple(
-    const T* input,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps
-) {
+template <typename T> void rms_norm_fwd_simple(const T *input, T *output, int batch, int seq, int hidden, float eps)
+{
     // Delegate to full version with nullptr weight and bias
     rms_norm_fwd(input, nullptr, nullptr, output, batch, seq, hidden, eps);
 }
 
 // Explicit template instantiation for bfloat16
-template void rms_norm_fwd_simple<bfloat16>(
-    const bfloat16*, bfloat16*, int, int, int, float
-);
+template void rms_norm_fwd_simple<bfloat16>(const bfloat16 *, bfloat16 *, int, int, int, float);
 
 } // namespace normalization
 } // namespace operators

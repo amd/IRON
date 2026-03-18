@@ -18,16 +18,19 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-#include <optional>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
-namespace iron {
-namespace runtime {
-namespace platform {
+namespace iron
+{
+namespace runtime
+{
+namespace platform
+{
 
 //==============================================================================
 // Platform Detection
@@ -36,13 +39,7 @@ namespace platform {
 /**
  * @brief Operating system enumeration
  */
-enum class OperatingSystem {
-    Unknown,
-    Windows,
-    Linux,
-    MacOS,
-    Unix
-};
+enum class OperatingSystem { Unknown, Windows, Linux, MacOS, Unix };
 
 /**
  * @brief Detect current operating system
@@ -52,7 +49,7 @@ enum class OperatingSystem {
 /**
  * @brief Get OS name as string
  */
-[[nodiscard]] const char* getOperatingSystemName();
+[[nodiscard]] const char *getOperatingSystemName();
 
 /**
  * @brief Check if running on 64-bit system
@@ -62,21 +59,24 @@ enum class OperatingSystem {
 /**
  * @brief Check if running on Windows
  */
-[[nodiscard]] inline bool isWindows() {
+[[nodiscard]] inline bool isWindows()
+{
     return getOperatingSystem() == OperatingSystem::Windows;
 }
 
 /**
  * @brief Check if running on Linux
  */
-[[nodiscard]] inline bool isLinux() {
+[[nodiscard]] inline bool isLinux()
+{
     return getOperatingSystem() == OperatingSystem::Linux;
 }
 
 /**
  * @brief Check if running on macOS
  */
-[[nodiscard]] inline bool isMacOS() {
+[[nodiscard]] inline bool isMacOS()
+{
     return getOperatingSystem() == OperatingSystem::MacOS;
 }
 
@@ -87,59 +87,59 @@ enum class OperatingSystem {
 /**
  * @brief Check if file exists
  */
-[[nodiscard]] bool fileExists(const std::string& path);
+[[nodiscard]] bool fileExists(const std::string &path);
 
 /**
  * @brief Check if path is a directory
  */
-[[nodiscard]] bool isDirectory(const std::string& path);
+[[nodiscard]] bool isDirectory(const std::string &path);
 
 /**
  * @brief Get file size in bytes
  */
-[[nodiscard]] size_t getFileSize(const std::string& path);
+[[nodiscard]] size_t getFileSize(const std::string &path);
 
 /**
  * @brief Read entire file into memory
  *
  * @throws RuntimeError if file cannot be read
  */
-[[nodiscard]] std::vector<uint8_t> readFile(const std::string& path);
+[[nodiscard]] std::vector<uint8_t> readFile(const std::string &path);
 
 /**
  * @brief Get absolute path
  */
-[[nodiscard]] std::string getAbsolutePath(const std::string& path);
+[[nodiscard]] std::string getAbsolutePath(const std::string &path);
 
 /**
  * @brief Get directory component of path
  */
-[[nodiscard]] std::string getDirectory(const std::string& path);
+[[nodiscard]] std::string getDirectory(const std::string &path);
 
 /**
  * @brief Get filename component of path
  */
-[[nodiscard]] std::string getFilename(const std::string& path);
+[[nodiscard]] std::string getFilename(const std::string &path);
 
 /**
  * @brief Get filename without extension
  */
-[[nodiscard]] std::string getStem(const std::string& path);
+[[nodiscard]] std::string getStem(const std::string &path);
 
 /**
  * @brief Get file extension (including dot)
  */
-[[nodiscard]] std::string getExtension(const std::string& path);
+[[nodiscard]] std::string getExtension(const std::string &path);
 
 /**
  * @brief Join path components
  */
-[[nodiscard]] std::string joinPath(const std::string& base, const std::string& path);
+[[nodiscard]] std::string joinPath(const std::string &base, const std::string &path);
 
 /**
  * @brief Check if path is absolute
  */
-[[nodiscard]] bool isAbsolutePath(const std::string& path);
+[[nodiscard]] bool isAbsolutePath(const std::string &path);
 
 //==============================================================================
 // Environment Variables
@@ -149,18 +149,18 @@ enum class OperatingSystem {
  * @brief Get environment variable value
  * @return Value if set, std::nullopt otherwise
  */
-[[nodiscard]] std::optional<std::string> getEnvVar(const char* name);
+[[nodiscard]] std::optional<std::string> getEnvVar(const char *name);
 
 /**
  * @brief Set environment variable
  * @return true if successful
  */
-bool setEnvVar(const char* name, const std::string& value);
+bool setEnvVar(const char *name, const std::string &value);
 
 /**
  * @brief Check if environment variable is truthy
  */
-[[nodiscard]] bool isEnvVarTruthy(const char* name);
+[[nodiscard]] bool isEnvVarTruthy(const char *name);
 
 //==============================================================================
 // Timing Utilities
@@ -187,14 +187,15 @@ bool setEnvVar(const char* name, const std::string& value);
  * } // Timer automatically logs elapsed time on destruction
  * @endcode
  */
-class ScopeTimer {
-public:
-    explicit ScopeTimer(const std::string& label);
+class ScopeTimer
+{
+  public:
+    explicit ScopeTimer(const std::string &label);
     ~ScopeTimer();
 
     // Prevent copying
-    ScopeTimer(const ScopeTimer&) = delete;
-    ScopeTimer& operator=(const ScopeTimer&) = delete;
+    ScopeTimer(const ScopeTimer &) = delete;
+    ScopeTimer &operator=(const ScopeTimer &) = delete;
 
     /**
      * @brief Get elapsed time in microseconds
@@ -204,9 +205,12 @@ public:
     /**
      * @brief Get label
      */
-    [[nodiscard]] const std::string& label() const { return label_; }
+    [[nodiscard]] const std::string &label() const
+    {
+        return label_;
+    }
 
-private:
+  private:
     std::string label_;
     uint64_t start_;
 };
@@ -218,27 +222,27 @@ private:
 /**
  * @brief Trim whitespace from string
  */
-[[nodiscard]] std::string trim(const std::string& str);
+[[nodiscard]] std::string trim(const std::string &str);
 
 /**
  * @brief Split string by delimiter
  */
-[[nodiscard]] std::vector<std::string> split(const std::string& str, char delimiter);
+[[nodiscard]] std::vector<std::string> split(const std::string &str, char delimiter);
 
 /**
  * @brief Join strings with delimiter
  */
-[[nodiscard]] std::string join(const std::vector<std::string>& parts, const std::string& delimiter);
+[[nodiscard]] std::string join(const std::vector<std::string> &parts, const std::string &delimiter);
 
 /**
  * @brief Convert string to lowercase
  */
-[[nodiscard]] std::string toLower(const std::string& str);
+[[nodiscard]] std::string toLower(const std::string &str);
 
 /**
  * @brief Convert string to uppercase
  */
-[[nodiscard]] std::string toUpper(const std::string& str);
+[[nodiscard]] std::string toUpper(const std::string &str);
 
 //==============================================================================
 // Logging Utilities
@@ -247,19 +251,15 @@ private:
 /**
  * @brief Log level enumeration
  */
-enum class LogLevel {
-    Debug = 0,
-    Info = 1,
-    Warning = 2,
-    Error = 3
-};
+enum class LogLevel { Debug = 0, Info = 1, Warning = 2, Error = 3 };
 
 /**
  * @brief Log callback function type
  */
-using LogCallback = std::function<void(LogLevel, const std::string&)>;
+using LogCallback = std::function<void(LogLevel, const std::string &)>;
 
-namespace log {
+namespace log
+{
 
 /**
  * @brief Set global log level
@@ -282,38 +282,42 @@ void setLogCallback(LogCallback callback);
 /**
  * @brief Get log level as string
  */
-[[nodiscard]] const char* levelToString(LogLevel level);
+[[nodiscard]] const char *levelToString(LogLevel level);
 
 /**
  * @brief Log a message
  */
-void log(LogLevel level, const std::string& message);
+void log(LogLevel level, const std::string &message);
 
 /**
  * @brief Log debug message
  */
-inline void debug(const std::string& message) {
+inline void debug(const std::string &message)
+{
     log(LogLevel::Debug, message);
 }
 
 /**
  * @brief Log info message
  */
-inline void info(const std::string& message) {
+inline void info(const std::string &message)
+{
     log(LogLevel::Info, message);
 }
 
 /**
  * @brief Log warning message
  */
-inline void warning(const std::string& message) {
+inline void warning(const std::string &message)
+{
     log(LogLevel::Warning, message);
 }
 
 /**
  * @brief Log error message
  */
-inline void error(const std::string& message) {
+inline void error(const std::string &message)
+{
     log(LogLevel::Error, message);
 }
 
@@ -338,23 +342,24 @@ inline void error(const std::string& message) {
  * auto func = lib->getSymbol<void(*)()>("my_function");
  * @endcode
  */
-class LibraryHandle {
-public:
+class LibraryHandle
+{
+  public:
     /**
      * @brief Load dynamic library
      * @param path Path to library file
      */
-    explicit LibraryHandle(const std::string& path);
+    explicit LibraryHandle(const std::string &path);
 
     ~LibraryHandle();
 
     // Prevent copying
-    LibraryHandle(const LibraryHandle&) = delete;
-    LibraryHandle& operator=(const LibraryHandle&) = delete;
+    LibraryHandle(const LibraryHandle &) = delete;
+    LibraryHandle &operator=(const LibraryHandle &) = delete;
 
     // Allow moving
-    LibraryHandle(LibraryHandle&& other) noexcept;
-    LibraryHandle& operator=(LibraryHandle&& other) noexcept;
+    LibraryHandle(LibraryHandle &&other) noexcept;
+    LibraryHandle &operator=(LibraryHandle &&other) noexcept;
 
     /**
      * @brief Check if library loaded successfully
@@ -367,8 +372,7 @@ public:
      * @param name Symbol name
      * @return Pointer to symbol, or nullptr if not found
      */
-    template<typename T>
-    T getSymbol(const char* name) const;
+    template <typename T> T getSymbol(const char *name) const;
 
     /**
      * @brief Get last error message
@@ -376,8 +380,8 @@ public:
      */
     [[nodiscard]] std::string getError() const;
 
-private:
-    void* handle_;
+  private:
+    void *handle_;
     bool valid_;
 };
 

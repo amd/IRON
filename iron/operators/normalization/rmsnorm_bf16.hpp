@@ -26,12 +26,15 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
-namespace iron {
-namespace operators {
-namespace normalization {
+namespace iron
+{
+namespace operators
+{
+namespace normalization
+{
 
 /**
  * @brief Apply Root Mean Square Layer Normalization
@@ -73,17 +76,15 @@ namespace normalization {
  * rms_norm_fwd(input, weight, nullptr, output, batch, seq, hidden, eps);
  * @endcode
  */
-template<typename T>
-void rms_norm_fwd(
-    const T* input,
-    const T* weight,
-    const T* bias,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps = 1e-6f
-);
+template <typename T>
+void rms_norm_fwd(const T *input,
+                  const T *weight,
+                  const T *bias,
+                  T *output,
+                  int batch,
+                  int seq,
+                  int hidden,
+                  float eps = 1e-6f);
 
 /**
  * @brief Apply RMSNorm without bias (common case for Llama3.2)
@@ -100,16 +101,8 @@ void rms_norm_fwd(
  * @param hidden Hidden dimension
  * @param eps Epsilon for numerical stability
  */
-template<typename T>
-void rms_norm_fwd(
-    const T* input,
-    const T* weight,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps = 1e-6f
-);
+template <typename T>
+void rms_norm_fwd(const T *input, const T *weight, T *output, int batch, int seq, int hidden, float eps = 1e-6f);
 
 /**
  * @brief Apply RMSNorm without weight or bias (unit variance normalization)
@@ -125,15 +118,8 @@ void rms_norm_fwd(
  * @param hidden Hidden dimension
  * @param eps Epsilon for numerical stability
  */
-template<typename T>
-void rms_norm_fwd_simple(
-    const T* input,
-    T* output,
-    int batch,
-    int seq,
-    int hidden,
-    float eps = 1e-6f
-);
+template <typename T>
+void rms_norm_fwd_simple(const T *input, T *output, int batch, int seq, int hidden, float eps = 1e-6f);
 
 } // namespace normalization
 } // namespace operators

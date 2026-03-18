@@ -37,7 +37,9 @@ def generate_test_params(extensive=False):
             names.append(
                 f"conv2d_{in_ch}x{out_ch}_k{kernel}_s{stride}_p{pad}_g{groups}_{in_h}x{in_w}"
             )
-            params.append((in_ch, out_ch, kernel, stride, pad, groups, batch, in_h, in_w))
+            params.append(
+                (in_ch, out_ch, kernel, stride, pad, groups, batch, in_h, in_w)
+            )
 
     return params, names
 
@@ -64,8 +66,16 @@ all_params = [
     all_params,
 )
 def test_conv2d(
-    in_channels, out_channels, kernel_size, stride, padding, groups, batch, in_h, in_w,
-    aie_context
+    in_channels,
+    out_channels,
+    kernel_size,
+    stride,
+    padding,
+    groups,
+    batch,
+    in_h,
+    in_w,
+    aie_context,
 ):
     """Test conv2d operator against CPU reference."""
 
@@ -111,7 +121,9 @@ def test_conv2d(
 
     # Note: Full test execution requires NPU hardware
     # This test validates the operator setup and configuration
-    print(f"\nConv2D Test: in={in_channels}, out={out_channels}, k={kernel_size}, s={stride}")
+    print(
+        f"\nConv2D Test: in={in_channels}, out={out_channels}, k={kernel_size}, s={stride}"
+    )
     print(f"  Input shape: {golden_ref['input'].shape}")
     print(f"  Weight shape: {golden_ref['weight'].shape}")
     print(f"  Output shape: {golden_ref['output'].shape}")
@@ -122,8 +134,16 @@ def test_conv2d(
     regular_params[:3],  # Test first few cases
 )
 def test_conv2d_forward(
-    in_channels, out_channels, kernel_size, stride, padding, groups, batch, in_h, in_w,
-    aie_context
+    in_channels,
+    out_channels,
+    kernel_size,
+    stride,
+    padding,
+    groups,
+    batch,
+    in_h,
+    in_w,
+    aie_context,
 ):
     """Test conv2d operator forward pass."""
 
@@ -164,8 +184,9 @@ def test_conv2d_forward(
     expected = golden_ref["output"]
 
     # Check shape
-    assert result.shape == expected.shape, \
-        f"Shape mismatch: got {result.shape}, expected {expected.shape}"
+    assert (
+        result.shape == expected.shape
+    ), f"Shape mismatch: got {result.shape}, expected {expected.shape}"
 
     # Check values with relaxed tolerance for AIE
     rel_tol = 0.05

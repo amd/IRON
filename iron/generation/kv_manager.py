@@ -85,6 +85,7 @@ class SequenceInfo:
         ...     prompt_length=100
         ... )
     """
+
     sequence_id: int
     kv_blocks: List[int] = field(default_factory=list)
     current_length: int = 0
@@ -146,7 +147,7 @@ class KVCacheManager:
         self,
         config: Llama32Config,
         max_sequences: int = 16,
-        max_blocks_per_sequence: int = 1024
+        max_blocks_per_sequence: int = 1024,
     ) -> None:
         """Initialize KV cache manager.
 
@@ -169,7 +170,9 @@ class KVCacheManager:
 
         # KV cache storage (Python implementation)
         # Structure: {layer_id: {block_id: {offset: (key, value)}}}
-        self._kv_cache: Dict[int, Dict[int, Dict[int, Tuple[np.ndarray, np.ndarray]]]] = {}
+        self._kv_cache: Dict[
+            int, Dict[int, Dict[int, Tuple[np.ndarray, np.ndarray]]]
+        ] = {}
 
         # Block allocation tracking
         self._allocated_blocks: set[int] = set()
@@ -186,9 +189,7 @@ class KVCacheManager:
         )
 
     def start_sequence(
-        self,
-        prompt_tokens: List[int],
-        max_new_tokens: Optional[int] = None
+        self, prompt_tokens: List[int], max_new_tokens: Optional[int] = None
     ) -> int:
         """Start a new generation sequence.
 
@@ -211,9 +212,7 @@ class KVCacheManager:
             >>> seq_id = manager.start_sequence(prompt)
         """
         if len(self.sequences) >= self.max_sequences:
-            raise RuntimeError(
-                f"Maximum sequences ({self.max_sequences}) reached"
-            )
+            raise RuntimeError(f"Maximum sequences ({self.max_sequences}) reached")
 
         # Generate unique sequence ID
         sequence_id = self._generate_sequence_id()
@@ -240,7 +239,7 @@ class KVCacheManager:
             sequence_id=sequence_id,
             kv_blocks=allocated_blocks,
             current_length=prompt_length,
-            prompt_length=prompt_length
+            prompt_length=prompt_length,
         )
 
         # Initialize KV cache structure for all layers
@@ -263,7 +262,7 @@ class KVCacheManager:
         position: int,
         key: np.ndarray,
         value: np.ndarray,
-        layer: int
+        layer: int,
     ) -> None:
         """Write KV entry for a token.
 
@@ -297,8 +296,16 @@ class KVCacheManager:
         seq_info = self.sequences[sequence_id]
 
         # Find block for this position
-        block_index = position // self.config.block_size if hasattr(self.config, 'block_size') else position // 32
-        block_offset = position % self.config.block_size if hasattr(self.config, 'block_size') else position % 32
+        block_index = (
+            position // self.config.block_size
+            if hasattr(self.config, "block_size")
+            else position // 32
+        )
+        block_offset = (
+            position % self.config.block_size
+            if hasattr(self.config, "block_size")
+            else position % 32
+        )
 
         if block_index >= len(seq_info.kv_blocks):
             raise IndexError(
@@ -323,10 +330,7 @@ class KVCacheManager:
         )
 
     def read_kv(
-        self,
-        sequence_id: int,
-        position: int,
-        layer: int
+        self, sequence_id: int, position: int, layer: int
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Read KV entry for a specific token.
 
@@ -353,8 +357,16 @@ class KVCacheManager:
         seq_info = self.sequences[sequence_id]
 
         # Find block for this position
-        block_index = position // self.config.block_size if hasattr(self.config, 'block_size') else position // 32
-        block_offset = position % self.config.block_size if hasattr(self.config, 'block_size') else position % 32
+        block_index = (
+            position // self.config.block_size
+            if hasattr(self.config, "block_size")
+            else position // 32
+        )
+        block_offset = (
+            position % self.config.block_size
+            if hasattr(self.config, "block_size")
+            else position % 32
+        )
 
         if block_index >= len(seq_info.kv_blocks):
             raise KeyError(
@@ -370,18 +382,13 @@ class KVCacheManager:
         if block_id not in self._kv_cache.get(layer, {}):
             raise KeyError(f"Block {block_id} not found in layer {layer}")
         if block_offset not in self._kv_cache[layer][block_id]:
-            raise KeyError(
-                f"No KV entry at block {block_id}, offset {block_offset}"
-            )
+            raise KeyError(f"No KV entry at block {block_id}, offset {block_offset}")
 
         key, value = self._kv_cache[layer][block_id][block_offset]
         return key.copy(), value.copy()
 
     def read_kv_context(
-        self,
-        sequence_id: int,
-        context_length: int,
-        layer: int
+        self, sequence_id: int, context_length: int, layer: int
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Read KV context for attention computation.
 
@@ -459,7 +466,7 @@ class KVCacheManager:
         token_id: int,
         key: np.ndarray,
         value: np.ndarray,
-        layer: Optional[int] = None
+        layer: Optional[int] = None,
     ) -> None:
         """Append a generated token to the sequence.
 
@@ -575,8 +582,8 @@ class KVCacheManager:
             "total_deallocations": self._total_deallocations,
             "peak_blocks": self._peak_blocks,
             "block_utilization": (
-                len(self._allocated_blocks) /
-                (self.max_sequences * self.max_blocks_per_sequence)
+                len(self._allocated_blocks)
+                / (self.max_sequences * self.max_blocks_per_sequence)
                 if self.max_sequences * self.max_blocks_per_sequence > 0
                 else 0.0
             ),
@@ -617,7 +624,9 @@ class KVCacheManager:
         Returns:
             Number of blocks required
         """
-        block_size = self.config.block_size if hasattr(self.config, 'block_size') else 32
+        block_size = (
+            self.config.block_size if hasattr(self.config, "block_size") else 32
+        )
         return (num_tokens + block_size - 1) // block_size
 
     def _allocate_blocks(self, num_blocks: int) -> List[int]:

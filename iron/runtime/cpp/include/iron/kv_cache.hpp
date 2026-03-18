@@ -26,15 +26,17 @@
 
 #pragma once
 
-#include <vector>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <cstdint>
-#include <cstddef>
-#include <atomic>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 /**
  * @brief Paged KV Cache for efficient autoregressive inference
@@ -43,8 +45,9 @@ namespace runtime {
  * fixed-size blocks to reduce fragmentation and enable efficient
  * memory reuse across sequences.
  */
-class PagedKVCache {
-public:
+class PagedKVCache
+{
+  public:
     /**
      * @brief Configuration for KV cache
      *
@@ -54,18 +57,19 @@ public:
      * - 64-dimensional head size
      */
     struct Config {
-        size_t blockSize = 32;        ///< Tokens per block
-        size_t maxBlocks = 1024;      ///< Max blocks per sequence
-        size_t numLayers = 16;        ///< Llama3.2-1B layers
-        size_t numHeads = 32;         ///< Attention heads (GQA groups)
-        size_t headDim = 64;          ///< Head dimension
-        size_t maxSequences = 16;     ///< Max concurrent sequences
+        size_t blockSize = 32;    ///< Tokens per block
+        size_t maxBlocks = 1024;  ///< Max blocks per sequence
+        size_t numLayers = 16;    ///< Llama3.2-1B layers
+        size_t numHeads = 32;     ///< Attention heads (GQA groups)
+        size_t headDim = 64;      ///< Head dimension
+        size_t maxSequences = 16; ///< Max concurrent sequences
 
         /**
          * @brief Calculate bytes per block
          * @return Size in bytes for a single block (keys + values)
          */
-        size_t bytesPerBlock() const {
+        size_t bytesPerBlock() const
+        {
             // 2 (key + value) * numHeads * blockSize * headDim * sizeof(float)
             return 2 * numHeads * blockSize * headDim * sizeof(float);
         }
@@ -74,7 +78,8 @@ public:
          * @brief Calculate total memory requirement
          * @return Total bytes needed for all blocks
          */
-        size_t totalBytes() const {
+        size_t totalBytes() const
+        {
             return maxBlocks * bytesPerBlock();
         }
 
@@ -82,9 +87,9 @@ public:
          * @brief Validate configuration
          * @return true if configuration is valid
          */
-        bool isValid() const {
-            return blockSize > 0 && maxBlocks > 0 && numLayers > 0 &&
-                   numHeads > 0 && headDim > 0 && maxSequences > 0;
+        bool isValid() const
+        {
+            return blockSize > 0 && maxBlocks > 0 && numLayers > 0 && numHeads > 0 && headDim > 0 && maxSequences > 0;
         }
     };
 
@@ -104,7 +109,7 @@ public:
      * @throws std::invalid_argument if config is invalid
      * @throws std::bad_alloc if memory allocation fails
      */
-    explicit PagedKVCache(const Config& config);
+    explicit PagedKVCache(const Config &config);
 
     /**
      * @brief Destructor
@@ -112,12 +117,12 @@ public:
     ~PagedKVCache();
 
     // Prevent copying (large object)
-    PagedKVCache(const PagedKVCache&) = delete;
-    PagedKVCache& operator=(const PagedKVCache&) = delete;
+    PagedKVCache(const PagedKVCache &) = delete;
+    PagedKVCache &operator=(const PagedKVCache &) = delete;
 
     // Allow moving
-    PagedKVCache(PagedKVCache&& other) noexcept;
-    PagedKVCache& operator=(PagedKVCache&& other) noexcept;
+    PagedKVCache(PagedKVCache &&other) noexcept;
+    PagedKVCache &operator=(PagedKVCache &&other) noexcept;
 
     //==========================================================================
     // Block Allocation
@@ -134,7 +139,7 @@ public:
      * @brief Free blocks for a sequence
      * @param blocks Block IDs to free
      */
-    void freeBlocks(const std::vector<BlockId>& blocks);
+    void freeBlocks(const std::vector<BlockId> &blocks);
 
     //==========================================================================
     // KV Operations
@@ -150,12 +155,7 @@ public:
      * @throws std::out_of_range if indices are invalid
      * @throws std::runtime_error if writing to unallocated block
      */
-    void writeKey(
-        size_t layer,
-        BlockId blockId,
-        size_t tokenOffset,
-        size_t head,
-        const float* key);
+    void writeKey(size_t layer, BlockId blockId, size_t tokenOffset, size_t head, const float *key);
 
     /**
      * @brief Write value vector to cache
@@ -167,12 +167,7 @@ public:
      * @throws std::out_of_range if indices are invalid
      * @throws std::runtime_error if writing to unallocated block
      */
-    void writeValue(
-        size_t layer,
-        BlockId blockId,
-        size_t tokenOffset,
-        size_t head,
-        const float* value);
+    void writeValue(size_t layer, BlockId blockId, size_t tokenOffset, size_t head, const float *value);
 
     /**
      * @brief Read key and value vectors from cache
@@ -184,13 +179,7 @@ public:
      * @param value Output value vector [headDim]
      * @throws std::out_of_range if indices are invalid
      */
-    void readKeyValue(
-        size_t layer,
-        BlockId blockId,
-        size_t tokenOffset,
-        size_t head,
-        float* key,
-        float* value) const;
+    void readKeyValue(size_t layer, BlockId blockId, size_t tokenOffset, size_t head, float *key, float *value) const;
 
     //==========================================================================
     // Contiguous Block Access
@@ -210,13 +199,12 @@ public:
      * @throws std::out_of_range if block range is invalid
      * @throws std::runtime_error if reading from unallocated block
      */
-    void getContiguousBlocks(
-        size_t layer,
-        BlockId startBlock,
-        size_t numBlocks,
-        size_t head,
-        float* outKeys,
-        float* outValues) const;
+    void getContiguousBlocks(size_t layer,
+                             BlockId startBlock,
+                             size_t numBlocks,
+                             size_t head,
+                             float *outKeys,
+                             float *outValues) const;
 
     //==========================================================================
     // Query Methods
@@ -251,9 +239,12 @@ public:
      * @brief Get configuration
      * @return Current configuration
      */
-    const Config& getConfig() const { return config_; }
+    const Config &getConfig() const
+    {
+        return config_;
+    }
 
-private:
+  private:
     /**
      * @brief Internal block structure
      *
@@ -278,18 +269,20 @@ private:
          */
         Block(size_t numHeads, size_t blockSize, size_t headDim)
             : keyCache(std::make_unique<float[]>(numHeads * blockSize * headDim)),
-              valueCache(std::make_unique<float[]>(numHeads * blockSize * headDim)) {}
+              valueCache(std::make_unique<float[]>(numHeads * blockSize * headDim))
+        {
+        }
 
         // Move constructor
-        Block(Block&& other) noexcept
-            : keyCache(std::move(other.keyCache)),
-              valueCache(std::move(other.valueCache)),
-              inUse(other.inUse) {
+        Block(Block &&other) noexcept
+            : keyCache(std::move(other.keyCache)), valueCache(std::move(other.valueCache)), inUse(other.inUse)
+        {
             other.inUse = false;
         }
 
         // Move assignment
-        Block& operator=(Block&& other) noexcept {
+        Block &operator=(Block &&other) noexcept
+        {
             if (this != &other) {
                 keyCache = std::move(other.keyCache);
                 valueCache = std::move(other.valueCache);

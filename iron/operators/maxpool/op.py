@@ -96,7 +96,9 @@ class AIEMaxPool2d(AIEOperatorBase):
         operator_dir = Path(__file__).parent
 
         # Determine kernel directory based on device
-        kernel_dir = "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        kernel_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
 
         file_name_base = (
             f"maxpool_{self.kernel_size[0]}x{self.kernel_size[1]}_"
@@ -138,7 +140,10 @@ class AIEMaxPool2d(AIEOperatorBase):
                     extra_flags=[],
                     depends=[
                         SourceArtifact.new(
-                            self.context.base_dir / "aie_kernels" / kernel_dir / "maxpool.cc"
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / kernel_dir
+                            / "maxpool.cc"
                         )
                     ],
                 ),
@@ -166,8 +171,12 @@ class AIEMaxPool2d(AIEOperatorBase):
             in_width: Input width
         """
         # Calculate output dimensions
-        out_height = (in_height + 2 * self.padding[0] - self.kernel_size[0]) // self.stride[0] + 1
-        out_width = (in_width + 2 * self.padding[1] - self.kernel_size[1]) // self.stride[1] + 1
+        out_height = (
+            in_height + 2 * self.padding[0] - self.kernel_size[0]
+        ) // self.stride[0] + 1
+        out_width = (
+            in_width + 2 * self.padding[1] - self.kernel_size[1]
+        ) // self.stride[1] + 1
 
         # Calculate buffer sizes
         input_size = channels * in_height * in_width

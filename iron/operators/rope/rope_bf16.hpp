@@ -23,19 +23,22 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
-namespace iron {
-namespace operators {
-namespace rope {
+namespace iron
+{
+namespace operators
+{
+namespace rope
+{
 
 /**
  * @brief Rotation method for RoPE
  */
 enum class RotationMethod {
-    TWO_HALVES = 0,   ///< Two-halves method (used in HuggingFace transformers)
-    INTERLEAVED = 1    ///< Interleaved method (used in original Llama paper)
+    TWO_HALVES = 0, ///< Two-halves method (used in HuggingFace transformers)
+    INTERLEAVED = 1 ///< Interleaved method (used in original Llama paper)
 };
 
 /**
@@ -81,20 +84,18 @@ enum class RotationMethod {
  * rope_fwd(q, k, cos, sin, q_out, k_out, batch, heads, seq, head_dim);
  * @endcode
  */
-template<typename T>
-void rope_fwd(
-    const T* q,
-    const T* k,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    T* k_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim,
-    RotationMethod method = RotationMethod::TWO_HALVES
-);
+template <typename T>
+void rope_fwd(const T *q,
+              const T *k,
+              const T *cos,
+              const T *sin,
+              T *q_out,
+              T *k_out,
+              int batch,
+              int heads,
+              int seq,
+              int head_dim,
+              RotationMethod method = RotationMethod::TWO_HALVES);
 
 /**
  * @brief Rotate half of the last dimension (180 degree rotation)
@@ -112,13 +113,7 @@ void rope_fwd(
  *
  * @note This is a helper function used internally by rope_fwd
  */
-template<typename T>
-void rotate_half(
-    const T* x,
-    T* out,
-    int num_elements,
-    int head_dim
-);
+template <typename T> void rotate_half(const T *x, T *out, int num_elements, int head_dim);
 
 /**
  * @brief Apply RoPE to query tensor only (for decoder self-attention)
@@ -137,18 +132,16 @@ void rotate_half(
  * @param head_dim Head dimension
  * @param method Rotation method
  */
-template<typename T>
-void rope_query_only(
-    const T* q,
-    const T* cos,
-    const T* sin,
-    T* q_out,
-    int batch,
-    int heads,
-    int seq,
-    int head_dim,
-    RotationMethod method = RotationMethod::TWO_HALVES
-);
+template <typename T>
+void rope_query_only(const T *q,
+                     const T *cos,
+                     const T *sin,
+                     T *q_out,
+                     int batch,
+                     int heads,
+                     int seq,
+                     int head_dim,
+                     RotationMethod method = RotationMethod::TWO_HALVES);
 
 } // namespace rope
 } // namespace operators

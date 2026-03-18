@@ -15,15 +15,16 @@
  * @note Uses Google Test framework
  */
 
-#include <iron/rope_cache.hpp>
-#include <gtest/gtest.h>
-#include <cmath>
 #include <chrono>
+#include <cmath>
+#include <gtest/gtest.h>
+#include <iron/rope_cache.hpp>
 #include <vector>
 
 using namespace iron::runtime;
 
-namespace {
+namespace
+{
 
 //==============================================================================
 // Test Fixture
@@ -32,11 +33,13 @@ namespace {
 /**
  * @brief Test fixture for RoPECache tests
  */
-class RoPECacheTest : public ::testing::Test {
-protected:
-    RoPECache::Config createTestConfig() {
+class RoPECacheTest : public ::testing::Test
+{
+  protected:
+    RoPECache::Config createTestConfig()
+    {
         RoPECache::Config config;
-        config.maxSeqLen = 2048;  // Small for testing
+        config.maxSeqLen = 2048; // Small for testing
         config.headDim = 64;
         config.theta = 10000.0f;
         return config;
@@ -45,19 +48,19 @@ protected:
     /**
      * @brief Compute expected RoPE values using reference formula
      */
-    void computeReferenceAngles(std::vector<float>& cosOut,
-                                 std::vector<float>& sinOut,
-                                 size_t seqLen,
-                                 size_t headDim,
-                                 float theta) {
+    void computeReferenceAngles(std::vector<float> &cosOut,
+                                std::vector<float> &sinOut,
+                                size_t seqLen,
+                                size_t headDim,
+                                float theta)
+    {
         const size_t halfDim = headDim / 2;
         cosOut.resize(seqLen * halfDim);
         sinOut.resize(seqLen * halfDim);
 
         for (size_t pos = 0; pos < seqLen; ++pos) {
             for (size_t i = 0; i < halfDim; ++i) {
-                float invFreq = std::pow(theta, -2.0f * static_cast<float>(i) /
-                                                static_cast<float>(headDim));
+                float invFreq = std::pow(theta, -2.0f * static_cast<float>(i) / static_cast<float>(headDim));
                 float angle = static_cast<float>(pos) * invFreq;
                 size_t idx = pos * halfDim + i;
                 cosOut[idx] = std::cos(angle);
@@ -71,7 +74,8 @@ protected:
 // Construction Tests
 //==============================================================================
 
-TEST_F(RoPECacheTest, Construction) {
+TEST_F(RoPECacheTest, Construction)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
@@ -80,25 +84,28 @@ TEST_F(RoPECacheTest, Construction) {
     EXPECT_TRUE(cache.getConfig().headDim == config.headDim);
 }
 
-TEST_F(RoPECacheTest, ConstructionWithDefaults) {
+TEST_F(RoPECacheTest, ConstructionWithDefaults)
+{
     RoPECache cache;
 
     EXPECT_TRUE(cache.isInitialized());
-    EXPECT_EQ(cache.getConfig().maxSeqLen, 131072);  // 128K
+    EXPECT_EQ(cache.getConfig().maxSeqLen, 131072); // 128K
     EXPECT_EQ(cache.getConfig().headDim, 64);
     EXPECT_FLOAT_EQ(cache.getConfig().theta, 10000.0f);
 }
 
-TEST_F(RoPECacheTest, ConstructionWithInvalidConfig) {
+TEST_F(RoPECacheTest, ConstructionWithInvalidConfig)
+{
     RoPECache::Config config;
-    config.maxSeqLen = 0;  // Invalid
+    config.maxSeqLen = 0; // Invalid
     EXPECT_THROW(RoPECache cache(config), std::invalid_argument);
 }
 
-TEST_F(RoPECacheTest, ConstructionWithOddHeadDim) {
+TEST_F(RoPECacheTest, ConstructionWithOddHeadDim)
+{
     RoPECache::Config config;
     config.maxSeqLen = 1024;
-    config.headDim = 63;  // Must be even
+    config.headDim = 63; // Must be even
     EXPECT_THROW(RoPECache cache(config), std::invalid_argument);
 }
 
@@ -106,10 +113,11 @@ TEST_F(RoPECacheTest, ConstructionWithOddHeadDim) {
 // Initialization Performance Tests
 //==============================================================================
 
-TEST_F(RoPECacheTest, InitializationTime) {
+TEST_F(RoPECacheTest, InitializationTime)
+{
     // Test with a reasonably large config
     RoPECache::Config config;
-    config.maxSeqLen = 32768;  // 32K
+    config.maxSeqLen = 32768; // 32K
     config.headDim = 64;
 
     RoPECache cache(config);
@@ -118,9 +126,10 @@ TEST_F(RoPECacheTest, InitializationTime) {
     EXPECT_LT(cache.getInitializationTimeMs(), 100.0);
 }
 
-TEST_F(RoPECacheTest, MemoryUsage) {
+TEST_F(RoPECacheTest, MemoryUsage)
+{
     RoPECache::Config config;
-    config.maxSeqLen = 131072;  // 128K
+    config.maxSeqLen = 131072; // 128K
     config.headDim = 64;
 
     RoPECache cache(config);
@@ -137,11 +146,12 @@ TEST_F(RoPECacheTest, MemoryUsage) {
 // Table Lookup Tests
 //==============================================================================
 
-TEST_F(RoPECacheTest, GetCosTable) {
+TEST_F(RoPECacheTest, GetCosTable)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
-    const float* cosTable = cache.getCosTable(100);
+    const float *cosTable = cache.getCosTable(100);
     ASSERT_NE(cosTable, nullptr);
 
     // First position should have cos(0) = 1 for all dimensions
@@ -151,11 +161,12 @@ TEST_F(RoPECacheTest, GetCosTable) {
     }
 }
 
-TEST_F(RoPECacheTest, GetSinTable) {
+TEST_F(RoPECacheTest, GetSinTable)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
-    const float* sinTable = cache.getSinTable(100);
+    const float *sinTable = cache.getSinTable(100);
     ASSERT_NE(sinTable, nullptr);
 
     // First position should have sin(0) = 0 for all dimensions
@@ -165,7 +176,8 @@ TEST_F(RoPECacheTest, GetSinTable) {
     }
 }
 
-TEST_F(RoPECacheTest, GetTableSequenceLengthExceedsMax) {
+TEST_F(RoPECacheTest, GetTableSequenceLengthExceedsMax)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
@@ -173,31 +185,30 @@ TEST_F(RoPECacheTest, GetTableSequenceLengthExceedsMax) {
     EXPECT_THROW(cache.getSinTable(config.maxSeqLen + 1), std::out_of_range);
 }
 
-TEST_F(RoPECacheTest, NumericalAccuracy) {
+TEST_F(RoPECacheTest, NumericalAccuracy)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
     // Compute reference values
     std::vector<float> refCos, refSin;
-    computeReferenceAngles(refCos, refSin, config.maxSeqLen,
-                           config.headDim, config.theta);
+    computeReferenceAngles(refCos, refSin, config.maxSeqLen, config.headDim, config.theta);
 
-    const float* cosTable = cache.getCosTable(config.maxSeqLen);
-    const float* sinTable = cache.getSinTable(config.maxSeqLen);
+    const float *cosTable = cache.getCosTable(config.maxSeqLen);
+    const float *sinTable = cache.getSinTable(config.maxSeqLen);
 
     // Check accuracy at various positions
     const size_t halfDim = config.headDim / 2;
     const std::vector<size_t> testPositions = {0, 1, 10, 100, 500, 1000, 2000};
 
     for (size_t pos : testPositions) {
-        if (pos >= config.maxSeqLen) continue;
+        if (pos >= config.maxSeqLen)
+            continue;
 
         for (size_t i = 0; i < halfDim; ++i) {
             size_t idx = pos * halfDim + i;
-            EXPECT_NEAR(cosTable[idx], refCos[idx], 1e-5)
-                << "Position " << pos << ", dim " << i;
-            EXPECT_NEAR(sinTable[idx], refSin[idx], 1e-5)
-                << "Position " << pos << ", dim " << i;
+            EXPECT_NEAR(cosTable[idx], refCos[idx], 1e-5) << "Position " << pos << ", dim " << i;
+            EXPECT_NEAR(sinTable[idx], refSin[idx], 1e-5) << "Position " << pos << ", dim " << i;
         }
     }
 }
@@ -206,15 +217,16 @@ TEST_F(RoPECacheTest, NumericalAccuracy) {
 // Device Buffer Tests
 //==============================================================================
 
-TEST_F(RoPECacheTest, GetDeviceBuffer) {
+TEST_F(RoPECacheTest, GetDeviceBuffer)
+{
     auto config = createTestConfig();
     RoPECache cache(config);
 
-    const void* deviceBuffer = cache.getDeviceBuffer();
+    const void *deviceBuffer = cache.getDeviceBuffer();
     ASSERT_NE(deviceBuffer, nullptr);
 
     // Buffer should contain interleaved cos and sin data
-    const float* buffer = static_cast<const float*>(deviceBuffer);
+    const float *buffer = static_cast<const float *>(deviceBuffer);
     const size_t elements = config.cacheElements();
 
     // First half should be cos values
@@ -228,7 +240,8 @@ TEST_F(RoPECacheTest, GetDeviceBuffer) {
     }
 }
 
-TEST_F(RoPECacheTest, DeviceBufferSize) {
+TEST_F(RoPECacheTest, DeviceBufferSize)
+{
     RoPECache::Config config;
     config.maxSeqLen = 4096;
     config.headDim = 128;
@@ -243,14 +256,15 @@ TEST_F(RoPECacheTest, DeviceBufferSize) {
 // Edge Case Tests
 //==============================================================================
 
-TEST_F(RoPECacheTest, SmallSequenceLength) {
+TEST_F(RoPECacheTest, SmallSequenceLength)
+{
     RoPECache::Config config;
     config.maxSeqLen = 16;
     config.headDim = 64;
 
     RoPECache cache(config);
 
-    const float* cosTable = cache.getCosTable(1);
+    const float *cosTable = cache.getCosTable(1);
     ASSERT_NE(cosTable, nullptr);
 
     // First position: all cos = 1, all sin = 0
@@ -260,7 +274,8 @@ TEST_F(RoPECacheTest, SmallSequenceLength) {
     }
 }
 
-TEST_F(RoPECacheTest, LargeHeadDim) {
+TEST_F(RoPECacheTest, LargeHeadDim)
+{
     RoPECache::Config config;
     config.maxSeqLen = 1024;
     config.headDim = 256;
@@ -268,20 +283,20 @@ TEST_F(RoPECacheTest, LargeHeadDim) {
     RoPECache cache(config);
 
     EXPECT_TRUE(cache.isInitialized());
-    EXPECT_EQ(cache.getDeviceBufferSize(),
-              config.maxSeqLen * (config.headDim / 2) * 2 * sizeof(float));
+    EXPECT_EQ(cache.getDeviceBufferSize(), config.maxSeqLen * (config.headDim / 2) * 2 * sizeof(float));
 }
 
-TEST_F(RoPECacheTest, DifferentTheta) {
+TEST_F(RoPECacheTest, DifferentTheta)
+{
     RoPECache::Config config;
     config.maxSeqLen = 1024;
     config.headDim = 64;
-    config.theta = 5000.0f;  // Different from default
+    config.theta = 5000.0f; // Different from default
 
     RoPECache cache(config);
 
     // Verify theta affects the computed values
-    const float* cosTable = cache.getCosTable(10);
+    const float *cosTable = cache.getCosTable(10);
 
     // At position 1, dim 0, with theta=5000:
     // inv_freq = 5000^0 = 1
@@ -294,7 +309,8 @@ TEST_F(RoPECacheTest, DifferentTheta) {
 // Not Initialized Tests (for completeness, though init happens in ctor)
 //==============================================================================
 
-TEST_F(RoPECacheTest, GetCosTableBeforeInit) {
+TEST_F(RoPECacheTest, GetCosTableBeforeInit)
+{
     // This test is somewhat artificial since initialization happens in constructor
     // In practice, isInitialized() should always be true after construction
     RoPECache cache(createTestConfig());

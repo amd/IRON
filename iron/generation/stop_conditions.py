@@ -83,6 +83,7 @@ class StopResult:
         >>> if result.should_stop:
         ...     print(f"Stopping due to: {result.reason}")
     """
+
     should_stop: bool = False
     reason: str = ""
     stop_string: Optional[str] = None
@@ -145,14 +146,14 @@ class StopConditionChecker:
 
         # Extract stop parameters
         # Handle both GenerationConfig and dict-like objects
-        if hasattr(config, 'eos_tokens'):
+        if hasattr(config, "eos_tokens"):
             self.eos_tokens: Set[int] = set(config.eos_tokens or [])
             self.max_tokens: int = config.max_new_tokens or 2048
             self.stop_strings: List[str] = list(config.stop_strings or [])
         elif isinstance(config, dict):
-            self.eos_tokens = set(config.get('eos_tokens', []) or [])
-            self.max_tokens = config.get('max_new_tokens', 2048)
-            self.stop_strings = list(config.get('stop_strings', []) or [])
+            self.eos_tokens = set(config.get("eos_tokens", []) or [])
+            self.max_tokens = config.get("max_new_tokens", 2048)
+            self.stop_strings = list(config.get("stop_strings", []) or [])
         else:
             # Defaults
             self.eos_tokens = {128001}  # Llama3.2 default
@@ -183,11 +184,7 @@ class StopConditionChecker:
         """
         if token_id in self.eos_tokens:
             logger.info(f"EOS token {token_id} detected")
-            return StopResult(
-                should_stop=True,
-                reason="eos_token",
-                token_id=token_id
-            )
+            return StopResult(should_stop=True, reason="eos_token", token_id=token_id)
         return StopResult(should_stop=False)
 
     def check_max_tokens(self, num_generated: int) -> StopResult:
@@ -205,16 +202,10 @@ class StopConditionChecker:
         """
         if num_generated >= self.max_tokens:
             logger.info(f"Max tokens ({self.max_tokens}) reached")
-            return StopResult(
-                should_stop=True,
-                reason="max_tokens"
-            )
+            return StopResult(should_stop=True, reason="max_tokens")
         return StopResult(should_stop=False)
 
-    def check_stop_string(
-        self,
-        generated_text: str
-    ) -> StopResult:
+    def check_stop_string(self, generated_text: str) -> StopResult:
         """Check if generated text contains a stop string.
 
         Searches the generated text for any configured stop strings.
@@ -237,18 +228,13 @@ class StopConditionChecker:
             if stop_string in generated_text:
                 logger.info(f"Stop string '{stop_string}' detected")
                 return StopResult(
-                    should_stop=True,
-                    reason="stop_string",
-                    stop_string=stop_string
+                    should_stop=True, reason="stop_string", stop_string=stop_string
                 )
 
         return StopResult(should_stop=False)
 
     def check_all(
-        self,
-        token_id: int,
-        generated_text: str = "",
-        num_generated: int = 0
+        self, token_id: int, generated_text: str = "", num_generated: int = 0
     ) -> StopResult:
         """Check all stop conditions.
 
@@ -294,10 +280,7 @@ class StopConditionChecker:
         return StopResult(should_stop=False)
 
     def check_batch(
-        self,
-        token_ids: List[int],
-        generated_texts: List[str],
-        num_generated: List[int]
+        self, token_ids: List[int], generated_texts: List[str], num_generated: List[int]
     ) -> List[StopResult]:
         """Check stop conditions for a batch of sequences.
 
@@ -391,9 +374,9 @@ class StopConditionChecker:
 
 # Convenience functions
 
+
 def create_llama3_stop_checker(
-    max_tokens: int = 2048,
-    stop_strings: Optional[List[str]] = None
+    max_tokens: int = 2048, stop_strings: Optional[List[str]] = None
 ) -> StopConditionChecker:
     """Create a stop checker configured for Llama3.2.
 
@@ -413,15 +396,13 @@ def create_llama3_stop_checker(
         model_type="llama3",
         eos_tokens=[128001, 128009],  # Llama3.2 EOS tokens
         max_new_tokens=max_tokens,
-        stop_strings=stop_strings
+        stop_strings=stop_strings,
     )
 
     return StopConditionChecker(config)
 
 
-def create_permissive_checker(
-    max_tokens: int = 4096
-) -> StopConditionChecker:
+def create_permissive_checker(max_tokens: int = 4096) -> StopConditionChecker:
     """Create a permissive checker (EOS only).
 
     Only stops on EOS token or max tokens. No stop string detection.
@@ -438,17 +419,14 @@ def create_permissive_checker(
     from ..api.generation_config import GenerationConfig
 
     config = GenerationConfig(
-        eos_tokens=[128001, 128009],
-        max_new_tokens=max_tokens,
-        stop_strings=None
+        eos_tokens=[128001, 128009], max_new_tokens=max_tokens, stop_strings=None
     )
 
     return StopConditionChecker(config)
 
 
 def create_strict_checker(
-    max_tokens: int = 512,
-    stop_strings: Optional[List[str]] = None
+    max_tokens: int = 512, stop_strings: Optional[List[str]] = None
 ) -> StopConditionChecker:
     """Create a strict checker with many stop conditions.
 
@@ -469,7 +447,7 @@ def create_strict_checker(
     default_stop_strings = [
         "\n\n",  # Double newline
         "</s>",  # Common EOS marker
-        "###",   # Section marker
+        "###",  # Section marker
     ]
 
     if stop_strings:
@@ -480,7 +458,7 @@ def create_strict_checker(
     config = GenerationConfig(
         eos_tokens=[128001, 128009],
         max_new_tokens=max_tokens,
-        stop_strings=default_stop_strings
+        stop_strings=default_stop_strings,
     )
 
     return StopConditionChecker(config)

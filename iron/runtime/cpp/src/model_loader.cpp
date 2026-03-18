@@ -21,28 +21,29 @@
  * - Atomic counters for lock-free status checks
  */
 
-#include <iron/model_loader.hpp>
-#include <iron/memory_budget.hpp>
-#include <stdexcept>
 #include <algorithm>
 #include <filesystem>
+#include <iron/memory_budget.hpp>
+#include <iron/model_loader.hpp>
+#include <stdexcept>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Construction/Destruction
 //==============================================================================
 
-ThreadSafeModelLoader::ThreadSafeModelLoader(
-    std::shared_ptr<MemoryBudget> memoryBudget,
-    LoadCallback loadCallback)
-    : memoryBudget_(std::move(memoryBudget)),
-      loadCallback_(std::move(loadCallback)) {
+ThreadSafeModelLoader::ThreadSafeModelLoader(std::shared_ptr<MemoryBudget> memoryBudget, LoadCallback loadCallback)
+    : memoryBudget_(std::move(memoryBudget)), loadCallback_(std::move(loadCallback))
+{
     startWorker();
 }
 
-ThreadSafeModelLoader::~ThreadSafeModelLoader() {
+ThreadSafeModelLoader::~ThreadSafeModelLoader()
+{
     stopWorker();
 }
 
@@ -50,12 +51,14 @@ ThreadSafeModelLoader::~ThreadSafeModelLoader() {
 // Worker Thread Management
 //==============================================================================
 
-void ThreadSafeModelLoader::startWorker() {
+void ThreadSafeModelLoader::startWorker()
+{
     stopping_ = false;
     workerThread_ = std::thread(&ThreadSafeModelLoader::processQueue, this);
 }
 
-void ThreadSafeModelLoader::stopWorker() {
+void ThreadSafeModelLoader::stopWorker()
+{
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         stopping_ = true;
@@ -67,19 +70,18 @@ void ThreadSafeModelLoader::stopWorker() {
     }
 }
 
-void ThreadSafeModelLoader::processQueue() {
+void ThreadSafeModelLoader::processQueue()
+{
     while (true) {
         std::string pathToLoad;
 
         // Wait for work
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
-            loadComplete_.wait(lock, [this] {
-                return stopping_ || !loadQueue_.empty();
-            });
+            loadComplete_.wait(lock, [this] { return stopping_ || !loadQueue_.empty(); });
 
             if (stopping_ && loadQueue_.empty()) {
-                return;  // Shutdown requested and no more work
+                return; // Shutdown requested and no more work
             }
 
             if (!loadQueue_.empty()) {
@@ -107,7 +109,8 @@ void ThreadSafeModelLoader::processQueue() {
 // Public API - Model Loading
 //==============================================================================
 
-ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::load(const std::string& path) {
+ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::load(const std::string &path)
+{
     if (path.empty()) {
         return LoadResult{false, nullptr, "Empty model path", false};
     }
@@ -158,8 +161,8 @@ ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::load(const std::string&
     return waitForLoading(path);
 }
 
-ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::waitForLoading(
-    const std::string& path) {
+ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::waitForLoading(const std::string &path)
+{
     // Poll for completion
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -195,8 +198,8 @@ ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::waitForLoading(
     }
 }
 
-std::shared_ptr<ThreadSafeModelLoader::LoadedModel>
-ThreadSafeModelLoader::getLoadedModel(const std::string& path) const {
+std::shared_ptr<ThreadSafeModelLoader::LoadedModel> ThreadSafeModelLoader::getLoadedModel(const std::string &path) const
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     if (it != loadedModels_.end() && it->second->isReady()) {
@@ -205,13 +208,15 @@ ThreadSafeModelLoader::getLoadedModel(const std::string& path) const {
     return nullptr;
 }
 
-bool ThreadSafeModelLoader::isLoaded(const std::string& path) const {
+bool ThreadSafeModelLoader::isLoaded(const std::string &path) const
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     return it != loadedModels_.end() && it->second->isReady();
 }
 
-bool ThreadSafeModelLoader::unload(const std::string& path) {
+bool ThreadSafeModelLoader::unload(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     if (it == loadedModels_.end()) {
@@ -219,18 +224,19 @@ bool ThreadSafeModelLoader::unload(const std::string& path) {
     }
 
     if (it->second->referenceCount.load(std::memory_order_relaxed) > 0) {
-        return false;  // Still in use
+        return false; // Still in use
     }
 
     loadedModels_.erase(it);
     return true;
 }
 
-std::vector<std::string> ThreadSafeModelLoader::getLoadedModels() const {
+std::vector<std::string> ThreadSafeModelLoader::getLoadedModels() const
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     std::vector<std::string> models;
     models.reserve(loadedModels_.size());
-    for (const auto& [path, model] : loadedModels_) {
+    for (const auto &[path, model] : loadedModels_) {
         if (model->isReady()) {
             models.push_back(path);
         }
@@ -238,7 +244,8 @@ std::vector<std::string> ThreadSafeModelLoader::getLoadedModels() const {
     return models;
 }
 
-size_t ThreadSafeModelLoader::getPendingLoadCount() const {
+size_t ThreadSafeModelLoader::getPendingLoadCount() const
+{
     return pendingLoads_.load(std::memory_order_relaxed);
 }
 
@@ -246,7 +253,8 @@ size_t ThreadSafeModelLoader::getPendingLoadCount() const {
 // Reference Counting
 //==============================================================================
 
-void ThreadSafeModelLoader::incrementReference(const std::string& path) {
+void ThreadSafeModelLoader::incrementReference(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     if (it != loadedModels_.end()) {
@@ -254,7 +262,8 @@ void ThreadSafeModelLoader::incrementReference(const std::string& path) {
     }
 }
 
-void ThreadSafeModelLoader::decrementReference(const std::string& path) {
+void ThreadSafeModelLoader::decrementReference(const std::string &path)
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     if (it != loadedModels_.end()) {
@@ -262,7 +271,8 @@ void ThreadSafeModelLoader::decrementReference(const std::string& path) {
     }
 }
 
-int ThreadSafeModelLoader::getReferenceCount(const std::string& path) const {
+int ThreadSafeModelLoader::getReferenceCount(const std::string &path) const
+{
     std::lock_guard<std::mutex> lock(queueMutex_);
     auto it = loadedModels_.find(path);
     if (it != loadedModels_.end()) {
@@ -275,8 +285,8 @@ int ThreadSafeModelLoader::getReferenceCount(const std::string& path) const {
 // Internal Methods
 //==============================================================================
 
-ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::loadInternal(
-    const std::string& path) {
+ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::loadInternal(const std::string &path)
+{
     // Double-check if already loaded (could have been loaded while queued)
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
@@ -293,20 +303,18 @@ ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::loadInternal(
         size_t estimatedSize = 0;
         try {
             estimatedSize = std::filesystem::file_size(path);
-        } catch (const std::filesystem::filesystem_error& e) {
+        } catch (const std::filesystem::filesystem_error &e) {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            loadedModels_[path]->errorMessage =
-                std::string("Cannot access model file: ") + e.what();
+            loadedModels_[path]->errorMessage = std::string("Cannot access model file: ") + e.what();
             loadedModels_[path]->isLoading = false;
             pendingLoads_.fetch_sub(1, std::memory_order_relaxed);
             return LoadResult{false, nullptr, loadedModels_[path]->errorMessage, false};
         }
 
         // Validate with rough estimates for KV cache and activations
-        auto result = memoryBudget_->validateModelLoad(
-            estimatedSize,
-            estimatedSize / 4,  // Rough estimate for KV cache
-            estimatedSize / 8   // Rough estimate for activations
+        auto result = memoryBudget_->validateModelLoad(estimatedSize,
+                                                       estimatedSize / 4, // Rough estimate for KV cache
+                                                       estimatedSize / 8  // Rough estimate for activations
         );
 
         if (!result.success) {
@@ -339,7 +347,7 @@ ThreadSafeModelLoader::LoadResult ThreadSafeModelLoader::loadInternal(
         }
         pendingLoads_.fetch_sub(1, std::memory_order_relaxed);
         return LoadResult{true, loadedModels_[path], "", false};
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         std::lock_guard<std::mutex> lock(queueMutex_);
         loadedModels_[path]->errorMessage = e.what();
         loadedModels_[path]->isLoading = false;

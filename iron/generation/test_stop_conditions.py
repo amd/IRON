@@ -31,7 +31,7 @@ from iron.generation.stop_conditions import (
     StopResult,
     create_llama3_stop_checker,
     create_permissive_checker,
-    create_strict_checker
+    create_strict_checker,
 )
 from iron.api.generation_config import GenerationConfig
 
@@ -40,13 +40,14 @@ from iron.api.generation_config import GenerationConfig
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def default_config() -> GenerationConfig:
     """Create default generation config."""
     return GenerationConfig(
         eos_tokens=[128001, 128009],
         max_new_tokens=512,
-        stop_strings=["</answer>", "Q:"]
+        stop_strings=["</answer>", "Q:"],
     )
 
 
@@ -64,6 +65,7 @@ def stop_checker(default_config: GenerationConfig) -> StopConditionChecker:
 # Category 1: Initialization Tests
 # -----------------------------------------------------------------------------
 
+
 class TestInitialization:
     """Tests for StopConditionChecker initialization."""
 
@@ -77,17 +79,18 @@ class TestInitialization:
     def test_init_with_dict(self):
         """Test initialization with dictionary."""
         config = {
-            'eos_tokens': [1, 2, 3],
-            'max_new_tokens': 100,
-            'stop_strings': ['stop']
+            "eos_tokens": [1, 2, 3],
+            "max_new_tokens": 100,
+            "stop_strings": ["stop"],
         }
         checker = StopConditionChecker(config)
         assert checker.eos_tokens == {1, 2, 3}
         assert checker.max_tokens == 100
-        assert checker.stop_strings == ['stop']
+        assert checker.stop_strings == ["stop"]
 
     def test_init_with_defaults(self):
         """Test initialization with minimal config."""
+
         class MinimalConfig:
             pass
 
@@ -100,6 +103,7 @@ class TestInitialization:
 # -----------------------------------------------------------------------------
 # Category 2: EOS Detection Tests
 # -----------------------------------------------------------------------------
+
 
 class TestEOSDetection:
     """Tests for EOS token detection."""
@@ -138,6 +142,7 @@ class TestEOSDetection:
 # Category 3: Max Tokens Tests
 # -----------------------------------------------------------------------------
 
+
 class TestMaxTokens:
     """Tests for maximum token limit."""
 
@@ -175,6 +180,7 @@ class TestMaxTokens:
 # -----------------------------------------------------------------------------
 # Category 4: Stop String Tests
 # -----------------------------------------------------------------------------
+
 
 class TestStopStrings:
     """Tests for stop string detection."""
@@ -217,15 +223,14 @@ class TestStopStrings:
 # Category 5: Combined Check Tests
 # -----------------------------------------------------------------------------
 
+
 class TestCombinedChecks:
     """Tests for check_all method."""
 
     def test_check_all_eos_priority(self, stop_checker):
         """Test that EOS has highest priority."""
         result = stop_checker.check_all(
-            token_id=128001,
-            generated_text="</answer>",
-            num_generated=512
+            token_id=128001, generated_text="</answer>", num_generated=512
         )
         assert result.should_stop is True
         assert result.reason == "eos_token"
@@ -233,9 +238,7 @@ class TestCombinedChecks:
     def test_check_all_max_tokens_priority(self, stop_checker):
         """Test that max tokens has second priority."""
         result = stop_checker.check_all(
-            token_id=5000,
-            generated_text="</answer>",
-            num_generated=512
+            token_id=5000, generated_text="</answer>", num_generated=512
         )
         assert result.should_stop is True
         assert result.reason == "max_tokens"
@@ -243,9 +246,7 @@ class TestCombinedChecks:
     def test_check_all_stop_string(self, stop_checker):
         """Test stop string detection in check_all."""
         result = stop_checker.check_all(
-            token_id=5000,
-            generated_text="The answer is </answer>",
-            num_generated=100
+            token_id=5000, generated_text="The answer is </answer>", num_generated=100
         )
         assert result.should_stop is True
         assert result.reason == "stop_string"
@@ -253,18 +254,14 @@ class TestCombinedChecks:
     def test_check_all_continue(self, stop_checker):
         """Test that check_all returns False when no condition met."""
         result = stop_checker.check_all(
-            token_id=5000,
-            generated_text="Hello, world!",
-            num_generated=10
+            token_id=5000, generated_text="Hello, world!", num_generated=10
         )
         assert result.should_stop is False
 
     def test_check_all_empty_text(self, stop_checker):
         """Test check_all with empty text."""
         result = stop_checker.check_all(
-            token_id=5000,
-            generated_text="",
-            num_generated=10
+            token_id=5000, generated_text="", num_generated=10
         )
         assert result.should_stop is False
 
@@ -272,6 +269,7 @@ class TestCombinedChecks:
 # -----------------------------------------------------------------------------
 # Category 6: Batch Tests
 # -----------------------------------------------------------------------------
+
 
 class TestBatchChecks:
     """Tests for batch stop condition checking."""
@@ -281,7 +279,7 @@ class TestBatchChecks:
         results = stop_checker.check_batch(
             token_ids=[128001, 5000, 5001],
             generated_texts=["text1", "text2", "text3"],
-            num_generated=[10, 20, 30]
+            num_generated=[10, 20, 30],
         )
         assert isinstance(results, list)
         assert len(results) == 3
@@ -291,7 +289,7 @@ class TestBatchChecks:
         results = stop_checker.check_batch(
             token_ids=[128001, 5000, 5001],
             generated_texts=["text", "text", "text"],
-            num_generated=[10, 10, 10]
+            num_generated=[10, 10, 10],
         )
         assert results[0].should_stop is True  # EOS
         assert results[1].should_stop is False
@@ -301,6 +299,7 @@ class TestBatchChecks:
 # -----------------------------------------------------------------------------
 # Category 7: Configuration Tests
 # -----------------------------------------------------------------------------
+
 
 class TestConfiguration:
     """Tests for configuration methods."""
@@ -331,25 +330,22 @@ class TestConfiguration:
         """Test getting configuration."""
         config = stop_checker.get_config()
         assert isinstance(config, dict)
-        assert 'eos_tokens' in config
-        assert 'max_tokens' in config
-        assert 'stop_strings' in config
+        assert "eos_tokens" in config
+        assert "max_tokens" in config
+        assert "stop_strings" in config
 
 
 # -----------------------------------------------------------------------------
 # Category 8: StopResult Tests
 # -----------------------------------------------------------------------------
 
+
 class TestStopResult:
     """Tests for StopResult dataclass."""
 
     def test_result_creation(self):
         """Test creating a StopResult."""
-        result = StopResult(
-            should_stop=True,
-            reason="eos_token",
-            token_id=128001
-        )
+        result = StopResult(should_stop=True, reason="eos_token", token_id=128001)
         assert result.should_stop is True
         assert result.reason == "eos_token"
 
@@ -389,6 +385,7 @@ class TestStopResult:
 # Category 9: Convenience Function Tests
 # -----------------------------------------------------------------------------
 
+
 class TestConvenienceFunctions:
     """Tests for convenience functions."""
 
@@ -414,8 +411,7 @@ class TestConvenienceFunctions:
     def test_create_strict_checker_custom_strings(self):
         """Test create_strict_checker with custom strings."""
         checker = create_strict_checker(
-            max_tokens=256,
-            stop_strings=["custom1", "custom2"]
+            max_tokens=256, stop_strings=["custom1", "custom2"]
         )
         assert "custom1" in checker.stop_strings
         assert "custom2" in checker.stop_strings
@@ -424,6 +420,7 @@ class TestConvenienceFunctions:
 # -----------------------------------------------------------------------------
 # Category 10: Edge Case Tests
 # -----------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     """Tests for edge cases."""
@@ -479,15 +476,14 @@ class TestEdgeCases:
 # Category 11: Integration Tests
 # -----------------------------------------------------------------------------
 
+
 class TestIntegration:
     """Integration tests for stop conditions."""
 
     def test_full_generation_scenario(self):
         """Simulate a full generation scenario."""
         config = GenerationConfig(
-            eos_tokens=[128001],
-            max_new_tokens=100,
-            stop_strings=["END"]
+            eos_tokens=[128001], max_new_tokens=100, stop_strings=["END"]
         )
         checker = StopConditionChecker(config)
 
@@ -496,15 +492,13 @@ class TestIntegration:
             result = checker.check_all(
                 token_id=5000 + i,
                 generated_text=f"Generated text {i}",
-                num_generated=i + 1
+                num_generated=i + 1,
             )
             assert result.should_stop is False
 
         # Now simulate EOS
         result = checker.check_all(
-            token_id=128001,
-            generated_text="Generated text END",
-            num_generated=51
+            token_id=128001, generated_text="Generated text END", num_generated=51
         )
         assert result.should_stop is True
         assert result.reason == "eos_token"
@@ -517,17 +511,13 @@ class TestIntegration:
         # Generate up to max
         for i in range(9):
             result = checker.check_all(
-                token_id=1000 + i,
-                generated_text="text",
-                num_generated=i + 1
+                token_id=1000 + i, generated_text="text", num_generated=i + 1
             )
             assert result.should_stop is False
 
         # Hit max
         result = checker.check_all(
-            token_id=1009,
-            generated_text="text",
-            num_generated=10
+            token_id=1009, generated_text="text", num_generated=10
         )
         assert result.should_stop is True
         assert result.reason == "max_tokens"

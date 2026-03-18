@@ -15,18 +15,19 @@
  * @note Uses Google Test framework
  */
 
-#include <iron/model_loader.hpp>
-#include <iron/memory_budget.hpp>
-#include <gtest/gtest.h>
-#include <thread>
-#include <vector>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <gtest/gtest.h>
+#include <iron/memory_budget.hpp>
+#include <iron/model_loader.hpp>
+#include <thread>
+#include <vector>
 
 using namespace iron::runtime;
 
-namespace {
+namespace
+{
 
 //==============================================================================
 // Test Fixtures
@@ -35,20 +36,20 @@ namespace {
 /**
  * @brief Test fixture for ThreadSafeModelLoader tests
  */
-class ModelLoaderTest : public ::testing::Test {
-protected:
+class ModelLoaderTest : public ::testing::Test
+{
+  protected:
     /**
      * @brief Create a simple load callback for testing
      */
-    ThreadSafeModelLoader::LoadCallback createMockLoadCallback() {
-        return [](const std::string& path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
+    ThreadSafeModelLoader::LoadCallback createMockLoadCallback()
+    {
+        return [](const std::string &path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
             auto model = std::make_shared<ThreadSafeModelLoader::LoadedModel>();
             model->path = path;
             // Create a dummy session (just a non-null pointer)
-            model->session = std::shared_ptr<void>(
-                static_cast<void*>(new int(42)),
-                [](void* p) { delete static_cast<int*>(p); }
-            );
+            model->session =
+                std::shared_ptr<void>(static_cast<void *>(new int(42)), [](void *p) { delete static_cast<int *>(p); });
             model->memoryUsage = 1024;
             return model;
         };
@@ -57,15 +58,14 @@ protected:
     /**
      * @brief Create a slow load callback for testing concurrency
      */
-    ThreadSafeModelLoader::LoadCallback createSlowLoadCallback(int delayMs = 100) {
-        return [delayMs](const std::string& path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
+    ThreadSafeModelLoader::LoadCallback createSlowLoadCallback(int delayMs = 100)
+    {
+        return [delayMs](const std::string &path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             auto model = std::make_shared<ThreadSafeModelLoader::LoadedModel>();
             model->path = path;
-            model->session = std::shared_ptr<void>(
-                static_cast<void*>(new int(42)),
-                [](void* p) { delete static_cast<int*>(p); }
-            );
+            model->session =
+                std::shared_ptr<void>(static_cast<void *>(new int(42)), [](void *p) { delete static_cast<int *>(p); });
             return model;
         };
     }
@@ -73,8 +73,9 @@ protected:
     /**
      * @brief Create a failing load callback
      */
-    ThreadSafeModelLoader::LoadCallback createFailingLoadCallback() {
-        return [](const std::string& path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
+    ThreadSafeModelLoader::LoadCallback createFailingLoadCallback()
+    {
+        return [](const std::string &path) -> std::shared_ptr<ThreadSafeModelLoader::LoadedModel> {
             throw std::runtime_error("Simulated load failure");
         };
     }
@@ -84,23 +85,26 @@ protected:
 // Construction Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, Construction) {
+TEST_F(ModelLoaderTest, Construction)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
     EXPECT_EQ(loader.getPendingLoadCount(), 0);
     EXPECT_FALSE(loader.isProcessing());
 }
 
-TEST_F(ModelLoaderTest, ConstructionWithMemoryBudget) {
+TEST_F(ModelLoaderTest, ConstructionWithMemoryBudget)
+{
     auto budget = std::make_shared<MemoryBudget>();
     ThreadSafeModelLoader loader(budget, createMockLoadCallback());
-    EXPECT_NE(loader.getPendingLoadCount(), 0);  // Will be 0 after construction
+    EXPECT_NE(loader.getPendingLoadCount(), 0); // Will be 0 after construction
 }
 
 //==============================================================================
 // Basic Loading Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, LoadModel) {
+TEST_F(ModelLoaderTest, LoadModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     auto result = loader.load("/path/to/model");
@@ -110,7 +114,8 @@ TEST_F(ModelLoaderTest, LoadModel) {
     EXPECT_TRUE(result.errorMessage.empty());
 }
 
-TEST_F(ModelLoaderTest, LoadModelWithEmptyPath) {
+TEST_F(ModelLoaderTest, LoadModelWithEmptyPath)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     auto result = loader.load("");
@@ -118,7 +123,8 @@ TEST_F(ModelLoaderTest, LoadModelWithEmptyPath) {
     EXPECT_FALSE(result.errorMessage.empty());
 }
 
-TEST_F(ModelLoaderTest, LoadModelNoCallback) {
+TEST_F(ModelLoaderTest, LoadModelNoCallback)
+{
     ThreadSafeModelLoader loader(nullptr, nullptr);
 
     auto result = loader.load("/path/to/model");
@@ -130,7 +136,8 @@ TEST_F(ModelLoaderTest, LoadModelNoCallback) {
 // Caching Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, LoadCachedModel) {
+TEST_F(ModelLoaderTest, LoadCachedModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     // First load
@@ -147,7 +154,8 @@ TEST_F(ModelLoaderTest, LoadCachedModel) {
     EXPECT_EQ(result1.model, result2.model);
 }
 
-TEST_F(ModelLoaderTest, IsLoaded) {
+TEST_F(ModelLoaderTest, IsLoaded)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     EXPECT_FALSE(loader.isLoaded("/path/to/model"));
@@ -157,7 +165,8 @@ TEST_F(ModelLoaderTest, IsLoaded) {
     EXPECT_TRUE(loader.isLoaded("/path/to/model"));
 }
 
-TEST_F(ModelLoaderTest, GetLoadedModel) {
+TEST_F(ModelLoaderTest, GetLoadedModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     EXPECT_EQ(loader.getLoadedModel("/path/to/model"), nullptr);
@@ -169,7 +178,8 @@ TEST_F(ModelLoaderTest, GetLoadedModel) {
     EXPECT_EQ(model->path, "/path/to/model");
 }
 
-TEST_F(ModelLoaderTest, GetLoadedModels) {
+TEST_F(ModelLoaderTest, GetLoadedModels)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     loader.load("/path/to/model1");
@@ -187,7 +197,8 @@ TEST_F(ModelLoaderTest, GetLoadedModels) {
 // Unloading Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, UnloadModel) {
+TEST_F(ModelLoaderTest, UnloadModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     loader.load("/path/to/model");
@@ -195,13 +206,14 @@ TEST_F(ModelLoaderTest, UnloadModel) {
 
     // Need to decrement reference count to 0 before unloading
     loader.decrementReference("/path/to/model");
-    loader.decrementReference("/path/to/model");  // Initial load adds 1, get adds 1
+    loader.decrementReference("/path/to/model"); // Initial load adds 1, get adds 1
 
     EXPECT_TRUE(loader.unload("/path/to/model"));
     EXPECT_FALSE(loader.isLoaded("/path/to/model"));
 }
 
-TEST_F(ModelLoaderTest, UnloadModelStillInUse) {
+TEST_F(ModelLoaderTest, UnloadModelStillInUse)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     loader.load("/path/to/model");
@@ -210,7 +222,8 @@ TEST_F(ModelLoaderTest, UnloadModelStillInUse) {
     EXPECT_FALSE(loader.unload("/path/to/model"));
 }
 
-TEST_F(ModelLoaderTest, UnloadNotLoadedModel) {
+TEST_F(ModelLoaderTest, UnloadNotLoadedModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     EXPECT_FALSE(loader.unload("/path/to/nonexistent"));
@@ -220,7 +233,8 @@ TEST_F(ModelLoaderTest, UnloadNotLoadedModel) {
 // Reference Counting Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, IncrementReference) {
+TEST_F(ModelLoaderTest, IncrementReference)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     loader.load("/path/to/model");
@@ -230,7 +244,8 @@ TEST_F(ModelLoaderTest, IncrementReference) {
     EXPECT_EQ(loader.getReferenceCount("/path/to/model"), initialRef + 1);
 }
 
-TEST_F(ModelLoaderTest, DecrementReference) {
+TEST_F(ModelLoaderTest, DecrementReference)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     loader.load("/path/to/model");
@@ -240,7 +255,8 @@ TEST_F(ModelLoaderTest, DecrementReference) {
     EXPECT_EQ(loader.getReferenceCount("/path/to/model"), initialRef - 1);
 }
 
-TEST_F(ModelLoaderTest, GetReferenceCountForNonExistentModel) {
+TEST_F(ModelLoaderTest, GetReferenceCountForNonExistentModel)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     EXPECT_EQ(loader.getReferenceCount("/path/to/nonexistent"), 0);
@@ -250,7 +266,8 @@ TEST_F(ModelLoaderTest, GetReferenceCountForNonExistentModel) {
 // Concurrent Loading Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, ConcurrentLoadsSameModel) {
+TEST_F(ModelLoaderTest, ConcurrentLoadsSameModel)
+{
     ThreadSafeModelLoader loader(nullptr, createSlowLoadCallback(50));
 
     std::atomic<int> successCount{0};
@@ -268,7 +285,7 @@ TEST_F(ModelLoaderTest, ConcurrentLoadsSameModel) {
         threads.emplace_back(loadTask);
     }
 
-    for (auto& t : threads) {
+    for (auto &t : threads) {
         t.join();
     }
 
@@ -277,30 +294,27 @@ TEST_F(ModelLoaderTest, ConcurrentLoadsSameModel) {
     EXPECT_EQ(loader.getReferenceCount("/path/to/model"), 4);
 }
 
-TEST_F(ModelLoaderTest, ConcurrentLoadsDifferentModels) {
+TEST_F(ModelLoaderTest, ConcurrentLoadsDifferentModels)
+{
     ThreadSafeModelLoader loader(nullptr, createSlowLoadCallback(20));
 
     std::atomic<int> successCount{0};
     std::vector<std::thread> threads;
     const std::vector<std::string> modelPaths = {
-        "/path/to/model1",
-        "/path/to/model2",
-        "/path/to/model3",
-        "/path/to/model4"
-    };
+        "/path/to/model1", "/path/to/model2", "/path/to/model3", "/path/to/model4"};
 
-    auto loadTask = [&](const std::string& path) {
+    auto loadTask = [&](const std::string &path) {
         auto result = loader.load(path);
         if (result.success) {
             successCount.fetch_add(1, std::memory_order_relaxed);
         }
     };
 
-    for (const auto& path : modelPaths) {
+    for (const auto &path : modelPaths) {
         threads.emplace_back(loadTask, path);
     }
 
-    for (auto& t : threads) {
+    for (auto &t : threads) {
         t.join();
     }
 
@@ -309,7 +323,8 @@ TEST_F(ModelLoaderTest, ConcurrentLoadsDifferentModels) {
     EXPECT_EQ(loader.getLoadedModels().size(), 4);
 }
 
-TEST_F(ModelLoaderTest, LoadQueueOrder) {
+TEST_F(ModelLoaderTest, LoadQueueOrder)
+{
     ThreadSafeModelLoader loader(nullptr, createSlowLoadCallback(10));
 
     // Queue multiple loads
@@ -326,7 +341,7 @@ TEST_F(ModelLoaderTest, LoadQueueOrder) {
         threads.emplace_back(loadTask, i);
     }
 
-    for (auto& t : threads) {
+    for (auto &t : threads) {
         t.join();
     }
 
@@ -338,7 +353,8 @@ TEST_F(ModelLoaderTest, LoadQueueOrder) {
 // Memory Budget Validation Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, LoadWithMemoryBudgetValidation) {
+TEST_F(ModelLoaderTest, LoadWithMemoryBudgetValidation)
+{
     auto budget = std::make_shared<MemoryBudget>();
     ThreadSafeModelLoader loader(budget, createMockLoadCallback());
 
@@ -347,10 +363,11 @@ TEST_F(ModelLoaderTest, LoadWithMemoryBudgetValidation) {
     EXPECT_TRUE(result.success);
 }
 
-TEST_F(ModelLoaderTest, LoadFailsWithInsufficientBudget) {
+TEST_F(ModelLoaderTest, LoadFailsWithInsufficientBudget)
+{
     // Create very restrictive budget
     MemoryBudget::Limits limits;
-    limits.totalBudget = 100;  // 100 bytes total
+    limits.totalBudget = 100; // 100 bytes total
     limits.weightBudget = 50;
     limits.kvCacheBudget = 20;
     limits.activationBudget = 20;
@@ -369,7 +386,8 @@ TEST_F(ModelLoaderTest, LoadFailsWithInsufficientBudget) {
 // Error Handling Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, LoadWithFailingCallback) {
+TEST_F(ModelLoaderTest, LoadWithFailingCallback)
+{
     ThreadSafeModelLoader loader(nullptr, createFailingLoadCallback());
 
     auto result = loader.load("/path/to/model");
@@ -377,14 +395,16 @@ TEST_F(ModelLoaderTest, LoadWithFailingCallback) {
     EXPECT_EQ(result.errorMessage, "Simulated load failure");
 }
 
-TEST_F(ModelLoaderTest, LoadResultGetOrThrow) {
+TEST_F(ModelLoaderTest, LoadResultGetOrThrow)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     auto result = loader.load("/path/to/model");
     EXPECT_NO_THROW(result.getOrThrow());
 }
 
-TEST_F(ModelLoaderTest, LoadResultGetOrThrowFails) {
+TEST_F(ModelLoaderTest, LoadResultGetOrThrowFails)
+{
     ThreadSafeModelLoader loader(nullptr, createFailingLoadCallback());
 
     auto result = loader.load("/path/to/model");
@@ -395,21 +415,22 @@ TEST_F(ModelLoaderTest, LoadResultGetOrThrowFails) {
 // Stress Tests
 //==============================================================================
 
-TEST_F(ModelLoaderTest, StressManyLoads) {
+TEST_F(ModelLoaderTest, StressManyLoads)
+{
     ThreadSafeModelLoader loader(nullptr, createMockLoadCallback());
 
     const int numLoads = 50;
     std::vector<std::thread> threads;
 
     auto loadTask = [&](int id) {
-        loader.load("/path/to/model" + std::to_string(id % 10));  // Reuse 10 models
+        loader.load("/path/to/model" + std::to_string(id % 10)); // Reuse 10 models
     };
 
     for (int i = 0; i < numLoads; ++i) {
         threads.emplace_back(loadTask, i);
     }
 
-    for (auto& t : threads) {
+    for (auto &t : threads) {
         t.join();
     }
 

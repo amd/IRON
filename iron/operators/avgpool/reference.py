@@ -69,6 +69,7 @@ def calculate_output_dim(
         Output dimension
     """
     import math
+
     out_dim = (input_dim + 2 * padding - dilation * (kernel_dim - 1) - 1) / stride + 1
     if ceil_mode:
         return math.ceil(out_dim)

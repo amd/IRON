@@ -73,7 +73,9 @@ class AIESwiGLUDecode(AIEOperatorBase):
             size=self.hidden_dim,
             num_aie_columns=8,
             num_channels=2,
-            tile_size=self.hidden_dim // 16,
+            # P1 FIX: Align tile_size with pipeline (hidden_dim//8 = 256) instead of hidden_dim//16 (128)
+            # This ensures consistent tile sizing across the swiglu_decode pipeline for better stability
+            tile_size=self.hidden_dim // 8,
         )
         self.silu = silu
         self.hidden_dim_padded = silu.size

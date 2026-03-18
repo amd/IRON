@@ -68,6 +68,7 @@ class GenerationResult:
         ... )
         >>> print(f"Generated: {result.token_text}")
     """
+
     token_id: int
     token_text: str = ""
     logit_prob: float = 0.0
@@ -117,7 +118,7 @@ class GenerationLoop:
         self,
         config: Llama32Config,
         weights: LlamaWeights,
-        generation_config: Optional[GenerationConfig] = None
+        generation_config: Optional[GenerationConfig] = None,
     ) -> None:
         """Initialize generation loop.
 
@@ -141,7 +142,7 @@ class GenerationLoop:
             temperature=self.generation_config.temperature,
             top_k=self.generation_config.top_k,
             top_p=self.generation_config.top_p,
-            repetition_penalty=self.generation_config.repetition_penalty
+            repetition_penalty=self.generation_config.repetition_penalty,
         )
 
         # KV cache for context retention (initialized per sequence)
@@ -211,7 +212,7 @@ class GenerationLoop:
                 layer_weights,
                 layer_idx,
                 positions=list(range(seq_len)),
-                is_prefill=True
+                is_prefill=True,
             )
 
         # Final RMSNorm
@@ -250,7 +251,9 @@ class GenerationLoop:
         if self._kv_cache is None:
             raise RuntimeError("Must call prefill() before decode()")
 
-        logger.debug(f"Decode phase: position={self._current_position}, token={token_id}")
+        logger.debug(
+            f"Decode phase: position={self._current_position}, token={token_id}"
+        )
 
         # Convert to numpy array (single token)
         tokens = np.array([token_id], dtype=np.int32)
@@ -263,11 +266,7 @@ class GenerationLoop:
         hidden = embeddings
         for layer_idx, layer_weights in enumerate(self.weights.layers):
             hidden = self._forward_layer(
-                hidden,
-                layer_weights,
-                layer_idx,
-                positions=[position],
-                is_prefill=False
+                hidden, layer_weights, layer_idx, positions=[position], is_prefill=False
             )
 
         # Final RMSNorm
@@ -317,7 +316,7 @@ class GenerationLoop:
         layer_weights: Any,
         layer_idx: int,
         positions: List[int],
-        is_prefill: bool
+        is_prefill: bool,
     ) -> np.ndarray:
         """Forward pass through a single transformer layer.
 
@@ -387,7 +386,7 @@ class GenerationLoop:
 
         # Compute attention scores: Q @ K^T / sqrt(head_dim)
         inv_scale = 1.0 / np.sqrt(head_dim)
-        attn_scores = np.einsum('nsh,nth->nst', q, k_full) * inv_scale
+        attn_scores = np.einsum("nsh,nth->nst", q, k_full) * inv_scale
 
         # Apply causal mask
         attn_scores = self._apply_causal_mask(attn_scores, positions, is_prefill)
@@ -397,10 +396,12 @@ class GenerationLoop:
 
         # Apply attention to values: attn_weights @ V
         # [num_heads, seq_len, kv_seq_len] @ [num_heads, kv_seq_len, head_dim]
-        attn_output = np.einsum('nst,nth->nsh', attn_weights, v_full)
+        attn_output = np.einsum("nst,nth->nsh", attn_weights, v_full)
 
         # Transpose back: [num_heads, seq_len, head_dim] -> [seq_len, num_heads * head_dim]
-        attn_output = attn_output.transpose(1, 0, 2).reshape(seq_len, num_heads * head_dim)
+        attn_output = attn_output.transpose(1, 0, 2).reshape(
+            seq_len, num_heads * head_dim
+        )
 
         # 7. Output projection
         attn_output = attn_output @ layer_weights.wo
@@ -446,7 +447,7 @@ class GenerationLoop:
         """
         # RMSNorm: x / sqrt(mean(x^2) + eps) * weight
         eps = self.config.rms_norm_eps
-        variance = np.mean(hidden ** 2, axis=-1, keepdims=True)
+        variance = np.mean(hidden**2, axis=-1, keepdims=True)
         hidden = hidden / np.sqrt(variance + eps)
         return hidden * weight
 
@@ -478,10 +479,7 @@ class GenerationLoop:
         return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
 
     def _apply_causal_mask(
-        self,
-        attn_scores: np.ndarray,
-        positions: List[int],
-        is_prefill: bool
+        self, attn_scores: np.ndarray, positions: List[int], is_prefill: bool
     ) -> np.ndarray:
         """Apply causal attention mask.
 
@@ -504,10 +502,7 @@ class GenerationLoop:
         return attn_scores
 
     def _apply_rope_to_qk(
-        self,
-        q: np.ndarray,
-        k: np.ndarray,
-        positions: List[int]
+        self, q: np.ndarray, k: np.ndarray, positions: List[int]
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Apply Rotary Positional Embedding to Q and K.
 
@@ -543,10 +538,7 @@ class GenerationLoop:
         return q_rotated, k_rotated
 
     def _apply_rope_single(
-        self,
-        x: np.ndarray,
-        cos: np.ndarray,
-        sin: np.ndarray
+        self, x: np.ndarray, cos: np.ndarray, sin: np.ndarray
     ) -> np.ndarray:
         """Apply RoPE to a single tensor.
 
@@ -585,11 +577,7 @@ class GenerationLoop:
         return x_rotated
 
     def _store_kv_cache(
-        self,
-        layer_idx: int,
-        k: np.ndarray,
-        v: np.ndarray,
-        positions: List[int]
+        self, layer_idx: int, k: np.ndarray, v: np.ndarray, positions: List[int]
     ) -> None:
         """Store or update KV cache for a layer.
 
@@ -612,10 +600,7 @@ class GenerationLoop:
             v_new = np.concatenate([v_cached, v], axis=1)
             self._kv_cache[layer_idx] = (k_new, v_new)
 
-    def _get_full_kv_cache(
-        self,
-        layer_idx: int
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _get_full_kv_cache(self, layer_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """Get full KV cache for a layer.
 
         Args:
@@ -646,7 +631,7 @@ class GenerationLoop:
         self,
         prompt_tokens: List[int],
         max_tokens: Optional[int] = None,
-        tokenizer: Optional[Any] = None
+        tokenizer: Optional[Any] = None,
     ) -> Iterator[GenerationResult]:
         """Generate tokens autoregressively.
 
@@ -685,7 +670,9 @@ class GenerationLoop:
         # Reset state
         self.reset()
 
-        logger.info(f"Starting generation: prompt_len={len(prompt_tokens)}, max_tokens={max_tokens}")
+        logger.info(
+            f"Starting generation: prompt_len={len(prompt_tokens)}, max_tokens={max_tokens}"
+        )
 
         # Prefill phase
         logits = self.prefill(prompt_tokens)
@@ -709,7 +696,9 @@ class GenerationLoop:
 
             if is_eos:
                 stop_reason = "eos_token"
-                logger.info(f"EOS token {token_id} detected at position {generated_count}")
+                logger.info(
+                    f"EOS token {token_id} detected at position {generated_count}"
+                )
             elif generated_count >= max_tokens - 1:
                 stop_reason = "max_tokens"
                 logger.info(f"Max tokens ({max_tokens}) reached")
@@ -721,7 +710,7 @@ class GenerationLoop:
                 logit_prob=float(np.log(1.0)),  # Placeholder
                 is_eos=is_eos,
                 stop_reason=stop_reason,
-                position=generated_count
+                position=generated_count,
             )
 
             yield result
@@ -740,9 +729,7 @@ class GenerationLoop:
         logger.info(f"Generation complete: {generated_count} tokens generated")
 
     def generate_batch(
-        self,
-        prompts: List[List[int]],
-        tokenizer: Optional[Any] = None
+        self, prompts: List[List[int]], tokenizer: Optional[Any] = None
     ) -> Iterator[Tuple[int, GenerationResult]]:
         """Generate for multiple prompts concurrently.
 

@@ -58,20 +58,22 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-#include <memory>
-#include <cstdint>
-#include <optional>
-#include <variant>
-#include <map>
-#include <stdexcept>
-#include <functional>
-#include <mutex>
 #include <atomic>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <variant>
+#include <vector>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 // Forward declarations
 class IBuffer;
@@ -93,8 +95,9 @@ class IBufferManager;
  * - Multiple threads can read simultaneously
  * - Write operations are serialized internally
  */
-class IBuffer {
-public:
+class IBuffer
+{
+  public:
     virtual ~IBuffer() = default;
 
     /**
@@ -112,7 +115,7 @@ public:
      *
      * @throws BufferError if write fails
      */
-    virtual void write(const void* data, size_t size, size_t offset = 0) = 0;
+    virtual void write(const void *data, size_t size, size_t offset = 0) = 0;
 
     /**
      * @brief Read data from buffer (device-to-host)
@@ -123,7 +126,7 @@ public:
      *
      * @throws BufferError if read fails
      */
-    virtual void read(void* data, size_t size, size_t offset = 0) const = 0;
+    virtual void read(void *data, size_t size, size_t offset = 0) const = 0;
 
     /**
      * @brief Sync buffer with device
@@ -142,7 +145,7 @@ public:
      * @note Use this only for platform-specific operations
      *       not covered by this interface.
      */
-    [[nodiscard]] virtual void* nativeHandle() const = 0;
+    [[nodiscard]] virtual void *nativeHandle() const = 0;
 
     /**
      * @brief Get buffer address for kernel argument
@@ -190,13 +193,17 @@ struct ExecutionResult {
      * @brief Check if execution was successful
      * @return true if status == 0
      */
-    [[nodiscard]] bool success() const { return status == 0; }
+    [[nodiscard]] bool success() const
+    {
+        return status == 0;
+    }
 
     /**
      * @brief Get error message or empty string
      * @return Error message if available
      */
-    [[nodiscard]] std::string getErrorMessage() const {
+    [[nodiscard]] std::string getErrorMessage() const
+    {
         return errorMessage.value_or("");
     }
 
@@ -204,7 +211,8 @@ struct ExecutionResult {
      * @brief Get execution time or 0
      * @return Execution time in microseconds
      */
-    [[nodiscard]] uint64_t getExecutionTimeUs() const {
+    [[nodiscard]] uint64_t getExecutionTimeUs() const
+    {
         return executionTimeUs.value_or(0);
     }
 };
@@ -221,27 +229,47 @@ struct ExecutionResult {
  * - Scalar integers (sizes, counts, indices)
  * - Scalar floats (parameters like epsilon, scale, alpha)
  */
-using KernelArgument = std::variant<
-    std::shared_ptr<IBuffer>,  // Buffer argument
-    int32_t,                    // Scalar signed integer
-    float,                      // Scalar float
-    uint32_t,                   // Scalar unsigned integer
-    int64_t,                    // Scalar 64-bit signed integer
-    uint64_t,                   // Scalar 64-bit unsigned integer
-    double                      // Scalar double precision
->;
+using KernelArgument = std::variant<std::shared_ptr<IBuffer>, // Buffer argument
+                                    int32_t,                  // Scalar signed integer
+                                    float,                    // Scalar float
+                                    uint32_t,                 // Scalar unsigned integer
+                                    int64_t,                  // Scalar 64-bit signed integer
+                                    uint64_t,                 // Scalar 64-bit unsigned integer
+                                    double                    // Scalar double precision
+                                    >;
 
 /**
  * @brief Helper to check KernelArgument type at runtime
  */
 struct KernelArgumentVisitor {
-    [[nodiscard]] const char* operator()(const std::shared_ptr<IBuffer>&) const { return "buffer"; }
-    [[nodiscard]] const char* operator()(int32_t) const { return "int32"; }
-    [[nodiscard]] const char* operator()(uint32_t) const { return "uint32"; }
-    [[nodiscard]] const char* operator()(int64_t) const { return "int64"; }
-    [[nodiscard]] const char* operator()(uint64_t) const { return "uint64"; }
-    [[nodiscard]] const char* operator()(float) const { return "float"; }
-    [[nodiscard]] const char* operator()(double) const { return "double"; }
+    [[nodiscard]] const char *operator()(const std::shared_ptr<IBuffer> &) const
+    {
+        return "buffer";
+    }
+    [[nodiscard]] const char *operator()(int32_t) const
+    {
+        return "int32";
+    }
+    [[nodiscard]] const char *operator()(uint32_t) const
+    {
+        return "uint32";
+    }
+    [[nodiscard]] const char *operator()(int64_t) const
+    {
+        return "int64";
+    }
+    [[nodiscard]] const char *operator()(uint64_t) const
+    {
+        return "uint64";
+    }
+    [[nodiscard]] const char *operator()(float) const
+    {
+        return "float";
+    }
+    [[nodiscard]] const char *operator()(double) const
+    {
+        return "double";
+    }
 };
 
 /**
@@ -265,12 +293,13 @@ struct ExecutionOptions {
     std::optional<std::string> platformOptions;
 
     /// Execution stream for async operations (platform-specific, nullable)
-    std::optional<void*> stream;
+    std::optional<void *> stream;
 
     /**
      * @brief Set timeout and return self for chaining
      */
-    ExecutionOptions& withTimeout(uint32_t ms) {
+    ExecutionOptions &withTimeout(uint32_t ms)
+    {
         timeoutMs = ms;
         return *this;
     }
@@ -278,7 +307,8 @@ struct ExecutionOptions {
     /**
      * @brief Enable profiling and return self for chaining
      */
-    ExecutionOptions& withProfiling(bool enable = true) {
+    ExecutionOptions &withProfiling(bool enable = true)
+    {
         profile = enable;
         return *this;
     }
@@ -286,7 +316,8 @@ struct ExecutionOptions {
     /**
      * @brief Set execution mode and return self for chaining
      */
-    ExecutionOptions& withSynchronous(bool sync = true) {
+    ExecutionOptions &withSynchronous(bool sync = true)
+    {
         synchronous = sync;
         return *this;
     }
@@ -321,8 +352,9 @@ struct ExecutionOptions {
  * }
  * @endcode
  */
-class IKernelHandle {
-public:
+class IKernelHandle
+{
+  public:
     virtual ~IKernelHandle() = default;
 
     /**
@@ -339,7 +371,7 @@ public:
      *
      * @throws ArgumentError if index is invalid or type mismatch
      */
-    virtual void setArg(size_t index, const KernelArgument& arg) = 0;
+    virtual void setArg(size_t index, const KernelArgument &arg) = 0;
 
     /**
      * @brief Execute kernel with set arguments
@@ -349,7 +381,7 @@ public:
      *
      * @throws RuntimeError if execution fails
      */
-    virtual ExecutionResult execute(const ExecutionOptions& options = ExecutionOptions()) = 0;
+    virtual ExecutionResult execute(const ExecutionOptions &options = ExecutionOptions()) = 0;
 
     /**
      * @brief Execute and wait for completion (convenience method)
@@ -357,7 +389,8 @@ public:
      * @param timeoutMs Timeout in milliseconds
      * @return ExecutionResult
      */
-    [[nodiscard]] ExecutionResult executeAndWait(uint32_t timeoutMs = 0) {
+    [[nodiscard]] ExecutionResult executeAndWait(uint32_t timeoutMs = 0)
+    {
         ExecutionOptions opts;
         opts.timeoutMs = timeoutMs;
         opts.synchronous = true;
@@ -437,8 +470,9 @@ public:
  * auto buf2 = manager->allocate(1024 * 1024);  // Gets same buffer
  * @endcode
  */
-class IBufferManager {
-public:
+class IBufferManager
+{
+  public:
     virtual ~IBufferManager() = default;
 
     /**
@@ -516,8 +550,9 @@ public:
  * @see NpuRuntime::create() for factory method
  * @see NpuRuntime::createForPlatform() for explicit platform selection
  */
-class INpuRuntime {
-public:
+class INpuRuntime
+{
+  public:
     virtual ~INpuRuntime() = default;
 
     //--------------------------------------------------------------------------
@@ -535,7 +570,7 @@ public:
      *
      * @throws XclbinError if file is invalid or loading fails
      */
-    virtual bool loadXclbin(const std::string& path) = 0;
+    virtual bool loadXclbin(const std::string &path) = 0;
 
     /**
      * @brief Load .xclbin from memory buffer
@@ -549,7 +584,7 @@ public:
      *
      * @throws XclbinError if data is invalid or loading fails
      */
-    virtual bool loadXclbinFromMemory(const void* data, size_t size) = 0;
+    virtual bool loadXclbinFromMemory(const void *data, size_t size) = 0;
 
     /**
      * @brief Unload specific .xclbin package
@@ -560,7 +595,7 @@ public:
      * @param path Path to .xclbin (must match load path)
      * @return true if unloaded successfully
      */
-    virtual bool unloadXclbin(const std::string& path) = 0;
+    virtual bool unloadXclbin(const std::string &path) = 0;
 
     /**
      * @brief Get list of available kernel names
@@ -574,15 +609,14 @@ public:
      * @param xclbinPath Path to .xclbin file
      * @return Vector of kernel names from that file
      */
-    [[nodiscard]] virtual std::vector<std::string> getKernelsFromXclbin(
-        const std::string& xclbinPath) const = 0;
+    [[nodiscard]] virtual std::vector<std::string> getKernelsFromXclbin(const std::string &xclbinPath) const = 0;
 
     /**
      * @brief Check if a specific kernel is available
      * @param kernelName Name of kernel to check
      * @return true if kernel is loaded and available
      */
-    [[nodiscard]] virtual bool hasKernel(const std::string& kernelName) const = 0;
+    [[nodiscard]] virtual bool hasKernel(const std::string &kernelName) const = 0;
 
     //--------------------------------------------------------------------------
     // Kernel Execution
@@ -604,10 +638,9 @@ public:
      * @throws KernelNotFoundError if kernel not found
      * @throws RuntimeError if execution fails
      */
-    virtual ExecutionResult execute(
-        const std::string& kernelName,
-        const std::vector<KernelArgument>& arguments,
-        const ExecutionOptions& options = ExecutionOptions()) = 0;
+    virtual ExecutionResult execute(const std::string &kernelName,
+                                    const std::vector<KernelArgument> &arguments,
+                                    const ExecutionOptions &options = ExecutionOptions()) = 0;
 
     /**
      * @brief Create a kernel execution handle
@@ -622,7 +655,7 @@ public:
      * @param kernelName Name of kernel
      * @return Kernel handle, or nullptr if kernel not found
      */
-    virtual std::shared_ptr<IKernelHandle> getKernel(const std::string& kernelName) = 0;
+    virtual std::shared_ptr<IKernelHandle> getKernel(const std::string &kernelName) = 0;
 
     //--------------------------------------------------------------------------
     // Buffer Management
@@ -639,9 +672,7 @@ public:
      *
      * @throws BufferError if allocation fails
      */
-    virtual std::shared_ptr<IBuffer> allocateBuffer(
-        size_t size,
-        bool hostAccessible = true) = 0;
+    virtual std::shared_ptr<IBuffer> allocateBuffer(size_t size, bool hostAccessible = true) = 0;
 
     /**
      * @brief Allocate buffer from existing host data
@@ -656,9 +687,7 @@ public:
      *
      * @throws BufferError if allocation fails
      */
-    virtual std::shared_ptr<IBuffer> allocateBufferFromData(
-        const void* data,
-        size_t size) = 0;
+    virtual std::shared_ptr<IBuffer> allocateBufferFromData(const void *data, size_t size) = 0;
 
     /**
      * @brief Get buffer manager for efficient allocation
@@ -745,9 +774,7 @@ public:
      *
      * @throws RuntimeError if platform not supported
      */
-    [[nodiscard]] static std::unique_ptr<INpuRuntime> createForPlatform(
-        const std::string& platform,
-        int deviceId = 0);
+    [[nodiscard]] static std::unique_ptr<INpuRuntime> createForPlatform(const std::string &platform, int deviceId = 0);
 
     /**
      * @brief Get current platform string
@@ -775,85 +802,98 @@ public:
 /**
  * @brief Base exception for runtime errors
  */
-class RuntimeError : public std::runtime_error {
-public:
-    explicit RuntimeError(const std::string& msg)
-        : std::runtime_error(msg) {}
+class RuntimeError : public std::runtime_error
+{
+  public:
+    explicit RuntimeError(const std::string &msg) : std::runtime_error(msg) {}
 
-    RuntimeError(const std::string& msg, int errorCode)
-        : std::runtime_error(msg), errorCode_(errorCode) {}
+    RuntimeError(const std::string &msg, int errorCode) : std::runtime_error(msg), errorCode_(errorCode) {}
 
-    [[nodiscard]] int errorCode() const { return errorCode_.value_or(-1); }
+    [[nodiscard]] int errorCode() const
+    {
+        return errorCode_.value_or(-1);
+    }
 
-private:
+  private:
     std::optional<int> errorCode_;
 };
 
 /**
  * @brief Exception for kernel not found
  */
-class KernelNotFoundError : public RuntimeError {
-public:
-    explicit KernelNotFoundError(const std::string& kernelName)
-        : RuntimeError("Kernel not found: " + kernelName),
-          kernelName_(kernelName) {}
+class KernelNotFoundError : public RuntimeError
+{
+  public:
+    explicit KernelNotFoundError(const std::string &kernelName)
+        : RuntimeError("Kernel not found: " + kernelName), kernelName_(kernelName)
+    {
+    }
 
-    [[nodiscard]] const std::string& kernelName() const { return kernelName_; }
+    [[nodiscard]] const std::string &kernelName() const
+    {
+        return kernelName_;
+    }
 
-private:
+  private:
     std::string kernelName_;
 };
 
 /**
  * @brief Exception for argument type mismatch
  */
-class ArgumentError : public RuntimeError {
-public:
-    ArgumentError(const std::string& msg, size_t argIndex)
-        : RuntimeError(msg), argIndex_(argIndex) {}
+class ArgumentError : public RuntimeError
+{
+  public:
+    ArgumentError(const std::string &msg, size_t argIndex) : RuntimeError(msg), argIndex_(argIndex) {}
 
-    [[nodiscard]] size_t argumentIndex() const { return argIndex_.value_or(0); }
+    [[nodiscard]] size_t argumentIndex() const
+    {
+        return argIndex_.value_or(0);
+    }
 
-private:
+  private:
     std::optional<size_t> argIndex_;
 };
 
 /**
  * @brief Exception for buffer operations
  */
-class BufferError : public RuntimeError {
-public:
-    explicit BufferError(const std::string& msg)
-        : RuntimeError(msg) {}
+class BufferError : public RuntimeError
+{
+  public:
+    explicit BufferError(const std::string &msg) : RuntimeError(msg) {}
 
-    BufferError(const std::string& msg, int errorCode)
-        : RuntimeError(msg, errorCode) {}
+    BufferError(const std::string &msg, int errorCode) : RuntimeError(msg, errorCode) {}
 };
 
 /**
  * @brief Exception for Xclbin loading errors
  */
-class XclbinError : public RuntimeError {
-public:
-    explicit XclbinError(const std::string& msg)
-        : RuntimeError(msg) {}
+class XclbinError : public RuntimeError
+{
+  public:
+    explicit XclbinError(const std::string &msg) : RuntimeError(msg) {}
 
-    XclbinError(const std::string& msg, int errorCode)
-        : RuntimeError(msg, errorCode) {}
+    XclbinError(const std::string &msg, int errorCode) : RuntimeError(msg, errorCode) {}
 };
 
 /**
  * @brief Exception for device not available
  */
-class DeviceNotAvailableError : public RuntimeError {
-public:
+class DeviceNotAvailableError : public RuntimeError
+{
+  public:
     explicit DeviceNotAvailableError(int deviceId)
-        : RuntimeError("NPU device " + std::to_string(deviceId) + " not available"),
-          deviceId_(deviceId) {}
+        : RuntimeError("NPU device " + std::to_string(deviceId) + " not available"), deviceId_(deviceId)
+    {
+    }
 
-    [[nodiscard]] int deviceId() const { return deviceId_; }
+    [[nodiscard]] int deviceId() const
+    {
+        return deviceId_;
+    }
 
-private:
+  private:
     int deviceId_;
 };
 

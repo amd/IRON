@@ -15,26 +15,28 @@
  * - Uses O(1) lookup during inference
  */
 
-#include <iron/rope_cache.hpp>
-#include <cmath>
 #include <chrono>
-#include <stdexcept>
+#include <cmath>
 #include <cstring>
-#include <string>
+#include <iron/rope_cache.hpp>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 
-namespace iron {
-namespace runtime {
+namespace iron
+{
+namespace runtime
+{
 
 //==============================================================================
 // Construction/Destruction
 //==============================================================================
 
-RoPECache::RoPECache(const Config& config) : config_(config) {
+RoPECache::RoPECache(const Config &config) : config_(config)
+{
     if (!config.isValid()) {
-        throw std::invalid_argument(
-            "Invalid RoPECache configuration: "
-            "maxSeqLen and headDim must be > 0, headDim must be even, theta > 0");
+        throw std::invalid_argument("Invalid RoPECache configuration: "
+                                    "maxSeqLen and headDim must be > 0, headDim must be even, theta > 0");
     }
     initialize();
 }
@@ -45,7 +47,8 @@ RoPECache::~RoPECache() = default;
 // Initialization
 //==============================================================================
 
-void RoPECache::initialize() {
+void RoPECache::initialize()
+{
     auto startTime = std::chrono::high_resolution_clock::now();
 
     // Allocate caches
@@ -63,17 +66,16 @@ void RoPECache::initialize() {
     // Copy to device buffer in interleaved format
     // Layout: [all cos values][all sin values]
     std::memcpy(deviceBuffer_.get(), cosCache_.data(), elements * sizeof(float));
-    std::memcpy(deviceBuffer_.get() + elements * sizeof(float),
-                sinCache_.data(), elements * sizeof(float));
+    std::memcpy(deviceBuffer_.get() + elements * sizeof(float), sinCache_.data(), elements * sizeof(float));
 
     auto endTime = std::chrono::high_resolution_clock::now();
-    initializationTimeMs_ = std::chrono::duration<double, std::milli>(
-        endTime - startTime).count();
+    initializationTimeMs_ = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
     initialized_ = true;
 }
 
-void RoPECache::computeAngles() {
+void RoPECache::computeAngles()
+{
     const size_t halfDim = config_.headDim / 2;
 
     // Pre-compute inverse frequencies
@@ -95,7 +97,8 @@ void RoPECache::computeAngles() {
     }
 }
 
-float RoPECache::getInverseFrequency(size_t i, size_t headDim, float theta) const {
+float RoPECache::getInverseFrequency(size_t i, size_t headDim, float theta) const
+{
     // inv_freq[i] = 1 / (theta ^ (2*i/headDim))
     // Computed as: theta^(-2*i/headDim) for numerical stability
     const float exponent = -2.0f * static_cast<float>(i) / static_cast<float>(headDim);
@@ -106,40 +109,42 @@ float RoPECache::getInverseFrequency(size_t i, size_t headDim, float theta) cons
 // Table Access
 //==============================================================================
 
-const float* RoPECache::getCosTable(size_t seqLen) const {
+const float *RoPECache::getCosTable(size_t seqLen) const
+{
     if (!initialized_) {
         throw std::runtime_error("RoPECache not initialized");
     }
     if (seqLen > config_.maxSeqLen) {
-        throw std::out_of_range(
-            "Sequence length " + std::to_string(seqLen) +
-            " exceeds maxSeqLen " + std::to_string(config_.maxSeqLen));
+        throw std::out_of_range("Sequence length " + std::to_string(seqLen) + " exceeds maxSeqLen " +
+                                std::to_string(config_.maxSeqLen));
     }
     // Return full table - caller uses first seqLen rows
     return cosCache_.data();
 }
 
-const float* RoPECache::getSinTable(size_t seqLen) const {
+const float *RoPECache::getSinTable(size_t seqLen) const
+{
     if (!initialized_) {
         throw std::runtime_error("RoPECache not initialized");
     }
     if (seqLen > config_.maxSeqLen) {
-        throw std::out_of_range(
-            "Sequence length " + std::to_string(seqLen) +
-            " exceeds maxSeqLen " + std::to_string(config_.maxSeqLen));
+        throw std::out_of_range("Sequence length " + std::to_string(seqLen) + " exceeds maxSeqLen " +
+                                std::to_string(config_.maxSeqLen));
     }
     // Return full table - caller uses first seqLen rows
     return sinCache_.data();
 }
 
-const void* RoPECache::getDeviceBuffer() const {
+const void *RoPECache::getDeviceBuffer() const
+{
     if (!initialized_) {
         throw std::runtime_error("RoPECache not initialized");
     }
     return deviceBuffer_.get();
 }
 
-size_t RoPECache::getDeviceBufferSize() const {
+size_t RoPECache::getDeviceBufferSize() const
+{
     return deviceBufferSize_;
 }
 
