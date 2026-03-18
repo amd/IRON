@@ -82,7 +82,7 @@ class AIELlamaOperators:
             AIERMSNorm(
                 size=prompt_len * config.emb_dim,
                 num_aie_columns=8,
-                num_channels=2,
+                num_channels=1,
                 tile_size=config.emb_dim,
                 weighted=True,
                 context=self.context,
@@ -396,7 +396,7 @@ class AIELlamaOperators:
         rms_norm_op = AIERMSNorm(
             size=config.emb_dim,
             num_aie_columns=1,
-            num_channels=2,
+            num_channels=1,
             tile_size=config.emb_dim,
             weighted=True,
             context=elf_ctx,
@@ -441,7 +441,7 @@ class AIELlamaOperators:
         repeat_interleave_op = AIERepeat(
             rows=config.n_kv_groups,
             cols=prompt_len * config.head_dim,  # Max context length
-            repeat=config.n_heads // config.n_kv_groups,
+            num_repeats=config.n_heads // config.n_kv_groups,
             transfer_size=config.head_dim,
             context=elf_ctx,
         )
@@ -1301,19 +1301,18 @@ def llama_forward_pass_decode(config, state):
     angles_slice = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").to("cpu").data[:] = torch_to_numpy(
+    aie_ops.decode.fused.get_buffer("rope_angles").data[:] = torch_to_numpy(
         angles_slice.flatten()
     )
 
     # Token embedding (on CPU)
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
-    aie_ops.decode.fused.get_buffer("x").to("cpu").data.reshape(-1, config.emb_dim)[
+    aie_ops.decode.fused.get_buffer("x").data.reshape(-1, config.emb_dim)[
         :seq_len, :
     ] = torch_to_numpy(x.squeeze(0))
 
     # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
-    aie_ops.decode.fused.input_buffer.to("cpu")
     aie_ops.decode.fused()
     aie_ops.decode.fused.output_buffer.to("cpu")
     logits = (

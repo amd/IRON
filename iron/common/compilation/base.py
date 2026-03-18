@@ -440,6 +440,14 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 os.path.abspath(artifact.filename),
                 os.path.abspath(artifact.mlir_input.filename),
             ]
+            # Pass kernel archives via -L/-l: so aiecc links them into the ELF
+            for dep in artifact.dependencies:
+                if isinstance(dep, KernelArchiveArtifact):
+                    archive_path = os.path.abspath(dep.filename)
+                    compile_cmd += [
+                        "-L", os.path.dirname(archive_path),
+                        f"-l:{os.path.basename(archive_path)}",
+                    ]
             commands.append(
                 ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
             )
@@ -508,19 +516,21 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 ]
             compile_cmd += [os.path.abspath(mlir_source.filename)]
 
-            # If the MLIR source depends on a kernel archive, pass it to aiecc.py so it can be linked
+            # If the MLIR source depends on a kernel archive, pass it to aiecc so it can be linked
             if (
                 isinstance(mlir_source, PythonGeneratedMLIRArtifact)
                 and "kernel_archive" in mlir_source.callback_kwargs
             ):
-                compile_cmd.append(
-                    os.path.abspath(
-                        os.path.join(
-                            self.build_dir,
-                            mlir_source.callback_kwargs["kernel_archive"],
-                        )
+                archive_path = os.path.abspath(
+                    os.path.join(
+                        self.build_dir,
+                        mlir_source.callback_kwargs["kernel_archive"],
                     )
                 )
+                compile_cmd += [
+                    "-L", os.path.dirname(archive_path),
+                    f"-l:{os.path.basename(archive_path)}",
+                ]
 
             commands.append(
                 ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
@@ -548,7 +558,23 @@ class PeanoCompilationRule(CompilationRule):
     def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
         self.mlir_aie_dir = mlir_aie_dir
+        self._objcopy_path = self._find_objcopy(peano_dir)
         super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _find_objcopy(peano_dir):
+        """Return path to llvm-objcopy, preferring the Peano installation."""
+        import shutil
+
+        peano_objcopy = Path(peano_dir) / "bin" / "llvm-objcopy"
+        if peano_objcopy.exists():
+            return str(peano_objcopy)
+        system_objcopy = shutil.which("llvm-objcopy")
+        if system_objcopy:
+            return system_objcopy
+        raise RuntimeError(
+            "llvm-objcopy not found in Peano installation or system PATH"
+        )
 
     def matches(self, artifacts):
         return any(artifacts.get_worklist(KernelObjectArtifact))
@@ -596,9 +622,8 @@ class PeanoCompilationRule(CompilationRule):
         return commands
 
     def _rename_symbols(self, artifact):
-        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
         cmd = [
-            objcopy_path,
+            self._objcopy_path,
         ]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
@@ -609,7 +634,7 @@ class PeanoCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
+        objcopy_path = self._objcopy_path
         nm_path = str(Path(self.peano_dir) / "bin" / "llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
