@@ -145,6 +145,7 @@ class GenerationLoop:
         )
 
         # KV cache for context retention (initialized per sequence)
+        # Stores (K, V) tuples for each layer: [num_kv_heads, seq_len, head_dim]
         self._kv_cache: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None
         self._current_position: int = 0
         self._sequence_id: int = 0
@@ -320,9 +321,13 @@ class GenerationLoop:
     ) -> np.ndarray:
         """Forward pass through a single transformer layer.
 
+        Implements the Llama3.2 transformer layer architecture:
+        1. Input RMSNorm -> Attention -> Output projection -> Residual
+        2. FFN RMSNorm -> SwiGLU MLP -> Residual
+
         Args:
             hidden: Input hidden states, shape [seq_len, hidden_size]
-            layer_weights: Layer weights
+            layer_weights: Layer weights (TransformerWeights dataclass)
             layer_idx: Layer index for KV cache
             positions: Token positions
             is_prefill: Whether this is prefill phase
@@ -330,17 +335,103 @@ class GenerationLoop:
         Returns:
             Output hidden states, shape [seq_len, hidden_size]
         """
-        # This is a simplified implementation
-        # A full implementation would include:
-        # 1. Input RMSNorm
-        # 2. Attention with KV cache
-        # 3. Output projection
-        # 4. Residual connection
-        # 5. MLP with SwiGLU
-        # 6. Final residual connection
+        seq_len = hidden.shape[0]
 
-        # For now, return hidden as placeholder
-        # The actual forward pass would use the operators from iron/operators/
+        # =====================
+        # ATTENTION BLOCK
+        # =====================
+
+        # 1. Input RMSNorm for attention path
+        hidden_norm = self._rms_norm(hidden, layer_weights.attn_norm)
+
+        # 2. Compute Q, K, V projections
+        # Q: [seq_len, num_heads * head_dim]
+        # K: [seq_len, num_kv_heads * head_dim]
+        # V: [seq_len, num_kv_heads * head_dim]
+        q = hidden_norm @ layer_weights.wq
+        k = hidden_norm @ layer_weights.wk
+        v = hidden_norm @ layer_weights.wv
+
+        # 3. Reshape for multi-head attention
+        num_heads = self.config.num_attention_heads
+        num_kv_heads = self.config.num_key_value_heads
+        head_dim = self.config.head_dim
+
+        # Q: [seq_len, num_heads, head_dim] -> [num_heads, seq_len, head_dim]
+        q = q.reshape(seq_len, num_heads, head_dim).transpose(1, 0, 2)
+        # K: [seq_len, num_kv_heads, head_dim] -> [num_kv_heads, seq_len, head_dim]
+        k = k.reshape(seq_len, num_kv_heads, head_dim).transpose(1, 0, 2)
+        # V: [seq_len, num_kv_heads, head_dim] -> [num_kv_heads, seq_len, head_dim]
+        v = v.reshape(seq_len, num_kv_heads, head_dim).transpose(1, 0, 2)
+
+        # 4. Apply RoPE to Q and K
+        q, k = self._apply_rope_to_qk(q, k, positions)
+
+        # 5. Compute attention with KV cache
+        if is_prefill:
+            # Store KV cache for all positions
+            self._store_kv_cache(layer_idx, k, v, positions)
+            k_full, v_full = k, v
+        else:
+            # Single token decode - retrieve cached KV
+            self._store_kv_cache(layer_idx, k, v, positions)
+            k_full, v_full = self._get_full_kv_cache(layer_idx)
+
+        # 6. Scaled dot-product attention
+        # Handle GQA (Grouped Query Attention) - repeat KV heads
+        if num_heads != num_kv_heads:
+            # Repeat K and V for each head group
+            n_groups = num_heads // num_kv_heads
+            k_full = np.repeat(k_full, n_groups, axis=0)
+            v_full = np.repeat(v_full, n_groups, axis=0)
+
+        # Compute attention scores: Q @ K^T / sqrt(head_dim)
+        inv_scale = 1.0 / np.sqrt(head_dim)
+        attn_scores = np.einsum('nsh,nth->nst', q, k_full) * inv_scale
+
+        # Apply causal mask
+        attn_scores = self._apply_causal_mask(attn_scores, positions, is_prefill)
+
+        # Softmax
+        attn_weights = self._softmax(attn_scores)
+
+        # Apply attention to values: attn_weights @ V
+        # [num_heads, seq_len, kv_seq_len] @ [num_heads, kv_seq_len, head_dim]
+        attn_output = np.einsum('nst,nth->nsh', attn_weights, v_full)
+
+        # Transpose back: [num_heads, seq_len, head_dim] -> [seq_len, num_heads * head_dim]
+        attn_output = attn_output.transpose(1, 0, 2).reshape(seq_len, num_heads * head_dim)
+
+        # 7. Output projection
+        attn_output = attn_output @ layer_weights.wo
+
+        # 8. Residual connection
+        hidden = hidden + attn_output
+
+        # =====================
+        # MLP BLOCK (SwiGLU)
+        # =====================
+
+        # 9. FFN RMSNorm
+        hidden_norm = self._rms_norm(hidden, layer_weights.ffn_norm)
+
+        # 10. SwiGLU: SiLU(gate) * up
+        # gate = hidden @ w1, up = hidden @ w3
+        gate = hidden_norm @ layer_weights.w1
+        up = hidden_norm @ layer_weights.w3
+
+        # SiLU activation on gate
+        gate_activated = self._silu(gate)
+
+        # Element-wise multiply
+        mlp_output = gate_activated * up
+
+        # 11. Down projection
+        mlp_output = mlp_output @ layer_weights.w2
+
+        # 12. Final residual connection
+        hidden = hidden + mlp_output
+
         return hidden
 
     def _rms_norm(self, hidden: np.ndarray, weight: np.ndarray) -> np.ndarray:
@@ -358,6 +449,185 @@ class GenerationLoop:
         variance = np.mean(hidden ** 2, axis=-1, keepdims=True)
         hidden = hidden / np.sqrt(variance + eps)
         return hidden * weight
+
+    def _silu(self, x: np.ndarray) -> np.ndarray:
+        """Apply SiLU (Sigmoid Linear Unit) activation.
+
+        SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+
+        Args:
+            x: Input array
+
+        Returns:
+            Activated output
+        """
+        return x * (1.0 / (1.0 + np.exp(-x)))
+
+    def _softmax(self, x: np.ndarray) -> np.ndarray:
+        """Apply softmax along last axis.
+
+        Args:
+            x: Input array
+
+        Returns:
+            Softmax output
+        """
+        # Subtract max for numerical stability
+        x_max = np.max(x, axis=-1, keepdims=True)
+        exp_x = np.exp(x - x_max)
+        return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+
+    def _apply_causal_mask(
+        self,
+        attn_scores: np.ndarray,
+        positions: List[int],
+        is_prefill: bool
+    ) -> np.ndarray:
+        """Apply causal attention mask.
+
+        Args:
+            attn_scores: Attention scores [num_heads, seq_len, kv_seq_len]
+            positions: Current positions
+            is_prefill: Whether in prefill phase
+
+        Returns:
+            Masked attention scores
+        """
+        num_heads, seq_len, kv_seq_len = attn_scores.shape
+
+        # Create causal mask (upper triangular = -inf)
+        mask = np.triu(np.full((seq_len, kv_seq_len), -np.inf), k=1)
+
+        # Apply mask to all heads
+        attn_scores = attn_scores + mask
+
+        return attn_scores
+
+    def _apply_rope_to_qk(
+        self,
+        q: np.ndarray,
+        k: np.ndarray,
+        positions: List[int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply Rotary Positional Embedding to Q and K.
+
+        Args:
+            q: Query tensor [num_heads, seq_len, head_dim]
+            k: Key tensor [num_kv_heads, seq_len, head_dim]
+            positions: Token positions
+
+        Returns:
+            Rotated Q and K tensors
+        """
+        num_heads, seq_len, head_dim = q.shape
+        num_kv_heads, _, _ = k.shape
+
+        # Compute RoPE angles for each position
+        # Using the Llama3.2 RoPE formula with theta_base
+        theta_base = self.config.rope_theta
+        inv_freq = 1.0 / np.power(theta_base, np.arange(0, head_dim, 2) / head_dim)
+
+        # Compute angles for each position
+        angles = np.outer(positions, inv_freq)  # [seq_len, head_dim/2]
+
+        # Compute cos and sin
+        cos = np.cos(angles)  # [seq_len, head_dim/2]
+        sin = np.sin(angles)  # [seq_len, head_dim/2]
+
+        # Apply RoPE to Q
+        q_rotated = self._apply_rope_single(q, cos, sin)
+
+        # Apply RoPE to K
+        k_rotated = self._apply_rope_single(k, cos, sin)
+
+        return q_rotated, k_rotated
+
+    def _apply_rope_single(
+        self,
+        x: np.ndarray,
+        cos: np.ndarray,
+        sin: np.ndarray
+    ) -> np.ndarray:
+        """Apply RoPE to a single tensor.
+
+        RoPE formula (two-halves method, Llama3.2 style):
+        [x0, x1, ..., x_{d/2-1}, x_{d/2}, ..., x_{d-1}] * cos +
+        [-x_{d/2}, ..., -x_{d-1}, x0, ..., x_{d/2-1}] * sin
+
+        Args:
+            x: Input tensor [num_heads, seq_len, head_dim]
+            cos: Cosine values [seq_len, head_dim/2]
+            sin: Sine values [seq_len, head_dim/2]
+
+        Returns:
+            Rotated tensor
+        """
+        num_heads, seq_len, head_dim = x.shape
+        half_dim = head_dim // 2
+
+        # Split into first half and second half
+        x1 = x[:, :, :half_dim]  # First half
+        x2 = x[:, :, half_dim:]  # Second half
+
+        # Expand cos/sin for broadcasting: [seq_len, half_dim] -> [1, seq_len, half_dim]
+        cos_expanded = cos[np.newaxis, :, :]
+        sin_expanded = sin[np.newaxis, :, :]
+
+        # Apply rotation
+        # rotated_first = x1 * cos - x2 * sin
+        # rotated_second = x1 * sin + x2 * cos
+        rotated_first = x1 * cos_expanded - x2 * sin_expanded
+        rotated_second = x1 * sin_expanded + x2 * cos_expanded
+
+        # Concatenate back
+        x_rotated = np.concatenate([rotated_first, rotated_second], axis=-1)
+
+        return x_rotated
+
+    def _store_kv_cache(
+        self,
+        layer_idx: int,
+        k: np.ndarray,
+        v: np.ndarray,
+        positions: List[int]
+    ) -> None:
+        """Store or update KV cache for a layer.
+
+        Args:
+            layer_idx: Layer index
+            k: Key tensor [num_kv_heads, seq_len, head_dim]
+            v: Value tensor [num_kv_heads, seq_len, head_dim]
+            positions: Token positions
+        """
+        if self._kv_cache is None:
+            self._kv_cache = {}
+
+        if layer_idx not in self._kv_cache:
+            # Initialize cache for this layer
+            self._kv_cache[layer_idx] = (k.copy(), v.copy())
+        else:
+            # Append to existing cache
+            k_cached, v_cached = self._kv_cache[layer_idx]
+            k_new = np.concatenate([k_cached, k], axis=1)
+            v_new = np.concatenate([v_cached, v], axis=1)
+            self._kv_cache[layer_idx] = (k_new, v_new)
+
+    def _get_full_kv_cache(
+        self,
+        layer_idx: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get full KV cache for a layer.
+
+        Args:
+            layer_idx: Layer index
+
+        Returns:
+            Tuple of (K, V) tensors [num_kv_heads, cached_seq_len, head_dim]
+        """
+        if self._kv_cache is None or layer_idx not in self._kv_cache:
+            raise RuntimeError(f"KV cache not initialized for layer {layer_idx}")
+
+        return self._kv_cache[layer_idx]
 
     def _output_projection(self, hidden: np.ndarray) -> np.ndarray:
         """Project hidden state to vocabulary logits.
