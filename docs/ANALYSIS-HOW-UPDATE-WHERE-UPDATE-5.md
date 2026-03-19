@@ -28,7 +28,7 @@ This document provides a comprehensive analysis of **34 benchmark test configura
 
 | Rank | Test Name | Metric | Change | Severity | Instability Factor |
 |------|-----------|--------|--------|----------|-------------------|
-| P0-1 | mem_copy_8_cols_1_channels_2048_tile_256 | Bandwidth (mean) | -25% | CRITICAL | stddev +61% |
+| P0-1 | mem_copy_8_cols_1_channels_2048_tile_256 | Bandwidth (mean) | -17.79% | CRITICAL | stddev +61% |
 
 ### 1.3 Significant Regressions (P1 - This Sprint)
 
@@ -108,13 +108,14 @@ This document provides a comprehensive analysis of **34 benchmark test configura
 
 | Metric | Change | Interpretation |
 |--------|--------|----------------|
-| Bandwidth (mean) | -25% | Severe performance degradation |
+| Bandwidth (mean) | -17.79% | Severe performance degradation |
 | Latency (mean) | +61% | Significant slowdown |
 | Stddev | +61% | Increased variability |
 
 **Analysis:**
 - This configuration represents a worst-case scenario: 8 columns with single channel and large tile size (2048)
-- The -25% bandwidth regression is the most severe in the entire benchmark suite
+- The -17.79% bandwidth regression (mean) indicates significant performance degradation
+- Note: Minimum bandwidth shows -25.09%, indicating occasional severe throughput drops
 - The +61% latency increase correlates with bandwidth loss
 - Increased stddev indicates potential synchronization or contention issues
 
@@ -122,7 +123,7 @@ This document provides a comprehensive analysis of **34 benchmark test configura
 
 | Configuration | Columns | Channels | Tile Size | Performance |
 |---------------|---------|----------|-----------|-------------|
-| mem_copy_8_cols_1_channels_2048_tile_256 | 8 | 1 | 2048 | -25% (REGRESSION) |
+| mem_copy_8_cols_1_channels_2048_tile_256 | 8 | 1 | 2048 | -17.79% mean, -25.09% min (REGRESSION) |
 | mem_copy_8_cols_2_channels_1024_tile_256 | 8 | 2 | 1024 | +2.1% (STABLE) |
 | mem_copy_4_cols_1_channels_2048_tile_256 | 4 | 1 | 2048 | +1.5% (STABLE) |
 
@@ -131,19 +132,23 @@ This document provides a comprehensive analysis of **34 benchmark test configura
 - 1 channel (single channel)
 - 2048 tile size (largest tile)
 
+**Note on Metric Selection:** This document now uses mean bandwidth (-17.79%) as the primary regression metric, consistent with other analysis documents. The minimum bandwidth (-25.09%) indicates worst-case performance drops and is retained for context.
+
 ### 3.2 P1 High: Large Tile Size Correlation
 
-| Configuration | Tile Size | Performance | Trend |
-|---------------|-----------|-------------|-------|
+| Configuration | Tile Size | Performance (Mean Bandwidth) | Trend |
+|---------------|-----------|------------------------------|-------|
 | mem_copy_*_tile_32 | 32 | +4.8% | Improvement |
 | mem_copy_*_tile_64 | 64 | +3.2% | Improvement |
 | mem_copy_*_tile_128 | 128 | +2.1% | Stable |
 | mem_copy_*_tile_256 | 256 | -1.5% | Minor regression |
 | mem_copy_*_tile_512 | 512 | -5.8% | Moderate regression |
 | mem_copy_*_tile_1024 | 1024 | -8.2% | Significant regression |
-| mem_copy_*_tile_2048 | 2048 | -25% | CRITICAL regression |
+| mem_copy_*_tile_2048 | 2048 | -17.79% mean, -25.09% min | CRITICAL regression |
 
 **Observation:** Clear negative correlation between tile size and performance for 8-column configurations.
+
+**Note:** The -17.79% mean bandwidth for tile_2048 represents the average regression, while the -25.09% minimum indicates worst-case scenarios that may occur during execution variability.
 
 ### 3.3 P1 High: Infrastructure Gap - Missing Maxpool/Reduction Metrics
 
@@ -283,7 +288,7 @@ iron/benchmarks/validate.py:
 
 | Priority | Issue | Files | Effort | Impact |
 |----------|-------|-------|--------|--------|
-| P0-1 | mem_copy 8-col/1-ch/2048-tile regression | design.py, op.py | 2-3 days | CRITICAL - 25% bandwidth loss |
+| P0-1 | mem_copy 8-col/1-ch/2048-tile regression (-17.79% mean bandwidth) | design.py, op.py | 2-3 days | CRITICAL - 17.79% mean bandwidth loss, -25.09% min |
 
 ### 7.2 P1 - High (This Sprint)
 
@@ -367,7 +372,8 @@ python scripts/check_regression.py --baseline pre_fix_bench5.json --current post
 
 | Configuration | Current | Target | Success Metric |
 |---------------|---------|--------|----------------|
-| mem_copy_8_cols_1_channels_2048_tile_256 | -25% | >= -5% | Eliminate critical regression |
+| mem_copy_8_cols_1_channels_2048_tile_256 (mean) | -17.79% | >= -5% | Eliminate critical regression |
+| mem_copy_8_cols_1_channels_2048_tile_256 (min) | -25.09% | >= -10% | Reduce worst-case drops |
 | maxpool metrics coverage | 0% | 100% | Enable detection |
 | reduction metrics coverage | 0% | 100% | Enable detection |
 
@@ -402,12 +408,17 @@ This document contains data from Small Bench-5.txt:
 - Benchmarks with metrics: 23 (67.6%)
 - Benchmarks without metrics: 13 (38.2%) - Infrastructure gap identified
 - Classification thresholds:
-  - P0 Critical: <= -20% OR stddev > 50%
-  - P1 High: -15% to -5%
+  - P0 Critical: <= -20% mean bandwidth OR stddev > 50%
+  - P1 High: -15% to -5% mean bandwidth
   - P2 Monitor: -5% to +1%
   - Improvement: > +1%
 
+**Metric Selection Note:** This document uses **mean bandwidth** as the primary regression metric, consistent with other analysis documents. Minimum bandwidth values are retained for context to indicate worst-case performance drops.
+
 **Data Source:** `C:\Users\antmi\Downloads\benchmark-results-github\Trends (vs main branch) for Small Bench-5.txt`
+
+**Verification Date:** 2026-03-18
+**Verified By:** Dr. Sarah Kim, Technical Product Strategist (Cross-Analysis Verification Report)
 
 ---
 
@@ -464,17 +475,18 @@ Examples:
 |---------|------|--------|---------|
 | 1.0 | 2026-03-18 | Jordan Lee | Initial analysis based on Small Bench-5.txt benchmark data |
 | 1.1 | 2026-03-18 | Dr. Sarah Kim | P0 FIX COMPLETE - mem_copy_8_cols ObjectFifo depth fix implemented |
+| 1.2 | 2026-03-18 | Jordan Lee | BANDWIDTH METRIC CORRECTION - Changed from minimum (-25.09%) to mean (-17.79%) bandwidth per cross-analysis verification report |
 
 ### P0 Fix Implementation Summary
 
-**Task:** mem_copy_8_cols_1_channels_2048_tile_256 -25% bandwidth regression
+**Task:** mem_copy_8_cols_1_channels_2048_tile_256 -17.79% mean bandwidth regression (minimum: -25.09%)
 
 | Item | Detail |
 |------|--------|
 | **Root Cause** | Shallow ObjectFifo depths causing DMA contention in 8-column configuration |
 | **Fix Applied** | Increased ObjectFifo depths from (2,1,2) to (4,4,4) for all FIFOs |
 | **Files Modified** | See table below |
-| **Expected Impact** | Bandwidth recovery from -25% to >= -5% |
+| **Expected Impact** | Bandwidth recovery from -17.79% mean (-25.09% min) to >= -5% |
 | **Status** | COMPLETE |
 
 ### Files Modified Table
@@ -498,6 +510,7 @@ python scripts/analyze_results.py --operator mem_copy --report stability
 - Analysis based on benchmark data from Small Bench-5.txt
 - 34 total benchmarks analyzed (23 with metrics, 13 without)
 - P0 FIX COMPLETE: mem_copy_8_cols_1_channels_2048_tile_256 ObjectFifo depth fix implemented
+- METRIC CORRECTION (v1.2): Updated bandwidth metric from minimum (-25.09%) to mean (-17.79%) per cross-analysis verification report
 - CRITICAL: Maxpool and Reduction operators have NO metrics - infrastructure issue (P1)
 - MHA is stable (~0% change)
 - Document status updated to COMPLETE

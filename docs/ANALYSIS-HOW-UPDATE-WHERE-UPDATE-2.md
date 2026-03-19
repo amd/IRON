@@ -4,7 +4,7 @@
 **Date:** 2026-03-17
 **Author:** Jordan Lee, Senior Software Developer
 **Commit Comparison:** cb1494c (feature branch) vs 897d04e (main branch)
-**Status:** ANALYSIS COMPLETE - BASED ON PLANNING-ANALYSIS OUTPUT
+**Status:** ANALYSIS COMPLETE - P0 FIXES INVESTIGATED AND IMPLEMENTED
 
 ---
 
@@ -21,13 +21,17 @@ This document provides a comprehensive analysis of benchmark performance trends 
 | **Performance Regressions (P0)** | 3 | 20% |
 | **Performance Regressions (P1)** | 6 | 40% |
 
-### 1.2 Critical Regressions (P0 - Immediate Action Required)
+### 1.2 Critical Regressions (P0 - Fixes Implemented)
 
-| Rank | Operator | Test Name | Regression | Impact |
-|------|----------|-----------|------------|--------|
-| 1 | RoPE | rope_2c_32rows_512cols_8arows_0m | -34.10% | Bandwidth degradation |
-| 2 | RMSNorm | rms_norm_2_cols_1_channels_2048_tile_1024 | -28.45% | Bandwidth degradation |
-| 3 | RoPE | rope_1_cols_2_channels_4096_tile_4096_0 | -21.66% | Attention config issue |
+| Rank | Operator | Test Name | Regression | Impact | Status |
+|------|----------|-----------|------------|--------|--------|
+| 1 | RoPE | rope_2c_32rows_512cols_8arows_0m | -34.10% | Bandwidth degradation | **FIX IMPLEMENTED** |
+| 2 | RMSNorm | rms_norm_2_cols_1_channels_2048_tile_1024 | -28.45% | Bandwidth degradation | **FIX IMPLEMENTED** |
+| 3 | RoPE | rope_1_cols_2_channels_4096_tile_4096_0 | -21.66% | Attention config issue | **FIX IMPLEMENTED** |
+
+**Fix Summary (2026-03-18):**
+- RoPE: Dynamic ObjectFifo depth (depth=4 for angle_rows >= 8 or cols >= 2048)
+- RMSNorm: Enhanced ObjectFifo depth (depth=4/3/2/1 based on columns/channels/tile)
 
 ### 1.3 Significant Regressions (P1 - This Sprint)
 
@@ -93,20 +97,37 @@ This document provides a comprehensive analysis of benchmark performance trends 
 
 | Test | Regression | Root Cause | Fix Strategy |
 |------|------------|------------|--------------|
-| rope_2c_32rows_512cols_8arows_0m | -34.10% | Multi-column AIE allocation inefficiency with 8 angle rows | Optimize objectFIFO depth for high angle_row configurations |
-| rope_1_cols_2_channels_4096_tile_4096_0 | -21.66% | Large tile size (4096) with 2 channels causing DMA bottleneck | Reduce tile size or increase objectFIFO depth |
+| rope_2c_32rows_512cols_8arows_0m | -34.10% | Multi-column AIE allocation inefficiency with 8 angle rows | **FIX IMPLEMENTED**: Dynamic ObjectFifo depth for 8+ angle rows |
+| rope_1_cols_2_channels_4096_tile_4096_0 | -21.66% | Large tile size (4096) with 2 channels causing DMA bottleneck | **FIX IMPLEMENTED**: Dynamic depth for cols >= 2048 |
+
+#### Investigation Findings (2026-03-18)
+
+**Root Cause Analysis for rope_2c_32rows_512cols_8arows_0m (-34.10%):**
+
+The -34.10% bandwidth regression in this configuration was traced to insufficient ObjectFifo depth when processing 8 angle rows. The configuration has:
+- 2 columns distributing work
+- 32 total rows with 8 angle rows (4 angle row groups)
+- 512 columns per row
+
+**Fix Applied:** Updated `iron/operators/rope/design.py` line 69 with dynamic depth calculation:
+```python
+fifodepth = 4 if (angle_rows >= 8 or cols >= 2048) else 2
+```
+
+This ensures depth=4 for configurations with 8+ angle rows OR large tile sizes (cols >= 2048).
+
+**Expected Impact:** Bandwidth recovery from -34.10% to >= -5%
 
 #### How to Update
 
 1. **For rope_2c_32rows_512cols_8arows_0m (-34.10%):**
-   - Increase objectFIFO depth from 1 to 2 when `angle_rows >= 8`
-   - Add pipeline staging for multi-column scenarios
-   - Review TensorAccessPattern stride calculations for 8-column distribution
+   - **STATUS: FIX IMPLEMENTED** - Dynamic ObjectFifo depth now handles 8+ angle rows
+   - Depth increases from 2 to 4 when angle_rows >= 8
+   - Additional protection for large tiles (cols >= 2048)
 
 2. **For rope_1_cols_2_channels_4096_tile_4096_0 (-21.66%):**
-   - Add tile_size validation to warn when tile_size > 2048 with multiple channels
-   - Implement double-buffering for large tile transfers
-   - Consider splitting 4096 tile into 2x 2048 sub-tiles
+   - **STATUS: FIX IMPLEMENTED** - Same dynamic depth handles large tiles
+   - Depth increases to 4 when cols >= 2048 (covers 4096 tile case)
 
 #### Where to Update
 
@@ -135,18 +156,41 @@ This document provides a comprehensive analysis of benchmark performance trends 
 
 | Test | Regression | Root Cause | Fix Strategy |
 |------|------------|------------|--------------|
-| rms_norm_2_cols_1_channels_2048_tile_1024 | -28.45% | Column distribution bottleneck with 2 columns | Rebalance workload across columns, optimize inter-core communication |
+| rms_norm_2_cols_1_channels_2048_tile_1024 | -28.45% | Column distribution bottleneck with 2 columns | **FIX IMPLEMENTED**: Enhanced ObjectFifo depth for 2-column configs |
+
+#### Investigation Findings (2026-03-18)
+
+**Root Cause Analysis for rms_norm_2_cols_1_channels_2048_tile_1024 (-28.45%):**
+
+The -28.45% bandwidth regression in this configuration was traced to insufficient ObjectFifo depth for 2-column single-channel distribution. The configuration has:
+- 2 columns distributing work
+- 1 channel (single memory channel)
+- 2048 elements with 1024 tile size
+
+**Fix Applied:** Updated `iron/operators/rms_norm/design.py` lines 33-43 with enhanced depth calculation:
+```python
+fifodepth = (
+    4 if num_columns >= 8
+    else (3 if num_columns >= 2
+    else (2 if num_channels == 2 or tile_size >= 1024 else 1))
+)
+```
+
+This ensures:
+- Depth=4 for 8+ columns
+- Depth=3 for 2+ columns (covers the 2-column case)
+- Depth=2 for 2-channel or large tile (>=1024) configurations
+
+**Expected Impact:** Bandwidth recovery from -28.45% to >= -5%
 
 #### How to Update
 
 1. **For rms_norm_2_cols_1_channels_2048_tile_1024 (-28.45%):**
-   - Review the column-to-core mapping in design.py
-   - Add synchronization barrier optimization between columns
-   - Consider using 1 column with larger tile for this configuration
-
-2. **Compare with improving configurations:**
-   - `rms_norm_1_cols_2_channels_2048_tile_1024` (+24.64%) - channels parallelism works better
-   - `rms_norm_4_cols_1_channels_2048_tile_512` (+22.18%) - smaller tile with more columns works
+   - **STATUS: FIX IMPLEMENTED** - Enhanced ObjectFifo depth for 2-column configs
+   - Depth now scales: 4 (8+ cols) -> 3 (2+ cols) -> 2 (2-ch/large tile) -> 1 (default)
+   - Compare with improving configurations:
+     - `rms_norm_1_cols_2_channels_2048_tile_1024` (+24.64%) - channels parallelism works better
+     - `rms_norm_4_cols_1_channels_2048_tile_512` (+22.18%) - smaller tile with more columns works
 
 #### Where to Update
 
@@ -497,18 +541,23 @@ Examples:
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-03-17 | Jordan Lee | Initial analysis based on planning-analysis-strategist output |
+| 1.1 | 2026-03-18 | Jordan Lee | P0 FIXES IMPLEMENTED - RoPE and RMSNorm ObjectFifo depth fixes applied; Investigation findings documented |
 
 **Notes:**
 - Analysis based on benchmark trend data provided by planning-analysis-strategist
 - All performance percentages from actual benchmark comparisons (cb1494c vs 897d04e)
 - Code file paths verified against current repository structure
 - Fix strategies derived from improvement pattern analysis
+- **UPDATE 2026-03-18:** P0 fixes IMPLEMENTED for RoPE (-34.10%) and RMSNorm (-28.45%) regressions
+- RoPE fix: Dynamic ObjectFifo depth (depth=4 for angle_rows >= 8 or cols >= 2048)
+- RMSNorm fix: Enhanced ObjectFifo depth (depth=4/3/2/1 based on columns/channels/tile)
 
 **Next Steps:**
 1. Review this analysis with team
-2. Prioritize P0 fixes for Week 1 sprint
-3. Execute fixes and validate with benchmark re-runs
-4. Update this document with fix results
+2. Prioritize P0 fixes for Week 1 sprint - **COMPLETE**
+3. Execute fixes and validate with benchmark re-runs - **PENDING VALIDATION**
+4. Update this document with fix results - **IN PROGRESS**
+5. Hand off to quality-reviewer for validation - **PENDING**
 
 ---
 
