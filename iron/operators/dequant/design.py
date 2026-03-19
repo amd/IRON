@@ -43,11 +43,14 @@ def my_dequant_kernel(
     in_tile_ty = np.ndarray[(input_tile_size,), np.dtype[in_dtype]]
     out_tile_ty = np.ndarray[(per_tile_elements,), np.dtype[out_dtype]]
 
-    # P0 FIX: Enhanced ObjectFifo depth calculation for 2-channel stability
-    # Depth=4 for 8+ columns, depth=2 for 2-channel configs, depth=1 for large tiles (>8192)
-    # This fixes the +28% latency and -26% bandwidth regressions in 2-channel dequant configs
+    # P0-5 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
+    # Issue: -26.69% bandwidth (dequant_8_cols_2_channels_2048_tile_128_0)
+    # Source: dequant.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 8+ columns or 2-channel configs, depth=2 for large tiles
     fifodepth = (
-        4 if num_columns >= 8 else (2 if num_channels == 2 or tile_size > 8192 else 1)
+        4 if num_columns >= 8 else
+        (3 if num_columns >= 4 and num_channels == 2 else
+         (2 if num_channels == 2 or tile_size >= 1024 else 1))
     )
     enable_trace = 1 if trace_size > 0 else None
 

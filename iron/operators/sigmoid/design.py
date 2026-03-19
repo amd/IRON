@@ -28,12 +28,14 @@ def my_sigmoid(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P1-8 FIX: Explicit ObjectFifo depth calculation for stability
-    # Depth=4 for 8+ columns, depth=3 for 2-4 columns, depth=2 for large tiles
+    # P0-8 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
+    # Issue: -22.31% bandwidth (sigmoid_1_cols_1_channels_2048_tile_2048)
+    # Source: sigmoid.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for tile>=1024
     fifodepth = (
-        4
-        if num_columns >= 8
-        else (3 if num_columns >= 2 else (2 if tile_size >= 2048 else 2))
+        4 if num_columns >= 8 else
+        (3 if num_columns >= 4 and num_channels == 2 else
+         (2 if num_channels == 2 or tile_size >= 1024 else 1))
     )
 
     # Dataflow with ObjectFifos

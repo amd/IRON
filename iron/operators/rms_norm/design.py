@@ -30,16 +30,15 @@ def my_rms_norm(dev, num_elements, num_columns, num_channels, trace_size, tile_s
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P1-5 FIX: Enhanced depth for 2-column single-channel stability
-    # Depth=4 for 8+ columns, depth=3 for 2-column configs, depth=2 for 2-channel or large tiles
+    # P0-3 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
+    # Issue: -28.79% bandwidth (rms_norm_4_cols_2_channels_2048_tile_256)
+    # Source: rmsnorm.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 8+ columns, depth=3 for 4+ columns,
+    # depth=2 for 2-channel or large tiles (>=1024), depth=1 otherwise
     fifodepth = (
-        4
-        if num_columns >= 8
-        else (
-            3
-            if num_columns >= 2
-            else (2 if num_channels == 2 or tile_size >= 1024 else 1)
-        )
+        4 if num_columns >= 8 else
+        (3 if num_columns >= 4 and num_channels == 2 else
+         (2 if num_channels == 2 or tile_size >= 1024 else 1))
     )
 
     # AIE-array data movement with object fifos
