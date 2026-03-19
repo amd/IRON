@@ -34,11 +34,12 @@ def my_axpy(
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
     # P1-10 FIX: Explicit ObjectFifo depth calculation for 2-channel stability
-    # Depth=4 for 8+ columns, depth=2 for 2-channel configs, depth=1 for large tiles (>4096)
+    # Depth=4 for 8+ columns, depth=3 for 4-col 2-ch, depth=2 for 2-channel configs, depth=1 for large tiles (>4096)
+    # P1-HIGH FIX: 4-col 2-ch -10.91% bandwidth regression (axpy_4_cols_2_channels_2048_tile_512_3.0_0)
     fifodepth = (
         4
         if num_columns >= 8
-        else (2 if num_channels == 2 else (1 if tile_size > 4096 else 2))
+        else (3 if num_columns >= 4 and num_channels == 2 else (2 if num_channels == 2 else (1 if tile_size > 4096 else 2)))
     )
 
     # AIE-array data movement with object fifos (one per column, not per channel)
