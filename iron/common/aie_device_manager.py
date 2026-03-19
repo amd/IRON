@@ -3,6 +3,10 @@
 
 """
 Global AIE Device Manager for resource sharing and cleanup
+
+Note: This module requires the AMD XRT toolchain (Linux only).
+On Windows or systems without XRT, import will fail gracefully
+and tests using AIE hardware will be skipped.
 """
 
 import logging
@@ -10,10 +14,22 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Any
-import pyxrt
-from aie.utils import DefaultNPURuntime
-from aie.utils.npukernel import NPUKernel
-from aie.iron.device import NPU1, NPU2
+
+# Lazy imports - only available on Linux with XRT toolchain
+pyxrt = None
+DefaultNPURuntime = None
+NPUKernel = None
+NPU1 = None
+NPU2 = None
+
+try:
+    import pyxrt
+    from aie.utils import DefaultNPURuntime
+    from aie.utils.npukernel import NPUKernel
+    from aie.iron.device import NPU1, NPU2
+    AIE_TOOLCHAIN_AVAILABLE = True
+except ImportError:
+    AIE_TOOLCHAIN_AVAILABLE = False
 
 
 class AIEDeviceManager:
@@ -27,8 +43,16 @@ class AIEDeviceManager:
         return cls._instance
 
     def __init__(self):
-        self.runtime = DefaultNPURuntime
-        # Expose device for AIEContext buffer allocation
+        if not AIE_TOOLCHAIN_AVAILABLE:
+            raise ImportError(
+                "AIE toolchain not available. This module requires:\n"
+                "  - Linux OS\n"
+                "  - AMD XRT drivers\n"
+                "  - pyxrt Python bindings\n"
+                "  - aie.iron MLIR toolchain\n"
+                "Tests using AIE hardware will be skipped on this platform."
+            )
+        self.runtime = DefaultNPURuntime()
         # Accessing protected member _device as AIEContext needs pyxrt.device
         self.device = self.runtime._device
         self.device_type = self.runtime.device()

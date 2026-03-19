@@ -37,7 +37,15 @@ import logging
 import subprocess
 import importlib.util
 from contextlib import nullcontext
-from aie.extras.context import mlir_mod_ctx
+
+# Lazy import - only available on Linux with AIE toolchain
+def _get_mlir_mod_ctx():
+    """Get mlir_mod_ctx from aie.extras.context (Linux AIE toolchain only)"""
+    try:
+        from aie.extras.context import mlir_mod_ctx
+        return mlir_mod_ctx
+    except ImportError:
+        return None
 
 # Compilation Artifacts
 # --------------------------------------------------------------------------
@@ -215,8 +223,9 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 # We only initiate an MLIR context if requested; otherwise, it is expected that the callback creates the context
+                mlir_context_fn = _get_mlir_mod_ctx()
                 ctx_callback = lambda: (
-                    mlir_mod_ctx() if artifact.requires_context else nullcontext()
+                    mlir_context_fn() if artifact.requires_context else nullcontext()
                 )
                 with ctx_callback() as ctx:
                     callback_function = getattr(module, artifact.callback_fn)

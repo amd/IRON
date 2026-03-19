@@ -10,10 +10,34 @@ import time
 import torch
 from ml_dtypes import bfloat16
 
-import aie.utils.config
-from . import compilation as comp
-from .aie_context import AIEContext
-from .aie_device_manager import AIEDeviceManager, pyxrt
+# Lazy imports - AIE toolchain only available on Linux
+aie_utils_config = None
+comp = None
+AIEContext = None
+pyxrt = None
+
+try:
+    import aie.utils.config
+    aie_utils_config = aie.utils.config
+except ImportError:
+    pass
+
+try:
+    from . import compilation as comp
+except ImportError:
+    pass
+
+try:
+    from .aie_context import AIEContext
+except ImportError:
+    pass
+
+try:
+    from .aie_device_manager import pyxrt, AIEDeviceManager
+except ImportError:
+    pyxrt = None  # type: ignore
+    AIEDeviceManager = None  # type: ignore
+
 from .utils import numpy_to_torch, torch_to_numpy
 
 
