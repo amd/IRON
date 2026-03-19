@@ -3,6 +3,7 @@
 
 import torch
 import numpy as np
+import logging
 from ml_dtypes import bfloat16
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AIEDequant(AIEOperatorBase):
@@ -35,6 +38,18 @@ class AIEDequant(AIEOperatorBase):
         self.tile_size = tile_size
         self.num_channels = num_channels
         self.group_size = group_size
+
+        # P2-6 CONFIGURATION VALIDATION: Warn about suboptimal 2-channel configurations
+        # Based on benchmark analysis (UPDATE-3.md):
+        # - 4-column 2-channel shows -19.91% bandwidth regression
+        # - 8-column 2-channel shows -8.39% bandwidth regression
+        # - 1-channel configs with same column counts perform near-neutral
+        if num_channels == 2 and num_aie_columns >= 4:
+            logger.warning(
+                f"P2-6: {num_aie_columns}-column configuration with 2-channel dequant "
+                f"shows bandwidth regression (-{19.91 if num_aie_columns == 4 else 8.39}%). "
+                f"Recommend using 1-2 columns for 2-channel workloads or increasing channels."
+            )
 
         # Calculate buffer sizes
         # Input: int4 packed data + scale factors

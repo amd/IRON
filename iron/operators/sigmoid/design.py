@@ -28,14 +28,22 @@ def my_sigmoid(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
+    # P1-8 FIX: Explicit ObjectFifo depth calculation for stability
+    # Depth=4 for 8+ columns, depth=3 for 2-4 columns, depth=2 for large tiles
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (3 if num_columns >= 2 else (2 if tile_size >= 2048 else 2))
+    )
+
     # Dataflow with ObjectFifos
     of_ins = [
-        ObjectFifo(line_type, name=f"in{i}_{j}")
+        ObjectFifo(line_type, name=f"in{i}_{j}", depth=fifodepth)
         for i in range(num_columns)
         for j in range(num_channels)
     ]
     of_outs = [
-        ObjectFifo(line_type, name=f"out{i}_{j}")
+        ObjectFifo(line_type, name=f"out{i}_{j}", depth=fifodepth)
         for i in range(num_columns)
         for j in range(num_channels)
     ]

@@ -30,14 +30,20 @@ def softmax(dev, num_elements, num_columns, num_channels, trace_size, tile_size)
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
+    # P1 FIX: Explicit ObjectFifo depth for single-column large-tile stability
+    # Depth=4 for 8+ columns, depth=2 for 2-channel or large tiles, depth=1 otherwise
+    fifodepth = (
+        4 if num_columns >= 8 else (2 if num_channels == 2 or tile_size >= 2048 else 1)
+    )
+
     # AIE-array data movement with object fifos
     of_in1s = [
-        ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
+        ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=fifodepth)
         for i in range(num_columns)
         for j in range(num_channels)
     ]
     of_outs = [
-        ObjectFifo(tile_ty, name=f"out_{i}_{j}")
+        ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=fifodepth)
         for i in range(num_columns)
         for j in range(num_channels)
     ]

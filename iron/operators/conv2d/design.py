@@ -87,10 +87,31 @@ def my_conv2d(
     input_tile_ty = np.ndarray[(tile_size,), np.dtype[dtype]]
     output_tile_ty = np.ndarray[(tile_size,), np.dtype[dtype]]
 
+    # P2-10 FIX: Explicit ObjectFifo depth calculation for 8-column stability
+    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for 2 columns, depth=1 for large tiles
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (
+            3
+            if num_columns >= 4
+            else (2 if num_columns >= 2 else (1 if tile_size > 4096 else 2))
+        )
+    )
+
     # AIE-array data movement with object fifos
-    of_ins = [ObjectFifo(input_tile_ty, name=f"in_{i}") for i in range(num_columns)]
-    of_weights = [ObjectFifo(input_tile_ty, name=f"w_{i}") for i in range(num_columns)]
-    of_outs = [ObjectFifo(output_tile_ty, name=f"out_{i}") for i in range(num_columns)]
+    of_ins = [
+        ObjectFifo(input_tile_ty, name=f"in_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_weights = [
+        ObjectFifo(input_tile_ty, name=f"w_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(output_tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # Determine kernel name based on configuration
     kernel_name = "conv2d_bf16_vector"

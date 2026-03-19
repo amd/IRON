@@ -33,8 +33,17 @@ def my_weighted_rms_norm(
     weights_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # Set fifodepth based on weight_length
-    fifodepth = 1 if weight_length > 4096 else 2
+    # P1-11 FIX: Enhanced ObjectFifo depth for weighted RMSNorm stability
+    # Depth=4 for 8+ columns, depth=3 for 2-column configs, depth=2 for 2-channel or large weights
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (
+            3
+            if num_columns >= 2
+            else (2 if num_channels == 2 or weight_length >= 2048 else 2)
+        )
+    )
 
     # AIE-array data movement with object fifos
     of_in1s = [

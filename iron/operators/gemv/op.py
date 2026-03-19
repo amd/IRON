@@ -3,6 +3,7 @@
 
 import torch
 import numpy as np
+import logging
 from ml_dtypes import bfloat16
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 from iron.common.utils import torch_to_numpy
+
+logger = logging.getLogger(__name__)
 
 
 class AIEGEMV(AIEOperatorBase):
@@ -41,6 +44,25 @@ class AIEGEMV(AIEOperatorBase):
             tile_size_output % tile_size_input == 0
             and tile_size_output >= tile_size_input
         ), "tile_size_output must be a multiple of tile_size_input"
+
+        # P2-5 CONFIGURATION VALIDATION: Warn about suboptimal column configurations
+        # Based on benchmark analysis (UPDATE-4.md):
+        # - 4-column M>K shows +736% stddev instability (CRITICAL)
+        # - 4-column K>M shows +14.29% improvement (OPTIMAL)
+        # - 8-column M>K shows +14.59% improvement (OPTIMAL)
+        if num_aie_columns == 4 and M > K:
+            logger.warning(
+                f"P2-5: 4-column configuration with M>K matrix ({M}x{K}) shows "
+                f"severe instability (+736% stddev) in benchmarks. "
+                f"Recommend using 8 columns for M>K workloads for +14.59% improvement."
+            )
+        elif num_aie_columns == 2 and K > M:
+            logger.warning(
+                f"P2-5: 2-column configuration with K>M matrix ({M}x{K}) shows "
+                f"bandwidth regression (-8.03%). "
+                f"Recommend using 4 columns for K>M workloads for +14.29% improvement."
+            )
+
         self.M = M  # matrix rows  (if is_mv=False, matrix columns)
         self.K = K  # matrix columns, vector rows  (if is_mv=False, matrix rows, vector columns)
         self.num_aie_columns = num_aie_columns

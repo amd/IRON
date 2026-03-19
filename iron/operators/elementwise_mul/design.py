@@ -34,9 +34,18 @@ def my_eltwise_mul(dev, num_elements, num_columns, num_channels, tile_size, trac
     fifodepth = 4 if num_columns >= 8 else (1 if tile_size > 4096 else 2)
 
     # AIE-array data movement with object fifos (one per column, not per channel)
-    of_in1s = [ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth) for i in range(num_columns)]
-    of_in2s = [ObjectFifo(tile_ty, name=f"in2_{i}", depth=fifodepth) for i in range(num_columns)]
-    of_outs = [ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth) for i in range(num_columns)]
+    of_in1s = [
+        ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_in2s = [
+        ObjectFifo(tile_ty, name=f"in2_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # AIE Core Function declaration
     eltwise_mul_bf16_vector = Kernel(

@@ -38,6 +38,17 @@ class AIEElementwiseAdd(AIEOperatorBase):
 
         self.num_aie_columns = num_aie_columns
         self.num_channels = num_channels
+
+        # P2-6 CONFIGURATION VALIDATION: Warn about suboptimal 1-column large tile configs
+        # Based on benchmark analysis (UPDATE-3.md):
+        # - 1-column with tile >= 1024 shows +56% latency regression
+        if num_aie_columns == 1 and tile_size and tile_size >= 1024:
+            logger.warning(
+                f"P2-6: 1-column configuration with large tile size ({tile_size}) "
+                f"shows latency regression (+56%). "
+                f"Recommend using 4-8 columns for large tile workloads."
+            )
+
         # Enforce ShimDMA limits for elementwise_add (uses 2 inputs per core)
         # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
         total_shimdma_channels = self.num_aie_columns * self.num_channels

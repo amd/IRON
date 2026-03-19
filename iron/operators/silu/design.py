@@ -28,9 +28,13 @@ def my_silu(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P1 FIX: Explicit ObjectFifo depth calculation for stability
-    # Depth=4 for 8+ columns, depth=1 for large tiles (>4096), depth=2 otherwise
-    fifodepth = 4 if num_columns >= 8 else (1 if tile_size > 4096 else 2)
+    # P1-7 FIX: Enhanced depth for 8-column small-tile stability
+    # Depth=6 for 8+ columns with small tiles (<512), depth=4 for 8+ columns, depth=2 otherwise
+    fifodepth = (
+        6
+        if (num_columns >= 8 and tile_size < 512)
+        else (4 if num_columns >= 8 else (2 if tile_size >= 2048 else 2))
+    )
 
     # Dataflow with ObjectFifos
     of_ins = [

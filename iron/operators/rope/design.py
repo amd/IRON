@@ -62,13 +62,24 @@ def rope(
     tensor_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
     angle_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
 
+    # P1 FIX: Dynamic ObjectFifo depth for 8-arrow and large-tile stability
+    # Depth=4 for 8+ angle rows OR cols >= 2048, depth=2 otherwise
+    # Note: cols represents the tile dimension in RoPE (tile = 1 x cols)
+    # This prevents bandwidth degradation in high-load scenarios
+    fifodepth = 4 if (angle_rows >= 8 or cols >= 2048) else 2
+
     # AIE-array data movement with object fifos (one per column, not per channel)
-    of_in = [ObjectFifo(tensor_tile_ty, name=f"in_{i}") for i in range(num_aie_columns)]
+    of_in = [
+        ObjectFifo(tensor_tile_ty, depth=fifodepth, name=f"in_{i}")
+        for i in range(num_aie_columns)
+    ]
     of_lut = [
-        ObjectFifo(angle_tile_ty, name=f"lut_{i}") for i in range(num_aie_columns)
+        ObjectFifo(angle_tile_ty, depth=fifodepth, name=f"lut_{i}")
+        for i in range(num_aie_columns)
     ]
     of_out = [
-        ObjectFifo(tensor_tile_ty, name=f"out_{i}") for i in range(num_aie_columns)
+        ObjectFifo(tensor_tile_ty, depth=fifodepth, name=f"out_{i}")
+        for i in range(num_aie_columns)
     ]
 
     # AIE Core Function declaration

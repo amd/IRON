@@ -30,7 +30,17 @@ def my_rms_norm(dev, num_elements, num_columns, num_channels, trace_size, tile_s
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    fifodepth = 1 if tile_size > 4096 else 2
+    # P1-5 FIX: Enhanced depth for 2-column single-channel stability
+    # Depth=4 for 8+ columns, depth=3 for 2-column configs, depth=2 for 2-channel or large tiles
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (
+            3
+            if num_columns >= 2
+            else (2 if num_channels == 2 or tile_size >= 1024 else 1)
+        )
+    )
 
     # AIE-array data movement with object fifos
     of_in1s = [

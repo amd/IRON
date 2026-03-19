@@ -20,10 +20,11 @@ def my_tanh(dev, size, num_columns, num_channels, tile_size, trace_size):
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 
-    # P0 FIX: Explicit ObjectFifo depth calculation for stability
-    # Depth=4 for 8+ columns, depth=1 for large tiles (>4096), depth=2 otherwise
-    # This fixes the +319% stddev instability in tanh_8_cols_1_channels_2048_tile_256
-    fifodepth = 4 if num_columns >= 8 else (1 if tile_size > 4096 else 2)
+    # P1 FIX: Enhanced formula for single-column large-tile stability
+    # Depth=4 for 8+ columns OR single-column with tile>=2048, depth=2 otherwise
+    fifodepth = (
+        4 if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048)) else 2
+    )
 
     # Calculate number of iterations per core
     total_cores = num_columns * num_channels

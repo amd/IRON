@@ -36,9 +36,18 @@ def my_eltwise_add(dev, num_elements, num_columns, num_channels, tile_size, trac
     # This fixes the +56% latency regression in eltwise_add_1_cols_2_channels_2048_tile_2048
     fifodepth = 4 if num_columns >= 8 else (1 if tile_size > 4096 else 2)
 
-    of_in1s = [ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth) for i in range(num_columns)]
-    of_in2s = [ObjectFifo(tile_ty, name=f"in2_{i}", depth=fifodepth) for i in range(num_columns)]
-    of_outs = [ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth) for i in range(num_columns)]
+    of_in1s = [
+        ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_in2s = [
+        ObjectFifo(tile_ty, name=f"in2_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # AIE Core Function declaration
     eltwise_add_bf16_vector = Kernel(

@@ -33,10 +33,27 @@ def my_axpy(
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
+    # P1-10 FIX: Explicit ObjectFifo depth calculation for 2-channel stability
+    # Depth=4 for 8+ columns, depth=2 for 2-channel configs, depth=1 for large tiles (>4096)
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (2 if num_channels == 2 else (1 if tile_size > 4096 else 2))
+    )
+
     # AIE-array data movement with object fifos (one per column, not per channel)
-    of_in1s = [ObjectFifo(tile_ty, name=f"in1_{i}") for i in range(num_columns)]
-    of_in2s = [ObjectFifo(tile_ty, name=f"in2_{i}") for i in range(num_columns)]
-    of_outs = [ObjectFifo(tile_ty, name=f"out_{i}") for i in range(num_columns)]
+    of_in1s = [
+        ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_in2s = [
+        ObjectFifo(tile_ty, name=f"in2_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # AIE Core Function declaration
     axpy_bf16_vector = Kernel(
