@@ -20,3 +20,8 @@ id_ed25519.pub
 *.model
 .cline_storage
 *.egg-info
+
+# Documentation and AI folders
+docs/
+chroma-data/
+.claude/
