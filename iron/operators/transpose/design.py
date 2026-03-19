@@ -43,7 +43,17 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, trace_size, m, n, s)
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    fifodepth = 1 if per_tile_elements > 4096 else 2
+    # P1-6 FIX: Enhanced depth for 2-channel multi-column bandwidth/stability regression
+    # Issue: -14.18% bw, +50.15% stddev (transpose_2048_M_64_N_1_cols_2_channels_64_m_64_n_8_s0)
+    # Source: transpose.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 4+ cols OR 2-ch with per_tile>=2048
+    # Depth=3 for 2+ cols OR per_tile>=1024
+    # Depth=2 otherwise (never use depth=1 for stability)
+    fifodepth = (
+        4
+        if (num_columns >= 4 or (num_channels == 2 and per_tile_elements >= 2048))
+        else (3 if (num_columns >= 2 or per_tile_elements >= 1024) else 2)
+    )
 
     # Create a TensorAccessPattern for each channel
     # to describe the data movement

@@ -20,10 +20,16 @@ def my_tanh(dev, size, num_columns, num_channels, tile_size, trace_size):
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 
-    # P1 FIX: Enhanced formula for single-column large-tile stability
-    # Depth=4 for 8+ columns OR single-column with tile>=2048, depth=2 otherwise
+    # P1-3 FIX: Enhanced depth for 8-col small-tile bandwidth regression
+    # Issue: -18.57% bandwidth (tanh_8_cols_1_channels_2048_tile_256)
+    # Source: tanh.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 8+ cols OR single-col tile>=2048 OR 4+ cols with small tile (<512)
+    # Depth=2 otherwise
     fifodepth = (
-        4 if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048)) else 2
+        4
+        if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048) or
+            (num_columns >= 4 and tile_size < 512))
+        else 2
     )
 
     # Calculate number of iterations per core

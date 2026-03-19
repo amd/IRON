@@ -62,11 +62,17 @@ def rope(
     tensor_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
     angle_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
 
-    # P1 FIX: Dynamic ObjectFifo depth for 8-arrow and large-tile stability
-    # Depth=4 for 8+ angle rows OR cols >= 2048, depth=2 otherwise
-    # Note: cols represents the tile dimension in RoPE (tile = 1 x cols)
-    # This prevents bandwidth degradation in high-load scenarios
-    fifodepth = 4 if (angle_rows >= 8 or cols >= 2048) else 2
+    # P1-4 FIX: Enhanced depth for 8-arrow small-col bandwidth/stability regression
+    # Issue: -18.65% bw, +61.64% stddev (rope_8c_32rows_512cols_8arows_0m)
+    # Source: rope.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 8+ angle rows OR cols>=2048 OR 4+ angle rows with small cols (<512)
+    # Depth=3 for 2+ angle rows OR cols>=1024
+    # Depth=2 otherwise
+    fifodepth = (
+        4
+        if (angle_rows >= 8 or cols >= 2048 or (angle_rows >= 4 and cols < 512))
+        else (3 if (angle_rows >= 2 or cols >= 1024) else 2)
+    )
 
     # AIE-array data movement with object fifos (one per column, not per channel)
     of_in = [

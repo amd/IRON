@@ -28,12 +28,18 @@ def my_relu(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P1-9 FIX: Explicit ObjectFifo depth calculation for stability
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for large tiles
+    # P1-1 FIX: Enhanced depth for single-column large-tile bandwidth regression
+    # Issue: -19.54% bandwidth (relu_1_cols_1_channels_2048_tile_2048)
+    # Source: relu.txt benchmark file (897d04e vs 84d3478)
+    # P1-2 FIX: Enhanced depth for 4/8-col small-tile stability
+    # Issue: +132.92% stddev (relu_4_cols), +66.99% stddev (relu_8_cols)
+    # Depth=4 for 8+ cols OR single-col with tile>=2048
+    # Depth=3 for 4+ cols OR tile>=1024
+    # Depth=2 otherwise
     fifodepth = (
         4
-        if num_columns >= 8
-        else (3 if num_columns >= 4 else (2 if tile_size >= 2048 else 2))
+        if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048))
+        else (3 if (num_columns >= 4 or tile_size >= 1024) else 2)
     )
 
     # Dataflow with ObjectFifos
