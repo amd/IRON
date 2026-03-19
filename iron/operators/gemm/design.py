@@ -243,6 +243,16 @@ def my_matmul(
     # loop unrollings. Reducing the depth to 1 here will work around that at
     # a big performance cost.
     fifo_depth = 2
+    # P2-1 FIX: Adaptive FIFO depth for large matrix stability
+    # Issue: +176.91% stddev (gemm_2048x2048x2048_64x64x64_1cols)
+    #        +159.82% stddev (gemm_2048x2048x2048_64x64x64_2cols_bcolmaj)
+    # Source: gemm.txt benchmark file (897d04e vs 84d3478)
+    # Depth=4 for 2048+ matrices or 2+ column configurations
+    # Depth=2 for smaller matrices
+    if M >= 2048 and K >= 2048 and N >= 2048:
+        fifo_depth = 4  # Increased from 2 for stability
+    elif n_aie_cols >= 2:
+        fifo_depth = 4  # 2-col and 4-col configurations need depth=4
 
     if dev == "npu":
         if n_aie_cols == 1:

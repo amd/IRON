@@ -112,15 +112,21 @@ def my_matvec(dev, cols, M, K, m_input, m_output=None, fifo_depth=4, verbose=Fal
     # Deeper FIFOs prevent underflow/overflow conditions that cause numerical instability
 
     # P1-13 FIX: Adaptive FIFO depth for K>M and M>K stability
-    # K>M with 2 columns needs depth=4, M>K with 4 columns needs depth=8
+    # P2-2 FIX: Enhanced FIFO depth for M>K 4-col and 8-col stability
+    # Issue: +67.33% stddev (matrix_vector_mul_8192x2048_4tsi_1024tso_4col0)
+    #        +85.10% stddev (matrix_vector_mul_8192x2048_4tsi_1024tso_8col0)
+    # Source: matrixvectormul.txt benchmark file (897d04e vs 84d3478)
+    # Depth=8 for 2-col K>M cases (increased from 4)
+    # Depth=16 for 4+-col M>K cases (increased from 8)
+    # Depth=8 for 8-col configs (increased from 4)
     num_aie_columns = cols
     fifodepth = (
-        4
+        8
         if (num_aie_columns == 2 and K > M)
         else (
-            8
+            16
             if (num_aie_columns >= 4 and M > K)
-            else (4 if num_aie_columns >= 8 else fifo_depth)
+            else (8 if num_aie_columns >= 8 else fifo_depth)
         )
     )
 
