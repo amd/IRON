@@ -30,7 +30,6 @@ import numpy as np
 from iron.generation.kv_manager import KVCacheManager, SequenceInfo
 from iron.models.llama32.config import Llama32Config
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================

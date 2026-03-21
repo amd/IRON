@@ -32,7 +32,6 @@ from iron.models.llama32.config import Llama32Config
 from iron.models.llama32.weights import LlamaWeights, TransformerWeights
 from iron.api.generation_config import GenerationConfig
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================

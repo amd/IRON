@@ -30,7 +30,6 @@ from typing import Dict, Any
 from iron.models.llama32.config import Llama32Config
 from iron.models.registry import ModelRegistry
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================

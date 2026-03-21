@@ -15,7 +15,10 @@ AIE_TOOLCHAIN_AVAILABLE = False
 AIE_TOOLCHAIN_ERROR = None
 try:
     from iron.common import AIEContext
-    from iron.common.aie_device_manager import AIE_TOOLCHAIN_AVAILABLE as TOOLCHAIN_AVAILABLE
+    from iron.common.aie_device_manager import (
+        AIE_TOOLCHAIN_AVAILABLE as TOOLCHAIN_AVAILABLE,
+    )
+
     AIE_TOOLCHAIN_AVAILABLE = TOOLCHAIN_AVAILABLE
 except ImportError as e:
     AIE_TOOLCHAIN_ERROR = str(e)
@@ -24,7 +27,7 @@ except ImportError as e:
 # Skip marker for hardware-dependent tests
 skip_if_no_aie = pytest.mark.skipif(
     not AIE_TOOLCHAIN_AVAILABLE,
-    reason=f"AIE toolchain not available: {AIE_TOOLCHAIN_ERROR}"
+    reason=f"AIE toolchain not available: {AIE_TOOLCHAIN_ERROR}",
 )
 
 
@@ -36,7 +39,9 @@ def aie_context(request):
     toolchain is not available (Windows or Linux without NPU hardware).
     """
     if not AIE_TOOLCHAIN_AVAILABLE:
-        raise pytest.skip("AIE toolchain not available - requires Linux with AMD XRT drivers and NPU hardware")
+        raise pytest.skip(
+            "AIE toolchain not available - requires Linux with AMD XRT drivers and NPU hardware"
+        )
     verbose_mlir = request.config.option.verbose > 0
     return AIEContext(mlir_verbose=verbose_mlir)
 
@@ -173,7 +178,8 @@ def pytest_configure(config):
         "markers", "metrics(**patterns): specify metric patterns for this test"
     )
     config.addinivalue_line(
-        "markers", "skip_if_no_aie: skip test if AIE toolchain is not available (Linux NPU hardware required)"
+        "markers",
+        "skip_if_no_aie: skip test if AIE toolchain is not available (Linux NPU hardware required)",
     )
 
 

@@ -27,6 +27,7 @@ try:
     from aie.utils import DefaultNPURuntime
     from aie.utils.npukernel import NPUKernel
     from aie.iron.device import NPU1, NPU2
+
     AIE_TOOLCHAIN_AVAILABLE = True
 except ImportError:
     AIE_TOOLCHAIN_AVAILABLE = False

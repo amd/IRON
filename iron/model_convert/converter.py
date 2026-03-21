@@ -60,7 +60,6 @@ from .gap_analyzer import (
 )
 from .architecture_scanner import ArchitectureScanner
 
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

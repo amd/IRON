@@ -38,14 +38,17 @@ import subprocess
 import importlib.util
 from contextlib import nullcontext
 
+
 # Lazy import - only available on Linux with AIE toolchain
 def _get_mlir_mod_ctx():
     """Get mlir_mod_ctx from aie.extras.context (Linux AIE toolchain only)"""
     try:
         from aie.extras.context import mlir_mod_ctx
+
         return mlir_mod_ctx
     except ImportError:
         return None
+
 
 # Compilation Artifacts
 # --------------------------------------------------------------------------

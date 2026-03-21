@@ -162,7 +162,6 @@ from iron.model_analysis.transformers_integration import (
     ARCHITECTURE_MODULE_MAP,
 )
 
-
 __version__ = "0.1.0"
 
 __all__ = [

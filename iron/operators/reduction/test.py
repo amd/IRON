@@ -146,6 +146,5 @@ def test_reduction_forward(
 # Import torch at module level (after pytest imports)
 import torch
 
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

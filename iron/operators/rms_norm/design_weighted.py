@@ -44,10 +44,18 @@ def my_weighted_rms_norm(
     # Depth=2 for 2-col/2-ch or large tiles (>=1024)
     # Depth=1 baseline
     fifodepth = (
-        5 if num_columns >= 8 else
-        (4 if num_channels == 2 and num_columns == 1 else
-         (3 if num_columns >= 4 and num_channels == 2 else
-          (2 if num_channels == 2 or weight_length >= 1024 else 1))))
+        5
+        if num_columns >= 8
+        else (
+            4
+            if num_channels == 2 and num_columns == 1
+            else (
+                3
+                if num_columns >= 4 and num_channels == 2
+                else (2 if num_channels == 2 or weight_length >= 1024 else 1)
+            )
+        )
+    )
 
     # AIE-array data movement with object fifos
     of_in1s = [

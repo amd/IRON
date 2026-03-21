@@ -35,7 +35,6 @@ from iron.generation.stop_conditions import (
 )
 from iron.api.generation_config import GenerationConfig
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================

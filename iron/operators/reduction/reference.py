@@ -10,7 +10,6 @@ Supports: sum, mean, max, min along specified dimensions
 import torch
 from typing import Literal
 
-
 ReductionOp = Literal["sum", "mean", "max", "min"]
 
 

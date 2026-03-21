@@ -24,7 +24,6 @@ import logging
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -96,7 +96,6 @@ from .generate_master_doc import (
     get_operator_base_class,
 )
 
-
 # Convenience functions
 
 

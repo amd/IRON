@@ -18,6 +18,7 @@ pyxrt = None
 
 try:
     import aie.utils.config
+
     aie_utils_config = aie.utils.config
 except ImportError:
     pass
