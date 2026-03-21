@@ -53,12 +53,12 @@ from .layer_builder import (
     create_transformer_block,
 )
 from .model_assembler import ModelAssembler, ModelAssemblyConfig, create_model
-from .gap_analyzer import (
+from iron.model_analysis.gap_analyzer import (
     GapAnalyzer,
     generate_gap_report,
     quick_check as quick_compatibility_check,
 )
-from .architecture_scanner import ArchitectureScanner
+from iron.model_analysis.architecture_scanner import ArchitectureScanner
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

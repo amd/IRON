@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional, Dict, Any, Tuple
+from scipy.special import softmax
 
 import numpy as np
 
@@ -235,7 +236,7 @@ class TokenSampler:
         sorted_logits = logits[sorted_indices]
 
         # Convert to probabilities
-        probs = np.softmax(sorted_logits)
+        probs = softmax(sorted_logits)
 
         # Calculate cumulative probabilities
         cumulative_probs = np.cumsum(probs)

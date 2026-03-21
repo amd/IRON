@@ -75,7 +75,7 @@ class GenerationResult:
     is_eos: bool = False
     stop_reason: Optional[str] = None
     position: int = 0
-    logprobs: Optional[Dict[int, float]] = field(default_factory=None)
+    logprobs: Optional[Dict[int, float]] = field(default_factory=dict)
 
     def __str__(self) -> str:
         """Get human-readable string representation."""
@@ -830,13 +830,18 @@ class GenerationLoop:
         logger.info(f"Generation complete: {generated_count} tokens generated")
 
     def generate_batch(
-        self, prompts: List[List[int]], tokenizer: Optional[Any] = None
+        self,
+        prompts: List[List[int]],
+        tokenizer: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ) -> Iterator[Tuple[int, GenerationResult]]:
         """Generate for multiple prompts concurrently.
 
         Args:
             prompts: List of tokenized prompts
             tokenizer: Optional tokenizer for decoding
+            max_tokens: Maximum tokens to generate per prompt. If None,
+                uses generation_config.max_tokens.
 
         Yields:
             Tuple of (prompt_index, GenerationResult)
@@ -848,8 +853,9 @@ class GenerationLoop:
         """
         # Simple sequential implementation
         # A full implementation would use batched operations
+        max_tokens = max_tokens or self.generation_config.max_tokens
         for idx, prompt in enumerate(prompts):
-            for result in self.generate(prompt, tokenizer=tokenizer):
+            for result in self.generate(prompt, tokenizer=tokenizer, max_tokens=max_tokens):
                 yield (idx, result)
 
     def get_kv_cache_stats(self) -> Dict[str, Any]:

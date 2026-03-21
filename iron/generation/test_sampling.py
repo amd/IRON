@@ -24,6 +24,7 @@ TEST CATEGORIES:
 from __future__ import annotations
 
 import pytest
+from scipy.special import softmax
 import numpy as np
 
 from iron.generation.sampling import (
@@ -142,8 +143,8 @@ class TestTemperature:
         sampler_high = TokenSampler(temperature=2.0)
 
         # Get probabilities
-        probs_low = np.softmax(sampler_low.apply_temperature(sample_logits))
-        probs_high = np.softmax(sampler_high.apply_temperature(sample_logits))
+        probs_low = softmax(sampler_low.apply_temperature(sample_logits))
+        probs_high = softmax(sampler_high.apply_temperature(sample_logits))
 
         # High temp should have lower max probability (flatter)
         assert probs_low.max() > probs_high.max()
