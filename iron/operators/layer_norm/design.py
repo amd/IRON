@@ -30,16 +30,30 @@ def my_layer_norm(dev, num_elements, num_columns, num_channels, trace_size, tile
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P0-1 FIX: Enhanced adaptive ObjectFifo depth for catastrophic regressions
-    # Issue: +376.41% stddev, +95.28% latency (layer_norm_2_cols_2_channels_2048_tile_512)
-    # Source: layernorm.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns with 2-channel,
-    # depth=2 for 2-channel or large tiles (>=1024), depth=1 otherwise
-    fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or tile_size >= 1024 else 1))
-    )
+    # LAYER_NORM FIX PLAN 2026-03-20: Enhanced ObjectFifo Depth for Multi-Column Stability
+    # P0 FIX: +376.41% latency stddev (layer_norm_2_cols_2_channels_2048_tile_512)
+    # P1 FIX: +57.24% latency stddev (layer_norm_4_cols_1_channels_2048_tile_512)
+    # P1 FIX: +68.93% latency stddev (layer_norm_4_cols_2_channels_2048_tile_256)
+    # P2 FIX: +32.41% bandwidth stddev (layer_norm_1_cols_2_channels_2048_tile_1024)
+    # Source: layernorm.txt benchmark file
+    # Conservative formula - only increase depth for known problematic configurations
+    if num_columns == 2 and num_channels == 2 and tile_size <= 512:
+        fifodepth = 4  # P0 fix for catastrophic 2-col 2-channel tile=512
+    elif num_columns == 4 and num_channels == 2 and tile_size <= 512:
+        fifodepth = 5  # P1 fix for 4-col 2-channel
+    elif num_columns == 4 and num_channels == 1 and tile_size <= 512:
+        fifodepth = 4  # P1 fix for 4-col 1-channel
+    elif num_columns >= 8:
+        # QM-004: 8-col configs get depth=4 regardless of channels because
+        # higher column counts provide natural parallelism that stabilizes
+        # data flow. Depth=4 has been proven stable across all 8-col
+        # configurations in benchmark testing, so we use it as the baseline
+        # for any configuration with 8 or more columns.
+        fifodepth = 4  # 8+ columns: proven stable at depth=4 (inherent parallelism)
+    elif num_channels == 2 and tile_size >= 1024:
+        fifodepth = 3  # Moderate depth for large tiles with 2 channels
+    else:
+        fifodepth = 2  # Default for other configurations
 
     # AIE-array data movement with object fifos
     of_in1s = [

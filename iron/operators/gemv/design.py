@@ -111,24 +111,53 @@ def my_matvec(dev, cols, M, K, m_input, m_output=None, fifo_depth=4, verbose=Fal
     # P0 FIX: Increased FIFO depths from (2,1,2) to 4 for all fifos to address swiglu_decode +3298% stddev instability
     # Deeper FIFOs prevent underflow/overflow conditions that cause numerical instability
 
-    # P1-13 FIX: Adaptive FIFO depth for K>M and M>K stability
-    # P2-2 FIX: Enhanced FIFO depth for M>K 4-col and 8-col stability
-    # Issue: +67.33% stddev (matrix_vector_mul_8192x2048_4tsi_1024tso_4col0)
-    #        +85.10% stddev (matrix_vector_mul_8192x2048_4tsi_1024tso_8col0)
-    # Source: matrixvectormul.txt benchmark file (897d04e vs 84d3478)
-    # Depth=8 for 2-col K>M cases (increased from 4)
-    # Depth=16 for 4+-col M>K cases (increased from 8)
-    # Depth=8 for 8-col configs (increased from 4)
+    # ========================================================================
+    # P0 FIX: Enhanced ObjectFifo depth calculation for GEMV stability
+    # ========================================================================
+    # Addresses critical stddev regressions identified in GEMV-FIX-PLAN.md:
+    #
+    # P0-CRITICAL (stddev >100%):
+    #   - matrix_vector_mul_8192x2048_4_4col0: +736.13% stddev (depth=24)
+    #   - matrix_vector_mul_2048x8192_1_8col: +367.72% stddev (depth=12)
+    #   - matrix_vector_mul_2048x8192_1_1col: +153.19% stddev (depth=8)
+    #
+    # P1-HIGH (stddev 50-100%):
+    #   - matrix_vector_mul_8192x2048_4tsi_1024tso_8col0: +85.10% stddev
+    #   - matrix_vector_mul_8192x2048_4tsi_1024tso_4col0: +67.33% stddev
+    #   - matrix_vector_mul_2048x8192_1_8col0: +66.58% stddev
+    #
+    # P2-MEDIUM (stddev 15-50% or BW issues):
+    #   - matrix_vector_mul_128x128_32_1col: +35.23% stddev
+    #   - matrix_vector_mul_2048x8192_1tsi_2048tso_1col0: +32.55% stddev
+    #   - matrix_vector_mul_8192x2048_4tsi_1024tso_2col0: -5.45% BW
+    #   - matrix_vector_mul_128x128_32tsi_128tso_1col0: +15.13% stddev
+    #
+    # Reference: docs/GEMV-FIX-PLAN.md, gemv.txt benchmark file
+    # Expected: Reduce +736% stddev to <20% for all critical configurations
+    # ========================================================================
     num_aie_columns = cols
-    fifodepth = (
-        8
-        if (num_aie_columns == 2 and K > M)
-        else (
-            16
-            if (num_aie_columns >= 4 and M > K)
-            else (8 if num_aie_columns >= 8 else fifo_depth)
-        )
-    )
+
+    # P0 FIX: 4-col M>K 8192x2048 needs maximum depth (was +736.13% stddev)
+    if num_aie_columns == 4 and M > K and M >= 8192:
+        fifodepth = 24
+    # P0 FIX: 8-col K>M 2048x8192 needs increased depth (was +367.72% stddev)
+    elif num_aie_columns == 8 and K > M:
+        fifodepth = 12
+    # P0 FIX: 1-col large configs need moderate depth (was +153.19% stddev)
+    elif num_aie_columns == 1 and max(M, K) >= 2048:
+        fifodepth = 8
+    # P1 FIX: Other 4+-col M>K configs (was +67-85% stddev)
+    elif num_aie_columns >= 4 and M > K:
+        fifodepth = 16
+    # P2 FIX: 2-col K>M bandwidth regression (was -5.45% BW)
+    elif num_aie_columns == 2 and K > M:
+        fifodepth = 8
+    # P1 FIX: 8-col general configurations
+    elif num_aie_columns >= 8:
+        fifodepth = 8
+    # Default: ensure minimum depth of 4
+    else:
+        fifodepth = max(4, fifo_depth)
 
     A_L3L1_fifos = [
         ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=fifodepth) for i in range(cols)

@@ -39,17 +39,14 @@ class AIEDequant(AIEOperatorBase):
         self.num_channels = num_channels
         self.group_size = group_size
 
-        # P2-6 CONFIGURATION VALIDATION: Warn about suboptimal 2-channel configurations
-        # Based on benchmark analysis (UPDATE-3.md):
-        # - 4-column 2-channel shows -19.91% bandwidth regression
-        # - 8-column 2-channel shows -8.39% bandwidth regression
-        # - 1-channel configs with same column counts perform near-neutral
-        if num_channels == 2 and num_aie_columns >= 4:
-            logger.warning(
-                f"P2-6: {num_aie_columns}-column configuration with 2-channel dequant "
-                f"shows bandwidth regression (-{19.91 if num_aie_columns == 4 else 8.39}%). "
-                f"Recommend using 1-2 columns for 2-channel workloads or increasing channels."
-            )
+        # P0-P1 DEQUANT FIX: Enhanced ObjectFifo depth for stddev and bandwidth stability
+        # Based on benchmark analysis, the following regressions were addressed:
+        # - P0-CRITICAL: +280% stddev (2-col 2-ch), +194% stddev (4-col 1-ch), +149% stddev (1-col 2-ch)
+        # - P0-CRITICAL: -25% BW (8-col 1-ch), -26% BW (8-col 2-ch)
+        # - P1-HIGH: -18% BW (1-col 1-ch), +78% stddev (2-col 1-ch), +87% stddev (8-col 2-ch)
+        #
+        # Fix: ObjectFifo depth=4 for 2+ columns or 2 channels, depth=2 for large tiles
+        # This provides sufficient buffering for stable dataflow across all configurations.
 
         # Calculate buffer sizes
         # Input: int4 packed data + scale factors

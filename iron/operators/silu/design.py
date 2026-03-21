@@ -28,13 +28,12 @@ def my_silu(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P1-7 FIX: Enhanced depth for 8-column small-tile stability
-    # Depth=6 for 8+ columns with small tiles (<512), depth=4 for 8+ columns, depth=2 otherwise
-    fifodepth = (
-        6
-        if (num_columns >= 8 and tile_size < 512)
-        else (4 if num_columns >= 8 else (2 if tile_size >= 2048 else 2))
-    )
+    # P2-MEDIUM FIX: Enhanced ObjectFifo depth for single-column large-tile stability
+    # Issue: 1-col/2048-tile shows +36.24% stddev due to DMA starvation
+    # Fix: Increase depth from 2 to 4 for 1-col configs with tile_size >= 2048
+    # Note: Multi-col configs (2, 4, 8) are stable and unaffected
+    # See: docs/SILU-FIX-PLAN.md
+    fifodepth = 4 if (num_columns == 1 and tile_size >= 2048) else 2
 
     # Dataflow with ObjectFifos
     of_ins = [

@@ -33,14 +33,34 @@ def my_axpy(
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P1-10 FIX: Explicit ObjectFifo depth calculation for 2-channel stability
-    # Depth=4 for 8+ columns, depth=3 for 4-col 2-ch, depth=2 for 2-channel configs, depth=1 for large tiles (>4096)
-    # P1-HIGH FIX: 4-col 2-ch -10.91% bandwidth regression (axpy_4_cols_2_channels_2048_tile_512_3.0_0)
-    fifodepth = (
-        4
-        if num_columns >= 8
-        else (3 if num_columns >= 4 and num_channels == 2 else (2 if num_channels == 2 else (1 if tile_size > 4096 else 2)))
-    )
+    # =====================================================================
+    # AXPY FIX PLAN 2026-03-20: ObjectFifo Depth Optimization
+    # =====================================================================
+    # Root Cause: Insufficient ObjectFifo depth causing DMA contention
+    # when multiple columns/channels compete for bandwidth.
+    #
+    # Benchmark Regressions Addressed:
+    # - P0-CRITICAL: axpy_2_cols_2_channels_2048_tile_1024_3.0 (-26.77% BW)
+    #   Fix: depth 2 -> 4
+    # - P1-HIGH: axpy_8_cols_2_channels_2048_tile_256_3.0 (-16.19% BW, +34.76% stddev)
+    #   Fix: depth 4 -> 6
+    # - P1-STABILITY: _0 variants with stddev explosions (+18% to +122%)
+    #   Fix: Consistent depth formula across all configs
+    # - P2-MEDIUM: axpy_4_cols_2_channels_2048_tile_512_3.0 (-10.21% BW)
+    #   Fix: depth 3 -> 5
+    # - P3-LOW: axpy_1_cols_2_channels_2048_tile_2048_3.0 (-1.96% BW)
+    #   Fix: depth 2 -> 3
+    #
+    # Formula: base_depth + column_factor + channel_factor
+    # - base_depth = 2 (minimum for pipelining)
+    # - column_factor = num_columns // 2 (+1 per 2 columns)
+    # - channel_factor = num_channels - 1 (+1 for 2 channels)
+    # - Clamped to range [2, 8]
+    # =====================================================================
+    base_depth = 2
+    column_factor = num_columns // 2
+    channel_factor = num_channels - 1
+    fifodepth = max(2, min(8, base_depth + column_factor + channel_factor))
 
     # AIE-array data movement with object fifos (one per column, not per channel)
     of_in1s = [
@@ -106,7 +126,18 @@ def my_axpy(
     with rt.sequence(tensor_ty, tensor_ty, tensor_ty) as (A, B, C):
         rt.start(*my_workers)
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+        # =================================================================
+        # Task Group Synchronization (AXPY FIX PLAN 2026-03-20)
+        # -----------------------------------------------------------------
+        # All fills and drains execute in parallel within the task group.
+        # wait=True on drains ensures data is fully transferred before
+        # task_group completion, preventing race conditions.
+        #
+        # NOTE: Previous analysis suggested wait=False might reduce
+        # serialization overhead, but this would risk data races when
+        # columns complete at different rates. The ObjectFifo depth
+        # increase (above) is the correct fix for throughput issues.
+        # =================================================================
         tg = rt.task_group()
 
         # Fill the input objectFIFOs with data
@@ -124,12 +155,13 @@ def my_axpy(
                 task_group=tg,
             )
         # Drain the output objectFIFOs with data
+        # wait=True: Block until transfer completes and data is available in C
         for i in range(num_columns):
             rt.drain(
                 of_outs[i].cons(),
                 C,
                 taps[i],
-                wait=True,  # wait for the transfer to complete and data to be available
+                wait=True,
                 task_group=tg,
             )
         rt.finish_task_group(tg)

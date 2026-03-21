@@ -26,6 +26,7 @@ class AIERope(AIEOperatorBase):
         cols: int,
         angle_rows=None,
         num_aie_columns=None,
+        num_channels=1,
         method_type=0,
         context=None,
     ):
@@ -38,6 +39,7 @@ class AIERope(AIEOperatorBase):
         self.cols = cols
         self.angle_rows = angle_rows
         self.num_aie_columns = num_aie_columns
+        self.num_channels = num_channels
         self.method_type = method_type
         assert method_type in {0, 1}
 
@@ -62,6 +64,7 @@ class AIERope(AIEOperatorBase):
                 self.cols,
                 self.angle_rows,
                 self.num_aie_columns,
+                self.num_channels,
                 0,
                 self.method_type,
             ],

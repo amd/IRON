@@ -13,12 +13,21 @@
 #include <aie_api/aie.hpp>
 
 extern "C" {
+// AXPY FIX PLAN 2026-03-20: Kernel optimization for small tile sizes
+// Addresses: axpy_8_cols_2_channels_2048_tile_256_3.0 (-16.19% bandwidth)
+// The fixed vector size of 64 is optimal for AIE architecture.
+// Added loop unroll hint to reduce loop overhead for small tiles (256 elements = 4 iterations)
 void saxpy(bfloat16 *restrict x, bfloat16 *restrict y, const float a, bfloat16 *restrict z, const int32_t vector_size)
 {
     event0();
     ::aie::vector<bfloat16, 64> a_v =
         ::aie::broadcast<bfloat16, 64>(aie::to_float<bfloat16>(a, 0)); // Convert to bfloat16
-                                                                       // #pragma clang loop min_iteration_count(4)
+// Loop unroll hint: reduces overhead for small tile sizes
+// For tile_size=256: 4 iterations (fully unrolled by compiler hint)
+// For tile_size=512: 8 iterations
+// For tile_size=1024: 16 iterations
+// For tile_size=2048: 32 iterations
+#pragma clang loop unroll_count(4)
     for (int i = 0; i < vector_size; i += 64) {
         ::aie::vector<bfloat16, 64> x_v = ::aie::load_v<64>(x);
         x += 64;

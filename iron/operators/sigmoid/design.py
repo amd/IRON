@@ -28,15 +28,34 @@ def my_sigmoid(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P0-8 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
-    # Issue: -22.31% bandwidth (sigmoid_1_cols_1_channels_2048_tile_2048)
-    # Source: sigmoid.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for tile>=1024
-    fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or tile_size >= 1024 else 1))
-    )
+    # SIGMOID-P0 FIX: Enhanced ObjectFifo depth calculation for stability
+    # Addresses P0-CRITICAL regression:
+    #   - sigmoid_8_cols_1_channels_2048_tile_256: +121.05% latency stddev, +51.46% max
+    # Addresses P1-HIGH regressions:
+    #   - sigmoid_4_cols_1_channels_2048_tile_512: -14.54% to -27.16% BW, +58.66% stddev
+    #   - sigmoid_2_cols_1_channels_2048_tile_1024: +67.80% latency stddev
+    # Addresses P2-MEDIUM regression:
+    #   - sigmoid_1_cols_1_channels_2048_tile_2048: -22.31% to -13.53% bandwidth
+    #
+    # Depth selection based on column count (primary) and tile size (secondary)
+    # See: docs/SIGMOID-FIX-PLAN.md for full analysis
+
+    base_depth = 2
+
+    # P0: 8-column catastrophic stddev
+    if num_columns >= 8:
+        fifodepth = 6
+    # P1: 4-col BW + stddev
+    elif num_columns >= 4:
+        fifodepth = 5
+    # P1: 2-col stddev explosion
+    elif num_columns >= 2:
+        fifodepth = 4
+    # P2: 1-col large tile BW
+    elif tile_size >= 2048:
+        fifodepth = 3
+    else:
+        fifodepth = 2  # baseline
 
     # Dataflow with ObjectFifos
     of_ins = [

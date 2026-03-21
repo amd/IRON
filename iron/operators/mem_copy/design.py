@@ -167,23 +167,91 @@ def create_partial_workload_config(
 #
 
 
-def my_mem_copy(dev, size, num_cores, num_channels, bypass, tile_size, trace_size):
+def calculate_mem_copy_depth(num_cores, num_channels, tile_size, is_transpose):
+    """
+    Calculate ObjectFIFO depth for MEM_COPY operator.
+
+    This enhanced depth formula addresses P0-CRITICAL and P1-HIGH regressions
+    by accounting for channel contention, core parallelism, tile size effects,
+    and transpose mode timing patterns.
+
+    Args:
+        num_cores: Number of AIE compute cores to utilize
+        num_channels: Number of DMA channels (1 or 2)
+        tile_size: Size of each transfer tile in elements
+        is_transpose: Whether transpose mode is enabled
+
+    Returns:
+        ObjectFIFO depth value clamped to [2, 16]
+    """
+    base_depth = 2
+
+    # Channel factor: 2-channel configs need more buffering
+    channel_factor = 1 if num_channels == 2 else 0
+
+    # Core factor: scales with core count
+    if num_cores >= 8:
+        core_factor = 4
+    elif num_cores >= 4:
+        core_factor = 2
+    elif num_cores >= 2:
+        core_factor = 1
+    else:
+        core_factor = 0
+
+    # Tile size factor: smaller tiles need more buffering
+    # Also large tiles (>=2048) need extra buffering for DMA burst stability
+    if tile_size <= 256:
+        tile_factor = 3
+    elif tile_size <= 512:
+        tile_factor = 2
+    elif tile_size <= 1024:
+        tile_factor = 1
+    elif tile_size >= 2048:
+        tile_factor = 1  # P2 fix: -16.99% BW for 1c/1ch/2048
+    else:
+        tile_factor = 0
+
+    # Transpose factor: non-transpose (False) mode has alignment overhead
+    transpose_factor = 1 if not is_transpose else 0
+
+    # Interaction multiplier for 2-channel + multi-core
+    interaction = 0
+    if num_channels == 2 and num_cores >= 2:
+        if num_cores >= 8:
+            interaction = 3
+        elif num_cores >= 4:
+            interaction = 2
+        else:
+            interaction = 1
+
+    depth = (
+        base_depth
+        + channel_factor
+        + core_factor
+        + tile_factor
+        + transpose_factor
+        + interaction
+    )
+    return max(2, min(16, depth))
+
+
+def my_mem_copy(
+    dev, size, num_cores, num_channels, bypass, tile_size, trace_size, transpose=True
+):
     # --------------------------------------------------------------------------
     # Configuration
     # --------------------------------------------------------------------------
     xfr_dtype = bfloat16
     line_size = 8192 if tile_size > 8192 else tile_size
-    # P1-5 FIX: Enhanced depth for 8-core 2-channel small-tile triple regression
-    # Issue: -17.85% bw, +47.18% lat, +106.34% stddev (mem_copy_8_cores_2_chans_2048_tile_256_False0)
-    # Source: memcopy.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ cores OR 4+ cores with 2-ch small tile (<512)
-    # Depth=3 for 4+ cores OR 2-ch with large tile (>=2048)
-    # Depth=2 otherwise
-    fifodepth = (
-        4
-        if (num_cores >= 8 or (num_cores >= 4 and num_channels == 2 and line_size < 512))
-        else (3 if (num_cores >= 4 or (num_channels == 2 and line_size >= 2048)) else 2)
-    )
+    # MEM_COPY-FIX-PLAN v1.0: Enhanced ObjectFIFO depth calculation
+    # Addresses P0-CRITICAL regressions:
+    #   - mem_copy_2_cores_2_chans_2048_tile_1024_False0: +375.75% latency stddev
+    #   - mem_copy_8_cores_2_chans_2048_tile_256_False0: +106.34% latency stddev
+    # Addresses P2-MEDIUM regression:
+    #   - mem_copy_1_cores_1_chans_2048_tile_2048: -16.99% bandwidth
+    # Formula: base(2) + channel(0-1) + core(0-4) + tile(0-3) + transpose(0-1) + interaction(0-3)
+    fifodepth = calculate_mem_copy_depth(num_cores, num_channels, line_size, transpose)
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 
@@ -462,6 +530,14 @@ if __name__ == "__main__":
     p.add_argument(
         "-t", "--trace-size", required=True, dest="trace_size", help="Trace size"
     )
+    # Transpose mode - defaults to True for backward compatibility
+    p.add_argument(
+        "--transpose",
+        required=False,
+        dest="transpose",
+        default="True",
+        help="Transpose mode enabled (True/False)",
+    )
     p.add_argument(
         "--output-file-path",
         "-o",
@@ -497,10 +573,12 @@ if __name__ == "__main__":
     ## It is converted to a boolean value
     bypass = str(opts.bypass).lower() in ("yes", "true", "t", "1")
     trace_size = opts.trace_size
+    # Transpose mode - convert to boolean
+    transpose = str(opts.transpose).lower() in ("yes", "true", "t", "1", "true")
     # Call the my_mem_copy function with the parsed arguments
     # and print the MLIR as a result
     module = my_mem_copy(
-        dev, length, num_cores, channels, bypass, tile_size, trace_size
+        dev, length, num_cores, channels, bypass, tile_size, trace_size, transpose
     )
 
     output_file_path = Path(opts.output_file_path)

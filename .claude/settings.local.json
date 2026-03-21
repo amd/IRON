@@ -24,7 +24,16 @@
       "Bash(black:*)",
       "Bash(clang-format:*)",
       "Bash(unix2dos:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(sort:*)",
+      "Bash(git show:*)",
+      "Bash(git diff-tree:*)",
+      "Bash(git -C \"/c/Users/antmi/IRON\" show 6bdf735 --stat)",
+      "Bash(git -C \"/c/Users/antmi/IRON\" diff iron/operators/gelu/design.py)",
+      "Bash(flake8:*)"
     ]
   }
 }

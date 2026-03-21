@@ -35,6 +35,7 @@ def rope(
     cols,
     angle_rows=None,
     num_aie_columns=1,
+    num_channels=1,
     trace_size=0,
     method_type=None,
 ):
@@ -62,17 +63,42 @@ def rope(
     tensor_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
     angle_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
 
-    # P1-4 FIX: Enhanced depth for 8-arrow small-col bandwidth/stability regression
-    # Issue: -18.65% bw, +61.64% stddev (rope_8c_32rows_512cols_8arows_0m)
-    # Source: rope.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ angle rows OR cols>=2048 OR 4+ angle rows with small cols (<512)
-    # Depth=3 for 2+ angle rows OR cols>=1024
-    # Depth=2 otherwise
-    fifodepth = (
-        4
-        if (angle_rows >= 8 or cols >= 2048 or (angle_rows >= 4 and cols < 512))
-        else (3 if (angle_rows >= 2 or cols >= 1024) else 2)
-    )
+    # ROPE-P1 FIX: Enhanced ObjectFifo depth calculation for stability
+    # Addresses P1-HIGH regressions:
+    #   - rope_4_cols_2_channels_4096_tile_1024_0: +60.67% latency stddev
+    #   - rope_8c_32rows_512cols_8arows_0m: -18.65% BW, +61.64% stddev
+    #   - rope_1_cols_2_channels_4096_tile_4096_0: -21.66% bandwidth
+    # Addresses P2-MEDIUM regressions:
+    #   - rope_2_cols_2_channels_4096_tile_2048_0: +35.73% latency stddev
+    #   - rope_2c_32rows_512cols_32arows_0m: +39.90% latency stddev
+    #   - rope_8c_32rows_512cols_32arows_0m: +35.48% latency stddev
+    # See: docs/ROPE-FIX-PLAN.md for full specification
+
+    base_depth = 2
+
+    # P1: 8-column high parallelism (blanket rule for all 8+ col configs)
+    if num_aie_columns >= 8:
+        fifodepth = 5
+    # P1: 4-col/2-ch combined parallelism + contention
+    elif num_aie_columns == 4 and num_channels == 2:
+        fifodepth = 5
+    # P1: 2-channel large tile (applies to ALL column counts)
+    elif num_channels == 2 and cols >= 2048:
+        fifodepth = 5
+    # P1: 2-channel single column (standalone rule)
+    elif num_aie_columns == 1 and num_channels == 2:
+        fifodepth = 4
+    # P2: 32 attention rows high pressure
+    elif angle_rows >= 32:
+        fifodepth = 5
+    # P2: 2-col/2-ch moderate contention
+    elif num_aie_columns == 2 and num_channels == 2:
+        fifodepth = 4
+    # P2: 8+ attention rows fallback
+    elif angle_rows >= 8:
+        fifodepth = 4
+    else:
+        fifodepth = 2  # baseline
 
     # AIE-array data movement with object fifos (one per column, not per channel)
     of_in = [

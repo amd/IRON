@@ -31,10 +31,20 @@ def my_eltwise_add(dev, num_elements, num_columns, num_channels, tile_size, trac
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
     # AIE-array data movement with object fifos (one per column, not per channel)
-    # P0 FIX: Explicit ObjectFifo depth calculation for stability
-    # Depth=4 for 8+ columns, depth=1 for large tiles (>4096), depth=2 otherwise
-    # This fixes the +56% latency regression in eltwise_add_1_cols_2_channels_2048_tile_2048
-    fifodepth = 4 if num_columns >= 8 else (1 if tile_size > 4096 else 2)
+    # P0/P1 FIX: Unified ObjectFifo depth for ELTWISE_ADD stability
+    # Issues: +292% latency stddev (4-col 2-chan tile=512), +84% bandwidth stddev (1-col 2-chan tile=2048)
+    # Source: eltwise.txt benchmark file
+    # Depth=5 for 4-col 2-channel tile<=512, depth=4 for 8-col and 1-col 2-channel large tiles
+    if num_columns == 4 and num_channels == 2 and tile_size <= 512:
+        fifodepth = 5
+    elif num_columns >= 8:
+        fifodepth = 4
+    elif num_columns == 1 and num_channels == 2 and tile_size >= 2048:
+        fifodepth = 4
+    elif num_channels == 2:
+        fifodepth = 3
+    else:
+        fifodepth = 2
 
     of_in1s = [
         ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)

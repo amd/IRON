@@ -28,19 +28,28 @@ def my_relu(dev, size, num_columns, num_channels, tile_size, trace_size):
     # Chunk size sent per DMA channel
     chunk = size // num_columns // num_channels
 
-    # P1-1 FIX: Enhanced depth for single-column large-tile bandwidth regression
-    # Issue: -19.54% bandwidth (relu_1_cols_1_channels_2048_tile_2048)
-    # Source: relu.txt benchmark file (897d04e vs 84d3478)
-    # P1-2 FIX: Enhanced depth for 4/8-col small-tile stability
-    # Issue: +132.92% stddev (relu_4_cols), +66.99% stddev (relu_8_cols)
-    # Depth=4 for 8+ cols OR single-col with tile>=2048
-    # Depth=3 for 4+ cols OR tile>=1024
-    # Depth=2 otherwise
-    fifodepth = (
-        4
-        if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048))
-        else (3 if (num_columns >= 4 or tile_size >= 1024) else 2)
-    )
+    # RELU-P1 FIX: Enhanced ObjectFifo depth for column/tile stability
+    # P1-1: relu_4_cols_1_channels_2048_tile_512 - +132.92% latency stddev fix
+    # P1-2: relu_8_cols_1_channels_2048_tile_256 - +66.99% latency stddev fix
+    # P2-1: relu_1_cols_1_channels_2048_tile_2048 - -19.54% bandwidth fix
+    # Source: docs/RELU-FIX-PLAN.md
+    #
+    # Depth selection based on column count and tile size interaction:
+    # - 8+ columns: depth=4 (maximum parallelism, high contention)
+    # - 4+ columns: depth=4 (moderate parallelism, moderate contention)
+    # - 1-col large tile (>=2048): depth=3 (single column, large transfers)
+    # - 2-col baseline: depth=2 (stable configuration)
+
+    base_depth = 2
+
+    if num_columns >= 8:
+        fifodepth = 4  # 8-col: +67% stddev fix
+    elif num_columns >= 4:
+        fifodepth = 4  # 4-col: +133% stddev P1 fix
+    elif num_columns == 1 and tile_size >= 2048:
+        fifodepth = 3  # 1-col large tile: -15% BW P2 fix
+    else:
+        fifodepth = 2  # baseline (2-col stable)
 
     # Dataflow with ObjectFifos
     of_ins = [

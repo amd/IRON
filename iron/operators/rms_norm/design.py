@@ -30,16 +30,38 @@ def my_rms_norm(dev, num_elements, num_columns, num_channels, trace_size, tile_s
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P0-3 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
-    # Issue: -28.79% bandwidth (rms_norm_4_cols_2_channels_2048_tile_256)
-    # Source: rmsnorm.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns,
-    # depth=2 for 2-channel or large tiles (>=1024), depth=1 otherwise
-    fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or tile_size >= 1024 else 1))
-    )
+    # RMS_NORM-P0 FIX: Enhanced ObjectFifo depth calculation for stability
+    # Addresses P0-CRITICAL regressions:
+    #   - rms_norm_1_cols_1_channels_2048_tile_2048: +215.25% latency stddev
+    #   - rms_norm_4_cols_2_channels_2048_tile_256: -28.79% bandwidth, +40.53% latency
+    # Addresses P1-HIGH regressions:
+    #   - rms_norm_1_cols_2_channels_2048_tile_1024: -16% to -18% bandwidth
+    #   - rms_norm_8_cols_1_channels_2048_tile_256: -15.64% bandwidth
+    # Addresses P2-MEDIUM regressions:
+    #   - rms_norm_4_cols_1_channels_2048_tile_512: -15.54% bandwidth
+    # See: docs/RMS_NORM-FIX-PLAN.md for detailed analysis
+    #
+    # Depth selection based on column/channel/tile interaction
+
+    base_depth = 2
+
+    # P0: 1-col large tile stddev explosion
+    if num_columns == 1 and num_channels == 1 and tile_size >= 2048:
+        fifodepth = 5
+    # P0: 4-col/2-ch bandwidth catastrophe
+    elif num_columns == 4 and num_channels == 2:
+        fifodepth = 5
+    # P1: 2-channel single column
+    elif num_columns == 1 and num_channels == 2:
+        fifodepth = 4
+    # P1: 8-column single channel
+    elif num_columns >= 8:
+        fifodepth = 5
+    # P2: 4-column single channel
+    elif num_columns == 4:
+        fifodepth = 3
+    else:
+        fifodepth = 2  # baseline (2-col stable)
 
     # AIE-array data movement with object fifos
     of_in1s = [

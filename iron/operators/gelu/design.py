@@ -10,7 +10,7 @@ import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import Tile, NPU1, NPU2
+from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
@@ -18,9 +18,32 @@ from aie.iron.controlflow import range_
 def my_gelu(dev, size, num_columns, num_channels, tile_size, trace_size):
     xfr_dtype = bfloat16
     line_size = 8192 if tile_size > 8192 else tile_size
-    fifodepth = 1 if line_size > 4096 else 2
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
+
+    # =====================================================================
+    # GELU FIX PLAN 2026-03-20: ObjectFifo Depth Optimization
+    # =====================================================================
+    # Root Cause: Insufficient ObjectFifo depth causing DMA contention
+    # when multiple columns/channels compete for bandwidth.
+    #
+    # Benchmark Regression Addressed:
+    # - P2-MEDIUM: gelu_4_cols_2_channels_2048_tile_256 (+65.59% latency stddev)
+    #   Previous: fifodepth = 2 (for tile_size <= 4096)
+    #   Expected: Reduce latency stddev from +65.59% to <10%
+    #
+    # Formula: base_depth + column_factor + channel_factor
+    # - base_depth = 2 (minimum for pipelining)
+    # - column_factor = num_columns // 2 (+1 per 2 columns)
+    # - channel_factor = num_channels - 1 (+1 for 2 channels)
+    # - Clamped to range [2, 8]
+    #
+    # Reference: gelu.txt benchmark file (4-col 2-channel configuration)
+    # =====================================================================
+    base_depth = 2
+    column_factor = num_columns // 2
+    channel_factor = num_channels - 1
+    fifodepth = max(2, min(8, base_depth + column_factor + channel_factor))
 
     # Calculate number of iterations per core
     total_cores = num_columns * num_channels
@@ -93,7 +116,8 @@ def my_gelu(dev, size, num_columns, num_channels, tile_size, trace_size):
     with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
         rt.start(*my_workers)
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+        # Initialize a group for parallel drain tasks,
+        # with fill resources freed when drains complete.
         tg = rt.task_group()
 
         # Fill the input objectFIFOs with data

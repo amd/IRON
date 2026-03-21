@@ -43,14 +43,28 @@ def my_dequant_kernel(
     in_tile_ty = np.ndarray[(input_tile_size,), np.dtype[in_dtype]]
     out_tile_ty = np.ndarray[(per_tile_elements,), np.dtype[out_dtype]]
 
-    # P0-5 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
-    # Issue: -26.69% bandwidth (dequant_8_cols_2_channels_2048_tile_128_0)
-    # Source: dequant.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns or 2-channel configs, depth=2 for large tiles
+    # P0-P1 DEQUANT FIX: Enhanced ObjectFifo depth for stddev and bandwidth regressions
+    #
+    # P0-CRITICAL - Stddev explosions (latency stability):
+    #   - dequant_2_cols_2_channels_2048_tile_512: +280.15% stddev -> depth=4
+    #   - dequant_4_cols_1_channels_2048_tile_512: +194.26% stddev -> depth=4
+    #   - dequant_1_cols_2_channels_2048_tile_1024_0: +149.23% stddev -> depth=4
+    #
+    # P0-CRITICAL - Bandwidth regressions:
+    #   - dequant_8_cols_1_channels_2048_tile_256_0: -25.19% BW -> depth=4
+    #   - dequant_8_cols_2_channels_2048_tile_128_0: -26.69% BW -> depth=4
+    #
+    # P1-HIGH:
+    #   - dequant_1_cols_1_channels_2048_tile_2048: -18.83% BW -> depth=2
+    #   - dequant_2_cols_1_channels_2048_tile_1024: +78.52% stddev -> depth=4
+    #   - dequant_8_cols_2_channels_2048_tile_128: +87.19% stddev -> depth=4
+    #
+    # FIFO Depth Formula:
+    #   - depth=4: 2+ columns OR 2 channels (covers all multi-col and 2-ch stddev issues)
+    #   - depth=2: 1-column with large tiles >=1024 (bandwidth stability)
+    #   - depth=1: 1-column with small tiles (minimal buffering needed)
     fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or tile_size >= 1024 else 1))
+        4 if num_columns >= 2 or num_channels == 2 else (2 if tile_size >= 1024 else 1)
     )
     enable_trace = 1 if trace_size > 0 else None
 

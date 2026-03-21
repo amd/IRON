@@ -29,18 +29,22 @@ def my_eltwise_mul(dev, num_elements, num_columns, num_channels, tile_size, trac
     tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P0-7 FIX: Enhanced adaptive ObjectFifo depth for triple regression
-    # Issue: -17.76% bw, +50.50% lat, +108.60% stddev (eltwise_mul_4_cols_2_channels_2048_tile_512)
-    # Source: eltwise.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns with 2-channel,
-    # depth=2 for 2-channel or tile>=512
-    fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or tile_size >= 1024 else 1))
-    )
-
     # AIE-array data movement with object fifos (one per column, not per channel)
+    # P0 FIX: Unified ObjectFifo depth for ELTWISE_MUL stability
+    # Issues: +108% latency stddev (4-col 2-chan tile=512), +195% latency stddev (1-col 2-chan tile=2048)
+    # Source: eltwise.txt benchmark file
+    # Depth=5 for 4-col 2-channel tile<=512, depth=4 for 8-col and 1-col 2-channel large tiles
+    if num_columns == 4 and num_channels == 2 and tile_size <= 512:
+        fifodepth = 5
+    elif num_columns >= 8:
+        fifodepth = 4
+    elif num_columns == 1 and num_channels == 2 and tile_size >= 2048:
+        fifodepth = 4
+    elif num_channels == 2:
+        fifodepth = 3
+    else:
+        fifodepth = 2
+
     of_in1s = [
         ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)
         for i in range(num_columns)
