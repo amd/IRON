@@ -55,17 +55,36 @@ def my_dequant_kernel(
     #   - dequant_8_cols_2_channels_2048_tile_128_0: -26.69% BW -> depth=4
     #
     # P1-HIGH:
-    #   - dequant_1_cols_1_channels_2048_tile_2048: -18.83% BW -> depth=2
+    #   - dequant_1_cols_1_channels_2048_tile_2048: -18.83% BW -> depth=2+tile_factor
     #   - dequant_2_cols_1_channels_2048_tile_1024: +78.52% stddev -> depth=4
     #   - dequant_8_cols_2_channels_2048_tile_128: +87.19% stddev -> depth=4
     #
-    # FIFO Depth Formula:
-    #   - depth=4: 2+ columns OR 2 channels (covers all multi-col and 2-ch stddev issues)
-    #   - depth=2: 1-column with large tiles >=1024 (bandwidth stability)
-    #   - depth=1: 1-column with small tiles (minimal buffering needed)
-    fifodepth = (
-        4 if num_columns >= 2 or num_channels == 2 else (2 if tile_size >= 1024 else 1)
-    )
+    # FIFO Depth Formula (UPDATED with tile_size_factor):
+    #   Base depth: 4 for 2+ columns OR 2 channels (stability)
+    #   For 1-column/1-channel: Use tile_size_factor for DMA pre-fetch optimization
+    #   - tile_size <= 256: factor = 3 (very small tiles, max DMA pre-fetch)
+    #   - tile_size < 512: factor = 2 (small tiles need +2 depth)
+    #   - tile_size < 1024: factor = 1 (moderate tiles need +1 depth)
+    #   - tile_size >= 1024: factor = 0 (large tiles have natural buffering)
+    #   Clamped to range [2, 8]
+    #
+    # TILE SIZE FACTOR RATIONALE:
+    # Smaller tiles complete compute faster, requiring deeper FIFOs for DMA pre-fetch
+    # to stay ahead. Pattern consistent with MEM_COPY and AXPY operators.
+    if num_columns >= 2 or num_channels == 2:
+        # Multi-column or 2-channel: fixed depth=4 for stability
+        fifodepth = 4
+    else:
+        # 1-column/1-channel: use tile_size_factor for optimal DMA pre-fetch
+        base_depth = 2
+        tile_size_factor = 0
+        if tile_size <= 256:
+            tile_size_factor = 3  # Very small tiles - maximum DMA pre-fetch needed
+        elif tile_size < 512:
+            tile_size_factor = 2  # Small tiles need +2 depth
+        elif tile_size < 1024:
+            tile_size_factor = 1  # Moderate tiles need +1 depth
+        fifodepth = max(2, min(8, base_depth + tile_size_factor))
     enable_trace = 1 if trace_size > 0 else None
 
     # AIE-array data movement with object fifos
