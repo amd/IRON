@@ -33,16 +33,21 @@ def my_weighted_rms_norm(
     weights_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P0-9 FIX: Enhanced adaptive ObjectFifo depth for bandwidth regression
-    # Issue: -22.59% bandwidth (weighted_rms_norm_1_cols_2_channels_2048_weights_2048)
+    # P1-HIGH FIX: Enhanced adaptive ObjectFifo depth for bandwidth/stability regressions
+    # Issues:
+    #   - 1-col/2-ch: -22.59% to -31.19% bandwidth, +45.30% latency (weighted_rms_norm_1_cols_2_channels_2048_weights_2048)
+    #   - 8-col/2-ch: +67.90% latency stddev explosion (weighted_rms_norm_8_cols_2_channels_2048_weights_256)
     # Source: weightrmsnorm.txt benchmark file (897d04e vs 84d3478)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns,
-    # depth=2 for 2-channel or large tiles (>=1024), depth=1 otherwise
+    # Depth=5 for 8+ columns (stddev fix)
+    # Depth=4 for 1-col/2-ch (bandwidth fix)
+    # Depth=3 for 4-col/2-ch
+    # Depth=2 for 2-col/2-ch or large tiles (>=1024)
+    # Depth=1 baseline
     fifodepth = (
-        4 if num_columns >= 8 else
-        (3 if num_columns >= 4 and num_channels == 2 else
-         (2 if num_channels == 2 or weight_length >= 1024 else 1))
-    )
+        5 if num_columns >= 8 else
+        (4 if num_channels == 2 and num_columns == 1 else
+         (3 if num_columns >= 4 and num_channels == 2 else
+          (2 if num_channels == 2 or weight_length >= 1024 else 1))))
 
     # AIE-array data movement with object fifos
     of_in1s = [
