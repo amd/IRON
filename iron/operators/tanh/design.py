@@ -20,16 +20,25 @@ def my_tanh(dev, size, num_columns, num_channels, tile_size, trace_size):
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 
+    # P2-MEDIUM FIX: Enhanced ObjectFifo depth for 2-column stability
+    # Issue: +26.53% latency stddev (tanh_2_cols_1_channels_2048_tile_1024)
+    # Root cause: 2-col configs don't match depth=4 conditions, default to depth=2
+    # Fix: Add explicit depth=3 for 2-column configurations
+    # See: docs/TANH-FIX-PLAN.md
     # P1-3 FIX: Enhanced depth for 8-col small-tile bandwidth regression
     # Issue: -18.57% bandwidth (tanh_8_cols_1_channels_2048_tile_256)
     # Source: tanh.txt benchmark file (897d04e vs 84d3478)
     # Depth=4 for 8+ cols OR single-col tile>=2048 OR 4+ cols with small tile (<512)
+    # Depth=3 for 2-column configs (stability fix)
     # Depth=2 otherwise
     fifodepth = (
         4
-        if (num_columns >= 8 or (num_columns == 1 and tile_size >= 2048) or
-            (num_columns >= 4 and tile_size < 512))
-        else 2
+        if (
+            num_columns >= 8
+            or (num_columns == 1 and tile_size >= 2048)
+            or (num_columns >= 4 and tile_size < 512)
+        )
+        else 3 if num_columns == 2 else 2
     )
 
     # Calculate number of iterations per core
