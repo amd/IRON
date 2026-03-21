@@ -1430,15 +1430,16 @@ The pipeline cycle for Document 3 is complete:
 | MEM_COPY-FIX-PLAN.md | #112 | mem_copy 2-core/8-core +375%/+106% stddev | **COMPLETE** | mem_copy/design.py |
 | RELU-FIX-PLAN.md | #114 | relu 4-col/8-col stddev + relu 1-col bandwidth | **COMPLETE** | relu/design.py |
 | RMS_NORM-FIX-PLAN.md | #115 | rms_norm 1-col/4-col depth optimization | **COMPLETE** | rms_norm/design.py |
+| WEIGHTED_RMS_NORM-FIX-PLAN.md | #121 | weighted_rms_norm 1-col/2-ch BW, 8-col stddev | **COMPLETE** | rms_norm/design_weighted.py |
 | ROPE-FIX-PLAN.md | #116 | rope 4-col/2-ch, 8-col, 1-col/2-ch regressions | **COMPLETE** | rope/design.py |
 | SIGMOID-FIX-PLAN.md | #117 | sigmoid 8-col/4-col/2-col/1-col depth optimization | **COMPLETE** | sigmoid/design.py |
 | SILU-FIX-PLAN.md | #118 | silu 1-col/2048-tile P0 targeted fix (minimal scope) | **COMPLETE** | silu/design.py |
 | TANH-FIX-PLAN.md | #119 | tanh 2-col +26.53% latency stddev | **COMPLETE** | tanh/design.py |
 | TRANSPOSE-FIX-PLAN.md | #120 | transpose 2-ch +49% BW stddev (HISTORICAL - fix already in 84b2333) | **COMPLETE** | No new changes - fix verified |
 
-**Total P0 Fixes Implemented:** 12 fixes across 9 documents (Task #115 includes 2 P0 configs, Task #116 includes 3 P1-HIGH configs, Task #117 includes 2 P1-HIGH configs, Task #118 includes 1 P0-CRITICAL config, Task #119 includes 1 P2-MEDIUM config)
-**Files Modified:** 15 unique files
-**Pipeline Cycles Complete:** 14/14 documents (100%)
+**Total P0 Fixes Implemented:** 13 fixes across 10 documents (Task #115 includes 2 P0 configs, Task #116 includes 3 P1-HIGH configs, Task #117 includes 2 P1-HIGH configs, Task #118 includes 1 P0-CRITICAL config, Task #119 includes 1 P2-MEDIUM config, Task #121 includes 2 P1-HIGH configs)
+**Files Modified:** 16 unique files
+**Pipeline Cycles Complete:** 15/15 documents (100%)
 
 ---
 
