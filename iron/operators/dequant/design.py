@@ -63,14 +63,16 @@ def my_dequant_kernel(
     #   Base depth: 4 for 2+ columns OR 2 channels (stability)
     #   For 1-column/1-channel: Use tile_size_factor for DMA pre-fetch optimization
     #   - tile_size <= 256: factor = 3 (very small tiles, max DMA pre-fetch)
-    #   - tile_size < 512: factor = 2 (small tiles need +2 depth)
-    #   - tile_size < 1024: factor = 1 (moderate tiles need +1 depth)
-    #   - tile_size >= 1024: factor = 0 (large tiles have natural buffering)
+    #   - tile_size <= 512: factor = 2 (small tiles need +2 depth)
+    #   - tile_size <= 1024: factor = 1 (moderate tiles need +1 depth)
+    #   - tile_size >= 2048: factor = 1 (large tiles need extra DMA burst buffering)
+    #   - else: factor = 0 (standard tiles have natural buffering)
     #   Clamped to range [2, 8]
     #
     # TILE SIZE FACTOR RATIONALE:
     # Smaller tiles complete compute faster, requiring deeper FIFOs for DMA pre-fetch
-    # to stay ahead. Pattern consistent with MEM_COPY and AXPY operators.
+    # to stay ahead. Also large tiles (>=2048) need extra buffering for DMA bursts.
+    # Pattern consistent with MEM_COPY operator (design.py:202-213).
     if num_columns >= 2 or num_channels == 2:
         # Multi-column or 2-channel: fixed depth=4 for stability
         fifodepth = 4
@@ -80,10 +82,12 @@ def my_dequant_kernel(
         tile_size_factor = 0
         if tile_size <= 256:
             tile_size_factor = 3  # Very small tiles - maximum DMA pre-fetch needed
-        elif tile_size < 512:
+        elif tile_size <= 512:
             tile_size_factor = 2  # Small tiles need +2 depth
-        elif tile_size < 1024:
+        elif tile_size <= 1024:
             tile_size_factor = 1  # Moderate tiles need +1 depth
+        elif tile_size >= 2048:
+            tile_size_factor = 1  # Large tiles need extra DMA burst buffering
         fifodepth = max(2, min(8, base_depth + tile_size_factor))
     enable_trace = 1 if trace_size > 0 else None
 
