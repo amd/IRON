@@ -6,7 +6,7 @@ name: "Commit Test Results to a Branch"
 inputs:
   pretty_flags:
     required: false
-    default: "--metric='Latency (mean)' --metric='Bandwidth (mean)' --metric='GFLOP/s (mean)' -o pretty.md"
+    default: "--metric='Latency (mean)' --metric='Bandwidth (mean)' --metric='Throughput (mean)' -o pretty.md"
   input_csv:
     required: false
     default: "tests_latest.csv"
