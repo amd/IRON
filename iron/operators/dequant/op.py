@@ -24,8 +24,7 @@ class AIEDequant(MLIROperator):
         group_size=32,
         context=None,
     ):
-        # Store num_aie_columns in self.num_columns for internal use (following the pattern)
-        self.num_columns = num_aie_columns
+        self.num_aie_columns = num_aie_columns
 
         self.size = size
         self.tile_size = tile_size
@@ -38,7 +37,7 @@ class AIEDequant(MLIROperator):
         self.input_size = (size // 2) + (size // group_size) * 2
         self.output_size = size
 
-        total_cores = self.num_columns * self.num_channels
+        total_cores = self.num_aie_columns * self.num_channels
         if self.size % total_cores != 0:
             raise ValueError(
                 f"size ({self.size}) must be divisible by total cores ({total_cores})"
@@ -51,7 +50,7 @@ class AIEDequant(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        return f"dequant_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        return f"dequant_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -61,7 +60,7 @@ class AIEDequant(MLIROperator):
             callback_args=[
                 self.context.device_manager.device_type,
                 self.size,
-                self.num_columns,
+                self.num_aie_columns,
                 self.num_channels,
                 0,
                 self.tile_size,

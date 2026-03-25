@@ -37,7 +37,13 @@ class AIEAXPY(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.scalar_factor}s"
+        scalar_str = (
+            f"{self.scalar_factor:.8f}".rstrip("0")
+            .rstrip(".")
+            .replace(".", "_")
+            .replace("-", "neg")
+        )
+        return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{scalar_str}s"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(

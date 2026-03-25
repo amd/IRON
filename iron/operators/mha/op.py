@@ -4,15 +4,11 @@
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
-from typing import Dict, List
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -51,6 +47,7 @@ class AIEMHA(MLIROperator):
             import_path=self.operator_dir / "design.py",
             callback_fn="fused_mha",
             callback_kwargs={
+                "dev": self.context.device_manager.device_type,
                 "heads": self.num_heads,
                 "S_q": self.seq_len,
                 "S_kv": self.seq_len,
@@ -122,35 +119,7 @@ class AIEMHA(MLIROperator):
         ]
 
     def get_artifacts(self):
-        # Override to add --dynamic-objFifos flag
-        operator_name = self.get_operator_name()
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
-        xclbin_artifact = XclbinArtifact(
-            f"{operator_name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=["--dynamic-objFifos"],
-        )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-            extra_flags=["--dynamic-objFifos"],
-        )
-        return xclbin_artifact, insts_artifact
+        return super().get_artifacts(dynamic_obj_fifos=True)
 
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
