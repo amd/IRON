@@ -348,9 +348,9 @@ class FusedFullELFCallable(FullELFCallable):
 
     def __call__(self):
         self.input_buffer.to("npu")
-        self.output_buffer.to("npu")
         super().__call__(
             self.input_buffer.buffer_object(),
             self.output_buffer.buffer_object(),
             self.scratch_buffer.buffer_object(),
         )
+        self.output_buffer.to("cpu")
