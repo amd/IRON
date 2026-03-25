@@ -34,9 +34,12 @@ class AIEGEMM(MLIROperator):
         min_M = tile_m * num_aie_rows
         min_K = tile_k
         min_N = tile_n * num_aie_columns
-        assert M % min_M == 0, f"M ({M}) must be multiple of {min_M}"
-        assert K % min_K == 0, f"K ({K}) must be multiple of {min_K}"
-        assert N % min_N == 0, f"N ({N}) must be multiple of {min_N}"
+        if M % min_M != 0:
+            raise ValueError(f"M ({M}) must be a multiple of {min_M}")
+        if K % min_K != 0:
+            raise ValueError(f"K ({K}) must be a multiple of {min_K}")
+        if N % min_N != 0:
+            raise ValueError(f"N ({N}) must be a multiple of {min_N}")
         self.M = M
         self.K = K
         self.N = N
@@ -58,9 +61,12 @@ class AIEGEMM(MLIROperator):
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
         else:
             min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        assert tile_m >= min_tile_m, f"tile_m ({tile_m}) must be >= {min_tile_m}"
-        assert tile_k >= min_tile_k, f"tile_k ({tile_k}) must be >= {min_tile_k}"
-        assert tile_n >= min_tile_n, f"tile_n ({tile_n}) must be >= {min_tile_n}"
+        if tile_m < min_tile_m:
+            raise ValueError(f"tile_m ({tile_m}) must be >= {min_tile_m}")
+        if tile_k < min_tile_k:
+            raise ValueError(f"tile_k ({tile_k}) must be >= {min_tile_k}")
+        if tile_n < min_tile_n:
+            raise ValueError(f"tile_n ({tile_n}) must be >= {min_tile_n}")
 
         MLIROperator.__init__(self, context=context)
 
