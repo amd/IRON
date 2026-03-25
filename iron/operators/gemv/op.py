@@ -54,7 +54,7 @@ class AIEGEMV(MLIROperator):
             import_path=self.operator_dir / "design.py",
             callback_fn="my_matvec",
             callback_args=[
-                self.context.device_manager.device_str(),
+                self.context.device_manager.device_type,
                 self.num_aie_columns,
                 self.M,
                 self.K,

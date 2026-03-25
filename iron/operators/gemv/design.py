@@ -10,7 +10,6 @@ from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1, NPU2
 
 """
 Matrix-vector design
@@ -64,11 +63,6 @@ def my_matvec(
     dtype_out_str = "bf16"
 
     assert M % cols == 0
-
-    if dev == "npu":
-        dev_ty = NPU1()
-    else:
-        dev_ty = NPU2()
 
     L1_A_ty = np.ndarray[
         (
@@ -196,4 +190,4 @@ def my_matvec(
             rt.finish_task_group(tg_ac)
         rt.finish_task_group(tg_b)
 
-    return Program(dev_ty, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program(SequentialPlacer())
