@@ -24,7 +24,7 @@ from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccess
 from aie.iron.controlflow import range_
 
 microkernel_mac_dim_map = {
-    "npu": {
+    "npu1": {
         "bf16": (4, 8, 4),
     },
     "npu2": {
@@ -42,7 +42,7 @@ def main():
         prog="AIE Matrix Multiplication MLIR Design (Whole Array)",
         description="Emits MLIR code for a matrix multiplication design of the given input size",
     )
-    argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu2")
+    argparser.add_argument("--dev", type=str, choices=["npu1", "npu2"], default="npu2")
     argparser.add_argument("-M", type=int, default=512)
     argparser.add_argument("-K", type=int, default=512)
     argparser.add_argument("-N", type=int, default=512)
@@ -147,6 +147,8 @@ def my_matmul(
 ):
     n_aie_rows = 4
 
+    dev_name = dev if isinstance(dev, str) else dev.resolve().name
+
     dtype_in = str_to_dtype(dtype_in_str)
     dtype_out = str_to_dtype(dtype_out_str)
 
@@ -191,17 +193,17 @@ def my_matmul(
     ), f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map[dev][dtype_in_str]
-    if dev == "npu2" and dtype_in_str == "bf16":
+    mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
+    if dev_name == "npu2" and dtype_in_str == "bf16":
         r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
     else:
         r, s, t = mac_dims
 
-    # npu is a 4 row x 4 col array
-    if dev == "npu" and n_aie_cols > 4:
+    # npu1 is a 4 row x 4 col array
+    if dev_name == "npu1" and n_aie_cols > 4:
         raise AssertionError("Invalid configuration: NPU (Phoenix/Hawk) has 4 columns")
     # npu2 is a 4 row x 8 col array
-    if dev == "npu2" and n_aie_cols > 8:
+    if dev_name == "npu2" and n_aie_cols > 8:
         raise AssertionError(
             "Invalid configuration: NPU2 (Strix/Strix Halo/Krackan) has 8 columns"
         )
@@ -246,7 +248,7 @@ def my_matmul(
     # a big performance cost.
     fifo_depth = 2
 
-    if dev == "npu":
+    if dev_name == "npu1":
         if n_aie_cols == 1:
             dev_ty = NPU1Col1()
         elif n_aie_cols == 2:

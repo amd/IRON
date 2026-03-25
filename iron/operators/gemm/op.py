@@ -75,7 +75,6 @@ class AIEGEMM(MLIROperator):
 
     def get_mlir_artifact(self):
         operator_name = self.get_operator_name()
-        device_str = self.context.device_manager.device_str()
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
         dtype_out = self.gemm_args.get("dtype_out", "bf16")
         use_scalar = self.gemm_args.get("use_scalar", False)
@@ -85,7 +84,7 @@ class AIEGEMM(MLIROperator):
             import_path=self.operator_dir / "design.py",
             callback_fn="my_matmul",
             callback_kwargs={
-                "dev": device_str,
+                "dev": self.context.device_manager.device_type,
                 "M": self.M,
                 "K": self.K,
                 "N": self.N,
