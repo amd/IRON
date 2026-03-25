@@ -19,25 +19,21 @@ def my_silu(
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
 
-    # Calculate number of iterations per core (using 1 channel per column)
-    num_channels = 1
-    total_cores = num_columns * num_channels
-    per_core_elements = size // total_cores
+    # Calculate number of iterations per core
+    per_core_elements = size // num_columns
     N_div_n = per_core_elements // line_size
 
     # Chunk size sent per DMA channel
-    chunk = size // num_columns // num_channels
+    chunk = size // num_columns
 
     # Dataflow with ObjectFifos
     of_ins = [
-        ObjectFifo(line_type, name=f"in{i}_{j}")
+        ObjectFifo(line_type, name=f"in{i}")
         for i in range(num_columns)
-        for j in range(num_channels)
     ]
     of_outs = [
-        ObjectFifo(line_type, name=f"out{i}_{j}")
+        ObjectFifo(line_type, name=f"out{i}")
         for i in range(num_columns)
-        for j in range(num_channels)
     ]
 
     # External, binary kernel definition
@@ -61,29 +57,26 @@ def my_silu(
         Worker(
             core_fn,
             [
-                of_ins[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
+                of_ins[i].cons(),
+                of_outs[i].prod(),
                 silu_fcn,
             ],
         )
         for i in range(num_columns)
-        for j in range(num_channels)
     ]
 
     # Create a TensorAccessPattern for each channel
     # to describe the data movement
     # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels.
+    # and moves them in parallel across the columns.
     taps = [
         TensorAccessPattern(
             (1, size),
-            chunk * i * num_channels + chunk * j,
+            chunk * i,
             [1, 1, 1, chunk],
             [0, 0, 0, 1],
         )
         for i in range(num_columns)
-        for j in range(num_channels)
     ]
 
     # Runtime operations to move data to/from the AIE-array
@@ -99,23 +92,21 @@ def my_silu(
 
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
-            for j in range(num_channels):
-                rt.fill(
-                    of_ins[i * num_channels + j].prod(),
-                    a_in,
-                    taps[i * num_channels + j],
-                    task_group=tg,
-                )
+            rt.fill(
+                of_ins[i].prod(),
+                a_in,
+                taps[i],
+                task_group=tg,
+            )
         # Drain the output objectFIFOs with data
         for i in range(num_columns):
-            for j in range(num_channels):
-                rt.drain(
-                    of_outs[i * num_channels + j].cons(),
-                    b_out,
-                    taps[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    task_group=tg,
-                )
+            rt.drain(
+                of_outs[i].cons(),
+                b_out,
+                taps[i],
+                wait=True,  # wait for the transfer to complete and data to be available
+                task_group=tg,
+            )
         rt.finish_task_group(tg)
 
     # Place components (assign them resources on the device) and generate an MLIR module
