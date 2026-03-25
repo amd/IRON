@@ -21,12 +21,13 @@ def my_rms_norm(
     kernel_archive="rms_norm.a",
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
-    n = per_tile_elements * num_columns
-    if num_elements % n != 0:
+    total_cores = num_columns * num_channels
+    per_core_elements = num_elements // total_cores
+    if num_elements % total_cores != 0:
         raise ValueError(
-            f"Number of elements ({num_elements}) must be a multiple of {n}."
+            f"Number of elements ({num_elements}) must be a multiple of {total_cores}."
         )
-    N_div_n = num_elements // n
+    N_div_n = per_core_elements // per_tile_elements
     chunk = num_elements // num_columns // num_channels  # For offset calculation
     dtype = bfloat16
 
