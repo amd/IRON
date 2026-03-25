@@ -1350,7 +1350,7 @@ def llama_forward_pass(aie_ops, aie_buffers, config, state):
             aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").to("cpu").data[
                 :
             ] = (aie_buffers.values_cache[layer_idx].to("cpu").data.flatten())
-            aie_ops.decode.fused.scratch_buffer.to("cpu")
+        aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:
         ret = llama_forward_pass_decode(aie_ops, config, state)
