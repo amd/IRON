@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from iron.common import (
@@ -27,10 +27,11 @@ class AIEGEMV(MLIROperator):
         if tile_size_output is None:
             tile_size_output = tile_size_input
 
-        if not (tile_size_output % tile_size_input == 0 and tile_size_output >= tile_size_input):
-            raise ValueError(
-                "tile_size_output must be a multiple of tile_size_input"
-            )
+        if not (
+            tile_size_output % tile_size_input == 0
+            and tile_size_output >= tile_size_input
+        ):
+            raise ValueError("tile_size_output must be a multiple of tile_size_input")
         self.M = M  # matrix rows
         self.K = K  # matrix columns, vector rows
         self.num_aie_columns = num_aie_columns

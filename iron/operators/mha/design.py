@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -151,7 +151,9 @@ def fused_mha(
     ), "Only emulate_bf16_mmul_with_bfp16=True is supported"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map["npu" if isinstance(dev, NPU1) else "npu2"][dtype_str]
+    mac_dims = microkernel_mac_dim_map["npu" if isinstance(dev, NPU1) else "npu2"][
+        dtype_str
+    ]
     r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
 
     if verbose:

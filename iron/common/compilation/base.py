@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -481,7 +481,8 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 if isinstance(dep, KernelArchiveArtifact):
                     archive_path = os.path.abspath(dep.filename)
                     compile_cmd += [
-                        "-L", os.path.dirname(archive_path),
+                        "-L",
+                        os.path.dirname(archive_path),
                         f"-l:{os.path.basename(archive_path)}",
                     ]
             commands.append(
@@ -564,7 +565,8 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                     )
                 )
                 compile_cmd += [
-                    "-L", os.path.dirname(archive_path),
+                    "-L",
+                    os.path.dirname(archive_path),
                     f"-l:{os.path.basename(archive_path)}",
                 ]
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -162,9 +162,7 @@ class AIEGEMM(MLIROperator):
         """Pad A matrix to match operator dimensions (M, K)"""
         M, K = A_np.shape
         if M > self.M:
-            raise ValueError(
-                f"A rows ({M}) exceeds operator M ({self.M})"
-            )
+            raise ValueError(f"A rows ({M}) exceeds operator M ({self.M})")
         if M == self.M and K == self.K:
             return A_np
 

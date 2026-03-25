@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -43,9 +43,7 @@ class AIEDequant(MLIROperator):
                 f"size ({self.size}) must be divisible by total cores ({total_cores})"
             )
         if total_cores > 16:
-            raise ValueError(
-                f"total cores ({total_cores}) must be <= 16"
-            )
+            raise ValueError(f"total cores ({total_cores}) must be <= 16")
 
         MLIROperator.__init__(self, context=context)
 

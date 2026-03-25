@@ -949,7 +949,10 @@ class AIELlamaBuffers:
                 self.prefill.logits,
                 offset_elements=i * logits_part_len,
                 length_elements=logits_part_len,
-                shape=(prompt_len, aie_ops.padded_vocab_size // aie_ops.vocab_partitions),
+                shape=(
+                    prompt_len,
+                    aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
+                ),
                 dtype=ml_dtypes.bfloat16,
             )
             for i in range(aie_ops.vocab_partitions)
@@ -1144,7 +1147,14 @@ def swiglu_ffn_forward_prefill(aie_ops, aie_buffers, layer_idx):
 
 
 def transformer_block_forward_prefill(
-    aie_ops, aie_buffers, config, seq_len, layer_idx, attn_keys_cache, attn_values_cache, attn_mask
+    aie_ops,
+    aie_buffers,
+    config,
+    seq_len,
+    layer_idx,
+    attn_keys_cache,
+    attn_values_cache,
+    attn_mask,
 ):
     # Step 1: RMS normalization
     aie_ops.prefill.rms_norm(
@@ -1363,7 +1373,9 @@ def main():
     aie_ops = AIELlamaOperators(config, max_seq_len)
     aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
 
-    forward_pass = lambda config, state: llama_forward_pass(aie_ops, aie_buffers, config, state)
+    forward_pass = lambda config, state: llama_forward_pass(
+        aie_ops, aie_buffers, config, state
+    )
 
     print(prompt, end="", flush=True)
     harness.generate(

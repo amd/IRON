@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
@@ -27,14 +27,8 @@ def my_silu(
     chunk = size // num_columns
 
     # Dataflow with ObjectFifos
-    of_ins = [
-        ObjectFifo(line_type, name=f"in{i}")
-        for i in range(num_columns)
-    ]
-    of_outs = [
-        ObjectFifo(line_type, name=f"out{i}")
-        for i in range(num_columns)
-    ]
+    of_ins = [ObjectFifo(line_type, name=f"in{i}") for i in range(num_columns)]
+    of_outs = [ObjectFifo(line_type, name=f"out{i}") for i in range(num_columns)]
 
     # External, binary kernel definition
     silu_fcn = Kernel(

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
@@ -81,7 +81,6 @@ class AIEOperatorBase(ABC):
     def add_artifacts(self, artifacts):
         for artifact in artifacts:
             self.artifacts.add(artifact)
-
 
 
 class MLIROperator(AIEOperatorBase, ABC):

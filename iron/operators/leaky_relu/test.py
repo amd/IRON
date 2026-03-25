@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -40,7 +40,9 @@ def get_params():
     return params
 
 
-@pytest.mark.parametrize("input_length,num_aie_columns,num_channels,tile_size,alpha", get_params())
+@pytest.mark.parametrize(
+    "input_length,num_aie_columns,num_channels,tile_size,alpha", get_params()
+)
 @pytest.mark.skip(reason="Leaky ReLU is currently broken (#36)")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
