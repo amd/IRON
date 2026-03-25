@@ -177,52 +177,6 @@ The hook will run the same linting checks as CI:
 
 To bypass the hook if needed: `git push --no-verify`
 
-## Quick Start Example
-
-Here's a simple example using the AXPY operator (Y = aX + Y):
-
-```python
-#!/usr/bin/env python3
-from iron.operators.axpy import AIEAXPY
-import numpy as np
-from ml_dtypes import bfloat16
-
-# Define operator parameters
-size = 2048
-num_aie_columns = 4
-num_channels = 2
-tile_size = 512
-scalar_factor = 3.0
-
-# Create and compile the operator
-operator = AIEAXPY(
-    size=size,
-    num_aie_columns=num_aie_columns,
-    num_channels=num_channels,
-    tile_size=tile_size,
-    scalar_factor=scalar_factor,
-)
-operator.compile()
-
-# Prepare input data
-x = np.random.rand(size).astype(bfloat16)
-y = np.random.rand(size).astype(bfloat16)
-output = np.zeros(size, dtype=bfloat16)
-
-# Run on NPU
-operator(x, y, output)
-
-# Verify: output = scalar_factor * x + y
-expected = scalar_factor * x.astype(np.float32) + y.astype(np.float32)
-print(f"Result matches expected: {np.allclose(output, expected, rtol=0.04)}")
-```
-
-Run this example:
-
-```bash
-python example.py
-```
-
 ## Applications
 
 ### Llama 3.2 1B Inference
