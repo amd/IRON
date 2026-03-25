@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -28,23 +24,22 @@ class AIERope(MLIROperator):
         if angle_rows is None:
             angle_rows = rows
 
-        assert cols % (16 * 2) == 0 and cols >= (
-            16 * 2
-        ), "cols must be multiple of 32 and >= 32"
-        assert rows % num_aie_columns == 0, "rows must be divisible by num_aie_columns"
-        assert (
-            angle_rows <= rows and rows % angle_rows == 0
-        ), "angle_rows must divide rows"
-        assert (
-            angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0
-        ), "angle_rows must be divisible by num_aie_columns"
+        if not (cols % (16 * 2) == 0 and cols >= (16 * 2)):
+            raise ValueError("cols must be multiple of 32 and >= 32")
+        if rows % num_aie_columns != 0:
+            raise ValueError("rows must be divisible by num_aie_columns")
+        if not (angle_rows <= rows and rows % angle_rows == 0):
+            raise ValueError("angle_rows must divide rows")
+        if not (angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0):
+            raise ValueError("angle_rows must be divisible by num_aie_columns")
 
         self.rows = rows
         self.cols = cols
         self.angle_rows = angle_rows
         self.num_aie_columns = num_aie_columns
         self.method_type = method_type
-        assert method_type in {0, 1}
+        if method_type not in {0, 1}:
+            raise ValueError(f"method_type must be 0 or 1, got {method_type}")
 
         MLIROperator.__init__(self, context=context)
 
@@ -52,10 +47,9 @@ class AIERope(MLIROperator):
         return f"rope_{self.num_aie_columns}col_{self.rows}rows_{self.cols}cols_{self.angle_rows}arows_{self.method_type}m"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="rope",
             callback_args=[
                 self.context.device_manager.device_type,

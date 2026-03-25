@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -39,10 +37,9 @@ class AIEReLU(MLIROperator):
         return f"relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="my_relu",
             callback_args=[
                 self.context.device_manager.device_type,
