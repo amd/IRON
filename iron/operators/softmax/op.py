@@ -23,11 +23,14 @@ class AIESoftmax(MLIROperator):
         mask_patch_value=0,
         context=None,
     ):
-        assert rows % 16 == 0, "rows must be multiple of 16"
-        assert cols % 16 == 0, "cols must be multiple of 16"
-        assert (rows * cols) % (
-            num_aie_columns * cols
-        ) == 0, "size must be multiple of num_aie_columns * tile_size"
+        if rows % 16 != 0:
+            raise ValueError(f"rows ({rows}) must be a multiple of 16")
+        if cols % 16 != 0:
+            raise ValueError(f"cols ({cols}) must be a multiple of 16")
+        if rows % num_aie_columns != 0:
+            raise ValueError(
+                f"rows ({rows}) must be a multiple of num_aie_columns ({num_aie_columns})"
+            )
 
         self.rows = rows
         self.cols = cols

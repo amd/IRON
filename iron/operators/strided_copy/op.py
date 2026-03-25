@@ -29,8 +29,14 @@ class AIEStridedCopy(MLIROperator):
         context=None,
         **kwargs,
     ):
-        assert len(input_sizes) == len(input_strides)
-        assert len(output_sizes) == len(output_strides)
+        if len(input_sizes) != len(input_strides):
+            raise ValueError(
+                f"input_sizes and input_strides must have the same length ({len(input_sizes)} vs {len(input_strides)})"
+            )
+        if len(output_sizes) != len(output_strides):
+            raise ValueError(
+                f"output_sizes and output_strides must have the same length ({len(output_sizes)} vs {len(output_strides)})"
+            )
         self.input_sizes = input_sizes
         self.input_strides = input_strides
         self.input_offset = input_offset

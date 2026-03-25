@@ -20,16 +20,20 @@ class AIEElementwiseAdd(MLIROperator):
         num_aie_columns=8,
         context=None,
     ):
-        assert (
-            size % (num_aie_columns * tile_size) == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
+        if size % (num_aie_columns * tile_size) != 0:
+            raise ValueError(
+                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({num_aie_columns * tile_size})"
+            )
         self.size = size
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
         # Enforce ShimDMA limits for elementwise_add (uses 2 inputs per core)
         # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
         total_shimdma_channels = self.num_aie_columns * 2
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
+        if total_shimdma_channels > 16:
+            raise ValueError(
+                f"num_aie_columns ({num_aie_columns}) exceeds conservative ShimDMA limit"
+            )
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):

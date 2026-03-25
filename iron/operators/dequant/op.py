@@ -39,8 +39,14 @@ class AIEDequant(MLIROperator):
         self.output_size = size
 
         total_cores = self.num_columns * self.num_channels
-        assert self.size % total_cores == 0, "Size must be divisible by total cores"
-        assert total_cores <= 16, "Total cores (columns * channels) must be <= 16"
+        if self.size % total_cores != 0:
+            raise ValueError(
+                f"size ({self.size}) must be divisible by total cores ({total_cores})"
+            )
+        if total_cores > 16:
+            raise ValueError(
+                f"total cores ({total_cores}) must be <= 16"
+            )
 
         MLIROperator.__init__(self, context=context)
 

@@ -36,7 +36,8 @@ class AIEMHA(MLIROperator):
         self.B_kv = 64
         self.num_KV_heads = num_KV_heads
         self.num_of_pipelines = num_of_pipelines
-        assert d == 64, "Only d=64 is supported in this version"
+        if d != 64:
+            raise ValueError(f"Only d=64 is supported in this version, got d={d}")
 
         MLIROperator.__init__(self, context=context)
 
