@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from pathlib import Path
 
 from iron.common import (
     MLIROperator,
@@ -69,7 +68,6 @@ class AIEGEMM(MLIROperator):
         return f"gemm_{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         operator_name = self.get_operator_name()
         device_str = self.context.device_manager.device_str()
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
@@ -78,7 +76,7 @@ class AIEGEMM(MLIROperator):
         separate_c_tiles = self.gemm_args.get("separate_c_tiles", False)
         return PythonGeneratedMLIRArtifact(
             f"{operator_name}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="my_matmul",
             callback_kwargs={
                 "dev": device_str,
@@ -158,6 +156,10 @@ class AIEGEMM(MLIROperator):
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""
         M, K = A_np.shape
+        if M > self.M:
+            raise ValueError(
+                f"A rows ({M}) exceeds operator M ({self.M})"
+            )
         if M == self.M and K == self.K:
             return A_np
 
@@ -170,12 +172,20 @@ class AIEGEMM(MLIROperator):
         """Pad B matrix to match operator dimensions based on layout"""
         if self.b_col_maj:
             N, K = B_np.shape
+            if N > self.N or K > self.K:
+                raise ValueError(
+                    f"B (col-major) shape ({N}, {K}) exceeds operator N ({self.N}), K ({self.K})"
+                )
             if N == self.N and K == self.K:
                 return B_np
             B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
             B_padded[:N, :K] = B_np
         else:
             K, N = B_np.shape
+            if N > self.N or K > self.K:
+                raise ValueError(
+                    f"B (row-major) shape ({K}, {N}) exceeds operator K ({self.K}), N ({self.N})"
+                )
             if K == self.K and N == self.N:
                 return B_np
             B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)

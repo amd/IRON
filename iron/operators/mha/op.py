@@ -42,12 +42,13 @@ class AIEMHA(MLIROperator):
         return f"mha_{self.num_heads}h_{kv_heads}kv_{self.seq_len}s_{self.d}d"
 
     def get_mlir_artifact(self):
+        device_str = self.context.device_manager.device_str()
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
             import_path=self.operator_dir / "design.py",
             callback_fn="fused_mha",
             callback_kwargs={
-                "dev": self.context.device_manager.device_type,
+                "dev": device_str,
                 "heads": self.num_heads,
                 "S_q": self.seq_len,
                 "S_kv": self.seq_len,
