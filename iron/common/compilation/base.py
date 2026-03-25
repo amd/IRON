@@ -282,8 +282,6 @@ class PythonGeneratedMLIRArtifact(CompilationArtifact):
         callback_args=None,
         callback_kwargs=None,
         requires_context=False,
-        uses_kernel_archive=False,
-        kernel_archive=None,
     ):
         self.import_path = import_path
         self.callback_fn = callback_fn
