@@ -29,7 +29,7 @@ params, names = generate_test_params()
 
 @pytest.mark.metrics(
     TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
-    TPS=r"\[Decode\]\s*Tokens per second: (?P<value>[\d\.e\+-]+)",
+    TPS=r"\[Decode\]\s*Tokens per second:\s*(?P<value>[\d\.e\+-]+)",
 )
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
