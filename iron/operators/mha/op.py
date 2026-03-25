@@ -95,12 +95,12 @@ class AIEMHA(MLIROperator):
 
         return [
             KernelObjectArtifact(
-                f"mha_mm.o",
+                "mha_mm.o",
                 extra_flags=mm_defines_colmaj,
                 dependencies=[SourceArtifact(mm_source)],
             ),
             KernelObjectArtifact(
-                f"mha_mm_rowmaj.o",
+                "mha_mm_rowmaj.o",
                 extra_flags=mm_defines_rowmaj,
                 dependencies=[SourceArtifact(mm_source)],
                 rename_symbols=mm_rename_symbols,
