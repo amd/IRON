@@ -77,7 +77,7 @@ class AIEDeviceManager:
         return context, self.kernels[kernel_key]
 
     def device_str(self) -> str:
-        """Return the resolved device name string (e.g. 'NPU1' or 'NPU2')."""
+        """Return the resolved device name string (e.g. 'npu1' or 'npu2')."""
         return self.device_type.resolve().name
 
     def cleanup(self):
