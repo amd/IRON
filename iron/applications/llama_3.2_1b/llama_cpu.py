@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+import math
 import llama_inference_harness as harness
 
 # Operators

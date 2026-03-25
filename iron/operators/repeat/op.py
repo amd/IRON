@@ -18,20 +18,20 @@ class AIERepeat(MLIROperator):
         self,
         rows,
         cols,
-        num_repeats,
+        repeat,
         transfer_size=None,
         dtype=bfloat16,
         context=None,
     ):
         self.rows = rows
         self.cols = cols
-        self.num_repeats = num_repeats
+        self.repeat = repeat
         self.transfer_size = transfer_size
         self.dtype = dtype
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        name = f"repeat_{self.rows}x{self.cols}_by_{self.num_repeats}"
+        name = f"repeat_{self.rows}x{self.cols}_by_{self.repeat}"
         if self.transfer_size is not None:
             name += f"_{self.transfer_size}ts"
         return name
@@ -47,7 +47,7 @@ class AIERepeat(MLIROperator):
                 self.dtype,
                 self.rows,
                 self.cols,
-                self.num_repeats,
+                self.repeat,
                 self.transfer_size,
             ],
         )
@@ -58,5 +58,5 @@ class AIERepeat(MLIROperator):
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.rows, self.cols)),
-            AIERuntimeArgSpec("out", (self.rows * self.num_repeats, self.cols)),
+            AIERuntimeArgSpec("out", (self.rows * self.repeat, self.cols)),
         ]

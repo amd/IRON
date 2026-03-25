@@ -273,3 +273,7 @@ def generate(config, state, forward_pass, num_tokens=100, use_kv_cache=True):
     sys.stderr.write(
         f"[Total]   Tokens per second:     {n_tokens_generated / (t_prefill + t_decode):7.3f}\n"
     )
+
+
+if __name__ == "__main__":
+    main()

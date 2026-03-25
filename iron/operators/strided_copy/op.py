@@ -44,7 +44,7 @@ class AIEStridedCopy(MLIROperator):
         self.transfer_size = transfer_size
         self.num_aie_channels = num_aie_channels
         self.kwargs = kwargs
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return (

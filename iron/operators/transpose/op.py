@@ -34,7 +34,7 @@ class AIETranspose(MLIROperator):
         self.num_columns = num_aie_columns
         self.num_channels = num_channels
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return f"transpose_{self.num_columns}c_{self.num_channels}ch_{self.M}x{self.N}_{self.m}x{self.n}_{self.s}s"

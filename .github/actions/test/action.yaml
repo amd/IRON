@@ -42,7 +42,7 @@ runs:
         esac
         
         if [ "${{ inputs.extensive }}" = "true" ]; then
-          pytest $TEST_PATH --csv-output=tests_latest.csv ${{ inputs.test_flags }}
+          pytest $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=DEBUG ${{ inputs.test_flags }}
         else
-          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv ${{ inputs.test_flags }}
+          pytest -m "not extensive" $TEST_PATH --csv-output=tests_latest.csv --log-cli-level=DEBUG ${{ inputs.test_flags }}
         fi

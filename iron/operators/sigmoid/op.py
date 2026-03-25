@@ -34,7 +34,7 @@ class AIESigmoid(MLIROperator):
                 f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
             )
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return f"sigmoid_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"

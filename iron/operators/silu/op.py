@@ -29,7 +29,7 @@ class AIESiLU(MLIROperator):
             raise ValueError(
                 f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit: a unary operator uses 2 DMA channels per column, max 8 columns (16 channels total)"
             )
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return f"silu_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"

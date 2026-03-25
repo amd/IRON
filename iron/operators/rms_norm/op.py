@@ -51,7 +51,7 @@ class AIERMSNorm(MLIROperator):
                 f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
             )
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         prefix = "weighted_rms" if self.weighted else "rms_norm"

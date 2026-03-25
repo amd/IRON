@@ -34,7 +34,7 @@ class AIELeakyReLU(MLIROperator):
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         # Use fixed-precision formatting to avoid scientific notation (e.g. 1e-05)

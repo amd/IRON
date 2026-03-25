@@ -271,6 +271,8 @@ class PythonGeneratedMLIRArtifact(CompilationArtifact):
         callback_args=None,
         callback_kwargs=None,
         requires_context=False,
+        uses_kernel_archive=False,
+        kernel_archive=None,
     ):
         self.import_path = import_path
         self.callback_fn = callback_fn
@@ -558,23 +560,7 @@ class PeanoCompilationRule(CompilationRule):
     def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
         self.mlir_aie_dir = mlir_aie_dir
-        self._objcopy_path = self._find_objcopy(peano_dir)
         super().__init__(*args, **kwargs)
-
-    @staticmethod
-    def _find_objcopy(peano_dir):
-        """Return path to llvm-objcopy, preferring the Peano installation."""
-        import shutil
-
-        peano_objcopy = Path(peano_dir) / "bin" / "llvm-objcopy"
-        if peano_objcopy.exists():
-            return str(peano_objcopy)
-        system_objcopy = shutil.which("llvm-objcopy")
-        if system_objcopy:
-            return system_objcopy
-        raise RuntimeError(
-            "llvm-objcopy not found in Peano installation or system PATH"
-        )
 
     def matches(self, artifacts):
         return any(artifacts.get_worklist(KernelObjectArtifact))
@@ -623,7 +609,7 @@ class PeanoCompilationRule(CompilationRule):
 
     def _rename_symbols(self, artifact):
         cmd = [
-            self._objcopy_path,
+            "llvm-objcopy-18",
         ]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
@@ -634,16 +620,16 @@ class PeanoCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = self._objcopy_path
-        nm_path = str(Path(self.peano_dir) / "bin" / "llvm-nm")
+        objcopy_path = "llvm-objcopy-18"
+        nm_path = "llvm-nm-18"
         symbol_map_file = artifact.filename + ".symbol_map"
 
         # Extract defined symbols and create symbol map
         nm_cmd = [
             "sh",
             "-c",
-            f'"{nm_path}" --defined-only --extern-only "{artifact.filename}" | '
-            f'awk \'{{print $3 " {prefix}" $3}}\' > "{symbol_map_file}"',
+            f"{nm_path} --defined-only --extern-only {artifact.filename} | "
+            f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
         ]
 
         # Apply the renaming using the symbol map
@@ -695,11 +681,10 @@ class ArchiveCompilationRule(CompilationRule):
             commands.append(ShellCompilationCommand(cmd))
 
             # Check for duplicate symbol definitions in the archive
-            llvm_nm = str(Path(self.peano_dir) / "bin" / "llvm-nm")
             check_cmd = [
                 "sh",
                 "-c",
-                f"\"{llvm_nm}\" \"{archive_path}\" | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
+                f"nm {archive_path} | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
                 f'if read sym; then echo "Error: Duplicate symbol in archive: $sym" >&2; exit 1; fi',
             ]
             commands.append(ShellCompilationCommand(check_cmd))

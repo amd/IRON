@@ -6,19 +6,15 @@ import subprocess
 import pytest
 import os
 from pathlib import Path
+import os
 
 test_dir = Path(__file__).parent
 weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
 
 
 def generate_test_params():
-    prompt_lengths = [
-        1024,  # 13
-    ]
-    num_tokens_list = [
-        40,
-        # 1
-    ]
+    prompt_lengths = [1024, 13]
+    num_tokens_list = [40, 1]
 
     params = []
     names = []

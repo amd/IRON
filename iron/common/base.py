@@ -4,13 +4,24 @@
 from abc import ABC, abstractmethod
 from ml_dtypes import bfloat16
 
+import numpy as np
+import os
+from pathlib import Path
+import logging
+import time
+import torch
+
 from aie.utils.npukernel import NPUKernel
+import aie.utils.config
 from . import compilation as comp
 from .context import AIEContext
 from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
+    KernelObjectArtifact,
     KernelArchiveArtifact,
+    SourceArtifact,
+    PythonGeneratedMLIRArtifact,
 )
 
 
@@ -71,12 +82,13 @@ class AIEOperatorBase(ABC):
             self.artifacts.add(artifact)
 
 
+
 class MLIROperator(AIEOperatorBase, ABC):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
+        AIEOperatorBase.__init__(self, *args, **kwargs)
 
     @abstractmethod
     def get_operator_name(self):
@@ -135,6 +147,9 @@ class MLIROperator(AIEOperatorBase, ABC):
 
 class CompositeOperator(AIEOperatorBase, ABC):
     """Base class for composite operators that chain multiple sub-operators"""
+
+    def __init__(self, context=None):
+        super().__init__(context)
 
 
 class AIERuntimeArgSpec:

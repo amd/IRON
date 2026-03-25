@@ -39,7 +39,7 @@ class AIEMHA(MLIROperator):
         self.num_of_pipelines = num_of_pipelines
         assert d == 64, "Only d=64 is supported in this version"
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         kv_heads = self.num_KV_heads if self.num_KV_heads > 0 else self.num_heads

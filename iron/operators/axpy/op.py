@@ -36,7 +36,7 @@ class AIEAXPY(MLIROperator):
         self.num_channels = num_channels
         self.scalar_factor = scalar_factor
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{self.scalar_factor}s"

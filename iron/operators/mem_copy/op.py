@@ -28,7 +28,7 @@ class AIEMemCopy(MLIROperator):
         # For naming consistency with other operators
         self.bypass_str = "bypass" if bypass else "no_bypass"
 
-        super().__init__(context=context)
+        MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
         return f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"

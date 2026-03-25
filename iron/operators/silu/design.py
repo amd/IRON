@@ -11,7 +11,7 @@ from aie.iron.controlflow import range_
 
 
 def my_silu(
-    dev, size, num_columns, tile_size, trace_size, kernel_archive=None, func_prefix=""
+    dev, size, num_columns, tile_size, trace_size, kernel_archive, func_prefix=""
 ):
     xfr_dtype = bfloat16
     # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
