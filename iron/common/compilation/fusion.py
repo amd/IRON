@@ -127,7 +127,7 @@ def fuse_mlir(artifact):
             buf_dtype = np.dtype[
                 ml_dtypes.bfloat16
             ]  # TODO: support for other data types
-            itemsize = 2
+            itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
             # RuntimeSequenceOp
             @aiex.runtime_sequence(
