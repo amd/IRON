@@ -32,6 +32,7 @@ mark the `SourceArtifact`s as available -- they cannot be generated.
 """
 
 from abc import ABC, abstractmethod
+from collections import deque
 from pathlib import Path
 import os.path
 import zlib
@@ -49,6 +50,7 @@ import sys
 def plan(rules, graph):
     if all(artifact.is_available() for artifact in graph):
         return []  # Everything has been compiled
+    available_before = sum(1 for artifact in graph.bfs() if artifact.is_available())
     for rule in rules:
         if rule.matches(graph):
             commands = rule.compile(graph)
@@ -56,6 +58,15 @@ def plan(rules, graph):
     else:
         raise RuntimeError(
             f"No matching rule to compile target(s): {', '.join(artifact.filename for artifact in graph)}"
+        )
+    available_after = sum(1 for artifact in graph.bfs() if artifact.is_available())
+    if available_after <= available_before:
+        unavailable = [
+            artifact.filename for artifact in graph.bfs() if not artifact.is_available()
+        ]
+        raise RuntimeError(
+            f"Rule {rule.__class__.__name__} fired but made no progress. "
+            f"Still unavailable: {unavailable}"
         )
     return [(rule, commands)] + plan(rules, graph)
 
@@ -122,9 +133,9 @@ class CompilationArtifactGraph:
 
     def _traverse(self, dfs):
         visited = set()
-        todo = self.artifacts.copy()
+        todo = deque(self.artifacts)
         while todo:
-            artifact = todo.pop() if dfs else todo.pop(0)
+            artifact = todo.pop() if dfs else todo.popleft()
             if artifact in visited:
                 continue
             visited.add(artifact)
@@ -608,8 +619,9 @@ class PeanoCompilationRule(CompilationRule):
         return commands
 
     def _rename_symbols(self, artifact):
+        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
         cmd = [
-            "llvm-objcopy-18",
+            objcopy_path,
         ]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
@@ -620,8 +632,8 @@ class PeanoCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = "llvm-objcopy-18"
-        nm_path = "llvm-nm-18"
+        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
+        nm_path = str(Path(self.peano_dir) / "bin" / "llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
         # Extract defined symbols and create symbol map
