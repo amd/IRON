@@ -1,15 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -34,10 +29,9 @@ class AIEMemCopy(MLIROperator):
         return f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="my_mem_copy",
             callback_args=[
                 self.context.device_manager.device_type,
@@ -68,35 +62,7 @@ class AIEMemCopy(MLIROperator):
         ]
 
     def get_artifacts(self):
-        # Override to add --dynamic-objFifos flag
-        operator_name = self.get_operator_name()
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if kernel_deps_inputs:
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
-        xclbin_artifact = XclbinArtifact(
-            f"{operator_name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=["--dynamic-objFifos"],
-        )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-            extra_flags=["--dynamic-objFifos"],
-        )
-        return xclbin_artifact, insts_artifact
+        return super().get_artifacts(dynamic_obj_fifos=True)
 
     def get_arg_spec(self):
         return [
