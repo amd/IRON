@@ -13,6 +13,11 @@ from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
 import ml_dtypes
 
+__all__ = [
+    "FusedMLIRSource",
+    "FusePythonGeneratedMLIRCompilationRule",
+]
+
 from . import (
     CompilationArtifact,
     CompilationRule,

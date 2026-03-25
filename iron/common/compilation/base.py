@@ -43,6 +43,31 @@ from contextlib import nullcontext
 from aie.extras.context import mlir_mod_ctx
 import sys
 
+__all__ = [
+    "plan",
+    "execute",
+    "compile",
+    "CompilationArtifactGraph",
+    "CompilationArtifact",
+    "SourceArtifact",
+    "FullElfArtifact",
+    "XclbinArtifact",
+    "InstsBinArtifact",
+    "KernelObjectArtifact",
+    "KernelArchiveArtifact",
+    "PythonGeneratedMLIRArtifact",
+    "CompilationCommand",
+    "ShellCompilationCommand",
+    "PythonCallbackCompilationCommand",
+    "CompilationRule",
+    "GenerateMLIRFromPythonCompilationRule",
+    "AieccCompilationRule",
+    "AieccFullElfCompilationRule",
+    "AieccXclbinInstsCompilationRule",
+    "PeanoCompilationRule",
+    "ArchiveCompilationRule",
+]
+
 # Global Functions
 # ##########################################################################
 
