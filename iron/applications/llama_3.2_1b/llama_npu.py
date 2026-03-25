@@ -437,7 +437,7 @@ class AIELlamaOperators:
         repeat_interleave_op = AIERepeat(
             rows=config.n_kv_groups,
             cols=prompt_len * config.head_dim,  # Max context length
-            num_repeats=config.n_heads // config.n_kv_groups,
+            repeat=config.n_heads // config.n_kv_groups,
             transfer_size=config.head_dim,
             context=elf_ctx,
         )
