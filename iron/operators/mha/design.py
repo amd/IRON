@@ -71,6 +71,7 @@ def main():
         default="my_mha.mlir",
         help="Output file path for the generated MLIR module",
     )
+    argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu2")
     argparser.add_argument(
         "--verbose", action="store_true", help="Enable verbose output"
     )
@@ -78,6 +79,7 @@ def main():
     args = argparser.parse_args()
 
     maybe_module = fused_mha(
+        dev=args.dev,
         heads=args.heads,
         S_q=args.S_q,
         S_kv=args.S_kv,
@@ -101,6 +103,7 @@ def main():
 
 
 def fused_mha(
+    dev: str,
     heads: int,
     S_q: int,
     S_kv: int,
@@ -119,7 +122,6 @@ def fused_mha(
     vectorized = True
     enable_tracing = trace_size > 0
     dtype_str = "bf16"
-    dev = "npu2"
 
     if number_of_pipelines > 6:
         number_of_pipelines_join_distribute = number_of_pipelines // 2
