@@ -46,8 +46,6 @@ from iron.operators import (
 )
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-logging.basicConfig(level=logging.DEBUG)
-
 max_seq_len = 2048
 
 
@@ -304,12 +302,13 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
+        # decode processes 1 query token at a time
         rope_queries_op = AIERope(
-            rows=1 * config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
+            rows=config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
         )
 
         rope_keys_op = AIERope(
-            rows=1 * config.n_kv_groups,
+            rows=config.n_kv_groups,
             cols=config.head_dim,
             angle_rows=1,
             context=elf_ctx,
@@ -1353,6 +1352,7 @@ def llama_forward_pass(config, state):
 
 def main():
     global aie_ops, aie_buffers, max_seq_len
+    logging.basicConfig(level=logging.DEBUG)
     args = harness.parse_args()
 
     assert (
