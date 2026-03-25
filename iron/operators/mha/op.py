@@ -4,7 +4,6 @@
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
-from pathlib import Path
 from typing import Dict, List
 
 from iron.common import (
@@ -46,10 +45,9 @@ class AIEMHA(MLIROperator):
         return f"mha_{self.num_heads}h_{kv_heads}kv_{self.seq_len}s_{self.d}d"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="fused_mha",
             callback_kwargs={
                 "heads": self.num_heads,

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 
 from iron.common import (
     MLIROperator,
@@ -57,10 +56,9 @@ class AIEStridedCopy(MLIROperator):
         )
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="strided_copy",
             callback_args=[
                 self.context.device_manager.device_type,
