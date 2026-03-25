@@ -14,17 +14,16 @@ import llama_inference_harness as harness
 def rope_forward(x, angles):
     """Rotary positional embedding using precomputed angles"""
     # x: (batch, seq_len, num_heads, head_dim) after view and before transpose
-    # angles: (context_length, head_dim)
+    # angles: (seq_len, head_dim) already sliced to the correct position range by the caller
     _, seq_len, _, head_dim = x.shape
-    angles_slice = angles[:seq_len]  # (seq_len, head_dim)
 
     # Split into even and odd dimensions
     x1 = x[..., : head_dim // 2]  # (batch, seq_len, num_heads, head_dim//2)
     x2 = x[..., head_dim // 2 :]  # (batch, seq_len, num_heads, head_dim//2)
 
     # Get cos and sin from angles
-    cos = angles_slice[:, ::2]  # (seq_len, head_dim//2)
-    sin = angles_slice[:, 1::2]  # (seq_len, head_dim//2)
+    cos = angles[:, ::2]  # (seq_len, head_dim//2)
+    sin = angles[:, 1::2]  # (seq_len, head_dim//2)
 
     # Reshape for broadcasting: (1, seq_len, 1, head_dim//2)
     # (The same cosine and sine values are used across batch and heads.)
