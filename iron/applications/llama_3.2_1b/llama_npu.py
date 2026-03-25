@@ -53,9 +53,6 @@ max_seq_len = 2048
 # ##########################################################################
 
 
-aie_ops = None
-
-
 class AIEPrefillOperations:
     pass
 
@@ -731,9 +728,6 @@ class AIELlamaOperators:
 # ##########################################################################
 
 
-aie_buffers = None
-
-
 def _xrttensor_subbuffer(parent, offset_elements, length_elements, shape, dtype):
     """Create an XRTSubBuffer into a parent XRTTensor."""
     itemsize = np.dtype(dtype).itemsize
@@ -836,7 +830,7 @@ class AIEPrefillBuffers:
 
 
 class AIELlamaBuffers:
-    def __init__(self, config, prompt_len):
+    def __init__(self, config, prompt_len, aie_ops):
         # Vector of the current token(s) being processed through the pipeline
         self.prefill = AIEPrefillBuffers(
             prompt_len,
@@ -967,6 +961,8 @@ class AIELlamaBuffers:
 
 
 def grouped_query_attention_forward_prefill(
+    aie_ops,
+    aie_buffers,
     config,
     x,
     keys_cache,
@@ -1114,7 +1110,7 @@ def grouped_query_attention_forward_prefill(
     return output, keys_cache, values_cache
 
 
-def swiglu_ffn_forward_prefill(layer_idx):
+def swiglu_ffn_forward_prefill(aie_ops, aie_buffers, layer_idx):
     # Step 1: Gate projection
     aie_ops.prefill.ffn_up_gate(
         aie_buffers.prefill.x_norm,
@@ -1148,7 +1144,7 @@ def swiglu_ffn_forward_prefill(layer_idx):
 
 
 def transformer_block_forward_prefill(
-    config, seq_len, layer_idx, attn_keys_cache, attn_values_cache, attn_mask
+    aie_ops, aie_buffers, config, seq_len, layer_idx, attn_keys_cache, attn_values_cache, attn_mask
 ):
     # Step 1: RMS normalization
     aie_ops.prefill.rms_norm(
@@ -1161,6 +1157,8 @@ def transformer_block_forward_prefill(
 
     # Step 2: Attention
     attn_output, attn_keys, attn_values = grouped_query_attention_forward_prefill(
+        aie_ops,
+        aie_buffers,
         config,
         x_norm,
         attn_keys_cache,
@@ -1191,7 +1189,7 @@ def transformer_block_forward_prefill(
     x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 5: Feed-forward network
-    swiglu_ffn_forward_prefill(layer_idx)
+    swiglu_ffn_forward_prefill(aie_ops, aie_buffers, layer_idx)
 
     # Step 6: Residual
     aie_ops.prefill.residual_add(
@@ -1201,7 +1199,7 @@ def transformer_block_forward_prefill(
     return attn_keys, attn_values
 
 
-def llama_forward_pass_prefill(config, state):
+def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     batch, seq_len = state.token_ids.shape
 
     # Step 1: RoPE angles
@@ -1222,6 +1220,8 @@ def llama_forward_pass_prefill(config, state):
     for layer_idx in range(config.n_layers):
         state.attn_keys_caches[layer_idx], state.attn_values_caches[layer_idx] = (
             transformer_block_forward_prefill(
+                aie_ops,
+                aie_buffers,
                 config,
                 seq_len,
                 layer_idx,
@@ -1289,7 +1289,7 @@ def patch_fused_decode_operator(ops, config, num_preceding_tokens):
     ops.fused.reload_elf(patched_elf_data)
 
 
-def llama_forward_pass_decode(config, state):
+def llama_forward_pass_decode(aie_ops, config, state):
     batch, seq_len = state.token_ids.shape
     assert seq_len == 1
     assert state.num_preceding_tokens < max_seq_len
@@ -1327,12 +1327,10 @@ def llama_forward_pass_decode(config, state):
 # ##########################################################################
 
 
-def llama_forward_pass(config, state):
-    global aie_ops, aie_buffers
-
+def llama_forward_pass(aie_ops, aie_buffers, config, state):
     batch, seq_len = state.token_ids.shape
     if seq_len > 1:
-        ret = llama_forward_pass_prefill(config, state)
+        ret = llama_forward_pass_prefill(aie_ops, aie_buffers, config, state)
         state.num_preceding_tokens = state.token_ids.shape[1]
         # Pass KV cache data onto fused decode operator
         for layer_idx in range(config.n_layers):
@@ -1345,13 +1343,12 @@ def llama_forward_pass(config, state):
             aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:
-        ret = llama_forward_pass_decode(config, state)
+        ret = llama_forward_pass_decode(aie_ops, config, state)
         state.num_preceding_tokens += 1
         return ret
 
 
 def main():
-    global aie_ops, aie_buffers, max_seq_len
     logging.basicConfig(level=logging.DEBUG)
     args = harness.parse_args()
 
@@ -1364,11 +1361,13 @@ def main():
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
     aie_ops = AIELlamaOperators(config, max_seq_len)
-    aie_buffers = AIELlamaBuffers(config, max_seq_len)
+    aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
+
+    forward_pass = lambda config, state: llama_forward_pass(aie_ops, aie_buffers, config, state)
 
     print(prompt, end="", flush=True)
     harness.generate(
-        config, state, llama_forward_pass, use_kv_cache=True, num_tokens=args.num_tokens
+        config, state, forward_pass, use_kv_cache=True, num_tokens=args.num_tokens
     )
 
 
