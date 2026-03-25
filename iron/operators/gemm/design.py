@@ -774,3 +774,7 @@ def my_matmul(
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program(SequentialPlacer())
     return module
+
+
+if __name__ == "__main__":
+    main()
