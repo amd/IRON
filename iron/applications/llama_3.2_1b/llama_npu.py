@@ -98,12 +98,12 @@ class AIELlamaOperators:
         )
 
         min_N = 64 * 8 * 4  # tile_n * num_aie_columns * partition_N
-        config.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
-        config.vocab_partitions = 4
+        self.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
+        self.vocab_partitions = 4
         self.prefill.gemv_out_head_compilable = AIEGEMM(
             M=prompt_len,
             K=config.emb_dim,
-            N=config.padded_vocab_size // config.vocab_partitions,
+            N=self.padded_vocab_size // self.vocab_partitions,
             num_aie_columns=8,
             tile_m=64,
             tile_k=64,
@@ -934,31 +934,31 @@ class AIELlamaBuffers:
         ).to("npu")
         W_out_head_parts = aie_ops.prefill.gemv_out_head_compilable.partition_B(
             torch_to_numpy(config.weights["model.embed_tokens.weight"]),
-            config.vocab_partitions,
+            aie_ops.vocab_partitions,
         )
         self.W_out_head_parts = [
             XRTTensor(part, dtype=part.dtype).to("npu") for part in W_out_head_parts
         ]  # partitioned, padded parts of weight, used by GEMM
         self.prefill.logits = XRTTensor(
             shape=(
-                config.vocab_partitions,
+                aie_ops.vocab_partitions,
                 prompt_len,
-                config.padded_vocab_size // config.vocab_partitions,
+                aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
             ),
             dtype=ml_dtypes.bfloat16,
         ).to("npu")
         logits_part_len = prompt_len * (
-            config.padded_vocab_size // config.vocab_partitions
+            aie_ops.padded_vocab_size // aie_ops.vocab_partitions
         )
         self.prefill.logits_parts = [
             _xrttensor_subbuffer(
                 self.prefill.logits,
                 offset_elements=i * logits_part_len,
                 length_elements=logits_part_len,
-                shape=(prompt_len, config.padded_vocab_size // config.vocab_partitions),
+                shape=(prompt_len, aie_ops.padded_vocab_size // aie_ops.vocab_partitions),
                 dtype=ml_dtypes.bfloat16,
             )
-            for i in range(config.vocab_partitions)
+            for i in range(aie_ops.vocab_partitions)
         ]
 
 
@@ -1237,7 +1237,7 @@ def llama_forward_pass_prefill(config, state):
     )
 
     # Step 5: Output projection
-    for i in range(config.vocab_partitions):
+    for i in range(aie_ops.vocab_partitions):
         aie_ops.prefill.out_head(
             aie_buffers.prefill.x,
             aie_buffers.W_out_head_parts[i],
@@ -1248,7 +1248,7 @@ def llama_forward_pass_prefill(config, state):
     logits_padded = (
         logits_padded_partitioned.transpose(0, 1)
         .contiguous()
-        .view(-1, config.padded_vocab_size)
+        .view(-1, aie_ops.padded_vocab_size)
     )
     logits = logits_padded.unsqueeze(0)[:, :seq_len, : config.vocab_size]
 
