@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -30,10 +27,10 @@ class AIEGEMV(MLIROperator):
         if tile_size_output is None:
             tile_size_output = tile_size_input
 
-        assert (
-            tile_size_output % tile_size_input == 0
-            and tile_size_output >= tile_size_input
-        ), "tile_size_output must be a multiple of tile_size_input"
+        if not (tile_size_output % tile_size_input == 0 and tile_size_output >= tile_size_input):
+            raise ValueError(
+                "tile_size_output must be a multiple of tile_size_input"
+            )
         self.M = M  # matrix rows
         self.K = K  # matrix columns, vector rows
         self.num_aie_columns = num_aie_columns
@@ -41,12 +38,8 @@ class AIEGEMV(MLIROperator):
         self.tile_size_output = tile_size_output
         self.num_batches = num_batches
         self.kernel_vector_size = kernel_vector_size
-        assert (
-            K >= kernel_vector_size and K % kernel_vector_size == 0
-        ), "K must be multiple of kernel_vector_size"
-
-        self.xclbin_artifact = None
-        self.insts_artifact = None
+        if not (K >= kernel_vector_size and K % kernel_vector_size == 0):
+            raise ValueError("K must be multiple of kernel_vector_size")
 
         MLIROperator.__init__(self, context=context)
 
@@ -54,12 +47,11 @@ class AIEGEMV(MLIROperator):
         return f"gemv_{self.M}x{self.K}_{self.tile_size_input}tsi_{self.tile_size_output}tso_{self.num_batches}batch_{self.num_aie_columns}col"
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         mlir_verbose = getattr(self.context, "mlir_verbose", False)
 
         return PythonGeneratedMLIRArtifact(
             f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
+            import_path=self.operator_dir / "design.py",
             callback_fn="my_matvec",
             callback_args=[
                 self.context.device_manager.device_str(),
@@ -78,7 +70,7 @@ class AIEGEMV(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"gemv_{self.K}k.o",
+                f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
