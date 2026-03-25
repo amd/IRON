@@ -72,10 +72,9 @@ __all__ = [
 # ##########################################################################
 
 
-def plan(rules, graph):
+def plan(rules, graph, _seen_unavailable=None):
     if all(artifact.is_available() for artifact in graph):
         return []  # Everything has been compiled
-    available_before = sum(1 for artifact in graph.bfs() if artifact.is_available())
     for rule in rules:
         if rule.matches(graph):
             commands = rule.compile(graph)
@@ -84,16 +83,15 @@ def plan(rules, graph):
         raise RuntimeError(
             f"No matching rule to compile target(s): {', '.join(artifact.filename for artifact in graph)}"
         )
-    available_after = sum(1 for artifact in graph.bfs() if artifact.is_available())
-    if available_after <= available_before:
-        unavailable = [
-            artifact.filename for artifact in graph.bfs() if not artifact.is_available()
-        ]
+    unavailable = frozenset(
+        artifact.filename for artifact in graph.bfs() if not artifact.is_available()
+    )
+    if unavailable == _seen_unavailable:
         raise RuntimeError(
             f"Rule {rule.__class__.__name__} fired but made no progress. "
-            f"Still unavailable: {unavailable}"
+            f"Still unavailable: {sorted(unavailable)}"
         )
-    return [(rule, commands)] + plan(rules, graph)
+    return [(rule, commands)] + plan(rules, graph, _seen_unavailable=unavailable)
 
 
 def execute(plan_steps):
