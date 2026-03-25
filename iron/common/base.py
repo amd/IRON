@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from ml_dtypes import bfloat16
 
+import inspect
 import numpy as np
 import os
 from pathlib import Path
@@ -90,6 +91,10 @@ class MLIROperator(AIEOperatorBase, ABC):
         self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
         AIEOperatorBase.__init__(self, *args, **kwargs)
 
+    @property
+    def operator_dir(self):
+        return Path(inspect.getfile(type(self))).parent
+
     @abstractmethod
     def get_operator_name(self):
         pass
@@ -102,7 +107,7 @@ class MLIROperator(AIEOperatorBase, ABC):
     def get_kernel_artifacts(self):
         pass
 
-    def get_artifacts(self, prefix=""):
+    def get_artifacts(self, prefix="", dynamic_obj_fifos: bool = False):
         operator_name = prefix + self.get_operator_name()
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps_inputs = self.get_kernel_artifacts()
@@ -119,15 +124,18 @@ class MLIROperator(AIEOperatorBase, ABC):
             if kernel_deps_inputs
             else []
         )
+        extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_deps,
+            extra_flags=extra_flags,
         )
         insts_artifact = InstsBinArtifact(
             f"{operator_name}.bin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact],
+            extra_flags=extra_flags,
         )
         return xclbin_artifact, insts_artifact
 
