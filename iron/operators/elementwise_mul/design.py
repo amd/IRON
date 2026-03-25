@@ -16,7 +16,6 @@ def my_eltwise_mul(
     num_columns,
     tile_size,
     trace_size,
-    kernel_archive,
     func_prefix="",
 ):
     per_tile_elements = 4096 if tile_size > 4096 else tile_size
@@ -41,7 +40,7 @@ def my_eltwise_mul(
     # AIE Core Function declaration
     eltwise_mul_bf16_vector = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
-        kernel_archive,
+        "mul.o",
         [tile_ty, tile_ty, tile_ty, np.int32],
     )
 

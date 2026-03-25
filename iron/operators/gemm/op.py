@@ -73,6 +73,11 @@ class AIEGEMM(MLIROperator):
     def get_operator_name(self):
         return f"gemm_{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
 
+    @property
+    def _kernel_flags_suffix(self):
+        """Suffix encoding compile-time flags that affect the kernel binary."""
+        return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
+
     def get_mlir_artifact(self):
         operator_name = self.get_operator_name()
         dtype_in = self.gemm_args.get("dtype_in", "bf16")
@@ -102,6 +107,7 @@ class AIEGEMM(MLIROperator):
                 "separate_c_tiles": int(separate_c_tiles),
                 "trace_size": 0,
                 "generate_taps": False,
+                "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
             },
             requires_context=False,
         )
@@ -126,12 +132,9 @@ class AIEGEMM(MLIROperator):
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
-        # Include flags in the filename to avoid stale builds when flags change
-        flags_suffix = f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
-
         return [
             KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{flags_suffix}.o",
+                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
                     SourceArtifact(base_dir / "aie_kernels" / "aie2p" / "mm.cc")

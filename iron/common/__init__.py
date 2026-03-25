@@ -9,7 +9,7 @@ Exported groups:
   - Callable/argument types: CompositeCallable, AIERuntimeArgSpec
   - Context management: AIEContext
   - Compilation artifacts: XclbinArtifact, InstsBinArtifact, KernelObjectArtifact,
-                            KernelArchiveArtifact, SourceArtifact, PythonGeneratedMLIRArtifact
+                            SourceArtifact, PythonGeneratedMLIRArtifact
   - Device management: AIEDeviceManager
 """
 
@@ -25,7 +25,6 @@ from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "XclbinArtifact",
     "InstsBinArtifact",
     "KernelObjectArtifact",
-    "KernelArchiveArtifact",
     "SourceArtifact",
     "PythonGeneratedMLIRArtifact",
     "AIEDeviceManager",

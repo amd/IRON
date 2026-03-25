@@ -32,7 +32,6 @@ class FusedMLIROperator(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
-        self.kernel_archive = "kernels.a"
         super().__init__(*args, **kwargs)
 
     def get_operator_name(self):
@@ -67,9 +66,6 @@ class FusedMLIROperator(AIEOperatorBase):
         for idx, op in enumerate(unique_operators):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
-                # FIXME: currently hard-coding that the design will accept this argument as an input if it uses kernels
-                # Also not handling name collisions of kernels with the same name
-                mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
                 mlir_artifact.callback_kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             op_names[op] = op_name
@@ -198,20 +194,10 @@ class FusedMLIROperator(AIEOperatorBase):
         operator_name = self.get_operator_name()
         mlir_artifact = self.get_mlir_artifact()
         kernel_objects = self.get_kernel_artifacts()
-        kernel_dep = (
-            [
-                comp.KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_objects,
-                )
-            ]
-            if kernel_objects
-            else []
-        )
         full_elf_artifact = comp.FullElfArtifact(
             f"{operator_name}.elf",
             mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_dep,
+            dependencies=[mlir_artifact] + kernel_objects,
         )
         self.add_artifacts([full_elf_artifact])
 

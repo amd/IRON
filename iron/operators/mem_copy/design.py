@@ -171,7 +171,6 @@ def my_mem_copy(
     bypass,
     tile_size,
     trace_size,
-    kernel_archive=None,
 ):
     # --------------------------------------------------------------------------
     # Configuration

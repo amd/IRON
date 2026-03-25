@@ -10,9 +10,7 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
-def my_silu(
-    dev, size, num_columns, tile_size, trace_size, kernel_archive, func_prefix=""
-):
+def my_silu(dev, size, num_columns, tile_size, trace_size, func_prefix=""):
     xfr_dtype = bfloat16
     # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
     line_size = 4096 if tile_size > 4096 else tile_size
@@ -33,7 +31,7 @@ def my_silu(
     # External, binary kernel definition
     silu_fcn = Kernel(
         f"{func_prefix}silu_bf16",
-        kernel_archive,
+        "silu.o",
         [line_type, line_type, np.int32],
     )
 

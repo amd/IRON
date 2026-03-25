@@ -65,6 +65,7 @@ class AIEGEMV(MLIROperator):
             ],
             callback_kwargs={
                 "verbose": mlir_verbose,
+                "kernel_object": f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
             },
         )
 

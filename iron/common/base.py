@@ -20,7 +20,6 @@ from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -87,7 +86,6 @@ class MLIROperator(AIEOperatorBase, ABC):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
     def __init__(self, *args, **kwargs):
-        self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
         AIEOperatorBase.__init__(self, *args, **kwargs)
 
     @property
@@ -109,20 +107,7 @@ class MLIROperator(AIEOperatorBase, ABC):
     def get_artifacts(self, prefix="", dynamic_obj_fifos: bool = False):
         operator_name = prefix + self.get_operator_name()
         mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if kernel_deps_inputs:
-            # Inject kernel archive name into the MLIR generation callback so the
-            # design function knows which archive to link against.
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive, dependencies=kernel_deps_inputs
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
+        kernel_deps = self.get_kernel_artifacts()
         extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",

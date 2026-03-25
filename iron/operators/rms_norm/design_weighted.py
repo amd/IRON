@@ -18,7 +18,6 @@ def my_weighted_rms_norm(
     num_channels,
     weight_length,
     trace_size,
-    kernel_archive="rms_norm.a",
     func_prefix="",
 ):
     assert (
@@ -60,12 +59,12 @@ def my_weighted_rms_norm(
     # AIE Core Function declaration
     rms_norm_kernel = Kernel(
         f"{func_prefix}rms_norm_bf16_vector",
-        kernel_archive,
+        "rms_norm.o",
         [tile_ty, tile_ty, np.int32],
     )
     eltwise_mul_kernel = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
-        kernel_archive,
+        "mul.o",
         [tile_ty, weights_ty, tile_ty, np.int32],
     )
 

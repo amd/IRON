@@ -18,7 +18,6 @@ def my_leaky_relu(
     tile_size,
     trace_size,
     alpha,
-    kernel_archive=None,
 ):
     xfr_dtype = bfloat16
     # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory

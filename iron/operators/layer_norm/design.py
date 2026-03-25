@@ -17,7 +17,6 @@ def my_layer_norm(
     num_channels,
     trace_size,
     tile_size,
-    kernel_archive=None,
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
     total_cores = num_columns * num_channels
@@ -50,7 +49,7 @@ def my_layer_norm(
 
     # AIE Core Function declaration
     layer_norm_kernel = Kernel(
-        "layer_norm", kernel_archive or "layer_norm.o", [tile_ty, tile_ty, np.int32]
+        "layer_norm", "layer_norm.o", [tile_ty, tile_ty, np.int32]
     )
 
     # Define a task that will run on a compute tile

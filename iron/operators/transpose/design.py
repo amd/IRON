@@ -10,9 +10,7 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
-def shuffle_transpose(
-    dev, M, N, num_columns, num_channels, m, n, s, kernel_archive=None, func_prefix=""
-):
+def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix=""):
     num_elements = M * N
     per_tile_elements = m * n
     dtype = bfloat16
@@ -100,10 +98,8 @@ def shuffle_transpose(
     ]
 
     # AIE Core Function declaration
-    if kernel_archive is None:
-        kernel_archive = f"transpose_{s}x{s}.a"
     transpose_kernel = Kernel(
-        f"{func_prefix}transpose_{s}x{s}", kernel_archive, [tile_ty, tile_ty]
+        f"{func_prefix}transpose_{s}x{s}", f"transpose_{m}x{n}.o", [tile_ty, tile_ty]
     )
 
     # Define a task that will run on a compute tile

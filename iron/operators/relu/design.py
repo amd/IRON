@@ -10,9 +10,7 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
-def my_relu(
-    dev, size, num_columns, num_channels, tile_size, trace_size, kernel_archive=None
-):
+def my_relu(dev, size, num_columns, num_channels, tile_size, trace_size):
     xfr_dtype = bfloat16
     # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
     line_size = 4096 if tile_size > 4096 else tile_size

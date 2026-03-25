@@ -141,7 +141,7 @@ def my_matmul(
     prio_accuracy,
     separate_c_tiles,
     trace_size,
-    kernel_archive=None,
+    kernel_object=None,
     func_prefix="",
     generate_taps=False,
 ):
@@ -277,11 +277,7 @@ def my_matmul(
 
     # AIE Core Function declarations
     scalar_suffix = "_scalar" if use_scalar else ""
-    kernel_archive = (
-        f"{func_prefix}gemm_{m}x{k}x{n}_archive.a"
-        if kernel_archive is None
-        else kernel_archive
-    )
+    gemm_object = kernel_object or f"{func_prefix}gemm_{m}x{k}x{n}.o"
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
@@ -291,19 +287,19 @@ def my_matmul(
         # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
         convert_copy_kernel = Kernel(
             f"convert_copy_f32_to_bf16",
-            kernel_archive,
+            "convert_copy.o",
             [C_l1_ty_internal, C_l1_ty, np.int32],
         )
         # Fix the kernels to use f32 outputs
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_f32",
-            kernel_archive,
+            gemm_object,
             [C_l1_ty_internal],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_f32"
         matmul_kernel = Kernel(
             matmul_func_name,
-            kernel_archive,
+            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty_internal],
         )
     else:
@@ -312,13 +308,13 @@ def my_matmul(
         fifo_depth_out = fifo_depth
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_{dtype_out_str}",
-            kernel_archive,
+            gemm_object,
             [C_l1_ty],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
         matmul_kernel = Kernel(
             matmul_func_name,
-            kernel_archive,
+            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty],
         )
 

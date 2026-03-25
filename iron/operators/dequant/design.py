@@ -18,7 +18,6 @@ def my_dequant_kernel(
     trace_size,
     tile_size,
     group_size,
-    kernel_archive=None,
 ):
     per_tile_elements = (
         16384 if tile_size > 16384 else tile_size

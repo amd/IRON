@@ -34,7 +34,7 @@ def my_matvec(
     m_input,
     m_output=None,
     num_batches=1,
-    kernel_archive="mv.o",
+    kernel_object="mv.o",
     func_prefix="",
     verbose=False,
 ):
@@ -83,7 +83,7 @@ def my_matvec(
     func_type = "vectorized" if vectorized else "scalar"
     matvec = Kernel(
         f"{func_prefix}matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        kernel_archive,
+        kernel_object,
         [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 

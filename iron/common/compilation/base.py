@@ -54,7 +54,6 @@ __all__ = [
     "XclbinArtifact",
     "InstsBinArtifact",
     "KernelObjectArtifact",
-    "KernelArchiveArtifact",
     "PythonGeneratedMLIRArtifact",
     "CompilationCommand",
     "ShellCompilationCommand",
@@ -65,7 +64,6 @@ __all__ = [
     "AieccFullElfCompilationRule",
     "AieccXclbinInstsCompilationRule",
     "PeanoCompilationRule",
-    "ArchiveCompilationRule",
 ]
 
 # Global Functions
@@ -292,10 +290,6 @@ class KernelObjectArtifact(CompilationArtifact):
         self.prefix_symbols = prefix_symbols
 
 
-class KernelArchiveArtifact(CompilationArtifact):
-    pass
-
-
 class PythonGeneratedMLIRArtifact(CompilationArtifact):
     def __init__(
         self,
@@ -474,15 +468,6 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 os.path.abspath(artifact.filename),
                 os.path.abspath(artifact.mlir_input.filename),
             ]
-            # Pass kernel archives via -L/-l: so aiecc links them into the ELF
-            for dep in artifact.dependencies:
-                if isinstance(dep, KernelArchiveArtifact):
-                    archive_path = os.path.abspath(dep.filename)
-                    compile_cmd += [
-                        "-L",
-                        os.path.dirname(archive_path),
-                        f"-l:{os.path.basename(archive_path)}",
-                    ]
             commands.append(
                 ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
             )
@@ -550,23 +535,6 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                     "--npu-insts-name=" + os.path.abspath(first_insts_bin.filename),
                 ]
             compile_cmd += [os.path.abspath(mlir_source.filename)]
-
-            # If the MLIR source depends on a kernel archive, pass it to aiecc so it can be linked
-            if (
-                isinstance(mlir_source, PythonGeneratedMLIRArtifact)
-                and "kernel_archive" in mlir_source.callback_kwargs
-            ):
-                archive_path = os.path.abspath(
-                    os.path.join(
-                        self.build_dir,
-                        mlir_source.callback_kwargs["kernel_archive"],
-                    )
-                )
-                compile_cmd += [
-                    "-L",
-                    os.path.dirname(archive_path),
-                    f"-l:{os.path.basename(archive_path)}",
-                ]
 
             commands.append(
                 ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
@@ -675,55 +643,3 @@ class PeanoCompilationRule(CompilationRule):
         ]
 
         return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
-
-
-class ArchiveCompilationRule(CompilationRule):
-    def __init__(self, peano_dir, *args, **kwargs):
-        self.peano_dir = peano_dir
-        super().__init__(*args, **kwargs)
-
-    def matches(self, artifacts):
-        return any(artifacts.get_worklist(KernelArchiveArtifact))
-
-    def compile(self, artifacts):
-        """Create an archive (.a) from compiled object files"""
-        worklist = artifacts.get_worklist(KernelArchiveArtifact)
-        commands = []
-        for artifact in worklist:
-            # Get archive filename from method
-            archive_path = artifact.filename
-            object_files = [
-                dep.filename
-                for dep in artifact.dependencies
-                if isinstance(dep, KernelObjectArtifact)
-            ]
-
-            # Try to find ar tool from PEANO, then system
-            ar_path = None
-
-            if self.peano_dir:
-                # Peano has llvm-ar for archiving
-                peano_ar = Path(self.peano_dir) / "bin" / "llvm-ar"
-                if os.path.exists(peano_ar):
-                    ar_path = peano_ar
-
-            if ar_path is None:
-                raise RuntimeError(
-                    "Could not find 'ar' tool in PEANO installation or system PATH"
-                )
-
-            cmd = [str(ar_path), "rcs", archive_path] + object_files
-            commands.append(ShellCompilationCommand(cmd))
-
-            # Check for duplicate symbol definitions in the archive
-            check_cmd = [
-                "sh",
-                "-c",
-                f"nm {archive_path} | grep ' [TDR] ' | awk '{{print $3}}' | sort | uniq -d | "
-                f'if read sym; then echo "Error: Duplicate symbol in archive: $sym" >&2; exit 1; fi',
-            ]
-            commands.append(ShellCompilationCommand(check_cmd))
-
-            artifact.available = True
-
-        return commands

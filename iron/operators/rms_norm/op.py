@@ -5,7 +5,6 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -84,9 +83,6 @@ class AIERMSNorm(MLIROperator):
             import_path=import_path,
             callback_fn=callback_fn,
             callback_args=callback_args,
-            callback_kwargs={
-                "kernel_archive": self.kernel_archive,
-            },
         )
 
     def get_kernel_artifacts(self):

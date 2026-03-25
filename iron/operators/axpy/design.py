@@ -18,7 +18,6 @@ def my_axpy(
     tile_size,
     trace_size,
     scalar_factor,
-    kernel_archive=None,
 ):
     factor = scalar_factor
     per_tile_elements = 4096 if tile_size > 4096 else tile_size

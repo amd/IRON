@@ -116,7 +116,6 @@ def fused_mha(
     emulate_bf16_mmul_with_bfp16: bool,
     trace_size: int = 0,
     verbose: bool = False,
-    kernel_archive=None,
 ):
 
     of_depth = 2
@@ -213,17 +212,19 @@ def fused_mha(
 
     # AIE kernel declarations
     func_type = "" if vectorized else "_scalar"
-    bin_name = kernel_archive if kernel_archive else "mha_kernels.a"
+    zero_kernel = Kernel(f"zero_{dtype_str}", "mha_mm.o", [qk_ty])
 
-    zero_kernel = Kernel(f"zero_{dtype_str}", bin_name, [qk_ty])
+    memcopy_kernel_scale = Kernel(
+        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+    )
 
-    memcopy_kernel_scale = Kernel(f"passThroughLine", bin_name, [s_ty, s_ty, np.int32])
-
-    scale_buffer_init_kernel = Kernel("init_scale_buffer", bin_name, [s_ty, np.int32])
+    scale_buffer_init_kernel = Kernel(
+        "init_scale_buffer", "mha_softmax.o", [s_ty, np.int32]
+    )
 
     partial_softmax_kernel = Kernel(
         "partial_softmax",
-        bin_name,
+        "mha_softmax.o",
         [
             qk_ty,
             qk_ty,
@@ -239,13 +240,13 @@ def fused_mha(
 
     matmul_QK = Kernel(
         f"matmul_bf16_bf16_wrapper{func_type}",
-        bin_name,
+        "mha_mm.o",
         [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
     matmul_PV = Kernel(
         "matmul_PV",
-        bin_name,
+        "mha_mha.o",
         [
             qk_ty,
             k_ty,
@@ -259,7 +260,7 @@ def fused_mha(
 
     rescale_O = Kernel(
         "rescale_O",
-        bin_name,
+        "mha_mha.o",
         [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
