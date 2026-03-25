@@ -219,12 +219,12 @@ def fused_mha(
     )
 
     scale_buffer_init_kernel = Kernel(
-        "init_scale_buffer", "mha_softmax.o", [s_ty, np.int32]
+        "init_scale_buffer", "mha_mha.o", [s_ty, np.int32]
     )
 
     partial_softmax_kernel = Kernel(
         "partial_softmax",
-        "mha_softmax.o",
+        "mha_mha.o",
         [
             qk_ty,
             qk_ty,
@@ -240,7 +240,7 @@ def fused_mha(
 
     matmul_QK = Kernel(
         f"matmul_bf16_bf16_wrapper{func_type}",
-        "mha_mm.o",
+        "mha_mha.o",
         [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
