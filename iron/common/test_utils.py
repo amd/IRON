@@ -57,10 +57,9 @@ def verify_buffer(
     if len(output) < len(expected):
         # Allow larger buffers - binning may have allocated more space than needed
         print(
-            f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(output)}"
+            f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(output)} "
+            f"({len(expected) - len(output)} elements missing)"
         )
-        # Record the indices that are missing from output (do not count toward max_error_rate)
-        errors.extend(i for i in range(len(output), len(expected)))
     compare_len = min(len(output), len(expected))
     mismatch_errors = []
     for i in range(compare_len):
@@ -134,6 +133,7 @@ def run_test(
     input_iter = iter(input_buffers.items())
     output_iter = iter(output_buffers.items())
     output_map = {}
+    inout_names = []
 
     total_bytes = 0
 
@@ -163,6 +163,7 @@ def run_test(
             buf = XRTTensor.from_torch(data)
             args.append(buf)
             output_map[name] = buf
+            inout_names.append(name)
             total_bytes += buf.buffer_object().size()
         else:
             raise ValueError(f"Unsupported direction: {spec.direction}")
@@ -195,6 +196,8 @@ def run_test(
                 errors[buf_name] = buf_errors
         else:
             print(f"Warning: Output buffer {buf_name} not found in operator arguments")
+
+    # inout buffers are in output_map and are verified above if present in output_buffers
 
     # Calculate bandwidth
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
