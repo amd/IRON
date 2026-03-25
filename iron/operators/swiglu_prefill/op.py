@@ -62,10 +62,8 @@ class SwiGLUPrefillCallable:
         self.right = XRTTensor((size_hidden,), dtype=bfloat16)
         self.left_swished = XRTTensor((size_hidden,), dtype=bfloat16)
         self.intermediate = XRTTensor((size_hidden,), dtype=bfloat16)
-        self.last_output_buf = None
 
     def __call__(self, input_buf, output_buf):
-        self.last_output_buf = output_buf
         input_buf.to("npu")
         output_buf.to("npu")
         self.weights_1.to("npu")
