@@ -285,17 +285,17 @@ class FusedFullELFCallable(FullELFCallable):
         itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
         self.input_buffer = XRTTensor(
-            shape=(max(input_buffer_size, itemsize) // itemsize,),
+            (max(input_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
         self.output_buffer = XRTTensor(
-            shape=(max(output_buffer_size, itemsize) // itemsize,),
+            (max(output_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
         self.scratch_buffer = XRTTensor(
-            shape=(max(scratch_buffer_size, itemsize) // itemsize,),
+            (max(scratch_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 

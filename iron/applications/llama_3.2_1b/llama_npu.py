@@ -742,8 +742,8 @@ def _xrttensor_subbuffer(parent, offset_elements, length_elements, shape, dtype)
 
 class AIEPrefillBuffers:
     def __init__(self, prompt_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
-        self.x = XRTTensor(shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.x_norm = XRTTensor(shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.x = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.x_norm = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
         self.attn_output = XRTTensor(
             shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16
         )
