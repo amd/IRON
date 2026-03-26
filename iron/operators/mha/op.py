@@ -104,12 +104,15 @@ class AIEMHA(MLIROperator):
                 dependencies=[SourceArtifact(mm_source)],
                 rename_symbols=mm_rename_symbols,
             ),
+            # mha.cc calls partial_softmax_bf16 from softmax.cc at C level, so
+            # include softmax.cc into the mha_mha.o compilation. This satisfies
+            # the linker without needing a separate mha_softmax.o that the
+            # aie-assign-core-link-files pass would never add to link_files
+            # (since no Kernel() directly references softmax.cc functions).
             KernelObjectArtifact(
-                "mha_softmax.o",
-                dependencies=[SourceArtifact(softmax_source)],
-            ),
-            KernelObjectArtifact(
-                "mha_mha.o", dependencies=[SourceArtifact(mha_source)]
+                "mha_mha.o",
+                extra_flags=["-include", softmax_source],
+                dependencies=[SourceArtifact(mha_source)],
             ),
             KernelObjectArtifact(
                 "mha_passThrough.o",

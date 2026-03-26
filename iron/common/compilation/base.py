@@ -35,6 +35,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
 import os.path
+import shutil
 import zlib
 import logging
 import subprocess
@@ -609,8 +610,27 @@ class PeanoCompilationRule(CompilationRule):
 
         return commands
 
+    def _find_tool(self, name):
+        """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
+        candidates = [
+            Path(self.peano_dir) / "bin" / name,
+            Path(self.mlir_aie_dir) / "bin" / name,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        for tool_name in [name, f"{name}-18"]:
+            found = shutil.which(tool_name)
+            if found:
+                return found
+        raise FileNotFoundError(
+            f"{name} not found. Searched in: "
+            + ", ".join(str(c) for c in candidates)
+            + f", and system PATH (also tried {name}-18)"
+        )
+
     def _rename_symbols(self, artifact):
-        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
+        objcopy_path = self._find_tool("llvm-objcopy")
         cmd = [
             objcopy_path,
         ]
@@ -623,8 +643,8 @@ class PeanoCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = str(Path(self.peano_dir) / "bin" / "llvm-objcopy")
-        nm_path = str(Path(self.peano_dir) / "bin" / "llvm-nm")
+        objcopy_path = self._find_tool("llvm-objcopy")
+        nm_path = self._find_tool("llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
         # Extract defined symbols and create symbol map
