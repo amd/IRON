@@ -574,15 +574,20 @@ class PeanoCompilationRule(CompilationRule):
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
         for artifact in worklist:
-            if len(artifact.dependencies) != 1:
+            if len(artifact.dependencies) < 1:
                 raise RuntimeError(
-                    "Expected exactly one dependency (the C source code) for KernelObjectArtifact"
+                    "Expected at least one dependency (the C source code) for KernelObjectArtifact"
                 )
             source_file = artifact.dependencies[0]
             if not isinstance(source_file, SourceArtifact):
                 raise RuntimeError(
                     "Expected KernelObject dependency to be a C source file"
                 )
+            for extra_dep in list(artifact.dependencies)[1:]:
+                if not isinstance(extra_dep, SourceArtifact):
+                    raise RuntimeError(
+                        "Expected all KernelObject dependencies to be C source files"
+                    )
 
             cmd = (
                 [

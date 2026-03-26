@@ -85,32 +85,15 @@ class AIEMHA(MLIROperator):
         mm_defines_colmaj = mm_defines_rowmaj + [
             "-DB_COL_MAJ",
         ]
-        mm_rename_symbols = {
-            "matmul_bf16_bf16": "matmul_bf16_bf16_rowmaj",
-            "matmul_scalar_bf16_bf16": "matmul_scalar_bf16_bf16_rowmaj",
-            "zero_bf16": "zero_bf16_rowmaj",
-            "zero_scalar_bf16": "zero_scalar_bf16_rowmaj",
-        }
-
+        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
+        # directly, so everything is compiled into a single mha.o translation unit.
         return [
             KernelObjectArtifact(
-                "mha_mm.o",
+                "mha.o",
                 extra_flags=mm_defines_colmaj,
-                dependencies=[SourceArtifact(mm_source)],
-            ),
-            KernelObjectArtifact(
-                "mha_mm_rowmaj.o",
-                extra_flags=mm_defines_rowmaj,
-                dependencies=[SourceArtifact(mm_source)],
-                rename_symbols=mm_rename_symbols,
-            ),
-            # mha.cc #includes softmax.cc directly, so both are compiled into
-            # mha_mha.o in a single translation unit.
-            KernelObjectArtifact(
-                "mha_mha.o",
-                extra_flags=[],
                 dependencies=[
                     SourceArtifact(mha_source),
+                    SourceArtifact(mm_source),
                     SourceArtifact(softmax_source),
                 ],
             ),

@@ -3,6 +3,10 @@
 
 #include "softmax.cc"
 
+// mm.cc compiled col-major via -DB_COL_MAJ in extra_flags.
+// This provides: matmul_bf16_bf16, matmul_scalar_bf16_bf16, zero_bf16, etc.
+#include "mm.cc"
+
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,10 +17,34 @@
 
 #define ROUNDING_MODE aie::rounding_mode::conv_even
 
+// Row-major variants needed by matmul_PV.  mm.cc's templates are already
+// available (it was included above); we just need to instantiate them with
+// b_row_maj=true (row-major B) and expose the results as extern "C" symbols.
 extern "C" {
-void matmul_scalar_bf16_bf16(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
-void matmul_bf16_bf16(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
-void matmul_bf16_bf16_rowmaj(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
+
+void zero_bf16_rowmaj(bfloat16 *c_out)
+{
+    zero_vectorized<bfloat16, DIM_M, DIM_N>(c_out);
+}
+
+void matmul_bf16_bf16_rowmaj(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out)
+{
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
+    // Explicitly instantiate with b_row_maj=true (row-major B), c_row_maj=true.
+    constexpr unsigned r = 8, s = 8, t = 8;
+    static_assert(DIM_M % (2 * r) == 0);
+    static_assert(DIM_K % s == 0);
+    static_assert(DIM_N % (2 * t) == 0);
+    matmul_vectorized_2x2_mmul<bfloat16, bfloat16,
+                               (DIM_M / r), (DIM_K / s), (DIM_N / t),
+                               r, s, t,
+                               /*b_row_maj=*/true, /*c_row_maj=*/true>(
+        a_in, b_in, c_out);
+}
+
+} // extern "C" (row-major wrappers)
+
+extern "C" {
 void partial_softmax_bf16(bfloat16 *input,
                           bfloat16 *output,
                           bfloat16 *scale_buffer,
@@ -25,7 +53,6 @@ void partial_softmax_bf16(bfloat16 *input,
                           const int32_t row_size,
                           const bfloat16 scale);
 void passThroughLine(int32_t *in, int32_t *out, int32_t lineWidth);
-void zero_bf16(bfloat16 *buffer);
 
 void matmul_bf16_bf16_wrapper(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t *idx_buffer)
 {
