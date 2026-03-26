@@ -83,7 +83,7 @@ class XRTSubBuffer:
             shape: Tuple giving the logical shape of this sub-buffer.
             dtype: numpy dtype for interpreting the buffer contents.
         """
-        self._bo = parent_bo.sub_buffer(offset_bytes, size_bytes)
+        self._bo = pyxrt.bo(parent_bo, size_bytes, offset_bytes)
         self._shape = tuple(shape)
         self.dtype = np.dtype(dtype)
         ptr = self._bo.map()
