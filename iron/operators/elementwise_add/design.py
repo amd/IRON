@@ -40,7 +40,7 @@ def my_eltwise_add(
     # AIE Core Function declaration
     eltwise_add_bf16_vector = Kernel(
         f"{func_prefix}eltwise_add_bf16_vector",
-        "add.o",
+        f"{func_prefix}add.o",
         [tile_ty, tile_ty, tile_ty, np.int32],
     )
 

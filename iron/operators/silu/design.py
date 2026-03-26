@@ -31,7 +31,7 @@ def my_silu(dev, size, num_columns, tile_size, trace_size, func_prefix=""):
     # External, binary kernel definition
     silu_fcn = Kernel(
         f"{func_prefix}silu_bf16",
-        "silu.o",
+        f"{func_prefix}silu.o",
         [line_type, line_type, np.int32],
     )
 

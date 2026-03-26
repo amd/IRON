@@ -83,7 +83,7 @@ def my_matvec(
     func_type = "vectorized" if vectorized else "scalar"
     matvec = Kernel(
         f"{func_prefix}matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        kernel_object,
+        f"{func_prefix}{kernel_object}",
         [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 

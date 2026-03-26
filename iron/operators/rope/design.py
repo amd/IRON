@@ -40,7 +40,9 @@ def rope(
     if angle_rows is None:
         angle_rows = rows
     kernel_object = (
-        "rope" + (f"_{method_type}" if method_type is not None else "") + ".o"
+        f"{func_prefix}rope"
+        + (f"_{method_type}" if method_type is not None else "")
+        + ".o"
     )
 
     assert cols % (16 * 2) == 0 and cols >= (

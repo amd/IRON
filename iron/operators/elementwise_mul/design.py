@@ -40,7 +40,7 @@ def my_eltwise_mul(
     # AIE Core Function declaration
     eltwise_mul_bf16_vector = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
-        "mul.o",
+        f"{func_prefix}mul.o",
         [tile_ty, tile_ty, tile_ty, np.int32],
     )
 
