@@ -35,11 +35,16 @@ void matmul_bf16_bf16_rowmaj(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out)
     static_assert(DIM_M % (2 * r) == 0);
     static_assert(DIM_K % s == 0);
     static_assert(DIM_N % (2 * t) == 0);
-    matmul_vectorized_2x2_mmul<bfloat16, bfloat16,
-                               (DIM_M / r), (DIM_K / s), (DIM_N / t),
-                               r, s, t,
-                               /*b_row_maj=*/true, /*c_row_maj=*/true>(
-        a_in, b_in, c_out);
+    matmul_vectorized_2x2_mmul<bfloat16,
+                               bfloat16,
+                               (DIM_M / r),
+                               (DIM_K / s),
+                               (DIM_N / t),
+                               r,
+                               s,
+                               t,
+                               /*b_row_maj=*/true,
+                               /*c_row_maj=*/true>(a_in, b_in, c_out);
 }
 
 } // extern "C" (row-major wrappers)

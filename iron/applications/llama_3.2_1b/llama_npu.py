@@ -744,74 +744,62 @@ class AIEPrefillBuffers:
     def __init__(self, prompt_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
         self.x = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
         self.x_norm = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.attn_output = XRTTensor(
-            shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_output = XRTTensor(
-            shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.attn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
         # SwiGLU intermediate buffers
-        self.ffn_gate = XRTTensor(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_up = XRTTensor(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_hidden = XRTTensor(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.ffn_gate = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_up = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_hidden = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
         # Attention buffers: queries and keys serve as both projection output and RoPE input/output
         self.queries = XRTTensor(
-            shape=(prompt_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
+            (prompt_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.keys = XRTTensor(
-            shape=(prompt_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
+            (prompt_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.values = XRTTensor(
-            shape=(prompt_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
+            (prompt_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
         )
-        self.rope_angles = XRTTensor(
-            shape=(prompt_len, head_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.rope_angles = XRTTensor((prompt_len, head_dim), dtype=ml_dtypes.bfloat16)
         # Attention score computation buffers (per-head) - parent buffers with subbuffers
         # Parent buffer for all heads' queries: (n_heads, prompt_len, head_dim) stored contiguously
         self.attn_scores_queries_all = XRTTensor(
-            shape=(n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
+            (n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_queries_per_head = [
             _xrttensor_subbuffer(
                 self.attn_scores_queries_all,
+                (prompt_len, head_dim),
                 offset_elements=h * prompt_len * head_dim,
                 length_elements=prompt_len * head_dim,
-                shape=(prompt_len, head_dim),
                 dtype=ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
         # Parent buffer for all KV groups' keys: (n_kv_groups, head_dim, prompt_len) stored contiguously
         self.attn_scores_keys_all = XRTTensor(
-            shape=(n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_keys_per_kv_group = [
             _xrttensor_subbuffer(
                 self.attn_scores_keys_all,
+                (head_dim, prompt_len),
                 offset_elements=g * head_dim * prompt_len,
                 length_elements=head_dim * prompt_len,
-                shape=(head_dim, prompt_len),
                 dtype=ml_dtypes.bfloat16,
             )
             for g in range(n_kv_groups)
         ]
         # Parent buffer for all heads' scores: (n_heads * prompt_len, prompt_len)
         self.attn_scores = XRTTensor(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_per_head = [
             _xrttensor_subbuffer(
                 self.attn_scores,
+                (prompt_len, prompt_len),
                 offset_elements=h * prompt_len * prompt_len,
                 length_elements=prompt_len * prompt_len,
-                shape=(prompt_len, prompt_len),
                 dtype=ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
@@ -819,13 +807,13 @@ class AIEPrefillBuffers:
         # Attention score scaling buffer (pre-initialized with 1/sqrt(head_dim))
         scale_factor = 1.0 / math.sqrt(head_dim)
         self.attn_scale_factor = XRTTensor(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scale_factor.data[:] = np.dtype(ml_dtypes.bfloat16).type(scale_factor)
         self.attn_scale_factor.to("npu")
         # Attention weights buffer (output of softmax)
         self.attn_weights = XRTTensor(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
 
 
@@ -844,14 +832,14 @@ class AIELlamaBuffers:
         # Per-layer KV cache buffers on NPU (used by strided copy for transpose and concatenate)
         self.keys_cache = [
             XRTTensor(
-                shape=(config.n_kv_groups, prompt_len, config.head_dim),
+                (config.n_kv_groups, prompt_len, config.head_dim),
                 dtype=ml_dtypes.bfloat16,
             )
             for _ in range(config.n_layers)
         ]
         self.values_cache = [
             XRTTensor(
-                shape=(config.n_kv_groups, prompt_len, config.head_dim),
+                (config.n_kv_groups, prompt_len, config.head_dim),
                 dtype=ml_dtypes.bfloat16,
             )
             for _ in range(config.n_layers)
@@ -934,7 +922,7 @@ class AIELlamaBuffers:
             XRTTensor(part, dtype=part.dtype).to("npu") for part in W_out_head_parts
         ]  # partitioned, padded parts of weight, used by GEMM
         self.prefill.logits = XRTTensor(
-            shape=(
+            (
                 aie_ops.vocab_partitions,
                 prompt_len,
                 aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
@@ -947,12 +935,12 @@ class AIELlamaBuffers:
         self.prefill.logits_parts = [
             _xrttensor_subbuffer(
                 self.prefill.logits,
-                offset_elements=i * logits_part_len,
-                length_elements=logits_part_len,
-                shape=(
+                (
                     prompt_len,
                     aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
                 ),
+                offset_elements=i * logits_part_len,
+                length_elements=logits_part_len,
                 dtype=ml_dtypes.bfloat16,
             )
             for i in range(aie_ops.vocab_partitions)

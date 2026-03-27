@@ -218,9 +218,7 @@ def fused_mha(
         f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
     )
 
-    scale_buffer_init_kernel = Kernel(
-        "init_scale_buffer", "mha.o", [s_ty, np.int32]
-    )
+    scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
 
     partial_softmax_kernel = Kernel(
         "partial_softmax",
