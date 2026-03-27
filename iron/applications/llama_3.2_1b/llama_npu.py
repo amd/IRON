@@ -656,19 +656,19 @@ class AIELlamaOperators:
             ] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.q_proj.weight"
             ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
-                f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-            ].flatten()
+            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+                ].flatten()
+            )
             self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").torch_view()[
                 :
             ] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.v_proj.weight"
             ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_output_decode_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
+            self.decode.fused.get_buffer(
+                f"W_attn_output_decode_{layer_idx}"
+            ).torch_view()[:] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.o_proj.weight"
             ].flatten()
             self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").torch_view()[:] = (
@@ -676,29 +676,27 @@ class AIELlamaOperators:
                     f"model.layers.{layer_idx}.post_attention_layernorm.weight"
                 ].flatten()
             )
-            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
-                f"model.layers.{layer_idx}.mlp.gate_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").torch_view()[:] = (
+            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").torch_view()[:] = (
                 config.weights[
-                    f"model.layers.{layer_idx}.mlp.up_proj.weight"
+                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
                 ].flatten()
             )
-            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
-                f"model.layers.{layer_idx}.mlp.down_proj.weight"
-            ].flatten()
+            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").torch_view()[:] = (
+                config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
+                ].flatten()
+            )
         scale_factor = 1.0 / math.sqrt(config.head_dim)
         self.decode.fused.get_buffer("attn_scale_factor").fill_(scale_factor)
-        self.decode.fused.get_buffer("W_final_norm").torch_view()[:] = (
-            config.weights["model.norm.weight"].flatten()
-        )
-        self.decode.fused.get_buffer("W_out_head").torch_view()[:] = (
-            config.weights["model.embed_tokens.weight"].flatten()
-        )
+        self.decode.fused.get_buffer("W_final_norm").torch_view()[:] = config.weights[
+            "model.norm.weight"
+        ].flatten()
+        self.decode.fused.get_buffer("W_out_head").torch_view()[:] = config.weights[
+            "model.embed_tokens.weight"
+        ].flatten()
         self.decode.fused.input_buffer.to("npu")
         self.decode.fused.scratch_buffer.to("npu")
         self.decode.fused.output_buffer.to("npu")
@@ -978,12 +976,8 @@ def grouped_query_attention_forward_prefill(
     )
 
     # Read results from NPU; to_torch() syncs from device internally
-    queries = aie_buffers.prefill.queries.to_torch()[
-        : seq_len * config.n_heads, :
-    ]
-    keys = aie_buffers.prefill.keys.to_torch()[
-        : seq_len * config.n_kv_groups, :
-    ]
+    queries = aie_buffers.prefill.queries.to_torch()[: seq_len * config.n_heads, :]
+    keys = aie_buffers.prefill.keys.to_torch()[: seq_len * config.n_kv_groups, :]
     values = aie_buffers.prefill.values.to_torch()[
         :seq_len, :
     ]  # (seq_len, n_kv_groups * head_dim)
@@ -1148,7 +1142,9 @@ def transformer_block_forward_prefill(
     )
 
     # Step 3: Residual
-    aie_buffers.prefill.attn_output.torch_view().unsqueeze(0)[0, :seq_len, :] = attn_output
+    aie_buffers.prefill.attn_output.torch_view().unsqueeze(0)[
+        0, :seq_len, :
+    ] = attn_output
     aie_buffers.prefill.attn_output.to("npu")
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
@@ -1277,9 +1273,9 @@ def llama_forward_pass_decode(aie_ops, config, state):
     angles_slice = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").torch_view()[:] = (
-        angles_slice.flatten()
-    )
+    aie_ops.decode.fused.get_buffer("rope_angles").torch_view()[
+        :
+    ] = angles_slice.flatten()
 
     # Token embedding (on CPU)
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
@@ -1312,12 +1308,12 @@ def llama_forward_pass(aie_ops, aie_buffers, config, state):
         state.num_preceding_tokens = state.token_ids.shape[1]
         # Pass KV cache data onto fused decode operator
         for layer_idx in range(config.n_layers):
-            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").torch_view()[:] = (
-                aie_buffers.keys_cache[layer_idx].to_torch().flatten()
-            )
-            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[:] = (
-                aie_buffers.values_cache[layer_idx].to_torch().flatten()
-            )
+            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").torch_view()[
+                :
+            ] = (aie_buffers.keys_cache[layer_idx].to_torch().flatten())
+            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[
+                :
+            ] = (aie_buffers.values_cache[layer_idx].to_torch().flatten())
         aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:

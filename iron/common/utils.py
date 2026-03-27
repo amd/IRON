@@ -31,7 +31,6 @@ _XRT_TO_TORCH_DTYPE: dict = {
 }
 
 
-
 def numpy_to_torch(arr: np.ndarray) -> torch.Tensor:
     """Convert a numpy array to a torch tensor, handling bfloat16."""
     if arr.dtype == bfloat16:
