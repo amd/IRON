@@ -10,9 +10,14 @@ from pathlib import Path
 from iron.operators.gemm.op import AIEGEMM
 from iron.operators.gemm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.aie_device_manager import AIEDeviceManager
 
 
 def get_params():
+    # Detect device and set max columns accordingly
+    # NPU1 (Phoenix) has 4 columns, NPU2 (Strix) has 8 columns
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = 4 if device_type == "npu1" else 8
     # fmt: off
     #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
     regular_params = [
@@ -62,6 +67,15 @@ def get_params():
                 trace_size,
                 partition_N,
             ) = p
+
+            # Skip tests that require more columns than available on the device
+            if num_aie_columns > max_aie_columns:
+                continue
+
+            # Skip configurations with small tile sizes that don't meet AIE2 kernel constraints
+            # AIE2 mm kernel requires m % (4 * r) == 0 where r=4 for bf16
+            if device_type == "npu1" and m < 16:
+                continue
 
             name = f"gemm_{M}x{K}x{N}_{m}x{k}x{n}_{num_aie_columns}cols"
             if b_col_maj:

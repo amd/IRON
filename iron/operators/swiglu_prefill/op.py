@@ -140,6 +140,9 @@ class AIESwiGLUPrefill(CompositeOperator):
         artifacts = []
         device_str = self.context.device_manager.device_str()
 
+        # Determine column count based on device
+        n_cols = 4 if device_str == "npu1" else 8
+
         accuracy_flags = {}
         if self.prio_accuracy:
             accuracy_flags = {
@@ -149,7 +152,11 @@ class AIESwiGLUPrefill(CompositeOperator):
             }
 
         gemm_1 = AIEGEMM(
-            M=self.seq_len, K=self.embedding_dim, N=self.hidden_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.embedding_dim,
+            N=self.hidden_dim,
+            num_aie_columns=n_cols,
+            **accuracy_flags,
         )
         self.gemm_1 = gemm_1
         self.seq_len_padded = gemm_1.M
@@ -167,8 +174,8 @@ class AIESwiGLUPrefill(CompositeOperator):
 
         silu = AIESiLU(
             size=self.seq_len_padded * self.hidden_dim_padded,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim_padded // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim_padded // n_cols,
         )
         self.silu = silu
         assert silu.size == self.seq_len_padded * self.hidden_dim_padded
@@ -185,8 +192,8 @@ class AIESwiGLUPrefill(CompositeOperator):
 
         eltwise_mul = AIEElementwiseMul(
             size=self.seq_len_padded * self.hidden_dim_padded,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim_padded // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim_padded // n_cols,
         )
         self.eltwise_mul = eltwise_mul
         assert eltwise_mul.size == self.seq_len_padded * self.hidden_dim_padded
@@ -204,7 +211,11 @@ class AIESwiGLUPrefill(CompositeOperator):
         artifacts.append(eltwise_mul_insts)
 
         gemm_2 = AIEGEMM(
-            M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.hidden_dim,
+            N=self.embedding_dim,
+            num_aie_columns=n_cols,
+            **accuracy_flags,
         )
         self.gemm_2 = gemm_2
         assert gemm_2.M == self.seq_len_padded

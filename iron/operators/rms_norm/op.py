@@ -93,12 +93,16 @@ class AIERMSNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        # Use device-aware kernel selection
+        arch_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
         artifacts = [
             KernelObjectArtifact(
                 f"rms_norm.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "rms_norm.cc"
+                        self.context.base_dir / "aie_kernels" / arch_dir / "rms_norm.cc"
                     )
                 ],
             ),

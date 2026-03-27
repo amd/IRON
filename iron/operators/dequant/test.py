@@ -10,15 +10,21 @@ from pathlib import Path
 from iron.operators.dequant.op import AIEDequant
 from iron.operators.dequant.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.aie_device_manager import AIEDeviceManager
 
 
 def get_params():
+    # Detect device and set max columns accordingly
+    # NPU1 (Phoenix) has 4 columns, NPU2 (Strix) has 8 columns
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = 4 if device_type == "npu1" else 8
+
     input_lengths = [1024, 2048, 4096, 8192]
     group_size = 32
 
     params = []
     for input_length in input_lengths:
-        for num_columns in range(1, 9):  # 1 to 8 columns
+        for num_columns in range(1, max_aie_columns + 1):
             for num_channels in range(1, 3):  # 1 or 2 channels
                 total_cores = num_columns * num_channels
                 tile_size = input_length // total_cores

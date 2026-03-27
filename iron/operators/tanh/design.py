@@ -41,7 +41,7 @@ def my_tanh(
     # External, binary kernel definition
     tanh_fcn = Kernel(
         "tanh_bf16",
-        "tanh.o",
+        kernel_archive if kernel_archive else "tanh.o",
         [line_type, line_type, np.int32],
     )
 

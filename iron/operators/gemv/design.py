@@ -12,6 +12,9 @@ from aie.helpers.dialects.scf import _for as range_
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
+from aie.helpers.taplib.tap import TensorAccessPattern
+
+from iron.common.device_utils import get_device_name, get_device_type
 
 """
 Matrix-vector design
@@ -66,10 +69,7 @@ def my_matvec(
 
     assert M % cols == 0
 
-    if dev == "npu":
-        dev_ty = NPU1()
-    else:
-        dev_ty = NPU2()
+    dev_ty = get_device_type(dev, cols)
 
     L1_A_ty = np.ndarray[
         (

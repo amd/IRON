@@ -136,12 +136,15 @@ class AIESwiGLUDecode(CompositeOperator):
         artifacts = []
         device_str = self.context.device_manager.device_str()
 
+        # Determine column count based on device
+        n_cols = 4 if device_str == "npu1" else 8
+
         gemv_1 = AIEGEMV(
             M=self.hidden_dim,
             K=self.embedding_dim,
-            num_aie_columns=8,
+            num_aie_columns=n_cols,
             tile_size_input=4,
-            tile_size_output=self.hidden_dim // 8,
+            tile_size_output=self.hidden_dim // n_cols,
         )
         self.gemv_1 = gemv_1
         gemv_1_xclbin, gemv_1_insts = gemv_1.get_artifacts(prefix="swiglu_gemv_1_")
@@ -156,8 +159,8 @@ class AIESwiGLUDecode(CompositeOperator):
 
         silu = AIESiLU(
             size=self.hidden_dim,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim // 16,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim // (n_cols * 2),
         )
         self.silu = silu
         self.hidden_dim_padded = silu.size
@@ -173,8 +176,8 @@ class AIESwiGLUDecode(CompositeOperator):
 
         eltwise_mul = AIEElementwiseMul(
             size=self.hidden_dim,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim // n_cols,
         )
         self.eltwise_mul = eltwise_mul
         assert self.hidden_dim <= eltwise_mul.size <= self.hidden_dim_padded
@@ -193,9 +196,9 @@ class AIESwiGLUDecode(CompositeOperator):
         gemv_2 = AIEGEMV(
             M=self.embedding_dim,
             K=self.hidden_dim,
-            num_aie_columns=8,
+            num_aie_columns=n_cols,
             tile_size_input=1,
-            tile_size_output=self.embedding_dim // 8,
+            tile_size_output=self.embedding_dim // n_cols,
         )
         self.gemv_2 = gemv_2
         gemv_2_xclbin, gemv_2_insts = gemv_2.get_artifacts(prefix="swiglu_gemv_2_")

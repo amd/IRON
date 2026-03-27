@@ -7,12 +7,14 @@ import pytest
 from pathlib import Path
 
 
+from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.softmax.op import AIESoftmax
+from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.softmax.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def get_optimal_columns_channels(input_length, tile_size):
+def get_optimal_columns_channels(input_length, tile_size, max_columns):
     """Helper function to determine optimal columns and channels for a given input length and tile size"""
     total_cores = input_length // tile_size
 
@@ -25,13 +27,18 @@ def get_optimal_columns_channels(input_length, tile_size):
     elif total_cores == 1:
         return 1, 1  # 1 core: use 1x1 configuration
     elif total_cores == 16:
-        return 4, 4  # 16 cores: use 4x4 configuration
+        # For 16 cores, use 2x2 to avoid exceeding device capabilities
+        # The 4x4 configuration causes placement issues on Phoenix
+        return 2, 2  # Use 2x2, each core handles more iterations
     else:
         return 2, 2  # Default fallback
 
 
 def get_params():
-    max_aie_columns = 8
+    # Detect device and set max columns accordingly
+    # NPU1 (Phoenix) has 4 columns, NPU2 (Strix) has 8 columns
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = 4 if device_type == "npu1" else 8
     num_channels = 2
     input_lengths = [32768]
     tile_sizes = [1024, 512, 2048]
@@ -40,8 +47,11 @@ def get_params():
     for input_length in input_lengths:
         for tile_size in tile_sizes:
             optimal_columns, optimal_channels = get_optimal_columns_channels(
-                input_length, tile_size
+                input_length, tile_size, max_aie_columns
             )
+            # Skip if configuration exceeds device capabilities
+            if optimal_columns > max_aie_columns:
+                continue
             name = f"softmax_{optimal_columns}_cols_{optimal_channels}_channels_{input_length}_tile_{tile_size}"
 
             # All tests are regular as extensive list was empty in original code

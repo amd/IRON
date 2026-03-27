@@ -20,8 +20,13 @@ from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
 
+from iron.common.device_utils import get_device_name, get_device_type
+
 microkernel_mac_dim_map = {
     "npu": {
+        "bf16": (4, 8, 4),
+    },
+    "npu1": {
         "bf16": (4, 8, 4),
     },
     "npu2": {
@@ -188,17 +193,18 @@ def my_matmul(
     ), f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map[dev][dtype_in_str]
-    if dev == "npu2" and dtype_in_str == "bf16":
+    dev_name = get_device_name(dev)
+    mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
+    if dev_name == "npu2" and dtype_in_str == "bf16":
         r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
     else:
         r, s, t = mac_dims
 
-    # npu is a 4 row x 4 col array
-    if dev == "npu" and n_aie_cols > 4:
-        raise AssertionError("Invalid configuration: NPU (Phoenix/Hawk) has 4 columns")
+    # npu1 is a 4 row x 4 col array
+    if dev_name == "npu1" and n_aie_cols > 4:
+        raise AssertionError("Invalid configuration: NPU1 (Phoenix/Hawk) has 4 columns")
     # npu2 is a 4 row x 8 col array
-    if dev == "npu2" and n_aie_cols > 8:
+    if dev_name == "npu2" and n_aie_cols > 8:
         raise AssertionError(
             "Invalid configuration: NPU2 (Strix/Strix Halo/Krackan) has 8 columns"
         )
@@ -243,15 +249,7 @@ def my_matmul(
     # a big performance cost.
     fifo_depth = 2
 
-    if dev == "npu":
-        if n_aie_cols == 1:
-            dev_ty = NPU1Col1()
-        elif n_aie_cols == 2:
-            dev_ty = NPU1Col2()
-        elif n_aie_cols == 4:
-            dev_ty = NPU1()
-    else:
-        dev_ty = NPU2()
+    dev_ty = get_device_type(dev, n_aie_cols)
 
     # These will hold TensorAccessPattern objects that represent the runtime
     # npu_dma_memcpy_nd operations of this design. They are only used if generate_taps is true

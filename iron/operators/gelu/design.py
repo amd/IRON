@@ -43,7 +43,7 @@ def my_gelu(
     # External, binary kernel definition
     gelu_fcn = Kernel(
         "gelu_bf16",
-        "gelu.o",
+        kernel_archive if kernel_archive else "gelu.o",
         [line_type, line_type, np.int32],
     )
 

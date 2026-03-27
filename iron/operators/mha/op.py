@@ -68,12 +68,18 @@ class AIEMHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        # Select kernel directory based on device type
+        device_str = self.context.device_manager.device_str()
+        kernel_dir = "aie2p" if device_str == "npu2" else "aie2"
+
         # Define source files
-        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
+        mm_source = str(self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc")
         softmax_source = str(
-            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+            self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
         )
-        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
+        mha_source = str(
+            self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc"
+        )  # TODO: MHA kernel only exists in aie2p
         passthrough_source = str(
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )

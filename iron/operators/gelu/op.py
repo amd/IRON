@@ -57,16 +57,34 @@ class AIEGELU(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
+        kernel_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
+        artifacts = [
             KernelObjectArtifact(
-                f"gelu.o",
+                "gelu.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
+                        self.context.base_dir / "aie_kernels" / kernel_dir / "gelu.cc"
                     )
                 ],
             ),
         ]
+        if kernel_dir == "aie2":
+            artifacts.append(
+                KernelObjectArtifact(
+                    "lut_based_ops.o",
+                    dependencies=[
+                        SourceArtifact(
+                            self.context.mlir_aie_dir
+                            / "aie_runtime_lib"
+                            / "AIE2"
+                            / "lut_based_ops.cpp"
+                        )
+                    ],
+                )
+            )
+        return artifacts
 
     def get_arg_spec(self):
         return [

@@ -62,7 +62,14 @@ class AIEReLU(MLIROperator):
                 f"relu.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "relu.cc"
+                        self.context.base_dir
+                        / "aie_kernels"
+                        / (
+                            "aie2p"
+                            if self.context.device_manager.device_str() == "npu2"
+                            else "aie2"
+                        )
+                        / "relu.cc"
                     )
                 ],
             ),

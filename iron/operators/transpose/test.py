@@ -7,13 +7,18 @@ from pathlib import Path
 
 
 import pytest
+from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.transpose.op import AIETranspose
+from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.transpose.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
-    max_aie_columns = 8
+    # Detect device and set max columns accordingly
+    # NPU1 (Phoenix) has 4 columns, NPU2 (Strix) has 8 columns
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = 4 if device_type == "npu1" else 8
     input_lengths = [64, 2048]
     n_list = [64, 128, 256, 512]
     s_list = [8]

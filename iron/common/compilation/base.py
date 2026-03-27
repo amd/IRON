@@ -547,9 +547,10 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
 
 
 class PeanoCompilationRule(CompilationRule):
-    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
+    def __init__(self, peano_dir, mlir_aie_dir, device_type=None, *args, **kwargs):
         self.peano_dir = peano_dir
         self.mlir_aie_dir = mlir_aie_dir
+        self.device_type = device_type
         super().__init__(*args, **kwargs)
 
     def matches(self, artifacts):
@@ -560,6 +561,21 @@ class PeanoCompilationRule(CompilationRule):
         include_path = Path(self.mlir_aie_dir) / "include"
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
+
+        # Select target and runtime lib directory based on device type
+        # npu1 (Phoenix/AIE2) and npu (legacy/AIE2) use aie2-none-unknown-elf
+        # npu2 (Strix Point/AIE2P) uses aie2p-none-unknown-elf
+        if self.device_type == "npu2":
+            target = "aie2p-none-unknown-elf"
+            runtime_lib_dir = "AIE2P"
+        else:
+            # Default to aie2 for npu1, npu, and any unrecognized device types
+            target = "aie2-none-unknown-elf"
+            runtime_lib_dir = "AIE2"
+        runtime_lib_include_path = (
+            Path(self.mlir_aie_dir) / "aie_runtime_lib" / runtime_lib_dir
+        )
+
         for artifact in worklist:
             if len(artifact.dependencies) != 1:
                 raise RuntimeError(
@@ -576,13 +592,14 @@ class PeanoCompilationRule(CompilationRule):
                     str(clang_path),
                     "-O2",
                     "-std=c++20",
-                    "--target=aie2p-none-unknown-elf",
+                    f"--target={target}",
                     "-Wno-parentheses",
                     "-Wno-attributes",
                     "-Wno-macro-redefined",
                     "-Wno-empty-body",
                     "-Wno-missing-template-arg-list-after-template-kw",
                     f"-I{str(include_path)}",
+                    f"-I{str(runtime_lib_include_path)}",
                 ]
                 + artifact.extra_flags
                 + ["-c", source_file.filename, "-o", artifact.filename]

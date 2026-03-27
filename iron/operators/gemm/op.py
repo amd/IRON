@@ -117,6 +117,7 @@ class AIEGEMM(MLIROperator):
 
     def get_kernel_artifacts(self):
         base_dir = self.context.base_dir
+        device_str = self.context.device_manager.device_str()
         emulate_bf16_mmul_with_bfp16 = self.gemm_args.get(
             "emulate_bf16_mmul_with_bfp16", True
         )
@@ -144,12 +145,15 @@ class AIEGEMM(MLIROperator):
         # Include flags in the filename to avoid stale builds when flags change
         flags_suffix = f"_{int(prio_accuracy)}_{int(emulate_bf16_mmul_with_bfp16)}_{int(round_conv_even)}"
 
+        # Select kernel directory based on device type
+        kernel_dir = "aie2p" if device_str == "npu2" else "aie2"
+
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
-                    SourceArtifact(base_dir / "aie_kernels" / "aie2p" / "mm.cc")
+                    SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
                 ],
             ),
             KernelObjectArtifact(

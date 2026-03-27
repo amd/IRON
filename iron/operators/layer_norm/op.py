@@ -60,6 +60,10 @@ class AIELayerNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        # Use device-aware kernel selection
+        arch_dir = (
+            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
+        )
         return [
             KernelObjectArtifact(
                 f"layer_norm.o",
@@ -67,7 +71,7 @@ class AIELayerNorm(MLIROperator):
                     SourceArtifact(
                         self.context.base_dir
                         / "aie_kernels"
-                        / "aie2p"
+                        / arch_dir
                         / "layer_norm.cc"
                     )
                 ],
