@@ -31,31 +31,6 @@ _XRT_TO_TORCH_DTYPE: dict = {
 }
 
 
-def xrt_to_torch(xrttensor) -> torch.Tensor:
-    """
-    Convert an XRTTensor (or compatible object with buffer_object()) to a Torch tensor,
-    supporting bfloat16.
-
-    Note: calls xrttensor.to("cpu") as a side effect to ensure the buffer is
-    synchronized to host memory before reading.
-    """
-    torch_dtype = _XRT_TO_TORCH_DTYPE.get(xrttensor.dtype)
-    if torch_dtype is None:
-        raise ValueError(f"Unsupported dtype: {xrttensor.dtype}")
-
-    xrttensor.to("cpu")
-    bo = xrttensor.buffer_object()
-    mem = bo.map()
-    t = torch.frombuffer(mem, dtype=torch_dtype)
-    return t.reshape(xrttensor.shape)
-
-
-def torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
-    """Convert a torch tensor to a numpy array, handling bfloat16."""
-    if tensor.dtype == torch.bfloat16:
-        return tensor.to(torch.float32).numpy().astype(bfloat16)
-    return tensor.numpy()
-
 
 def numpy_to_torch(arr: np.ndarray) -> torch.Tensor:
     """Convert a numpy array to a torch tensor, handling bfloat16."""
@@ -116,6 +91,13 @@ class XRTSubBuffer(XRTTensor):
     def to_torch(self) -> torch.Tensor:
         """Return a torch tensor view of this sub-buffer's data (syncs from device first)."""
         self.to("cpu")
+        torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
+        if torch_dtype is None:
+            raise ValueError(f"Unsupported dtype: {self.dtype}")
+        return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)
+
+    def torch_view(self) -> torch.Tensor:
+        """Return a torch tensor view of this sub-buffer's host memory without syncing from device."""
         torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
         if torch_dtype is None:
             raise ValueError(f"Unsupported dtype: {self.dtype}")

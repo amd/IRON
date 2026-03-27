@@ -37,7 +37,7 @@ class AIEDeviceManager:
 
     def get_context_and_kernel(
         self, xclbin_path: str, kernel_name: str | None = None
-    ) -> tuple:
+    ) -> tuple[pyxrt.hw_context, pyxrt.kernel]:
         """Get or create hardware context and kernel for xclbin"""
         # Check if we already have a context for this xclbin
 

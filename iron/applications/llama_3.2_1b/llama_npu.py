@@ -24,7 +24,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
-from iron.common.utils import torch_to_numpy, XRTSubBuffer
+from iron.common.utils import XRTSubBuffer
 from iron.common.fusion import (
     FusedMLIROperator,
     FusedFullELFCallable,
@@ -646,77 +646,57 @@ class AIELlamaOperators:
         # Operator static buffers (weights, LUTs)
 
         for layer_idx in range(config.n_layers):
-            self.decode.fused.get_buffer(f"W_norm1_{layer_idx}").to("cpu").data[:] = (
-                torch_to_numpy(
-                    config.weights[
-                        f"model.layers.{layer_idx}.input_layernorm.weight"
-                    ].flatten()
-                )
+            self.decode.fused.get_buffer(f"W_norm1_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.input_layernorm.weight"
+                ].flatten()
             )
-            self.decode.fused.get_buffer(f"W_attn_query_{layer_idx}").to("cpu").data[
+            self.decode.fused.get_buffer(f"W_attn_query_{layer_idx}").torch_view()[
                 :
-            ] = torch_to_numpy(
-                config.weights[
-                    f"model.layers.{layer_idx}.self_attn.q_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").to("cpu").data[
+            ] = config.weights[
+                f"model.layers.{layer_idx}.self_attn.q_proj.weight"
+            ].flatten()
+            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").torch_view()[
                 :
-            ] = torch_to_numpy(
-                config.weights[
-                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").to("cpu").data[
+            ] = config.weights[
+                f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+            ].flatten()
+            self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").torch_view()[
                 :
-            ] = torch_to_numpy(
-                config.weights[
-                    f"model.layers.{layer_idx}.self_attn.v_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_attn_output_decode_{layer_idx}").to(
-                "cpu"
-            ).data[:] = torch_to_numpy(
-                config.weights[
-                    f"model.layers.{layer_idx}.self_attn.o_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").to("cpu").data[:] = (
-                torch_to_numpy(
-                    config.weights[
-                        f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-                    ].flatten()
-                )
-            )
-            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").to("cpu").data[
+            ] = config.weights[
+                f"model.layers.{layer_idx}.self_attn.v_proj.weight"
+            ].flatten()
+            self.decode.fused.get_buffer(f"W_attn_output_decode_{layer_idx}").torch_view()[
                 :
-            ] = torch_to_numpy(
+            ] = config.weights[
+                f"model.layers.{layer_idx}.self_attn.o_proj.weight"
+            ].flatten()
+            self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").torch_view()[:] = (
                 config.weights[
-                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
+                    f"model.layers.{layer_idx}.post_attention_layernorm.weight"
                 ].flatten()
             )
-            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").to("cpu").data[:] = (
-                torch_to_numpy(
-                    config.weights[
-                        f"model.layers.{layer_idx}.mlp.up_proj.weight"
-                    ].flatten()
-                )
-            )
-            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").to("cpu").data[
+            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").torch_view()[
                 :
-            ] = torch_to_numpy(
+            ] = config.weights[
+                f"model.layers.{layer_idx}.mlp.gate_proj.weight"
+            ].flatten()
+            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").torch_view()[:] = (
                 config.weights[
-                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
+                    f"model.layers.{layer_idx}.mlp.up_proj.weight"
                 ].flatten()
             )
+            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").torch_view()[
+                :
+            ] = config.weights[
+                f"model.layers.{layer_idx}.mlp.down_proj.weight"
+            ].flatten()
         scale_factor = 1.0 / math.sqrt(config.head_dim)
-        self.decode.fused.get_buffer("attn_scale_factor").to("cpu").data[
-            :
-        ] = scale_factor
-        self.decode.fused.get_buffer("W_final_norm").to("cpu").data[:] = torch_to_numpy(
+        self.decode.fused.get_buffer("attn_scale_factor").fill_(scale_factor)
+        self.decode.fused.get_buffer("W_final_norm").torch_view()[:] = (
             config.weights["model.norm.weight"].flatten()
         )
-        self.decode.fused.get_buffer("W_out_head").to("cpu").data[:] = torch_to_numpy(
+        self.decode.fused.get_buffer("W_out_head").torch_view()[:] = (
             config.weights["model.embed_tokens.weight"].flatten()
         )
         self.decode.fused.input_buffer.to("npu")
@@ -728,6 +708,7 @@ class AIELlamaOperators:
 # ##########################################################################
 
 
+# TODO: consider moving to iron/common/utils.py or upstreaming to mlir-aie
 def _xrttensor_subbuffer(parent, shape, offset_elements, length_elements, dtype):
     """Create an XRTSubBuffer into a parent XRTTensor."""
     itemsize = np.dtype(dtype).itemsize
@@ -809,7 +790,7 @@ class AIEPrefillBuffers:
         self.attn_scale_factor = XRTTensor(
             (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
-        self.attn_scale_factor.data[:] = np.dtype(ml_dtypes.bfloat16).type(scale_factor)
+        self.attn_scale_factor.fill_(scale_factor)
         self.attn_scale_factor.to("npu")
         # Attention weights buffer (output of softmax)
         self.attn_weights = XRTTensor(
@@ -915,7 +896,10 @@ class AIELlamaBuffers:
             config.weights["model.embed_tokens.weight"]
         ).to("npu")
         W_out_head_parts = aie_ops.prefill.gemv_out_head_compilable.partition_B(
-            torch_to_numpy(config.weights["model.embed_tokens.weight"]),
+            config.weights["model.embed_tokens.weight"]
+            .view(torch.int16)
+            .numpy()
+            .view(ml_dtypes.bfloat16),
             aie_ops.vocab_partitions,
         )
         self.W_out_head_parts = [
@@ -993,14 +977,14 @@ def grouped_query_attention_forward_prefill(
         aie_buffers.prefill.keys,
     )
 
-    # Read results from NPU
-    queries = aie_buffers.prefill.queries.to("cpu").to_torch()[
+    # Read results from NPU; to_torch() syncs from device internally
+    queries = aie_buffers.prefill.queries.to_torch()[
         : seq_len * config.n_heads, :
     ]
-    keys = aie_buffers.prefill.keys.to("cpu").to_torch()[
+    keys = aie_buffers.prefill.keys.to_torch()[
         : seq_len * config.n_kv_groups, :
     ]
-    values = aie_buffers.prefill.values.to("cpu").to_torch()[
+    values = aie_buffers.prefill.values.to_torch()[
         :seq_len, :
     ]  # (seq_len, n_kv_groups * head_dim)
     queries = queries.view(batch, seq_len, config.n_heads, config.head_dim)
@@ -1067,7 +1051,6 @@ def grouped_query_attention_forward_prefill(
         aie_buffers.prefill.attn_scale_factor,
         aie_buffers.prefill.attn_scores,
     )
-    aie_buffers.prefill.attn_scores.to("cpu")
     # Buffer is (n_heads * max_seq_len, max_seq_len), view as (n_heads, max_seq_len, max_seq_len) then slice
     max_seq_len_buf = aie_buffers.prefill.attn_scores.shape[0] // config.n_heads
     scores = (
@@ -1150,7 +1133,6 @@ def transformer_block_forward_prefill(
         aie_buffers.W_norm1[layer_idx],
         aie_buffers.prefill.x_norm,
     )
-    aie_buffers.prefill.x_norm.to("cpu")
     x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 2: Attention
@@ -1166,20 +1148,19 @@ def transformer_block_forward_prefill(
     )
 
     # Step 3: Residual
-    aie_buffers.prefill.attn_output.to_torch().unsqueeze(0)[0, :seq_len, :] = attn_output
+    aie_buffers.prefill.attn_output.torch_view().unsqueeze(0)[0, :seq_len, :] = attn_output
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
     )
-    x = aie_buffers.prefill.x.to("cpu").to_torch().unsqueeze(0)[:, :seq_len, :]
+    x = aie_buffers.prefill.x.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 4: Post-norm
-    aie_buffers.prefill.x.to_torch().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.torch_view().unsqueeze(0)[0, :seq_len, :] = x
     aie_ops.prefill.rms_norm(
         aie_buffers.prefill.x,
         aie_buffers.W_norm2[layer_idx],
         aie_buffers.prefill.x_norm,
     )
-    aie_buffers.prefill.x_norm.to("cpu")
     x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 5: Feed-forward network
@@ -1199,7 +1180,7 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     # Step 1: RoPE angles
     num_preceding_tokens = state.attn_keys_caches[0].shape[2]
     angles_slice = config.angles[num_preceding_tokens : num_preceding_tokens + seq_len]
-    aie_buffers.prefill.rope_angles.to_torch()[:seq_len, :] = angles_slice
+    aie_buffers.prefill.rope_angles.torch_view()[:seq_len, :] = angles_slice
 
     # Step 2: Token embedding
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
@@ -1207,7 +1188,7 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     attn_mask = torch.triu(
         torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
     )
-    aie_buffers.prefill.x.to_torch().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.torch_view().unsqueeze(0)[0, :seq_len, :] = x
     aie_buffers.prefill.x.to("npu")
 
     # Step 3: Transformer blocks
@@ -1237,7 +1218,6 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
             aie_buffers.W_out_head_parts[i],
             aie_buffers.prefill.logits_parts[i],
         )
-    aie_buffers.prefill.logits.to("cpu")
     logits_padded_partitioned = aie_buffers.prefill.logits.to_torch()
     logits_padded = (
         logits_padded_partitioned.transpose(0, 1)
@@ -1249,10 +1229,10 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     # Step 6: Initialize per-layer NPU cache buffers with current cache state for decode phase
     for layer_idx in range(config.n_layers):
         cache_len = state.attn_keys_caches[layer_idx].shape[2]
-        aie_buffers.keys_cache[layer_idx].to_torch()[:, :cache_len, :] = (
+        aie_buffers.keys_cache[layer_idx].torch_view()[:, :cache_len, :] = (
             state.attn_keys_caches[layer_idx].squeeze(0)
         )
-        aie_buffers.values_cache[layer_idx].to_torch()[:, :cache_len, :] = (
+        aie_buffers.values_cache[layer_idx].torch_view()[:, :cache_len, :] = (
             state.attn_values_caches[layer_idx].squeeze(0)
         )
         aie_buffers.keys_cache[layer_idx].to("npu")
@@ -1294,14 +1274,14 @@ def llama_forward_pass_decode(aie_ops, config, state):
     angles_slice = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").to("cpu").to_torch()[:] = (
+    aie_ops.decode.fused.get_buffer("rope_angles").torch_view()[:] = (
         angles_slice.flatten()
     )
 
     # Token embedding (on CPU)
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
-    aie_ops.decode.fused.get_buffer("x").to_torch().view(-1, config.emb_dim)[
+    aie_ops.decode.fused.get_buffer("x").torch_view().view(-1, config.emb_dim)[
         :seq_len, :
     ] = x
 
@@ -1329,15 +1309,11 @@ def llama_forward_pass(aie_ops, aie_buffers, config, state):
         state.num_preceding_tokens = state.token_ids.shape[1]
         # Pass KV cache data onto fused decode operator
         for layer_idx in range(config.n_layers):
-            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").to(
-                "cpu"
-            ).to_torch()[:] = (
-                aie_buffers.keys_cache[layer_idx].to("cpu").to_torch().flatten()
+            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").torch_view()[:] = (
+                aie_buffers.keys_cache[layer_idx].to_torch().flatten()
             )
-            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").to(
-                "cpu"
-            ).to_torch()[:] = (
-                aie_buffers.values_cache[layer_idx].to("cpu").to_torch().flatten()
+            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[:] = (
+                aie_buffers.values_cache[layer_idx].to_torch().flatten()
             )
         aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret

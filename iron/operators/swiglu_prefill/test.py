@@ -6,7 +6,6 @@ import pytest
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-from iron.common.utils import xrt_to_torch
 from iron.operators.swiglu_prefill.op import AIESwiGLUPrefill
 
 # swiglu_prefill shares the same reference implementation as swiglu_decode:
@@ -53,12 +52,12 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     errors = {}
 
     # Verify intermediate result (left_swished * right)
-    left_swished = xrt_to_torch(op_func.left_swished).reshape((seq_len, hidden_dim))
-    right = xrt_to_torch(op_func.right).reshape((seq_len, hidden_dim))
+    left_swished = op_func.left_swished.to_torch().reshape((seq_len, hidden_dim))
+    right = op_func.right.to_torch().reshape((seq_len, hidden_dim))
     ref_2 = left_swished * right
 
     # Note: intermediate buffer in op_func stores the result of eltwise_mul
-    intermediate = xrt_to_torch(op_func.intermediate).reshape((seq_len, hidden_dim))
+    intermediate = op_func.intermediate.to_torch().reshape((seq_len, hidden_dim))
     errors_2 = verify_buffer(
         intermediate, "intermediate", ref_2, rel_tol=0.04, abs_tol=0.4
     )
@@ -71,7 +70,7 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     # We allow up to 5% of values to exceed these tolerances to handle precision outliers.
     # TODO: investigate outliers in output
     ref_3 = intermediate @ golden_ref["w_down"]
-    output = xrt_to_torch(output_buf).reshape((seq_len, embedding_dim))
+    output = output_buf.to_torch().reshape((seq_len, embedding_dim))
     errors_3 = verify_buffer(
         output, "output", ref_3, rel_tol=0.08, abs_tol=0.4, max_error_rate=0.05
     )

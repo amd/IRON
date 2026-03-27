@@ -4,7 +4,6 @@
 import time
 import numpy as np
 from ml_dtypes import bfloat16
-from .utils import xrt_to_torch
 from .base import AIEOperatorBase
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
@@ -188,7 +187,7 @@ def run_test(
             continue
         if buf_name in output_map:
             buf = output_map[buf_name]
-            output_torch = xrt_to_torch(buf)
+            output_torch = buf.to_torch()
             buf_errors = verify_buffer(
                 output_torch, buf_name, expected, rel_tol, abs_tol, max_error_rate
             )

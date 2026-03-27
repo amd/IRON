@@ -6,7 +6,6 @@ import pytest
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-from iron.common.utils import xrt_to_torch
 from iron.operators.swiglu_decode.op import AIESwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
@@ -45,7 +44,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     # Reshape to (1, hidden_dim) using the unpadded dimension to match the golden reference shape.
     # Note: op.hidden_dim_padded may differ if padding was applied; we use hidden_dim here
     # because the golden reference was generated with the unpadded hidden_dim.
-    intermediate = xrt_to_torch(op_func.intermediate).reshape((1, hidden_dim))
+    intermediate = op_func.intermediate.to_torch().reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
         intermediate,
         "intermediate",
@@ -59,7 +58,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
 
     # Verify output using intermediate result
     ref_2 = intermediate @ golden_ref["w_down"]
-    output = xrt_to_torch(output_buf).reshape((1, embedding_dim))
+    output = output_buf.to_torch().reshape((1, embedding_dim))
     errors_output = verify_buffer(output, "output", ref_2, rel_tol=0.04, abs_tol=0.4)
     if errors_output:
         errors["output"] = errors_output
