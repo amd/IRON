@@ -13,6 +13,7 @@ import time
 import torch
 
 from aie.utils.npukernel import NPUKernel
+import aie.utils as aie_utils
 import aie.utils.config
 from . import compilation as comp
 from .context import AIEContext
@@ -130,11 +131,17 @@ class MLIROperator(AIEOperatorBase, ABC):
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def get_callable(self):
-        return NPUKernel(
+        npu_kernel = NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
             kernel_name=self.xclbin_artifact.kernel_name,
             insts_path=self.insts_artifact.filename,
         )
+        runtime = aie_utils.DefaultNPURuntime
+        # Pre-load the kernel handle once so that each __call__ goes directly
+        # to runtime.run() without the repeated load() overhead (which triggers
+        # an NPU context switch even on a cache hit, costing ~1-3 ms per call).
+        handle = runtime.load(npu_kernel)
+        return lambda *args: runtime.run(handle, [a for a in args if not callable(a)])
 
 
 class CompositeOperator(AIEOperatorBase, ABC):
