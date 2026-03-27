@@ -728,7 +728,7 @@ class AIELlamaOperators:
 # ##########################################################################
 
 
-def _xrttensor_subbuffer(parent, offset_elements, length_elements, shape, dtype):
+def _xrttensor_subbuffer(parent, shape, offset_elements, length_elements, dtype):
     """Create an XRTSubBuffer into a parent XRTTensor."""
     itemsize = np.dtype(dtype).itemsize
     return XRTSubBuffer(
@@ -1166,18 +1166,14 @@ def transformer_block_forward_prefill(
     )
 
     # Step 3: Residual
-    aie_buffers.prefill.attn_output.data.reshape(-1)[: seq_len * config.emb_dim] = (
-        torch_to_numpy(attn_output.squeeze(0))
-    )
+    aie_buffers.prefill.attn_output.to_torch().unsqueeze(0)[0, :seq_len, :] = attn_output
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
     )
     x = aie_buffers.prefill.x.to("cpu").to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 4: Post-norm
-    aie_buffers.prefill.x.data.reshape(-1)[: seq_len * config.emb_dim] = torch_to_numpy(
-        x.squeeze(0)
-    )
+    aie_buffers.prefill.x.to_torch().unsqueeze(0)[0, :seq_len, :] = x
     aie_ops.prefill.rms_norm(
         aie_buffers.prefill.x,
         aie_buffers.W_norm2[layer_idx],
@@ -1203,7 +1199,7 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     # Step 1: RoPE angles
     num_preceding_tokens = state.attn_keys_caches[0].shape[2]
     angles_slice = config.angles[num_preceding_tokens : num_preceding_tokens + seq_len]
-    aie_buffers.prefill.rope_angles.data[:seq_len, :] = torch_to_numpy(angles_slice)
+    aie_buffers.prefill.rope_angles.to_torch()[:seq_len, :] = angles_slice
 
     # Step 2: Token embedding
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
@@ -1211,7 +1207,7 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     attn_mask = torch.triu(
         torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
     )
-    aie_buffers.prefill.x.data[:seq_len, :] = torch_to_numpy(x.squeeze(0))
+    aie_buffers.prefill.x.to_torch().unsqueeze(0)[0, :seq_len, :] = x
     aie_buffers.prefill.x.to("npu")
 
     # Step 3: Transformer blocks
@@ -1253,10 +1249,10 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     # Step 6: Initialize per-layer NPU cache buffers with current cache state for decode phase
     for layer_idx in range(config.n_layers):
         cache_len = state.attn_keys_caches[layer_idx].shape[2]
-        aie_buffers.keys_cache[layer_idx].data[:, :cache_len, :] = torch_to_numpy(
+        aie_buffers.keys_cache[layer_idx].to_torch()[:, :cache_len, :] = (
             state.attn_keys_caches[layer_idx].squeeze(0)
         )
-        aie_buffers.values_cache[layer_idx].data[:, :cache_len, :] = torch_to_numpy(
+        aie_buffers.values_cache[layer_idx].to_torch()[:, :cache_len, :] = (
             state.attn_values_caches[layer_idx].squeeze(0)
         )
         aie_buffers.keys_cache[layer_idx].to("npu")
@@ -1298,18 +1294,19 @@ def llama_forward_pass_decode(aie_ops, config, state):
     angles_slice = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").data[:] = torch_to_numpy(
+    aie_ops.decode.fused.get_buffer("rope_angles").to("cpu").to_torch()[:] = (
         angles_slice.flatten()
     )
 
     # Token embedding (on CPU)
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
-    aie_ops.decode.fused.get_buffer("x").data.reshape(-1, config.emb_dim)[
+    aie_ops.decode.fused.get_buffer("x").to_torch().view(-1, config.emb_dim)[
         :seq_len, :
-    ] = torch_to_numpy(x.squeeze(0))
+    ] = x
 
     # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
+    aie_ops.decode.fused.input_buffer.to("cpu")
     aie_ops.decode.fused()
     aie_ops.decode.fused.output_buffer.to("cpu")
     logits = (
@@ -1332,12 +1329,16 @@ def llama_forward_pass(aie_ops, aie_buffers, config, state):
         state.num_preceding_tokens = state.token_ids.shape[1]
         # Pass KV cache data onto fused decode operator
         for layer_idx in range(config.n_layers):
-            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").to("cpu").data[
-                :
-            ] = (aie_buffers.keys_cache[layer_idx].to("cpu").data.flatten())
-            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").to("cpu").data[
-                :
-            ] = (aie_buffers.values_cache[layer_idx].to("cpu").data.flatten())
+            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").to(
+                "cpu"
+            ).to_torch()[:] = (
+                aie_buffers.keys_cache[layer_idx].to("cpu").to_torch().flatten()
+            )
+            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").to(
+                "cpu"
+            ).to_torch()[:] = (
+                aie_buffers.values_cache[layer_idx].to("cpu").to_torch().flatten()
+            )
         aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:

@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 import pyxrt
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 torch_dtype_map = {
     "bf16": torch.bfloat16,
@@ -63,13 +64,12 @@ def numpy_to_torch(arr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
-class XRTSubBuffer:
+class XRTSubBuffer(XRTTensor):
     """
     A view into a sub-region of an XRTTensor's underlying pyxrt.bo buffer.
 
-    Provides the same interface as XRTTensor (buffer_object(), to(), shape, dtype,
-    data, to_torch()) so that it can be used in place of XRTTensor when passing
-    to NPUKernel callables or reading/writing sub-regions of a larger allocation.
+    Inherits from XRTTensor so that isinstance checks in the runtime pass.
+    Bypasses XRTTensor.__init__ to avoid allocating a new buffer object.
 
     The parent XRTTensor must remain alive as long as this sub-buffer is in use.
     """
@@ -83,9 +83,11 @@ class XRTSubBuffer:
             shape: Tuple giving the logical shape of this sub-buffer.
             dtype: numpy dtype for interpreting the buffer contents.
         """
+        # Skip XRTTensor.__init__ (which would allocate a new bo); set base attrs directly.
+        self.device = "npu"
+        self.dtype = np.dtype(dtype)
         self._bo = pyxrt.bo(parent_bo, size_bytes, offset_bytes)
         self._shape = tuple(shape)
-        self.dtype = np.dtype(dtype)
         ptr = self._bo.map()
         self._data = np.frombuffer(ptr, dtype=self.dtype).reshape(self._shape)
 
