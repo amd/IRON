@@ -97,7 +97,12 @@ class XRTSubBuffer(XRTTensor):
         return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)
 
     def torch_view(self) -> torch.Tensor:
-        """Return a torch tensor view of this sub-buffer's host memory without syncing from device."""
+        """Return a torch tensor view of this sub-buffer's host memory without syncing from device.
+
+        Marks the buffer as CPU-resident so that a subsequent .to("npu") call (or the
+        NPU operator's implicit sync) will push the written data to device.
+        """
+        self.device = "cpu"  # mark dirty so next to("npu") will actually sync
         torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
         if torch_dtype is None:
             raise ValueError(f"Unsupported dtype: {self.dtype}")

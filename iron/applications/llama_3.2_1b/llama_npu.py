@@ -1149,6 +1149,7 @@ def transformer_block_forward_prefill(
 
     # Step 3: Residual
     aie_buffers.prefill.attn_output.torch_view().unsqueeze(0)[0, :seq_len, :] = attn_output
+    aie_buffers.prefill.attn_output.to("npu")
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
     )
@@ -1156,6 +1157,7 @@ def transformer_block_forward_prefill(
 
     # Step 4: Post-norm
     aie_buffers.prefill.x.torch_view().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.to("npu")
     aie_ops.prefill.rms_norm(
         aie_buffers.prefill.x,
         aie_buffers.W_norm2[layer_idx],
@@ -1181,6 +1183,7 @@ def llama_forward_pass_prefill(aie_ops, aie_buffers, config, state):
     num_preceding_tokens = state.attn_keys_caches[0].shape[2]
     angles_slice = config.angles[num_preceding_tokens : num_preceding_tokens + seq_len]
     aie_buffers.prefill.rope_angles.torch_view()[:seq_len, :] = angles_slice
+    aie_buffers.prefill.rope_angles.to("npu")
 
     # Step 2: Token embedding
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
