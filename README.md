@@ -126,7 +126,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
-   ./iron/operators/axpy/test.py
+   pytest ./iron/operators/axpy/
    ```
 
 ### Building/Using & Testing Operators
@@ -217,7 +217,7 @@ IRON operators are designed for maximum NPU utilization:
 Run benchmarks:
 
 ```bash
-# Run all operators with performance metrics
+# Run all operators with performance metrics stored in tests_latest.csv
 pytest iron/operators/ -m "not extensive" -v
 ```
 

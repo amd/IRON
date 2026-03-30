@@ -19,11 +19,15 @@ IRON is a close-to-metal Python API for AMD Ryzen™ AI NPUs (XDNA architecture)
 # 1. Source XRT (required for all operations)
 source /opt/xilinx/xrt/setup.sh
 
-# 2. Activate virtual environment
+# 2. Create virtual environment (may already be present)
+python3 -m venv ironenv
+
+# 3. Activate virtual environment
 source ironenv/bin/activate
 
-# 3. Install dependencies
-pip install -r requirements.txt
+# 4. Install dependencies
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
 ```
 
 **Note:** XRT must be sourced before running any tests or operators.
@@ -41,7 +45,7 @@ Compiled artifacts (`.xclbin`, `.bin`, `.o` files) are stored in `build/` direct
 ### Run All Operators (non-extensive tests)
 
 ```bash
-pytest iron/operators/ -m "not extensive"
+pytest iron/operators/ -m "not extensive" --iterations 1
 ```
 
 ### Run Extensive Test Suite
@@ -54,8 +58,6 @@ pytest iron/operators/
 
 ```bash
 pytest iron/operators/axpy/
-# OR directly execute the test.py
-./iron/operators/axpy/test.py
 ```
 
 ### Run Application Tests
@@ -67,7 +69,7 @@ pytest iron/applications/
 ### Run Specific Test Function
 
 ```bash
-pytest iron/operators/gemm/test.py::test_gemm_basic
+pytest iron/operators/gemm/test.py::test_gemm
 ```
 
 ### Parallel Testing (faster)
@@ -254,7 +256,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 
 ## Operator Fusion
 
-IRON supports fusing multiple operators into a single xclbin for improved performance:
+IRON supports fusing multiple operators into a single ELF file. This improves performance enabling a single runtime dispatch for a chain of operators. This works only with the "full ELF" flow, which uses ELF files at runtime. The ELF files take the place of `xclbin`s:
 
 ```python
 from iron.common.fusion import FusedMLIROperator
@@ -282,8 +284,7 @@ fused_op = FusedMLIROperator(
 Benefits of fusion:
 
 - Reduces host ↔ NPU data transfers
-- Shares compiled resources (kernels.a)
-- Eliminates intermediate buffer round-trips
+- Runs a chain of operators using a single host-side dispatch (one CPU/host interrupt after fusion vs. one interrupt per operator without fusion)
 
 ## Common Patterns
 
@@ -299,8 +300,8 @@ taps = [
     TensorAccessPattern(
         (1, total_elements),
         chunk * i,  # offset for column i
-        [1, 1, 1, chunk],
-        [0, 0, 0, 1],
+        [1, 1, 1, chunk], # sizes
+        [0, 0, 0, 1], # strides
     )
     for i in range(num_columns)
 ]
