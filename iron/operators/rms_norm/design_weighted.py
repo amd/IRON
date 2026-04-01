@@ -15,14 +15,10 @@ def my_weighted_rms_norm(
     dev,
     num_elements,
     num_columns,
-    num_channels,
     weight_length,
     trace_size,
     func_prefix="",
 ):
-    assert (
-        num_channels == 1
-    ), "Multi-channel weighted RMS Norm is not yet implemented: the weight ObjectFifo is shared across all columns and does not support per-channel weight routing."
     per_tile_elements = weight_length
     total_cores = num_columns  # For each core that does rms norm, another core will take its output to do eltwise mul
     n = per_tile_elements * total_cores

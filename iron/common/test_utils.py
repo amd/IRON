@@ -52,40 +52,38 @@ def verify_buffer(
         List of error indices. Empty if verification passes.
     """
     errors = []
-    expected = reference.reshape((-1,))
+    expected_np = reference.reshape((-1,))
     output = output.reshape((-1,))
 
-    if len(output) < len(expected):
+    if len(output) < len(expected_np):
         # Allow larger buffers - binning may have allocated more space than needed
         print(
-            f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(output)} "
-            f"({len(expected) - len(output)} elements missing)"
+            f"Buffer size mismatch for {buf_name}: expected {len(expected_np)}, got {len(output)}"
         )
-    compare_len = min(len(output), len(expected))
-    mismatch_errors = []
+        errors.extend(i for i in range(abs(len(output) - len(expected_np))))
+    compare_len = min(len(output), len(expected_np))
     for i in range(compare_len):
-        if not nearly_equal(float(output[i]), float(expected[i]), rel_tol, abs_tol):
-            mismatch_errors.append(i)
-            if len(mismatch_errors) <= 10:
+        if not nearly_equal(float(output[i]), float(expected_np[i]), rel_tol, abs_tol):
+            errors.append(i)
+            if len(errors) <= 10:
                 print(
-                    f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(output[i]):.6f}"
+                    f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
                 )
 
-    # Check if error rate is acceptable (only counting value mismatches, not size mismatches)
-    if max_error_rate > 0.0 and len(mismatch_errors) > 0:
-        error_rate = len(mismatch_errors) / compare_len
+    # Check if error rate is acceptable
+    if max_error_rate > 0.0 and len(errors) > 0:
+        error_rate = len(errors) / compare_len
         max_allowed_errors = int(compare_len * max_error_rate)
-        if len(mismatch_errors) <= max_allowed_errors:
+        if len(errors) <= max_allowed_errors:
             print(
-                f"{buf_name}: {len(mismatch_errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
             )
-            return errors  # Pass value check - within allowed error rate; return any size-mismatch errors only
+            return []  # Pass - within allowed error rate
         else:
             print(
-                f"{buf_name}: {len(mismatch_errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
+                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
             )
 
-    errors.extend(mismatch_errors)
     return errors
 
 

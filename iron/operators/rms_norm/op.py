@@ -62,7 +62,6 @@ class AIERMSNorm(MLIROperator):
                 self.context.device_manager.device_type,
                 self.size,
                 self.num_aie_columns,
-                self.num_channels,
                 self.tile_size,
                 0,
             ]

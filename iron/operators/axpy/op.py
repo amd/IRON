@@ -8,6 +8,7 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
+from iron.common.utils import float_to_name
 
 
 class AIEAXPY(MLIROperator):
@@ -19,7 +20,7 @@ class AIEAXPY(MLIROperator):
         num_aie_columns,
         num_channels,
         tile_size,
-        scalar_factor=0.01,
+        scalar_factor=3.0,
         context=None,
     ):
         max_multiple = num_aie_columns * tile_size
@@ -37,13 +38,7 @@ class AIEAXPY(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        scalar_str = (
-            f"{self.scalar_factor:.8f}".rstrip("0")
-            .rstrip(".")
-            .replace(".", "_")
-            .replace("-", "neg")
-        )
-        return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{scalar_str}s"
+        return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{float_to_name(self.scalar_factor)}s"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(

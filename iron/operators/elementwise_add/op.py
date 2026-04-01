@@ -37,7 +37,7 @@ class AIEElementwiseAdd(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        return f"add_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
+        return f"eltwise_add_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(

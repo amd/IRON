@@ -141,7 +141,7 @@ class MLIROperator(AIEOperatorBase, ABC):
         # to runtime.run() without the repeated load() overhead (which triggers
         # an NPU context switch even on a cache hit, costing ~1-3 ms per call).
         handle = runtime.load(npu_kernel)
-        return lambda *args: runtime.run(handle, [a for a in args if not callable(a)])
+        return lambda *args: runtime.run(handle, list(args))
 
 
 class CompositeOperator(AIEOperatorBase, ABC):

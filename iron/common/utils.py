@@ -7,6 +7,25 @@ from ml_dtypes import bfloat16
 import pyxrt
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
+
+def float_to_name(v: float) -> str:
+    """Convert a float to a filesystem-safe string for use in operator names.
+
+    Uses repr() for the shortest exact round-trip representation, then sanitizes
+    characters that are problematic in filenames or shell scripts:
+      '.' -> 'p'  (decimal point)
+      '-' -> 'n'  (negative sign / negative exponent)
+      '+' -> ''   (positive exponent, redundant)
+
+    Examples:
+      3.0   -> '3p0'
+      0.01  -> '0p01'
+      -0.5  -> 'n0p5'
+      1e-10 -> '1en10'
+    """
+    return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
+
+
 torch_dtype_map = {
     "bf16": torch.bfloat16,
     "f32": torch.float32,
@@ -29,13 +48,6 @@ _XRT_TO_TORCH_DTYPE: dict = {
     np.dtype(bfloat16): torch.bfloat16,
     bfloat16: torch.bfloat16,
 }
-
-
-def numpy_to_torch(arr: np.ndarray) -> torch.Tensor:
-    """Convert a numpy array to a torch tensor, handling bfloat16."""
-    if arr.dtype == bfloat16:
-        return torch.from_numpy(arr.astype(np.float32)).to(torch.bfloat16)
-    return torch.from_numpy(arr)
 
 
 class XRTSubBuffer(XRTTensor):

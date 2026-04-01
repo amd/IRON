@@ -8,6 +8,7 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
+from iron.common.utils import float_to_name
 
 
 class AIELeakyReLU(MLIROperator):
@@ -38,15 +39,7 @@ class AIELeakyReLU(MLIROperator):
         MLIROperator.__init__(self, context=context)
 
     def get_operator_name(self):
-        # Use fixed-precision formatting to avoid scientific notation (e.g. 1e-05)
-        # which would produce invalid filenames with '-' characters.
-        alpha_str = (
-            f"{self.alpha:.8f}".rstrip("0")
-            .rstrip(".")
-            .replace(".", "_")
-            .replace("-", "neg")
-        )
-        return f"leaky_relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_a{alpha_str}"
+        return f"leaky_relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_a{float_to_name(self.alpha)}"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
