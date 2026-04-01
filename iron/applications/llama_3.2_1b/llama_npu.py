@@ -77,7 +77,7 @@ class AIELlamaOperators:
             AIERMSNorm(
                 size=prompt_len * config.emb_dim,
                 num_aie_columns=8,
-                num_channels=1,
+                num_channels=1,  # weighted=True forces num_channels=1; see AIERMSNorm.__init__
                 tile_size=config.emb_dim,
                 weighted=True,
                 context=self.context,
@@ -95,6 +95,7 @@ class AIELlamaOperators:
         )
 
         min_N = 64 * 8 * 4  # tile_n * num_aie_columns * partition_N
+        # Stored on self (not config) because this is a derived operator value, not raw model config.
         self.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
         self.vocab_partitions = 4
         self.prefill.gemv_out_head_compilable = AIEGEMM(
@@ -392,7 +393,7 @@ class AIELlamaOperators:
         rms_norm_op = AIERMSNorm(
             size=config.emb_dim,
             num_aie_columns=1,
-            num_channels=1,
+            num_channels=1,  # weighted=True forces num_channels=1; see AIERMSNorm.__init__
             tile_size=config.emb_dim,
             weighted=True,
             context=elf_ctx,
@@ -706,19 +707,6 @@ class AIELlamaOperators:
 # ##########################################################################
 
 
-# TODO: consider moving to iron/common/utils.py or upstreaming to mlir-aie
-def _xrttensor_subbuffer(parent, shape, offset_elements, length_elements, dtype):
-    """Create an XRTSubBuffer into a parent XRTTensor."""
-    itemsize = np.dtype(dtype).itemsize
-    return XRTSubBuffer(
-        parent_bo=parent.buffer_object(),
-        offset_bytes=offset_elements * itemsize,
-        size_bytes=length_elements * itemsize,
-        shape=shape,
-        dtype=dtype,
-    )
-
-
 class AIEPrefillBuffers:
     def __init__(self, prompt_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
         self.x = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
@@ -746,7 +734,7 @@ class AIEPrefillBuffers:
             (n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_queries_per_head = [
-            _xrttensor_subbuffer(
+            XRTSubBuffer.from_parent(
                 self.attn_scores_queries_all,
                 (prompt_len, head_dim),
                 offset_elements=h * prompt_len * head_dim,
@@ -760,7 +748,7 @@ class AIEPrefillBuffers:
             (n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_keys_per_kv_group = [
-            _xrttensor_subbuffer(
+            XRTSubBuffer.from_parent(
                 self.attn_scores_keys_all,
                 (head_dim, prompt_len),
                 offset_elements=g * head_dim * prompt_len,
@@ -774,7 +762,7 @@ class AIEPrefillBuffers:
             (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_per_head = [
-            _xrttensor_subbuffer(
+            XRTSubBuffer.from_parent(
                 self.attn_scores,
                 (prompt_len, prompt_len),
                 offset_elements=h * prompt_len * prompt_len,
@@ -915,7 +903,7 @@ class AIELlamaBuffers:
             aie_ops.padded_vocab_size // aie_ops.vocab_partitions
         )
         self.prefill.logits_parts = [
-            _xrttensor_subbuffer(
+            XRTSubBuffer.from_parent(
                 self.prefill.logits,
                 (
                     prompt_len,
@@ -1048,7 +1036,7 @@ def grouped_query_attention_forward_prefill(
     # Buffer is (n_heads * max_seq_len, max_seq_len), view as (n_heads, max_seq_len, max_seq_len) then slice
     max_seq_len_buf = aie_buffers.prefill.attn_scores.shape[0] // config.n_heads
     scores = (
-        aie_buffers.prefill.attn_scores.to_torch()
+        aie_buffers.prefill.attn_scores.to_torch()  # to_torch() syncs device→host; torch_view() would not sync and must not be used here
         .view(config.n_heads, max_seq_len_buf, max_seq_len_buf)
         .unsqueeze(0)[:, :, :seq_len, :context_len]
     )

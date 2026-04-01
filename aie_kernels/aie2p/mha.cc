@@ -3,8 +3,11 @@
 
 #include "softmax.cc"
 
-// mm.cc compiled col-major via -DB_COL_MAJ in extra_flags.
-// This provides: matmul_bf16_bf16, matmul_scalar_bf16_bf16, zero_bf16, etc.
+// mha.cc is a single compilation unit that includes mm.cc and softmax.cc via
+// #include (there is no separate link step).  The col-major B variants are
+// compiled by passing -DB_COL_MAJ to the compiler; this flag is set in the
+// PeanoCompilationRule configuration for this file.
+// mm.cc provides: matmul_bf16_bf16, matmul_scalar_bf16_bf16, zero_bf16, etc.
 #include "mm.cc"
 
 #include <aie_api/aie.hpp>
@@ -17,9 +20,10 @@
 
 #define ROUNDING_MODE aie::rounding_mode::conv_even
 
-// Row-major variants needed by matmul_PV.  mm.cc's templates are already
-// available (it was included above); we just need to instantiate them with
-// b_row_maj=true (row-major B) and expose the results as extern "C" symbols.
+// Row-major variants needed by matmul_PV.  Because there is no separate link
+// step, all kernel symbols must be defined in this single translation unit.
+// mm.cc's templates are already available (included above); we instantiate
+// them here with b_row_maj=true and expose the results as extern "C" symbols.
 extern "C" {
 
 void zero_bf16_rowmaj(bfloat16 *c_out)

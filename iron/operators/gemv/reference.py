@@ -6,7 +6,9 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 
-def generate_golden_reference(M=128, K=128, seed=42):
+def generate_golden_reference(
+    M=128, K=128, seed=42
+):  # Defaults are tile-aligned minimums; tests always pass explicit values
     """
     Generate golden reference data for GEMV (General Matrix-Vector Multiplication).
 

@@ -172,5 +172,5 @@ def pytest_generate_tests(metafunc):
 
 
 def pytest_make_parametrize_id(config, val, argname):
-    """Automatically generate test IDs with parameter names"""
+    # Required: pytest_runtest_makereport parses test IDs with format "{argname}_{val}" for CSV reporting.
     return f"{argname}_{val}"

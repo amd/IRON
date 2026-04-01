@@ -106,3 +106,20 @@ class XRTSubBuffer(XRTTensor):
         if torch_dtype is None:
             raise ValueError(f"Unsupported dtype: {self.dtype}")
         return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)
+
+    @classmethod
+    def from_parent(cls, parent, shape, offset_elements, length_elements, dtype):
+        """Create an XRTSubBuffer into a sub-region of a parent XRTTensor.
+
+        Accepts element-count offsets/lengths and converts to bytes internally.
+        XRTTensor has no built-in slice API; use this until mlir-aie gains
+        XRTTensor.__getitem__ slice support.
+        """
+        itemsize = np.dtype(dtype).itemsize
+        return cls(
+            parent_bo=parent.buffer_object(),
+            offset_bytes=offset_elements * itemsize,
+            size_bytes=length_elements * itemsize,
+            shape=shape,
+            dtype=dtype,
+        )

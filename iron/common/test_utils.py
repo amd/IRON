@@ -7,6 +7,8 @@ from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
+# TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
+
 
 def nearly_equal(
     a, b, rel_tol=128 * np.finfo(np.float32).eps, abs_tol=np.finfo(np.float32).tiny

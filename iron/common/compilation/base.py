@@ -72,6 +72,10 @@ __all__ = [
 
 
 def plan(rules, graph, _seen_unavailable=None):
+    # _seen_unavailable: snapshot of unavailable artifact filenames from the
+    # previous recursion.  If a rule fires but the unavailable set is unchanged,
+    # we raise RuntimeError to detect rules that make no forward progress
+    # (stall detection, not graph-cycle detection).
     if all(artifact.is_available() for artifact in graph):
         return []  # Everything has been compiled
     for rule in rules:
@@ -624,6 +628,7 @@ class PeanoCompilationRule(CompilationRule):
         for candidate in candidates:
             if candidate.is_file():
                 return str(candidate)
+        # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
         for tool_name in [name, f"{name}-18"]:
             found = shutil.which(tool_name)
             if found:
