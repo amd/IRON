@@ -29,7 +29,7 @@ class GEMM(MLIROperator):
     tile_n: int = 64
     b_col_maj: bool = False
     c_col_maj: bool = False
-    num_aie_columns: int = field(default=8, repr=False)
+    num_aie_columns: int = field(default=8)
     emulate_bf16_mmul_with_bfp16: bool = field(default=True, repr=False)
     prio_accuracy: bool = field(default=False, repr=False)
     round_conv_even: bool = field(default=True, repr=False)
