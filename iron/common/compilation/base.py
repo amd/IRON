@@ -40,6 +40,7 @@ import subprocess
 import importlib.util
 from contextlib import nullcontext
 from aie.extras.context import mlir_mod_ctx
+from iron.common.device_utils import DEVICE_CONFIGS
 import sys
 
 # Global Functions
@@ -562,18 +563,15 @@ class PeanoCompilationRule(CompilationRule):
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
 
-        # Select target and runtime lib directory based on device type
-        # npu1 (Phoenix/AIE2) and npu (legacy/AIE2) use aie2-none-unknown-elf
-        # npu2 (Strix Point/AIE2P) uses aie2p-none-unknown-elf
-        if self.device_type == "npu2":
-            target = "aie2p-none-unknown-elf"
-            runtime_lib_dir = "AIE2P"
-        else:
-            # Default to aie2 for npu1, npu, and any unrecognized device types
-            target = "aie2-none-unknown-elf"
-            runtime_lib_dir = "AIE2"
+        if self.device_type not in DEVICE_CONFIGS:
+            raise ValueError(
+                f"Unsupported device type: {self.device_type!r} "
+                f"(supported: {', '.join(DEVICE_CONFIGS)})"
+            )
+        config = DEVICE_CONFIGS[self.device_type]
+        target = config["target"]
         runtime_lib_include_path = (
-            Path(self.mlir_aie_dir) / "aie_runtime_lib" / runtime_lib_dir
+            Path(self.mlir_aie_dir) / "aie_runtime_lib" / config["runtime_lib_dir"]
         )
 
         for artifact in worklist:

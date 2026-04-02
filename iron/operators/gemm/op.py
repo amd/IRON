@@ -18,6 +18,7 @@ from iron.common import (
 )
 
 from iron.common.utils import torch_to_numpy, numpy_to_torch
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 class AIEGEMM(MLIROperator):
@@ -145,8 +146,7 @@ class AIEGEMM(MLIROperator):
         # Include flags in the filename to avoid stale builds when flags change
         flags_suffix = f"_{int(prio_accuracy)}_{int(emulate_bf16_mmul_with_bfp16)}_{int(round_conv_even)}"
 
-        # Select kernel directory based on device type
-        kernel_dir = "aie2p" if device_str == "npu2" else "aie2"
+        kernel_dir = DEVICE_CONFIGS[device_str]["kernel_dir"]
 
         return [
             KernelObjectArtifact(

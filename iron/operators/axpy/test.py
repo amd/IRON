@@ -11,11 +11,12 @@ from iron.operators.axpy.op import AIEAXPY
 from iron.operators.axpy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
     device_type = AIEDeviceManager().device_str()
-    max_aie_columns = 4 if device_type == "npu1" else 8
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
     num_channels = 2
     input_lengths = [1024, 2048, 4096, 8192]
     scalar_factors = [3.0, 10.0]

@@ -18,6 +18,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 from iron.common.utils import torch_to_numpy
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 class AIERMSNorm(MLIROperator):
@@ -93,10 +94,9 @@ class AIERMSNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        # Use device-aware kernel selection
-        arch_dir = (
-            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
-        )
+        arch_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
+            "kernel_dir"
+        ]
         artifacts = [
             KernelObjectArtifact(
                 f"rms_norm.o",

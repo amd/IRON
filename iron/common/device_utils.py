@@ -35,6 +35,22 @@ def get_device_name(dev):
             return "npu2"
 
 
+DEVICE_CONFIGS = {
+    "npu1": {
+        "target": "aie2-none-unknown-elf",
+        "runtime_lib_dir": "AIE2",
+        "kernel_dir": "aie2",
+        "max_columns": NPU1().cols,
+    },
+    "npu2": {
+        "target": "aie2p-none-unknown-elf",
+        "runtime_lib_dir": "AIE2P",
+        "kernel_dir": "aie2p",
+        "max_columns": NPU2().cols,
+    },
+}
+
+
 def get_device_type(dev, n_aie_cols):
     """Resolve device type to appropriate NPU device instance.
 

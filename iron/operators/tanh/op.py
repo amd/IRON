@@ -6,6 +6,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 from pathlib import Path
 
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -58,9 +59,9 @@ class AIETanh(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        kernel_dir = (
-            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
-        )
+        kernel_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
+            "kernel_dir"
+        ]
         artifacts = [
             KernelObjectArtifact(
                 "tanh.o",

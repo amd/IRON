@@ -11,11 +11,12 @@ from iron.operators.rope.op import AIERope
 from iron.operators.rope.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
     device_type = AIEDeviceManager().device_str()
-    max_cols = 4 if device_type == "npu1" else 8
+    max_cols = DEVICE_CONFIGS[device_type]["max_columns"]
     num_aie_columns_options = [c for c in [1, 2, 4, 8] if c <= max_cols]
 
     # Combine all options

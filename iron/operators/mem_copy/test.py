@@ -11,11 +11,12 @@ from iron.operators.mem_copy.op import AIEMemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
     device_type = AIEDeviceManager().device_str()
-    max_columns = 4 if device_type == "npu1" else 8
+    max_columns = DEVICE_CONFIGS[device_type]["max_columns"]
 
     input_lengths = [1024, 2048, 4096, 8192]
     bypass_modes = [False, True]

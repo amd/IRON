@@ -18,6 +18,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 from iron.common.utils import torch_to_numpy, numpy_to_torch
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 class AIEMHA(MLIROperator):
@@ -67,9 +68,8 @@ class AIEMHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        # Select kernel directory based on device type
         device_str = self.context.device_manager.device_str()
-        kernel_dir = "aie2p" if device_str == "npu2" else "aie2"
+        kernel_dir = DEVICE_CONFIGS[device_str]["kernel_dir"]
 
         # Define source files
         mm_source = str(self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc")
