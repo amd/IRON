@@ -77,11 +77,9 @@ class FusedMLIROperator(AIEOperatorBase):
             comp_runlist.append((op_names[op], *bufs))
 
         # Calculate buffer layout: {buffer_name -> (type, offset, length)}
-        (
-            self.subbuffer_layout,
-            self.buffer_sizes,
-            self.slice_info,
-        ) = self._calculate_buffer_layout()
+        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
+            self._calculate_buffer_layout()
+        )
 
         filename = self.get_operator_name() + "_fused.mlir"
         fused_artifact = comp.FusedMLIRSource(

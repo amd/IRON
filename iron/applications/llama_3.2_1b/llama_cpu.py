@@ -235,37 +235,43 @@ def llama_forward_pass(config, state):
 
     # Step 3: Apply transformer blocks
     for layer_idx in range(config.n_layers):
-        (
-            x,
-            state.attn_keys_caches[layer_idx],
-            state.attn_values_caches[layer_idx],
-        ) = transformer_block_forward(
-            x,
-            state.attn_keys_caches[layer_idx],
-            state.attn_values_caches[layer_idx],
-            config.n_heads,
-            config.n_kv_groups,
-            W_norm1=config.weights[f"model.layers.{layer_idx}.input_layernorm.weight"],
-            W_attn_query=config.weights[
-                f"model.layers.{layer_idx}.self_attn.q_proj.weight"
-            ],
-            W_attn_key=config.weights[
-                f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-            ],
-            W_attn_value=config.weights[
-                f"model.layers.{layer_idx}.self_attn.v_proj.weight"
-            ],
-            W_attn_out=config.weights[
-                f"model.layers.{layer_idx}.self_attn.o_proj.weight"
-            ],
-            W_ffn_fc1=config.weights[f"model.layers.{layer_idx}.mlp.gate_proj.weight"],
-            W_ffn_fc2=config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"],
-            W_ffn_fc3=config.weights[f"model.layers.{layer_idx}.mlp.down_proj.weight"],
-            W_norm2=config.weights[
-                f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-            ],
-            rope_angles=config.angles,
-            attn_mask=attn_mask,
+        x, state.attn_keys_caches[layer_idx], state.attn_values_caches[layer_idx] = (
+            transformer_block_forward(
+                x,
+                state.attn_keys_caches[layer_idx],
+                state.attn_values_caches[layer_idx],
+                config.n_heads,
+                config.n_kv_groups,
+                W_norm1=config.weights[
+                    f"model.layers.{layer_idx}.input_layernorm.weight"
+                ],
+                W_attn_query=config.weights[
+                    f"model.layers.{layer_idx}.self_attn.q_proj.weight"
+                ],
+                W_attn_key=config.weights[
+                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+                ],
+                W_attn_value=config.weights[
+                    f"model.layers.{layer_idx}.self_attn.v_proj.weight"
+                ],
+                W_attn_out=config.weights[
+                    f"model.layers.{layer_idx}.self_attn.o_proj.weight"
+                ],
+                W_ffn_fc1=config.weights[
+                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
+                ],
+                W_ffn_fc2=config.weights[
+                    f"model.layers.{layer_idx}.mlp.up_proj.weight"
+                ],
+                W_ffn_fc3=config.weights[
+                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
+                ],
+                W_norm2=config.weights[
+                    f"model.layers.{layer_idx}.post_attention_layernorm.weight"
+                ],
+                rope_angles=config.angles,
+                attn_mask=attn_mask,
+            )
         )
 
     # Step 4: Final normalization
