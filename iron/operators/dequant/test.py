@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.dequant.op import AIEDequant
+from iron.operators.dequant.op import Dequant
 from iron.operators.dequant.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -59,7 +59,7 @@ def test_dequant(
         group_size=group_size,
     )
 
-    operator = AIEDequant(
+    operator = Dequant(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

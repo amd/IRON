@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.mha.op import AIEMHA
+from iron.operators.mha.op import MHA
 from iron.operators.mha.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -45,7 +45,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
         num_pipeline=num_pipelines,
     )
 
-    operator = AIEMHA(
+    operator = MHA(
         num_heads=num_heads,
         seq_len=seq_len,
         d=dim,

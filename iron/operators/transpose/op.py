@@ -1,60 +1,73 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+
+import aie.utils as aie_utils
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
 
 
-class AIETranspose(MLIROperator):
+@dataclass
+class Transpose(MLIROperator):
     """AIE-accelerated transpose operator"""
 
-    def __init__(self, M, N, num_aie_columns, num_channels, m, n, s, context=None):
-        if M % m != 0:
-            raise ValueError(f"Matrix rows ({M}) must be a multiple of {m}")
-        if N % n != 0:
-            raise ValueError(f"Matrix columns ({N}) must be a multiple of {n}")
-        if m % s != 0:
-            raise ValueError(f"AIE tile rows ({m}) must be a multiple of {s}")
-        if n % s != 0:
-            raise ValueError(f"AIE tile columns ({n}) must be a multiple of {s}")
-        if M * N % (m * n * num_aie_columns * num_channels) != 0:
+    M: int
+    N: int
+    num_aie_columns: int
+    num_channels: int
+    m: int
+    n: int
+    s: int
+    context: object = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if self.M % self.m != 0:
+            raise ValueError(f"Matrix rows ({self.M}) must be a multiple of {self.m}")
+        if self.N % self.n != 0:
+            raise ValueError(
+                f"Matrix columns ({self.N}) must be a multiple of {self.n}"
+            )
+        if self.m % self.s != 0:
+            raise ValueError(f"AIE tile rows ({self.m}) must be a multiple of {self.s}")
+        if self.n % self.s != 0:
+            raise ValueError(
+                f"AIE tile columns ({self.n}) must be a multiple of {self.s}"
+            )
+        if (
+            self.M
+            * self.N
+            % (self.m * self.n * self.num_aie_columns * self.num_channels)
+            != 0
+        ):
             raise ValueError(
                 "Transfer size must be divisible by m*n*num_columns*num_channels"
             )
-
-        self.M = M
-        self.N = N
-        self.m = m
-        self.n = n
-        self.s = s
-        self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"transpose_{self.num_aie_columns}c_{self.num_channels}ch_{self.M}x{self.N}_{self.m}x{self.n}_{self.s}s"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="shuffle_transpose",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.M,
-                self.N,
-                self.num_aie_columns,
-                self.num_channels,
-                self.m,
-                self.n,
-                self.s,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "shuffle_transpose",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.M,
+                    self.N,
+                    self.num_aie_columns,
+                    self.num_channels,
+                    self.m,
+                    self.n,
+                    self.s,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
@@ -78,6 +91,6 @@ class AIETranspose(MLIROperator):
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec("in", (self.M * self.N,)),  # input
-            AIERuntimeArgSpec("out", (self.M * self.N,)),  # output (transposed)
+            AIERuntimeArgSpec("in", (self.M * self.N,)),
+            AIERuntimeArgSpec("out", (self.M * self.N,)),
         ]

@@ -1,47 +1,57 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIEMemCopy(MLIROperator):
-    """AIE-accelerated memory copy operator. Note: the `prefix` parameter is intentionally not supported."""
+@dataclass
+class MemCopy(MLIROperator):
+    """AIE-accelerated memory copy operator."""
 
-    def __init__(self, size, num_cores, num_channels, bypass, tile_size, context=None):
-        self.size = size
-        self.num_cores = num_cores
-        self.num_channels = num_channels
-        self.bypass = bypass
-        self.tile_size = tile_size
+    size: int
+    num_cores: int
+    num_channels: int
+    bypass: bool
+    tile_size: int
+    context: object = field(default=None, repr=False)
 
-        # For naming consistency with other operators
-        self.bypass_str = "bypass" if bypass else "no_bypass"
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_cores": "cores",
+        "num_channels": "chans",
+        "tile_size": "tile",
+    }
 
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"
+    def __post_init__(self):
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_mem_copy",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_cores,
-                self.num_channels,
-                self.bypass,
-                self.tile_size,
-                0,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_mem_copy",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.size,
+                    self.num_cores,
+                    self.num_channels,
+                    self.bypass,
+                    self.tile_size,
+                    0,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
@@ -66,6 +76,6 @@ class AIEMemCopy(MLIROperator):
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec("in", (self.size,)),  # input
-            AIERuntimeArgSpec("out", (self.size,)),  # output
+            AIERuntimeArgSpec("in", (self.size,)),
+            AIERuntimeArgSpec("out", (self.size,)),
         ]

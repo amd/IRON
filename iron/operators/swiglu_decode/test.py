@@ -7,7 +7,7 @@ import pytest
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-from iron.operators.swiglu_decode.op import AIESwiGLUDecode
+from iron.operators.swiglu_decode.op import SwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
 
@@ -29,7 +29,7 @@ def get_params():
 def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
 
-    operator = AIESwiGLUDecode(
+    operator = SwiGLUDecode(
         embedding_dim=embedding_dim, hidden_dim=hidden_dim, context=aie_context
     )
     operator.weights_1 = golden_ref["w_gate"].T

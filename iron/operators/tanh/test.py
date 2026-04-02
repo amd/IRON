@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.tanh.op import AIETanh
+from iron.operators.tanh.op import Tanh
 from iron.operators.tanh.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -48,7 +48,7 @@ def get_params():
 def test_tanh(input_length, num_aie_columns, num_channels, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIETanh(
+    operator = Tanh(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

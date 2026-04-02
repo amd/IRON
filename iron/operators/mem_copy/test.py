@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.mem_copy.op import AIEMemCopy
+from iron.operators.mem_copy.op import MemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -61,7 +61,7 @@ def test_mem_copy(
 ):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEMemCopy(
+    operator = MemCopy(
         size=input_length,
         num_cores=num_cores,
         num_channels=num_channels,

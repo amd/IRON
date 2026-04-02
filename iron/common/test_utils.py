@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
+from __future__ import annotations
+
 import numpy as np
+import torch
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -11,8 +13,11 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 
 def nearly_equal(
-    a, b, rel_tol=128 * np.finfo(np.float32).eps, abs_tol=np.finfo(np.float32).tiny
-):
+    a: float,
+    b: float,
+    rel_tol: float = 128 * np.finfo(np.float32).eps,
+    abs_tol: float = np.finfo(np.float32).tiny,
+) -> bool:
     """
     Compare two floating point numbers for approximate equality.
 
@@ -34,8 +39,13 @@ def nearly_equal(
 
 
 def verify_buffer(
-    output, buf_name, reference, rel_tol=0.04, abs_tol=1e-6, max_error_rate=0.0
-):
+    output: np.ndarray | torch.Tensor,
+    buf_name: str,
+    reference: np.ndarray | torch.Tensor,
+    rel_tol: float = 0.04,
+    abs_tol: float = 1e-6,
+    max_error_rate: float = 0.0,
+) -> list[int]:
     """
     Verify buffer contents match reference within tolerances.
 
@@ -88,16 +98,15 @@ def verify_buffer(
 
 
 def run_test(
-    operator,
-    input_buffers,
-    output_buffers,
-    intermediate_buffers=None,
-    rel_tol=0.04,
-    abs_tol=1e-6,
-    max_error_rate=0.0,
-    warmup_iters=1,
-    timed_iters=1,
-):
+    operator: AIEOperatorBase,
+    input_buffers: dict[str, torch.Tensor],
+    output_buffers: dict[str, torch.Tensor | None],
+    rel_tol: float = 0.04,
+    abs_tol: float = 1e-6,
+    max_error_rate: float = 0.0,
+    warmup_iters: int = 1,
+    timed_iters: int = 1,
+) -> tuple[dict[str, list[int]], float, float]:
     """
     Run operator test with specified input/output buffers.
 
@@ -105,7 +114,6 @@ def run_test(
         operator: AIE operator instance (must be an AIEOperatorBase subclass)
         input_buffers: Dict mapping buffer names to input data arrays
         output_buffers: Dict mapping buffer names to reference output arrays
-        intermediate_buffers: Not supported; passing a non-empty value raises ValueError
         rel_tol: Relative tolerance for comparison of output buffers
         abs_tol: Absolute tolerance for comparison of output buffers
         max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
@@ -115,10 +123,6 @@ def run_test(
     Returns:
         (errors: dict, latency_us: float, bandwidth_gbps: float)
     """
-    if intermediate_buffers:
-        raise ValueError(
-            "intermediate_buffers verification is not supported in run_test"
-        )
 
     if not isinstance(operator, AIEOperatorBase):
         raise ValueError("run_test only supports AIEOperatorBase subclasses")
@@ -171,14 +175,12 @@ def run_test(
     for _ in range(warmup_iters):
         op_func(*args)
 
-    # Run operator
-    start_time = time.perf_counter()
+    # Run timed iterations and measure NPU execution time
+    total_npu_ns = 0
     for _ in range(timed_iters):
-        op_func(*args)
-    end_time = time.perf_counter()
-
-    elapsed = (end_time - start_time) / timed_iters
-    latency_us = elapsed * 1e6
+        result = op_func(*args)
+        total_npu_ns += result.npu_time
+    latency_us = (total_npu_ns / timed_iters) / 1e3
 
     # Verify outputs
     errors = {}
@@ -198,7 +200,7 @@ def run_test(
 
     # inout buffers are in output_map and are verified above if present in output_buffers
 
-    # Calculate bandwidth
+    # NPU-side bandwidth (excludes host DMA transfer time)
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
 
     return errors, latency_us, bandwidth_gbps

@@ -11,6 +11,7 @@ import sys
 import statistics
 
 from iron.common import AIEContext
+import aie.utils as aie_utils
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def aie_context(request):
     verbose_mlir = request.config.option.verbose > 0
     ctx = AIEContext(mlir_verbose=verbose_mlir)
     yield ctx
-    ctx.device_manager.reset()
+    aie_utils.DefaultNPURuntime.cleanup()
 
 
 def pytest_addoption(parser):

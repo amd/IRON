@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.gemv.op import AIEGEMV
+from iron.operators.gemv.op import GEMV
 from iron.operators.gemv.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -39,7 +39,7 @@ def get_params():
 def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
     golden_ref = generate_golden_reference(M=M, K=K)
 
-    operator = AIEGEMV(
+    operator = GEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,

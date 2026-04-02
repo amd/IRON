@@ -32,17 +32,17 @@ from iron.common.fusion import (
     patch_elf,
 )
 from iron.operators import (
-    AIERMSNorm,
-    AIEGEMM,
-    AIEGEMV,
-    AIEElementwiseAdd,
-    AIEElementwiseMul,
-    AIESiLU,
-    AIERope,
-    AIEStridedCopy,
-    AIERepeat,
-    AIESoftmax,
-    AIETranspose,
+    RMSNorm,
+    GEMM,
+    GEMV,
+    ElementwiseAdd,
+    ElementwiseMul,
+    SiLU,
+    Rope,
+    StridedCopy,
+    Repeat,
+    Softmax,
+    Transpose,
 )
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
@@ -77,10 +77,10 @@ class AIELlamaOperators:
         # Prefill operators
 
         self.prefill.rms_norm = (
-            AIERMSNorm(
+            RMSNorm(
                 size=prompt_len * config.emb_dim,
                 num_aie_columns=8,
-                num_channels=1,  # weighted=True forces num_channels=1; see AIERMSNorm.__init__
+                num_channels=1,  # weighted=True forces num_channels=1; see RMSNorm.__init__
                 tile_size=config.emb_dim,
                 weighted=True,
                 context=self.context,
@@ -90,9 +90,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.residual_add = (
-            AIEElementwiseAdd(
-                size=prompt_len * config.emb_dim, tile_size=config.emb_dim
-            )
+            ElementwiseAdd(size=prompt_len * config.emb_dim, tile_size=config.emb_dim)
             .compile()
             .get_callable()
         )
@@ -101,7 +99,7 @@ class AIELlamaOperators:
         # Stored on self (not config) because this is a derived operator value, not raw model config.
         self.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
         self.vocab_partitions = 4
-        self.prefill.gemv_out_head_compilable = AIEGEMM(
+        self.prefill.gemv_out_head_compilable = GEMM(
             M=prompt_len,
             K=config.emb_dim,
             N=self.padded_vocab_size // self.vocab_partitions,
@@ -118,7 +116,7 @@ class AIELlamaOperators:
         # SwiGLU FFN operators
         # Prefill: M=prompt_len, K=emb_dim, N=hidden_dim
         self.prefill.ffn_up_gate = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.hidden_dim,
@@ -134,7 +132,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.ffn_down = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.hidden_dim,
                 N=config.emb_dim,
@@ -150,7 +148,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.ffn_silu = (
-            AIESiLU(
+            SiLU(
                 size=prompt_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
@@ -161,7 +159,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.eltwise_mul_ffn = (
-            AIEElementwiseMul(
+            ElementwiseMul(
                 size=prompt_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
@@ -174,7 +172,7 @@ class AIELlamaOperators:
         # Attention score scaling operators
         # FIXME: Using elementwise mul is very wasteful (of bandwidth) here since it's the same scalar factor for all values; need a kernel that allows scalar multiplication of a vector; maybe use AXPY
         self.prefill.attn_scale = (
-            AIEElementwiseMul(
+            ElementwiseMul(
                 size=config.n_heads * prompt_len * prompt_len,
                 tile_size=prompt_len,
                 num_aie_columns=8,
@@ -189,7 +187,7 @@ class AIELlamaOperators:
         # For keys: (seq_len, num_kv_groups * head_dim) = (seq_len, 512)
         # angle_rows=1 because all rows use the same angle row (angles are per position)
         self.prefill.rope_queries = (
-            AIERope(
+            Rope(
                 rows=prompt_len * config.n_heads,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -200,7 +198,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.rope_keys = (
-            AIERope(
+            Rope(
                 rows=prompt_len * config.n_kv_groups,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -213,7 +211,7 @@ class AIELlamaOperators:
         # Attention projection operators
         # Query projection: (seq_len, emb_dim) -> (seq_len, n_heads * head_dim)
         self.prefill.attn_query = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_heads * config.head_dim,
@@ -230,7 +228,7 @@ class AIELlamaOperators:
 
         # Key projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_key = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
@@ -247,7 +245,7 @@ class AIELlamaOperators:
 
         # Value projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_value = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
@@ -265,7 +263,7 @@ class AIELlamaOperators:
         # Attention score computation: Q @ K^T per head
         # For prefill: (seq_len, head_dim) @ (head_dim, seq_len) = (seq_len, seq_len) per head
         self.prefill.attn_scores = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.head_dim,
                 N=prompt_len,
@@ -285,7 +283,7 @@ class AIELlamaOperators:
 
         elf_ctx = AIEContext(build_dir="build_elf")
 
-        gemv_attn_query_op = AIEGEMV(
+        gemv_attn_query_op = GEMV(
             M=config.n_heads * config.head_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -294,7 +292,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_attn_key_value_op = AIEGEMV(
+        gemv_attn_key_value_op = GEMV(
             M=config.n_kv_groups * config.head_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -304,11 +302,11 @@ class AIELlamaOperators:
         )
 
         # decode processes 1 query token at a time
-        rope_queries_op = AIERope(
+        rope_queries_op = Rope(
             rows=config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
         )
 
-        rope_keys_op = AIERope(
+        rope_keys_op = Rope(
             rows=config.n_kv_groups,
             cols=config.head_dim,
             angle_rows=1,
@@ -316,7 +314,7 @@ class AIELlamaOperators:
         )
 
         strided_copy_cache_magic = 0xDEADBEE0
-        strided_copy_cache_op = AIEStridedCopy(
+        strided_copy_cache_op = StridedCopy(
             input_sizes=(config.n_kv_groups, config.head_dim),
             input_strides=(config.head_dim, 1),
             input_offset=0,
@@ -326,13 +324,13 @@ class AIELlamaOperators:
             input_buffer_size=1 * config.n_kv_groups * config.head_dim,
             output_buffer_size=config.n_kv_groups * prompt_len * config.head_dim,
             num_aie_channels=1,
-            output_offset_patch_marker=strided_copy_cache_magic,
+            kwargs={"output_offset_patch_marker": strided_copy_cache_magic},
             context=elf_ctx,
         )
 
         # For decode: per head, (1, head_dim) @ (head_dim, max_context_len)
         # Use GEMV: (max_context_len, head_dim) @ (head_dim,) = (max_context_len,)
-        gemv_attn_scores_op = AIEGEMV(
+        gemv_attn_scores_op = GEMV(
             M=prompt_len,  # max possible context length
             K=config.head_dim,
             num_aie_columns=8,
@@ -342,7 +340,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        attn_scale_op = AIEElementwiseMul(
+        attn_scale_op = ElementwiseMul(
             size=config.n_heads * prompt_len,
             tile_size=prompt_len // 8,
             num_aie_columns=8,
@@ -351,7 +349,7 @@ class AIELlamaOperators:
 
         # Softmax operators for attention weights
         softmax_magic = 0xBA5EBA11
-        softmax_op = AIESoftmax(
+        softmax_op = Softmax(
             rows=config.n_heads,
             cols=prompt_len,
             num_aie_columns=1,
@@ -362,7 +360,7 @@ class AIELlamaOperators:
         )
 
         # Fused transpose for all attention heads (decode)
-        transpose_values_op = AIETranspose(
+        transpose_values_op = Transpose(
             M=prompt_len,
             N=config.head_dim,
             num_aie_columns=2,
@@ -374,7 +372,7 @@ class AIELlamaOperators:
         )
 
         # GEMV for attention context: (head_dim, max_context_len) @ (max_context_len,) = (head_dim,) per head
-        gemv_attn_context_op = AIEGEMV(
+        gemv_attn_context_op = GEMV(
             M=config.head_dim,
             K=prompt_len,  # max possible context length
             num_aie_columns=8,
@@ -384,7 +382,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_attn_output_op = AIEGEMV(
+        gemv_attn_output_op = GEMV(
             M=config.emb_dim,
             K=config.n_heads * config.head_dim,
             num_aie_columns=8,
@@ -393,16 +391,16 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        rms_norm_op = AIERMSNorm(
+        rms_norm_op = RMSNorm(
             size=config.emb_dim,
             num_aie_columns=1,
-            num_channels=1,  # weighted=True forces num_channels=1; see AIERMSNorm.__init__
+            num_channels=1,  # weighted=True forces num_channels=1; see RMSNorm.__init__
             tile_size=config.emb_dim,
             weighted=True,
             context=elf_ctx,
         )
 
-        gemv_ffn_up_gate_op = AIEGEMV(
+        gemv_ffn_up_gate_op = GEMV(
             M=config.hidden_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -411,7 +409,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_ffn_down_op = AIEGEMV(
+        gemv_ffn_down_op = GEMV(
             M=config.emb_dim,
             K=config.hidden_dim,
             num_aie_columns=8,
@@ -420,25 +418,25 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        silu_ffn_op = AIESiLU(
+        silu_ffn_op = SiLU(
             size=config.hidden_dim,
             tile_size=config.hidden_dim // 8,
             num_aie_columns=8,
             context=elf_ctx,
         )
 
-        eltwise_mul_ffn_op = AIEElementwiseMul(
+        eltwise_mul_ffn_op = ElementwiseMul(
             size=config.hidden_dim,
             tile_size=config.hidden_dim // 8,
             num_aie_columns=8,
             context=elf_ctx,
         )
 
-        residual_add_op = AIEElementwiseAdd(
+        residual_add_op = ElementwiseAdd(
             size=config.emb_dim, tile_size=config.emb_dim // 8, context=elf_ctx
         )
 
-        repeat_interleave_op = AIERepeat(
+        repeat_interleave_op = Repeat(
             rows=config.n_kv_groups,
             cols=prompt_len * config.head_dim,  # Max context length
             repeat=config.n_heads // config.n_kv_groups,
@@ -446,7 +444,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_out_head_op = AIEGEMV(
+        gemv_out_head_op = GEMV(
             M=config.vocab_size,
             K=config.emb_dim,
             num_aie_columns=8,

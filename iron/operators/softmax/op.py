@@ -1,68 +1,63 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIESoftmax(MLIROperator):
+@dataclass
+class Softmax(MLIROperator):
     """AIE-accelerated Softmax operation"""
 
-    def __init__(
-        self,
-        rows: int,
-        cols: int,
-        num_aie_columns=1,
-        num_channels=1,
-        rtp_vector_size=None,
-        mask_patch_value=0,
-        context=None,
-    ):
-        if rows % 16 != 0:
-            raise ValueError(f"rows ({rows}) must be a multiple of 16")
-        if cols % 16 != 0:
-            raise ValueError(f"cols ({cols}) must be a multiple of 16")
-        if rows % num_aie_columns != 0:
+    rows: int
+    cols: int
+    num_aie_columns: int = 1
+    num_channels: int = 1
+    rtp_vector_size: int | None = None
+    mask_patch_value: int = 0
+    context: object = field(default=None, repr=False)
+
+    @property
+    def size(self):
+        return self.rows * self.cols
+
+    def __post_init__(self):
+        if self.rows % 16 != 0:
+            raise ValueError(f"rows ({self.rows}) must be a multiple of 16")
+        if self.cols % 16 != 0:
+            raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
+        if self.rows % self.num_aie_columns != 0:
             raise ValueError(
-                f"rows ({rows}) must be a multiple of num_aie_columns ({num_aie_columns})"
+                f"rows ({self.rows}) must be a multiple of num_aie_columns ({self.num_aie_columns})"
             )
-
-        self.rows = rows
-        self.cols = cols
-        self.size = rows * cols
-        self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
-        self.rtp_vector_size = rtp_vector_size
-        self.mask_patch_value = mask_patch_value
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        name = f"softmax_{self.num_aie_columns}col_{self.num_channels}ch_{self.size}_{self.cols}t"
-        if self.rtp_vector_size is not None:
-            name += f"_{self.rtp_vector_size}rtp"
-        return name
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="softmax",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.num_channels,
-                0,  # trace_size
-                self.cols,
-                self.rtp_vector_size,
-                self.mask_patch_value,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "softmax",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.size,
+                    self.num_aie_columns,
+                    self.num_channels,
+                    0,  # trace_size
+                    self.cols,
+                    self.rtp_vector_size,
+                    self.mask_patch_value,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):

@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.elementwise_add.op import AIEElementwiseAdd
+from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.elementwise_add.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -46,7 +46,7 @@ def get_params():
 def test_elementwise_add(input_length, num_aie_columns, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEElementwiseAdd(
+    operator = ElementwiseAdd(
         size=input_length,
         num_aie_columns=num_aie_columns,
         tile_size=tile_size,

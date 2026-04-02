@@ -7,7 +7,7 @@ import pytest
 
 from ml_dtypes import bfloat16
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
-from iron.operators.swiglu_prefill.op import AIESwiGLUPrefill
+from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 
 # swiglu_prefill shares the same reference implementation as swiglu_decode:
 # both compute W3 @ (SiLU(W1 @ x) * (W2 @ x)), differing only in that prefill
@@ -33,7 +33,7 @@ def get_params():
 def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
-    operator = AIESwiGLUPrefill(
+    operator = SwiGLUPrefill(
         seq_len=seq_len,
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,

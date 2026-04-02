@@ -7,8 +7,8 @@ import pyxrt
 import ctypes
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
-from .device_manager import AIEDeviceManager
 from .utils import XRTSubBuffer
+import aie.utils as aie_utils
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 # Fused Operator
@@ -33,9 +33,6 @@ class FusedMLIROperator(AIEOperatorBase):
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
         super().__init__(*args, **kwargs)
-
-    def get_operator_name(self):
-        return self.name
 
     def get_kernel_artifacts(self):
         """Collect all kernel artifacts from child operators."""
@@ -66,7 +63,7 @@ class FusedMLIROperator(AIEOperatorBase):
         for idx, op in enumerate(unique_operators):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
-                mlir_artifact.callback_kwargs["func_prefix"] = f"op{idx}_"
+                mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             op_names[op] = op_name
             operator_mlir_map[op_name] = mlir_artifact
@@ -79,7 +76,7 @@ class FusedMLIROperator(AIEOperatorBase):
             self._calculate_buffer_layout()
         )
 
-        filename = self.get_operator_name() + "_fused.mlir"
+        filename = self.name + "_fused.mlir"
         fused_artifact = comp.FusedMLIRSource(
             filename,
             operator_mlir_map=operator_mlir_map,
@@ -191,7 +188,7 @@ class FusedMLIROperator(AIEOperatorBase):
         return subbuffer_layout, buffer_sizes, slice_info
 
     def set_up_artifacts(self):
-        operator_name = self.get_operator_name()
+        operator_name = self.name
         mlir_artifact = self.get_mlir_artifact()
         kernel_objects = self.get_kernel_artifacts()
         full_elf_artifact = comp.FullElfArtifact(
@@ -202,7 +199,10 @@ class FusedMLIROperator(AIEOperatorBase):
         self.add_artifacts([full_elf_artifact])
 
     def get_arg_spec(self):
-        pass
+        raise NotImplementedError(
+            "FusedMLIROperator does not expose a unified arg spec; "
+            "use get_layout_for_buffer() to inspect individual buffer layouts"
+        )
 
     def get_callable(self):
         return FusedFullELFCallable(self)
@@ -240,11 +240,9 @@ class FullELFCallable:
         elf_data,
         device_name="main",
         sequence_name="sequence",
-        device_manager=None,
     ):
         self.device_name = device_name
         self.sequence_name = sequence_name
-        self.device_manager = device_manager or AIEDeviceManager()
         self.reload_elf(elf_data)
 
     def __call__(self, *args):
@@ -268,17 +266,17 @@ class FullELFCallable:
         ]
         capsule = ctypes.pythonapi.PyCapsule_New(elf_data_u8.ctypes.data, None, None)
         xrt_elf = pyxrt.elf(capsule, elf_data.nbytes)
-        xrt_context = pyxrt.hw_context(self.device_manager.device, xrt_elf)
+        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
 
 
 class FusedFullELFCallable(FullELFCallable):
-    def __init__(self, op, elf_data=None, device_manager=None):
+    def __init__(self, op, elf_data=None):
         if elf_data is None:
             elf_data = load_elf(op)
-        super().__init__(elf_data, device_manager=device_manager)
+        super().__init__(elf_data)
 
         self.op = op
         input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes

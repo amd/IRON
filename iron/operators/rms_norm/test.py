@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.rms_norm.op import AIERMSNorm
+from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -18,21 +18,19 @@ def get_params():
     for weighted in [False, True]:
         for input_length in input_lengths:
             for num_aie_columns in range(1, max_aie_columns + 1):
-                # Weighted RMS Norm only supports num_channels=1; multi-channel
-                # weight routing is not yet implemented in design_weighted.py.
-                num_channels_options = range(1, 3) if not weighted else [1]
+                num_channels_options = range(1, 3)
                 for num_channels_rms in num_channels_options:  # 1 or 2
+                    total_cores = num_aie_columns * num_channels_rms
                     if not weighted:
-                        total_cores = num_aie_columns * num_channels_rms
                         tile_size = input_length // total_cores
                         if tile_size > 8192:
                             tile_size = 8192
                         check_length = tile_size * total_cores
                     else:
-                        tile_size = input_length // num_aie_columns
+                        tile_size = input_length // total_cores
                         if tile_size > 4096:
                             tile_size = 4096
-                        check_length = tile_size * num_aie_columns
+                        check_length = tile_size * total_cores
                     if check_length == input_length:
                         is_regular = input_length == 2048
                         marks = [] if is_regular else [pytest.mark.extensive]
@@ -66,7 +64,7 @@ def test_rms_norm(
     cols = tile_size
     golden_ref = generate_golden_reference(rows=rows, cols=cols, weighted=weighted)
 
-    operator = AIERMSNorm(
+    operator = RMSNorm(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

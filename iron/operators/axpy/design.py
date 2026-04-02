@@ -14,7 +14,6 @@ def my_axpy(
     dev,
     num_elements,
     num_columns,
-    num_channels,  # TODO: num_channels is currently unused in this design
     tile_size,
     trace_size,
     scalar_factor,

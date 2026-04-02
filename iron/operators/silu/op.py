@@ -1,49 +1,61 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
+import aie.utils as aie_utils
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
 
 
-class AIESiLU(MLIROperator):
+@dataclass
+class SiLU(MLIROperator):
     """AIE-accelerated SiLU activation function"""
 
-    def __init__(self, size, tile_size, num_aie_columns=8, context=None):
-        if size % (num_aie_columns * tile_size) != 0:
+    size: int
+    tile_size: int
+    num_aie_columns: int = 8
+    context: object = field(default=None, repr=False)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_aie_columns": "col",
+    }
+
+    def __post_init__(self):
+        if self.size % (self.num_aie_columns * self.tile_size) != 0:
             raise ValueError(
-                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({num_aie_columns * tile_size})"
+                f"size ({self.size}) must be a multiple of num_aie_columns * tile_size "
+                f"({self.num_aie_columns * self.tile_size})"
             )
-        self.size = size
-        self.tile_size = tile_size
-        self.num_aie_columns = num_aie_columns
-        # Enforce ShimDMA limits for SiLU (uses 1 input per core)
-        # Maximum safe configuration: 8 columns × 1 channel = 8 ShimDMA channels
         if self.num_aie_columns > 8:
             raise ValueError(
-                f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit: a unary operator uses 2 DMA channels per column, max 8 columns (16 channels total)"
+                f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit: "
+                f"a unary operator uses 2 DMA channels per column, max 8 columns (16 channels total)"
             )
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"silu_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_silu",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.tile_size,
-                0,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_silu",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.size,
+                    self.num_aie_columns,
+                    self.tile_size,
+                    0,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
@@ -60,6 +72,6 @@ class AIESiLU(MLIROperator):
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec("in", (self.size,)),  # input
-            AIERuntimeArgSpec("out", (self.size,)),  # output
+            AIERuntimeArgSpec("in", (self.size,)),
+            AIERuntimeArgSpec("out", (self.size,)),
         ]

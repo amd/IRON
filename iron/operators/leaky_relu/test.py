@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.leaky_relu.op import AIELeakyReLU
+from iron.operators.leaky_relu.op import LeakyReLU
 from iron.operators.leaky_relu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -53,7 +53,7 @@ def test_leaky_relu(
 ):
     golden_ref = generate_golden_reference(input_length=input_length, alpha=alpha)
 
-    operator = AIELeakyReLU(
+    operator = LeakyReLU(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

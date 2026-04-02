@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.layer_norm.op import AIELayerNorm
+from iron.operators.layer_norm.op import LayerNorm
 from iron.operators.layer_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -53,7 +53,7 @@ def test_layer_norm(
     cols = tile_size
     golden_ref = generate_golden_reference(rows=rows, cols=cols)
 
-    operator = AIELayerNorm(
+    operator = LayerNorm(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

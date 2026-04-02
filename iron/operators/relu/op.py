@@ -1,70 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    KernelObjectArtifact,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-)
+from dataclasses import dataclass
+from typing import ClassVar
+
+from iron.common import ChanneledUnaryOperator
 
 
-class AIEReLU(MLIROperator):
+@dataclass
+class ReLU(ChanneledUnaryOperator):
     """AIE-accelerated ReLU activation function"""
 
-    def __init__(self, size, num_aie_columns, num_channels, tile_size, context=None):
-        max_multiple = num_aie_columns * tile_size
-        if size % max_multiple != 0:
-            raise ValueError(
-                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
-            )
-
-        self.size = size
-        self.tile_size = tile_size
-        self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
-
-        total_shimdma_channels = self.num_aie_columns * self.num_channels
-        if total_shimdma_channels > 16:
-            raise ValueError(
-                f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
-            )
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"relu_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_relu",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.num_channels,
-                self.tile_size,
-                0,
-            ],
-        )
-
-    def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                "relu.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "relu.cc"
-                    )
-                ],
-            ),
-        ]
-
-    def get_arg_spec(self):
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),  # input
-            AIERuntimeArgSpec("out", (self.size,)),  # output
-        ]
+    kernel_name: ClassVar[str] = "relu"
+    kernel_subdir: ClassVar[str] = "aie2p"
+    callback_fn: ClassVar[str] = "my_relu"

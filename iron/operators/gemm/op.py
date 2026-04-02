@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
 import numpy as np
 
 from iron.common import (
@@ -9,69 +12,66 @@ from iron.common import (
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIEGEMM(MLIROperator):
+@dataclass
+class GEMM(MLIROperator):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
 
-    def __init__(
-        self,
-        M,
-        K,
-        N,
-        tile_m=64,
-        tile_k=64,
-        tile_n=64,
-        # TODO: Add support for partitioning M and/or K
-        # partition_M=1,
-        # partition_K=1,
-        num_aie_columns=8,
-        context=None,
-        **gemm_kwargs,
-    ):
-        num_aie_rows = 4
-        min_M = tile_m * num_aie_rows
-        min_K = tile_k
-        min_N = tile_n * num_aie_columns
-        if M % min_M != 0:
-            raise ValueError(f"M ({M}) must be a multiple of {min_M}")
-        if K % min_K != 0:
-            raise ValueError(f"K ({K}) must be a multiple of {min_K}")
-        if N % min_N != 0:
-            raise ValueError(f"N ({N}) must be a multiple of {min_N}")
-        self.M = M
-        self.K = K
-        self.N = N
-        self.tile_m = tile_m
-        self.tile_k = tile_k
-        self.tile_n = tile_n
+    M: int
+    K: int
+    N: int
+    tile_m: int = 64
+    tile_k: int = 64
+    tile_n: int = 64
+    b_col_maj: bool = False
+    c_col_maj: bool = False
+    num_aie_columns: int = field(default=8, repr=False)
+    emulate_bf16_mmul_with_bfp16: bool = field(default=True, repr=False)
+    prio_accuracy: bool = field(default=False, repr=False)
+    round_conv_even: bool = field(default=True, repr=False)
+    dtype_in: str = field(default="bf16", repr=False)
+    dtype_out: str = field(default="bf16", repr=False)
+    use_scalar: bool = field(default=False, repr=False)
+    separate_c_tiles: bool = field(default=False, repr=False)
+    context: object = field(default=None, repr=False)
 
-        self.num_aie_columns = num_aie_columns
-        self.gemm_args = gemm_kwargs
-        self.b_col_maj = gemm_kwargs.get("b_col_maj", False)
-        self.c_col_maj = gemm_kwargs.get("c_col_maj", False)
-        self.emulate_bf16_mmul_with_bfp16 = gemm_kwargs.get(
-            "emulate_bf16_mmul_with_bfp16", True
-        )
-        self.prio_accuracy = gemm_kwargs.get("prio_accuracy", False)
-        self.round_conv_even = gemm_kwargs.get("round_conv_even", True)
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "tile_m": "tm",
+        "tile_k": "tk",
+        "tile_n": "tn",
+        "b_col_maj": "bc",
+        "c_col_maj": "cc",
+    }
+
+    def __post_init__(self):
+        num_aie_rows = 4
+        min_M = self.tile_m * num_aie_rows
+        min_K = self.tile_k
+        min_N = self.tile_n * self.num_aie_columns
+        if self.M % min_M != 0:
+            raise ValueError(f"M ({self.M}) must be a multiple of {min_M}")
+        if self.K % min_K != 0:
+            raise ValueError(f"K ({self.K}) must be a multiple of {min_K}")
+        if self.N % min_N != 0:
+            raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
         if self.emulate_bf16_mmul_with_bfp16:
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
         else:
             min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        if tile_m < min_tile_m:
-            raise ValueError(f"tile_m ({tile_m}) must be >= {min_tile_m}")
-        if tile_k < min_tile_k:
-            raise ValueError(f"tile_k ({tile_k}) must be >= {min_tile_k}")
-        if tile_n < min_tile_n:
-            raise ValueError(f"tile_n ({tile_n}) must be >= {min_tile_n}")
+        if self.tile_m < min_tile_m:
+            raise ValueError(f"tile_m ({self.tile_m}) must be >= {min_tile_m}")
+        if self.tile_k < min_tile_k:
+            raise ValueError(f"tile_k ({self.tile_k}) must be >= {min_tile_k}")
+        if self.tile_n < min_tile_n:
+            raise ValueError(f"tile_n ({self.tile_n}) must be >= {min_tile_n}")
 
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"gemm_{self.M}x{self.K}x{self.N}_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
+        MLIROperator.__init__(self, context=self.context)
 
     @property
     def _kernel_flags_suffix(self):
@@ -79,37 +79,34 @@ class AIEGEMM(MLIROperator):
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
     def get_mlir_artifact(self):
-        operator_name = self.get_operator_name()
-        dtype_in = self.gemm_args.get("dtype_in", "bf16")
-        dtype_out = self.gemm_args.get("dtype_out", "bf16")
-        use_scalar = self.gemm_args.get("use_scalar", False)
-        separate_c_tiles = self.gemm_args.get("separate_c_tiles", False)
         return PythonGeneratedMLIRArtifact(
-            f"{operator_name}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_matmul",
-            callback_kwargs={
-                "dev": self.context.device_manager.device_type,
-                "M": self.M,
-                "K": self.K,
-                "N": self.N,
-                "m": self.tile_m,
-                "k": self.tile_k,
-                "n": self.tile_n,
-                "n_aie_cols": self.num_aie_columns,
-                "dtype_in_str": dtype_in,
-                "dtype_out_str": dtype_out,
-                "b_col_maj": int(self.b_col_maj),
-                "c_col_maj": int(self.c_col_maj),
-                "use_scalar": use_scalar,
-                "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
-                "prio_accuracy": self.prio_accuracy,
-                "separate_c_tiles": int(separate_c_tiles),
-                "trace_size": 0,
-                "generate_taps": False,
-                "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
-            },
-            requires_context=False,
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_matmul",
+                (),
+                {
+                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "M": self.M,
+                    "K": self.K,
+                    "N": self.N,
+                    "m": self.tile_m,
+                    "k": self.tile_k,
+                    "n": self.tile_n,
+                    "n_aie_cols": self.num_aie_columns,
+                    "dtype_in_str": self.dtype_in,
+                    "dtype_out_str": self.dtype_out,
+                    "b_col_maj": int(self.b_col_maj),
+                    "c_col_maj": int(self.c_col_maj),
+                    "use_scalar": self.use_scalar,
+                    "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
+                    "prio_accuracy": self.prio_accuracy,
+                    "separate_c_tiles": int(self.separate_c_tiles),
+                    "trace_size": 0,
+                    "generate_taps": False,
+                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                },
+            ),
         )
 
     def get_kernel_artifacts(self):

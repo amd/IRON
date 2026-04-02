@@ -15,8 +15,8 @@ def my_layer_norm(
     num_elements,
     num_columns,
     num_channels,
-    trace_size,
     tile_size,
+    trace_size,
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
     total_cores = num_columns * num_channels

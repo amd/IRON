@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from iron.operators.transpose.op import AIETranspose
+from iron.operators.transpose.op import Transpose
 from iron.operators.transpose.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -60,7 +60,7 @@ def get_params():
 def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     golden_ref = generate_golden_reference(rows=M, cols=N)
 
-    operator = AIETranspose(
+    operator = Transpose(
         M=M,
         N=N,
         num_aie_columns=aie_columns,

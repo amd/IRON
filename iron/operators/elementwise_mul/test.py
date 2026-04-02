@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.elementwise_mul.op import AIEElementwiseMul
+from iron.operators.elementwise_mul.op import ElementwiseMul
 from iron.operators.elementwise_mul.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -47,7 +47,7 @@ def get_params():
 def test_elementwise_mul(input_length, num_aie_columns, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEElementwiseMul(
+    operator = ElementwiseMul(
         size=input_length,
         tile_size=tile_size,
         num_aie_columns=num_aie_columns,

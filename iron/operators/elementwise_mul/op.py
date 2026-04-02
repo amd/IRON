@@ -1,73 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    KernelObjectArtifact,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-)
+from dataclasses import dataclass
+from typing import ClassVar
+
+from iron.common import BinaryElementwiseOperator
 
 
-class AIEElementwiseMul(MLIROperator):
+@dataclass
+class ElementwiseMul(BinaryElementwiseOperator):
     """AIE-accelerated element-wise multiplication"""
 
-    def __init__(
-        self,
-        size,
-        tile_size,
-        num_aie_columns=8,
-        context=None,
-    ):
-        if size % (num_aie_columns * tile_size) != 0:
-            raise ValueError(
-                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({num_aie_columns * tile_size})"
-            )
-        self.size = size
-        self.tile_size = tile_size
-        self.num_aie_columns = num_aie_columns
-        # Enforce ShimDMA limits for elementwise_mul (uses 2 inputs per core)
-        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
-        total_shimdma_channels = self.num_aie_columns * 2
-        if total_shimdma_channels > 16:
-            raise ValueError(
-                f"num_aie_columns ({num_aie_columns}) exceeds conservative ShimDMA limit"
-            )
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"eltwise_mul_{self.num_aie_columns}col_{self.size}_{self.tile_size}t"
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_eltwise_mul",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.tile_size,
-                0,
-            ],
-        )
-
-    def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                "mul.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "mul.cc"
-                    )
-                ],
-            ),
-        ]
-
-    def get_arg_spec(self):
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),  # input1
-            AIERuntimeArgSpec("in", (self.size,)),  # input2
-            AIERuntimeArgSpec("out", (self.size,)),  # output
-        ]
+    kernel_name: ClassVar[str] = "mul"
+    kernel_subdir: ClassVar[str] = "generic"
+    callback_fn: ClassVar[str] = "my_eltwise_mul"

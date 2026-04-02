@@ -1,65 +1,74 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIERope(MLIROperator):
+@dataclass
+class Rope(MLIROperator):
+    """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
 
-    def __init__(
-        self,
-        rows: int,
-        cols: int,
-        angle_rows=None,
-        num_aie_columns=1,
-        method_type=0,
-        context=None,
-    ):
-        if angle_rows is None:
-            angle_rows = rows
+    rows: int
+    cols: int
+    angle_rows: int | None = None
+    num_aie_columns: int = 1
+    method_type: int = 0
+    context: object = field(default=None, repr=False)
 
-        if not (cols % (16 * 2) == 0 and cols >= (16 * 2)):
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_aie_columns": "col",
+        "angle_rows": "arows",
+        "method_type": "m",
+    }
+
+    def __post_init__(self):
+        if self.angle_rows is None:
+            self.angle_rows = self.rows
+
+        if not (self.cols % (16 * 2) == 0 and self.cols >= (16 * 2)):
             raise ValueError("cols must be multiple of 32 and >= 32")
-        if rows % num_aie_columns != 0:
+        if self.rows % self.num_aie_columns != 0:
             raise ValueError("rows must be divisible by num_aie_columns")
-        if not (angle_rows <= rows and rows % angle_rows == 0):
+        if not (self.angle_rows <= self.rows and self.rows % self.angle_rows == 0):
             raise ValueError("angle_rows must divide rows")
-        if not (angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0):
+        if not (
+            self.angle_rows >= self.num_aie_columns
+            and self.angle_rows % self.num_aie_columns == 0
+        ):
             raise ValueError("angle_rows must be divisible by num_aie_columns")
+        if self.method_type not in {0, 1}:
+            raise ValueError(f"method_type must be 0 or 1, got {self.method_type}")
 
-        self.rows = rows
-        self.cols = cols
-        self.angle_rows = angle_rows
-        self.num_aie_columns = num_aie_columns
-        self.method_type = method_type
-        if method_type not in {0, 1}:
-            raise ValueError(f"method_type must be 0 or 1, got {method_type}")
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"rope_{self.num_aie_columns}col_{self.rows}rows_{self.cols}cols_{self.angle_rows}arows_{self.method_type}m"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="rope",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.rows,
-                self.cols,
-                self.angle_rows,
-                self.num_aie_columns,
-                0,
-                self.method_type,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "rope",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.rows,
+                    self.cols,
+                    self.angle_rows,
+                    self.num_aie_columns,
+                    0,
+                    self.method_type,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
@@ -79,25 +88,7 @@ class AIERope(MLIROperator):
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec(
-                "in",
-                (
-                    self.rows,
-                    self.cols,
-                ),
-            ),  # input tensor
-            AIERuntimeArgSpec(
-                "in",
-                (
-                    self.angle_rows,
-                    self.cols,
-                ),
-            ),  # angles
-            AIERuntimeArgSpec(
-                "out",
-                (
-                    self.rows,
-                    self.cols,
-                ),
-            ),  # output
+            AIERuntimeArgSpec("in", (self.rows, self.cols)),  # input tensor
+            AIERuntimeArgSpec("in", (self.angle_rows, self.cols)),  # angles
+            AIERuntimeArgSpec("out", (self.rows, self.cols)),  # output
         ]

@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.gelu.op import AIEGELU
+from iron.operators.gelu.op import GELU
 from iron.operators.gelu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -50,7 +50,7 @@ def get_params():
 def test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEGELU(
+    operator = GELU(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

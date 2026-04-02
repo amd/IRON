@@ -1,87 +1,73 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIERMSNorm(MLIROperator):
+@dataclass
+class RMSNorm(MLIROperator):
     """AIE-accelerated RMS Normalization layer"""
 
-    def __init__(
-        self,
-        size,
-        num_aie_columns,
-        num_channels,
-        tile_size,
-        weighted=False,
-        context=None,
-    ):
-        # Note: epsilon is hardcoded to 1e-5 in the AIE kernel (rms_norm.cc) and cannot be changed at runtime.
-        if weighted and num_channels != 1:
+    size: int
+    num_aie_columns: int
+    num_channels: int
+    tile_size: int
+    weighted: bool = False
+    context: object = field(default=None, repr=False)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "weighted": "w",
+    }
+
+    def __post_init__(self):
+        # Note: epsilon is hardcoded to 1e-5 in the AIE kernel and cannot be changed at runtime.
+        max_multiple = self.num_aie_columns * self.num_channels * self.tile_size
+        if self.size % max_multiple != 0:
             raise ValueError(
-                f"Weighted RMS Norm only supports num_channels=1 (got {num_channels})"
+                f"size ({self.size}) must be a multiple of "
+                f"num_aie_columns * num_channels * tile_size ({max_multiple})"
             )
-        max_multiple = num_aie_columns * tile_size
-        if size % max_multiple != 0:
-            raise ValueError(
-                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
-            )
-
-        self.size = size
-        self.tile_size = tile_size
-
-        self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
-        self.weighted = weighted
-
-        # Enforce ShimDMA limits for weighted RMS Norm (uses 2 inputs per core)
-        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         if total_shimdma_channels > 16:
             raise ValueError(
                 f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
             )
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        prefix = "weighted_rms" if self.weighted else "rms_norm"
-        return f"{prefix}_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         if self.weighted:
-            import_path = self.operator_dir / "design_weighted.py"
+            source_path = self.operator_dir / "design_weighted.py"
             callback_fn = "my_weighted_rms_norm"
-            callback_args = [
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.tile_size,
-                0,
-            ]
         else:
-            import_path = self.operator_dir / "design.py"
+            source_path = self.operator_dir / "design.py"
             callback_fn = "my_rms_norm"
-            callback_args = [
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.num_channels,
-                0,  # trace_size
-                self.tile_size,
-            ]
 
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=import_path,
-            callback_fn=callback_fn,
-            callback_args=callback_args,
+            f"{self.name}.mlir",
+            DesignGenerator(
+                source_path,
+                callback_fn,
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.size,
+                    self.num_aie_columns,
+                    self.num_channels,
+                    self.tile_size,
+                    0,  # trace_size
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):

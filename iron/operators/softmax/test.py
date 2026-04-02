@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.softmax.op import AIESoftmax
+from iron.operators.softmax.op import Softmax
 from iron.operators.softmax.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -59,7 +59,7 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
 
     golden_ref = generate_golden_reference(rows=rows, cols=cols)
 
-    operator = AIESoftmax(
+    operator = Softmax(
         rows=rows,
         cols=cols,
         num_aie_columns=num_aie_columns,

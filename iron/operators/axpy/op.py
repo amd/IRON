@@ -1,59 +1,52 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
-from iron.common.utils import float_to_name
+import aie.utils as aie_utils
 
 
-class AIEAXPY(MLIROperator):
+@dataclass
+class AXPY(MLIROperator):
     """AIE-accelerated aX + Y operator"""
 
-    def __init__(
-        self,
-        size,
-        num_aie_columns,
-        num_channels,
-        tile_size,
-        scalar_factor=3.0,
-        context=None,
-    ):
-        max_multiple = num_aie_columns * tile_size
-        if size % max_multiple != 0:
+    size: int
+    num_aie_columns: int
+    tile_size: int
+    scalar_factor: float = 3.0
+    context: object = field(default=None, repr=False)
+
+    def __post_init__(self):
+        max_multiple = self.num_aie_columns * self.tile_size
+        if self.size % max_multiple != 0:
             raise ValueError(
-                f"size ({size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
+                f"size ({self.size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
             )
-
-        self.size = size
-        self.tile_size = tile_size
-        self.num_aie_columns = num_aie_columns
-        self.num_channels = num_channels
-        self.scalar_factor = scalar_factor
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"axpy_{self.num_aie_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t_{float_to_name(self.scalar_factor)}s"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="my_axpy",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_aie_columns,
-                self.num_channels,
-                self.tile_size,
-                0,
-                self.scalar_factor,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_axpy",
+                (
+                    aie_utils.DefaultNPURuntime.device(),
+                    self.size,
+                    self.num_aie_columns,
+                    self.tile_size,
+                    0,
+                    self.scalar_factor,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):

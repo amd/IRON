@@ -3,9 +3,8 @@
 
 import torch
 import numpy as np
-from ml_dtypes import bfloat16
-import pyxrt
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from aie.utils.hostruntime.tensor_class import _array_to_torch
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor, xrt as _pyxrt
 
 
 def float_to_name(v: float) -> str:
@@ -35,20 +34,6 @@ torch_dtype_map = {
     "i32": torch.int32,
 }
 
-# Maps XRTTensor dtype objects/types to their torch equivalents.
-# Both np.dtype(...) objects and bare ml_dtypes types are included because
-# xrttensor.dtype may return either form depending on how the tensor was created.
-_XRT_TO_TORCH_DTYPE: dict = {
-    np.dtype("float32"): torch.float32,
-    np.dtype("int32"): torch.int32,
-    np.dtype("int16"): torch.int16,
-    np.dtype("int8"): torch.int8,
-    np.dtype("uint8"): torch.uint8,
-    np.dtype("float16"): torch.float16,
-    np.dtype(bfloat16): torch.bfloat16,
-    bfloat16: torch.bfloat16,
-}
-
 
 class XRTSubBuffer(XRTTensor):
     """
@@ -72,7 +57,8 @@ class XRTSubBuffer(XRTTensor):
         # Skip XRTTensor.__init__ (which would allocate a new bo); set base attrs directly.
         self.device = "npu"
         self.dtype = np.dtype(dtype)
-        self._bo = pyxrt.bo(parent_bo, size_bytes, offset_bytes)
+        # TODO: replace with XRTTensor.__getitem__ slice support when available upstream
+        self._bo = _pyxrt.bo(parent_bo, size_bytes, offset_bytes)
         self._shape = tuple(shape)
         ptr = self._bo.map()
         self._data = np.frombuffer(ptr, dtype=self.dtype).reshape(self._shape)
@@ -89,23 +75,10 @@ class XRTSubBuffer(XRTTensor):
         """Return the underlying pyxrt.bo (required by NPUKernel)."""
         return self._bo
 
-    def to(self, target_device: str) -> "XRTSubBuffer":
-        """Sync buffer to/from the NPU."""
-        if target_device == "npu":
-            self._bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
-        elif target_device == "cpu":
-            self._bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
-        else:
-            raise ValueError(f"Unknown device '{target_device}'")
-        return self
-
     def to_torch(self) -> torch.Tensor:
         """Return a torch tensor view of this sub-buffer's data (syncs from device first)."""
         self.to("cpu")
-        torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
-        if torch_dtype is None:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
-        return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)
+        return _array_to_torch(self._data)
 
     def torch_view(self) -> torch.Tensor:
         """Return a torch tensor view of this sub-buffer's host memory without syncing from device.
@@ -114,10 +87,7 @@ class XRTSubBuffer(XRTTensor):
         NPU operator's implicit sync) will push the written data to device.
         """
         self.device = "cpu"  # mark dirty so next to("npu") will actually sync
-        torch_dtype = _XRT_TO_TORCH_DTYPE.get(self.dtype)
-        if torch_dtype is None:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
-        return torch.frombuffer(self._bo.map(), dtype=torch_dtype).reshape(self._shape)
+        return _array_to_torch(self._data)
 
     @classmethod
     def from_parent(cls, parent, shape, offset_elements, length_elements, dtype):

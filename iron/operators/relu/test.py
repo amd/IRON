@@ -4,7 +4,7 @@
 
 import pytest
 
-from iron.operators.relu.op import AIEReLU
+from iron.operators.relu.op import ReLU
 from iron.operators.relu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -48,7 +48,7 @@ def get_params():
 def test_relu(input_length, num_aie_columns, num_channels, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEReLU(
+    operator = ReLU(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

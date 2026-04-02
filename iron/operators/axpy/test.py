@@ -4,14 +4,13 @@
 
 import pytest
 
-from iron.operators.axpy.op import AIEAXPY
+from iron.operators.axpy.op import AXPY
 from iron.operators.axpy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
     max_aie_columns = 8
-    num_channels = 2
     input_lengths = [1024, 2048, 4096, 8192]
     scalar_factors = [3.0, 10.0]
 
@@ -30,7 +29,6 @@ def get_params():
                     pytest.param(
                         input_length,
                         num_aie_columns,
-                        num_channels,
                         tile_size,
                         scalar,
                         marks=marks,
@@ -44,20 +42,17 @@ def get_params():
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
+    "input_length,num_aie_columns,tile_size,scalar_factor",
     get_params(),
 )
-def test_axpy(
-    input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context
-):
+def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_context):
     golden_ref = generate_golden_reference(
         input_length=input_length, scalar=scalar_factor
     )
 
-    operator = AIEAXPY(
+    operator = AXPY(
         size=input_length,
         num_aie_columns=num_aie_columns,
-        num_channels=num_channels,
         tile_size=tile_size,
         scalar_factor=scalar_factor,
         context=aie_context,

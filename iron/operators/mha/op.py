@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
+
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
@@ -11,59 +14,61 @@ from iron.common import (
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIEMHA(MLIROperator):
+@dataclass
+class MHA(MLIROperator):
+    """AIE-accelerated Multi-Head Attention operator"""
 
-    def __init__(
-        self,
-        num_heads: int,
-        seq_len: int,
-        d: int,
-        num_KV_heads: int,
-        num_of_pipelines: int = 1,
-        context=None,
-    ):
-        self.num_heads = num_heads
-        self.seq_len = seq_len
-        self.d = d
+    num_heads: int
+    seq_len: int
+    d: int
+    num_KV_heads: int
+    num_of_pipelines: int = field(default=1, repr=False)
+    context: object = field(default=None, repr=False)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_heads": "h",
+        "num_KV_heads": "kv",
+        "seq_len": "s",
+    }
+
+    def __post_init__(self):
         self.B_q = 64
         self.B_kv = 64
-        self.num_KV_heads = num_KV_heads
-        self.num_of_pipelines = num_of_pipelines
-        if d != 64:
-            raise ValueError(f"Only d=64 is supported in this version, got d={d}")
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        kv_heads = self.num_KV_heads if self.num_KV_heads > 0 else self.num_heads
-        return f"mha_{self.num_heads}h_{kv_heads}kv_{self.seq_len}s_{self.d}d"
+        if self.d != 64:
+            raise ValueError(f"Only d=64 is supported in this version, got d={self.d}")
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=self.operator_dir / "design.py",
-            callback_fn="fused_mha",
-            callback_kwargs={
-                "dev": self.context.device_manager.device_type,
-                "heads": self.num_heads,
-                "S_q": self.seq_len,
-                "S_kv": self.seq_len,
-                "d": self.d,
-                "B_q": self.B_q,
-                "B_kv": self.B_kv,
-                "num_KV_heads": self.num_KV_heads,
-                "number_of_pipelines": self.num_of_pipelines,
-                "emulate_bf16_mmul_with_bfp16": True,
-                "trace_size": 0,
-                "verbose": False,
-            },
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "fused_mha",
+                (),
+                {
+                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "heads": self.num_heads,
+                    "S_q": self.seq_len,
+                    "S_kv": self.seq_len,
+                    "d": self.d,
+                    "B_q": self.B_q,
+                    "B_kv": self.B_kv,
+                    "num_KV_heads": self.num_KV_heads,
+                    "number_of_pipelines": self.num_of_pipelines,
+                    "emulate_bf16_mmul_with_bfp16": True,
+                    "trace_size": 0,
+                    "verbose": False,
+                },
+            ),
         )
 
     def get_kernel_artifacts(self):
-        # Define source files
         mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
         softmax_source = str(
             self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
@@ -73,7 +78,6 @@ class AIEMHA(MLIROperator):
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
 
-        # Compile mm.cc (col-major)
         mm_defines_rowmaj = [
             "-Dbf16_bf16_ONLY",
             f"-DDIM_M={self.B_q}",

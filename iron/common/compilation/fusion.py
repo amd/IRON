@@ -13,11 +13,6 @@ from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
 import ml_dtypes
 
-__all__ = [
-    "FusedMLIRSource",
-    "FusePythonGeneratedMLIRCompilationRule",
-]
-
 from . import (
     CompilationArtifact,
     CompilationRule,
@@ -71,22 +66,19 @@ def extract_runtime_sequence_arg_types(dev_op):
 
 
 def get_child_mlir_module(mlir_artifact):
-    """Extract MLIR module from a PythonGeneratedMLIRArtifact."""
+    """Extract MLIR module from a PythonGeneratedMLIRArtifact.
+
+    Uses the artifact's DesignGenerator to dynamically import the design
+    module and call the callback, returning the raw (non-stringified) MLIR
+    module object for further inspection by the fusion pass.
+    """
     assert isinstance(mlir_artifact, PythonGeneratedMLIRArtifact)
-    spec = importlib.util.spec_from_file_location(
-        Path(mlir_artifact.import_path).name, mlir_artifact.import_path
-    )
+    gen = mlir_artifact.generator
+    spec = importlib.util.spec_from_file_location(gen.source_path.name, gen.source_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-
-    if mlir_artifact.requires_context:
-        raise NotImplementedError("Not handled, make your operator return a ctx.module")
-
-    callback_function = getattr(module, mlir_artifact.callback_fn)
-    mlir_module = callback_function(
-        *mlir_artifact.callback_args, **mlir_artifact.callback_kwargs
-    )
-    return mlir_module
+    callback_function = getattr(module, gen.fn_name)
+    return callback_function(*gen.args, **gen.kwargs)
 
 
 def fuse_mlir(artifact):

@@ -69,7 +69,7 @@ def strided_copy(
     # input_offset_patch_marker (and output_offset_patch_marker) is a deferred-offset mechanism:
     # When non-zero, it is used as a placeholder offset value in the TensorAccessPattern instead
     # of the statically-computed input_offset. The actual offset is then patched at runtime by the
-    # caller (e.g., AIEStridedCopy.forward()) by writing the real byte offset into the instruction
+    # caller (e.g., StridedCopy.forward()) by writing the real byte offset into the instruction
     # stream. This allows the same compiled xclbin/insts to be reused with different runtime offsets
     # into a shared buffer, without recompilation. The tensor_dims is also expanded by the marker
     # value to prevent the compiler from flagging out-of-bounds accesses during code generation.
