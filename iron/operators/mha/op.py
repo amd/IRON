@@ -21,7 +21,6 @@ from iron.common.utils import torch_to_numpy, numpy_to_torch
 
 
 class AIEMHA(MLIROperator):
-
     def __init__(
         self,
         num_heads: int,

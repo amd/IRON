@@ -18,6 +18,7 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16
+from iron.common.device_utils import get_device_name
 
 
 def softmax(
@@ -64,22 +65,40 @@ def softmax(
     softmax_kernel = Kernel(
         f"{func_prefix}softmax_bf16", kernel_archive, [tile_ty, tile_ty, np.int32]
     )
-    mask_kernel = Kernel(
-        f"{func_prefix}mask_bf16", kernel_archive, [tile_ty, np.int32, np.int32]
-    )
+    use_masking = get_device_name(dev) == "npu2"
+    if not use_masking and mask_patch_value:
+        raise ValueError(
+            "Masking (mask_patch_value) is not supported on AIE2 (npu1) devices"
+        )
+    if use_masking:
+        mask_kernel = Kernel(
+            f"{func_prefix}mask_bf16", kernel_archive, [tile_ty, np.int32, np.int32]
+        )
 
     # Define a task that will run on a compute tile
-    def core_body(of_in1, of_out, softmax_kernel, mask_kernel, rtp, barrier):
-        # Number of sub-vector "tile" iterations
-        barrier.wait_for_value(1)
-        vector_size = rtp[0]
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out.acquire(1)
-            mask_kernel(elem_in1, vector_size, per_tile_elements)
-            softmax_kernel(elem_in1, elem_out, per_tile_elements)
-            of_in1.release(1)
-            of_out.release(1)
+    if use_masking:
+
+        def core_body(of_in1, of_out, softmax_kernel, mask_kernel, rtp, barrier):
+            barrier.wait_for_value(1)
+            vector_size = rtp[0]
+            for _ in range_(N_div_n):
+                elem_in1 = of_in1.acquire(1)
+                elem_out = of_out.acquire(1)
+                mask_kernel(elem_in1, vector_size, per_tile_elements)
+                softmax_kernel(elem_in1, elem_out, per_tile_elements)
+                of_in1.release(1)
+                of_out.release(1)
+
+    else:
+
+        def core_body(of_in1, of_out, softmax_kernel, rtp, barrier):
+            barrier.wait_for_value(1)
+            for _ in range_(N_div_n):
+                elem_in1 = of_in1.acquire(1)
+                elem_out = of_out.acquire(1)
+                softmax_kernel(elem_in1, elem_out, per_tile_elements)
+                of_in1.release(1)
+                of_out.release(1)
 
     rtps = [
         Buffer(
@@ -98,18 +117,25 @@ def softmax(
     ]
 
     # Create a worker to run the task on a compute tile
+    if use_masking:
+        worker_args = lambda i, j: [
+            of_in1s[i * num_channels + j].cons(),
+            of_outs[i * num_channels + j].prod(),
+            softmax_kernel,
+            mask_kernel,
+            rtps[i * num_channels + j],
+            barriers[i * num_channels + j],
+        ]
+    else:
+        worker_args = lambda i, j: [
+            of_in1s[i * num_channels + j].cons(),
+            of_outs[i * num_channels + j].prod(),
+            softmax_kernel,
+            rtps[i * num_channels + j],
+            barriers[i * num_channels + j],
+        ]
     my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                softmax_kernel,
-                mask_kernel,
-                rtps[i * num_channels + j],
-                barriers[i * num_channels + j],
-            ],
-        )
+        Worker(core_body, worker_args(i, j))
         for i in range(num_aie_columns)
         for j in range(num_channels)
     ]

@@ -105,7 +105,6 @@ class SwiGLUPrefillCallable:
 
 
 class AIESwiGLUPrefill(CompositeOperator):
-
     def __init__(
         self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None
     ):

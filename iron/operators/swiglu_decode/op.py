@@ -109,7 +109,6 @@ class SwiGLUDecodeCallable:
 
 
 class AIESwiGLUDecode(CompositeOperator):
-
     def __init__(self, embedding_dim, hidden_dim, prio_accuracy=False, context=None):
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim

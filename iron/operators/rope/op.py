@@ -15,7 +15,6 @@ from iron.common import (
 
 
 class AIERope(MLIROperator):
-
     def __init__(
         self,
         rows: int,

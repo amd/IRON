@@ -162,9 +162,11 @@ def fuse_mlir(artifact):
                             if buf_name in artifact.slice_info:
                                 base_name, start, end = artifact.slice_info[buf_name]
                                 # Get parent buffer info
-                                buf_type, parent_offset, parent_length = (
-                                    artifact.subbuffer_layout[base_name]
-                                )
+                                (
+                                    buf_type,
+                                    parent_offset,
+                                    parent_length,
+                                ) = artifact.subbuffer_layout[base_name]
                                 # Calculate actual offset and length for slice
                                 offset = parent_offset + start
                                 length = end - start

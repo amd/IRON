@@ -19,7 +19,6 @@ from iron.common import (
 
 
 class AIEMemCopy(MLIROperator):
-
     def __init__(self, size, num_cores, num_channels, bypass, tile_size, context=None):
         self.size = size
         self.num_cores = num_cores

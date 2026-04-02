@@ -69,7 +69,6 @@ class AIEDecodeOperations:
 
 
 class AIELlamaOperators:
-
     def __init__(self, config, prompt_len):
         self.context = AIEContext()
         self.context.build_dir.mkdir(parents=True, exist_ok=True)
@@ -1190,15 +1189,16 @@ def llama_forward_pass_prefill(config, state):
 
     # Step 3: Transformer blocks
     for layer_idx in range(config.n_layers):
-        state.attn_keys_caches[layer_idx], state.attn_values_caches[layer_idx] = (
-            transformer_block_forward_prefill(
-                config,
-                seq_len,
-                layer_idx,
-                state.attn_keys_caches[layer_idx],
-                state.attn_values_caches[layer_idx],
-                attn_mask=attn_mask,
-            )
+        (
+            state.attn_keys_caches[layer_idx],
+            state.attn_values_caches[layer_idx],
+        ) = transformer_block_forward_prefill(
+            config,
+            seq_len,
+            layer_idx,
+            state.attn_keys_caches[layer_idx],
+            state.attn_values_caches[layer_idx],
+            attn_mask=attn_mask,
         )
 
     # Step 4: Final normalization

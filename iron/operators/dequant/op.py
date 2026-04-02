@@ -18,7 +18,6 @@ from iron.common import (
 
 
 class AIEDequant(MLIROperator):
-
     def __init__(
         self,
         size,
