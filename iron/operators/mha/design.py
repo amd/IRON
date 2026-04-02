@@ -18,45 +18,11 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1Col1, NPU1, NPU2, Tile
+from aie.iron.device import Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
-
-
-def get_device_name(dev):
-    """Get device name string for looking up microkernel dimensions.
-
-    Returns "npu1" for Phoenix/NPU1 devices, "npu2" for Strix/NPU2 devices.
-    """
-    if isinstance(dev, str):
-        if dev in ("npu", "npu1"):
-            return "npu1"
-        else:
-            return "npu2"
-    elif hasattr(dev, "resolve"):
-        # Device object from device_manager.device_type
-        return dev.resolve().name
-    else:
-        # Assume it's a device type object - check class name
-        name = type(dev).__name__
-        if "NPU1" in name:
-            return "npu1"
-        else:
-            return "npu2"
-
-
-def get_device_type(dev):
-    """Resolve device type to appropriate NPU device instance.
-
-    For MHA, we use NPU1Col1 for NPU1 devices.
-    """
-    dev_name = get_device_name(dev)
-    if dev_name == "npu1":
-        return NPU1Col1()
-    else:
-        return NPU2()
-
+from iron.common.device_utils import get_device_name, get_device_type
 
 dtype_map = {
     "bf16": bfloat16,
@@ -916,7 +882,7 @@ def fused_mha(
                 rt.finish_task_group(tg)
 
     # Create the program from the device type and runtime
-    dev_ty = get_device_type(dev)
+    dev_ty = get_device_type(dev, 1)
     my_program = Program(dev_ty, rt)
 
     # Place components (assign them resources on the device) and generate an MLIR module

@@ -6,6 +6,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 from pathlib import Path
 
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -57,19 +58,15 @@ class AIEReLU(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        kernel_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
+            "kernel_dir"
+        ]
         return [
             KernelObjectArtifact(
                 f"relu.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / (
-                            "aie2p"
-                            if self.context.device_manager.device_str() == "npu2"
-                            else "aie2"
-                        )
-                        / "relu.cc"
+                        self.context.base_dir / "aie_kernels" / kernel_dir / "relu.cc"
                     )
                 ],
             ),
