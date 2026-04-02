@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCOPE="repo"
 
-RUNNER_VERSION="2.329.0"               # check for latest: https://github.com/actions/runner/releases
+RUNNER_VERSION="2.333.1"               # check for latest: https://github.com/actions/runner/releases
 RUNNER_NAME="docker-runner-$(cat /etc/hostname)"
 RUNNER_DIR="/workspace/runner"
 
@@ -23,6 +23,7 @@ install_runner() {
 
 configure_runner() {
     local token="$1"
+    local labels="${RUNNER_LABELS:-docker}"
     cd "${RUNNER_DIR}"
     ./config.sh \
       --url "https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}" \
@@ -31,7 +32,7 @@ configure_runner() {
       --work _work \
       --unattended \
       --ephemeral \
-      --labels docker
+      --labels "${labels}"
 }
 
 install_runner

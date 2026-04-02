@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   Test:
-    runs-on: [self-hosted, docker]
+    runs-on: [self-hosted, strix]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
         uses: ./.github/actions/commit_results
         id: commit_results
         with:
-          dir: examples
+          dir: strix/examples
           pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
 
       - name: Upload test results

@@ -3,7 +3,28 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-set -x 
+set -x
+
+ARCH="${1}"
+
+# Auto-detect architecture if not specified
+if [ -z "${ARCH}" ]; then
+    source /opt/xilinx/xrt/setup.sh
+    XRT_OUTPUT=$(xrt-smi examine 2>/dev/null)
+    if echo "${XRT_OUTPUT}" | grep -qi "phoenix"; then
+        ARCH="phoenix"
+    elif echo "${XRT_OUTPUT}" | grep -qi "strix"; then
+        ARCH="strix"
+    else
+        echo "ERROR: Could not auto-detect architecture from xrt-smi examine output:"
+        echo "${XRT_OUTPUT}"
+        exit 1
+    fi
+    echo "Auto-detected architecture: ${ARCH}"
+fi
+
+# Ensure lowercase
+ARCH=$(echo "${ARCH}" | tr '[:upper:]' '[:lower:]')
 
 IMAGE_NAME="iron-public-dev-github-runner"
 GITHUB_OWNER="amd"
@@ -36,7 +57,7 @@ get_registration_token() {
 
 while true; do
     DATE=$(printf '%(%Y_%m_%d_%H_%M_%S)T')
-    NAME="ci-run-${DATE}"
+    NAME="ci-run-${ARCH}-${DATE}"
     if ! TOKEN="$(get_registration_token)"; then
         echo "Failed to get runner registration token" >&2
         exit 1
@@ -54,6 +75,7 @@ while true; do
         -e GITHUB_RUNNER_TOKEN="${TOKEN}" \
         -e GITHUB_OWNER="${GITHUB_OWNER}" \
         -e GITHUB_REPO="${GITHUB_REPO}" \
+        -e RUNNER_LABELS="${ARCH}" \
         ${IMAGE_NAME}
     echo "Container ${NAME} exited. Restarting in 2 seconds..."
     sleep 2

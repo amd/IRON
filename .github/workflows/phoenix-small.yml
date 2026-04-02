@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Small Benchmark/Test Suite
+name: Phoenix - Small Benchmark/Test Suite
 
 on:
-  pull_request: 
+  pull_request:
   workflow_dispatch:
   push:
      branches:
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   Test:
-    runs-on: [self-hosted, docker]
+    runs-on: [self-hosted, phoenix]
     steps:
       - name: Pull
         uses: actions/checkout@v4
@@ -46,16 +46,15 @@ jobs:
           HOME: /workspace
         uses: ./.github/actions/commit_results
         with:
-          dir: small
+          dir: phoenix/small
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: results-small
+          name: results-phoenix-small
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 7
 
       - name: Mark workflow as failed if tests failed
         if: steps.test.outcome == 'failure'
         run: exit 1
-        

@@ -11,7 +11,7 @@ name: Comment on PR with Test Results
 
 on:
   workflow_run:
-    workflows: [Small Benchmark/Test Suite, Test Example Applications]
+    workflows: [Strix - Small Benchmark/Test Suite, Strix - Test Example Applications, Phoenix - Small Benchmark/Test Suite, Phoenix - Test Example Applications]
     types:
       - completed
 
@@ -75,22 +75,24 @@ jobs:
               trendsContent = 'Trends not available.';
             }
             
+            const workflowName = context.payload.workflow_run.name;
+            const arch = workflowName.startsWith('Phoenix') ? 'Phoenix (aie2/npu1)' : 'Strix (aie2p/npu2)';
             const body = `<details>
-                  <summary>📊 Test Results for ${context.payload.workflow_run.name}</summary>
+                  <summary>📊 Test Results for ${workflowName} [${arch}]</summary>
 
             [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
-            
+
             ${prettyContent}
-            
+
             </details>
-            
+
             <details>
-            <summary>📈 Trends (vs main branch) for  ${context.payload.workflow_run.name}</summary>
+            <summary>📈 Trends (vs main branch) for ${workflowName} [${arch}]</summary>
 
             [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
 
             ${trendsContent}
-            
+
             </details>`;
             
             github.rest.issues.createComment({
