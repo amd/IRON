@@ -7,6 +7,15 @@ from aie.utils.hostruntime.tensor_class import _array_to_torch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor, xrt as _pyxrt
 
 
+def get_shim_dma_limit(dev) -> int:
+    """Return the total number of ShimDMA output channels available on the device.
+
+    Each shim tile exposes a fixed number of DMA source connections; summing
+    across all shim tiles gives the device-wide ShimDMA budget.
+    """
+    return sum(dev.get_num_connections(t, output=True) for t in dev.get_shim_tiles())
+
+
 def float_to_name(v: float) -> str:
     """Convert a float to a filesystem-safe string for use in operator names.
 

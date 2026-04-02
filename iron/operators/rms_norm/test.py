@@ -3,15 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import aie.utils as aie_utils
 
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.utils import get_shim_dma_limit
 
 
 def get_params():
-    max_aie_columns = 8
-    num_channels = 2
+    dev = aie_utils.DefaultNPURuntime.device()
+    max_aie_columns = dev.cols
+    shim_dma_limit = get_shim_dma_limit(dev)
     input_lengths = [1024, 2048, 4096, 8192]
 
     params = []
@@ -20,6 +23,16 @@ def get_params():
             for num_aie_columns in range(1, max_aie_columns + 1):
                 num_channels_options = range(1, 3)
                 for num_channels_rms in num_channels_options:  # 1 or 2
+                    # Skip configs that exceed device limits.
+                    if num_aie_columns * num_channels_rms > shim_dma_limit:
+                        continue
+                    # Weighted design uses one weight FIFO per channel shared across
+                    # columns; ShimDMA output budget = num_channels * (num_aie_columns + 1).
+                    if (
+                        weighted
+                        and num_channels_rms * (num_aie_columns + 1) > shim_dma_limit
+                    ):
+                        continue
                     total_cores = num_aie_columns * num_channels_rms
                     if not weighted:
                         tile_size = input_length // total_cores

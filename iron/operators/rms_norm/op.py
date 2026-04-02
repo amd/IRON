@@ -13,6 +13,7 @@ from iron.common import (
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from iron.common.utils import get_shim_dma_limit
 
 
 @dataclass
@@ -33,6 +34,24 @@ class RMSNorm(MLIROperator):
 
     def __post_init__(self):
         # Note: epsilon is hardcoded to 1e-5 in the AIE kernel and cannot be changed at runtime.
+        dev = aie_utils.DefaultNPURuntime.device()
+        shim_dma_limit = get_shim_dma_limit(dev)
+
+        # The weighted design uses one weight ObjectFifo per channel shared across all
+        # columns, so its ShimDMA budget is:
+        #   (num_aie_columns * num_channels) in-fills
+        #   + num_channels weight-fills
+        #   + (num_aie_columns * num_channels) out-drains
+        # The binding constraint is on the output (host→AIE) shim DMA channels:
+        #   num_channels * (num_aie_columns + 1) <= shim_dma_limit
+        if self.weighted:
+            weighted_shim_usage = self.num_channels * (self.num_aie_columns + 1)
+            if weighted_shim_usage > shim_dma_limit:
+                raise ValueError(
+                    f"weighted RMSNorm with num_aie_columns={self.num_aie_columns}, "
+                    f"num_channels={self.num_channels} requires {weighted_shim_usage} ShimDMA "
+                    f"output channels but device only has {shim_dma_limit}"
+                )
         max_multiple = self.num_aie_columns * self.num_channels * self.tile_size
         if self.size % max_multiple != 0:
             raise ValueError(
@@ -40,9 +59,10 @@ class RMSNorm(MLIROperator):
                 f"num_aie_columns * num_channels * tile_size ({max_multiple})"
             )
         total_shimdma_channels = self.num_aie_columns * self.num_channels
-        if total_shimdma_channels > 16:
+        if total_shimdma_channels > shim_dma_limit:
             raise ValueError(
-                f"num_aie_columns * num_channels ({total_shimdma_channels}) exceeds ShimDMA limit of 16"
+                f"num_aie_columns * num_channels ({total_shimdma_channels}) "
+                f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
             )
         MLIROperator.__init__(self, context=self.context)
 

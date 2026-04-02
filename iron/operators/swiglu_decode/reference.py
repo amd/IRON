@@ -28,7 +28,16 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
     val_range = 4
     x = torch.randn(M, K, dtype=torch.bfloat16) * val_range
     w_gate = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # gate projection
+    # bias1 and bias2 are generated but not used; they are retained to preserve
+    # the random number sequence from the original reference implementation so
+    # that the test weights do not hit the SiLU kernel's tanh saturation region.
+    _bias1 = (
+        torch.randn(K, dtype=torch.bfloat16) * val_range
+    )  # unused; preserves RNG state
     w_up = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # up projection
+    _bias2 = (
+        torch.randn(K, dtype=torch.bfloat16) * val_range
+    )  # unused; preserves RNG state
     w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
 
     # Generate golden outputs

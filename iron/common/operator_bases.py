@@ -14,6 +14,7 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from .utils import get_shim_dma_limit
 
 
 @dataclass
@@ -54,11 +55,13 @@ class ChanneledUnaryOperator(MLIROperator):
                 f"size ({self.size}) must be a multiple of "
                 f"num_aie_columns * tile_size ({max_multiple})"
             )
+        dev = aie_utils.DefaultNPURuntime.device()
+        shim_dma_limit = get_shim_dma_limit(dev)
         total_shimdma_channels = self.num_aie_columns * self.num_channels
-        if total_shimdma_channels > 16:
+        if total_shimdma_channels > shim_dma_limit:
             raise ValueError(
                 f"num_aie_columns * num_channels ({total_shimdma_channels}) "
-                f"exceeds conservative ShimDMA limit of 16"
+                f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
             )
         MLIROperator.__init__(self, context=self.context)
 
@@ -145,10 +148,14 @@ class BinaryElementwiseOperator(MLIROperator):
                 f"size ({self.size}) must be a multiple of "
                 f"num_aie_columns * tile_size ({self.num_aie_columns * self.tile_size})"
             )
+        dev = aie_utils.DefaultNPURuntime.device()
+        shim_dma_limit = get_shim_dma_limit(dev)
+        # Binary operators use 2 ShimDMA channels per column (one per input).
         total_shimdma_channels = self.num_aie_columns * 2
-        if total_shimdma_channels > 16:
+        if total_shimdma_channels > shim_dma_limit:
             raise ValueError(
-                f"num_aie_columns ({self.num_aie_columns}) exceeds conservative ShimDMA limit"
+                f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit "
+                f"of {shim_dma_limit // 2} columns for this device"
             )
         MLIROperator.__init__(self, context=self.context)
 
