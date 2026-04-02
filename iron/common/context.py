@@ -32,7 +32,9 @@ class AIEContext:
             comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.PeanoCompilationRule(
-                self.peano_dir, self.mlir_aie_dir, device_type=device_type
+                self.peano_dir,
+                self.mlir_aie_dir,
+                device_type=self.device_manager.device_str(),
             ),
             comp.ArchiveCompilationRule(self.peano_dir),
             comp.AieccXclbinInstsCompilationRule(
