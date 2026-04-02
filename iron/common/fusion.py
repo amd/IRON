@@ -54,7 +54,7 @@ class FusedMLIROperator(AIEOperatorBase):
         operator_mlir_map = {}
         mlir_dependencies = []
         comp_runlist = []
-        op_names = {}  # op -> op_name
+        op_names = {}  # id(op) -> op_name
 
         unique_operators = []
         for op, *_ in self.runlist:
@@ -65,11 +65,11 @@ class FusedMLIROperator(AIEOperatorBase):
             if len(op.get_kernel_artifacts()) > 0:
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
-            op_names[op] = op_name
+            op_names[id(op)] = op_name
             operator_mlir_map[op_name] = mlir_artifact
 
         for op, *bufs in self.runlist:
-            comp_runlist.append((op_names[op], *bufs))
+            comp_runlist.append((op_names[id(op)], *bufs))
 
         # Calculate buffer layout: {buffer_name -> (type, offset, length)}
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
