@@ -8,7 +8,6 @@ import sys
 import os
 import resource
 from pathlib import Path
-import os
 
 test_dir = Path(__file__).parent
 weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))

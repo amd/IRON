@@ -9,7 +9,6 @@ from pathlib import Path
 
 from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.softmax.op import AIESoftmax
-from iron.common.aie_device_manager import AIEDeviceManager
 from iron.operators.softmax.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -35,8 +34,6 @@ def get_optimal_columns_channels(input_length, tile_size, max_columns):
 
 
 def get_params():
-    # Detect device and set max columns accordingly
-    # NPU1 (Phoenix) has 4 columns, NPU2 (Strix) has 8 columns
     device_type = AIEDeviceManager().device_str()
     max_aie_columns = 4 if device_type == "npu1" else 8
     num_channels = 2

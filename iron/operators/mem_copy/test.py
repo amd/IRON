@@ -14,7 +14,6 @@ from iron.common.aie_device_manager import AIEDeviceManager
 
 
 def get_params():
-    # Detect device and set max columns accordingly
     device_type = AIEDeviceManager().device_str()
     max_columns = 4 if device_type == "npu1" else 8
 
