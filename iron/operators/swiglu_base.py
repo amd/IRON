@@ -127,16 +127,10 @@ class _SwiGLUCallable:
         raise NotImplementedError
 
     def __call__(self, input_buf, output_buf):
-        # Ensure all buffers are on device
+        # Sync input in case caller wrote to it via torch_view() between calls.
+        # Weights and internal buffers stay on device; the XRT runtime syncs all
+        # args to device automatically before each kernel invocation.
         input_buf.to("npu")
-        output_buf.to("npu")
-        self.weights_1.to("npu")
-        self.weights_2.to("npu")
-        self.weights_3.to("npu")
-        self.left.to("npu")
-        self.right.to("npu")
-        self.left_swished.to("npu")
-        self.intermediate.to("npu")
 
         # 1. matmul(weights_1, input) -> left
         self._call_matmul(self.matmul_1_callable, self.weights_1, input_buf, self.left)

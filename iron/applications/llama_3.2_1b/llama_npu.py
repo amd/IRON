@@ -777,8 +777,7 @@ class AIEPrefillBuffers:
         self.attn_scale_factor = XRTTensor(
             (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
-        self.attn_scale_factor.fill_(scale_factor)
-        self.attn_scale_factor.to("npu")
+        self.attn_scale_factor.fill_(scale_factor)  # fill_() syncs to device
         # Attention weights buffer (output of softmax)
         self.attn_weights = XRTTensor(
             (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
@@ -828,60 +827,58 @@ class AIELlamaBuffers:
             self.W_norm1.append(
                 XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.input_layernorm.weight"]
-                ).to("npu")
+                )
             )
             self.W_norm2.append(
                 XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.post_attention_layernorm.weight"
                     ]
-                ).to("npu")
+                )
             )
             self.W_attn_query_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.q_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_attn_key_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.k_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_attn_value_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.v_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_ffn_gate_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.gate_proj.weight"].T
-                ).to("npu")
+                )
             )
             self.W_ffn_up_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].T
-                ).to("npu")
+                )
             )
             self.W_ffn_down_prefill.append(
                 XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.down_proj.weight"].T
-                ).to("npu")
+                )
             )
 
         # Final RMS norm weights
-        self.W_final_norm = XRTTensor.from_torch(
-            config.weights["model.norm.weight"]
-        ).to("npu")
+        self.W_final_norm = XRTTensor.from_torch(config.weights["model.norm.weight"])
         # Final linear layer (unpadded/unpartitioned, used by GEMV)
         self.W_out_head = XRTTensor.from_torch(
             config.weights["model.embed_tokens.weight"]
-        ).to("npu")
+        )
         W_out_head_parts = aie_ops.prefill.gemv_out_head_compilable.partition_B(
             # Zero-copy bfloat16 bitcast: view as uint16 (same width) then reinterpret
             # as ml_dtypes.bfloat16. Matches the pattern used in Tensor.from_torch().
@@ -892,7 +889,7 @@ class AIELlamaBuffers:
             aie_ops.vocab_partitions,
         )
         self.W_out_head_parts = [
-            XRTTensor(part, dtype=part.dtype).to("npu") for part in W_out_head_parts
+            XRTTensor(part, dtype=part.dtype) for part in W_out_head_parts
         ]  # partitioned, padded parts of weight, used by GEMM
         self.prefill.logits = XRTTensor(
             (
@@ -901,7 +898,7 @@ class AIELlamaBuffers:
                 aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
             ),
             dtype=ml_dtypes.bfloat16,
-        ).to("npu")
+        )
         logits_part_len = prompt_len * (
             aie_ops.padded_vocab_size // aie_ops.vocab_partitions
         )
@@ -1267,8 +1264,7 @@ def llama_forward_pass_decode(config, state):
 
     # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
     aie_ops.decode.fused.input_buffer.to("cpu")
-    aie_ops.decode.fused()
-    aie_ops.decode.fused.output_buffer.to("cpu")
+    aie_ops.decode.fused()  # FusedFullELFCallable.__call__() syncs output_buffer to cpu
     logits = (
         aie_ops.decode.fused.get_buffer("logits")
         .to_torch()
