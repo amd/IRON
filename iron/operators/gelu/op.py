@@ -12,5 +12,5 @@ class GELU(ChanneledUnaryOperator):
     """AIE-accelerated GELU activation function"""
 
     kernel_name: ClassVar[str] = "gelu"
-    kernel_subdir: ClassVar[str] = "aie2p"
+    needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_gelu"

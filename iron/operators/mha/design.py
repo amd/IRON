@@ -24,7 +24,6 @@ from aie.iron.device import NPU1, NPU1Col1, NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
-from iron.common.device_utils import get_device_name, get_device_type
 
 dtype_map = {
     "bf16": bfloat16,

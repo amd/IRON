@@ -128,16 +128,20 @@ class MLIROperator(AIEOperatorBase):
                 for f in dataclasses.fields(self)
                 if f.repr and getattr(self, f.name) is not None
             )
-            return type(self).__name__ + "_" + "_".join(parts)
-        params = self._params
-        if params is not None:
+            base = type(self).__name__ + "_" + "_".join(parts)
+        elif self._params is not None:
             parts = (
-                f"{k}{_serialize_param(v)}" for k, v in params.items() if v is not None
+                f"{k}{_serialize_param(v)}"
+                for k, v in self._params.items()
+                if v is not None
             )
-            return type(self).__name__ + "_" + "_".join(parts)
-        raise NotImplementedError(
-            f"{type(self).__name__} must be a @dataclass or define a _params property"
-        )
+            base = type(self).__name__ + "_" + "_".join(parts)
+        else:
+            raise NotImplementedError(
+                f"{type(self).__name__} must be a @dataclass or define a _params property"
+            )
+        dev = aie_utils.get_current_device()
+        return f"{base}_{dev.resolve().name}"
 
     @abstractmethod
     def get_mlir_artifact(self) -> CompilationArtifact:
@@ -151,8 +155,13 @@ class MLIROperator(AIEOperatorBase):
         self, prefix: str = "", dynamic_obj_fifos: bool = False
     ) -> tuple[XclbinArtifact, InstsBinArtifact]:
         operator_name = prefix + self.name
+        arch = self.name.rsplit("_", 1)[-1]
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps = self.get_kernel_artifacts()
+        for dep in kernel_deps:
+            if isinstance(dep, KernelObjectArtifact):
+                p = Path(dep.filename)
+                dep.filename = str(p.with_stem(f"{p.stem}_{arch}"))
         extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",

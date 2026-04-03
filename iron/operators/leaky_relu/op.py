@@ -15,7 +15,6 @@ class LeakyReLU(ChanneledUnaryOperator):
     alpha: float = 0.01
 
     kernel_name: ClassVar[str] = "leaky_relu"
-    kernel_subdir: ClassVar[str] = "aie2p"
     callback_fn: ClassVar[str] = "my_leaky_relu"
     _name_aliases: ClassVar[Dict[str, str]] = {
         **ChanneledUnaryOperator._name_aliases,

@@ -43,7 +43,7 @@ class MemCopy(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_mem_copy",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.size,
                     self.num_cores,
                     self.num_channels,

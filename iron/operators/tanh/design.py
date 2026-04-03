@@ -40,7 +40,7 @@ def my_tanh(dev, size, num_columns, num_channels, tile_size, trace_size):
     # External, binary kernel definition
     tanh_fcn = Kernel(
         "tanh_bf16",
-        kernel_archive if kernel_archive else "tanh.o",
+        "tanh.o",
         [line_type, line_type, np.int32],
     )
 

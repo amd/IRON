@@ -14,6 +14,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from iron.common.device_utils import get_kernel_dir
 import aie.utils as aie_utils
 
 
@@ -86,7 +87,7 @@ class GEMM(MLIROperator):
                 "my_matmul",
                 (),
                 {
-                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "dev": aie_utils.get_current_device(),
                     "M": self.M,
                     "K": self.K,
                     "N": self.N,
@@ -129,7 +130,7 @@ class GEMM(MLIROperator):
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
-        kernel_dir = "aie2p"
+        kernel_dir = get_kernel_dir()
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",

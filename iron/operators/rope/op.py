@@ -60,7 +60,7 @@ class Rope(MLIROperator):
                 self.operator_dir / "design.py",
                 "rope",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.rows,
                     self.cols,
                     self.angle_rows,

@@ -17,6 +17,7 @@ from iron.common import (
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from iron.common.device_utils import get_kernel_dir
 
 
 @dataclass
@@ -52,7 +53,7 @@ class MHA(MLIROperator):
                 "fused_mha",
                 (),
                 {
-                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "dev": aie_utils.get_current_device(),
                     "heads": self.num_heads,
                     "S_q": self.seq_len,
                     "S_kv": self.seq_len,
@@ -69,7 +70,8 @@ class MHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
+        kernel_dir = get_kernel_dir()
+        mm_source = str(self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc")
         softmax_source = str(
             self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
         )

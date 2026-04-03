@@ -41,7 +41,7 @@ class Repeat(MLIROperator):
                 self.operator_dir / "design.py",
                 "repeat",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.dtype,
                     self.rows,
                     self.cols,

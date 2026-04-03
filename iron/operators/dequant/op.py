@@ -50,7 +50,7 @@ class Dequant(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_dequant_kernel",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.size,
                     self.num_aie_columns,
                     self.num_channels,

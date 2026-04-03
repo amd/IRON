@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar, Dict
 
 import aie.utils as aie_utils
+
 from .base import MLIROperator, AIERuntimeArgSpec
 from .compilation import (
     KernelObjectArtifact,
@@ -14,6 +16,7 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from .device_utils import get_kernel_dir
 from .utils import get_shim_dma_limit
 
 
@@ -24,10 +27,10 @@ class ChanneledUnaryOperator(MLIROperator):
     Assumes a single kernel source file and a standard design.py callback
     with args [device, size, num_aie_columns, num_channels, tile_size, trace_size].
 
-    Subclasses must define three ClassVar attributes:
+    Subclasses must define ClassVar attributes:
         kernel_name:   name of the kernel object file (e.g. "gelu" → gelu.o / gelu.cc)
-        kernel_subdir: subdirectory under aie_kernels/ (e.g. "aie2p", "generic")
         callback_fn:   design.py callback function name (e.g. "my_gelu")
+        needs_lut_ops: set True for operators that require lut_based_ops.o on aie2
 
     Customization points:
         - For operators with extra parameters (e.g. alpha, trace_size), add
@@ -45,8 +48,8 @@ class ChanneledUnaryOperator(MLIROperator):
     context: object = field(default=None, repr=False)
 
     kernel_name: ClassVar[str]
-    kernel_subdir: ClassVar[str]
     callback_fn: ClassVar[str]
+    needs_lut_ops: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         max_multiple = self.num_aie_columns * self.tile_size
@@ -55,7 +58,7 @@ class ChanneledUnaryOperator(MLIROperator):
                 f"size ({self.size}) must be a multiple of "
                 f"num_aie_columns * tile_size ({max_multiple})"
             )
-        dev = aie_utils.DefaultNPURuntime.device()
+        dev = aie_utils.get_current_device()
         shim_dma_limit = get_shim_dma_limit(dev)
         total_shimdma_channels = self.num_aie_columns * self.num_channels
         if total_shimdma_channels > shim_dma_limit:
@@ -78,7 +81,7 @@ class ChanneledUnaryOperator(MLIROperator):
         override this method.
         """
         return [
-            aie_utils.DefaultNPURuntime.device(),
+            aie_utils.get_current_device(),
             self.size,
             self.num_aie_columns,
             self.num_channels,
@@ -97,19 +100,37 @@ class ChanneledUnaryOperator(MLIROperator):
         )
 
     def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
-        return [
+        dev = aie_utils.get_current_device()
+        kernel_dir = get_kernel_dir(dev)
+        artifacts = [
             KernelObjectArtifact(
                 f"{self.kernel_name}.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir
                         / "aie_kernels"
-                        / self.kernel_subdir
+                        / kernel_dir
                         / f"{self.kernel_name}.cc"
                     )
                 ],
-            ),
+            )
         ]
+        if self.needs_lut_ops and kernel_dir == "aie2":
+            mlir_aie_dir = Path(aie_utils.config.root_path())
+            artifacts.append(
+                KernelObjectArtifact(
+                    "lut_based_ops.o",
+                    dependencies=[
+                        SourceArtifact(
+                            mlir_aie_dir
+                            / "aie_runtime_lib"
+                            / "AIE2"
+                            / "lut_based_ops.cpp"
+                        )
+                    ],
+                )
+            )
+        return artifacts
 
 
 @dataclass
@@ -123,7 +144,7 @@ class BinaryElementwiseOperator(MLIROperator):
     parameter — each core uses 2 DMA channels (one per input), so the ShimDMA
     limit is enforced as num_aie_columns * 2 <= 16.
 
-    Subclasses must define three ClassVar attributes:
+    Subclasses must define ClassVar attributes:
         kernel_name:   name of the kernel object file (e.g. "add" → add.o / add.cc)
         kernel_subdir: subdirectory under aie_kernels/ (e.g. "generic")
         callback_fn:   design.py callback function name (e.g. "my_eltwise_add")
@@ -148,7 +169,7 @@ class BinaryElementwiseOperator(MLIROperator):
                 f"size ({self.size}) must be a multiple of "
                 f"num_aie_columns * tile_size ({self.num_aie_columns * self.tile_size})"
             )
-        dev = aie_utils.DefaultNPURuntime.device()
+        dev = aie_utils.get_current_device()
         shim_dma_limit = get_shim_dma_limit(dev)
         # Binary operators use 2 ShimDMA channels per column (one per input).
         total_shimdma_channels = self.num_aie_columns * 2
@@ -168,7 +189,7 @@ class BinaryElementwiseOperator(MLIROperator):
 
     def _mlir_callback_args(self) -> list[Any]:
         return [
-            aie_utils.DefaultNPURuntime.device(),
+            aie_utils.get_current_device(),
             self.size,
             self.num_aie_columns,
             self.tile_size,

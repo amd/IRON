@@ -39,7 +39,7 @@ class AXPY(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_axpy",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.size,
                     self.num_aie_columns,
                     self.tile_size,

@@ -58,7 +58,7 @@ class Transpose(MLIROperator):
                 self.operator_dir / "design.py",
                 "shuffle_transpose",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.M,
                     self.N,
                     self.num_aie_columns,

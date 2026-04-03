@@ -61,7 +61,7 @@ class GEMV(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_matvec",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.num_aie_columns,
                     self.M,
                     self.K,

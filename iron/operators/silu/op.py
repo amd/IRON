@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import ClassVar, Dict
 
 import aie.utils as aie_utils
-from iron.common.device_utils import DEVICE_CONFIGS
+
+from iron.common.device_utils import get_kernel_dir
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -50,7 +52,7 @@ class SiLU(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_silu",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.size,
                     self.num_aie_columns,
                     self.tile_size,
@@ -60,9 +62,7 @@ class SiLU(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        kernel_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
-            "kernel_dir"
-        ]
+        kernel_dir = get_kernel_dir()
         artifacts = [
             KernelObjectArtifact(
                 "silu.o",
@@ -74,12 +74,13 @@ class SiLU(MLIROperator):
             ),
         ]
         if kernel_dir == "aie2":
+            mlir_aie_dir = Path(aie_utils.config.root_path())
             artifacts.append(
                 KernelObjectArtifact(
                     "lut_based_ops.o",
                     dependencies=[
                         SourceArtifact(
-                            self.context.mlir_aie_dir
+                            mlir_aie_dir
                             / "aie_runtime_lib"
                             / "AIE2"
                             / "lut_based_ops.cpp"

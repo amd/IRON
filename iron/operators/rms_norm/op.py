@@ -13,6 +13,7 @@ from iron.common import (
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from iron.common.device_utils import get_kernel_dir
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -34,7 +35,7 @@ class RMSNorm(MLIROperator):
 
     def __post_init__(self):
         # Note: epsilon is hardcoded to 1e-5 in the AIE kernel and cannot be changed at runtime.
-        dev = aie_utils.DefaultNPURuntime.device()
+        dev = aie_utils.get_current_device()
         shim_dma_limit = get_shim_dma_limit(dev)
 
         # The weighted design uses one weight ObjectFifo per channel shared across all
@@ -80,7 +81,7 @@ class RMSNorm(MLIROperator):
                 source_path,
                 callback_fn,
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.size,
                     self.num_aie_columns,
                     self.num_channels,
@@ -91,9 +92,7 @@ class RMSNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        arch_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
-            "kernel_dir"
-        ]
+        arch_dir = get_kernel_dir()
         artifacts = [
             KernelObjectArtifact(
                 "rms_norm.o",

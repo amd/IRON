@@ -23,7 +23,6 @@ from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
 
-from iron.common.device_utils import get_device_name, get_device_type
 
 microkernel_mac_dim_map = {
     "npu1": {

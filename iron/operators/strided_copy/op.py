@@ -65,7 +65,7 @@ class StridedCopy(MLIROperator):
                 self.operator_dir / "design.py",
                 "strided_copy",
                 (
-                    aie_utils.DefaultNPURuntime.device(),
+                    aie_utils.get_current_device(),
                     self.dtype,
                     self.input_buffer_size,
                     self.input_sizes,

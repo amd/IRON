@@ -12,7 +12,6 @@ import statistics
 
 from iron.common import AIEContext
 import aie.utils as aie_utils
-from iron.common.aie_device_manager import AIEDeviceManager
 
 
 @pytest.fixture
@@ -158,7 +157,7 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    device = AIEDeviceManager().device_str()
+    device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item in items:
         marker = item.get_closest_marker("supported_devices")
         if marker and device not in marker.args:

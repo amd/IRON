@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 import pytest
+import aie.utils as aie_utils
 import torch
 import ml_dtypes
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -13,13 +14,12 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.operators.gemm.op import GEMM
 from iron.operators.gemm.reference import generate_golden_reference
 from iron.common.test_utils import run_test, verify_buffer
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
-    device_type = AIEDeviceManager().device_str()
-    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+    dev = aie_utils.get_current_device()
+    max_aie_columns = dev.cols
+    device_type = dev.resolve().name
     # fmt: off
     #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
     regular_params = [

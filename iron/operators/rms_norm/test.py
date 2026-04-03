@@ -5,8 +5,6 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
@@ -14,7 +12,7 @@ from iron.common.utils import get_shim_dma_limit
 
 
 def get_params():
-    dev = aie_utils.DefaultNPURuntime.device()
+    dev = aie_utils.get_current_device()
     max_aie_columns = dev.cols
     shim_dma_limit = get_shim_dma_limit(dev)
     input_lengths = [1024, 2048, 4096, 8192]

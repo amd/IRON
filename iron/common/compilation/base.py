@@ -47,6 +47,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 import sys
 
+import aie.utils as aie_utils
+from aie.iron.device import NPU2
+
 # Global Functions
 # ##########################################################################
 
@@ -574,10 +577,9 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
 
 
 class PeanoCompilationRule(CompilationRule):
-    def __init__(self, peano_dir, mlir_aie_dir, device_type=None, *args, **kwargs):
+    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
         self.mlir_aie_dir = mlir_aie_dir
-        self.device_type = device_type
         super().__init__(*args, **kwargs)
 
     def matches(self, artifacts):
@@ -589,15 +591,13 @@ class PeanoCompilationRule(CompilationRule):
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
 
-        if self.device_type not in DEVICE_CONFIGS:
-            raise ValueError(
-                f"Unsupported device type: {self.device_type!r} "
-                f"(supported: {', '.join(DEVICE_CONFIGS)})"
-            )
-        config = DEVICE_CONFIGS[self.device_type]
-        target = config["target"]
+        dev = aie_utils.get_current_device()
+        is_npu2 = isinstance(dev, NPU2)
+        target = "aie2p-none-unknown-elf" if is_npu2 else "aie2-none-unknown-elf"
         runtime_lib_include_path = (
-            Path(self.mlir_aie_dir) / "aie_runtime_lib" / config["runtime_lib_dir"]
+            Path(self.mlir_aie_dir)
+            / "aie_runtime_lib"
+            / ("AIE2P" if is_npu2 else "AIE2")
         )
 
         for artifact in worklist:

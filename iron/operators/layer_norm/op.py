@@ -15,7 +15,6 @@ class LayerNorm(ChanneledUnaryOperator):
     trace_size: InitVar[int] = 0
 
     kernel_name: ClassVar[str] = "layer_norm"
-    kernel_subdir: ClassVar[str] = "aie2p"
     callback_fn: ClassVar[str] = "my_layer_norm"
 
     def __post_init__(self, trace_size):
@@ -24,7 +23,7 @@ class LayerNorm(ChanneledUnaryOperator):
 
     def _mlir_callback_args(self):
         return [
-            aie_utils.DefaultNPURuntime.device(),
+            aie_utils.get_current_device(),
             self.size,
             self.num_aie_columns,
             self.num_channels,
