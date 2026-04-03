@@ -150,13 +150,8 @@ class MLIROperator(AIEOperatorBase):
         self, prefix: str = "", dynamic_obj_fifos: bool = False
     ) -> tuple[XclbinArtifact, InstsBinArtifact]:
         operator_name = prefix + self.name
-        arch = self.name.rsplit("_", 1)[-1]
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps = self.get_kernel_artifacts()
-        for dep in kernel_deps:
-            if isinstance(dep, KernelObjectArtifact):
-                p = Path(dep.filename)
-                dep.filename = str(p.with_stem(f"{p.stem}_{arch}"))
         extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",

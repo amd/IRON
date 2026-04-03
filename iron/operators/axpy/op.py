@@ -6,6 +6,8 @@ from typing import ClassVar
 
 from iron.common import (
     BinaryElementwiseOperator,
+    KernelObjectArtifact,
+    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
@@ -19,8 +21,20 @@ class AXPY(BinaryElementwiseOperator):
 
     kernel_name: ClassVar[str] = "axpy"
     kernel_fn_name: ClassVar[str] = "saxpy"
-    kernel_subdir: ClassVar[str] = "generic"
     callback_fn: ClassVar[str] = "my_axpy"
+
+    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
+        # axpy.cc lives under aie_kernels/generic/ (not device-specific)
+        return [
+            KernelObjectArtifact(
+                "axpy.o",
+                dependencies=[
+                    SourceArtifact(
+                        self.context.base_dir / "aie_kernels" / "generic" / "axpy.cc"
+                    )
+                ],
+            )
+        ]
 
     def _mlir_callback_args(self):
         return super()._mlir_callback_args() + [self.scalar_factor]
