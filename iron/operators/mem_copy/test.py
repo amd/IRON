@@ -7,20 +7,25 @@ import pytest
 from iron.operators.mem_copy.op import MemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
+    device_type = AIEDeviceManager().device_str()
+    max_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+
     input_lengths = [1024, 2048, 4096, 8192]
     bypass_modes = [False, True]
 
     params = []
 
     for input_length in input_lengths:
-        for num_cores in range(1, 17):  # 1 to 16 cores
+        for num_cores in range(1, max_columns * 2 + 1):  # Up to MAX_COLUMNS * 2 cores
             for num_channels in range(1, 3):  # 1 or 2 channels
                 for bypass in bypass_modes:
                     # Calculate the maximum cores that can be utilized with 1 or 2 shim channels
-                    max_cores = 8 * num_channels  # MAX_COLUMNS (8) * num_channels
+                    max_cores = max_columns * num_channels  # MAX_COLUMNS * num_channels
 
                     if max_cores >= num_cores and num_cores >= num_channels:
                         tile_size = input_length // num_cores

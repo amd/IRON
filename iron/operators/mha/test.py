@@ -28,6 +28,7 @@ def get_params():
     ]
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",

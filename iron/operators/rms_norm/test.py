@@ -5,6 +5,8 @@
 import pytest
 import aie.utils as aie_utils
 
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
 from iron.common.test_utils import run_test

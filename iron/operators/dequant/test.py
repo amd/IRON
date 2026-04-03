@@ -7,15 +7,20 @@ import pytest
 from iron.operators.dequant.op import Dequant
 from iron.operators.dequant.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+
     input_lengths = [1024, 2048, 4096, 8192]
     group_size = 32
 
     params = []
     for input_length in input_lengths:
-        for num_columns in range(1, 9):  # 1 to 8 columns
+        for num_columns in range(1, max_aie_columns + 1):
             for num_channels in range(1, 3):  # 1 or 2 channels
                 total_cores = num_columns * num_channels
                 tile_size = input_length // total_cores

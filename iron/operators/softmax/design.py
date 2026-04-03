@@ -74,7 +74,6 @@ def softmax(
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, softmax_kernel, mask_kernel, rtp, barrier):
-        # Number of sub-vector "tile" iterations
         barrier.wait_for_value(1)
         vector_size = rtp[0]
         for _ in range_(N_div_n):
@@ -102,18 +101,16 @@ def softmax(
     ]
 
     # Create a worker to run the task on a compute tile
+    worker_args = lambda i, j: [
+        of_in1s[i * num_channels + j].cons(),
+        of_outs[i * num_channels + j].prod(),
+        softmax_kernel,
+        mask_kernel,
+        rtps[i * num_channels + j],
+        barriers[i * num_channels + j],
+    ]
     my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                softmax_kernel,
-                mask_kernel,
-                rtps[i * num_channels + j],
-                barriers[i * num_channels + j],
-            ],
-        )
+        Worker(core_body, worker_args(i, j))
         for i in range(num_aie_columns)
         for j in range(num_channels)
     ]

@@ -3,13 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.operators.transpose.op import Transpose
 from iron.operators.transpose.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
-    max_aie_columns = 8
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
     input_lengths = [64, 2048]
     n_list = [64, 128, 256, 512]
     s_list = [8]

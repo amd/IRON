@@ -40,7 +40,7 @@ def my_sigmoid(dev, size, num_columns, num_channels, tile_size, trace_size):
     # External, binary kernel definition
     sigmoid_fcn = Kernel(
         "sigmoid_bf16",
-        "sigmoid.o",
+        kernel_archive if kernel_archive else "sigmoid.o",
         [line_type, line_type, np.int32],
     )
 

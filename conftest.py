@@ -12,6 +12,7 @@ import statistics
 
 from iron.common import AIEContext
 import aie.utils as aie_utils
+from iron.common.aie_device_manager import AIEDeviceManager
 
 
 @pytest.fixture
@@ -154,6 +155,18 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "metrics(**patterns): specify metric patterns for this test"
     )
+
+
+def pytest_collection_modifyitems(config, items):
+    device = AIEDeviceManager().device_str()
+    for item in items:
+        marker = item.get_closest_marker("supported_devices")
+        if marker and device not in marker.args:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=f"Not supported on {device} (supported: {', '.join(marker.args)})"
+                )
+            )
 
 
 def pytest_sessionfinish(session, exitstatus):

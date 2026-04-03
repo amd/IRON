@@ -129,12 +129,13 @@ class GEMM(MLIROperator):
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
+        kernel_dir = "aie2p"
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
-                    SourceArtifact(base_dir / "aie_kernels" / "aie2p" / "mm.cc")
+                    SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
                 ],
             ),
             KernelObjectArtifact(

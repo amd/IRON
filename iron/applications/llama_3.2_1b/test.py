@@ -27,6 +27,7 @@ def generate_test_params():
 params, names = generate_test_params()
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
     TPS=r"\[Decode\]\s*Tokens per second:\s*(?P<value>[\d\.e\+-]+)",

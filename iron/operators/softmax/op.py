@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass, field
 
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -61,16 +62,37 @@ class Softmax(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
+        kernel_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
+            "kernel_dir"
+        ]
+        artifacts = [
             KernelObjectArtifact(
                 "softmax.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+                        self.context.base_dir
+                        / "aie_kernels"
+                        / kernel_dir
+                        / "softmax.cc"
                     )
                 ],
             ),
         ]
+        if kernel_dir == "aie2":
+            artifacts.append(
+                KernelObjectArtifact(
+                    "lut_based_ops.o",
+                    dependencies=[
+                        SourceArtifact(
+                            self.context.mlir_aie_dir
+                            / "aie_runtime_lib"
+                            / "AIE2"
+                            / "lut_based_ops.cpp"
+                        )
+                    ],
+                )
+            )
+        return artifacts
 
     def get_arg_spec(self):
         return [

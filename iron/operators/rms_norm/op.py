@@ -91,12 +91,15 @@ class RMSNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        arch_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
+            "kernel_dir"
+        ]
         artifacts = [
             KernelObjectArtifact(
                 "rms_norm.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "rms_norm.cc"
+                        self.context.base_dir / "aie_kernels" / arch_dir / "rms_norm.cc"
                     )
                 ],
             ),

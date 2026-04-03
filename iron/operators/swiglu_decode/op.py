@@ -27,7 +27,6 @@ class SwiGLUDecodeCallable(_SwiGLUCallable):
 
 
 class SwiGLUDecode(CompositeOperator):
-
     def __init__(self, embedding_dim, hidden_dim, prio_accuracy=False, context=None):
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
@@ -52,7 +51,7 @@ class SwiGLUDecode(CompositeOperator):
         silu = SiLU(
             size=self.hidden_dim,
             num_aie_columns=8,
-            tile_size=self.hidden_dim // 16,
+            tile_size=self.hidden_dim // (8 * 2),
         )
         self.silu = silu
         self.hidden_dim_padded = silu.size

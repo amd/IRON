@@ -64,4 +64,11 @@ void softmax_bf16(bfloat16 *restrict input, bfloat16 *restrict output, const int
     softmax_simple_bf16(input, output, input_size);
 }
 
+void mask_bf16(bfloat16 *inout, const int32_t unmasked_size, const int32_t total_size)
+{
+    for (int32_t i = unmasked_size; i < total_size; i++) {
+        inout[i] = (bfloat16)(-INFINITY);
+    }
+}
+
 } // extern "C"

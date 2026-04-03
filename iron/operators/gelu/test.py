@@ -4,13 +4,16 @@
 
 import pytest
 
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.operators.gelu.op import GELU
 from iron.operators.gelu.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
-    max_aie_columns = 8
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
     num_channels_choices = [1, 2]
     input_lengths = [1024, 2048, 4096, 8192]
 

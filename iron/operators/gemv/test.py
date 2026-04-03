@@ -7,9 +7,14 @@ import pytest
 from iron.operators.gemv.op import GEMV
 from iron.operators.gemv.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+
     params_list = [
         (128, 128, 1, 32, 128),
         (2048, 8192, 1, 1, 2048),
@@ -24,6 +29,10 @@ def get_params():
 
     params = []
     for p in params_list:
+        M, K, num_aie_columns, tile_size_input, tile_size_output = p
+        # Skip tests that require more columns than available on the device
+        if num_aie_columns > max_aie_columns:
+            continue
         params.append(pytest.param(*p))
     return params
 

@@ -4,12 +4,14 @@
 
 import pytest
 
+from iron.common.aie_device_manager import AIEDeviceManager
+from iron.common.device_utils import DEVICE_CONFIGS
 from iron.operators.softmax.op import Softmax
 from iron.operators.softmax.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
-def get_optimal_columns_channels(input_length, tile_size):
+def get_optimal_columns_channels(input_length, tile_size, max_columns):
     """Helper function to determine optimal columns and channels for a given input length and tile size"""
     total_cores = input_length // tile_size
 
@@ -22,12 +24,16 @@ def get_optimal_columns_channels(input_length, tile_size):
     elif total_cores == 1:
         return 1, 1  # 1 core: use 1x1 configuration
     elif total_cores == 16:
-        return 4, 4  # 16 cores: use 4x4 configuration
+        # For 16 cores, use 2x2 to avoid exceeding device capabilities
+        # The 4x4 configuration causes placement issues on Phoenix
+        return 2, 2  # Use 2x2, each core handles more iterations
     else:
         return 2, 2  # Default fallback
 
 
 def get_params():
+    device_type = AIEDeviceManager().device_str()
+    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
     input_lengths = [32768]
     tile_sizes = [1024, 512, 2048]
 
@@ -35,8 +41,11 @@ def get_params():
     for input_length in input_lengths:
         for tile_size in tile_sizes:
             optimal_columns, optimal_channels = get_optimal_columns_channels(
-                input_length, tile_size
+                input_length, tile_size, max_aie_columns
             )
+            # Skip if configuration exceeds device capabilities
+            if optimal_columns > max_aie_columns:
+                continue
 
             params.append(
                 pytest.param(input_length, optimal_columns, optimal_channels, tile_size)

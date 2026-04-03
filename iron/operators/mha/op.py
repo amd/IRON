@@ -71,9 +71,11 @@ class MHA(MLIROperator):
     def get_kernel_artifacts(self):
         mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
         softmax_source = str(
-            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
+            self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
         )
-        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
+        mha_source = str(
+            self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc"
+        )  # TODO: MHA kernel only exists in aie2p
         passthrough_source = str(
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
