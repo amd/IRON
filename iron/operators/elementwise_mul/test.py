@@ -3,38 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-import aie.utils as aie_utils
 
 from iron.operators.elementwise_mul.op import ElementwiseMul
 from iron.operators.elementwise_mul.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, make_binary_elementwise_params
 
 
 def get_params():
-    max_aie_columns = aie_utils.get_current_device().cols
-    input_lengths = [1024, 2048, 4096, 8192]
-
-    params = []
-    for input_length in input_lengths:
-        for num_aie_columns in range(1, max_aie_columns + 1):
-            tile_size = input_length // num_aie_columns
-            if tile_size > 4096:
-                tile_size = 4096
-            if tile_size * num_aie_columns != input_length:
-                continue
-
-            is_regular = input_length == 2048
-            marks = [] if is_regular else [pytest.mark.extensive]
-
-            params.append(
-                pytest.param(
-                    input_length,
-                    num_aie_columns,
-                    tile_size,
-                    marks=marks,
-                )
-            )
-    return params
+    return [
+        pytest.param(il, nac, ts, marks=[] if not ext else [pytest.mark.extensive])
+        for il, nac, ts, ext in make_binary_elementwise_params(
+            [1024, 2048, 4096, 8192], 4096
+        )
+    ]
 
 
 @pytest.mark.metrics(

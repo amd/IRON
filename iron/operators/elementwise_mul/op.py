@@ -12,5 +12,6 @@ class ElementwiseMul(BinaryElementwiseOperator):
     """AIE-accelerated element-wise multiplication"""
 
     kernel_name: ClassVar[str] = "mul"
+    kernel_fn_name: ClassVar[str] = "eltwise_mul_bf16_vector"
     kernel_subdir: ClassVar[str] = "generic"
     callback_fn: ClassVar[str] = "my_eltwise_mul"

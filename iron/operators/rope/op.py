@@ -16,7 +16,7 @@ import aie.utils as aie_utils
 
 
 @dataclass
-class Rope(MLIROperator):
+class RoPE(MLIROperator):
     """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
 
     rows: int

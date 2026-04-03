@@ -20,7 +20,7 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1, NPU1Col1, NPU2, Tile
+from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
@@ -74,13 +74,12 @@ def main():
         default="my_mha.mlir",
         help="Output file path for the generated MLIR module",
     )
-    argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu2")
     argparser.add_argument(
         "--verbose", action="store_true", help="Enable verbose output"
     )
 
     args = argparser.parse_args()
-    dev = NPU1() if args.dev == "npu" else NPU2()
+    dev = NPU2()
 
     maybe_module = fused_mha(
         dev=dev,
@@ -153,9 +152,7 @@ def fused_mha(
     ), "Only emulate_bf16_mmul_with_bfp16=True is supported"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map["npu" if isinstance(dev, NPU1) else "npu2"][
-        dtype_str
-    ]
+    mac_dims = microkernel_mac_dim_map["npu2"][dtype_str]
     r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
 
     if verbose:
@@ -891,7 +888,7 @@ def fused_mha(
                 rt.finish_task_group(tg)
 
     # Create the program from the device type and runtime
-    dev_ty = NPU1Col1() if isinstance(dev, NPU1) else NPU2()
+    dev_ty = NPU2()
     my_program = Program(dev_ty, rt)
 
     # Place components (assign them resources on the device) and generate an MLIR module

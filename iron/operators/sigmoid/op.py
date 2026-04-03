@@ -12,5 +12,6 @@ class Sigmoid(ChanneledUnaryOperator):
     """AIE-accelerated Sigmoid activation function"""
 
     kernel_name: ClassVar[str] = "sigmoid"
+    kernel_fn_name: ClassVar[str] = "sigmoid_bf16"
     needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_sigmoid"

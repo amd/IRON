@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import numpy as np
-from aie.utils.hostruntime.tensor_class import _array_to_torch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor, xrt as _pyxrt
 
 
@@ -32,16 +30,6 @@ def float_to_name(v: float) -> str:
       1e-10 -> '1en10'
     """
     return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
-
-
-torch_dtype_map = {
-    "bf16": torch.bfloat16,
-    "f32": torch.float32,
-    "i8": torch.int8,
-    "ui8": torch.uint8,
-    "i16": torch.int16,
-    "i32": torch.int32,
-}
 
 
 class XRTSubBuffer(XRTTensor):
@@ -73,7 +61,7 @@ class XRTSubBuffer(XRTTensor):
         self._data = np.frombuffer(ptr, dtype=self.dtype).reshape(self._shape)
 
     @property
-    def shape(self):
+    def shape(self) -> tuple[int, ...]:
         return self._shape
 
     @property
@@ -83,20 +71,6 @@ class XRTSubBuffer(XRTTensor):
     def buffer_object(self):
         """Return the underlying pyxrt.bo (required by NPUKernel)."""
         return self._bo
-
-    def to_torch(self) -> torch.Tensor:
-        """Return a torch tensor view of this sub-buffer's data (syncs from device first)."""
-        self.to("cpu")
-        return _array_to_torch(self._data)
-
-    def torch_view(self) -> torch.Tensor:
-        """Return a torch tensor view of this sub-buffer's host memory without syncing from device.
-
-        Marks the buffer as CPU-resident so that a subsequent .to("npu") call (or the
-        NPU operator's implicit sync) will push the written data to device.
-        """
-        self.device = "cpu"  # mark dirty so next to("npu") will actually sync
-        return _array_to_torch(self._data)
 
     @classmethod
     def from_parent(cls, parent, shape, offset_elements, length_elements, dtype):

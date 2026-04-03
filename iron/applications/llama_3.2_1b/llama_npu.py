@@ -38,7 +38,7 @@ from iron.operators import (
     ElementwiseAdd,
     ElementwiseMul,
     SiLU,
-    Rope,
+    RoPE,
     StridedCopy,
     Repeat,
     Softmax,
@@ -80,7 +80,7 @@ class AIELlamaOperators:
             RMSNorm(
                 size=prompt_len * config.emb_dim,
                 num_aie_columns=8,
-                num_channels=1,  # weighted=True forces num_channels=1; see RMSNorm.__init__
+                num_channels=1,  # weighted=True with 8 columns needs 9 ShimDMA fills/channel; max 16 total forces num_channels=1
                 tile_size=config.emb_dim,
                 weighted=True,
                 context=self.context,
@@ -96,13 +96,12 @@ class AIELlamaOperators:
         )
 
         min_N = 64 * 8 * 4  # tile_n * num_aie_columns * partition_N
-        # Stored on self (not config) because this is a derived operator value, not raw model config.
-        self.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
-        self.vocab_partitions = 4
+        config.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
+        config.vocab_partitions = 4
         self.prefill.gemv_out_head_compilable = GEMM(
             M=prompt_len,
             K=config.emb_dim,
-            N=self.padded_vocab_size // self.vocab_partitions,
+            N=config.padded_vocab_size // config.vocab_partitions,
             num_aie_columns=8,
             tile_m=64,
             tile_k=64,
@@ -187,7 +186,7 @@ class AIELlamaOperators:
         # For keys: (seq_len, num_kv_groups * head_dim) = (seq_len, 512)
         # angle_rows=1 because all rows use the same angle row (angles are per position)
         self.prefill.rope_queries = (
-            Rope(
+            RoPE(
                 rows=prompt_len * config.n_heads,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -198,7 +197,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.rope_keys = (
-            Rope(
+            RoPE(
                 rows=prompt_len * config.n_kv_groups,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -302,11 +301,11 @@ class AIELlamaOperators:
         )
 
         # decode processes 1 query token at a time
-        rope_queries_op = Rope(
+        rope_queries_op = RoPE(
             rows=config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
         )
 
-        rope_keys_op = Rope(
+        rope_keys_op = RoPE(
             rows=config.n_kv_groups,
             cols=config.head_dim,
             angle_rows=1,
@@ -394,7 +393,7 @@ class AIELlamaOperators:
         rms_norm_op = RMSNorm(
             size=config.emb_dim,
             num_aie_columns=1,
-            num_channels=1,  # weighted=True forces num_channels=1; see RMSNorm.__init__
+            num_channels=1,
             tile_size=config.emb_dim,
             weighted=True,
             context=elf_ctx,
@@ -886,34 +885,34 @@ class AIELlamaBuffers:
             .view(torch.uint16)
             .numpy()
             .view(ml_dtypes.bfloat16),
-            aie_ops.vocab_partitions,
+            config.vocab_partitions,
         )
         self.W_out_head_parts = [
             XRTTensor(part, dtype=part.dtype) for part in W_out_head_parts
         ]  # partitioned, padded parts of weight, used by GEMM
         self.prefill.logits = XRTTensor(
             (
-                aie_ops.vocab_partitions,
+                config.vocab_partitions,
                 prompt_len,
-                aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
+                config.padded_vocab_size // config.vocab_partitions,
             ),
             dtype=ml_dtypes.bfloat16,
         )
         logits_part_len = prompt_len * (
-            aie_ops.padded_vocab_size // aie_ops.vocab_partitions
+            config.padded_vocab_size // config.vocab_partitions
         )
         self.prefill.logits_parts = [
             XRTSubBuffer.from_parent(
                 self.prefill.logits,
                 (
                     prompt_len,
-                    aie_ops.padded_vocab_size // aie_ops.vocab_partitions,
+                    config.padded_vocab_size // config.vocab_partitions,
                 ),
                 offset_elements=i * logits_part_len,
                 length_elements=logits_part_len,
                 dtype=ml_dtypes.bfloat16,
             )
-            for i in range(aie_ops.vocab_partitions)
+            for i in range(config.vocab_partitions)
         ]
 
 
@@ -1189,7 +1188,7 @@ def llama_forward_pass_prefill(config, state):
     )
 
     # Step 5: Output projection
-    for i in range(aie_ops.vocab_partitions):
+    for i in range(config.vocab_partitions):
         aie_ops.prefill.out_head(
             aie_buffers.prefill.x,
             aie_buffers.W_out_head_parts[i],
@@ -1199,7 +1198,7 @@ def llama_forward_pass_prefill(config, state):
     logits_padded = (
         logits_padded_partitioned.transpose(0, 1)
         .contiguous()
-        .view(-1, aie_ops.padded_vocab_size)
+        .view(-1, config.padded_vocab_size)
     )
     logits = logits_padded.unsqueeze(0)[:, :seq_len, : config.vocab_size]
 

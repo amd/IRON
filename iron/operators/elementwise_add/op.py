@@ -12,5 +12,6 @@ class ElementwiseAdd(BinaryElementwiseOperator):
     """AIE-accelerated element-wise addition"""
 
     kernel_name: ClassVar[str] = "add"
+    kernel_fn_name: ClassVar[str] = "eltwise_add_bf16_vector"
     kernel_subdir: ClassVar[str] = "generic"
     callback_fn: ClassVar[str] = "my_eltwise_add"

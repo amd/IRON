@@ -44,11 +44,11 @@ import logging
 import subprocess
 import importlib.util
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable
 import sys
 
-import aie.utils as aie_utils
-from aie.iron.device import NPU2
+from iron.common.device_utils import get_kernel_dir
 
 # Global Functions
 # ##########################################################################
@@ -61,7 +61,7 @@ class DesignGenerator:
     source_path: Path
     fn_name: str
     args: tuple = ()
-    kwargs: dict = field(default_factory=dict)
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __call__(self) -> str:
         spec = importlib.util.spec_from_file_location(
@@ -118,8 +118,8 @@ def compile(
     build_dir: str = "build",
     dry_run: bool = False,
 ) -> None:
-    if not os.path.exists(build_dir) and not dry_run:
-        os.makedirs(build_dir)
+    if not Path(build_dir).exists() and not dry_run:
+        Path(build_dir).mkdir(parents=True, exist_ok=True)
     artifacts.move_artifacts(build_dir)
     artifacts.populate_availability_from_filesystem()
     plan_steps = plan(rules, artifacts)
@@ -134,7 +134,15 @@ def compile(
 
 
 class CompilationArtifactGraph:
+    """DAG of compilation artifacts representing a build dependency graph."""
+
     def __init__(self, artifacts: list[CompilationArtifact] | None = None) -> None:
+        """Initialize the graph.
+
+        Args:
+            artifacts: Top-level artifacts to include in the graph.  Each
+                artifact may reference further dependencies, forming the DAG.
+        """
         self.artifacts: list[CompilationArtifact] = (
             artifacts if artifacts is not None else []
         )
@@ -208,7 +216,7 @@ class CompilationArtifactGraph:
     def move_artifacts(self, new_root: str) -> None:
         """Make all artifacts paths point into a build directory"""
         for artifact in self.bfs():
-            if not os.path.isabs(artifact.filename):
+            if not Path(artifact.filename).is_absolute():
                 artifact.filename = str(Path(new_root) / Path(artifact.filename).name)
 
     def add(self, artifact: CompilationArtifact) -> None:
@@ -220,12 +228,26 @@ class CompilationArtifactGraph:
 
 
 class CompilationArtifact(ABC):
+    """Abstract base for a single node in a compilation artifact graph.
+
+    Each artifact corresponds to exactly one file on disk.  Subclasses
+    represent specific kinds of build products (source files, MLIR modules,
+    kernel objects, xclbin packages, etc.).
+    """
+
     def __init__(
         self,
         filename: str | Path,
         dependencies: list[CompilationArtifact] | None = None,
         available: bool = False,
     ) -> None:
+        """Initialize the artifact.
+
+        Args:
+            filename: Path to the file produced by this artifact.
+            dependencies: Artifacts that must be built before this one.
+            available: Whether the artifact is already considered built.
+        """
         self.filename = str(filename)
         self.dependencies: CompilationArtifactGraph = CompilationArtifactGraph(
             artifacts=dependencies if dependencies is not None else []
@@ -241,11 +263,12 @@ class CompilationArtifact(ABC):
         return self.available and self.dependencies_available()
 
     def dependencies_available(self) -> bool:
+        """Return True if all direct dependencies are available."""
         return all(d.is_available() for d in self.dependencies)
 
     def is_available_in_filesystem(self) -> bool:
         """'Real' availability: checks if the underlying file exists and is up-to-date with respect to dependencies."""
-        if not os.path.exists(self.filename):
+        if not Path(self.filename).exists():
             return False
         file_mtime = os.path.getmtime(self.filename)
         for dependency in self.dependencies:
@@ -389,11 +412,11 @@ class ShellCompilationCommand(CompilationCommand):
             cwd=self.cwd,
             env={**self.env, "PYTHONUNBUFFERED": "1"},
         )
-        if 0 != result.returncode:
+        if result.returncode != 0:
             print("Return code: ", result.returncode)
             print(result.stdout)
             print(result.stderr, file=sys.stderr)
-        return 0 == result.returncode
+        return result.returncode == 0
 
     def __repr__(self) -> str:
         return f"Shell({' '.join(self.command)})"
@@ -439,9 +462,7 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         worklist = graph.get_worklist(PythonGeneratedMLIRArtifact)
         for artifact in worklist:
             new_artifact = SourceArtifact(artifact.filename)
-            callback = lambda new_artifact=new_artifact, generator=artifact.generator: self.generate_mlir(
-                new_artifact, generator
-            )
+            callback = partial(self.generate_mlir, new_artifact, artifact.generator)
             commands.append(PythonCallbackCompilationCommand(callback))
             new_artifact.available = True
             graph.replace(artifact, new_artifact)
@@ -591,13 +612,10 @@ class PeanoCompilationRule(CompilationRule):
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
 
-        dev = aie_utils.get_current_device()
-        is_npu2 = isinstance(dev, NPU2)
-        target = "aie2p-none-unknown-elf" if is_npu2 else "aie2-none-unknown-elf"
+        kernel_dir = get_kernel_dir()
+        target = f"{kernel_dir}-none-unknown-elf"
         runtime_lib_include_path = (
-            Path(self.mlir_aie_dir)
-            / "aie_runtime_lib"
-            / ("AIE2P" if is_npu2 else "AIE2")
+            Path(self.mlir_aie_dir) / "aie_runtime_lib" / kernel_dir.upper()
         )
 
         for artifact in worklist:

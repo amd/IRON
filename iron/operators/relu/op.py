@@ -12,4 +12,5 @@ class ReLU(ChanneledUnaryOperator):
     """AIE-accelerated ReLU activation function"""
 
     kernel_name: ClassVar[str] = "relu"
+    kernel_fn_name: ClassVar[str] = "relu_bf16"
     callback_fn: ClassVar[str] = "my_relu"

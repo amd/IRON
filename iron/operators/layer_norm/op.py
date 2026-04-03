@@ -15,7 +15,9 @@ class LayerNorm(ChanneledUnaryOperator):
     trace_size: InitVar[int] = 0
 
     kernel_name: ClassVar[str] = "layer_norm"
+    kernel_fn_name: ClassVar[str] = "layer_norm"
     callback_fn: ClassVar[str] = "my_layer_norm"
+    tile_cap: ClassVar[int] = 8192
 
     def __post_init__(self, trace_size):
         self.trace_size = trace_size

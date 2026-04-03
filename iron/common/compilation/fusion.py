@@ -5,16 +5,22 @@
 Temporal fusion of multiple MLIR modules into one module with multiple devices and a main runtime sequence that calls into them.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import importlib.util
+from functools import partial
 from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
 import ml_dtypes
 
+from typing import Any
+
 from . import (
     CompilationArtifact,
+    CompilationArtifactGraph,
     CompilationRule,
     CompilationCommand,
     PythonCallbackCompilationCommand,
@@ -29,13 +35,13 @@ from . import (
 class FusedMLIRSource(CompilationArtifact):
     def __init__(
         self,
-        filename,
-        operator_mlir_map,
-        runlist,
-        subbuffer_layout,
-        buffer_sizes,
-        slice_info=None,
-    ):
+        filename: str,
+        operator_mlir_map: dict[str, PythonGeneratedMLIRArtifact],
+        runlist: list[tuple[str, ...]],
+        subbuffer_layout: dict[str, tuple[str, int, int]],
+        buffer_sizes: tuple[int, int, int],
+        slice_info: dict[str, tuple[str, int, int]] | None = None,
+    ) -> None:
         dependencies = list(operator_mlir_map.values())
         super().__init__(filename, dependencies)
         self.operator_mlir_map = operator_mlir_map
@@ -49,7 +55,7 @@ class FusedMLIRSource(CompilationArtifact):
 # ##########################################################################
 
 
-def extract_runtime_sequence_arg_types(dev_op):
+def extract_runtime_sequence_arg_types(dev_op: Any) -> list[Any]:
     """MLIR helper: Extract argument types from a device operation's runtime sequence."""
     for nested_op in dev_op.body_region.blocks[0].operations:
         op_name = nested_op.operation.name
@@ -65,14 +71,17 @@ def extract_runtime_sequence_arg_types(dev_op):
     raise RuntimeError("Could not find runtime sequence in device operation")
 
 
-def get_child_mlir_module(mlir_artifact):
+def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
     """Extract MLIR module from a PythonGeneratedMLIRArtifact.
 
     Uses the artifact's DesignGenerator to dynamically import the design
     module and call the callback, returning the raw (non-stringified) MLIR
     module object for further inspection by the fusion pass.
     """
-    assert isinstance(mlir_artifact, PythonGeneratedMLIRArtifact)
+    if not isinstance(mlir_artifact, PythonGeneratedMLIRArtifact):
+        raise TypeError(
+            f"Expected PythonGeneratedMLIRArtifact, got {type(mlir_artifact).__name__}"
+        )
     gen = mlir_artifact.generator
     spec = importlib.util.spec_from_file_location(gen.source_path.name, gen.source_path)
     module = importlib.util.module_from_spec(spec)
@@ -81,7 +90,7 @@ def get_child_mlir_module(mlir_artifact):
     return callback_function(*gen.args, **gen.kwargs)
 
 
-def fuse_mlir(artifact):
+def fuse_mlir(artifact: FusedMLIRSource) -> None:
     """Fuse multiple MLIR modules by inlining their device operations and adding a new main device and runtime sequence that call into sequence of operations based on a runlist."""
 
     input_buffer_size, output_buffer_size, scratch_buffer_size = artifact.buffer_sizes
@@ -95,9 +104,11 @@ def fuse_mlir(artifact):
         device_ops = [
             op for op in mlir_module.body.operations if isinstance(op, aie.DeviceOp)
         ]
-        assert (
-            len(device_ops) == 1
-        ), f"Expected exactly one device operation in MLIR artifact for operator '{op_name}'"
+        if len(device_ops) != 1:
+            raise ValueError(
+                f"Expected exactly one device operation in MLIR artifact for operator '{op_name}', "
+                f"got {len(device_ops)}"
+            )
         device_op = device_ops[0]
         if device_ty is None:
             device_ty = device_op.device
@@ -229,14 +240,14 @@ def fuse_mlir(artifact):
 class FusePythonGeneratedMLIRCompilationRule(CompilationRule):
     """Compilation rule that fuses multiple MLIR modules into one."""
 
-    def matches(self, graph):
+    def matches(self, graph: CompilationArtifactGraph) -> bool:
         return any(graph.get_worklist(FusedMLIRSource))
 
-    def compile(self, graph):
-        commands = []
+    def compile(self, graph: CompilationArtifactGraph) -> list[CompilationCommand]:
+        commands: list[CompilationCommand] = []
         worklist = graph.get_worklist(FusedMLIRSource)
         for artifact in worklist:
-            callback = lambda artifact=artifact: fuse_mlir(artifact)
+            callback = partial(fuse_mlir, artifact)
             commands.append(PythonCallbackCompilationCommand(callback))
             new_artifact = SourceArtifact(artifact.filename)
             new_artifact.available = True

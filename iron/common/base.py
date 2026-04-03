@@ -3,17 +3,18 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import dataclasses
-from ml_dtypes import bfloat16
-from typing import Any, Callable, ClassVar, Dict
-
 import inspect
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable, ClassVar
 
 import numpy as np
-from aie.utils.npukernel import NPUKernel
+from ml_dtypes import bfloat16
 import aie.utils as aie_utils
+from aie.utils.npukernel import NPUKernel
+
 from . import compilation as comp
 from .context import AIEContext
 from .utils import float_to_name
@@ -29,6 +30,8 @@ from .compilation import (
 
 class AIEOperatorBase(ABC):
     """Base class for AIE-accelerated operations"""
+
+    _default_context: ClassVar[AIEContext | None] = None
 
     def __init__(self, context: AIEContext | None = None) -> None:
         self.artifacts = comp.CompilationArtifactGraph()
@@ -59,7 +62,7 @@ class AIEOperatorBase(ABC):
     @classmethod
     def get_default_context(cls) -> AIEContext:
         """Return the process-wide default AIEContext, creating it on first call (lazy singleton)."""
-        if not hasattr(AIEOperatorBase, "_default_context"):
+        if AIEOperatorBase._default_context is None:
             AIEOperatorBase._default_context = AIEContext()
         return AIEOperatorBase._default_context
 
@@ -98,7 +101,7 @@ def _serialize_param(v: object) -> str:
 class MLIROperator(AIEOperatorBase):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
+    _name_aliases: ClassVar[dict[str, str]] = {
         "num_aie_columns": "c",
         "num_channels": "ch",
         "tile_size": "t",
@@ -108,19 +111,18 @@ class MLIROperator(AIEOperatorBase):
         "cols": "n",
     }
 
-    def __init__(self, *args, **kwargs):
-        AIEOperatorBase.__init__(self, *args, **kwargs)
-
     @property
     def operator_dir(self) -> Path:
         return Path(inspect.getfile(type(self))).parent
 
     @property
-    def _params(self) -> dict[str, Any] | None:
-        return None
-
-    @property
     def name(self) -> str:
+        """Unique name for this operator instance, derived from its parameters.
+
+        For @dataclass subclasses the name is automatically constructed from the
+        dataclass fields using ``_name_aliases`` to shorten field names.
+        Non-dataclass subclasses must override this property directly.
+        """
         if dataclasses.is_dataclass(self):
             aliases = type(self)._name_aliases
             parts = (
@@ -129,16 +131,9 @@ class MLIROperator(AIEOperatorBase):
                 if f.repr and getattr(self, f.name) is not None
             )
             base = type(self).__name__ + "_" + "_".join(parts)
-        elif self._params is not None:
-            parts = (
-                f"{k}{_serialize_param(v)}"
-                for k, v in self._params.items()
-                if v is not None
-            )
-            base = type(self).__name__ + "_" + "_".join(parts)
         else:
             raise NotImplementedError(
-                f"{type(self).__name__} must be a @dataclass or define a _params property"
+                f"{type(self).__name__} must be a @dataclass or override the name property"
             )
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
@@ -184,20 +179,15 @@ class MLIROperator(AIEOperatorBase):
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def get_callable(self) -> Callable[..., Any]:
-        handle: list = [None]  # use list for nonlocal mutation in Python 3
+        npu_kernel = NPUKernel(
+            xclbin_path=self.xclbin_artifact.filename,
+            kernel_name=self.xclbin_artifact.kernel_name,
+            insts_path=self.insts_artifact.filename,
+        )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
 
         def call(*args):
-            if handle[0] is None:
-                # compile() is idempotent: populate_availability_from_filesystem()
-                # checks disk and skips already-compiled artifacts
-                self.compile()
-                npu_kernel = NPUKernel(
-                    xclbin_path=self.xclbin_artifact.filename,
-                    kernel_name=self.xclbin_artifact.kernel_name,
-                    insts_path=self.insts_artifact.filename,
-                )
-                handle[0] = aie_utils.DefaultNPURuntime.load(npu_kernel)
-            return aie_utils.DefaultNPURuntime.run(handle[0], list(args))
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
 
         return call
 
@@ -209,19 +199,16 @@ class CompositeOperator(AIEOperatorBase):
         super().__init__(context)
 
 
+@dataclass(frozen=True)
 class AIERuntimeArgSpec:
     """Specification for a single runtime argument of an AIE operator."""
 
-    def __init__(
-        self, direction: str, shape: tuple[int, ...], dtype: np.dtype = bfloat16
-    ) -> None:
-        self.shape = shape
-        self.dtype = dtype
-        if direction not in {"in", "out", "inout"}:
-            raise ValueError(
-                f"Invalid direction {direction!r}: must be one of 'in', 'out', 'inout'"
-            )
-        self.direction = direction
+    direction: str
+    shape: tuple[int, ...]
+    dtype: np.dtype = dataclasses.field(default_factory=lambda: bfloat16)
 
-    def __repr__(self) -> str:
-        return f"AIERuntimeArgSpec(direction={self.direction}, shape={self.shape}, dtype={self.dtype})"
+    def __post_init__(self) -> None:
+        if self.direction not in {"in", "out", "inout"}:
+            raise ValueError(
+                f"Invalid direction {self.direction!r}: must be one of 'in', 'out', 'inout'"
+            )

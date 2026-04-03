@@ -5,9 +5,19 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import aie.utils as aie_utils
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+torch_dtype_map = {
+    "bf16": torch.bfloat16,
+    "f32": torch.float32,
+    "i8": torch.int8,
+    "ui8": torch.uint8,
+    "i16": torch.int16,
+    "i32": torch.int32,
+}
 
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 
@@ -62,8 +72,17 @@ def verify_buffer(
         List of error indices. Empty if verification passes.
     """
     errors = []
-    expected_np = reference.reshape((-1,))
-    output = output.reshape((-1,))
+
+    def _to_numpy(x):
+        if isinstance(x, torch.Tensor):
+            t = x.detach().cpu().contiguous()
+            if t.dtype == torch.bfloat16:
+                return t.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+            return t.numpy()
+        return np.asarray(x)
+
+    expected_np = _to_numpy(reference).reshape((-1,))
+    output = _to_numpy(output).reshape((-1,))
 
     if len(output) < len(expected_np):
         # Allow larger buffers - binning may have allocated more space than needed
@@ -72,13 +91,21 @@ def verify_buffer(
         )
         errors.extend(i for i in range(abs(len(output) - len(expected_np))))
     compare_len = min(len(output), len(expected_np))
-    for i in range(compare_len):
-        if not nearly_equal(float(output[i]), float(expected_np[i]), rel_tol, abs_tol):
-            errors.append(i)
-            if len(errors) <= 10:
-                print(
-                    f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
-                )
+    diff = np.abs(
+        output[:compare_len].astype(float) - expected_np[:compare_len].astype(float)
+    )
+    norm = np.minimum(
+        np.abs(output[:compare_len].astype(float))
+        + np.abs(expected_np[:compare_len].astype(float)),
+        np.finfo(np.float32).max,
+    )
+    mask = diff >= np.maximum(abs_tol, rel_tol * norm)
+    error_indices = np.where(mask)[0].tolist()
+    for i in error_indices[:10]:
+        print(
+            f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
+        )
+    errors.extend(error_indices)
 
     # Check if error rate is acceptable
     if max_error_rate > 0.0 and len(errors) > 0:
@@ -204,3 +231,47 @@ def run_test(
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
 
     return errors, latency_us, bandwidth_gbps
+
+
+def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choices):
+    """Generate parameter tuples for channeled unary operator tests.
+
+    Yields:
+        (input_length, num_aie_columns, num_channels, tile_size, is_extensive)
+    """
+    max_aie_columns = aie_utils.get_current_device().cols
+    for input_length in input_lengths:
+        for num_aie_columns in range(1, max_aie_columns + 1):
+            for num_channels in num_channels_choices:
+                total_cores = num_aie_columns * num_channels
+                tile_size = input_length // total_cores
+                if tile_size > tile_size_cap:
+                    tile_size = tile_size_cap
+                if tile_size * total_cores != input_length:
+                    continue
+                is_extensive = input_length != 2048
+                yield (
+                    input_length,
+                    num_aie_columns,
+                    num_channels,
+                    tile_size,
+                    is_extensive,
+                )
+
+
+def make_binary_elementwise_params(input_lengths, tile_size_cap=None):
+    """Generate parameter tuples for binary elementwise operator tests.
+
+    Yields:
+        (input_length, num_aie_columns, tile_size, is_extensive)
+    """
+    max_aie_columns = aie_utils.get_current_device().cols
+    for input_length in input_lengths:
+        for num_aie_columns in range(1, max_aie_columns + 1):
+            tile_size = input_length // num_aie_columns
+            if tile_size_cap is not None and tile_size > tile_size_cap:
+                tile_size = tile_size_cap
+            if tile_size * num_aie_columns != input_length:
+                continue
+            is_extensive = input_length != 2048
+            yield (input_length, num_aie_columns, tile_size, is_extensive)

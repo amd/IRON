@@ -1,15 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "softmax.cc"
-
-// mha.cc is a single compilation unit that includes mm.cc and softmax.cc via
-// #include (there is no separate link step).  The col-major B variants are
-// compiled by passing -DB_COL_MAJ to the compiler; this flag is set in the
-// PeanoCompilationRule configuration for this file.
-// mm.cc provides: matmul_bf16_bf16, matmul_scalar_bf16_bf16, zero_bf16, etc.
-#include "mm.cc"
-
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,40 +11,11 @@
 
 #define ROUNDING_MODE aie::rounding_mode::conv_even
 
-// Row-major variants needed by matmul_PV.  Because there is no separate link
-// step, all kernel symbols must be defined in this single translation unit.
-// mm.cc's templates are already available (included above); we instantiate
-// them here with b_row_maj=true and expose the results as extern "C" symbols.
 extern "C" {
-
-void zero_bf16_rowmaj(bfloat16 *c_out)
-{
-    zero_vectorized<bfloat16, DIM_M, DIM_N>(c_out);
-}
-
-void matmul_bf16_bf16_rowmaj(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out)
-{
-    ::aie::set_rounding(aie::rounding_mode::conv_even);
-    // Explicitly instantiate with b_row_maj=true (row-major B), c_row_maj=true.
-    constexpr unsigned r = 8, s = 8, t = 8;
-    static_assert(DIM_M % (2 * r) == 0);
-    static_assert(DIM_K % s == 0);
-    static_assert(DIM_N % (2 * t) == 0);
-    matmul_vectorized_2x2_mmul<bfloat16,
-                               bfloat16,
-                               (DIM_M / r),
-                               (DIM_K / s),
-                               (DIM_N / t),
-                               r,
-                               s,
-                               t,
-                               /*b_row_maj=*/true,
-                               /*c_row_maj=*/true>(a_in, b_in, c_out);
-}
-
-} // extern "C" (row-major wrappers)
-
-extern "C" {
+void matmul_scalar_bf16_bf16(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
+void matmul_bf16_bf16(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
+void matmul_bf16_bf16_rowmaj(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out);
+void zero_bf16(bfloat16 *buffer);
 void partial_softmax_bf16(bfloat16 *input,
                           bfloat16 *output,
                           bfloat16 *scale_buffer,

@@ -4,7 +4,7 @@
 
 import pytest
 import aie.utils as aie_utils
-from iron.operators.rope.op import Rope
+from iron.operators.rope.op import RoPE
 from iron.operators.rope.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
@@ -65,7 +65,7 @@ def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
         rows=rows, cols=cols, context_len=angle_rows, method_type=method_type
     )
 
-    operator = Rope(
+    operator = RoPE(
         rows=rows,
         cols=cols,
         num_aie_columns=aie_columns,

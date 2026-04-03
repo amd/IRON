@@ -82,7 +82,7 @@ class MHA(MLIROperator):
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
 
-        mm_defines_rowmaj = [
+        mm_defines = [
             "-Dbf16_bf16_ONLY",
             f"-DDIM_M={self.B_q}",
             f"-DDIM_K={self.d}",
@@ -90,20 +90,33 @@ class MHA(MLIROperator):
             "-DROUND_CONV_EVEN",
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
         ]
-        mm_defines_colmaj = mm_defines_rowmaj + [
-            "-DB_COL_MAJ",
-        ]
-        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
-        # directly, so everything is compiled into a single mha.o translation unit.
+        # mm.cc is compiled twice: once col-major (for QK) and once row-major
+        # (for PV). The row-major symbols are renamed via llvm-objcopy to avoid
+        # collisions when both .o files are linked into the kernel archive.
         return [
             KernelObjectArtifact(
-                "mha.o",
-                extra_flags=mm_defines_colmaj,
-                dependencies=[
-                    SourceArtifact(mha_source),
-                    SourceArtifact(mm_source),
-                    SourceArtifact(softmax_source),
-                ],
+                "mha_mm.o",
+                extra_flags=mm_defines + ["-DB_COL_MAJ"],
+                dependencies=[SourceArtifact(mm_source)],
+            ),
+            KernelObjectArtifact(
+                "mha_mm_rowmaj.o",
+                extra_flags=mm_defines,
+                dependencies=[SourceArtifact(mm_source)],
+                rename_symbols={
+                    "matmul_bf16_bf16": "matmul_bf16_bf16_rowmaj",
+                    "matmul_scalar_bf16_bf16": "matmul_scalar_bf16_bf16_rowmaj",
+                    "zero_bf16": "zero_bf16_rowmaj",
+                    "zero_scalar_bf16": "zero_scalar_bf16_rowmaj",
+                },
+            ),
+            KernelObjectArtifact(
+                "mha_softmax.o",
+                dependencies=[SourceArtifact(softmax_source)],
+            ),
+            KernelObjectArtifact(
+                "mha_mha.o",
+                dependencies=[SourceArtifact(mha_source)],
             ),
             KernelObjectArtifact(
                 "mha_passThrough.o",

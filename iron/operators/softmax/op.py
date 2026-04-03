@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import aie.utils as aie_utils
 
 from iron.common.device_utils import get_kernel_dir
+from iron.common.operator_bases import lut_based_ops_artifacts
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
@@ -78,21 +78,7 @@ class Softmax(MLIROperator):
                 ],
             ),
         ]
-        if kernel_dir == "aie2":
-            mlir_aie_dir = Path(aie_utils.config.root_path())
-            artifacts.append(
-                KernelObjectArtifact(
-                    "lut_based_ops.o",
-                    dependencies=[
-                        SourceArtifact(
-                            mlir_aie_dir
-                            / "aie_runtime_lib"
-                            / "AIE2"
-                            / "lut_based_ops.cpp"
-                        )
-                    ],
-                )
-            )
+        artifacts.extend(lut_based_ops_artifacts(kernel_dir))
         return artifacts
 
     def get_arg_spec(self):

@@ -1,69 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import ClassVar
 
 from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    KernelObjectArtifact,
-    SourceArtifact,
+    BinaryElementwiseOperator,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-import aie.utils as aie_utils
 
 
 @dataclass
-class AXPY(MLIROperator):
+class AXPY(BinaryElementwiseOperator):
     """AIE-accelerated aX + Y operator"""
 
-    size: int
-    num_aie_columns: int
-    tile_size: int
     scalar_factor: float = 3.0
-    context: object = field(default=None, repr=False)
 
-    def __post_init__(self):
-        max_multiple = self.num_aie_columns * self.tile_size
-        if self.size % max_multiple != 0:
-            raise ValueError(
-                f"size ({self.size}) must be a multiple of num_aie_columns * tile_size ({max_multiple})"
-            )
-        MLIROperator.__init__(self, context=self.context)
+    kernel_name: ClassVar[str] = "axpy"
+    kernel_fn_name: ClassVar[str] = "saxpy"
+    kernel_subdir: ClassVar[str] = "generic"
+    callback_fn: ClassVar[str] = "my_axpy"
 
-    def get_mlir_artifact(self):
+    def _mlir_callback_args(self):
+        return super()._mlir_callback_args() + [self.scalar_factor]
+
+    def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir / "design.py",
-                "my_axpy",
-                (
-                    aie_utils.get_current_device(),
-                    self.size,
-                    self.num_aie_columns,
-                    self.tile_size,
-                    0,
-                    self.scalar_factor,
-                ),
+                self.callback_fn,
+                tuple(self._mlir_callback_args()),
             ),
         )
-
-    def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                "axpy.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "axpy.cc"
-                    )
-                ],
-            ),
-        ]
-
-    def get_arg_spec(self):
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),  # x
-            AIERuntimeArgSpec("in", (self.size,)),  # y
-            AIERuntimeArgSpec("out", (self.size,)),  # output
-        ]

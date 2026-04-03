@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import aie.utils as aie_utils
 
 from .base import MLIROperator, AIERuntimeArgSpec
+from .context import AIEContext
 from .compilation import (
     KernelObjectArtifact,
     SourceArtifact,
@@ -18,6 +19,23 @@ from .compilation import (
 )
 from .device_utils import get_kernel_dir
 from .utils import get_shim_dma_limit
+
+
+def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
+    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
+    if kernel_dir != "aie2":
+        return []
+    mlir_aie_dir = Path(aie_utils.config.root_path())
+    return [
+        KernelObjectArtifact(
+            "lut_based_ops.o",
+            dependencies=[
+                SourceArtifact(
+                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
+                )
+            ],
+        )
+    ]
 
 
 @dataclass
@@ -45,11 +63,13 @@ class ChanneledUnaryOperator(MLIROperator):
     num_aie_columns: int
     num_channels: int
     tile_size: int
-    context: object = field(default=None, repr=False)
+    context: AIEContext | None = field(default=None, repr=False)
 
     kernel_name: ClassVar[str]
+    kernel_fn_name: ClassVar[str]
     callback_fn: ClassVar[str]
     needs_lut_ops: ClassVar[bool] = False
+    tile_cap: ClassVar[int] = 4096
 
     def __post_init__(self) -> None:
         max_multiple = self.num_aie_columns * self.tile_size
@@ -66,7 +86,7 @@ class ChanneledUnaryOperator(MLIROperator):
                 f"num_aie_columns * num_channels ({total_shimdma_channels}) "
                 f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
             )
-        MLIROperator.__init__(self, context=self.context)
+        super().__init__(context=self.context)
 
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
         return [
@@ -90,12 +110,17 @@ class ChanneledUnaryOperator(MLIROperator):
         ]
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
+        callback_args = self._mlir_callback_args() + [
+            self.kernel_fn_name,
+            f"{self.kernel_name}.o",
+            self.tile_cap,
+        ]
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
-                self.operator_dir / "design.py",
-                self.callback_fn,
-                tuple(self._mlir_callback_args()),
+                self.operator_dir.parent / "channeled_unary_design.py",
+                "channeled_unary_design",
+                tuple(callback_args),
             ),
         )
 
@@ -115,21 +140,8 @@ class ChanneledUnaryOperator(MLIROperator):
                 ],
             )
         ]
-        if self.needs_lut_ops and kernel_dir == "aie2":
-            mlir_aie_dir = Path(aie_utils.config.root_path())
-            artifacts.append(
-                KernelObjectArtifact(
-                    "lut_based_ops.o",
-                    dependencies=[
-                        SourceArtifact(
-                            mlir_aie_dir
-                            / "aie_runtime_lib"
-                            / "AIE2"
-                            / "lut_based_ops.cpp"
-                        )
-                    ],
-                )
-            )
+        if self.needs_lut_ops:
+            artifacts.extend(lut_based_ops_artifacts(kernel_dir))
         return artifacts
 
 
@@ -153,14 +165,18 @@ class BinaryElementwiseOperator(MLIROperator):
     size: int
     tile_size: int
     num_aie_columns: int = 8
-    context: object = field(default=None, repr=False)
+    context: AIEContext | None = field(default=None, repr=False)
 
     kernel_name: ClassVar[str]
+    kernel_fn_name: ClassVar[str]
     kernel_subdir: ClassVar[str]
     callback_fn: ClassVar[str]
-    _name_aliases: ClassVar[Dict[str, str]] = {
+    # Override parent's "c" alias with "col" so binary-elementwise operator names
+    # are unambiguous when num_aie_columns and num_channels both appear in the
+    # name (the parent ChanneledUnaryOperator uses "c" for num_aie_columns).
+    _name_aliases: ClassVar[dict[str, str]] = {
         **MLIROperator._name_aliases,
-        "num_aie_columns": "col",
+        "num_aie_columns": "col",  # intentionally overrides parent's "c" alias
     }
 
     def __post_init__(self) -> None:
@@ -178,7 +194,7 @@ class BinaryElementwiseOperator(MLIROperator):
                 f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit "
                 f"of {shim_dma_limit // 2} columns for this device"
             )
-        MLIROperator.__init__(self, context=self.context)
+        super().__init__(context=self.context)
 
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
         return [
@@ -188,6 +204,11 @@ class BinaryElementwiseOperator(MLIROperator):
         ]
 
     def _mlir_callback_args(self) -> list[Any]:
+        """Return the callback_args list for PythonGeneratedMLIRArtifact.
+
+        Subclasses with extra parameters (e.g. scalar_factor) should
+        override this method.
+        """
         return [
             aie_utils.get_current_device(),
             self.size,
@@ -197,12 +218,16 @@ class BinaryElementwiseOperator(MLIROperator):
         ]
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
+        callback_args = self._mlir_callback_args() + [
+            self.kernel_fn_name,
+            f"{self.kernel_name}.o",
+        ]
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
-                self.operator_dir / "design.py",
-                self.callback_fn,
-                tuple(self._mlir_callback_args()),
+                self.operator_dir.parent / "binary_elementwise_design.py",
+                "binary_elementwise_design",
+                tuple(callback_args),
             ),
         )
 
