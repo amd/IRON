@@ -17,7 +17,6 @@ from iron.common import (
     DesignGenerator,
 )
 import aie.utils as aie_utils
-from iron.common.device_utils import get_kernel_dir
 
 
 @dataclass
@@ -53,7 +52,7 @@ class MHA(MLIROperator):
                 "fused_mha",
                 (),
                 {
-                    "dev": aie_utils.get_current_device(),
+                    "dev": aie_utils.DefaultNPURuntime.device(),
                     "heads": self.num_heads,
                     "S_q": self.seq_len,
                     "S_kv": self.seq_len,
@@ -70,19 +69,16 @@ class MHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        kernel_dir = get_kernel_dir()
-        mm_source = str(self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc")
+        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
         softmax_source = str(
-            self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
+            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
         )
-        mha_source = str(
-            self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc"
-        )  # TODO: MHA kernel only exists in aie2p
+        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
         passthrough_source = str(
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
 
-        mm_defines = [
+        mm_defines_rowmaj = [
             "-Dbf16_bf16_ONLY",
             f"-DDIM_M={self.B_q}",
             f"-DDIM_K={self.d}",
@@ -90,33 +86,20 @@ class MHA(MLIROperator):
             "-DROUND_CONV_EVEN",
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
         ]
-        # mm.cc is compiled twice: once col-major (for QK) and once row-major
-        # (for PV). The row-major symbols are renamed via llvm-objcopy to avoid
-        # collisions when both .o files are linked into the kernel archive.
+        mm_defines_colmaj = mm_defines_rowmaj + [
+            "-DB_COL_MAJ",
+        ]
+        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
+        # directly, so everything is compiled into a single mha.o translation unit.
         return [
             KernelObjectArtifact(
-                "mha_mm.o",
-                extra_flags=mm_defines + ["-DB_COL_MAJ"],
-                dependencies=[SourceArtifact(mm_source)],
-            ),
-            KernelObjectArtifact(
-                "mha_mm_rowmaj.o",
-                extra_flags=mm_defines,
-                dependencies=[SourceArtifact(mm_source)],
-                rename_symbols={
-                    "matmul_bf16_bf16": "matmul_bf16_bf16_rowmaj",
-                    "matmul_scalar_bf16_bf16": "matmul_scalar_bf16_bf16_rowmaj",
-                    "zero_bf16": "zero_bf16_rowmaj",
-                    "zero_scalar_bf16": "zero_scalar_bf16_rowmaj",
-                },
-            ),
-            KernelObjectArtifact(
-                "mha_softmax.o",
-                dependencies=[SourceArtifact(softmax_source)],
-            ),
-            KernelObjectArtifact(
-                "mha_mha.o",
-                dependencies=[SourceArtifact(mha_source)],
+                "mha.o",
+                extra_flags=mm_defines_colmaj,
+                dependencies=[
+                    SourceArtifact(mha_source),
+                    SourceArtifact(mm_source),
+                    SourceArtifact(softmax_source),
+                ],
             ),
             KernelObjectArtifact(
                 "mha_passThrough.o",
