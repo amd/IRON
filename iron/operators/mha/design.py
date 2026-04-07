@@ -1,9 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import sys
 import math
 import copy
+from pathlib import Path
 
 from ml_dtypes import bfloat16
 import numpy as np
@@ -18,7 +20,7 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1Col1, NPU2, Tile
+from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
@@ -30,6 +32,9 @@ dtype_map = {
 
 microkernel_mac_dim_map = {
     "npu": {
+        "bf16": (4, 8, 4),
+    },
+    "npu1": {
         "bf16": (4, 8, 4),
     },
     "npu2": {
@@ -66,7 +71,7 @@ def main():
         "--output-file-path",
         "-o",
         type=str,
-        default=base_dir / "build" / f"my_mha.mlir",
+        default="my_mha.mlir",
         help="Output file path for the generated MLIR module",
     )
     argparser.add_argument(
@@ -74,8 +79,10 @@ def main():
     )
 
     args = argparser.parse_args()
+    dev = NPU2()
 
     maybe_module = fused_mha(
+        dev=dev,
         heads=args.heads,
         S_q=args.S_q,
         S_kv=args.S_kv,
@@ -99,6 +106,7 @@ def main():
 
 
 def fused_mha(
+    dev,
     heads: int,
     S_q: int,
     S_kv: int,
@@ -110,14 +118,12 @@ def fused_mha(
     emulate_bf16_mmul_with_bfp16: bool,
     trace_size: int = 0,
     verbose: bool = False,
-    kernel_archive=None,
 ):
 
     of_depth = 2
     vectorized = True
-    enable_tracing = True if trace_size > 0 else False
+    enable_tracing = trace_size > 0
     dtype_str = "bf16"
-    dev = "npu2"
 
     if number_of_pipelines > 6:
         number_of_pipelines_join_distribute = number_of_pipelines // 2
@@ -136,14 +142,17 @@ def fused_mha(
     num_kv_blocks = S_kv_pad // B_kv
     num_q_block_per_pipeline = num_q_blocks // number_of_pipelines
 
-    # VJUNG: When the number of KV head is 0 we do a regular MHA, otherwise we do GQA.
+    # VJUNG: When the number of KV heads is 0, treat it as regular MHA (num_KV_heads == heads).
+    # Otherwise, num_KV_heads < heads indicates GQA.
     if num_KV_heads == 0:
         num_KV_heads = heads
 
-    emulate_bf16_mmul_with_bfp16 = True
+    assert (
+        emulate_bf16_mmul_with_bfp16
+    ), "Only emulate_bf16_mmul_with_bfp16=True is supported"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map[dev][dtype_str]
+    mac_dims = microkernel_mac_dim_map["npu2"][dtype_str]
     r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
 
     if verbose:
@@ -163,7 +172,7 @@ def fused_mha(
     ), "Number of KV heads must be less than or equal to number of heads"
     assert (
         heads % num_KV_heads == 0
-    ), f"Number of KV heads ({num_KV_heads}) must be divisible by number of heads ({heads})"
+    ), f"Number of heads ({heads}) must be divisible by number of KV heads ({num_KV_heads})"
 
     assert B_q % r == 0, f"B_q must be divisible by r ({B_q} % {r} != 0)"
     assert B_kv % t == 0, f"B_kv must be divisible by t ({B_kv} % {t} != 0)"
@@ -174,7 +183,9 @@ def fused_mha(
 
     dtype = dtype_map[dtype_str]
 
-    inv_scale = (1 / np.sqrt(d)) * 1.4453125
+    inv_scale = (
+        1 / np.sqrt(d)
+    ) * 1.4453125  # 1.4453125 ≈ log2(e), converts softmax base
 
     # Tensors living in DRAM
     Q_ty = np.ndarray[
@@ -201,17 +212,17 @@ def fused_mha(
 
     # AIE kernel declarations
     func_type = "" if vectorized else "_scalar"
-    bin_name = kernel_archive if kernel_archive else "mha_kernels.a"
+    zero_kernel = Kernel(f"zero_{dtype_str}", "mha.o", [qk_ty])
 
-    zero_kernel = Kernel(f"zero_{dtype_str}", bin_name, [qk_ty])
+    memcopy_kernel_scale = Kernel(
+        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+    )
 
-    memcopy_kernel_scale = Kernel(f"passThroughLine", bin_name, [s_ty, s_ty, np.int32])
-
-    scale_buffer_init_kernel = Kernel("init_scale_buffer", bin_name, [s_ty, np.int32])
+    scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
 
     partial_softmax_kernel = Kernel(
         "partial_softmax",
-        bin_name,
+        "mha.o",
         [
             qk_ty,
             qk_ty,
@@ -227,13 +238,13 @@ def fused_mha(
 
     matmul_QK = Kernel(
         f"matmul_bf16_bf16_wrapper{func_type}",
-        bin_name,
+        "mha.o",
         [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
     matmul_PV = Kernel(
         "matmul_PV",
-        bin_name,
+        "mha.o",
         [
             qk_ty,
             k_ty,
@@ -247,7 +258,7 @@ def fused_mha(
 
     rescale_O = Kernel(
         "rescale_O",
-        bin_name,
+        "mha.o",
         [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
@@ -877,10 +888,7 @@ def fused_mha(
                 rt.finish_task_group(tg)
 
     # Create the program from the device type and runtime
-    if dev == "npu":
-        dev_ty = NPU1Col1()
-    else:
-        dev_ty = NPU2()
+    dev_ty = NPU2()
     my_program = Program(dev_ty, rt)
 
     # Place components (assign them resources on the device) and generate an MLIR module

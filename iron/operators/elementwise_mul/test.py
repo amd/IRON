@@ -1,47 +1,21 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
 
-
-from iron.operators.elementwise_mul.op import AIEElementwiseMul
+from iron.operators.elementwise_mul.op import ElementwiseMul
 from iron.operators.elementwise_mul.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, make_binary_elementwise_params
 
 
 def get_params():
-    max_aie_columns = 8
-    num_channels = 2
-    input_lengths = [1024, 2048, 4096, 8192]
-
-    params = []
-    for input_length in input_lengths:
-        for num_aie_columns in range(1, max_aie_columns + 1):
-            tile_size = input_length // num_aie_columns
-            if tile_size > 4096:
-                tile_size = 4096
-            if tile_size * num_aie_columns != input_length:
-                continue
-
-            name = f"eltwise_mul_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-
-            is_regular = input_length == 2048
-            marks = [] if is_regular else [pytest.mark.extensive]
-
-            params.append(
-                pytest.param(
-                    input_length,
-                    num_aie_columns,
-                    num_channels,
-                    tile_size,
-                    id=name,
-                    marks=marks,
-                )
-            )
-    return params
+    return [
+        pytest.param(il, nac, ts, marks=[] if not ext else [pytest.mark.extensive])
+        for il, nac, ts, ext in make_binary_elementwise_params(
+            [1024, 2048, 4096, 8192], 4096
+        )
+    ]
 
 
 @pytest.mark.metrics(
@@ -49,15 +23,13 @@ def get_params():
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size",
+    "input_length,num_aie_columns,tile_size",
     get_params(),
 )
-def test_elementwise_mul(
-    input_length, num_aie_columns, num_channels, tile_size, aie_context
-):
+def test_elementwise_mul(input_length, num_aie_columns, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEElementwiseMul(
+    operator = ElementwiseMul(
         size=input_length,
         tile_size=tile_size,
         num_aie_columns=num_aie_columns,

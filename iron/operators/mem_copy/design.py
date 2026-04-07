@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import List
 
 import numpy as np
 import math
@@ -131,8 +131,8 @@ def create_partial_workload_config(
         padding_needed = line_size - partial_tile_size
         highest_common_factor_pad = math.gcd(partial_tile_size, padding_needed)
         for tap_repeat_exp in reversed(
-            range(0, math.ceil(math.log2(TAP_REPEAT_MAX) + 1))
-        ):  # +1 to include the end of range
+            range(0, math.ceil(math.log2(TAP_REPEAT_MAX)) + 1)
+        ):
             padding_size = highest_common_factor_pad * 2**tap_repeat_exp
             padding_tap_repeat = math.floor(padding_needed / padding_size)
             config.padding_tap_repeats.append(padding_tap_repeat)
@@ -171,7 +171,6 @@ def my_mem_copy(
     bypass,
     tile_size,
     trace_size,
-    kernel_archive=None,
 ):
     # --------------------------------------------------------------------------
     # Configuration
@@ -213,12 +212,15 @@ def my_mem_copy(
         )
 
         # Task for the core to perform
-        def core_fn(of_in, of_out, mem_copyLine):
-            elemOut = of_out.acquire(1)
-            elemIn = of_in.acquire(1)
-            mem_copyLine(elemIn, elemOut, line_size)
-            of_in.release(1)
-            of_out.release(1)
+        num_lines = tile_size // line_size
+
+        def core_fn(of_in, of_out, mem_copy_line):
+            for _ in range_(num_lines):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                mem_copy_line(elem_in, elem_out, line_size)
+                of_in.release(1)
+                of_out.release(1)
 
         # Create a worker to perform the task
         my_workers = [
@@ -299,14 +301,14 @@ def my_mem_copy(
                             ofh = of_outs[objfifo_idx + j].cons()
                             ofh.endpoint = RuntimeEndpoint(AnyShimTile)
                             rt._fifos.add(ofh)
-                    objfifo_idx = objfifo_idx + partial_config.num_cores_with_no_tiles
+                    objfifo_idx += partial_config.num_cores_with_no_tiles
                 elif (
                     objfifo_idx == num_cores - 1
                     and partial_config.partial_tap is not None
                 ):
                     # Fill the last objfifo with padding+real data
                     tg_out = rt.task_group()
-                    tg_count = 1
+                    tg_count = 0
                     for padding_tap_repeat, padding_tap in zip(
                         partial_config.padding_tap_repeats, partial_config.padding_taps
                     ):
@@ -328,7 +330,7 @@ def my_mem_copy(
                                     padding_tap,
                                     task_group=tg_out,
                                 )
-                            tg_count = tg_count + 1
+                            tg_count += 1
                     if tg_count % TASK_GROUP_SIZE == 0:
                         rt.fill(
                             of_ins[objfifo_idx].prod(),
@@ -346,7 +348,7 @@ def my_mem_copy(
                             partial_config.partial_tap,
                             task_group=tg_out,
                         )
-                    tg_count = tg_count + 1
+                    tg_count += 1
                     # Drain the last objfifo with padding+real data
                     for padding_tap_repeat, padding_tap in zip(
                         partial_config.padding_tap_repeats, partial_config.padding_taps
@@ -369,7 +371,7 @@ def my_mem_copy(
                                     padding_tap,
                                     task_group=tg_out,
                                 )
-                            tg_count = tg_count + 1
+                            tg_count += 1
                     rt.drain(
                         of_outs[objfifo_idx].cons(),
                         b_out,
@@ -378,7 +380,7 @@ def my_mem_copy(
                         task_group=tg_out,
                     )
                     rt.finish_task_group(tg_out)
-                    objfifo_idx = objfifo_idx + 1
+                    objfifo_idx += 1
                 else:
                     tg_out = rt.task_group()  # Use taskgroup for parallel drain tasks
                     for j in range(partial_config.num_cores_with_full_tiles):
@@ -399,7 +401,7 @@ def my_mem_copy(
                             task_group=tg_out,
                         )
                     rt.finish_task_group(tg_out)
-                    objfifo_idx = objfifo_idx + partial_config.num_cores_with_full_tiles
+                    objfifo_idx += partial_config.num_cores_with_full_tiles
 
     # Place components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer(num_channels))

@@ -1,74 +1,74 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
-from pathlib import Path
-from typing import Dict, List
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
-from iron.common.utils import torch_to_numpy, numpy_to_torch
+import aie.utils as aie_utils
 
 
-class AIEMHA(MLIROperator):
+@dataclass
+class MHA(MLIROperator):
+    """AIE-accelerated Multi-Head Attention operator"""
 
-    def __init__(
-        self,
-        num_heads: int,
-        seq_len: int,
-        d: int,
-        num_KV_heads: int,
-        num_of_pipelines: int = 1,
-        context=None,
-    ):
-        self.num_heads = num_heads
-        self.seq_len = seq_len
-        self.d = d
+    num_heads: int
+    seq_len: int
+    d: int
+    num_KV_heads: int
+    num_of_pipelines: int = field(default=1, repr=False)
+    context: object = field(default=None, repr=False)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_heads": "h",
+        "num_KV_heads": "kv",
+        "seq_len": "s",
+    }
+
+    def __post_init__(self):
         self.B_q = 64
         self.B_kv = 64
-        self.num_KV_heads = num_KV_heads
-        self.num_of_pipelines = num_of_pipelines
-        assert d == 64, "Only d=64 is supported in this version"
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        kv_heads = self.num_KV_heads if self.num_KV_heads > 0 else self.num_heads
-        return f"mha_{self.num_heads}h_{kv_heads}kv_{self.seq_len}s_{self.d}d"
+        if self.d != 64:
+            raise ValueError(f"Only d=64 is supported in this version, got d={self.d}")
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
-            callback_fn="fused_mha",
-            callback_kwargs={
-                "heads": self.num_heads,
-                "S_q": self.seq_len,
-                "S_kv": self.seq_len,
-                "d": self.d,
-                "B_q": self.B_q,
-                "B_kv": self.B_kv,
-                "num_KV_heads": self.num_KV_heads,
-                "number_of_pipelines": self.num_of_pipelines,
-                "emulate_bf16_mmul_with_bfp16": True,
-                "trace_size": 0,
-                "verbose": False,
-            },
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "fused_mha",
+                (),
+                {
+                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "heads": self.num_heads,
+                    "S_q": self.seq_len,
+                    "S_kv": self.seq_len,
+                    "d": self.d,
+                    "B_q": self.B_q,
+                    "B_kv": self.B_kv,
+                    "num_KV_heads": self.num_KV_heads,
+                    "number_of_pipelines": self.num_of_pipelines,
+                    "emulate_bf16_mmul_with_bfp16": True,
+                    "trace_size": 0,
+                    "verbose": False,
+                },
+            ),
         )
 
     def get_kernel_artifacts(self):
-        # Define source files
         mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
         softmax_source = str(
             self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
@@ -78,7 +78,6 @@ class AIEMHA(MLIROperator):
             self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
         )
 
-        # Compile mm.cc (col-major)
         mm_defines_rowmaj = [
             "-Dbf16_bf16_ONLY",
             f"-DDIM_M={self.B_q}",
@@ -90,31 +89,17 @@ class AIEMHA(MLIROperator):
         mm_defines_colmaj = mm_defines_rowmaj + [
             "-DB_COL_MAJ",
         ]
-        mm_rename_symbols = {
-            "matmul_bf16_bf16": "matmul_bf16_bf16_rowmaj",
-            "matmul_scalar_bf16_bf16": "matmul_scalar_bf16_bf16_rowmaj",
-            "zero_bf16": "zero_bf16_rowmaj",
-            "zero_scalar_bf16": "zero_scalar_bf16_rowmaj",
-        }
-
+        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
+        # directly, so everything is compiled into a single mha.o translation unit.
         return [
             KernelObjectArtifact(
-                f"mha_mm.o",
+                "mha.o",
                 extra_flags=mm_defines_colmaj,
-                dependencies=[SourceArtifact(mm_source)],
-            ),
-            KernelObjectArtifact(
-                f"mha_mm_rowmaj.o",
-                extra_flags=mm_defines_rowmaj,
-                dependencies=[SourceArtifact(mm_source)],
-                rename_symbols=mm_rename_symbols,
-            ),
-            KernelObjectArtifact(
-                "mha_softmax.o",
-                dependencies=[SourceArtifact(softmax_source)],
-            ),
-            KernelObjectArtifact(
-                "mha_mha.o", dependencies=[SourceArtifact(mha_source)]
+                dependencies=[
+                    SourceArtifact(mha_source),
+                    SourceArtifact(mm_source),
+                    SourceArtifact(softmax_source),
+                ],
             ),
             KernelObjectArtifact(
                 "mha_passThrough.o",
@@ -124,35 +109,7 @@ class AIEMHA(MLIROperator):
         ]
 
     def get_artifacts(self):
-        # Override to add --dynamic-objFifos flag
-        operator_name = self.get_operator_name()
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
-        xclbin_artifact = XclbinArtifact(
-            f"{operator_name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=["--dynamic-objFifos"],
-        )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-            extra_flags=["--dynamic-objFifos"],
-        )
-        return xclbin_artifact, insts_artifact
+        return super().get_artifacts(dynamic_obj_fifos=True)
 
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
@@ -195,8 +152,6 @@ class AIEMHA(MLIROperator):
         self, src: np.ndarray, H: int, S: int, S_pad: int, D: int
     ) -> np.ndarray:
         """Unpack padded tensor back to compact format."""
-        dst = src
         if S < S_pad:
-            dst = np.zeros((H, S, D), dtype=src.dtype)
-            dst = src[:H, :S, :D]
-        return dst
+            return src[:H, :S, :D]
+        return src

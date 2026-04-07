@@ -6,8 +6,10 @@ import ml_dtypes
 import pyxrt
 import ctypes
 from . import compilation as comp
-from .base import AIEOperatorBase, MLIROperator, AIEBuffer
-from .device_manager import AIEDeviceManager
+from .base import AIEOperatorBase, MLIROperator
+from .utils import XRTSubBuffer
+import aie.utils as aie_utils
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 # Fused Operator
 # ##########################################################################
@@ -19,10 +21,15 @@ class FusedMLIROperator(AIEOperatorBase):
     def __init__(
         self, name, runlist, input_args, output_args, buffer_sizes=None, *args, **kwargs
     ):
-        assert all(
+        if not all(
             isinstance(op, MLIROperator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
-        )
+        ):
+            raise TypeError(
+                "runlist entries must be (MLIROperator, *str) tuples; "
+                "each operator must be an MLIROperator and each buffer name must be a str"
+            )
+        super().__init__(*args, **kwargs)
         self.runlist = runlist
         self.name = name
         self.input_args = input_args
@@ -30,19 +37,19 @@ class FusedMLIROperator(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
-        self.kernel_archive = "kernels.a"
-        super().__init__(*args, **kwargs)
-
-    def get_operator_name(self):
-        return self.name
 
     def get_kernel_artifacts(self):
-        """Collect all kernel artifacts from child operators."""
+        """Collect all kernel artifacts from child operators.
+
+        Returns:
+            List of KernelObjectArtifact instances from all unique child operators,
+            with filenames and symbol prefixes disambiguated per operator index.
+        """
         kernel_artifacts = []
-        unique_operators = []
-        for op, *_ in self.runlist:
-            if op not in unique_operators:
-                unique_operators.append(op)
+        seen: dict[int, object] = {}
+        unique_operators = [
+            seen.setdefault(id(op), op) for op, *_ in self.runlist if id(op) not in seen
+        ]
         for idx, op in enumerate(unique_operators):
             objs = op.get_kernel_artifacts()
             for obj in objs:
@@ -52,36 +59,39 @@ class FusedMLIROperator(AIEOperatorBase):
         return kernel_artifacts
 
     def get_mlir_artifact(self):
+        """Build and return the fused MLIR source artifact.
+
+        Constructs the operator MLIR map and run-list, then wraps them in a
+        ``FusedMLIRSource`` artifact.  Buffer layout attributes
+        (``subbuffer_layout``, ``buffer_sizes``, ``slice_info``) must already
+        be set by ``set_up_artifacts()`` before this method is called.
+
+        Returns:
+            A ``FusedMLIRSource`` artifact ready for compilation.
+        """
         # Build operator_mlir_map: {op_name -> PythonGeneratedMLIRArtifact}
         operator_mlir_map = {}
-        mlir_dependencies = []
         comp_runlist = []
-        op_names = {}  # op -> op_name
+        op_names = {}  # id(op) -> op_name
 
-        unique_operators = []
-        for op, *_ in self.runlist:
-            if op not in unique_operators:
-                unique_operators.append(op)
+        seen2: dict[int, object] = {}
+        unique_operators = [
+            seen2.setdefault(id(op), op)
+            for op, *_ in self.runlist
+            if id(op) not in seen2
+        ]
         for idx, op in enumerate(unique_operators):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
-                # FIXME: currently hard-coding that the design will accept this argument as an input if it uses kernels
-                # Also not handling name collisions of kernels with the same name
-                mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-                mlir_artifact.callback_kwargs["func_prefix"] = f"op{idx}_"
+                mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
-            op_names[op] = op_name
+            op_names[id(op)] = op_name
             operator_mlir_map[op_name] = mlir_artifact
 
         for op, *bufs in self.runlist:
-            comp_runlist.append((op_names[op], *bufs))
+            comp_runlist.append((op_names[id(op)], *bufs))
 
-        # Calculate buffer layout: {buffer_name -> (type, offset, length)}
-        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
-            self._calculate_buffer_layout()
-        )
-
-        filename = self.get_operator_name() + "_fused.mlir"
+        filename = self.name + "_fused.mlir"
         fused_artifact = comp.FusedMLIRSource(
             filename,
             operator_mlir_map=operator_mlir_map,
@@ -102,9 +112,11 @@ class FusedMLIROperator(AIEOperatorBase):
         # Collect all buffer specs from operators
         for op, *bufs in self.runlist:
             args_specs = op.get_arg_spec()
-            assert len(args_specs) == len(
-                bufs
-            ), "Number of buffers must match operator argument specification"
+            if len(args_specs) != len(bufs):
+                raise ValueError(
+                    f"Number of buffers ({len(bufs)}) must match operator argument "
+                    f"specification ({len(args_specs)}) for operator {op!r}"
+                )
             for i, buf_name in enumerate(bufs):
                 args_spec = args_specs[i]
 
@@ -127,23 +139,21 @@ class FusedMLIROperator(AIEOperatorBase):
                     if buf_name not in args:
                         args[buf_name] = args_spec
                     else:
-                        assert np.prod(args[buf_name].shape) == np.prod(
-                            args_spec.shape
-                        ), f"Buffer {buf_name} has conflicting sizes between operators"
+                        if np.prod(args[buf_name].shape) != np.prod(args_spec.shape):
+                            raise ValueError(
+                                f"Buffer '{buf_name}' has conflicting sizes between operators: "
+                                f"{args[buf_name].shape} vs {args_spec.shape}"
+                            )
 
         # Verify all input/output args are present (either as regular or sliced buffers)
         all_buffer_names = set(args.keys()) | set(sliced_buffers.keys())
         for arg in self.input_args:
             # Check if it's a base buffer name in explicit_buffer_sizes
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
-                raise AssertionError(
-                    f"Input argument {arg} not found in runlist buffers"
-                )
+                raise ValueError(f"Input argument {arg} not found in runlist buffers")
         for arg in self.output_args:
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
-                raise AssertionError(
-                    f"Output argument {arg} not found in runlist buffers"
-                )
+                raise ValueError(f"Output argument {arg} not found in runlist buffers")
 
         # Determine buffer types and create layout
         subbuffer_layout = {}
@@ -193,33 +203,51 @@ class FusedMLIROperator(AIEOperatorBase):
         return subbuffer_layout, buffer_sizes, slice_info
 
     def set_up_artifacts(self):
-        operator_name = self.get_operator_name()
+        """Set up the artifact dependency graph for this fused operator.
+
+        Computes the buffer layout first, then builds the fused MLIR artifact
+        and full-ELF artifact and registers them via ``add_artifacts()``.
+        """
+        # Calculate buffer layout before building mlir artifact (used by get_mlir_artifact)
+        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
+            self._calculate_buffer_layout()
+        )
+        operator_name = self.name
         mlir_artifact = self.get_mlir_artifact()
         kernel_objects = self.get_kernel_artifacts()
-        kernel_dep = (
-            [
-                comp.KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_objects,
-                )
-            ]
-            if kernel_objects
-            else []
-        )
         full_elf_artifact = comp.FullElfArtifact(
             f"{operator_name}.elf",
             mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_dep,
+            dependencies=[mlir_artifact] + kernel_objects,
         )
         self.add_artifacts([full_elf_artifact])
 
     def get_arg_spec(self):
-        pass
+        raise NotImplementedError(
+            "FusedMLIROperator does not expose a unified arg spec; "
+            "use get_layout_for_buffer() to inspect individual buffer layouts"
+        )
 
     def get_callable(self):
+        """Return a callable that executes the fused operator on the NPU.
+
+        Returns:
+            A ``FusedFullELFCallable`` wrapping this operator.
+        """
         return FusedFullELFCallable(self)
 
     def get_layout_for_buffer(self, buffer_name):
+        """Return the (buffer_type, offset, length) layout for a named buffer.
+
+        Sliced buffers are resolved recursively to their parent's absolute
+        offset.
+
+        Args:
+            buffer_name: Name of the buffer, optionally with slice notation.
+
+        Returns:
+            Tuple of (buf_type, offset_bytes, length_bytes).
+        """
         if buffer_name in self.slice_info:
             buf_name, start, end = self.slice_info[buffer_name]
             buf_type, parent_start, parent_end = self.get_layout_for_buffer(buf_name)
@@ -252,11 +280,9 @@ class FullELFCallable:
         elf_data,
         device_name="main",
         sequence_name="sequence",
-        device_manager=None,
     ):
         self.device_name = device_name
         self.sequence_name = sequence_name
-        self.device_manager = device_manager or AIEDeviceManager()
         self.reload_elf(elf_data)
 
     def __call__(self, *args):
@@ -280,34 +306,34 @@ class FullELFCallable:
         ]
         capsule = ctypes.pythonapi.PyCapsule_New(elf_data_u8.ctypes.data, None, None)
         xrt_elf = pyxrt.elf(capsule, elf_data.nbytes)
-        xrt_context = pyxrt.hw_context(self.device_manager.device, xrt_elf)
+        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
 
 
 class FusedFullELFCallable(FullELFCallable):
-    def __init__(self, op, elf_data=None, device_manager=None):
+    def __init__(self, op, elf_data=None):
         if elf_data is None:
             elf_data = load_elf(op)
-        super().__init__(elf_data, device_manager=device_manager)
+        super().__init__(elf_data)
 
         self.op = op
         input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
         itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
-        self.input_buffer = AIEBuffer(
-            shape=(max(input_buffer_size, itemsize) // itemsize,),
+        self.input_buffer = XRTTensor(
+            (max(input_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
-        self.output_buffer = AIEBuffer(
-            shape=(max(output_buffer_size, itemsize) // itemsize,),
+        self.output_buffer = XRTTensor(
+            (max(output_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
-        self.scratch_buffer = AIEBuffer(
-            shape=(max(scratch_buffer_size, itemsize) // itemsize,),
+        self.scratch_buffer = XRTTensor(
+            (max(scratch_buffer_size, itemsize) // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
@@ -332,31 +358,23 @@ class FusedFullELFCallable(FullELFCallable):
                 f"Unknown buffer type '{buf_type}' for buffer '{buffer_name}'"
             )
 
-        if main_buffer is None:
-            raise RuntimeError(f"Main buffer for type '{buf_type}' is not allocated")
-
-        # Convert byte offset/length to element offset/length
         itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-        offset_elements = offset // itemsize
-        length_elements = length // itemsize
-
-        # Create subbuffer with appropriate shape
-        sub_buffer = main_buffer.subbuffer(
-            length=length_elements,
-            offset=offset_elements,
-            shape=(length_elements,),
+        sub_buffer = XRTSubBuffer(
+            parent_bo=main_buffer.buffer_object(),
+            offset_bytes=offset,
+            size_bytes=length,
+            shape=(length // itemsize,),
             dtype=ml_dtypes.bfloat16,
         )
 
-        # Cache and return
         self._buffer_cache[buffer_name] = sub_buffer
         return sub_buffer
 
     def __call__(self):
         self.input_buffer.to("npu")
-        self.output_buffer.to("npu")
         super().__call__(
-            self.input_buffer.bo if self.input_buffer else None,
-            self.output_buffer.bo if self.output_buffer else None,
-            self.scratch_buffer.bo if self.scratch_buffer else None,
+            self.input_buffer.buffer_object(),
+            self.output_buffer.buffer_object(),
+            self.scratch_buffer.buffer_object(),
         )
+        self.output_buffer.to("cpu")

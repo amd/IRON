@@ -13,8 +13,8 @@ The 'harness' function does the following:
 """
 
 import torch
-import math
 import sys
+from pathlib import Path
 import time
 import argparse
 
@@ -77,6 +77,7 @@ class LlamaModelState:
         self.reset_kv_cache(config)
 
     def reset_kv_cache(self, config):
+        self.num_preceding_tokens = 0
         # Set up KV cache -- initially empty
         # This is what passes information from previous tokens to the current token during generation
         self.attn_keys_caches = [
@@ -143,8 +144,6 @@ def get_tokenizer(tokenizer_path, special_tokens):
 
 
 def generate_token(config, forward_pass, state):
-    generated_tokens = []
-
     # Step 1: Forward pass
     logits, state = forward_pass(config, state)
 
@@ -157,7 +156,7 @@ def generate_token(config, forward_pass, state):
 
     # Step 4: Top-k filtering
     if config.top_k is not None:
-        top_logits, top_indices = torch.topk(last_token_logits, config.top_k)
+        top_logits, _ = torch.topk(last_token_logits, config.top_k)
         min_val = top_logits[:, -1:]
         last_token_logits = torch.where(
             last_token_logits < min_val, torch.tensor(float("-inf")), last_token_logits
@@ -194,7 +193,7 @@ def parse_args():
 
 
 def get_prompt(prompt_len):
-    with open("prompt.txt", "r") as f:
+    with open(Path(__file__).parent / "prompt.txt", "r") as f:
         prompt = f.read()
     prompt = prompt[:prompt_len]
     return prompt
@@ -216,7 +215,7 @@ def init(
     prompt_token_ids += config.tokenizer.encode(prompt)
     assert (
         len(prompt_token_ids) <= config.context_length
-    ), "Prompt + new tokens to generate too long (exceed context)"
+    ), f"Prompt length ({len(prompt_token_ids)} tokens) exceeds model context length ({config.context_length})"
     prompt_token_ids = torch.tensor([prompt_token_ids], dtype=torch.long)
 
     state.token_ids = prompt_token_ids
@@ -275,7 +274,3 @@ def generate(config, state, forward_pass, num_tokens=100, use_kv_cache=True):
     sys.stderr.write(
         f"[Total]   Tokens per second:     {n_tokens_generated / (t_prefill + t_decode):7.3f}\n"
     )
-
-
-if __name__ == "__main__":
-    main()

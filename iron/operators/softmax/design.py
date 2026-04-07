@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -29,18 +29,18 @@ def softmax(
     tile_size,
     rtp_vector_size=None,
     mask_patch_value=0,
-    kernel_archive="softmax.a",
     func_prefix="",
 ):
     per_tile_elements = tile_size
     if rtp_vector_size is None:
         rtp_vector_size = per_tile_elements
-    n = per_tile_elements * num_aie_columns
-    if num_elements % n != 0:
+    total_cores = num_aie_columns * num_channels
+    per_core_elements = num_elements // total_cores
+    if num_elements % total_cores != 0:
         raise ValueError(
-            f"Number of elements ({num_elements}) must be a multiple of {n}."
+            f"Number of elements ({num_elements}) must be a multiple of {total_cores}."
         )
-    N_div_n = num_elements // n
+    N_div_n = per_core_elements // per_tile_elements
     chunk = num_elements // num_aie_columns // num_channels  # For offset calculation
     dtype = bfloat16
 
@@ -62,15 +62,18 @@ def softmax(
 
     # AIE Core Function declaration
     softmax_kernel = Kernel(
-        f"{func_prefix}softmax_bf16", kernel_archive, [tile_ty, tile_ty, np.int32]
+        f"{func_prefix}softmax_bf16",
+        f"{func_prefix}softmax.o",
+        [tile_ty, tile_ty, np.int32],
     )
     mask_kernel = Kernel(
-        f"{func_prefix}mask_bf16", kernel_archive, [tile_ty, np.int32, np.int32]
+        f"{func_prefix}mask_bf16",
+        f"{func_prefix}softmax.o",
+        [tile_ty, np.int32, np.int32],
     )
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, softmax_kernel, mask_kernel, rtp, barrier):
-        # Number of sub-vector "tile" iterations
         barrier.wait_for_value(1)
         vector_size = rtp[0]
         for _ in range_(N_div_n):
@@ -98,18 +101,16 @@ def softmax(
     ]
 
     # Create a worker to run the task on a compute tile
+    worker_args = lambda i, j: [
+        of_in1s[i * num_channels + j].cons(),
+        of_outs[i * num_channels + j].prod(),
+        softmax_kernel,
+        mask_kernel,
+        rtps[i * num_channels + j],
+        barriers[i * num_channels + j],
+    ]
     my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                softmax_kernel,
-                mask_kernel,
-                rtps[i * num_channels + j],
-                barriers[i * num_channels + j],
-            ],
-        )
+        Worker(core_body, worker_args(i, j))
         for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
@@ -135,10 +136,14 @@ def softmax(
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
 
-        # Set run-time parameter for actual vector size (remainder is considered padding and ignored by the computation)
+        # Set run-time parameter controlling how many elements each core processes:
+        # - Normal case (mask_patch_value == 0): set to rtp_vector_size (the actual active row width;
+        #   elements beyond this are padding and are ignored by the softmax computation).
+        # - Masked case (mask_patch_value != 0): set to mask_patch_value, which the mask kernel uses
+        #   as a threshold to zero out elements beyond the unmasked patch boundary before softmax.
         def set_rtps(*args):
             for rtp in args:
-                rtp[0] = rtp_vector_size if not mask_patch_value else mask_patch_value
+                rtp[0] = mask_patch_value if mask_patch_value else rtp_vector_size
 
         rt.inline_ops(set_rtps, rtps)
 

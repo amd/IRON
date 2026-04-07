@@ -1,20 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-
-import numpy as np
-
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.helpers.dialects.scf import _for as range_
-from ml_dtypes import bfloat16
 
 """
 Rotary Positional Encoding (RoPE) design
 
-Applies RoPE to each row of the input tensor. 
+Applies RoPE to each row of the input tensor.
 Expects input tensor of shape (rows, cols) and a tensor of precomputed angles (look-up table) of shape (angle_rows, cols).
 Another interpretation of the input tensor is (rows / num_heads, num_heads, cols), where num_heads = rows / angle_rows.
 
@@ -25,6 +15,15 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
   This is useful for models where multiple heads share the same positional encodings and the heads are 'interspersed' in the input tensor (i.e. input tensor shape is (rows, n_heads, cols)).
 """
 
+import numpy as np
+
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron.placers import SequentialPlacer
+from aie.iron.device import NPU1, NPU2
+from aie.helpers.taplib.tap import TensorAccessPattern
+from aie.helpers.dialects.scf import _for as range_
+from ml_dtypes import bfloat16
+
 
 def rope(
     dev,
@@ -34,17 +33,17 @@ def rope(
     num_aie_columns=1,
     trace_size=0,
     method_type=None,
-    kernel_archive=None,
     func_prefix="",
 ):
     dtype = bfloat16
 
     if angle_rows is None:
         angle_rows = rows
-    if kernel_archive is None:
-        kernel_archive = (
-            "rope" + (f"_{method_type}" if method_type is not None else "") + ".o"
-        )
+    kernel_object = (
+        f"{func_prefix}rope"
+        + (f"_{method_type}" if method_type is not None else "")
+        + ".o"
+    )
 
     assert cols % (16 * 2) == 0 and cols >= (
         16 * 2
@@ -77,7 +76,7 @@ def rope(
     # AIE Core Function declaration
     rope_kernel = Kernel(
         f"{func_prefix}rope",
-        kernel_archive,
+        kernel_object,
         [tensor_tile_ty, angle_tile_ty, tensor_tile_ty, np.int32],
     )
 

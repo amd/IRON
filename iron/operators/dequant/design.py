@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
@@ -18,18 +18,18 @@ def my_dequant_kernel(
     trace_size,
     tile_size,
     group_size,
-    kernel_archive=None,
 ):
     per_tile_elements = (
         16384 if tile_size > 16384 else tile_size
     )  # Largest tile size for 64KB in L1 and possible
     # group size of 1 with objfifo depth of 1
-    n = per_tile_elements * num_columns
-    if num_elements % n != 0:
+    total_cores = num_columns * num_channels
+    per_core_elements = num_elements // total_cores
+    if num_elements % total_cores != 0:
         raise ValueError(
-            f"Number of elements ({num_elements}) must be a multiple of {n}."
+            f"Number of elements ({num_elements}) must be a multiple of {total_cores}."
         )
-    N_div_n = num_elements // n
+    N_div_n = per_core_elements // per_tile_elements
     chunk = num_elements // num_columns // num_channels  # For offset calculation
     in_dtype = np.uint8
     out_dtype = bfloat16
@@ -46,7 +46,7 @@ def my_dequant_kernel(
     out_tile_ty = np.ndarray[(per_tile_elements,), np.dtype[out_dtype]]
 
     fifodepth = 1 if tile_size > 8192 else 2
-    enable_trace = 1 if trace_size > 0 else None
+    enable_trace = trace_size > 0
 
     # AIE-array data movement with object fifos
     of_in1s = [

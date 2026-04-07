@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 
 name: Milestone
-about: Deeploy's Milestone
+about: IRON Milestone
 title: '[MILESTONE] '
 labels: milestone
 assignees: ''

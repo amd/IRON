@@ -1,5 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+import argparse
+from pathlib import Path
 
 from ml_dtypes import bfloat16
 
@@ -21,7 +24,10 @@ from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccess
 from aie.iron.controlflow import range_
 
 microkernel_mac_dim_map = {
-    "npu": {
+    "npu1": {
+        "bf16": (4, 8, 4),
+    },
+    "npu1": {
         "bf16": (4, 8, 4),
     },
     "npu2": {
@@ -39,7 +45,7 @@ def main():
         prog="AIE Matrix Multiplication MLIR Design (Whole Array)",
         description="Emits MLIR code for a matrix multiplication design of the given input size",
     )
-    argparser.add_argument("--dev", type=str, choices=["npu", "npu2"], default="npu2")
+    argparser.add_argument("--dev", type=str, choices=["npu1", "npu2"], default="npu2")
     argparser.add_argument("-M", type=int, default=512)
     argparser.add_argument("-K", type=int, default=512)
     argparser.add_argument("-N", type=int, default=512)
@@ -50,7 +56,7 @@ def main():
     argparser.add_argument("--b-col-maj", type=int, choices=[0, 1], default=0)
     argparser.add_argument("--c-col-maj", type=int, choices=[0, 1], default=0)
     # Whether to use the scalar kernel; this is low, but can be useful for debugging smaller sizes
-    argparser.add_argument("--scalar", type=bool, choices=[0, 1], default=0)
+    argparser.add_argument("--scalar", type=int, choices=[0, 1], default=0)
     argparser.add_argument(
         "--emulate-bf16-mmul-with-bfp16", action="store_true", default=False
     )
@@ -138,11 +144,13 @@ def my_matmul(
     prio_accuracy,
     separate_c_tiles,
     trace_size,
-    kernel_archive=None,
+    kernel_object=None,
     func_prefix="",
     generate_taps=False,
 ):
     n_aie_rows = 4
+
+    dev_name = dev if isinstance(dev, str) else dev.resolve().name
 
     dtype_in = str_to_dtype(dtype_in_str)
     dtype_out = str_to_dtype(dtype_out_str)
@@ -188,17 +196,17 @@ def my_matmul(
     ), f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map[dev][dtype_in_str]
-    if dev == "npu2" and dtype_in_str == "bf16":
+    mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
+    if dev_name == "npu2" and dtype_in_str == "bf16":
         r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
     else:
         r, s, t = mac_dims
 
-    # npu is a 4 row x 4 col array
-    if dev == "npu" and n_aie_cols > 4:
+    # npu1 is a 4 row x 4 col array
+    if dev_name == "npu1" and n_aie_cols > 4:
         raise AssertionError("Invalid configuration: NPU (Phoenix/Hawk) has 4 columns")
     # npu2 is a 4 row x 8 col array
-    if dev == "npu2" and n_aie_cols > 8:
+    if dev_name == "npu2" and n_aie_cols > 8:
         raise AssertionError(
             "Invalid configuration: NPU2 (Strix/Strix Halo/Krackan) has 8 columns"
         )
@@ -243,7 +251,7 @@ def my_matmul(
     # a big performance cost.
     fifo_depth = 2
 
-    if dev == "npu":
+    if dev_name == "npu1":
         if n_aie_cols == 1:
             dev_ty = NPU1Col1()
         elif n_aie_cols == 2:
@@ -272,11 +280,7 @@ def my_matmul(
 
     # AIE Core Function declarations
     scalar_suffix = "_scalar" if use_scalar else ""
-    kernel_archive = (
-        f"{func_prefix}gemm_{m}x{k}x{n}_archive.a"
-        if kernel_archive is None
-        else kernel_archive
-    )
+    gemm_object = kernel_object or f"{func_prefix}gemm_{m}x{k}x{n}.o"
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
@@ -286,19 +290,19 @@ def my_matmul(
         # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
         convert_copy_kernel = Kernel(
             f"convert_copy_f32_to_bf16",
-            kernel_archive,
+            "convert_copy.o",
             [C_l1_ty_internal, C_l1_ty, np.int32],
         )
         # Fix the kernels to use f32 outputs
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_f32",
-            kernel_archive,
+            gemm_object,
             [C_l1_ty_internal],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_f32"
         matmul_kernel = Kernel(
             matmul_func_name,
-            kernel_archive,
+            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty_internal],
         )
     else:
@@ -307,13 +311,13 @@ def my_matmul(
         fifo_depth_out = fifo_depth
         zero_kernel = Kernel(
             f"zero{scalar_suffix}_{dtype_out_str}",
-            kernel_archive,
+            gemm_object,
             [C_l1_ty],
         )
         matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
         matmul_kernel = Kernel(
             matmul_func_name,
-            kernel_archive,
+            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty],
         )
 
@@ -771,3 +775,7 @@ def my_matmul(
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program(SequentialPlacer())
     return module
+
+
+if __name__ == "__main__":
+    main()

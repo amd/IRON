@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
+import aie.utils as aie_utils
 
-
-from iron.operators.gemv.op import AIEGEMV
+from iron.operators.gemv.op import GEMV
 from iron.operators.gemv.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
+    max_aie_columns = aie_utils.get_current_device().cols
+
     params_list = [
         (128, 128, 1, 32, 128),
         (2048, 8192, 1, 1, 2048),
@@ -28,11 +28,10 @@ def get_params():
     params = []
     for p in params_list:
         M, K, num_aie_columns, tile_size_input, tile_size_output = p
-        name = f"matrix_vector_mul_{M}x{K}_{tile_size_input}tsi_{tile_size_output}tso_{num_aie_columns}col"
-
-        # All tests are considered regular here as per original code structure
-        # (original code returned same list for both regular and extensive)
-        params.append(pytest.param(*p, id=name))
+        # Skip tests that require more columns than available on the device
+        if num_aie_columns > max_aie_columns:
+            continue
+        params.append(pytest.param(*p))
     return params
 
 
@@ -47,7 +46,7 @@ def get_params():
 def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
     golden_ref = generate_golden_reference(M=M, K=K)
 
-    operator = AIEGEMV(
+    operator = GEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,

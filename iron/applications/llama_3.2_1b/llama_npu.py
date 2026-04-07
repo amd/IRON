@@ -19,15 +19,12 @@ import numpy as np
 import ml_dtypes
 import llama_inference_harness as harness
 import logging
-import time
 
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
-from iron.common import AIEBuffer
-from iron.common.utils import torch_to_numpy
-from iron.common.base import PatchableSingleXclbinCallable
+from iron.common.utils import XRTSubBuffer
 from iron.common.fusion import (
     FusedMLIROperator,
     FusedFullELFCallable,
@@ -35,29 +32,28 @@ from iron.common.fusion import (
     patch_elf,
 )
 from iron.operators import (
-    AIERMSNorm,
-    AIEGEMM,
-    AIEGEMV,
-    AIEElementwiseAdd,
-    AIEElementwiseMul,
-    AIESiLU,
-    AIERope,
-    AIEStridedCopy,
-    AIERepeat,
-    AIESoftmax,
-    AIETranspose,
+    RMSNorm,
+    GEMM,
+    GEMV,
+    ElementwiseAdd,
+    ElementwiseMul,
+    SiLU,
+    RoPE,
+    StridedCopy,
+    Repeat,
+    Softmax,
+    Transpose,
 )
-
-logging.basicConfig(level=logging.DEBUG)
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 max_seq_len = 2048
+
+aie_ops = None
+aie_buffers = None
 
 
 # AIE Operator Configuration
 # ##########################################################################
-
-
-aie_ops = None
 
 
 class AIEPrefillOperations:
@@ -81,11 +77,10 @@ class AIELlamaOperators:
         # Prefill operators
 
         self.prefill.rms_norm = (
-            AIERMSNorm(
+            RMSNorm(
                 size=prompt_len * config.emb_dim,
-                eps=1e-5,
                 num_aie_columns=8,
-                num_channels=2,
+                num_channels=1,  # weighted=True with 8 columns needs 9 ShimDMA fills/channel; max 16 total forces num_channels=1
                 tile_size=config.emb_dim,
                 weighted=True,
                 context=self.context,
@@ -95,9 +90,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.residual_add = (
-            AIEElementwiseAdd(
-                size=prompt_len * config.emb_dim, tile_size=config.emb_dim
-            )
+            ElementwiseAdd(size=prompt_len * config.emb_dim, tile_size=config.emb_dim)
             .compile()
             .get_callable()
         )
@@ -105,7 +98,7 @@ class AIELlamaOperators:
         min_N = 64 * 8 * 4  # tile_n * num_aie_columns * partition_N
         config.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
         config.vocab_partitions = 4
-        self.prefill.gemv_out_head_compilable = AIEGEMM(
+        self.prefill.gemv_out_head_compilable = GEMM(
             M=prompt_len,
             K=config.emb_dim,
             N=config.padded_vocab_size // config.vocab_partitions,
@@ -122,7 +115,7 @@ class AIELlamaOperators:
         # SwiGLU FFN operators
         # Prefill: M=prompt_len, K=emb_dim, N=hidden_dim
         self.prefill.ffn_up_gate = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.hidden_dim,
@@ -138,7 +131,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.ffn_down = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.hidden_dim,
                 N=config.emb_dim,
@@ -154,7 +147,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.ffn_silu = (
-            AIESiLU(
+            SiLU(
                 size=prompt_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
@@ -165,7 +158,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.eltwise_mul_ffn = (
-            AIEElementwiseMul(
+            ElementwiseMul(
                 size=prompt_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
@@ -178,7 +171,7 @@ class AIELlamaOperators:
         # Attention score scaling operators
         # FIXME: Using elementwise mul is very wasteful (of bandwidth) here since it's the same scalar factor for all values; need a kernel that allows scalar multiplication of a vector; maybe use AXPY
         self.prefill.attn_scale = (
-            AIEElementwiseMul(
+            ElementwiseMul(
                 size=config.n_heads * prompt_len * prompt_len,
                 tile_size=prompt_len,
                 num_aie_columns=8,
@@ -193,7 +186,7 @@ class AIELlamaOperators:
         # For keys: (seq_len, num_kv_groups * head_dim) = (seq_len, 512)
         # angle_rows=1 because all rows use the same angle row (angles are per position)
         self.prefill.rope_queries = (
-            AIERope(
+            RoPE(
                 rows=prompt_len * config.n_heads,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -204,7 +197,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.rope_keys = (
-            AIERope(
+            RoPE(
                 rows=prompt_len * config.n_kv_groups,
                 cols=config.head_dim,
                 angle_rows=prompt_len,
@@ -217,7 +210,7 @@ class AIELlamaOperators:
         # Attention projection operators
         # Query projection: (seq_len, emb_dim) -> (seq_len, n_heads * head_dim)
         self.prefill.attn_query = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_heads * config.head_dim,
@@ -234,7 +227,7 @@ class AIELlamaOperators:
 
         # Key projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_key = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
@@ -251,7 +244,7 @@ class AIELlamaOperators:
 
         # Value projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_value = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
@@ -269,7 +262,7 @@ class AIELlamaOperators:
         # Attention score computation: Q @ K^T per head
         # For prefill: (seq_len, head_dim) @ (head_dim, seq_len) = (seq_len, seq_len) per head
         self.prefill.attn_scores = (
-            AIEGEMM(
+            GEMM(
                 M=prompt_len,
                 K=config.head_dim,
                 N=prompt_len,
@@ -289,7 +282,7 @@ class AIELlamaOperators:
 
         elf_ctx = AIEContext(build_dir="build_elf")
 
-        gemv_attn_query_op = AIEGEMV(
+        gemv_attn_query_op = GEMV(
             M=config.n_heads * config.head_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -298,7 +291,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_attn_key_value_op = AIEGEMV(
+        gemv_attn_key_value_op = GEMV(
             M=config.n_kv_groups * config.head_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -307,19 +300,20 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        rope_queries_op = AIERope(
-            rows=1 * config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
+        # decode processes 1 query token at a time
+        rope_queries_op = RoPE(
+            rows=config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
         )
 
-        rope_keys_op = AIERope(
-            rows=1 * config.n_kv_groups,
+        rope_keys_op = RoPE(
+            rows=config.n_kv_groups,
             cols=config.head_dim,
             angle_rows=1,
             context=elf_ctx,
         )
 
         strided_copy_cache_magic = 0xDEADBEE0
-        strided_copy_cache_op = AIEStridedCopy(
+        strided_copy_cache_op = StridedCopy(
             input_sizes=(config.n_kv_groups, config.head_dim),
             input_strides=(config.head_dim, 1),
             input_offset=0,
@@ -329,13 +323,13 @@ class AIELlamaOperators:
             input_buffer_size=1 * config.n_kv_groups * config.head_dim,
             output_buffer_size=config.n_kv_groups * prompt_len * config.head_dim,
             num_aie_channels=1,
-            output_offset_patch_marker=strided_copy_cache_magic,
+            kwargs={"output_offset_patch_marker": strided_copy_cache_magic},
             context=elf_ctx,
         )
 
         # For decode: per head, (1, head_dim) @ (head_dim, max_context_len)
         # Use GEMV: (max_context_len, head_dim) @ (head_dim,) = (max_context_len,)
-        gemv_attn_scores_op = AIEGEMV(
+        gemv_attn_scores_op = GEMV(
             M=prompt_len,  # max possible context length
             K=config.head_dim,
             num_aie_columns=8,
@@ -345,7 +339,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        attn_scale_op = AIEElementwiseMul(
+        attn_scale_op = ElementwiseMul(
             size=config.n_heads * prompt_len,
             tile_size=prompt_len // 8,
             num_aie_columns=8,
@@ -354,7 +348,7 @@ class AIELlamaOperators:
 
         # Softmax operators for attention weights
         softmax_magic = 0xBA5EBA11
-        softmax_op = AIESoftmax(
+        softmax_op = Softmax(
             rows=config.n_heads,
             cols=prompt_len,
             num_aie_columns=1,
@@ -365,7 +359,7 @@ class AIELlamaOperators:
         )
 
         # Fused transpose for all attention heads (decode)
-        transpose_values_op = AIETranspose(
+        transpose_values_op = Transpose(
             M=prompt_len,
             N=config.head_dim,
             num_aie_columns=2,
@@ -377,7 +371,7 @@ class AIELlamaOperators:
         )
 
         # GEMV for attention context: (head_dim, max_context_len) @ (max_context_len,) = (head_dim,) per head
-        gemv_attn_context_op = AIEGEMV(
+        gemv_attn_context_op = GEMV(
             M=config.head_dim,
             K=prompt_len,  # max possible context length
             num_aie_columns=8,
@@ -387,7 +381,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_attn_output_op = AIEGEMV(
+        gemv_attn_output_op = GEMV(
             M=config.emb_dim,
             K=config.n_heads * config.head_dim,
             num_aie_columns=8,
@@ -396,17 +390,16 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        rms_norm_op = AIERMSNorm(
+        rms_norm_op = RMSNorm(
             size=config.emb_dim,
-            eps=1e-5,
             num_aie_columns=1,
-            num_channels=2,
+            num_channels=1,
             tile_size=config.emb_dim,
             weighted=True,
             context=elf_ctx,
         )
 
-        gemv_ffn_up_gate_op = AIEGEMV(
+        gemv_ffn_up_gate_op = GEMV(
             M=config.hidden_dim,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -415,7 +408,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_ffn_down_op = AIEGEMV(
+        gemv_ffn_down_op = GEMV(
             M=config.emb_dim,
             K=config.hidden_dim,
             num_aie_columns=8,
@@ -424,25 +417,25 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        silu_ffn_op = AIESiLU(
+        silu_ffn_op = SiLU(
             size=config.hidden_dim,
             tile_size=config.hidden_dim // 8,
             num_aie_columns=8,
             context=elf_ctx,
         )
 
-        eltwise_mul_ffn_op = AIEElementwiseMul(
+        eltwise_mul_ffn_op = ElementwiseMul(
             size=config.hidden_dim,
             tile_size=config.hidden_dim // 8,
             num_aie_columns=8,
             context=elf_ctx,
         )
 
-        residual_add_op = AIEElementwiseAdd(
+        residual_add_op = ElementwiseAdd(
             size=config.emb_dim, tile_size=config.emb_dim // 8, context=elf_ctx
         )
 
-        repeat_interleave_op = AIERepeat(
+        repeat_interleave_op = Repeat(
             rows=config.n_kv_groups,
             cols=prompt_len * config.head_dim,  # Max context length
             repeat=config.n_heads // config.n_kv_groups,
@@ -450,7 +443,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        gemv_out_head_op = AIEGEMV(
+        gemv_out_head_op = GEMV(
             M=config.vocab_size,
             K=config.emb_dim,
             num_aie_columns=8,
@@ -654,61 +647,57 @@ class AIELlamaOperators:
         # Operator static buffers (weights, LUTs)
 
         for layer_idx in range(config.n_layers):
-            self.decode.fused.get_buffer(f"W_norm1_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.input_layernorm.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_query_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
+            self.decode.fused.get_buffer(f"W_norm1_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.input_layernorm.weight"
+                ].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_attn_query_{layer_idx}").torch_view()[
+                :
+            ] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.q_proj.weight"
             ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
+            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+                ].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").torch_view()[
+                :
+            ] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.v_proj.weight"
             ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_output_decode_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
+            self.decode.fused.get_buffer(
+                f"W_attn_output_decode_{layer_idx}"
+            ).torch_view()[:] = config.weights[
                 f"model.layers.{layer_idx}.self_attn.o_proj.weight"
             ].flatten()
-            self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.mlp.gate_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.mlp.up_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = config.weights[
-                f"model.layers.{layer_idx}.mlp.down_proj.weight"
-            ].flatten()
+            self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.post_attention_layernorm.weight"
+                ].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
+                ].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").torch_view()[:] = (
+                config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].flatten()
+            )
+            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").torch_view()[:] = (
+                config.weights[
+                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
+                ].flatten()
+            )
         scale_factor = 1.0 / math.sqrt(config.head_dim)
-        self.decode.fused.get_buffer("attn_scale_factor").to("cpu").view_as_torch()[
-            :
-        ] = scale_factor
-        self.decode.fused.get_buffer("W_final_norm").to("cpu").view_as_torch()[:] = (
-            config.weights["model.norm.weight"].flatten()
-        )
-        self.decode.fused.get_buffer("W_out_head").to("cpu").view_as_torch()[:] = (
-            config.weights["model.embed_tokens.weight"].flatten()
-        )
+        self.decode.fused.get_buffer("attn_scale_factor").fill_(scale_factor)
+        self.decode.fused.get_buffer("W_final_norm").torch_view()[:] = config.weights[
+            "model.norm.weight"
+        ].flatten()
+        self.decode.fused.get_buffer("W_out_head").torch_view()[:] = config.weights[
+            "model.embed_tokens.weight"
+        ].flatten()
         self.decode.fused.input_buffer.to("npu")
         self.decode.fused.scratch_buffer.to("npu")
         self.decode.fused.output_buffer.to("npu")
@@ -717,94 +706,85 @@ class AIELlamaOperators:
 # Allocate buffers shared with NPU
 # ##########################################################################
 
-aie_buffers = None
-
 
 class AIEPrefillBuffers:
     def __init__(self, prompt_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
-        self.x = AIEBuffer(shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.x_norm = AIEBuffer(shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.attn_output = AIEBuffer(
-            shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_output = AIEBuffer(
-            shape=(prompt_len, emb_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.x = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.x_norm = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.attn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
         # SwiGLU intermediate buffers
-        self.ffn_gate = AIEBuffer(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_up = AIEBuffer(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
-        self.ffn_hidden = AIEBuffer(
-            shape=(prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.ffn_gate = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_up = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_hidden = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
         # Attention buffers: queries and keys serve as both projection output and RoPE input/output
-        self.queries = AIEBuffer(
-            shape=(prompt_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
+        self.queries = XRTTensor(
+            (prompt_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
         )
-        self.keys = AIEBuffer(
-            shape=(prompt_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
+        self.keys = XRTTensor(
+            (prompt_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
         )
-        self.values = AIEBuffer(
-            shape=(prompt_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
+        self.values = XRTTensor(
+            (prompt_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
         )
-        self.rope_angles = AIEBuffer(
-            shape=(prompt_len, head_dim), dtype=ml_dtypes.bfloat16
-        )
+        self.rope_angles = XRTTensor((prompt_len, head_dim), dtype=ml_dtypes.bfloat16)
         # Attention score computation buffers (per-head) - parent buffers with subbuffers
         # Parent buffer for all heads' queries: (n_heads, prompt_len, head_dim) stored contiguously
-        self.attn_scores_queries_all = AIEBuffer(
-            shape=(n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
+        self.attn_scores_queries_all = XRTTensor(
+            (n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_queries_per_head = [
-            self.attn_scores_queries_all.subbuffer(
-                length=prompt_len * head_dim,
-                offset=h * prompt_len * head_dim,
-                shape=(prompt_len, head_dim),
+            XRTSubBuffer.from_parent(
+                self.attn_scores_queries_all,
+                (prompt_len, head_dim),
+                offset_elements=h * prompt_len * head_dim,
+                length_elements=prompt_len * head_dim,
+                dtype=ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
         # Parent buffer for all KV groups' keys: (n_kv_groups, head_dim, prompt_len) stored contiguously
-        self.attn_scores_keys_all = AIEBuffer(
-            shape=(n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
+        self.attn_scores_keys_all = XRTTensor(
+            (n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_keys_per_kv_group = [
-            self.attn_scores_keys_all.subbuffer(
-                length=head_dim * prompt_len,
-                offset=g * head_dim * prompt_len,
-                shape=(head_dim, prompt_len),
+            XRTSubBuffer.from_parent(
+                self.attn_scores_keys_all,
+                (head_dim, prompt_len),
+                offset_elements=g * head_dim * prompt_len,
+                length_elements=head_dim * prompt_len,
+                dtype=ml_dtypes.bfloat16,
             )
             for g in range(n_kv_groups)
         ]
         # Parent buffer for all heads' scores: (n_heads * prompt_len, prompt_len)
-        self.attn_scores = AIEBuffer(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+        self.attn_scores = XRTTensor(
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_per_head = [
-            self.attn_scores.subbuffer(
-                length=prompt_len * prompt_len,
-                offset=h * prompt_len * prompt_len,
-                shape=(prompt_len, prompt_len),
+            XRTSubBuffer.from_parent(
+                self.attn_scores,
+                (prompt_len, prompt_len),
+                offset_elements=h * prompt_len * prompt_len,
+                length_elements=prompt_len * prompt_len,
+                dtype=ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
         # Attention score scaling buffer (pre-initialized with 1/sqrt(head_dim))
         scale_factor = 1.0 / math.sqrt(head_dim)
-        self.attn_scale_factor = AIEBuffer(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+        self.attn_scale_factor = XRTTensor(
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
-        self.attn_scale_factor.view_as_torch()[:] = scale_factor
-        self.attn_scale_factor.to("npu")
+        self.attn_scale_factor.fill_(scale_factor)  # fill_() syncs to device
         # Attention weights buffer (output of softmax)
-        self.attn_weights = AIEBuffer(
-            shape=(n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+        self.attn_weights = XRTTensor(
+            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
 
 
 class AIELlamaBuffers:
-    def __init__(self, config, prompt_len):
+    def __init__(self, config, prompt_len, aie_ops):
         # Vector of the current token(s) being processed through the pipeline
         self.prefill = AIEPrefillBuffers(
             prompt_len,
@@ -817,15 +797,15 @@ class AIELlamaBuffers:
 
         # Per-layer KV cache buffers on NPU (used by strided copy for transpose and concatenate)
         self.keys_cache = [
-            AIEBuffer(
-                shape=(config.n_kv_groups, prompt_len, config.head_dim),
+            XRTTensor(
+                (config.n_kv_groups, prompt_len, config.head_dim),
                 dtype=ml_dtypes.bfloat16,
             )
             for _ in range(config.n_layers)
         ]
         self.values_cache = [
-            AIEBuffer(
-                shape=(config.n_kv_groups, prompt_len, config.head_dim),
+            XRTTensor(
+                (config.n_kv_groups, prompt_len, config.head_dim),
                 dtype=ml_dtypes.bfloat16,
             )
             for _ in range(config.n_layers)
@@ -836,102 +816,101 @@ class AIELlamaBuffers:
         self.W_norm2 = []
         # Attention projection weights
         self.W_attn_query_prefill = []
-        self.W_attn_query_decode = []
         self.W_attn_key_prefill = []
-        self.W_attn_key_decode = []
         self.W_attn_value_prefill = []
-        self.W_attn_value_decode = []
-        self.W_attn_output_decode = []
         # SwiGLU FFN weights
         self.W_ffn_gate_prefill = []
         self.W_ffn_up_prefill = []
         self.W_ffn_down_prefill = []
-        self.W_ffn_gate_decode = []
-        self.W_ffn_up_decode = []
-        self.W_ffn_down_decode = []
         for layer_idx in range(config.n_layers):
             self.W_norm1.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.input_layernorm.weight"]
-                ).to("npu")
+                )
             )
             self.W_norm2.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.post_attention_layernorm.weight"
                     ]
-                ).to("npu")
+                )
             )
             self.W_attn_query_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.q_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_attn_key_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.k_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_attn_value_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[
                         f"model.layers.{layer_idx}.self_attn.v_proj.weight"
                     ].T
-                ).to("npu")
+                )
             )
             self.W_ffn_gate_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.gate_proj.weight"].T
-                ).to("npu")
+                )
             )
             self.W_ffn_up_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].T
-                ).to("npu")
+                )
             )
             self.W_ffn_down_prefill.append(
-                AIEBuffer.from_torch(
+                XRTTensor.from_torch(
                     config.weights[f"model.layers.{layer_idx}.mlp.down_proj.weight"].T
-                ).to("npu")
+                )
             )
 
         # Final RMS norm weights
-        self.W_final_norm = AIEBuffer.from_torch(
-            config.weights["model.norm.weight"]
-        ).to("npu")
-        # Final linear layer
-        self.W_out_head = AIEBuffer.from_torch(
+        self.W_final_norm = XRTTensor.from_torch(config.weights["model.norm.weight"])
+        # Final linear layer (unpadded/unpartitioned, used by GEMV)
+        self.W_out_head = XRTTensor.from_torch(
             config.weights["model.embed_tokens.weight"]
-        ).to(
-            "npu"
-        )  # unpadded/unpartitioned, used by GEMV
+        )
         W_out_head_parts = aie_ops.prefill.gemv_out_head_compilable.partition_B(
-            torch_to_numpy(config.weights["model.embed_tokens.weight"]),
+            # Zero-copy bfloat16 bitcast: view as uint16 (same width) then reinterpret
+            # as ml_dtypes.bfloat16. Matches the pattern used in Tensor.from_torch().
+            config.weights["model.embed_tokens.weight"]
+            .view(torch.uint16)
+            .numpy()
+            .view(ml_dtypes.bfloat16),
             config.vocab_partitions,
         )
         self.W_out_head_parts = [
-            AIEBuffer.from_np(W_out_head_part).to("npu")
-            for W_out_head_part in W_out_head_parts
+            XRTTensor(part, dtype=part.dtype) for part in W_out_head_parts
         ]  # partitioned, padded parts of weight, used by GEMM
-        self.prefill.logits = AIEBuffer(
-            shape=(
+        self.prefill.logits = XRTTensor(
+            (
                 config.vocab_partitions,
                 prompt_len,
                 config.padded_vocab_size // config.vocab_partitions,
-            )
-        ).to("npu")
+            ),
+            dtype=ml_dtypes.bfloat16,
+        )
+        logits_part_len = prompt_len * (
+            config.padded_vocab_size // config.vocab_partitions
+        )
         self.prefill.logits_parts = [
-            self.prefill.logits.subbuffer(
-                length=prompt_len
-                * (config.padded_vocab_size // config.vocab_partitions),
-                offset=i
-                * prompt_len
-                * (config.padded_vocab_size // config.vocab_partitions),
-                shape=(prompt_len, config.padded_vocab_size // config.vocab_partitions),
+            XRTSubBuffer.from_parent(
+                self.prefill.logits,
+                (
+                    prompt_len,
+                    config.padded_vocab_size // config.vocab_partitions,
+                ),
+                offset_elements=i * logits_part_len,
+                length_elements=logits_part_len,
+                dtype=ml_dtypes.bfloat16,
             )
             for i in range(config.vocab_partitions)
         ]
@@ -981,14 +960,10 @@ def grouped_query_attention_forward_prefill(
         aie_buffers.prefill.keys,
     )
 
-    # Read results from NPU
-    queries = aie_buffers.prefill.queries.to("cpu").view_as_torch()[
-        : seq_len * config.n_heads, :
-    ]
-    keys = aie_buffers.prefill.keys.to("cpu").view_as_torch()[
-        : seq_len * config.n_kv_groups, :
-    ]
-    values = aie_buffers.prefill.values.to("cpu").view_as_torch()[
+    # Read results from NPU; to_torch() syncs from device internally
+    queries = aie_buffers.prefill.queries.to_torch()[: seq_len * config.n_heads, :]
+    keys = aie_buffers.prefill.keys.to_torch()[: seq_len * config.n_kv_groups, :]
+    values = aie_buffers.prefill.values.to_torch()[
         :seq_len, :
     ]  # (seq_len, n_kv_groups * head_dim)
     queries = queries.view(batch, seq_len, config.n_heads, config.head_dim)
@@ -1020,13 +995,13 @@ def grouped_query_attention_forward_prefill(
     # (batch, num_heads, seq_len, head_dim) @ (batch, num_heads, head_dim, context_len)
     # -> (batch, num_heads, seq_len, context_len)
 
-    queries_buf = aie_buffers.prefill.attn_scores_queries_all.view_as_torch().view(
+    queries_buf = aie_buffers.prefill.attn_scores_queries_all.torch_view().view(
         config.n_heads, -1, config.head_dim
     )
     queries_buf[:, :seq_len, :] = queries.squeeze(0)[
         :, :seq_len, :
     ]  # (num_heads, seq_len, head_dim)
-    keys_buf = aie_buffers.prefill.attn_scores_keys_all.view_as_torch().view(
+    keys_buf = aie_buffers.prefill.attn_scores_keys_all.torch_view().view(
         config.n_kv_groups, config.head_dim, -1
     )
     keys_buf[:, :, :context_len] = keys.squeeze(0).transpose(
@@ -1053,12 +1028,11 @@ def grouped_query_attention_forward_prefill(
         aie_buffers.prefill.attn_scale_factor,
         aie_buffers.prefill.attn_scores,
     )
-    aie_buffers.prefill.attn_scores.to("cpu")
     # Buffer is (n_heads * max_seq_len, max_seq_len), view as (n_heads, max_seq_len, max_seq_len) then slice
-    max_seq_len = aie_buffers.prefill.attn_scores.shape[0] // config.n_heads
+    max_seq_len_buf = aie_buffers.prefill.attn_scores.shape[0] // config.n_heads
     scores = (
-        aie_buffers.prefill.attn_scores.view_as_torch()
-        .view(config.n_heads, max_seq_len, max_seq_len)
+        aie_buffers.prefill.attn_scores.to_torch()  # to_torch() syncs device→host; torch_view() would not sync and must not be used here
+        .view(config.n_heads, max_seq_len_buf, max_seq_len_buf)
         .unsqueeze(0)[:, :, :seq_len, :context_len]
     )
 
@@ -1121,7 +1095,12 @@ def swiglu_ffn_forward_prefill(layer_idx):
 
 
 def transformer_block_forward_prefill(
-    config, seq_len, layer_idx, attn_keys_cache, attn_values_cache, attn_mask
+    config,
+    seq_len,
+    layer_idx,
+    attn_keys_cache,
+    attn_values_cache,
+    attn_mask,
 ):
     # Step 1: RMS normalization
     aie_ops.prefill.rms_norm(
@@ -1129,8 +1108,7 @@ def transformer_block_forward_prefill(
         aie_buffers.W_norm1[layer_idx],
         aie_buffers.prefill.x_norm,
     )
-    aie_buffers.prefill.x_norm.to("cpu")
-    x_norm = aie_buffers.prefill.x_norm.view_as_torch().unsqueeze(0)[:, :seq_len, :]
+    x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 2: Attention
     attn_output, attn_keys, attn_values = grouped_query_attention_forward_prefill(
@@ -1143,23 +1121,24 @@ def transformer_block_forward_prefill(
     )
 
     # Step 3: Residual
-    aie_buffers.prefill.attn_output.view_as_torch().unsqueeze(0)[
+    aie_buffers.prefill.attn_output.torch_view().unsqueeze(0)[
         0, :seq_len, :
     ] = attn_output
+    aie_buffers.prefill.attn_output.to("npu")
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
     )
-    x = aie_buffers.prefill.x.to("cpu").view_as_torch().unsqueeze(0)[:, :seq_len, :]
+    x = aie_buffers.prefill.x.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 4: Post-norm
-    aie_buffers.prefill.x.view_as_torch().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.torch_view().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.to("npu")
     aie_ops.prefill.rms_norm(
         aie_buffers.prefill.x,
         aie_buffers.W_norm2[layer_idx],
         aie_buffers.prefill.x_norm,
     )
-    aie_buffers.prefill.x_norm.to("cpu")
-    x_norm = aie_buffers.prefill.x_norm.view_as_torch().unsqueeze(0)[:, :seq_len, :]
+    x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 5: Feed-forward network
     swiglu_ffn_forward_prefill(layer_idx)
@@ -1178,7 +1157,8 @@ def llama_forward_pass_prefill(config, state):
     # Step 1: RoPE angles
     num_preceding_tokens = state.attn_keys_caches[0].shape[2]
     angles_slice = config.angles[num_preceding_tokens : num_preceding_tokens + seq_len]
-    aie_buffers.prefill.rope_angles.view_as_torch()[:seq_len, :] = angles_slice
+    aie_buffers.prefill.rope_angles.torch_view()[:seq_len, :] = angles_slice
+    aie_buffers.prefill.rope_angles.to("npu")
 
     # Step 2: Token embedding
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
@@ -1186,7 +1166,8 @@ def llama_forward_pass_prefill(config, state):
     attn_mask = torch.triu(
         torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
     )
-    aie_buffers.prefill.x.view_as_torch().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.torch_view().unsqueeze(0)[0, :seq_len, :] = x
+    aie_buffers.prefill.x.to("npu")
 
     # Step 3: Transformer blocks
     for layer_idx in range(config.n_layers):
@@ -1213,8 +1194,7 @@ def llama_forward_pass_prefill(config, state):
             aie_buffers.W_out_head_parts[i],
             aie_buffers.prefill.logits_parts[i],
         )
-    aie_buffers.prefill.logits.to("cpu")
-    logits_padded_partitioned = aie_buffers.prefill.logits.view_as_torch()
+    logits_padded_partitioned = aie_buffers.prefill.logits.to_torch()
     logits_padded = (
         logits_padded_partitioned.transpose(0, 1)
         .contiguous()
@@ -1225,10 +1205,10 @@ def llama_forward_pass_prefill(config, state):
     # Step 6: Initialize per-layer NPU cache buffers with current cache state for decode phase
     for layer_idx in range(config.n_layers):
         cache_len = state.attn_keys_caches[layer_idx].shape[2]
-        aie_buffers.keys_cache[layer_idx].view_as_torch()[:, :cache_len, :] = (
+        aie_buffers.keys_cache[layer_idx].torch_view()[:, :cache_len, :] = (
             state.attn_keys_caches[layer_idx].squeeze(0)
         )
-        aie_buffers.values_cache[layer_idx].view_as_torch()[:, :cache_len, :] = (
+        aie_buffers.values_cache[layer_idx].torch_view()[:, :cache_len, :] = (
             state.attn_values_caches[layer_idx].squeeze(0)
         )
         aie_buffers.keys_cache[layer_idx].to("npu")
@@ -1270,24 +1250,23 @@ def llama_forward_pass_decode(config, state):
     angles_slice = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").to("cpu").view_as_torch()[
+    aie_ops.decode.fused.get_buffer("rope_angles").torch_view()[
         :
-    ] = angles_slice
+    ] = angles_slice.flatten()
 
     # Token embedding (on CPU)
     tok_emb_weight = config.weights["model.embed_tokens.weight"]
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
-    aie_ops.decode.fused.get_buffer("x").view_as_torch().view(-1, config.emb_dim)[
+    aie_ops.decode.fused.get_buffer("x").torch_view().view(-1, config.emb_dim)[
         :seq_len, :
     ] = x
 
     # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
     aie_ops.decode.fused.input_buffer.to("cpu")
-    aie_ops.decode.fused()
-    aie_ops.decode.fused.output_buffer.to("cpu")
+    aie_ops.decode.fused()  # FusedFullELFCallable.__call__() syncs output_buffer to cpu
     logits = (
         aie_ops.decode.fused.get_buffer("logits")
-        .view_as_torch()
+        .to_torch()
         .view(1, 1, config.vocab_size)
     )
 
@@ -1300,24 +1279,19 @@ def llama_forward_pass_decode(config, state):
 
 def llama_forward_pass(config, state):
     global aie_ops, aie_buffers
-
     batch, seq_len = state.token_ids.shape
     if seq_len > 1:
         ret = llama_forward_pass_prefill(config, state)
         state.num_preceding_tokens = state.token_ids.shape[1]
         # Pass KV cache data onto fused decode operator
         for layer_idx in range(config.n_layers):
-            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = (
-                aie_buffers.keys_cache[layer_idx].to("cpu").view_as_torch().flatten()
-            )
-            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").to(
-                "cpu"
-            ).view_as_torch()[:] = (
-                aie_buffers.values_cache[layer_idx].to("cpu").view_as_torch().flatten()
-            )
-            aie_ops.decode.fused.scratch_buffer.to("cpu")
+            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").torch_view()[
+                :
+            ] = (aie_buffers.keys_cache[layer_idx].to_torch().flatten())
+            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[
+                :
+            ] = (aie_buffers.values_cache[layer_idx].to_torch().flatten())
+        aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:
         ret = llama_forward_pass_decode(config, state)
@@ -1327,6 +1301,7 @@ def llama_forward_pass(config, state):
 
 def main():
     global aie_ops, aie_buffers, max_seq_len
+    logging.basicConfig(level=logging.DEBUG)
     args = harness.parse_args()
 
     assert (
@@ -1338,7 +1313,7 @@ def main():
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
     aie_ops = AIELlamaOperators(config, max_seq_len)
-    aie_buffers = AIELlamaBuffers(config, max_seq_len)
+    aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
 
     print(prompt, end="", flush=True)
     harness.generate(

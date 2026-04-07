@@ -1,48 +1,21 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
 
-
-from iron.operators.gelu.op import AIEGELU
+from iron.operators.gelu.op import GELU
 from iron.operators.gelu.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, make_channeled_unary_params
 
 
 def get_params():
-    max_aie_columns = 8
-    num_channels_choices = [1, 2]
-    input_lengths = [1024, 2048, 4096, 8192]
-
-    params = []
-    for input_length in input_lengths:
-        for num_aie_columns in range(1, max_aie_columns + 1):
-            for num_channels in num_channels_choices:
-                total_cores = num_aie_columns * num_channels
-                tile_size = input_length // total_cores
-                if tile_size > 8192:
-                    tile_size = 8192
-                check_length = tile_size * total_cores
-                if check_length == input_length:
-                    name = f"gelu_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-
-                    is_regular = input_length == 2048
-                    marks = [] if is_regular else [pytest.mark.extensive]
-
-                    params.append(
-                        pytest.param(
-                            input_length,
-                            num_aie_columns,
-                            num_channels,
-                            tile_size,
-                            id=name,
-                            marks=marks,
-                        )
-                    )
-    return params
+    return [
+        pytest.param(il, nac, nc, ts, marks=[] if not ext else [pytest.mark.extensive])
+        for il, nac, nc, ts, ext in make_channeled_unary_params(
+            [1024, 2048, 4096, 8192], 8192, [1, 2]
+        )
+    ]
 
 
 @pytest.mark.metrics(
@@ -56,7 +29,7 @@ def get_params():
 def test_gelu(input_length, num_aie_columns, num_channels, tile_size, aie_context):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEGELU(
+    operator = GELU(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

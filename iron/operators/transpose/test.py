@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from pathlib import Path
-
-
 import pytest
-from iron.operators.transpose.op import AIETranspose
+import aie.utils as aie_utils
+
+from iron.operators.transpose.op import Transpose
 from iron.operators.transpose.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
 def get_params():
-    max_aie_columns = 8
+    max_aie_columns = aie_utils.get_current_device().cols
     input_lengths = [64, 2048]
     n_list = [64, 128, 256, 512]
     s_list = [8]
@@ -36,7 +34,6 @@ def get_params():
                         length = M * N
                         if check_length != length:
                             continue
-                        name = f"transpose_{M}_M_{N}_N_{num_aie_columns}_cols_{num_channels}_channels_{m}_m_{n}_n_{s}_s"
 
                         is_regular = M == 2048 and N == 64
                         marks = [] if is_regular else [pytest.mark.extensive]
@@ -50,7 +47,6 @@ def get_params():
                                 m,
                                 n,
                                 s,
-                                id=name,
                                 marks=marks,
                             )
                         )
@@ -66,7 +62,7 @@ def get_params():
 def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
     golden_ref = generate_golden_reference(rows=M, cols=N)
 
-    operator = AIETranspose(
+    operator = Transpose(
         M=M,
         N=N,
         num_aie_columns=aie_columns,

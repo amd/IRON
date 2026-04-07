@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -144,6 +144,13 @@ def generate_golden_reference(
         freq_config=freq_config,
     )
     val_range = 4
+    # Head count is inferred from rows and context_len. This logic assumes rows is either
+    # smaller than context_len (1 head, seq_len == rows) or an exact multiple of context_len
+    # (n_heads == rows // context_len).
+    if context_len < rows and rows % context_len != 0:
+        raise ValueError(
+            f"rows ({rows}) must be a multiple of context_len ({context_len}) when rows > context_len"
+        )
     n_heads = rows // context_len if context_len < rows else 1
     seq_len = rows // n_heads
     A = torch.rand(n_heads, seq_len, cols, dtype=torch.bfloat16) * val_range
