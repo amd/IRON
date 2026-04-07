@@ -1,20 +1,15 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
 from ml_dtypes import bfloat16
 
-from aie.extras.context import mlir_mod_ctx
-from aie.dialects.aie import *
-from aie.dialects.aiex import *
 import aie.dialects.index as index
+from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-
-from iron.common.device_utils import get_device_name, get_device_type
 
 """
 Matrix-vector design
@@ -39,7 +34,7 @@ def my_matvec(
     m_input,
     m_output=None,
     num_batches=1,
-    kernel_archive="mv.o",
+    kernel_object="mv.o",
     func_prefix="",
     verbose=False,
 ):
@@ -69,8 +64,6 @@ def my_matvec(
 
     assert M % cols == 0
 
-    dev_ty = get_device_type(dev, cols)
-
     L1_A_ty = np.ndarray[
         (
             m_input,
@@ -90,7 +83,7 @@ def my_matvec(
     func_type = "vectorized" if vectorized else "scalar"
     matvec = Kernel(
         f"{func_prefix}matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        kernel_archive,
+        f"{func_prefix}{kernel_object}",
         [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 
@@ -150,7 +143,7 @@ def my_matvec(
         for col in range(cols)
     ]
 
-    # Every column gets the entirety of the vector B, no TAP needed.
+    # Every column gets the entirety of the vector B.
     # This design assumes that all of B fits on the cores.
     B_tap = TensorAccessPattern(
         tensor_dims=L3_B_ty.__args__[0],
@@ -197,4 +190,4 @@ def my_matvec(
             rt.finish_task_group(tg_ac)
         rt.finish_task_group(tg_b)
 
-    return Program(dev_ty, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program(SequentialPlacer())

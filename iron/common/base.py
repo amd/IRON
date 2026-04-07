@@ -1,25 +1,28 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
-import os
-from pathlib import Path
-from abc import ABC, abstractmethod
-import logging
-import time
-import torch
-from ml_dtypes import bfloat16
+from __future__ import annotations
 
-import aie.utils.config
+import dataclasses
+import inspect
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, ClassVar
+
+import numpy as np
+from ml_dtypes import bfloat16
+import aie.utils as aie_utils
+from aie.utils.npukernel import NPUKernel
+
 from . import compilation as comp
 from .context import AIEContext
-from .device_manager import AIEDeviceManager, pyxrt
-from .utils import numpy_to_torch, torch_to_numpy
+from .utils import float_to_name
 from .compilation import (
+    CompilationArtifact,
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )
@@ -28,45 +31,49 @@ from .compilation import (
 class AIEOperatorBase(ABC):
     """Base class for AIE-accelerated operations"""
 
-    def __init__(self, context=None):
-        self.artifacts = comp.CompilationArtifactGraph(
-            []
-        )  # CompilationArtifact objects are uniqued within the context
+    _default_context: ClassVar[AIEContext | None] = None
+
+    def __init__(self, context: AIEContext | None = None) -> None:
+        self.artifacts = comp.CompilationArtifactGraph()
         if context is None:
             context = self.get_default_context()
-        context.register_operator(self)
         self.context = context
 
     @abstractmethod
-    def set_up_artifacts(self):
+    def set_up_artifacts(self) -> None:
         """
-        Subclasses should overwrite this method to set up their required dependenices and runtime runlist, kernels and buffers with calls to add_artifacts(), add_kernel(), add_buffer(), and add_to_runlist().
-        Note: This method should only *describe* the required artifacts and runtime buffers, and not yet do any computation or compilation.
-        Compilation will be handled automatically based on the provided description.
+        Declare the artifact dependency graph for this operator.
+
+        Subclasses must implement this method and call add_artifacts() to register
+        the artifacts they require. This method should only *describe* dependencies;
+        it must not perform any computation or compilation.  Compilation is triggered
+        separately via compile().
         """
         pass
 
     @abstractmethod
-    def get_arg_spec(self):
+    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
         pass
 
     @abstractmethod
-    def get_callable(self):
+    def get_callable(self) -> Callable[..., Any]:
         pass
 
     @classmethod
-    def get_default_context(cls):
-        """One global 'default' context if none is specified"""
-        if not hasattr(AIEOperatorBase, "_default_context"):
+    def get_default_context(cls) -> AIEContext:
+        """Return the process-wide default AIEContext, creating it on first call (lazy singleton)."""
+        if AIEOperatorBase._default_context is None:
             AIEOperatorBase._default_context = AIEContext()
         return AIEOperatorBase._default_context
 
-    def compile(self, dry_run=False):
+    def compile(self, dry_run: bool = False) -> AIEOperatorBase:
         """
         Set up the operator and compile any necessary artifacts.
-        Subclasses are expected to overwrite set_up(); they may register any artifacts that they need to be compiled there.
+        Subclasses are expected to overwrite set_up_artifacts(); they may register any
+        artifacts that they need to be compiled there.
         """
-        self.set_up_artifacts()
+        if not self.artifacts:
+            self.set_up_artifacts()
         comp.compile(
             self.context.compilation_rules,
             self.artifacts,
@@ -75,282 +82,128 @@ class AIEOperatorBase(ABC):
         )
         return self
 
-    def add_artifacts(self, artifacts):
+    def add_artifacts(self, artifacts: list[CompilationArtifact]) -> None:
         for artifact in artifacts:
             self.artifacts.add(artifact)
 
 
-def sync_to_device(bos):
-    for bo in bos:
-        bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
+def _serialize_param(v: object) -> str:
+    """Convert a parameter value to a filesystem-safe string for operator names."""
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, float):
+        return float_to_name(v)
+    if isinstance(v, (list, tuple)):
+        return "x".join(str(x) for x in v)
+    return str(v)
 
 
-def sync_from_device(bos):
-    for bo in bos:
-        bo.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
-
-
-def execute_runlist(runlist):
-    runlist.execute()
-    runlist.wait()
-
-
-class MLIROperator(AIEOperatorBase, ABC):
+class MLIROperator(AIEOperatorBase):
     """Base class for AIE-accelerated operations defined by a single MLIR source"""
 
-    def __init__(self, *args, **kwargs):
-        self.kernel_archive = f"{self.get_operator_name()}_kernels.a"
-        AIEOperatorBase.__init__(self, *args, **kwargs)
+    _name_aliases: ClassVar[dict[str, str]] = {
+        "num_aie_columns": "c",
+        "num_channels": "ch",
+        "tile_size": "t",
+        "size": "sz",
+        "scalar_factor": "sf",
+        "rows": "r",
+        "cols": "n",
+    }
+
+    @property
+    def operator_dir(self) -> Path:
+        return Path(inspect.getfile(type(self))).parent
+
+    @property
+    def name(self) -> str:
+        """Unique name for this operator instance, derived from its parameters.
+
+        For @dataclass subclasses the name is automatically constructed from the
+        dataclass fields using ``_name_aliases`` to shorten field names.
+        Non-dataclass subclasses must override this property directly.
+        """
+        if dataclasses.is_dataclass(self):
+            aliases = type(self)._name_aliases
+            parts = (
+                f"{aliases.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+                for f in dataclasses.fields(self)
+                if f.repr and getattr(self, f.name) is not None
+            )
+            base = type(self).__name__ + "_" + "_".join(parts)
+        else:
+            raise NotImplementedError(
+                f"{type(self).__name__} must be a @dataclass or override the name property"
+            )
+        dev = aie_utils.get_current_device()
+        return f"{base}_{dev.resolve().name}"
 
     @abstractmethod
-    def get_operator_name(self):
+    def get_mlir_artifact(self) -> CompilationArtifact:
         pass
 
     @abstractmethod
-    def get_mlir_artifact(self):
+    def get_kernel_artifacts(self) -> list[CompilationArtifact]:
         pass
 
-    @abstractmethod
-    def get_kernel_artifacts(self):
-        pass
-
-    def get_artifacts(self, prefix=""):
-        operator_name = prefix + self.get_operator_name()
+    def get_artifacts(
+        self, prefix: str = "", dynamic_obj_fifos: bool = False
+    ) -> tuple[XclbinArtifact, InstsBinArtifact]:
+        operator_name = prefix + self.name
         mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
-            # FIXME: currently hard-coding that the design will accept this argument as an input if it uses kernels
-            # Also not handling name collisions of kernels with the same name
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
+        kernel_deps = self.get_kernel_artifacts()
+        extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_deps,
+            extra_flags=extra_flags,
         )
         insts_artifact = InstsBinArtifact(
             f"{operator_name}.bin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact],
+            extra_flags=extra_flags,
         )
         return xclbin_artifact, insts_artifact
 
-    def set_up_artifacts(self):
+    def set_up_artifacts(self) -> None:
         xclbin_artifact, insts_artifact = self.get_artifacts()
         self.xclbin_artifact = xclbin_artifact
         self.insts_artifact = insts_artifact
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
-    def get_callable(self):
-        return SingleXclbinCallable(
+    def get_callable(self) -> Callable[..., Any]:
+        npu_kernel = NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
             kernel_name=self.xclbin_artifact.kernel_name,
-            insts_bin_path=self.insts_artifact.filename,
-            args_spec=self.get_arg_spec(),
+            insts_path=self.insts_artifact.filename,
         )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+
+        def call(*args):
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+
+        return call
 
 
-class CompositeOperator(AIEOperatorBase, ABC):
+class CompositeOperator(AIEOperatorBase):
     """Base class for composite operators that chain multiple sub-operators"""
 
-    def __init__(self, context=None):
+    def __init__(self, context: AIEContext | None = None) -> None:
         super().__init__(context)
 
 
+@dataclass(frozen=True)
 class AIERuntimeArgSpec:
-    def __init__(self, direction, shape, dtype=bfloat16):
-        self.shape = shape
-        self.dtype = dtype
-        assert direction in {"in", "out", "inout"}
-        self.direction = direction
+    """Specification for a single runtime argument of an AIE operator."""
 
-    def __repr__(self):
-        return f"AIERuntimeArgSpec(direction={self.direction}, shape={self.shape}, dtype={self.dtype})"
+    direction: str
+    shape: tuple[int, ...]
+    dtype: np.dtype = dataclasses.field(default_factory=lambda: bfloat16)
 
-
-class AIEBuffer:
-    def __init__(self, shape, dtype=bfloat16, bo=None, device_manager=None):
-        size = np.prod(shape) * np.dtype(dtype).itemsize
-        self.shape = shape
-        self.dtype = dtype
-        self.bo = bo
-        self.on = "cpu"
-        self.device_manager = device_manager or AIEDeviceManager()
-        if not self.bo:
-            self.bo = pyxrt.bo(
-                self.device_manager.device,
-                size,
-                pyxrt.bo.host_only,
-                0x10000,
+    def __post_init__(self) -> None:
+        if self.direction not in {"in", "out", "inout"}:
+            raise ValueError(
+                f"Invalid direction {self.direction!r}: must be one of 'in', 'out', 'inout'"
             )
-        self.memory_view = self.bo.map()
-        self.subviews = []
-
-    def subbuffer(self, length, offset, shape, dtype=None):
-        if dtype is None:
-            dtype = self.dtype
-        assert np.prod(shape) == length
-        itemsize = np.dtype(dtype).itemsize
-        assert offset >= 0
-        assert offset * itemsize <= np.prod(self.shape) * np.dtype(self.dtype).itemsize
-        assert (
-            length * itemsize + offset * itemsize
-            <= np.prod(self.shape) * np.dtype(self.dtype).itemsize
-        )
-        sub_bo = pyxrt.bo(
-            self.bo,  # parent bo
-            length * itemsize,  # size
-            offset * itemsize,  # offset
-        )
-        sub_buffer = AIEBuffer(
-            shape=shape, dtype=dtype, bo=sub_bo, device_manager=self.device_manager
-        )
-        sub_buffer.on = self.on
-        self.subviews.append(sub_buffer)
-        return sub_buffer
-
-    def view(self, shape):
-        assert np.prod(shape) == np.prod(self.shape)
-        sub_buffer = AIEBuffer(
-            shape=shape,
-            dtype=self.dtype,
-            bo=self.bo,
-            device_manager=self.device_manager,
-        )
-        sub_buffer.on = self.on
-        self.subviews.append(sub_buffer)
-        return sub_buffer
-
-    def view_as_np(self):
-        self.to("cpu")
-        # Interpret the buffer as a 1-dimensional array then change its view to the expected shape
-        return np.frombuffer(
-            self.memory_view, dtype=self.dtype, count=np.prod(self.shape)
-        ).reshape(self.shape)
-
-    def view_as_torch(self):
-        return numpy_to_torch(self.view_as_np())
-
-    def to(self, dest):
-        direction = {
-            "npu": pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE,
-            "cpu": pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE,
-        }
-        if dest not in direction:
-            raise RuntimeError(f"Unknown destination for AIEBuffer.to(): {dest}")
-        if self.on == dest:
-            return self
-        direction = direction[dest]
-        self.bo.sync(direction)
-        self.on = dest
-        todo = self.subviews.copy()
-        while todo:
-            sub_buffer = todo.pop()
-            sub_buffer.on = self.on
-            todo.extend(sub_buffer.subviews)
-        return self
-
-    @staticmethod
-    def from_np(buffer):
-        shape = buffer.shape
-        dtype = buffer.dtype
-        size = np.prod(shape) * np.dtype(dtype).itemsize
-        aie_buffer = AIEBuffer(shape=shape, dtype=dtype)
-        aie_buffer.view_as_np()[:] = buffer
-        aie_buffer.to("npu")
-        return aie_buffer
-
-    @staticmethod
-    def from_torch(tensor):
-        return AIEBuffer.from_np(torch_to_numpy(tensor))
-
-
-class SingleXclbinCallable:
-    def __init__(
-        self, xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager=None
-    ):
-        self.device_manager = device_manager or AIEDeviceManager()
-        self.context, self.xrt_kernel = self.device_manager.get_context_and_kernel(
-            str(xclbin_path), kernel_name
-        )
-        with open(str(insts_bin_path), "rb") as f:
-            instructions = np.frombuffer(f.read(), dtype=np.uint32)
-        insts_bo = pyxrt.bo(
-            self.device_manager.device,
-            instructions.nbytes,
-            pyxrt.bo.cacheable,
-            self.xrt_kernel.group_id(1),
-        )
-        insts_bo.write(instructions.view(np.uint8), 0)
-        self.insts_buffer = AIEBuffer(
-            shape=(len(instructions),), dtype=np.uint32, bo=insts_bo
-        )
-        self.insts_buffer.to("npu")
-        self.args_spec = args_spec
-
-    def __call__(self, *buffers):
-        assert len(buffers) == len(self.args_spec)
-        # assert all(
-        #    np.prod(buffers[i].shape) >= np.prod(self.args_spec[i].shape) and buffers[i].dtype == self.args_spec[i].dtype
-        #    for i in range(len(buffers))
-        # ), "Input buffer shapes or dtypes do not match expected argument specification."
-        self.insts_buffer.to("npu")
-        for buf in buffers:
-            buf.to("npu")
-        opcode = 3
-        bos = [buffer.bo for buffer in buffers]
-        run = self.xrt_kernel(
-            opcode, self.insts_buffer.bo, self.insts_buffer.shape[0], *bos
-        )
-        ret_code = run.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"Kernel did not complete correctly: {ret_code}")
-
-
-class PatchableSingleXclbinCallable(SingleXclbinCallable):
-    def __init__(
-        self, xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager=None
-    ):
-        super().__init__(
-            xclbin_path, kernel_name, insts_bin_path, args_spec, device_manager
-        )
-        self.baseline_instructions = self.insts_buffer.view_as_np().copy()
-
-    def patch(self, patches):
-        """Apply patches with masking: dict of {position: (value, mask)}."""
-        insts = self.insts_buffer.view_as_np()
-        insts[:] = self.baseline_instructions
-        for pos, (val, mask) in patches.items():
-            insts[pos] = (np.int64(insts[pos]) & ~mask) | (val & mask)
-        self.insts_buffer.to("npu")
-
-
-class CompositeCallable:
-    """Callable for executing a sequence of sub-operators"""
-
-    def __init__(self, sequence, intermediate_buffers=None):
-        """
-        Args:
-            sequence: List of (callable, args_indices) tuples.
-                      args_indices is a list of indices into the combined list of [inputs, outputs, intermediates].
-            intermediate_buffers: List of AIEBuffer objects for intermediate results.
-        """
-        self.sequence = sequence
-        self.intermediate_buffers = intermediate_buffers or []
-
-    def __call__(self, *args):
-        # args contains inputs and outputs
-        all_buffers = list(args) + self.intermediate_buffers
-
-        for op_callable, indices in self.sequence:
-            op_args = [all_buffers[i] for i in indices]
-            op_callable(*op_args)

@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
+import aie.utils as aie_utils
 
-
-from iron.operators.mem_copy.op import AIEMemCopy
+from iron.operators.mem_copy.op import MemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
-    device_type = AIEDeviceManager().device_str()
-    max_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+    max_columns = aie_utils.get_current_device().cols
 
     input_lengths = [1024, 2048, 4096, 8192]
     bypass_modes = [False, True]
@@ -39,8 +34,6 @@ def get_params():
 
                         # Only proceed if tile_size * num_cores == input_length (exact division)
                         if tile_size * num_cores == input_length:
-                            name = f"mem_copy_{num_cores}_cores_{num_channels}_chans_{input_length}_tile_{tile_size}_{str(bypass)}"
-
                             is_regular = input_length == 2048 and bypass == False
                             marks = [] if is_regular else [pytest.mark.extensive]
 
@@ -51,7 +44,6 @@ def get_params():
                                     num_channels,
                                     bypass,
                                     tile_size,
-                                    id=name,
                                     marks=marks,
                                 )
                             )
@@ -72,7 +64,7 @@ def test_mem_copy(
 ):
     golden_ref = generate_golden_reference(input_length=input_length)
 
-    operator = AIEMemCopy(
+    operator = MemCopy(
         size=input_length,
         num_cores=num_cores,
         num_channels=num_channels,
@@ -81,8 +73,9 @@ def test_mem_copy(
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["inout"]}
-    output_buffers = {"output": golden_ref["inout"]}
+    # num_cores >= num_channels is required: each channel must have at least one core assigned
+    input_buffers = {"input": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.01, abs_tol=1e-6

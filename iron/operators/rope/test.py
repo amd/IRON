@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from pathlib import Path
-
-
 import pytest
-from iron.operators.rope.op import AIERope
+import aie.utils as aie_utils
+from iron.operators.rope.op import RoPE
 from iron.operators.rope.reference import generate_golden_reference
 from iron.common.test_utils import run_test
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
-    device_type = AIEDeviceManager().device_str()
-    max_cols = DEVICE_CONFIGS[device_type]["max_columns"]
+    max_cols = aie_utils.get_current_device().cols
     num_aie_columns_options = [c for c in [1, 2, 4, 8] if c <= max_cols]
 
     # Combine all options
@@ -31,8 +25,6 @@ def get_params():
             for n_angle_rows in input_angle_rows:
                 for n_cols in input_cols:
                     for method_type in method_types:
-                        name = f"rope_{num_aie_columns}c_{n_rows}rows_{n_cols}cols_{n_angle_rows}arows_{method_type}m"
-
                         is_regular = (
                             n_rows == 32
                             and n_cols == 512
@@ -54,7 +46,6 @@ def get_params():
                                 n_angle_rows,
                                 num_aie_columns,
                                 method_type,
-                                id=name,
                                 marks=marks,
                             )
                         )
@@ -74,7 +65,7 @@ def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
         rows=rows, cols=cols, context_len=angle_rows, method_type=method_type
     )
 
-    operator = AIERope(
+    operator = RoPE(
         rows=rows,
         cols=cols,
         num_aie_columns=aie_columns,

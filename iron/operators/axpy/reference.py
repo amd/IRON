@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.utils import torch_dtype_map
+from iron.common.test_utils import torch_dtype_map
 
 
 def generate_golden_reference(input_length: int, scalar=3.0, dtype="bf16", seed=42):

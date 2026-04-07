@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
@@ -11,7 +11,7 @@ import sys
 import statistics
 
 from iron.common import AIEContext
-from iron.common.aie_device_manager import AIEDeviceManager
+import aie.utils as aie_utils
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def aie_context(request):
     verbose_mlir = request.config.option.verbose > 0
     ctx = AIEContext(mlir_verbose=verbose_mlir)
     yield ctx
-    ctx.device_manager.reset()
+    aie_utils.DefaultNPURuntime.cleanup()
 
 
 def pytest_addoption(parser):
@@ -157,7 +157,7 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    device = AIEDeviceManager().device_str()
+    device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item in items:
         marker = item.get_closest_marker("supported_devices")
         if marker and device not in marker.args:
@@ -182,3 +182,8 @@ def pytest_generate_tests(metafunc):
     if iterations > 1:
         metafunc.fixturenames.append("_iteration")
         metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")
+
+
+def pytest_make_parametrize_id(config, val, argname):
+    # Required: pytest_runtest_makereport parses test IDs with format "{argname}_{val}" for CSV reporting.
+    return f"{argname}_{val}"

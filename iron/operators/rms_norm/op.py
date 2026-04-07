@@ -1,105 +1,101 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import torch.nn as nn
-import numpy as np
-from ml_dtypes import bfloat16
-from pathlib import Path
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
-from iron.common.utils import torch_to_numpy
-from iron.common.device_utils import DEVICE_CONFIGS
+import aie.utils as aie_utils
+from iron.common.device_utils import get_kernel_dir
+from iron.common.utils import get_shim_dma_limit
 
 
-class AIERMSNorm(MLIROperator):
+@dataclass
+class RMSNorm(MLIROperator):
     """AIE-accelerated RMS Normalization layer"""
 
-    def __init__(
-        self,
-        size,
-        eps=1e-6,
-        num_aie_columns=None,
-        num_channels=None,
-        tile_size=None,
-        weighted=False,
-        context=None,
-    ):
-        max_multiple = num_aie_columns * tile_size
-        assert (
-            size % max_multiple == 0
-        ), "size must be multiple of num_aie_columns * tile_size"
-        assert size % tile_size == 0, "size must be multiple of tile_size"
+    size: int
+    num_aie_columns: int
+    num_channels: int
+    tile_size: int
+    weighted: bool = False
+    context: object = field(default=None, repr=False)
 
-        self.size = size
-        self.tile_size = tile_size
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "weighted": "w",
+    }
 
-        self.num_columns = num_aie_columns
-        self.num_channels = num_channels
-        self.eps = eps
-        self.weighted = weighted
+    def __post_init__(self):
+        # Note: epsilon is hardcoded to 1e-5 in the AIE kernel and cannot be changed at runtime.
+        dev = aie_utils.get_current_device()
+        shim_dma_limit = get_shim_dma_limit(dev)
 
-        # Enforce ShimDMA limits for weighted RMS Norm (uses 2 inputs per core)
-        # Maximum safe configuration: 8 columns × 2 channels = 16 ShimDMA channels
-        total_shimdma_channels = self.num_columns * self.num_channels
-        assert total_shimdma_channels <= 16, "Conservative ShimDMA limit"
-
-        MLIROperator.__init__(self, context=context)
-
-    def get_operator_name(self):
-        return f"weighted_rms_{self.num_columns}c_{self.num_channels}ch_{self.size}_{self.tile_size}t"
+        # The weighted design uses one weight ObjectFifo per channel shared across all
+        # columns, so its ShimDMA budget is:
+        #   (num_aie_columns * num_channels) in-fills
+        #   + num_channels weight-fills
+        #   + (num_aie_columns * num_channels) out-drains
+        # The binding constraint is on the output (host→AIE) shim DMA channels:
+        #   num_channels * (num_aie_columns + 1) <= shim_dma_limit
+        if self.weighted:
+            weighted_shim_usage = self.num_channels * (self.num_aie_columns + 1)
+            if weighted_shim_usage > shim_dma_limit:
+                raise ValueError(
+                    f"weighted RMSNorm with num_aie_columns={self.num_aie_columns}, "
+                    f"num_channels={self.num_channels} requires {weighted_shim_usage} ShimDMA "
+                    f"output channels but device only has {shim_dma_limit}"
+                )
+        max_multiple = self.num_aie_columns * self.num_channels * self.tile_size
+        if self.size % max_multiple != 0:
+            raise ValueError(
+                f"size ({self.size}) must be a multiple of "
+                f"num_aie_columns * num_channels * tile_size ({max_multiple})"
+            )
+        total_shimdma_channels = self.num_aie_columns * self.num_channels
+        if total_shimdma_channels > shim_dma_limit:
+            raise ValueError(
+                f"num_aie_columns * num_channels ({total_shimdma_channels}) "
+                f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
+            )
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         if self.weighted:
-            import_path = operator_dir / "design_weighted.py"
+            source_path = self.operator_dir / "design_weighted.py"
             callback_fn = "my_weighted_rms_norm"
-            callback_args = [
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_columns,
-                self.num_channels,
-                self.tile_size,
-                0,
-            ]
         else:
-            import_path = operator_dir / "design.py"
+            source_path = self.operator_dir / "design.py"
             callback_fn = "my_rms_norm"
-            callback_args = [
-                self.context.device_manager.device_type,
-                self.size,
-                self.num_columns,
-                self.num_channels,
-                0,  # trace_size
-                self.tile_size,
-            ]
 
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=import_path,
-            callback_fn=callback_fn,
-            callback_args=callback_args,
-            callback_kwargs={
-                "kernel_archive": self.kernel_archive,
-            },
+            f"{self.name}.mlir",
+            DesignGenerator(
+                source_path,
+                callback_fn,
+                (
+                    aie_utils.get_current_device(),
+                    self.size,
+                    self.num_aie_columns,
+                    self.num_channels,
+                    self.tile_size,
+                    0,  # trace_size
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
-        arch_dir = DEVICE_CONFIGS[self.context.device_manager.device_str()][
-            "kernel_dir"
-        ]
+        arch_dir = get_kernel_dir()
         artifacts = [
             KernelObjectArtifact(
-                f"rms_norm.o",
+                "rms_norm.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / arch_dir / "rms_norm.cc"

@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
+import aie.utils as aie_utils
 
-
-from iron.operators.axpy.op import AIEAXPY
+from iron.operators.axpy.op import AXPY
 from iron.operators.axpy.reference import generate_golden_reference
 from iron.common.test_utils import run_test
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
-    device_type = AIEDeviceManager().device_str()
-    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
-    num_channels = 2
+    max_aie_columns = aie_utils.get_current_device().cols
     input_lengths = [1024, 2048, 4096, 8192]
     scalar_factors = [3.0, 10.0]
 
@@ -28,8 +22,6 @@ def get_params():
             if tile_size * num_aie_columns != input_length:
                 continue
             for scalar in scalar_factors:
-                name = f"axpy_{num_aie_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}_{scalar}"
-
                 # Determine if this is a regular test case
                 is_regular = input_length == 2048 and scalar == 3.0
                 marks = [] if is_regular else [pytest.mark.extensive]
@@ -38,10 +30,8 @@ def get_params():
                     pytest.param(
                         input_length,
                         num_aie_columns,
-                        num_channels,
                         tile_size,
                         scalar,
-                        id=name,
                         marks=marks,
                     )
                 )
@@ -53,20 +43,17 @@ def get_params():
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
 @pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size,scalar_factor",
+    "input_length,num_aie_columns,tile_size,scalar_factor",
     get_params(),
 )
-def test_axpy(
-    input_length, num_aie_columns, num_channels, tile_size, scalar_factor, aie_context
-):
+def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_context):
     golden_ref = generate_golden_reference(
         input_length=input_length, scalar=scalar_factor
     )
 
-    operator = AIEAXPY(
+    operator = AXPY(
         size=input_length,
         num_aie_columns=num_aie_columns,
-        num_channels=num_channels,
         tile_size=tile_size,
         scalar_factor=scalar_factor,
         context=aie_context,

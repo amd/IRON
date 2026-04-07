@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 import pytest
-from pathlib import Path
+import aie.utils as aie_utils
 
-
-from iron.operators.dequant.op import AIEDequant
+from iron.operators.dequant.op import Dequant
 from iron.operators.dequant.reference import generate_golden_reference
 from iron.common.test_utils import run_test
-from iron.common.aie_device_manager import AIEDeviceManager
-from iron.common.device_utils import DEVICE_CONFIGS
 
 
 def get_params():
-    device_type = AIEDeviceManager().device_str()
-    max_aie_columns = DEVICE_CONFIGS[device_type]["max_columns"]
+    max_aie_columns = aie_utils.get_current_device().cols
 
     input_lengths = [1024, 2048, 4096, 8192]
     group_size = 32
@@ -34,8 +29,6 @@ def get_params():
 
                 # Only proceed if tile_size * total_cores == input_length (exact division)
                 if tile_size * total_cores == input_length:
-                    name = f"dequant_{num_columns}_cols_{num_channels}_channels_{input_length}_tile_{tile_size}"
-
                     is_regular = input_length == 2048
                     marks = [] if is_regular else [pytest.mark.extensive]
 
@@ -46,7 +39,6 @@ def get_params():
                             num_channels,
                             tile_size,
                             group_size,
-                            id=name,
                             marks=marks,
                         )
                     )
@@ -70,7 +62,7 @@ def test_dequant(
         group_size=group_size,
     )
 
-    operator = AIEDequant(
+    operator = Dequant(
         size=input_length,
         num_aie_columns=num_aie_columns,
         num_channels=num_channels,

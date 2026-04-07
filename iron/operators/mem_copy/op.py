@@ -1,108 +1,81 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
-from pathlib import Path
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
+import aie.utils as aie_utils
 
 
-class AIEMemCopy(MLIROperator):
-    def __init__(self, size, num_cores, num_channels, bypass, tile_size, context=None):
-        self.size = size
-        self.num_cores = num_cores
-        self.num_channels = num_channels
-        self.bypass = bypass
-        self.tile_size = tile_size
+@dataclass
+class MemCopy(MLIROperator):
+    """AIE-accelerated memory copy operator."""
 
-        # For naming consistency with other operators
-        self.bypass_str = "bypass" if bypass else "no_bypass"
+    size: int
+    num_cores: int
+    num_channels: int
+    bypass: bool
+    tile_size: int
+    context: object = field(default=None, repr=False)
 
-        MLIROperator.__init__(self, context=context)
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_cores": "cores",
+        "num_channels": "chans",
+        "tile_size": "tile",
+    }
 
-    def get_operator_name(self):
-        return f"mem_copy_{self.num_cores}_cores_{self.num_channels}_chans_tile_{self.tile_size}_{self.bypass_str}"
+    def __post_init__(self):
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
-        size = self.tile_size * self.num_cores
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
-            callback_fn="my_mem_copy",
-            callback_args=[
-                self.context.device_manager.device_type,
-                size,
-                self.num_cores,
-                self.num_channels,
-                self.bypass,
-                self.tile_size,
-                0,
-            ],
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_mem_copy",
+                (
+                    aie_utils.get_current_device(),
+                    self.size,
+                    self.num_cores,
+                    self.num_channels,
+                    self.bypass,
+                    self.tile_size,
+                    0,
+                ),
+            ),
         )
 
     def get_kernel_artifacts(self):
-        if not self.bypass:
-            return [
-                KernelObjectArtifact(
-                    "mem_copy.o",
-                    dependencies=[
-                        SourceArtifact(
-                            self.context.base_dir
-                            / "aie_kernels"
-                            / "generic"
-                            / "passThrough.cc"
-                        )
-                    ],
-                )
-            ]
-        else:
+        if self.bypass:
             return []
+        return [
+            KernelObjectArtifact(
+                "mem_copy.o",
+                dependencies=[
+                    SourceArtifact(
+                        self.context.base_dir
+                        / "aie_kernels"
+                        / "generic"
+                        / "passThrough.cc"
+                    )
+                ],
+            )
+        ]
 
     def get_artifacts(self):
-        # Override to add --dynamic-objFifos flag
-        operator_name = self.get_operator_name()
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps_inputs = self.get_kernel_artifacts()
-        if len(kernel_deps_inputs) > 0:
-            mlir_artifact.callback_kwargs["kernel_archive"] = self.kernel_archive
-        kernel_deps = (
-            [
-                KernelArchiveArtifact(
-                    self.kernel_archive,
-                    dependencies=kernel_deps_inputs,
-                )
-            ]
-            if kernel_deps_inputs
-            else []
-        )
-        xclbin_artifact = XclbinArtifact(
-            f"{operator_name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=["--dynamic-objFifos"],
-        )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-            extra_flags=["--dynamic-objFifos"],
-        )
-        return xclbin_artifact, insts_artifact
+        return super().get_artifacts(dynamic_obj_fifos=True)
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec("in", (self.size,)),  # input
-            AIERuntimeArgSpec("out", (self.size,)),  # output
+            AIERuntimeArgSpec("in", (self.size,)),
+            AIERuntimeArgSpec("out", (self.size,)),
         ]

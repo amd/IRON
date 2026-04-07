@@ -1,91 +1,85 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import numpy as np
-from ml_dtypes import bfloat16
-from pathlib import Path
+from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    DesignGenerator,
 )
-from iron.common.utils import torch_to_numpy
+import aie.utils as aie_utils
 
 
-class AIEGEMV(MLIROperator):
+@dataclass
+class GEMV(MLIROperator):
     """AIE-accelerated General Matrix-Vector/Vector-Matrix Multiplication layer"""
 
-    def __init__(
-        self,
-        M,
-        K,
-        num_aie_columns=1,
-        tile_size_input=2,
-        tile_size_output=None,
-        num_batches=1,
-        use_static_weight=False,
-        kernel_vector_size=64,
-        context=None,
-    ):
-        if tile_size_output is None:
-            tile_size_output = tile_size_input
+    M: int
+    K: int
+    num_aie_columns: int = 1
+    tile_size_input: int = 2
+    tile_size_output: int | None = None
+    num_batches: int = 1
+    kernel_vector_size: int = field(default=64, repr=False)
+    context: object = field(default=None, repr=False)
 
-        assert (
-            tile_size_output % tile_size_input == 0
-            and tile_size_output >= tile_size_input
-        ), "tile_size_output must be a multiple of tile_size_input"
-        self.M = M  # matrix rows
-        self.K = K  # matrix columns, vector rows
-        self.num_aie_columns = num_aie_columns
-        self.tile_size_input = tile_size_input
-        self.tile_size_output = tile_size_output
-        self.num_batches = num_batches
-        self.kernel_vector_size = kernel_vector_size
-        assert (
-            K >= kernel_vector_size and K % kernel_vector_size == 0
-        ), "K must be multiple of kernel_vector_size"
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_aie_columns": "col",
+        "tile_size_input": "tsi",
+        "tile_size_output": "tso",
+        "num_batches": "batch",
+    }
 
-        self.xclbin_artifact = None
-        self.insts_artifact = None
+    def __post_init__(self):
+        if self.tile_size_output is None:
+            self.tile_size_output = self.tile_size_input
 
-        MLIROperator.__init__(self, context=context)
+        if not (
+            self.tile_size_output % self.tile_size_input == 0
+            and self.tile_size_output >= self.tile_size_input
+        ):
+            raise ValueError("tile_size_output must be a multiple of tile_size_input")
+        if not (
+            self.K >= self.kernel_vector_size and self.K % self.kernel_vector_size == 0
+        ):
+            raise ValueError("K must be multiple of kernel_vector_size")
 
-    def get_operator_name(self):
-        return f"gemv_{self.M}x{self.K}_{self.tile_size_input}tsi_{self.tile_size_output}tso_{self.num_batches}batch_{self.num_aie_columns}col"
+        MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
-        operator_dir = Path(__file__).parent
         mlir_verbose = getattr(self.context, "mlir_verbose", False)
 
         return PythonGeneratedMLIRArtifact(
-            f"{self.get_operator_name()}.mlir",
-            import_path=operator_dir / "design.py",
-            callback_fn="my_matvec",
-            callback_args=[
-                self.context.device_manager.device_type,
-                self.num_aie_columns,
-                self.M,
-                self.K,
-                self.tile_size_input,
-                self.tile_size_output,
-                self.num_batches,
-            ],
-            callback_kwargs={
-                "verbose": mlir_verbose,
-            },
+            f"{self.name}.mlir",
+            DesignGenerator(
+                self.operator_dir / "design.py",
+                "my_matvec",
+                (
+                    aie_utils.get_current_device(),
+                    self.num_aie_columns,
+                    self.M,
+                    self.K,
+                    self.tile_size_input,
+                    self.tile_size_output,
+                    self.num_batches,
+                ),
+                {
+                    "verbose": mlir_verbose,
+                    "kernel_object": f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
+                },
+            ),
         )
 
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"gemv_{self.K}k.o",
+                f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"

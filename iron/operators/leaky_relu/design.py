@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
@@ -18,9 +18,9 @@ def my_leaky_relu(
     tile_size,
     trace_size,
     alpha,
-    kernel_archive=None,
 ):
     xfr_dtype = bfloat16
+    # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
     line_size = 4096 if tile_size > 4096 else tile_size
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
@@ -56,8 +56,8 @@ def my_leaky_relu(
     # Task for the core to perform
     def core_fn(of_in, of_out, leaky_relu_line):
         for _ in range_(N_div_n):
-            elemOut = of_out.acquire(1)
             elemIn = of_in.acquire(1)
+            elemOut = of_out.acquire(1)
             leaky_relu_line(elemIn, elemOut, line_size, alpha)
             of_in.release(1)
             of_out.release(1)

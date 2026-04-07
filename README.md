@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-FileCopyrightText: Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0
    <img src="https://img.shields.io/github/downloads/amd/iron/total.svg" alt="GitHub downloads" /></a>
 <a href="https://github.com/amd/iron/actions" title="Check out our tests">
    <img src="https://github.com/amd/iron/actions/workflows/small.yml/badge.svg" alt="Iron Tests" /></a>
-<a href="https://github.com/amd/iron/blob/main/docs/contribute.md" title="Contribution Guide">
+<a href="https://github.com/amd/iron/blob/main/CONTRIBUTING.md" title="Contribution Guide">
     <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 <a href="https://github.com/amd/iron/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache-yellow.svg" alt="license: Apache" /></a>
@@ -24,8 +24,15 @@ SPDX-License-Identifier: Apache-2.0
    <img src="./images/XDNA2.png" alt="IRONCLAD Logo" style="max-width: 100%; height: auto;">
 </p>
 
-IRON is an open-source & close-to-metal Python API enabling fast and efficient execution on [AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html). It relies on language bindings around the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) dialect. 
+IRON is an open-source & close-to-metal Python API enabling fast and efficient execution on [AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html). It relies on language bindings around the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) dialect.
 
+**Key Features:**
+
+- Close-to-metal NPU programming via MLIR-AIE Python bindings
+- Pre-built operator library (GEMM, MHA, RMSNorm, RoPE, activations, etc.)
+- Operator fusion for optimal performance
+- Extensible architecture for custom operators
+- End-to-end LLM inference (Llama 3.2 1B example included)
 
 The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
@@ -78,7 +85,7 @@ These instructions will guide you through everything required for building and e
 
 ### Initial Setup
 
-  > Be sure you have the latest BIOS on your laptop or mini-PC that enables the NPU. See [here](#update-bios).
+  > **Important**: Ensure your system has the latest BIOS version that enables NPU support. Check your laptop/mini-PC manufacturer's support website for BIOS updates.
 
 If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+ by installing the Hardware Enablement (HWE) stack:
 
@@ -119,33 +126,36 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
-   ./iron/operators/axpy/test.py
+   pytest ./iron/operators/axpy/
    ```
 
 ### Building/Using & Testing Operators
 
 All available operators can be found in `iron/operators`. These each contain:
 
-* `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
-* `design.py`: The implementation of the operator's NPU code. Often references a kernel in `aie_kernels` for the compute core code and describes the data movement using ObjectFIFOs.
-* `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
-* `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
+- `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
+- `design.py`: The implementation of the operator's NPU code. Often references a kernel in `aie_kernels` for the compute core code and describes the data movement using ObjectFIFOs.
+- `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
+- `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
 
-> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated: 
+> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`
 >       `source /path/to/ironenv/bin/activate`
 
 To build and test all the operators:
+
 ``` bash
 pytest iron/operators/ -m "not extensive"
-``` 
+```
 
 To run the extensive test suite:
+
 ``` bash
 pytest iron/operators/
 ```
 
 To run a specific operator's tests:
+
 ``` bash
 pytest iron/operators/axpy/
 ```
@@ -160,12 +170,68 @@ chmod +x .git/hooks/pre-push
 ```
 
 The hook will run the same linting checks as CI:
+
 - License checks (reuse)
 - Python formatting (black)
 - C++ formatting (clang-format)
 
 To bypass the hook if needed: `git push --no-verify`
 
+## Applications
+
+### Llama 3.2 1B Inference
+
+IRON includes a complete LLM inference example demonstrating NPU acceleration:
+
+- **Location**: `iron/applications/llama_3.2_1b/`
+- **Model**: Meta Llama 3.2 1B
+- **Features**: Multi-head attention, fused operators, bfloat16 quantization
+
+See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
+
+## Architecture
+
+IRON uses a three-layer architecture:
+
+1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
+   - Each operator has: `op.py` (interface), `design.py` (MLIR-AIE implementation), `reference.py` (CPU reference), `test.py` (validation)
+
+2. **AIE Kernels** (`aie_kernels/`): Low-level C++ compute kernels
+   - Organized by architecture: `generic/`, `aie2/`, `aie2p/`
+   - Vectorized using AIE API for optimal performance
+
+3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
+   - MLIR-AIE compilation pipeline
+   - XRT runtime integration
+   - Operator fusion framework
+
+## Performance
+
+IRON operators are designed for maximum NPU utilization:
+
+- Parallel execution across multiple AIE columns
+- Optimized data movement via ObjectFIFOs
+- Fused operations to minimize host-NPU transfers
+- Vectorized kernels using AIE intrinsics
+
+Run benchmarks:
+
+```bash
+# Run all operators with performance metrics stored in tests_latest.csv
+pytest iron/operators/ -m "not extensive" -v
+```
+
+## Community and Support
+
+- 💬 **Discord**: Join our [Discord server](https://discord.gg/cW99Ds85e8) for discussions and support
+- 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
+- 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
+- 📚 **Documentation**: Operator examples in `iron/operators/`, kernel docs in `aie_kernels/README.md`
+
+## License
+
+IRON is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.
+
 -----
 
-<p align="center">Copyright&copy; 2025 Advanced Micro Devices, Inc</p>
+<p align="center">Copyright&copy; 2025-2026 Advanced Micro Devices, Inc</p>

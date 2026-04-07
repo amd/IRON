@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
@@ -10,13 +10,29 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
-def my_relu(
-    dev, size, num_columns, num_channels, tile_size, trace_size, kernel_archive=None
+def channeled_unary_design(
+    dev,
+    size,
+    num_columns,
+    num_channels,
+    tile_size,
+    trace_size,
+    kernel_fn_name,
+    kernel_obj_file,
+    tile_cap=4096,
+    func_prefix="",
 ):
     xfr_dtype = bfloat16
-    line_size = 4096 if tile_size > 4096 else tile_size
+    line_size = tile_cap if tile_size > tile_cap else tile_size
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
+
+    # When tile_cap > 4096 (e.g. 8192), tiles may exceed a single 8 KB bank,
+    # so the FIFO depth must shrink to 1 to avoid exceeding local memory.
+    fifo_kwargs = {}
+    if tile_cap > 4096:
+        fifodepth = 1 if line_size > 4096 else 2
+        fifo_kwargs = {"depth": fifodepth}
 
     # Calculate number of iterations per core
     total_cores = num_columns * num_channels
@@ -28,29 +44,29 @@ def my_relu(
 
     # Dataflow with ObjectFifos
     of_ins = [
-        ObjectFifo(line_type, name=f"in{i}_{j}")
+        ObjectFifo(line_type, name=f"in{i}_{j}", **fifo_kwargs)
         for i in range(num_columns)
         for j in range(num_channels)
     ]
     of_outs = [
-        ObjectFifo(line_type, name=f"out{i}_{j}")
+        ObjectFifo(line_type, name=f"out{i}_{j}", **fifo_kwargs)
         for i in range(num_columns)
         for j in range(num_channels)
     ]
 
     # External, binary kernel definition
-    relu_fcn = Kernel(
-        "relu_bf16",
-        "relu.o",
+    kernel_fcn = Kernel(
+        f"{func_prefix}{kernel_fn_name}",
+        f"{func_prefix}{kernel_obj_file}",
         [line_type, line_type, np.int32],
     )
 
     # Task for the core to perform
-    def core_fn(of_in, of_out, reluLine):
+    def core_fn(of_in, of_out, kernel_line):
         for _ in range_(N_div_n):
-            elemOut = of_out.acquire(1)
-            elemIn = of_in.acquire(1)
-            reluLine(elemIn, elemOut, line_size)
+            elem_in = of_in.acquire(1)
+            elem_out = of_out.acquire(1)
+            kernel_line(elem_in, elem_out, line_size)
             of_in.release(1)
             of_out.release(1)
 
@@ -61,7 +77,7 @@ def my_relu(
             [
                 of_ins[i * num_channels + j].cons(),
                 of_outs[i * num_channels + j].prod(),
-                relu_fcn,
+                kernel_fcn,
             ],
         )
         for i in range(num_columns)
@@ -69,10 +85,6 @@ def my_relu(
     ]
 
     # Create a TensorAccessPattern for each channel
-    # to describe the data movement
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels.
     taps = [
         TensorAccessPattern(
             (1, size),
@@ -89,7 +101,6 @@ def my_relu(
     with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
         rt.start(*my_workers)
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
         tg = rt.task_group()
 
         # Fill the input objectFIFOs with data
@@ -108,10 +119,10 @@ def my_relu(
                     of_outs[i * num_channels + j].cons(),
                     b_out,
                     taps[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
+                    wait=True,
                     task_group=tg,
                 )
         rt.finish_task_group(tg)
 
-    # Place components (assign them resources on the device) and generate an MLIR module
+    # Place components and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())

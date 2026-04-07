@@ -1,18 +1,14 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from ml_dtypes import bfloat16
-from pathlib import Path
 import numpy as np
-import argparse
-import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
-from aie.helpers.util import np_ndarray_type_get_shape
 
 
 def my_weighted_rms_norm(
@@ -22,11 +18,10 @@ def my_weighted_rms_norm(
     num_channels,
     weight_length,
     trace_size,
-    kernel_archive="rms_norm.a",
     func_prefix="",
 ):
     per_tile_elements = weight_length
-    total_cores = num_columns  # For each core that does rms norm, another core will take its output to do eltwise mul
+    total_cores = num_columns * num_channels
     n = per_tile_elements * total_cores
     if num_elements % n != 0:
         raise ValueError(
@@ -45,28 +40,35 @@ def my_weighted_rms_norm(
 
     # AIE-array data movement with object fifos
     of_in1s = [
-        ObjectFifo(tile_ty, name=f"in1_{i}", depth=fifodepth)
-        for i in range(total_cores)
+        ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=fifodepth)
+        for i in range(num_columns)
+        for j in range(num_channels)
     ]
-    of_in2s = ObjectFifo(weights_ty, name=f"in2_weights", depth=fifodepth)
+    # One weight ObjectFifo per channel, shared across columns in that channel
+    of_in2s = [
+        ObjectFifo(weights_ty, name=f"in2_weights_{j}", depth=fifodepth)
+        for j in range(num_channels)
+    ]
     of_out1s = [
-        ObjectFifo(tile_ty, name=f"out1_{i}", depth=fifodepth)
-        for i in range(total_cores)
+        ObjectFifo(tile_ty, name=f"out1_{i}_{j}", depth=fifodepth)
+        for i in range(num_columns)
+        for j in range(num_channels)
     ]
     of_out2s = [
-        ObjectFifo(tile_ty, name=f"out2_{i}", depth=fifodepth)
-        for i in range(total_cores)
+        ObjectFifo(tile_ty, name=f"out2_{i}_{j}", depth=fifodepth)
+        for i in range(num_columns)
+        for j in range(num_channels)
     ]
 
     # AIE Core Function declaration
     rms_norm_kernel = Kernel(
         f"{func_prefix}rms_norm_bf16_vector",
-        kernel_archive,
+        f"{func_prefix}rms_norm.o",
         [tile_ty, tile_ty, np.int32],
     )
     eltwise_mul_kernel = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
-        kernel_archive,
+        f"{func_prefix}mul.o",
         [tile_ty, weights_ty, tile_ty, np.int32],
     )
 
@@ -94,42 +96,47 @@ def my_weighted_rms_norm(
     # Create workers to run the task on compute tiles,
     # one core for rms norm and another pipelined to do eltwise mul
     my_workers = []
-    for i in range(total_cores):
-        my_workers.append(
-            Worker(
-                core_body_norm,
-                [
-                    of_in1s[i].cons(),
-                    of_out1s[i].prod(),
-                    rms_norm_kernel,
-                ],
+    for i in range(num_columns):
+        for j in range(num_channels):
+            idx = i * num_channels + j
+            my_workers.append(
+                Worker(
+                    core_body_norm,
+                    [
+                        of_in1s[idx].cons(),
+                        of_out1s[idx].prod(),
+                        rms_norm_kernel,
+                    ],
+                )
             )
-        )
-    for i in range(total_cores):
-        my_workers.append(
-            Worker(
-                core_body_mul,
-                [
-                    of_out1s[i].cons(),
-                    of_in2s.cons(),
-                    of_out2s[i].prod(),
-                    eltwise_mul_kernel,
-                ],
+    for i in range(num_columns):
+        for j in range(num_channels):
+            idx = i * num_channels + j
+            my_workers.append(
+                Worker(
+                    core_body_mul,
+                    [
+                        of_out1s[idx].cons(),
+                        of_in2s[j].cons(),
+                        of_out2s[idx].prod(),
+                        eltwise_mul_kernel,
+                    ],
+                )
             )
-        )
 
     # Create a TensorAccessPattern for each core
-    # to describe the data movement
+    # to describe the data movement.
     # The pattern chops the data in equal chunks
-    # and moves them in parallel across the cores.
+    # and moves them in parallel across columns and channels.
     taps = [
         TensorAccessPattern(
             (1, num_elements),
-            chunk * i,
+            chunk * i * num_channels + chunk * j,
             [1, 1, 1, chunk],
             [0, 0, 0, 1],
         )
-        for i in range(total_cores)
+        for i in range(num_columns)
+        for j in range(num_channels)
     ]
 
     # Runtime operations to move data to/from the AIE-array
@@ -141,27 +148,33 @@ def my_weighted_rms_norm(
         tg = rt.task_group()
 
         # Fill the input objectFIFOs with data
-        for i in range(total_cores):
+        for i in range(num_columns):
+            for j in range(num_channels):
+                idx = i * num_channels + j
+                rt.fill(
+                    of_in1s[idx].prod(),
+                    A,
+                    taps[idx],
+                    task_group=tg,
+                )
+        # Fill weights (one per channel)
+        for j in range(num_channels):
             rt.fill(
-                of_in1s[i].prod(),
-                A,
-                taps[i],
+                of_in2s[j].prod(),
+                B,
                 task_group=tg,
             )
-        rt.fill(
-            of_in2s.prod(),
-            B,
-            task_group=tg,
-        )
         # Drain the output objectFIFOs with data
-        for i in range(total_cores):
-            rt.drain(
-                of_out2s[i].cons(),
-                C,
-                taps[i],
-                wait=True,
-                task_group=tg,
-            )
+        for i in range(num_columns):
+            for j in range(num_channels):
+                idx = i * num_channels + j
+                rt.drain(
+                    of_out2s[idx].cons(),
+                    C,
+                    taps[idx],
+                    wait=True,
+                    task_group=tg,
+                )
         rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
