@@ -196,7 +196,8 @@ xclbin (NPU binary) + insts.bin (instruction sequence)
 
 ### NPU Architecture Limits
 
-- **NPU1 (AIE2)**: 4 rows × 1-4 columns (AMD Ryzen AI Phoenix/Hawk Point)
+- **NPU1 (AIE2)**: 4 rows × 4 columns (AMD Ryzen AI Phoenix/Hawk Point)
+  - It has 5 columns, but only 4 are accessible.
 - **NPU2 (AIE2P)**: 4 rows × 8 columns (AMD Ryzen AI 300 Series "Strix Point", Ryzen AI 9 HX 370 "Strix Halo", Krackan)
 
 ### Tile and Dimension Constraints
