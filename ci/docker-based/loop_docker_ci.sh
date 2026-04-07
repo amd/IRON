@@ -13,7 +13,7 @@ if [ -z "${ARCH}" ]; then
     XRT_OUTPUT=$(xrt-smi examine 2>/dev/null)
     if echo "${XRT_OUTPUT}" | grep -qi "phoenix"; then
         ARCH="phoenix"
-    elif echo "${XRT_OUTPUT}" | grep -qi "strix"; then
+    elif echo "${XRT_OUTPUT}" | egrep -qi "strix|krackan"; then
         ARCH="strix"
     else
         echo "ERROR: Could not auto-detect architecture from xrt-smi examine output:"
