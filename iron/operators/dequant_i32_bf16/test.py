@@ -5,8 +5,8 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.operators.dequant_i32.op import DequantI32
-from iron.operators.dequant_i32.reference import generate_golden_reference
+from iron.operators.dequant_i32_bf16.op import DequantI32
+from iron.operators.dequant_i32_bf16.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
