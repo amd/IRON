@@ -71,11 +71,11 @@ def my_fused_dequant_matvec(
     L3_C_ty = np.ndarray[(M,), dtype_out]
 
     # --- Kernel declaration ---
-    # group_size is compile-time via -DGROUP_SIZE, not a runtime parameter.
+    # K and group_size are compile-time via -DDIM_K/-DGROUP_SIZE.
     fused_matvec = Kernel(
         "fused_dequant_matvec_bf16",
-        f"fused_dequant_gemv_g{group_size}.o",
-        [np.int32, np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
+        f"fused_dequant_gemv_{K}k_g{group_size}.o",
+        [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
 
     # --- ObjectFIFOs ---
@@ -102,7 +102,7 @@ def my_fused_dequant_matvec(
                     output_row_offset = j_i32 * m_input
                     a = A_L3L1_fifo.acquire(1)
                     fused_matvec_fn(
-                        m_input, K, output_row_offset, a, b, c
+                        m_input, output_row_offset, a, b, c
                     )
                     A_L3L1_fifo.release(1)
                 C_L1L3_fifo.release(1)

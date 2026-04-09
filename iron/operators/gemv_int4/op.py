@@ -88,7 +88,7 @@ class GEMVInt4(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"fused_dequant_gemv_g{self.group_size}.o",
+                f"fused_dequant_gemv_{self.K}k_g{self.group_size}.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir
@@ -98,6 +98,7 @@ class GEMVInt4(MLIROperator):
                     )
                 ],
                 extra_flags=[
+                    f"-DDIM_K={self.K}",
                     f"-DGROUP_SIZE={self.group_size}",
                 ],
             ),
