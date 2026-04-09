@@ -5,8 +5,8 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.operators.quantize.op import Quantize
-from iron.operators.quantize.reference import generate_golden_reference
+from iron.operators.quantize_bf16_i8.op import Quantize
+from iron.operators.quantize_bf16_i8.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
