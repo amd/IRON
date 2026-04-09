@@ -49,7 +49,7 @@ def my_leaky_relu(
     leaky_relu_fcn = Kernel(
         "leaky_relu_bf16",
         "leaky_relu.o",
-        [line_type, line_type, np.int32, np.dtype[xfr_dtype]],
+        [line_type, line_type, np.int32, xfr_dtype],
     )
 
     # Task for the core to perform

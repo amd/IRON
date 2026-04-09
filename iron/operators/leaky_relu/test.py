@@ -25,7 +25,6 @@ def get_params():
 @pytest.mark.parametrize(
     "input_length,num_aie_columns,num_channels,tile_size,alpha", get_params()
 )
-@pytest.mark.skip(reason="Leaky ReLU is currently broken (#36)")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
