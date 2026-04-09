@@ -21,34 +21,41 @@ def get_params():
     max_aie_columns = dev.cols
     device_type = dev.resolve().name
     # fmt: off
-    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N, dtype_in, dtype_out
     regular_params = [
-        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0, 1),
-        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0, 1),
-        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0, 1),
-        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0, 1),
-        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0, 1),
-        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0, 1),
-        (  64,   512,   256,               4,      True,     False,  16,  64,  64,          0, 4),
+        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0, 1, "bf16", "bf16"),
+        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0, 1, "bf16", "bf16"),
+        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0, 1, "bf16", "bf16"),
+        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0, 1, "bf16", "bf16"),
+        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0, 1, "bf16", "bf16"),
+        (  64,   512,   256,               4,      True,     False,  16,  64,  64,          0, 4, "bf16", "bf16"),
+    ]
+    int8_params = [
+        (2048,  2048,  2048,               4,     False,     False,  64,  64,  64,          0, 1, "i8", "i32"),
+        ( 512,   512,   512,               4,     False,     False,  32,  32,  32,          0, 1, "i8", "i32"),
+        (2048,  2048,  2048,               8,     False,     False,  64,  64,  64,          0, 1, "i8", "i32"),
+        (1024,  1024,  1024,               8,     False,     False,  64,  64,  64,          0, 1, "i8", "i8"),
+        (1024,  1024,  1024,               8,      True,     False,  64,  64,  64,          0, 1, "i8", "i16"),
     ]
     extensive_params = [
-        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0, 1),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0, 1),
-        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0, 1),
-        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0, 1),
+        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0, 1, "bf16", "bf16"),
+        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0, 1, "bf16", "bf16"),
+        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0, 1, "bf16", "bf16"),
     ]
     # fmt: on
 
@@ -69,6 +76,8 @@ def get_params():
                 n,
                 trace_size,
                 partition_N,
+                dtype_in,
+                dtype_out,
             ) = p
 
             # Skip tests that require more columns than available on the device
@@ -84,6 +93,7 @@ def get_params():
             params.append(pytest.param(*p, marks=marks))
 
     add_params(regular_params, is_extensive=False)
+    add_params(int8_params, is_extensive=False)
     add_params(extensive_params, is_extensive=True)
 
     return params
@@ -95,7 +105,7 @@ def get_params():
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.parametrize(
-    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N",
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N,dtype_in,dtype_out",
     get_params(),
 )
 def test_gemm(
@@ -110,6 +120,8 @@ def test_gemm(
     n,
     trace_size,
     partition_N,
+    dtype_in,
+    dtype_out,
     aie_context,
 ):
     total_N = N * partition_N
@@ -118,6 +130,8 @@ def test_gemm(
         M=M,
         K=K,
         N=total_N,
+        dtype=dtype_in,
+        dtype_out=dtype_out,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
     )
@@ -130,12 +144,19 @@ def test_gemm(
         tile_k=k,
         tile_n=n,
         num_aie_columns=num_aie_columns,
-        prio_accuracy=True,
+        prio_accuracy=dtype_in == "bf16",
         emulate_bf16_mmul_with_bfp16=False,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
+        dtype_in=dtype_in,
+        dtype_out=dtype_out,
         context=aie_context,
     )
+
+    if dtype_in == "i8":
+        rel_tol, abs_tol = 1e-10, 1e-10
+    else:
+        rel_tol, abs_tol = 0.005, 0.005
 
     if partition_N == 1:
         input_buffers = {
@@ -146,7 +167,7 @@ def test_gemm(
             "C": golden_ref["output"][0].flatten(),
         }
         errors, latency_us, bandwidth_gbps = run_test(
-            operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
+            operator, input_buffers, output_buffers, rel_tol=rel_tol, abs_tol=abs_tol
         )
     else:
         compilable = operator.compile()
@@ -200,7 +221,7 @@ def test_gemm(
         # Compare concatenated output to full reference
         C_expected = golden_ref["output"][0]
         buf_errors = verify_buffer(
-            C_concat, "C", C_expected, rel_tol=0.005, abs_tol=0.005
+            C_concat, "C", C_expected, rel_tol=rel_tol, abs_tol=abs_tol
         )
         errors = {"C": buf_errors} if buf_errors else {}
 
