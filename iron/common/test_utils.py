@@ -19,6 +19,17 @@ torch_dtype_map = {
     "i32": torch.int32,
 }
 
+# Numpy equivalent of torch_dtype_map, for use in AIERuntimeArgSpec and other
+# numpy-based interfaces. Derived from torch_dtype_map to stay in sync.
+np_dtype_map = {
+    k: (
+        np.dtype(bfloat16)
+        if v == torch.bfloat16
+        else torch.tensor([], dtype=v).numpy().dtype
+    )
+    for k, v in torch_dtype_map.items()
+}
+
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 
 

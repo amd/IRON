@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
 import numpy as np
-from ml_dtypes import bfloat16
 
 from iron.common import (
     MLIROperator,
@@ -16,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from iron.common.test_utils import np_dtype_map
 import aie.utils as aie_utils
 
 
@@ -167,18 +167,9 @@ class GEMM(MLIROperator):
             ),
         ]
 
-    _np_dtype_map = {
-        "bf16": bfloat16,
-        "f32": np.float32,
-        "i8": np.int8,
-        "ui8": np.uint8,
-        "i16": np.int16,
-        "i32": np.int32,
-    }
-
     def get_arg_spec(self):
-        dtype_in_np = self._np_dtype_map[self.dtype_in]
-        dtype_out_np = self._np_dtype_map[self.dtype_out]
+        dtype_in_np = np_dtype_map[self.dtype_in]
+        dtype_out_np = np_dtype_map[self.dtype_out]
         return [
             AIERuntimeArgSpec("in", (self.M, self.K), dtype=dtype_in_np),  # input A
             AIERuntimeArgSpec(
