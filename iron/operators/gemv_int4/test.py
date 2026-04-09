@@ -16,9 +16,13 @@ def get_params():
 
     params_list = [
         # (M, K, num_aie_columns, tile_size_input, tile_size_output, group_size)
-        (2048, 2048, 4, 1, 512, 32),  # Basic
-        (8192, 2048, 4, 1, 2048, 32),  # Llama down_proj
-        (2048, 8192, 4, 1, 512, 32),  # Llama up_proj
+        (2048, 2048, 4, 1, 512, 32),  # Basic, 4 cols
+        (8192, 2048, 4, 1, 2048, 32),  # Llama down_proj, 4 cols
+        (2048, 8192, 4, 1, 512, 32),  # Llama up_proj, 4 cols
+        (2048, 8192, 8, 1, 256, 32),  # Llama up_proj, 8 cols
+        (8192, 2048, 8, 1, 1024, 32),  # Llama down_proj, 8 cols
+        (2048, 8192, 4, 4, 512, 32),  # tsi=4 for better amortization
+        (8192, 2048, 4, 4, 2048, 32),  # tsi=4
     ]
 
     params = []
