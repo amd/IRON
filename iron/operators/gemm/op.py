@@ -78,6 +78,16 @@ class GEMM(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
+    def name(self) -> str:
+        """Include dtype in operator name when not the default bf16, to avoid
+        xclbin filename collisions between bf16 and int8 GEMM variants with
+        identical dimensions."""
+        base = super().name
+        if self.dtype_in != "bf16":
+            base += f"_{self.dtype_in}_{self.dtype_out}"
+        return base
+
+    @property
     def _kernel_flags_suffix(self):
         """Suffix encoding compile-time flags that affect the kernel binary."""
         if self.dtype_in == "i8":
