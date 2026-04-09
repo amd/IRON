@@ -27,7 +27,7 @@ class GEMVInt4(MLIROperator):
     num_aie_columns: int = 4
     tile_size_input: int = 1
     tile_size_output: int | None = None
-    group_size: int = field(default=32, repr=False)
+    group_size: int = 32
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {

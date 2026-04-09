@@ -75,6 +75,8 @@ def test_gemv_int4(
     }
     output_buffers = {"output": golden_ref["output"]}
 
+    # Tolerances are looser than bf16 GEMV (rel_tol=0.04, abs_tol=1e-3) because
+    # INT4 quantization introduces significant per-group rounding error.
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.07, abs_tol=0.7
     )

@@ -27,28 +27,6 @@
 #include <stdint.h>
 #include <type_traits>
 
-// Dequant one 32-element block: load uint4 → unpack → scale → return bf16
-template <uint32_t block_size>
-inline __attribute__((always_inline)) aie::vector<bfloat16, block_size>
-dequant_block(const uint4 *&weights, const bfloat16 *&b_ptr,
-              aie::vector<bfloat16, block_size> sf_broadcast,
-              aie::accum<accfloat, block_size> &acc) {
-    aie::vector<uint4, block_size> I0 = aie::load_v<block_size>(weights);
-    weights += block_size / 2;
-
-    aie::vector<uint8, block_size> as_int8 = aie::unpack(I0);
-    aie::vector<uint16, block_size> as_int16 = aie::unpack(as_int8);
-    aie::vector<bfloat16, block_size> as_bf16 = aie::to_float<bfloat16>(as_int16, 0);
-    aie::vector<bfloat16, block_size> w_dequant =
-        aie::mul(as_bf16, sf_broadcast).template to_vector<bfloat16>();
-
-    aie::vector<bfloat16, block_size> b_vec = aie::load_v<block_size>(b_ptr);
-    b_ptr += block_size;
-
-    acc = aie::mac(acc, w_dequant, b_vec);
-    return w_dequant;
-}
-
 // block_size: dequant vector width (must be 32 for aie::unpack)
 // G: group size (compile-time for pipelining, must be multiple of block_size)
 // DK: K dimension (compile-time for loop count optimization)
@@ -86,7 +64,7 @@ void fused_dequant_matvec(uint32_t m,
             // Two independent unpack chains for the compiler to interleave.
             AIE_LOOP_MIN_ITERATION_COUNT(loop_iters)
             for (uint32_t g = 0; g < groups_per_row; g += 2)
-                chess_prepare_for_pipelining
+                AIE_PREPARE_FOR_PIPELINING
             {
                 // --- Chain A: group g ---
                 bfloat16 sf_a = row_scales[g];
@@ -131,7 +109,7 @@ void fused_dequant_matvec(uint32_t m,
             // Generic path: 1 group per iteration
             AIE_LOOP_MIN_ITERATION_COUNT(loop_iters)
             for (uint32_t g = 0; g < groups_per_row; g++)
-                chess_prepare_for_pipelining
+                AIE_PREPARE_FOR_PIPELINING
             {
                 bfloat16 sf = row_scales[g];
                 aie::vector<bfloat16, block_size> sf_broadcast =
