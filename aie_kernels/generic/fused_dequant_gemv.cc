@@ -65,74 +65,68 @@ void fused_dequant_matvec(uint32_t m,
             AIE_LOOP_MIN_ITERATION_COUNT(loop_iters)
             for (uint32_t g = 0; g < groups_per_row; g += 2)
                 AIE_PREPARE_FOR_PIPELINING
-            {
-                // --- Chain A: group g ---
-                bfloat16 sf_a = row_scales[g];
-                aie::vector<bfloat16, block_size> sf_a_bc =
-                    aie::broadcast<bfloat16, block_size>(sf_a);
+                {
+                    // --- Chain A: group g ---
+                    bfloat16 sf_a = row_scales[g];
+                    aie::vector<bfloat16, block_size> sf_a_bc = aie::broadcast<bfloat16, block_size>(sf_a);
 
-                aie::vector<uint4, block_size> I0_a = aie::load_v<block_size>(row_weights);
-                row_weights += block_size / 2;
+                    aie::vector<uint4, block_size> I0_a = aie::load_v<block_size>(row_weights);
+                    row_weights += block_size / 2;
 
-                // --- Chain B: group g+1 (interleaved) ---
-                bfloat16 sf_b = row_scales[g + 1];
-                aie::vector<bfloat16, block_size> sf_b_bc =
-                    aie::broadcast<bfloat16, block_size>(sf_b);
+                    // --- Chain B: group g+1 (interleaved) ---
+                    bfloat16 sf_b = row_scales[g + 1];
+                    aie::vector<bfloat16, block_size> sf_b_bc = aie::broadcast<bfloat16, block_size>(sf_b);
 
-                aie::vector<uint4, block_size> I0_b = aie::load_v<block_size>(row_weights);
-                row_weights += block_size / 2;
+                    aie::vector<uint4, block_size> I0_b = aie::load_v<block_size>(row_weights);
+                    row_weights += block_size / 2;
 
-                // Unpack chain A
-                aie::vector<uint8, block_size> a8_a = aie::unpack(I0_a);
-                aie::vector<uint16, block_size> a16_a = aie::unpack(a8_a);
-                aie::vector<bfloat16, block_size> abf_a = aie::to_float<bfloat16>(a16_a, 0);
-                aie::vector<bfloat16, block_size> w_a =
-                    aie::mul(abf_a, sf_a_bc).template to_vector<bfloat16>();
+                    // Unpack chain A
+                    aie::vector<uint8, block_size> a8_a = aie::unpack(I0_a);
+                    aie::vector<uint16, block_size> a16_a = aie::unpack(a8_a);
+                    aie::vector<bfloat16, block_size> abf_a = aie::to_float<bfloat16>(a16_a, 0);
+                    aie::vector<bfloat16, block_size> w_a = aie::mul(abf_a, sf_a_bc).template to_vector<bfloat16>();
 
-                // Unpack chain B
-                aie::vector<uint8, block_size> a8_b = aie::unpack(I0_b);
-                aie::vector<uint16, block_size> a16_b = aie::unpack(a8_b);
-                aie::vector<bfloat16, block_size> abf_b = aie::to_float<bfloat16>(a16_b, 0);
-                aie::vector<bfloat16, block_size> w_b =
-                    aie::mul(abf_b, sf_b_bc).template to_vector<bfloat16>();
+                    // Unpack chain B
+                    aie::vector<uint8, block_size> a8_b = aie::unpack(I0_b);
+                    aie::vector<uint16, block_size> a16_b = aie::unpack(a8_b);
+                    aie::vector<bfloat16, block_size> abf_b = aie::to_float<bfloat16>(a16_b, 0);
+                    aie::vector<bfloat16, block_size> w_b = aie::mul(abf_b, sf_b_bc).template to_vector<bfloat16>();
 
-                // Load activation vectors and MAC
-                aie::vector<bfloat16, block_size> b_a = aie::load_v<block_size>(b_ptr);
-                b_ptr += block_size;
-                acc = aie::mac(acc, w_a, b_a);
+                    // Load activation vectors and MAC
+                    aie::vector<bfloat16, block_size> b_a = aie::load_v<block_size>(b_ptr);
+                    b_ptr += block_size;
+                    acc = aie::mac(acc, w_a, b_a);
 
-                aie::vector<bfloat16, block_size> b_b = aie::load_v<block_size>(b_ptr);
-                b_ptr += block_size;
-                acc = aie::mac(acc, w_b, b_b);
-            }
+                    aie::vector<bfloat16, block_size> b_b = aie::load_v<block_size>(b_ptr);
+                    b_ptr += block_size;
+                    acc = aie::mac(acc, w_b, b_b);
+                }
         } else {
             // Generic path: 1 group per iteration
             AIE_LOOP_MIN_ITERATION_COUNT(loop_iters)
             for (uint32_t g = 0; g < groups_per_row; g++)
                 AIE_PREPARE_FOR_PIPELINING
-            {
-                bfloat16 sf = row_scales[g];
-                aie::vector<bfloat16, block_size> sf_broadcast =
-                    aie::broadcast<bfloat16, block_size>(sf);
+                {
+                    bfloat16 sf = row_scales[g];
+                    aie::vector<bfloat16, block_size> sf_broadcast = aie::broadcast<bfloat16, block_size>(sf);
 
-                AIE_LOOP_MIN_ITERATION_COUNT(blocks_per_group)
-                for (uint32_t blk = 0; blk < blocks_per_group; blk++) {
-                    aie::vector<uint4, block_size> I0 = aie::load_v<block_size>(row_weights);
-                    row_weights += block_size / 2;
+                    AIE_LOOP_MIN_ITERATION_COUNT(blocks_per_group)
+                    for (uint32_t blk = 0; blk < blocks_per_group; blk++) {
+                        aie::vector<uint4, block_size> I0 = aie::load_v<block_size>(row_weights);
+                        row_weights += block_size / 2;
 
-                    aie::vector<uint8, block_size> as_int8 = aie::unpack(I0);
-                    aie::vector<uint16, block_size> as_int16 = aie::unpack(as_int8);
-                    aie::vector<bfloat16, block_size> as_bf16 =
-                        aie::to_float<bfloat16>(as_int16, 0);
-                    aie::vector<bfloat16, block_size> w_dequant =
-                        aie::mul(as_bf16, sf_broadcast).template to_vector<bfloat16>();
+                        aie::vector<uint8, block_size> as_int8 = aie::unpack(I0);
+                        aie::vector<uint16, block_size> as_int16 = aie::unpack(as_int8);
+                        aie::vector<bfloat16, block_size> as_bf16 = aie::to_float<bfloat16>(as_int16, 0);
+                        aie::vector<bfloat16, block_size> w_dequant =
+                            aie::mul(as_bf16, sf_broadcast).template to_vector<bfloat16>();
 
-                    aie::vector<bfloat16, block_size> b_vec = aie::load_v<block_size>(b_ptr);
-                    b_ptr += block_size;
+                        aie::vector<bfloat16, block_size> b_vec = aie::load_v<block_size>(b_ptr);
+                        b_ptr += block_size;
 
-                    acc = aie::mac(acc, w_dequant, b_vec);
+                        acc = aie::mac(acc, w_dequant, b_vec);
+                    }
                 }
-            }
         }
 
         *c_out = static_cast<bfloat16>(aie::reduce_add(acc.template to_vector<float>()));
