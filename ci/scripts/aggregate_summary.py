@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Aggregate CI results from Strix and Phoenix subdirectories into a top-level summary."""
+"""Aggregate CI results from Krackan and Phoenix subdirectories into a top-level summary."""
 
 import argparse
 import csv
@@ -26,7 +26,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 SUITES = ["examples", "small", "extensive"]
-ARCHS = ["strix", "phoenix"]
+ARCHS = ["krackan", "phoenix"]
 
 
 def read_latest_csv(path):
@@ -62,20 +62,20 @@ for suite in SUITES:
         arch_results[arch] = read_latest_csv(csv_path)
 
     # Union of all test names across architectures
-    all_tests = sorted(set(arch_results["strix"]) | set(arch_results["phoenix"]))
+    all_tests = sorted(set(arch_results["krackan"]) | set(arch_results["phoenix"]))
 
     lines += [
         f"## {suite.capitalize()}",
         "",
-        "| Test | Strix | Phoenix |",
+        "| Test | Krackan | Phoenix |",
         "|---|---|---|",
     ]
     if not all_tests:
         lines.append("| (no data) | - | - |")
     for test in all_tests:
-        strix = status_str(arch_results["strix"].get(test))
+        krackan = status_str(arch_results["krackan"].get(test))
         phoenix = status_str(arch_results["phoenix"].get(test))
-        lines.append(f"| {test} | {strix} | {phoenix} |")
+        lines.append(f"| {test} | {krackan} | {phoenix} |")
     lines.append("")
 
 output_path = os.path.join(args.results_root, args.output)

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Strix - Small Benchmark/Test Suite
+name: Krackan - Extensive Benchmark/Test Suite
 
 on:
-  pull_request: 
   workflow_dispatch:
+  schedule:
+   - cron:  '0 9 * * *'  # 2 AM MT
   push:
      branches:
        - main
@@ -19,7 +20,7 @@ concurrency:
 
 jobs:
   Test:
-    runs-on: [self-hosted, strix]
+    runs-on: [self-hosted, krackan]
     steps:
       - name: Pull
         uses: actions/checkout@v4
@@ -37,7 +38,7 @@ jobs:
         uses: ./.github/actions/test
         with:
           env_name: ci_env
-          extensive: "false"
+          extensive: "true"
           test_suite: "operators"
 
       - name: Commit test results
@@ -46,16 +47,15 @@ jobs:
           HOME: /workspace
         uses: ./.github/actions/commit_results
         with:
-          dir: strix/small
+          dir: krackan/extensive
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: results-small
+          name: results-extensive
           path: ${{ steps.commit_results.outputs.results_dir }}
           retention-days: 7
 
       - name: Mark workflow as failed if tests failed
         if: steps.test.outcome == 'failure'
         run: exit 1
-        
