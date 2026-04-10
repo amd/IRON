@@ -75,7 +75,7 @@ while true; do
         -e GITHUB_RUNNER_TOKEN="${TOKEN}" \
         -e GITHUB_OWNER="${GITHUB_OWNER}" \
         -e GITHUB_REPO="${GITHUB_REPO}" \
-        -e RUNNER_LABELS="${ARCH}" \
+        -e RUNNER_LABELS="${ARCH},docker" \
         ${IMAGE_NAME}
     echo "Container ${NAME} exited. Restarting in 2 seconds..."
     sleep 2
