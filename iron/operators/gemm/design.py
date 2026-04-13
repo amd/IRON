@@ -26,11 +26,7 @@ from aie.iron.controlflow import range_
 microkernel_mac_dim_map = {
     "npu1": {
         "bf16": (4, 8, 4),
-        "i8": (8, 8, 8),
-    },
-    "npu1": {
-        "bf16": (4, 8, 4),
-        "i8": (8, 8, 8),
+        "i8": (4, 8, 8),
     },
     "npu2": {
         "bf16": {
