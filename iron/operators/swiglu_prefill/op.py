@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import aie.utils as aie_utils
+
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
 )
+from iron.common.utils import get_shim_dma_limit
 from iron.operators.swiglu_base import _SwiGLUCallable, chain_swiglu_artifacts
 from iron.operators.gemm.op import GEMM
 from iron.operators.silu.op import SiLU
@@ -53,8 +56,15 @@ class SwiGLUPrefill(CompositeOperator):
                 "round_conv_even": True,
             }
 
+        dev = aie_utils.get_current_device()
+        n_cols = get_shim_dma_limit(dev) // 2
+
         gemm_1 = GEMM(
-            M=self.seq_len, K=self.embedding_dim, N=self.hidden_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.embedding_dim,
+            N=self.hidden_dim,
+            num_aie_columns=n_cols,
+            **accuracy_flags,
         )
         self.gemm_1 = gemm_1
         self.seq_len_padded = gemm_1.M
@@ -63,22 +73,26 @@ class SwiGLUPrefill(CompositeOperator):
 
         silu = SiLU(
             size=self.seq_len_padded * self.hidden_dim_padded,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim_padded // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim_padded // n_cols,
         )
         self.silu = silu
         assert silu.size == self.seq_len_padded * self.hidden_dim_padded
 
         eltwise_mul = ElementwiseMul(
             size=self.seq_len_padded * self.hidden_dim_padded,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim_padded // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim_padded // n_cols,
         )
         self.eltwise_mul = eltwise_mul
         assert eltwise_mul.size == self.seq_len_padded * self.hidden_dim_padded
 
         gemm_2 = GEMM(
-            M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.hidden_dim,
+            N=self.embedding_dim,
+            num_aie_columns=n_cols,
+            **accuracy_flags,
         )
         self.gemm_2 = gemm_2
         assert gemm_2.M == self.seq_len_padded
