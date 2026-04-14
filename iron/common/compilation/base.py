@@ -365,6 +365,12 @@ class KernelObjectArtifact(CompilationArtifact):
         self.prefix_symbols = prefix_symbols
 
 
+class KernelArchiveArtifact(CompilationArtifact):
+    """A static archive (.a) bundling one or more KernelObjectArtifacts."""
+
+    pass
+
+
 class PythonGeneratedMLIRArtifact(CompilationArtifact):
     def __init__(
         self,
@@ -518,6 +524,55 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
 class AieccXclbinInstsCompilationRule(AieccCompilationRule):
     def matches(self, graph):
         return any(graph.get_worklist((XclbinArtifact, InstsBinArtifact)))
+
+    @staticmethod
+    def _collect_kernel_objects(
+        mlir_source, mlir_sources_to_xclbins, mlir_sources_to_insts
+    ):
+        """Collect all KernelObjectArtifact filenames that an MLIR source depends on."""
+        kernel_objs = set()
+        for mapping in (mlir_sources_to_xclbins, mlir_sources_to_insts):
+            for artifact in mapping.get(mlir_source, []):
+                for dep in artifact.dependencies:
+                    if isinstance(dep, KernelObjectArtifact):
+                        kernel_objs.add(Path(dep.filename).name)
+        return sorted(kernel_objs)
+
+    @staticmethod
+    def _inject_link_files(mlir_path, kernel_obj_names):
+        """Rewrite an MLIR file so that aie.core ops use link_files instead of
+        func.func-level link_with.  This is necessary when there are auxiliary
+        kernel objects (e.g. lut_based_ops.o) that are not directly referenced
+        by any func.func declaration but must still be linked into every core.
+        """
+        import re
+
+        with open(mlir_path, "r") as f:
+            mlir_text = f.read()
+
+        # Strip link_with from func.func declarations — link_files on the core
+        # supersedes it and the two must not coexist.
+        mlir_text = re.sub(
+            r'(func\.func\s+private\s+@\S+\([^)]*\))\s*attributes\s*\{link_with\s*=\s*"[^"]*"\}',
+            r"\1",
+            mlir_text,
+        )
+
+        # Build the link_files attribute value
+        link_files_attr = (
+            "[" + ", ".join(f'"{name}"' for name in kernel_obj_names) + "]"
+        )
+
+        # Add link_files to every aie.core closing brace.
+        # aie.core regions end with `aie.end\n    }` — we append the attribute dict.
+        mlir_text = re.sub(
+            r"(aie\.end\s*\n(\s*)\})",
+            rf"\1 {{link_files = {link_files_attr}}}",
+            mlir_text,
+        )
+
+        with open(mlir_path, "w") as f:
+            f.write(mlir_text)
 
     def compile(self, graph):
         # If there are both xclbin and insts.bin targets based on the same source MLIR code, we can combine them into one single `aiecc.py` invocation.
@@ -715,3 +770,31 @@ class PeanoCompilationRule(CompilationRule):
         ]
 
         return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
+
+
+class ArchiveCompilationRule(CompilationRule):
+    """Bundle KernelObjectArtifacts into a static archive (.a)."""
+
+    def __init__(self, peano_dir, *args, **kwargs):
+        self.peano_dir = peano_dir
+        super().__init__(*args, **kwargs)
+
+    def matches(self, artifacts):
+        return any(artifacts.get_worklist(KernelArchiveArtifact))
+
+    def compile(self, artifacts):
+        ar_path = Path(self.peano_dir) / "bin" / "llvm-ar"
+        if not ar_path.exists():
+            raise RuntimeError(f"Could not find llvm-ar at {ar_path}")
+        worklist = artifacts.get_worklist(KernelArchiveArtifact)
+        commands = []
+        for artifact in worklist:
+            object_files = [
+                dep.filename
+                for dep in artifact.dependencies
+                if isinstance(dep, KernelObjectArtifact)
+            ]
+            cmd = [str(ar_path), "rcs", artifact.filename] + object_files
+            commands.append(ShellCompilationCommand(cmd))
+            artifact.available = True
+        return commands

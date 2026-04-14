@@ -23,6 +23,7 @@ from .compilation import (
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
+    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
 )

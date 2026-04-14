@@ -13,6 +13,7 @@ from .base import (
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
+    KernelArchiveArtifact,
     PythonGeneratedMLIRArtifact,
     CompilationCommand,
     ShellCompilationCommand,
@@ -23,6 +24,7 @@ from .base import (
     AieccFullElfCompilationRule,
     AieccXclbinInstsCompilationRule,
     PeanoCompilationRule,
+    ArchiveCompilationRule,
 )
 from .fusion import (
     FusedMLIRSource,

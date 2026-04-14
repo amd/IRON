@@ -44,6 +44,7 @@ class AIEContext:
             comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.PeanoCompilationRule(peano_dir, mlir_aie_dir),
+            comp.ArchiveCompilationRule(peano_dir),
             comp.AieccXclbinInstsCompilationRule(
                 self.build_dir, peano_dir, mlir_aie_dir
             ),

@@ -30,6 +30,7 @@ def softmax(
     rtp_vector_size=None,
     mask_patch_value=0,
     func_prefix="",
+    kernel_obj_file="softmax.o",
 ):
     per_tile_elements = tile_size
     if rtp_vector_size is None:
@@ -63,12 +64,12 @@ def softmax(
     # AIE Core Function declaration
     softmax_kernel = Kernel(
         f"{func_prefix}softmax_bf16",
-        f"{func_prefix}softmax.o",
+        f"{func_prefix}{kernel_obj_file}",
         [tile_ty, tile_ty, np.int32],
     )
     mask_kernel = Kernel(
         f"{func_prefix}mask_bf16",
-        f"{func_prefix}softmax.o",
+        f"{func_prefix}{kernel_obj_file}",
         [tile_ty, np.int32, np.int32],
     )
 
