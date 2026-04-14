@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Test Example Applications
+name: Krackan - Test Example Applications
 
 on:
   workflow_dispatch:

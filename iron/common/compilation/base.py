@@ -525,55 +525,6 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
     def matches(self, graph):
         return any(graph.get_worklist((XclbinArtifact, InstsBinArtifact)))
 
-    @staticmethod
-    def _collect_kernel_objects(
-        mlir_source, mlir_sources_to_xclbins, mlir_sources_to_insts
-    ):
-        """Collect all KernelObjectArtifact filenames that an MLIR source depends on."""
-        kernel_objs = set()
-        for mapping in (mlir_sources_to_xclbins, mlir_sources_to_insts):
-            for artifact in mapping.get(mlir_source, []):
-                for dep in artifact.dependencies:
-                    if isinstance(dep, KernelObjectArtifact):
-                        kernel_objs.add(Path(dep.filename).name)
-        return sorted(kernel_objs)
-
-    @staticmethod
-    def _inject_link_files(mlir_path, kernel_obj_names):
-        """Rewrite an MLIR file so that aie.core ops use link_files instead of
-        func.func-level link_with.  This is necessary when there are auxiliary
-        kernel objects (e.g. lut_based_ops.o) that are not directly referenced
-        by any func.func declaration but must still be linked into every core.
-        """
-        import re
-
-        with open(mlir_path, "r") as f:
-            mlir_text = f.read()
-
-        # Strip link_with from func.func declarations — link_files on the core
-        # supersedes it and the two must not coexist.
-        mlir_text = re.sub(
-            r'(func\.func\s+private\s+@\S+\([^)]*\))\s*attributes\s*\{link_with\s*=\s*"[^"]*"\}',
-            r"\1",
-            mlir_text,
-        )
-
-        # Build the link_files attribute value
-        link_files_attr = (
-            "[" + ", ".join(f'"{name}"' for name in kernel_obj_names) + "]"
-        )
-
-        # Add link_files to every aie.core closing brace.
-        # aie.core regions end with `aie.end\n    }` — we append the attribute dict.
-        mlir_text = re.sub(
-            r"(aie\.end\s*\n(\s*)\})",
-            rf"\1 {{link_files = {link_files_attr}}}",
-            mlir_text,
-        )
-
-        with open(mlir_path, "w") as f:
-            f.write(mlir_text)
-
     def compile(self, graph):
         # If there are both xclbin and insts.bin targets based on the same source MLIR code, we can combine them into one single `aiecc.py` invocation.
         mlir_sources = set()
@@ -652,6 +603,27 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         return commands
 
 
+def _find_tool(name, peano_dir, mlir_aie_dir):
+    """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
+    candidates = [
+        Path(peano_dir) / "bin" / name,
+        Path(mlir_aie_dir) / "bin" / name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
+    for tool_name in [name, f"{name}-18"]:
+        found = shutil.which(tool_name)
+        if found:
+            return found
+    raise FileNotFoundError(
+        f"{name} not found. Searched in: "
+        + ", ".join(str(c) for c in candidates)
+        + f", and system PATH (also tried {name}-18)"
+    )
+
+
 class PeanoCompilationRule(CompilationRule):
     def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
@@ -717,24 +689,7 @@ class PeanoCompilationRule(CompilationRule):
         return commands
 
     def _find_tool(self, name):
-        """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
-        candidates = [
-            Path(self.peano_dir) / "bin" / name,
-            Path(self.mlir_aie_dir) / "bin" / name,
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
-        # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
-        for tool_name in [name, f"{name}-18"]:
-            found = shutil.which(tool_name)
-            if found:
-                return found
-        raise FileNotFoundError(
-            f"{name} not found. Searched in: "
-            + ", ".join(str(c) for c in candidates)
-            + f", and system PATH (also tried {name}-18)"
-        )
+        return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
 
     def _rename_symbols(self, artifact):
         objcopy_path = self._find_tool("llvm-objcopy")
@@ -775,17 +730,16 @@ class PeanoCompilationRule(CompilationRule):
 class ArchiveCompilationRule(CompilationRule):
     """Bundle KernelObjectArtifacts into a static archive (.a)."""
 
-    def __init__(self, peano_dir, *args, **kwargs):
+    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
+        self.mlir_aie_dir = mlir_aie_dir
         super().__init__(*args, **kwargs)
 
     def matches(self, artifacts):
         return any(artifacts.get_worklist(KernelArchiveArtifact))
 
     def compile(self, artifacts):
-        ar_path = Path(self.peano_dir) / "bin" / "llvm-ar"
-        if not ar_path.exists():
-            raise RuntimeError(f"Could not find llvm-ar at {ar_path}")
+        ar_path = _find_tool("llvm-ar", self.peano_dir, self.mlir_aie_dir)
         worklist = artifacts.get_worklist(KernelArchiveArtifact)
         commands = []
         for artifact in worklist:
