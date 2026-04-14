@@ -28,8 +28,30 @@ class SwiGLUPrefillCallable(_SwiGLUCallable):
 
 class SwiGLUPrefill(CompositeOperator):
     def __init__(
-        self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None
+        self,
+        seq_len,
+        embedding_dim,
+        hidden_dim,
+        prio_accuracy=False,
+        tile_m=None,
+        tile_k=None,
+        tile_n=None,
+        context=None,
     ):
+        """
+        Args:
+            seq_len, embedding_dim, hidden_dim: SwiGLU FFN shape.
+            prio_accuracy: propagate the prio-accuracy flags to the inner GEMMs.
+            tile_m, tile_k, tile_n: optional overrides for the inner GEMMs'
+                tile sizes. If None, each falls back to GEMM's default (64).
+                Lowering tile_m reduces the minimum seq_len that SwiGLUPrefill
+                can be instantiated with (min_M = tile_m * 4), which unblocks
+                dispatch for decode-runtime batch sizes like M=32/64/128.
+                Both inner GEMMs share the same tile triple — this is the
+                common case; for asymmetric shapes, instantiate per-stage
+                GEMMs manually and compose.
+            context: AIEContext.
+        """
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
@@ -39,6 +61,9 @@ class SwiGLUPrefill(CompositeOperator):
         self.weights_3 = None
 
         self.prio_accuracy = prio_accuracy
+        self.tile_m = tile_m
+        self.tile_k = tile_k
+        self.tile_n = tile_n
         super().__init__(context=context)
 
     def set_up_artifacts(self):
@@ -53,8 +78,20 @@ class SwiGLUPrefill(CompositeOperator):
                 "round_conv_even": True,
             }
 
+        tile_flags = {}
+        if self.tile_m is not None:
+            tile_flags["tile_m"] = self.tile_m
+        if self.tile_k is not None:
+            tile_flags["tile_k"] = self.tile_k
+        if self.tile_n is not None:
+            tile_flags["tile_n"] = self.tile_n
+
         gemm_1 = GEMM(
-            M=self.seq_len, K=self.embedding_dim, N=self.hidden_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.embedding_dim,
+            N=self.hidden_dim,
+            **accuracy_flags,
+            **tile_flags,
         )
         self.gemm_1 = gemm_1
         self.seq_len_padded = gemm_1.M
@@ -78,7 +115,11 @@ class SwiGLUPrefill(CompositeOperator):
         assert eltwise_mul.size == self.seq_len_padded * self.hidden_dim_padded
 
         gemm_2 = GEMM(
-            M=self.seq_len, K=self.hidden_dim, N=self.embedding_dim, **accuracy_flags
+            M=self.seq_len,
+            K=self.hidden_dim,
+            N=self.embedding_dim,
+            **accuracy_flags,
+            **tile_flags,
         )
         self.gemm_2 = gemm_2
         assert gemm_2.M == self.seq_len_padded
