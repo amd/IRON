@@ -17,7 +17,15 @@ from iron.common.test_utils import verify_buffer
 
 
 def get_params():
-    params_list = [(256, 2048, 2048, False)]
+    # (seq_len, embedding_dim, hidden_dim, prio_accuracy, tile_kwargs)
+    # The default case uses GEMM's native tile defaults (tile_m=tile_k=tile_n=64,
+    # so min_M = 256). The small-M case exercises the tile-override path:
+    # tile_m=16 drops min_M to 64, which is what real decode-runtime batch
+    # sizes (32/64/128) require to be dispatchable.
+    params_list = [
+        (256, 2048, 2048, False, {}),
+        (64, 1024, 3584, False, {"tile_m": 16, "tile_k": 64, "tile_n": 64}),
+    ]
 
     params = []
     for p in params_list:
@@ -29,8 +37,12 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
-def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy,tile_kwargs", get_params()
+)
+def test_swiglu_prefill(
+    seq_len, embedding_dim, hidden_dim, prio_accuracy, tile_kwargs, aie_context
+):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
     operator = SwiGLUPrefill(
@@ -39,6 +51,7 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         hidden_dim=hidden_dim,
         prio_accuracy=bool(prio_accuracy),
         context=aie_context,
+        **tile_kwargs,
     )
     operator.weights_1 = golden_ref["w_gate"].T
     operator.weights_2 = golden_ref["w_up"].T
