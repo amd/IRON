@@ -17,7 +17,14 @@ from iron.common.test_utils import verify_buffer
 
 
 def get_params():
-    params_list = [(256, 2048, 2048, False)]
+    # (seq_len, embedding_dim, hidden_dim, prio_accuracy)
+    # Square shapes cover the historical smoke-test config; rectangular
+    # shapes reflect real decoder-model FFN dims (e.g. Qwen3.5-0.8B
+    # embedding=1024, hidden=3584) that downstream runtimes actually hit.
+    params_list = [
+        (256, 2048, 2048, False),
+        (256, 1024, 3584, False),
+    ]
 
     params = []
     for p in params_list:
