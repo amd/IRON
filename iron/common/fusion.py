@@ -23,11 +23,33 @@ logger = logging.getLogger(__name__)
 
 
 class FusedMLIROperator(AIEOperatorBase):
-    """Operator that fuses multiple MLIROperators into one."""
+    """Operator that fuses multiple MLIROperators into one.
+
+    Args:
+        dispatch: Dispatch strategy for the fused operator.
+            ``"auto"`` (default) selects ``"fused"`` on NPU2 and
+            ``"separate"`` on NPU1.  ``"fused"`` uses a single-ELF
+            dispatch (requires NPU2).  ``"separate"`` compiles each
+            sub-operator to its own xclbin and invokes them sequentially.
+    """
+
+    DISPATCH_MODES = ("auto", "fused", "separate")
 
     def __init__(
-        self, name, runlist, input_args, output_args, buffer_sizes=None, *args, **kwargs
+        self,
+        name,
+        runlist,
+        input_args,
+        output_args,
+        buffer_sizes=None,
+        dispatch="auto",
+        *args,
+        **kwargs,
     ):
+        if dispatch not in self.DISPATCH_MODES:
+            raise ValueError(
+                f"dispatch must be one of {self.DISPATCH_MODES!r}, got {dispatch!r}"
+            )
         if not all(
             isinstance(op, MLIROperator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
@@ -44,6 +66,7 @@ class FusedMLIROperator(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
+        self._dispatch = dispatch
 
     def get_kernel_artifacts(self):
         """Collect all kernel artifacts from child operators.
@@ -213,17 +236,27 @@ class FusedMLIROperator(AIEOperatorBase):
         """Set up the artifact dependency graph for this fused operator.
 
         Computes the buffer layout first, then builds the artifacts.
-        On NPU2, uses the full-ELF flow (fused MLIR → single ELF).
-        On NPU1 (Phoenix), uses chained xclbin flow (separate xclbin per
-        unique operator, chained via --xclbin-input).
+        The dispatch mode (``"fused"`` vs ``"separate"``) is resolved here
+        when set to ``"auto"``.
         """
         # Calculate buffer layout (used by both paths for get_buffer())
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self._calculate_buffer_layout()
         )
 
-        dev = aie_utils.get_current_device()
-        self._use_full_elf = isinstance(dev, NPU2)
+        is_npu2 = isinstance(aie_utils.get_current_device(), NPU2)
+
+        if self._dispatch == "auto":
+            self._use_full_elf = is_npu2
+        elif self._dispatch == "fused":
+            if not is_npu2:
+                raise RuntimeError(
+                    "dispatch='fused' requires NPU2 (Strix); "
+                    "Phoenix/NPU1 does not support full-ELF dispatch"
+                )
+            self._use_full_elf = True
+        else:  # "separate"
+            self._use_full_elf = False
 
         if self._use_full_elf:
             self._set_up_full_elf_artifacts()
@@ -304,8 +337,8 @@ class FusedMLIROperator(AIEOperatorBase):
         """Return a callable that executes the fused operator on the NPU.
 
         Returns:
-            A ``FusedFullELFCallable`` on NPU2, or a ``FusedXclbinCallable``
-            on NPU1 (Phoenix).
+            A ``FusedFullELFCallable`` when using fused dispatch, or a
+            ``FusedXclbinCallable`` when using separate dispatch.
         """
         if self._use_full_elf:
             return FusedFullELFCallable(self)
