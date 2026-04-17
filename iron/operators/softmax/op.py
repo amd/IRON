@@ -10,6 +10,7 @@ from iron.common.operator_bases import lut_based_ops_artifacts
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
+    KernelArchiveArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -44,42 +45,53 @@ class Softmax(MLIROperator):
             )
         MLIROperator.__init__(self, context=self.context)
 
+    @property
+    def _kernel_link_file(self):
+        kernel_dir = get_kernel_dir()
+        if kernel_dir == "aie2":
+            return f"{self.name}_kernels.a"
+        return "softmax.o"
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "softmax",
-                (
-                    aie_utils.get_current_device(),
-                    self.size,
-                    self.num_aie_columns,
-                    self.num_channels,
-                    0,  # trace_size
-                    self.cols,
-                    self.rtp_vector_size,
-                    self.mask_patch_value,
-                ),
+                (),
+                {
+                    "dev": aie_utils.get_current_device(),
+                    "num_elements": self.size,
+                    "num_aie_columns": self.num_aie_columns,
+                    "num_channels": self.num_channels,
+                    "trace_size": 0,
+                    "tile_size": self.cols,
+                    "rtp_vector_size": self.rtp_vector_size,
+                    "mask_patch_value": self.mask_patch_value,
+                    "kernel_obj_file": self._kernel_link_file,
+                },
             ),
         )
 
     def get_kernel_artifacts(self):
         kernel_dir = get_kernel_dir()
-        artifacts = [
-            KernelObjectArtifact(
-                "softmax.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / kernel_dir
-                        / "softmax.cc"
-                    )
-                ],
-            ),
-        ]
-        artifacts.extend(lut_based_ops_artifacts(kernel_dir))
-        return artifacts
+        softmax_obj = KernelObjectArtifact(
+            "softmax.o",
+            dependencies=[
+                SourceArtifact(
+                    self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
+                )
+            ],
+        )
+        lut_objs = lut_based_ops_artifacts(kernel_dir)
+        if lut_objs:
+            return [
+                KernelArchiveArtifact(
+                    f"{self.name}_kernels.a",
+                    dependencies=[softmax_obj] + lut_objs,
+                )
+            ]
+        return [softmax_obj]
 
     def get_arg_spec(self):
         return [

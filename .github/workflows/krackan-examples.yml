@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Test Example Applications
+name: Krackan - Test Example Applications
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   Test:
-    runs-on: [self-hosted, docker]
+    runs-on: [self-hosted, krackan]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
         uses: ./.github/actions/commit_results
         id: commit_results
         with:
-          dir: examples
+          dir: krackan/examples
           pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
 
       - name: Upload test results

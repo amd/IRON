@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import aie.utils as aie_utils
+
 from iron.common import (
     CompositeOperator,
     AIERuntimeArgSpec,
 )
+from iron.common.utils import get_shim_dma_limit
 from iron.operators.swiglu_base import _SwiGLUCallable, chain_swiglu_artifacts
 from iron.operators.gemv.op import GEMV
 from iron.operators.silu.op import SiLU
@@ -39,27 +42,30 @@ class SwiGLUDecode(CompositeOperator):
         super().__init__(context=context)
 
     def set_up_artifacts(self):
+        dev = aie_utils.get_current_device()
+        n_cols = get_shim_dma_limit(dev) // 2
+
         gemv_1 = GEMV(
             M=self.hidden_dim,
             K=self.embedding_dim,
-            num_aie_columns=8,
+            num_aie_columns=n_cols,
             tile_size_input=4,
-            tile_size_output=self.hidden_dim // 8,
+            tile_size_output=self.hidden_dim // n_cols,
         )
         self.gemv_1 = gemv_1
 
         silu = SiLU(
             size=self.hidden_dim,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim // (8 * 2),
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim // (n_cols * 2),
         )
         self.silu = silu
         self.hidden_dim_padded = silu.size
 
         eltwise_mul = ElementwiseMul(
             size=self.hidden_dim,
-            num_aie_columns=8,
-            tile_size=self.hidden_dim // 8,
+            num_aie_columns=n_cols,
+            tile_size=self.hidden_dim // n_cols,
         )
         self.eltwise_mul = eltwise_mul
         assert self.hidden_dim <= eltwise_mul.size <= self.hidden_dim_padded
@@ -67,9 +73,9 @@ class SwiGLUDecode(CompositeOperator):
         gemv_2 = GEMV(
             M=self.embedding_dim,
             K=self.hidden_dim,
-            num_aie_columns=8,
+            num_aie_columns=n_cols,
             tile_size_input=1,
-            tile_size_output=self.embedding_dim // 8,
+            tile_size_output=self.embedding_dim // n_cols,
         )
         self.gemv_2 = gemv_2
 

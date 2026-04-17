@@ -12,6 +12,7 @@ import aie.utils as aie_utils
 from .base import MLIROperator, AIERuntimeArgSpec
 from .context import AIEContext
 from .compilation import (
+    KernelArchiveArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -109,10 +110,22 @@ class ChanneledUnaryOperator(MLIROperator):
             0,
         ]
 
+    @property
+    def _kernel_link_file(self) -> str:
+        """The file name that the MLIR Kernel declaration should link_with.
+
+        When auxiliary objects are required (e.g. lut_based_ops.o on aie2),
+        all objects are bundled into an archive and the archive name is
+        returned so that aiecc links the entire archive.
+        """
+        if self.needs_lut_ops and get_kernel_dir() == "aie2":
+            return f"{self.name}_kernels.a"
+        return f"{self.kernel_name}.o"
+
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
         callback_args = self._mlir_callback_args() + [
             self.kernel_fn_name,
-            f"{self.kernel_name}.o",
+            self._kernel_link_file,
             self.tile_cap,
         ]
         return PythonGeneratedMLIRArtifact(
@@ -124,25 +137,29 @@ class ChanneledUnaryOperator(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
+    def get_kernel_artifacts(self) -> list:
         dev = aie_utils.get_current_device()
         kernel_dir = get_kernel_dir(dev)
-        artifacts = [
-            KernelObjectArtifact(
-                f"{self.kernel_name}.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / kernel_dir
-                        / f"{self.kernel_name}.cc"
-                    )
-                ],
-            )
-        ]
-        if self.needs_lut_ops:
-            artifacts.extend(lut_based_ops_artifacts(kernel_dir))
-        return artifacts
+        kernel_obj = KernelObjectArtifact(
+            f"{self.kernel_name}.o",
+            dependencies=[
+                SourceArtifact(
+                    self.context.base_dir
+                    / "aie_kernels"
+                    / kernel_dir
+                    / f"{self.kernel_name}.cc"
+                )
+            ],
+        )
+        if self.needs_lut_ops and kernel_dir == "aie2":
+            lut_objs = lut_based_ops_artifacts(kernel_dir)
+            return [
+                KernelArchiveArtifact(
+                    f"{self.name}_kernels.a",
+                    dependencies=[kernel_obj] + lut_objs,
+                )
+            ]
+        return [kernel_obj]
 
 
 @dataclass

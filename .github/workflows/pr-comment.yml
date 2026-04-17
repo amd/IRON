@@ -2,100 +2,246 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from https://stackoverflow.com/a/71683208
 
-# Commenting on a PR is a separate workflow from the others so that PRs from 
+# Commenting on a PR is a separate workflow from the others so that PRs from
 # forks can receive comments as well. Since this workflow is not triggered by
 # a pull request event, but instead by the completion of another workflow, we
 # have write permissions to the repository and can therefore comment on the PR.
+#
+# This workflow collects artifacts from ALL completed CI workflows for the same
+# head SHA, arranges them into the {arch}/{suite}/ layout expected by
+# aggregate_summary.py, and posts (or updates) a single aggregated comment.
 
 name: Comment on PR with Test Results
 
 on:
   workflow_run:
-    workflows: [Small Benchmark/Test Suite, Test Example Applications]
+    workflows:
+      - Krackan - Small Benchmark/Test Suite
+      - Krackan - Test Example Applications
+      - Phoenix - Small Benchmark/Test Suite
+      - Phoenix - Test Example Applications
     types:
       - completed
 
 jobs:
-  download:
+  comment:
     runs-on: ubuntu-latest
-    # Only run if the workflow completed (not cancelled)
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure' }}
     steps:
-      - name: Download artifact
-        id: download
-        continue-on-error: true
-        uses: actions/download-artifact@v5
-        with:
-          github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
-          merge-multiple: true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Comment results on PR
-        if: steps.download.outcome == 'success'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Collect artifacts from all CI runs for this SHA
+        id: collect
         uses: actions/github-script@v7
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
             const path = require('path');
-            const downloadPath = '${{ steps.download.outputs.download-path }}' || process.env.GITHUB_WORKSPACE;
-            
-            // Check if pr_number file exists
-            const prNumberPath = path.join(downloadPath, 'pr_number');
-            if (!fs.existsSync(prNumberPath)) {
-              console.log('No pr_number file found. Skipping comment.');
+            const {execSync} = require('child_process');
+
+            const headSha = context.payload.workflow_run.head_sha;
+            const headBranch = context.payload.workflow_run.head_branch;
+            core.info(`Head SHA: ${headSha}, branch: ${headBranch}`);
+
+            // Mapping: artifact name -> directory layout for aggregate_summary.py
+            const ARTIFACT_MAP = {
+              'results-phoenix-small':    'phoenix/small',
+              'results-phoenix-examples': 'phoenix/examples',
+              'results-small':            'krackan/small',
+              'results-examples':         'krackan/examples',
+            };
+
+            // The workflow names we care about
+            const WORKFLOWS = [
+              'Krackan - Small Benchmark/Test Suite',
+              'Krackan - Test Example Applications',
+              'Phoenix - Small Benchmark/Test Suite',
+              'Phoenix - Test Example Applications',
+            ];
+
+            const root = path.join(process.env.RUNNER_TEMP, 'results');
+            fs.mkdirSync(root, {recursive: true});
+
+            let prNumber = null;
+            let commitSha = null;
+            let date = null;
+            let foundAny = false;
+
+            // For each workflow, find the latest completed run on this head SHA
+            for (const wf of WORKFLOWS) {
+              // List workflow runs filtered by head SHA and branch
+              const runs = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: headSha,
+                status: 'completed',
+                per_page: 10,
+              });
+
+              const matching = runs.data.workflow_runs.filter(r => r.name === wf);
+              if (matching.length === 0) {
+                core.info(`No completed run found for "${wf}" at ${headSha}`);
+                continue;
+              }
+
+              const run = matching[0]; // most recent
+              core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
+
+              // List artifacts for this run
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+
+              for (const artifact of artifacts.data.artifacts) {
+                const dir = ARTIFACT_MAP[artifact.name];
+                if (!dir) continue;
+
+                core.info(`Downloading artifact "${artifact.name}" -> ${dir}`);
+
+                const zip = await github.rest.actions.downloadArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                  archive_format: 'zip',
+                });
+
+                const zipPath = path.join(process.env.RUNNER_TEMP, `${artifact.name}.zip`);
+                fs.writeFileSync(zipPath, Buffer.from(zip.data));
+
+                const destDir = path.join(root, dir);
+                fs.mkdirSync(destDir, {recursive: true});
+                execSync(`unzip -o "${zipPath}" -d "${destDir}"`);
+                foundAny = true;
+
+                // Read PR metadata from the first artifact that has it
+                const prPath = path.join(destDir, 'pr_number');
+                if (!prNumber && fs.existsSync(prPath)) {
+                  prNumber = fs.readFileSync(prPath, 'utf8').trim();
+                }
+                const shaPath = path.join(destDir, 'commit_sha');
+                if (!commitSha && fs.existsSync(shaPath)) {
+                  commitSha = fs.readFileSync(shaPath, 'utf8').trim();
+                }
+                const datePath = path.join(destDir, 'date');
+                if (!date && fs.existsSync(datePath)) {
+                  date = fs.readFileSync(datePath, 'utf8').trim();
+                }
+              }
+            }
+
+            if (!foundAny) {
+              core.info('No artifacts found. Skipping.');
+              core.setOutput('skip', 'true');
               return;
             }
-            
-            const issue_number = Number(fs.readFileSync(prNumberPath, 'utf8').trim());
-            
-            // Skip if not triggered by a PR (pr_number will be empty or invalid)
-            if (!issue_number || isNaN(issue_number)) {
+
+            core.setOutput('skip', 'false');
+            core.setOutput('root', root);
+            core.setOutput('pr_number', prNumber || '');
+            core.setOutput('commit_sha', commitSha || '');
+            core.setOutput('date', date || '');
+
+      - name: Generate aggregate summary
+        if: steps.collect.outputs.skip != 'true'
+        run: |
+          python ci/scripts/aggregate_summary.py \
+            --results-root "${{ steps.collect.outputs.root }}" \
+            -o "${{ steps.collect.outputs.root }}/summary.md"
+
+      - name: Comment on PR
+        if: steps.collect.outputs.skip != 'true' && steps.collect.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const root = '${{ steps.collect.outputs.root }}';
+            const prNumber = Number('${{ steps.collect.outputs.pr_number }}');
+            const commitSha = '${{ steps.collect.outputs.commit_sha }}';
+            const date = '${{ steps.collect.outputs.date }}';
+            const server = '${{ github.server_url }}';
+            const repo = '${{ github.repository }}';
+
+            if (!prNumber || isNaN(prNumber)) {
               console.log('Not triggered by a PR. Skipping comment.');
               return;
             }
-            
-            const commitSha = fs.readFileSync(path.join(downloadPath, 'commit_sha'), 'utf8').trim();
-            const date = fs.readFileSync(path.join(downloadPath, 'date'), 'utf8').trim();
-            const server = '${{ github.server_url }}';
-            const repo = '${{ github.repository }}';
-            
-            let prettyContent = '';
+
+            let summaryContent = '';
             try {
-              prettyContent = fs.readFileSync(path.join(downloadPath, 'readme.md'), 'utf8');
+              summaryContent = fs.readFileSync(path.join(root, 'summary.md'), 'utf8');
             } catch (error) {
-              prettyContent = 'Pretty output not available.';
+              summaryContent = 'Aggregate summary not available.';
             }
-            
-            // Read the trends.md content
-            let trendsContent = '';
-            try {
-              trendsContent = fs.readFileSync(path.join(downloadPath, 'trends.md'), 'utf8');
-            } catch (error) {
-              trendsContent = 'Trends not available.';
+
+            // Read per-suite details
+            const suites = [
+              {dir: 'krackan/small',      label: 'Krackan - Small'},
+              {dir: 'krackan/examples',    label: 'Krackan - Examples'},
+              {dir: 'phoenix/small',       label: 'Phoenix - Small'},
+              {dir: 'phoenix/examples',    label: 'Phoenix - Examples'},
+            ];
+
+            let details = '';
+            for (const suite of suites) {
+              const suiteDir = path.join(root, suite.dir);
+              let readme = '', trends = '';
+              try { readme = fs.readFileSync(path.join(suiteDir, 'readme.md'), 'utf8'); } catch {}
+              try { trends = fs.readFileSync(path.join(suiteDir, 'trends.md'), 'utf8'); } catch {}
+              if (!readme && !trends) continue;
+
+              details += `<details>\n<summary>${suite.label}</summary>\n\n`;
+              if (readme) details += readme + '\n\n';
+              if (trends) {
+                details += `**Trends:**\n\n${trends}\n\n`;
+              }
+              details += `</details>\n\n`;
             }
-            
-            const body = `<details>
-                  <summary>📊 Test Results for ${context.payload.workflow_run.name}</summary>
+
+            const marker = '<!-- iron-ci-aggregate -->';
+            const body = `${marker}
+            ## CI Test Results
 
             [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
-            
-            ${prettyContent}
-            
-            </details>
-            
-            <details>
-            <summary>📈 Trends (vs main branch) for  ${context.payload.workflow_run.name}</summary>
 
-            [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
+            ${summaryContent}
 
-            ${trendsContent}
-            
-            </details>`;
-            
-            github.rest.issues.createComment({
-              issue_number: issue_number,
+            ${details}`;
+
+            // Update existing comment if present, otherwise create new one
+            const comments = await github.rest.issues.listComments({
+              issue_number: prNumber,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
+              per_page: 100,
             });
+
+            const existing = comments.data.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+              core.info(`Updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+              core.info('Created new comment');
+            }

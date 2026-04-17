@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Krackan - Extensive Benchmark/Test Suite
+
+on:
+  workflow_dispatch:
+  schedule:
+   - cron:  '0 9 * * *'  # 2 AM MT
+  push:
+     branches:
+       - main
+       - devel
+
+# VJUNG: Introduce concurrency groups named with branch refs.
+# VJUNG: If one pushes 5 times on its branch only the most recent commit will trigger CI.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Test:
+    runs-on: [self-hosted, krackan]
+    steps:
+      - name: Pull
+        uses: actions/checkout@v4
+        env:
+          HOME: /workspace
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Test
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+          extensive: "true"
+          test_suite: "operators"
+
+      - name: Commit test results
+        id: commit_results
+        env:
+          HOME: /workspace
+        uses: ./.github/actions/commit_results
+        with:
+          dir: krackan/extensive
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-extensive
+          path: ${{ steps.commit_results.outputs.results_dir }}
+          retention-days: 7
+
+      - name: Mark workflow as failed if tests failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1

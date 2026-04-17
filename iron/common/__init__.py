@@ -13,6 +13,7 @@ from .operator_bases import ChanneledUnaryOperator, BinaryElementwiseOperator
 from .context import AIEContext
 from .compilation import (
     KernelObjectArtifact,
+    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,

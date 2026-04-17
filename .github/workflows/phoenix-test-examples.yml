@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Phoenix - Test Example Applications
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - devel
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Test:
+    runs-on: [self-hosted, phoenix]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        env:
+          HOME: /workspace
+
+      - name: Prerequisites
+        uses: ./.github/actions/prereqs
+        with:
+          env_name: ci_env
+
+      - name: Install additional requirements for examples
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          set -euxo pipefail
+          source ci_env/bin/activate
+          pip install -r requirements_examples.txt
+
+      - name: Print mlir-aie version
+        shell: bash
+        env:
+          HOME: /workspace
+        run: |
+          set -euxo pipefail
+          source ci_env/bin/activate
+          echo "=== mlir-aie version ==="
+          aie-opt --version
+          echo "========================"
+
+      - name: Print resource limits
+        shell: bash
+        run: |
+          echo "=== ulimit -a ==="
+          ulimit -a
+          echo ""
+          echo "=== /proc/self/limits ==="
+          cat /proc/self/limits
+          echo ""
+          echo "=== Free memory ==="
+          free -h
+
+      - name: Run examples
+        id: test
+        continue-on-error: true
+        uses: ./.github/actions/test
+        env:
+          PYTHONUNBUFFERED: "1"
+        with:
+          env_name: ci_env
+          test_suite: "applications"
+
+      - name: Commit example test results
+        uses: ./.github/actions/commit_results
+        id: commit_results
+        with:
+          dir: phoenix/examples
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-phoenix-examples
+          path: ${{ steps.commit_results.outputs.results_dir }}
+          retention-days: 14
+
+      - name: Upload MLIR artifacts for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-artifacts
+          path: |
+            iron/applications/llama_3.2_1b/build/*.mlir
+            iron/applications/llama_3.2_1b/build_elf/*.mlir
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Fail workflow if examples failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1

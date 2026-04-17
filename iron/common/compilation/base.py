@@ -365,6 +365,12 @@ class KernelObjectArtifact(CompilationArtifact):
         self.prefix_symbols = prefix_symbols
 
 
+class KernelArchiveArtifact(CompilationArtifact):
+    """A static archive (.a) bundling one or more KernelObjectArtifacts."""
+
+    pass
+
+
 class PythonGeneratedMLIRArtifact(CompilationArtifact):
     def __init__(
         self,
@@ -597,6 +603,27 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         return commands
 
 
+def _find_tool(name, peano_dir, mlir_aie_dir):
+    """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
+    candidates = [
+        Path(peano_dir) / "bin" / name,
+        Path(mlir_aie_dir) / "bin" / name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
+    for tool_name in [name, f"{name}-18"]:
+        found = shutil.which(tool_name)
+        if found:
+            return found
+    raise FileNotFoundError(
+        f"{name} not found. Searched in: "
+        + ", ".join(str(c) for c in candidates)
+        + f", and system PATH (also tried {name}-18)"
+    )
+
+
 class PeanoCompilationRule(CompilationRule):
     def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
         self.peano_dir = peano_dir
@@ -662,24 +689,7 @@ class PeanoCompilationRule(CompilationRule):
         return commands
 
     def _find_tool(self, name):
-        """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
-        candidates = [
-            Path(self.peano_dir) / "bin" / name,
-            Path(self.mlir_aie_dir) / "bin" / name,
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
-        # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
-        for tool_name in [name, f"{name}-18"]:
-            found = shutil.which(tool_name)
-            if found:
-                return found
-        raise FileNotFoundError(
-            f"{name} not found. Searched in: "
-            + ", ".join(str(c) for c in candidates)
-            + f", and system PATH (also tried {name}-18)"
-        )
+        return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
 
     def _rename_symbols(self, artifact):
         objcopy_path = self._find_tool("llvm-objcopy")
@@ -715,3 +725,30 @@ class PeanoCompilationRule(CompilationRule):
         ]
 
         return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
+
+
+class ArchiveCompilationRule(CompilationRule):
+    """Bundle KernelObjectArtifacts into a static archive (.a)."""
+
+    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
+        self.peano_dir = peano_dir
+        self.mlir_aie_dir = mlir_aie_dir
+        super().__init__(*args, **kwargs)
+
+    def matches(self, artifacts):
+        return any(artifacts.get_worklist(KernelArchiveArtifact))
+
+    def compile(self, artifacts):
+        ar_path = _find_tool("llvm-ar", self.peano_dir, self.mlir_aie_dir)
+        worklist = artifacts.get_worklist(KernelArchiveArtifact)
+        commands = []
+        for artifact in worklist:
+            object_files = [
+                dep.filename
+                for dep in artifact.dependencies
+                if isinstance(dep, KernelObjectArtifact)
+            ]
+            cmd = [str(ar_path), "rcs", artifact.filename] + object_files
+            commands.append(ShellCompilationCommand(cmd))
+            artifact.available = True
+        return commands
