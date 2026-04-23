@@ -102,9 +102,7 @@ for suite in SUITES:
         csv_path = os.path.join(args.results_root, arch, suite, "latest.csv")
         arch_results[arch] = read_latest_csv(csv_path)
 
-    all_tests = sorted(
-        set(arch_results["krackan"]) | set(arch_results["phoenix"])
-    )
+    all_tests = sorted(set(arch_results["krackan"]) | set(arch_results["phoenix"]))
 
     # Skip suite entirely when there is no data
     if not all_tests:
