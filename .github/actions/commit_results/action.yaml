@@ -64,8 +64,8 @@ runs:
       continue-on-error: true  # This step will fail for PRs from forks because of permission issues; ignore
       shell: bash
       run: |
+        ./ci/scripts/aggregate_summary.py --results-root ../results -o ../results/readme.md
         cd ../results
-        ./ci/scripts/aggregate_summary.py --results-root . -o readme.md
         git add ${{ inputs.dir }}/all.csv ${{ inputs.dir }}/latest.csv ${{ inputs.dir }}/readme.md ${{ inputs.dir }}/trends.md readme.md
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
