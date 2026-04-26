@@ -15,7 +15,7 @@ void relu_vectorized_bf16(bfloat16 *restrict a, bfloat16 *restrict c, const int3
 {
     event0();
 
-    const int v_factor = 16;
+    const int v_factor = 32;
     v32bfloat16 zeroes = broadcast_zero_to_v32bfloat16();
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_RANGE(16, 16)

@@ -21,7 +21,7 @@ template <typename T_in, typename T_out> void eltwise_add(T_in *a, T_in *b, T_ou
 template <typename T_in, typename T_out> void eltwise_vadd(T_in *a, T_in *b, T_out *c, int size)
 {
 
-    constexpr int vec_factor = 16;
+    constexpr int vec_factor = 32;
     event0();
     T_in *__restrict pA1 = a;
     T_in *__restrict pB1 = b;

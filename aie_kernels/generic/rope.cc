@@ -75,9 +75,9 @@ extern "C" {
 void rope(bfloat16 *input, bfloat16 *lut, bfloat16 *output, int32_t dims)
 {
 #if defined(TWO_HALVES)
-    rope_kernel_two_halves<bfloat16, 16>(input, lut, output, dims); // For the two-halves method used in HF transformers
+    rope_kernel_two_halves<bfloat16, 32>(input, lut, output, dims); // For the two-halves method used in HF transformers
 #elif defined(INTERLEAVED)
-    rope_kernel_interleaved<bfloat16, 16>(
+    rope_kernel_interleaved<bfloat16, 32>(
         input, lut, output, dims); // For the interleaved method used in the Llama paper
 #endif
 }

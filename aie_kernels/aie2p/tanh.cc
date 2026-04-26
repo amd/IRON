@@ -13,24 +13,23 @@ void tanh_bf16_vectorized(bfloat16 *restrict input_vector, bfloat16 *restrict ou
     event0();
 
     int num_elems = vector_size;
-    auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
-    auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
+    auto it_in = aie::begin_restrict_vector<32>((bfloat16 *)input_vector);
+    auto it_out = aie::begin_restrict_vector<32>((bfloat16 *)output_vector);
 
-    aie::vector<bfloat16, 16> input;
-    aie::accum<accfloat, 16> acc;
-    aie::vector<bfloat16, 16> output;
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_MIN_ITERATION_COUNT(64)
-    for (int i = 0; i < num_elems; i += 16) {
-        // Load input vector
-        input = *it_in++;
+    for (int i = 0; i < num_elems; i += 32) {
+        auto input = *it_in++;
 
-        // Compute tanh
-        acc.from_vector(input, 0);
-        auto tanh_x = aie::tanh<bfloat16>(acc.to_vector<float>());
+        // vtanh operates on 16 float lanes; split to two halves
+        aie::accum<accfloat, 16> acc_lo;
+        aie::accum<accfloat, 16> acc_hi;
+        acc_lo.from_vector(input.extract<16>(0), 0);
+        acc_hi.from_vector(input.extract<16>(1), 0);
+        auto tanh_lo = aie::tanh<bfloat16>(acc_lo.to_vector<float>());
+        auto tanh_hi = aie::tanh<bfloat16>(acc_hi.to_vector<float>());
 
-        // Store output vector
-        *it_out++ = tanh_x;
+        *it_out++ = aie::concat(tanh_lo, tanh_hi);
     }
 
     event1();

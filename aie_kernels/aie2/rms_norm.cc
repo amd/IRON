@@ -74,12 +74,12 @@ extern "C" {
 void rms_norm_bf16_vector(bfloat16 *input, bfloat16 *output, int32_t size, float epsilon)
 {
     ::aie::set_rounding(aie::rounding_mode::conv_even); // round-to-nearest-even
-    rms_norm_general<bfloat16, 16>(input, nullptr, output, size, epsilon);
+    rms_norm_general<bfloat16, 32>(input, nullptr, output, size, epsilon);
 }
 
 void weighted_rms_norm(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t size, float epsilon)
 {
     ::aie::set_rounding(aie::rounding_mode::conv_even); // round-to-nearest-even
-    rms_norm_general<bfloat16, 16>(a_in, b_in, c_out, size, epsilon);
+    rms_norm_general<bfloat16, 32>(a_in, b_in, c_out, size, epsilon);
 }
 }

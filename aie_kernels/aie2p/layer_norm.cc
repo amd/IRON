@@ -103,6 +103,6 @@ extern "C" {
 void layer_norm(bfloat16 *input, bfloat16 *output, int32_t cols)
 {
     ::aie::set_rounding(aie::rounding_mode::conv_even);
-    layer_norm<bfloat16, 16>(input, output, cols);
+    layer_norm<bfloat16, 32>(input, output, cols);
 }
 }

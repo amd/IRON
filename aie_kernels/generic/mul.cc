@@ -20,9 +20,9 @@ template <typename T_in, typename T_out> void eltwise_vmul(T_in *a, T_in *b, T_o
 {
 
     event0();
-    for (int i = 0; i < size; i += 16) {
-        auto A = aie::load_v<16>(a + i);
-        auto B = aie::load_v<16>(b + i);
+    for (int i = 0; i < size; i += 32) {
+        auto A = aie::load_v<32>(a + i);
+        auto B = aie::load_v<32>(b + i);
         auto C = aie::mul(A, B).template to_vector<T_out>();
         aie::store_v(c + i, C);
     }
