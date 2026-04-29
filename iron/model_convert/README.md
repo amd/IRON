@@ -49,8 +49,83 @@ model = converter.create_npu_model(compile_artifacts=True)
 
 **CLI:**
 ```bash
+# Interactive mode (recommended)
+python -m iron.model_convert.interactive_convert meta-llama/Llama-2-7b-hf
+python -m iron.model_convert.interactive_convert mistralai/Mistral-7B-v0.1 -o ./iron_model
+
+# Batch mode (non-interactive)
+python -m iron.model_convert.interactive_convert ./model_dir --batch --force
+
+# Legacy CLI (converter.py)
 python -m iron.model_convert.cli convert meta-llama/Llama-2-7b-hf -o ./iron_model --compile
 ```
+
+---
+
+## Interactive Converter
+
+The interactive converter (`interactive_convert.py`) provides a guided 9-phase conversion pipeline with real-time progress, weight loading, and Rich terminal UI.
+
+```bash
+# Interactive mode -- step-by-step with progress bars
+python -m iron.model_convert.interactive_convert meta-llama/Llama-2-7b-hf
+
+# Specify output directory
+python -m iron.model_convert.interactive_convert mistralai/Mistral-7B-v0.1 -o ./iron_model
+
+# Batch mode (no prompts)
+python -m iron.model_convert.interactive_convert Qwen/Qwen2.5-7B --batch --force
+```
+
+### Conversion Phases
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| 1 | **Input Resolution** | Locate model or download from HuggingFace Hub |
+| 2 | **Architecture Parse** | Load and normalize config via `ConfigAdapter` |
+| 3 | **Compatibility Check** | Run `GapAnalyzer` to detect unsupported features |
+| 4 | **NPU Configuration** | Set AIE columns, tile sizes, operator flags |
+| 5 | **Weight Loading** | Load safetensors/pytorch weights via memory-mapped I/O |
+| 6 | **Weight Mapping** | Map HF weight names to IRON names with transforms |
+| 7 | **Shape Analysis** | Compute NPU-padded shapes via `ShapeManager` |
+| 8 | **Model Assembly** | Count operators, compute memory requirements |
+| 9 | **Export** | Save `.npy` files + JSON manifests |
+
+After each phase, state is checkpointed to disk so partially completed conversions can be resumed.
+
+### Output Format
+
+```
+output/
+  config.json              # Complete IRON configuration
+  model_info.json          # Model architecture summary
+  conversion_manifest.json # Full conversion metadata
+  weight_manifest.json     # Weight-to-file mapping
+  weights/                 # Individual .npy weight files
+    tok_emb_weight.npy
+    layers_0_attention_wq_weight.npy
+    ...
+```
+
+### Checkpoint / Resume
+
+The converter saves a `.conversion_checkpoint.json` after each phase. On subsequent runs it automatically detects and offers to resume.
+
+```bash
+# Force restart (ignores checkpoint)
+python -m iron.model_convert.interactive_convert ./model --force
+```
+
+> **Note:** Checkpoints store configuration metadata but not weight tensor data. Resuming after Phase 6 requires re-loading weights from Phase 5.
+
+### Weight Transformations
+
+| Transform | Description | Applied To |
+|-----------|-------------|------------|
+| `NONE` | No transformation | Norm weights, embeddings, V projections |
+| `TRANSPOSE` | Transpose for column-major NPU layout | Q/K/O projections, FFN weights, LM head |
+| `DEQUANT` | Dequantize INT4/INT8 weights | Quantized models (AWQ, GPTQ) |
+| `RESHAPE` | Reshape for multi-part weights | Packed QKV, combined gate+up projections |
 
 ---
 
@@ -75,6 +150,7 @@ iron/
     ├── __main__.py          # Module entry point
     ├── cli.py               # Full conversion CLI
     ├── converter.py         # HuggingFaceConverter
+    ├── interactive_convert.py  # Interactive 9-phase pipeline (Rich UI)
     ├── config_adapter.py    # Config parsing
     ├── weight_mapper.py     # Weight transformation
     ├── shape_manager.py     # Shape/tiling management
