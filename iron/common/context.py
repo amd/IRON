@@ -18,6 +18,9 @@ class AIEContext:
         base_dir: Repository root directory (three levels above this file).
         build_dir: Directory where compiled artifacts are written.
         mlir_verbose: Enable verbose MLIR output during compilation.
+        compiler: Kernel compiler to use: "peano" (default) or "chess".
+                  When "chess", all kernels and aiecc linking use xchesscc.
+                  Requires Vitis/aietools in PATH.
     """
 
     # Repo root: iron/common/../../.. = three levels up from this file.
@@ -25,10 +28,15 @@ class AIEContext:
 
     build_dir: Path = field(default_factory=lambda: Path(os.getcwd()) / "build")
     mlir_verbose: bool = False
+    compiler: str = "peano"
 
     def __post_init__(self) -> None:
         """Normalize build_dir to a Path object."""
         self.build_dir = Path(self.build_dir)
+        if self.compiler not in ("peano", "chess"):
+            raise ValueError(
+                f"compiler must be 'peano' or 'chess', got {self.compiler!r}"
+            )
 
     @property
     def compilation_rules(self):
@@ -40,13 +48,17 @@ class AIEContext:
         """
         mlir_aie_dir = Path(aie.utils.config.root_path())
         peano_dir = Path(aie.utils.config.peano_install_dir())
+        use_chess = self.compiler == "chess"
+
         return [
             comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
-            comp.PeanoCompilationRule(peano_dir, mlir_aie_dir),
+            comp.KernelCompilationRule(peano_dir, mlir_aie_dir, use_chess=use_chess),
             comp.ArchiveCompilationRule(peano_dir, mlir_aie_dir),
             comp.AieccXclbinInstsCompilationRule(
-                self.build_dir, peano_dir, mlir_aie_dir
+                self.build_dir, peano_dir, mlir_aie_dir, use_chess=use_chess
             ),
-            comp.AieccFullElfCompilationRule(self.build_dir, peano_dir, mlir_aie_dir),
+            comp.AieccFullElfCompilationRule(
+                self.build_dir, peano_dir, mlir_aie_dir, use_chess=use_chess
+            ),
         ]

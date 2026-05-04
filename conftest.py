@@ -18,7 +18,8 @@ import aie.utils as aie_utils
 def aie_context(request):
     """Create a fresh AIEContext for each test"""
     verbose_mlir = request.config.option.verbose > 0
-    ctx = AIEContext(mlir_verbose=verbose_mlir)
+    compiler = request.config.getoption("--compiler", default="peano")
+    ctx = AIEContext(mlir_verbose=verbose_mlir, compiler=compiler)
     yield ctx
     aie_utils.DefaultNPURuntime.cleanup()
 
@@ -34,6 +35,12 @@ def pytest_addoption(parser):
         type=int,
         default=5,
         help="Number of iterations to run each test for statistics",
+    )
+    parser.addoption(
+        "--compiler",
+        default="peano",
+        choices=["peano", "chess"],
+        help="Kernel compiler: 'peano' (default) or 'chess' (requires Vitis/aietools)",
     )
 
 

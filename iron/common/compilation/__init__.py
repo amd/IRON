@@ -23,7 +23,7 @@ from .base import (
     AieccCompilationRule,
     AieccFullElfCompilationRule,
     AieccXclbinInstsCompilationRule,
-    PeanoCompilationRule,
+    KernelCompilationRule,
     ArchiveCompilationRule,
 )
 from .fusion import (

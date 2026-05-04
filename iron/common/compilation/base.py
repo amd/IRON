@@ -482,10 +482,13 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
 
 
 class AieccCompilationRule(CompilationRule):
-    def __init__(self, build_dir, peano_dir, mlir_aie_dir, *args, **kwargs):
+    def __init__(
+        self, build_dir, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs
+    ):
         self.build_dir = build_dir
         self.aiecc_path = Path(mlir_aie_dir) / "bin" / "aiecc"
         self.peano_dir = peano_dir
+        self.use_chess = use_chess
         super().__init__(*args, **kwargs)
 
 
@@ -503,10 +506,20 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 "-v",
                 "-j1",
                 "--no-compile-host",
-                "--no-xchesscc",
-                "--no-xbridge",
-                "--peano",
-                str(self.peano_dir),
+            ]
+            if self.use_chess:
+                compile_cmd += [
+                    "--xchesscc",
+                    "--xbridge",
+                ]
+            else:
+                compile_cmd += [
+                    "--no-xchesscc",
+                    "--no-xbridge",
+                    "--peano",
+                    str(self.peano_dir),
+                ]
+            compile_cmd += [
                 "--expand-load-pdis",
                 "--generate-full-elf",
                 "--full-elf-name",
@@ -547,10 +560,20 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 "-v",
                 "-j1",
                 "--no-compile-host",
-                "--no-xchesscc",
-                "--no-xbridge",
-                "--peano",
-                str(self.peano_dir),
+            ]
+            if self.use_chess:
+                compile_cmd += [
+                    "--xchesscc",
+                    "--xbridge",
+                ]
+            else:
+                compile_cmd += [
+                    "--no-xchesscc",
+                    "--no-xbridge",
+                    "--peano",
+                    str(self.peano_dir),
+                ]
+            compile_cmd += [
                 "--dynamic-objFifos",
             ]
             do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
@@ -624,23 +647,24 @@ def _find_tool(name, peano_dir, mlir_aie_dir):
     )
 
 
-class PeanoCompilationRule(CompilationRule):
-    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
+class KernelCompilationRule(CompilationRule):
+    """Compile KernelObjectArtifacts using Peano (clang++) or xchesscc."""
+
+    def __init__(self, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs):
         self.peano_dir = peano_dir
         self.mlir_aie_dir = mlir_aie_dir
+        self.use_chess = use_chess
         super().__init__(*args, **kwargs)
 
     def matches(self, artifacts):
         return any(artifacts.get_worklist(KernelObjectArtifact))
 
     def compile(self, artifacts):
-        clang_path = Path(self.peano_dir) / "bin" / "clang++"
         include_path = Path(self.mlir_aie_dir) / "include"
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
 
         kernel_dir = get_kernel_dir()
-        target = f"{kernel_dir}-none-unknown-elf"
         runtime_lib_include_path = (
             Path(self.mlir_aie_dir) / "aie_runtime_lib" / kernel_dir.upper()
         )
@@ -655,29 +679,39 @@ class PeanoCompilationRule(CompilationRule):
                 raise RuntimeError(
                     "Expected KernelObject dependency to be a C source file"
                 )
-            for extra_dep in list(artifact.dependencies)[1:]:
-                if not isinstance(extra_dep, SourceArtifact):
-                    raise RuntimeError(
-                        "Expected all KernelObject dependencies to be C source files"
-                    )
 
-            cmd = (
-                [
-                    str(clang_path),
-                    "-O2",
-                    "-std=c++20",
-                    f"--target={target}",
-                    "-Wno-parentheses",
-                    "-Wno-attributes",
-                    "-Wno-macro-redefined",
-                    "-Wno-empty-body",
-                    "-Wno-missing-template-arg-list-after-template-kw",
-                    f"-I{str(include_path)}",
-                    f"-I{str(runtime_lib_include_path)}",
-                ]
-                + artifact.extra_flags
-                + ["-c", source_file.filename, "-o", artifact.filename]
-            )
+            if self.use_chess:
+                wrapper_path = Path(self.mlir_aie_dir) / "bin" / "xchesscc_wrapper"
+                cmd = (
+                    [
+                        str(wrapper_path),
+                        kernel_dir,  # e.g. "aie2" or "aie2p"
+                        f"-I{str(include_path)}",
+                        f"-I{str(runtime_lib_include_path)}",
+                    ]
+                    + artifact.extra_flags
+                    + ["-c", source_file.filename, "-o", artifact.filename]
+                )
+            else:
+                clang_path = Path(self.peano_dir) / "bin" / "clang++"
+                target = f"{kernel_dir}-none-unknown-elf"
+                cmd = (
+                    [
+                        str(clang_path),
+                        "-O2",
+                        "-std=c++20",
+                        f"--target={target}",
+                        "-Wno-parentheses",
+                        "-Wno-attributes",
+                        "-Wno-macro-redefined",
+                        "-Wno-empty-body",
+                        "-Wno-missing-template-arg-list-after-template-kw",
+                        f"-I{str(include_path)}",
+                        f"-I{str(runtime_lib_include_path)}",
+                    ]
+                    + artifact.extra_flags
+                    + ["-c", source_file.filename, "-o", artifact.filename]
+                )
 
             commands.append(ShellCompilationCommand(cmd))
             if artifact.rename_symbols:
@@ -693,9 +727,7 @@ class PeanoCompilationRule(CompilationRule):
 
     def _rename_symbols(self, artifact):
         objcopy_path = self._find_tool("llvm-objcopy")
-        cmd = [
-            objcopy_path,
-        ]
+        cmd = [objcopy_path]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
                 "--redefine-sym",
