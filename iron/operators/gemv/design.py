@@ -9,7 +9,6 @@ from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
 
 """
 Matrix-vector design
@@ -190,4 +189,4 @@ def my_matvec(
             rt.finish_task_group(tg_ac)
         rt.finish_task_group(tg_b)
 
-    return Program(dev, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program()

@@ -18,7 +18,6 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
 import numpy as np
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
@@ -161,4 +160,4 @@ def rope(
         rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program()

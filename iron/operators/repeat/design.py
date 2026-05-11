@@ -9,7 +9,6 @@ import numpy as np
 
 from aie.dialects.aiex import TensorAccessPattern
 from aie.iron import ObjectFifo, Program, Runtime
-from aie.iron.placers import SequentialPlacer
 
 
 def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
@@ -69,4 +68,4 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
         rt.drain(fifo_out.cons(), out, output_tap, task_group=tg, wait=True)
         rt.finish_task_group(tg)
 
-    return Program(dev, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program()

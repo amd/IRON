@@ -15,7 +15,6 @@ from aie.iron import (
     Runtime,
     Worker,
 )
-from aie.iron.placers import SequentialPlacer
 from aie.iron.device import Tile, NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -222,7 +221,8 @@ def my_mem_copy(
                 of_in.release(1)
                 of_out.release(1)
 
-        # Create a worker to perform the task
+        # Create a worker to perform the task.
+        # Place at most ``num_channels`` workers per column.
         my_workers = [
             Worker(
                 core_fn,
@@ -231,6 +231,7 @@ def my_mem_copy(
                     of_outs[i].prod(),
                     mem_copy_fcn,
                 ],
+                tile=Tile(i // num_channels, 2 + (i % num_channels)),
             )
             for i in range(num_cores)
         ]
@@ -404,4 +405,4 @@ def my_mem_copy(
                     objfifo_idx += partial_config.num_cores_with_full_tiles
 
     # Place components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program(SequentialPlacer(num_channels))
+    return Program(dev, rt).resolve_program()
