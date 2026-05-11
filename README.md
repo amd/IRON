@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
     <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black" /></a>
 
 <p align="center">
-   <img src="./images/XDNA2.png" alt="IRONCLAD Logo" style="max-width: 100%; height: auto;">
+   <img src="./images/XDNA2.png" alt="IRON Logo" style="max-width: 100%; height: auto;">
 </p>
 
 IRON is an open-source & close-to-metal Python API enabling fast and efficient execution on [AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html). It relies on language bindings around the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) dialect.

@@ -6,7 +6,9 @@
 import argparse
 import csv
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
+from pretty_common import display_name, split_test_path
 
 
 def parse_args():
@@ -31,6 +33,11 @@ def parse_args():
     )
     p.add_argument(
         "--test-column", default="Test", help="Test column name (default: Test)"
+    )
+    p.add_argument(
+        "--test-path-column",
+        default="Test Path",
+        help="Test path column name (default: 'Test Path')",
     )
     p.add_argument(
         "--round",
@@ -102,7 +109,7 @@ def build_table_for_test(
 
     header_cols = "".join(f"<th>{m}</th>" for m in metrics)
     out = []
-    out.append(f"\n## {test_name}\n")
+    out.append(f"\n### {test_name}\n")
     if len(metrics) == 0:
         out.append("_No metrics available._\n")
         return "\n".join(out)
@@ -156,41 +163,52 @@ def main():
         field_order = reader.fieldnames or []
 
     test_col = args.test_column
+    test_path_col = args.test_path_column
     commit_col = args.commit_column
     date_col = args.date_column
 
-    # Group by test
-    by_test: Dict[str, List[Dict[str, str]]] = {}
+    # Group rows by (directory, display_name). The display_name is
+    # 'funcname[params]' derived from Test Path + Test.
+    by_dir: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
     for row in rows:
-        test = row.get(test_col, "").strip() or "UNNAMED_TEST"
-        by_test.setdefault(test, []).append(row)
+        test_path = (row.get(test_path_col) or "").strip()
+        params = (row.get(test_col) or "").strip()
+        directory, func = split_test_path(test_path)
+        if not directory:
+            directory = "(unknown)"
+        display = display_name(func, params, fallback=test_path or "UNNAMED_TEST")
+        by_dir.setdefault(directory, {}).setdefault(display, []).append(row)
 
     # Build output
     out_parts = []
-    out_parts.append("# IRONCLAD Trends\n")
+    out_parts.append("# IRON Trends\n")
 
-    exclude_cols = {test_col, commit_col, date_col, "Checks"}
+    exclude_cols = {test_col, test_path_col, commit_col, date_col, "Checks"}
 
-    for test in sorted(by_test.keys()):
-        test_rows = by_test[test]
-        metrics = [
-            k
-            for k in field_order
-            if k not in exclude_cols
-            and any(try_parse_float(r.get(k)) is not None for r in test_rows)
-        ]
-        metrics.sort()
-        section = build_table_for_test(
-            test_name=test,
-            rows=test_rows,
-            metrics=metrics,
-            date_col=date_col,
-            commit_col=commit_col,
-            ndigits=args.ndigits,
-            threshold=args.threshold,
-            date_fmt=args.date_fmt,
-        )
-        out_parts.append(section)
+    for directory in sorted(by_dir.keys()):
+        out_parts.append(f"\n<details>\n<summary>{directory}</summary>\n")
+        tests_in_dir = by_dir[directory]
+        for test in sorted(tests_in_dir.keys()):
+            test_rows = tests_in_dir[test]
+            metrics = [
+                k
+                for k in field_order
+                if k not in exclude_cols
+                and any(try_parse_float(r.get(k)) is not None for r in test_rows)
+            ]
+            metrics.sort()
+            section = build_table_for_test(
+                test_name=test,
+                rows=test_rows,
+                metrics=metrics,
+                date_col=date_col,
+                commit_col=commit_col,
+                ndigits=args.ndigits,
+                threshold=args.threshold,
+                date_fmt=args.date_fmt,
+            )
+            out_parts.append(section)
+        out_parts.append("\n</details>\n")
 
     with open(args.output, "w", newline="") as f:
         f.write("\n".join(out_parts))

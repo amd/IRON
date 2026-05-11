@@ -9,7 +9,7 @@
 #
 # This workflow collects artifacts from ALL completed CI workflows for the same
 # head SHA, arranges them into the {arch}/{suite}/ layout expected by
-# aggregate_summary.py, and posts (or updates) a single aggregated comment.
+# pretty_aggregate.py, and posts (or updates) a single aggregated comment.
 
 name: Comment on PR with Test Results
 
@@ -52,7 +52,7 @@ jobs:
             const headBranch = context.payload.workflow_run.head_branch;
             core.info(`Head SHA: ${headSha}, branch: ${headBranch}`);
 
-            // Mapping: artifact name -> directory layout for aggregate_summary.py
+            // Mapping: artifact name -> directory layout for pretty_aggregate.py
             const ARTIFACT_MAP = {
               'results-phoenix-small':    'phoenix/small',
               'results-phoenix-examples': 'phoenix/examples',
@@ -155,7 +155,7 @@ jobs:
       - name: Generate aggregate summary
         if: steps.collect.outputs.skip != 'true'
         run: |
-          python ci/scripts/aggregate_summary.py \
+          python ci/scripts/pretty_aggregate.py \
             --results-root "${{ steps.collect.outputs.root }}" \
             -o "${{ steps.collect.outputs.root }}/summary.md"
 
