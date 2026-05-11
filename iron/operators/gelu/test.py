@@ -16,7 +16,11 @@ def get_params():
             marks.append(pytest.mark.extensive)
         # TODO: temporary - disable tile_size=8192 for GeLU, issue #113
         if ts == 8192:
-            marks.append(pytest.mark.skip(reason="temporary: tile_size=8192 disabled for GeLU, see issue #113"))
+            marks.append(
+                pytest.mark.skip(
+                    reason="temporary: tile_size=8192 disabled for GeLU, see issue #113"
+                )
+            )
         return marks
 
     return [

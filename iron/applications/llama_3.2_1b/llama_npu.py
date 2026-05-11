@@ -1245,7 +1245,7 @@ def llama_forward_pass_decode(config, state):
     assert seq_len == 1
     assert state.num_preceding_tokens < max_seq_len
 
-    #patch_fused_decode_operator(aie_ops.decode, config, state.num_preceding_tokens)
+    # patch_fused_decode_operator(aie_ops.decode, config, state.num_preceding_tokens)
 
     # Prefill RoPE angle look-up tables
     angles_slice = config.angles[
