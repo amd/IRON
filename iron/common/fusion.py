@@ -8,6 +8,7 @@ import numpy as np
 import ml_dtypes
 import pyxrt
 import ctypes
+import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
 from .utils import XRTSubBuffer
@@ -31,9 +32,14 @@ class FusedMLIROperator(AIEOperatorBase):
             ``"separate"`` on NPU1.  ``"fused"`` uses a single-ELF
             dispatch (requires NPU2).  ``"separate"`` compiles each
             sub-operator to its own xclbin and invokes them sequentially.
+            ``"reference"`` runs only the per-operator CPU reference
+            implementations (no NPU compilation/dispatch).  ``"compare"``
+            runs the ``"separate"`` xclbin path and, after each NPU step,
+            also runs the operator's CPU reference on the NPU-produced
+            inputs and logs the deviation.
     """
 
-    DISPATCH_MODES = ("auto", "fused", "separate")
+    DISPATCH_MODES = ("auto", "fused", "separate", "reference", "compare")
 
     def __init__(
         self,
@@ -247,21 +253,27 @@ class FusedMLIROperator(AIEOperatorBase):
         is_npu2 = isinstance(aie_utils.get_current_device(), NPU2)
 
         if self._dispatch == "auto":
-            self._use_full_elf = is_npu2
+            self._mode = "fused" if is_npu2 else "separate"
         elif self._dispatch == "fused":
             if not is_npu2:
                 raise RuntimeError(
                     "dispatch='fused' requires NPU2 (Strix); "
                     "Phoenix/NPU1 does not support full-ELF dispatch"
                 )
-            self._use_full_elf = True
-        else:  # "separate"
-            self._use_full_elf = False
-
-        if self._use_full_elf:
-            self._set_up_full_elf_artifacts()
+            self._mode = "fused"
         else:
+            self._mode = self._dispatch  # "separate", "reference", or "compare"
+
+        # Backwards-compat flag (used by get_callable/params_path).
+        self._use_full_elf = self._mode == "fused"
+
+        if self._mode == "fused":
+            self._set_up_full_elf_artifacts()
+        elif self._mode in ("separate", "compare"):
             self._set_up_xclbin_artifacts()
+        else:
+            # "reference": no NPU artifacts to compile.
+            pass
 
     def _set_up_full_elf_artifacts(self):
         """Full-ELF path (NPU2): fuse MLIR into a single ELF."""
@@ -340,8 +352,12 @@ class FusedMLIROperator(AIEOperatorBase):
             A ``FusedFullELFCallable`` when using fused dispatch, or a
             ``FusedXclbinCallable`` when using separate dispatch.
         """
-        if self._use_full_elf:
+        if self._mode == "fused":
             return FusedFullELFCallable(self)
+        if self._mode == "reference":
+            return FusedReferenceCallable(self)
+        if self._mode == "compare":
+            return FusedCompareCallable(self)
         return FusedXclbinCallable(self)
 
     def get_layout_for_buffer(self, buffer_name):
@@ -612,6 +628,246 @@ class FusedXclbinCallable:
 
         # Sync all base buffers from device so callers can read results
         # (covers both output and scratch buffers)
+        for buf_name in self.op.subbuffer_layout:
+            if buf_name not in self.op.input_args:
+                self._buffers[buf_name].to("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Reference and compare dispatch
+# ---------------------------------------------------------------------------
+
+
+class _CPUBuffer:
+    """Minimal buffer adapter compatible with the ``XRTTensor`` API used by
+    callers (``torch_view``, ``to("npu")``, ``to("cpu")``, ``fill_``).
+
+    Backed by a flat 1D ``torch.bfloat16`` tensor in host memory.  All device
+    sync calls are no-ops.
+    """
+
+    def __init__(self, n_elements):
+        self._t = torch.zeros(n_elements, dtype=torch.bfloat16)
+
+    def torch_view(self):
+        return self._t
+
+    def to(self, *_args, **_kwargs):
+        return self
+
+    def fill_(self, value):
+        self._t.fill_(value)
+        return self
+
+    def buffer_object(self):
+        return None
+
+
+def _reshape_for_spec(flat_tensor, spec):
+    """Slice a flat host buffer to the element count implied by ``spec`` and
+    reshape it to the operator-declared shape.
+
+    Returns a view (no copy)."""
+    n = int(np.prod(spec.shape)) if spec.shape else 1
+    return flat_tensor[:n].reshape(spec.shape)
+
+
+def _call_reference(step_op, inputs):
+    """Invoke ``step_op.reference(*inputs)`` if available.
+
+    Returns the reference output tensor, or ``None`` if the operator has no
+    reference implementation.  Propagates other exceptions.
+    """
+    ref_fn = getattr(step_op, "reference", None)
+    if ref_fn is None:
+        return None
+    try:
+        return ref_fn(*inputs)
+    except NotImplementedError:
+        return None
+
+
+class FusedReferenceCallable:
+    """Pure-CPU evaluation of a fused operator runlist.
+
+    No NPU compilation or dispatch occurs.  Each runlist step calls
+    ``op.reference(*inputs)`` on host-side ``torch.bfloat16`` buffers.
+
+    Useful for validating the reference implementations themselves and for
+    comparing layer-by-layer expected outputs against NPU output.
+    """
+
+    def __init__(self, op):
+        self.op = op
+        self.last_elapsed = 0.0
+        itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
+
+        self._buffers = {}  # base buffer name -> _CPUBuffer
+        for buf_name, (_, _, length) in op.subbuffer_layout.items():
+            n = max(length, itemsize) // itemsize
+            self._buffers[buf_name] = _CPUBuffer(n)
+
+        # API parity with FusedFullELFCallable / FusedXclbinCallable
+        input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
+        self.input_buffer = _CPUBuffer(max(input_buffer_size, itemsize) // itemsize)
+        self.output_buffer = _CPUBuffer(max(output_buffer_size, itemsize) // itemsize)
+        self.scratch_buffer = _CPUBuffer(max(scratch_buffer_size, itemsize) // itemsize)
+
+        self._buffer_cache = {}
+
+    def _resolve_buffer(self, buf_name):
+        if buf_name in self._buffers:
+            return self._buffers[buf_name]
+        if buf_name in self.op.slice_info:
+            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
+            parent = self._buffers[base_name]
+            itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
+            start = start_bytes // itemsize
+            end = end_bytes // itemsize
+            sliced = _CPUBuffer.__new__(_CPUBuffer)
+            sliced._t = parent.torch_view()[start:end]
+            self._buffers[buf_name] = sliced
+            return sliced
+        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
+
+    def get_buffer(self, buffer_name):
+        if buffer_name in self._buffer_cache:
+            return self._buffer_cache[buffer_name]
+        buf = self._resolve_buffer(buffer_name)
+        self._buffer_cache[buffer_name] = buf
+        return buf
+
+    def __call__(self):
+        t0 = time.perf_counter()
+        for step_op, *buf_names in self.op.runlist:
+            arg_specs = step_op.get_arg_spec()
+            if len(arg_specs) != len(buf_names):
+                raise ValueError(
+                    f"Operator {step_op!r} arg-spec count {len(arg_specs)} "
+                    f"does not match runlist buffer count {len(buf_names)}"
+                )
+            *in_names, out_name = buf_names
+            *in_specs, out_spec = arg_specs
+
+            inputs = []
+            for name, spec in zip(in_names, in_specs):
+                flat = self._resolve_buffer(name).torch_view()
+                inputs.append(_reshape_for_spec(flat, spec).clone())
+
+            out = _call_reference(step_op, inputs)
+            if out is None:
+                raise NotImplementedError(
+                    f"Operator {type(step_op).__name__} has no reference "
+                    f"implementation; cannot use dispatch='reference'"
+                )
+
+            out_flat = self._resolve_buffer(out_name).torch_view()
+            n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
+            out_flat[:n_out].copy_(out.reshape(-1).to(torch.bfloat16))
+        self.last_elapsed = time.perf_counter() - t0
+
+
+class FusedCompareCallable(FusedXclbinCallable):
+    """Run the separate-xclbin NPU pipeline and, after each step, run the
+    operator's CPU reference on the same (NPU-produced) inputs.
+
+    Logs per-step max-abs and max-rel error.  The NPU output is what
+    propagates to the next step on both sides, so each comparison reflects
+    only the deviation of the current operator (no error accumulation).
+    """
+
+    def __init__(self, op, rel_tol=0.05, abs_tol=1e-2):
+        super().__init__(op)
+        self.rel_tol = rel_tol
+        self.abs_tol = abs_tol
+        # Per-step diagnostic records populated on each __call__.
+        self.last_step_stats = []
+
+    def _read_buffer_to_cpu(self, name, spec):
+        """Sync a device buffer to host and return a reshaped float32 view."""
+        buf = self._resolve_buffer(name)
+        buf.to("cpu")
+        flat = buf.torch_view()
+        n = int(np.prod(spec.shape)) if spec.shape else 1
+        return flat[:n].clone().reshape(spec.shape)
+
+    def __call__(self):
+        # Sync inputs to device.
+        for buf_name in self.op.input_args:
+            self._buffers[buf_name].to("npu")
+
+        self.last_step_stats = []
+        t0 = time.perf_counter()
+
+        for step_idx, (kernel, args) in enumerate(self._execution_plan):
+            step_op, *buf_names = self.op.runlist[step_idx]
+            arg_specs = step_op.get_arg_spec()
+            *in_names, out_name = buf_names
+            *in_specs, out_spec = arg_specs
+
+            # Snapshot NPU-side inputs before running the kernel.
+            cpu_inputs = [
+                self._read_buffer_to_cpu(name, spec)
+                for name, spec in zip(in_names, in_specs)
+            ]
+
+            # Run NPU step.
+            kernel(*args)
+
+            # Read NPU output.
+            npu_out = self._read_buffer_to_cpu(out_name, out_spec).to(torch.float32)
+
+            # Run reference on the same inputs.
+            ref_out = _call_reference(step_op, cpu_inputs)
+            stats = {
+                "step": step_idx,
+                "op": type(step_op).__name__,
+                "op_name": getattr(step_op, "name", type(step_op).__name__),
+                "inputs": list(in_names),
+                "output": out_name,
+            }
+            if ref_out is None:
+                stats["skipped"] = True
+                logger.info(
+                    "[compare step %d] %s -> %s: no reference (skipped)",
+                    step_idx,
+                    stats["op"],
+                    out_name,
+                )
+            else:
+                ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
+                diff = (npu_out - ref_flat).abs()
+                ref_mag = ref_flat.abs()
+                max_abs = float(diff.max())
+                ref_max = float(ref_mag.max())
+                rel = float((diff / (ref_mag + 1e-6)).max())
+                mean_abs = float(diff.mean())
+                stats.update(
+                    skipped=False,
+                    max_abs=max_abs,
+                    mean_abs=mean_abs,
+                    max_rel=rel,
+                    ref_max=ref_max,
+                )
+                fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+                level = logging.WARNING if fail else logging.INFO
+                logger.log(
+                    level,
+                    "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
+                    step_idx,
+                    stats["op"],
+                    out_name,
+                    max_abs,
+                    mean_abs,
+                    rel,
+                    ref_max,
+                    "  MISMATCH" if fail else "",
+                )
+            self.last_step_stats.append(stats)
+
+        self.last_elapsed = time.perf_counter() - t0
+
+        # Sync all base buffers back so callers can read results.
         for buf_name in self.op.subbuffer_layout:
             if buf_name not in self.op.input_args:
                 self._buffers[buf_name].to("cpu")
