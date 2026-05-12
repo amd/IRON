@@ -59,3 +59,7 @@ class Repeat(MLIROperator):
             AIERuntimeArgSpec("in", (self.rows, self.cols)),
             AIERuntimeArgSpec("out", (self.rows * self.repeat, self.cols)),
         ]
+
+    def reference(self, x):
+        """CPU reference: repeat-interleave along the leading dimension."""
+        return x.repeat_interleave(self.repeat, dim=0)

@@ -99,3 +99,11 @@ class GEMV(MLIROperator):
             AIERuntimeArgSpec("in", batch_dim + (self.K,)),  # vector
             AIERuntimeArgSpec("out", batch_dim + (self.M,)),  # output
         ]
+
+    def reference(self, A, B):
+        """CPU reference: (optionally batched) matrix-vector product."""
+        import torch
+
+        A32 = A.to(torch.float32)
+        B32 = B.to(torch.float32)
+        return (A32 @ B32.unsqueeze(-1)).squeeze(-1).to(torch.bfloat16)

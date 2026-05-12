@@ -15,3 +15,8 @@ class ElementwiseMul(BinaryElementwiseOperator):
     kernel_fn_name: ClassVar[str] = "eltwise_mul_bf16_vector"
     kernel_subdir: ClassVar[str] = "generic"
     callback_fn: ClassVar[str] = "my_eltwise_mul"
+
+    def reference(self, a, b):
+        import torch
+
+        return (a.to(torch.float32) * b.to(torch.float32)).to(torch.bfloat16)

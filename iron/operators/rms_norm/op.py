@@ -124,3 +124,16 @@ class RMSNorm(MLIROperator):
             AIERuntimeArgSpec("out", (self.size // self.tile_size, self.tile_size))
         )
         return specs
+
+    def reference(self, x, w=None):
+        """CPU reference: row-wise RMS normalization, optionally weighted."""
+        import torch
+
+        x32 = x.to(torch.float32)
+        rms = torch.sqrt((x32 * x32).mean(dim=-1, keepdim=True))
+        out = x32 / (rms + 1e-5)
+        if self.weighted:
+            if w is None:
+                raise ValueError("weighted RMSNorm requires weight input")
+            out = out * w.to(torch.float32)
+        return out.to(torch.bfloat16)

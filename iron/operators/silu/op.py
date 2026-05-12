@@ -17,3 +17,9 @@ class SiLU(ChanneledUnaryOperator):
     kernel_fn_name: ClassVar[str] = "silu_bf16"
     callback_fn: ClassVar[str] = "my_silu"
     needs_lut_ops: ClassVar[bool] = True
+
+    def reference(self, x):
+        import torch
+
+        x32 = x.to(torch.float32)
+        return (x32 * torch.sigmoid(x32)).to(torch.bfloat16)

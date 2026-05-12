@@ -92,3 +92,37 @@ class RoPE(MLIROperator):
             AIERuntimeArgSpec("in", (self.angle_rows, self.cols)),  # angles
             AIERuntimeArgSpec("out", (self.rows, self.cols)),  # output
         ]
+
+    def reference(self, x, angles):
+        """CPU reference for RoPE.
+
+        Assumes ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs
+        along the last dim (length ``cols``).  Only ``method_type == 0``
+        (TWO_HALVES) is currently supported.
+
+        ``angles`` may have fewer rows than ``x``; in that case the angles
+        are tiled along the row dimension to match ``x``."""
+        import torch
+
+        if self.method_type != 0:
+            raise NotImplementedError(
+                f"RoPE reference only supports method_type=0 (TWO_HALVES), "
+                f"got {self.method_type}"
+            )
+        rows, cols = self.rows, self.cols
+        half = cols // 2
+        cos = angles[..., 0::2].to(torch.float32)
+        sin = angles[..., 1::2].to(torch.float32)
+        if cos.shape[0] != rows:
+            if rows % cos.shape[0] == 0:
+                rep = rows // cos.shape[0]
+                cos = cos.repeat(rep, 1)
+                sin = sin.repeat(rep, 1)
+            else:
+                cos = cos[:rows]
+                sin = sin[:rows]
+        x32 = x.to(torch.float32)
+        x1, x2 = x32[..., :half], x32[..., half:]
+        y1 = x1 * cos - x2 * sin
+        y2 = x2 * cos + x1 * sin
+        return torch.cat([y1, y2], dim=-1).to(torch.bfloat16)
