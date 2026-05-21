@@ -9,6 +9,8 @@ import argparse
 import csv
 import os
 
+from pretty_common import display_name, parse_checks, split_test_path, status_emoji
+
 parser = argparse.ArgumentParser(
     description="Aggregate CI results from all architecture subdirectories into a top-level readme.md"
 )
@@ -38,20 +40,22 @@ METRIC_PREFERENCE = [
 
 
 def read_latest_csv(path):
-    """Return a dict mapping test name -> {checks, passed, metrics}."""
+    """Return a dict mapping (directory, display_name) -> {checks, passed, metrics}."""
     if not os.path.exists(path):
         return {}
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         results = {}
         for row in reader:
-            test = row.get("Test", "")
-            checks = row.get("Checks", "")
-            try:
-                p, n = map(int, checks.split("/"))
-                passed = p == n
-            except (ValueError, AttributeError):
-                passed = None
+            test_path = row.get("Test Path", "") or ""
+            params = row.get("Test", "") or ""
+            directory, func = split_test_path(test_path)
+            if not directory:
+                directory = "(unknown)"
+            display = display_name(func, params, fallback=test_path or "?")
+
+            p, n = parse_checks(row.get("Checks", ""))
+            passed = (p == n) if n > 0 else None
 
             metrics = {}
             for m in METRIC_PREFERENCE:
@@ -59,16 +63,14 @@ def read_latest_csv(path):
                 if val:
                     metrics[m] = val
 
-            results[test] = {"passed": passed, "metrics": metrics}
+            results[(directory, display)] = {"passed": passed, "metrics": metrics}
         return results
 
 
 def status_str(entry):
-    if entry is None:
+    if entry is None or entry["passed"] is None:
         return "-"
-    if entry["passed"] is None:
-        return "-"
-    return "pass" if entry["passed"] else "**FAIL**"
+    return "✅" if entry["passed"] else "❌"
 
 
 def metric_str(entry):
@@ -86,7 +88,7 @@ def metric_str(entry):
 
 
 def metric_label(arch_results):
-    """Pick the metric column name present in most entries."""
+    """Pick the first metric column name present in any entry."""
     for m in METRIC_PREFERENCE:
         for entry in arch_results.values():
             if entry["metrics"].get(m):
@@ -102,33 +104,40 @@ for suite in SUITES:
         csv_path = os.path.join(args.results_root, arch, suite, "latest.csv")
         arch_results[arch] = read_latest_csv(csv_path)
 
-    all_tests = sorted(set(arch_results["krackan"]) | set(arch_results["phoenix"]))
+    all_keys = set(arch_results["krackan"]) | set(arch_results["phoenix"])
 
     # Skip suite entirely when there is no data
-    if not all_tests:
+    if not all_keys:
         continue
+
+    # Group keys by directory
+    by_dir = {}
+    for directory, display in all_keys:
+        by_dir.setdefault(directory, []).append(display)
 
     # Determine metric labels per arch
     k_metric = metric_label(arch_results["krackan"])
     p_metric = metric_label(arch_results["phoenix"])
-
-    # Build header with merged arch columns
     k_metric_hdr = f" {k_metric}" if k_metric else ""
     p_metric_hdr = f" {p_metric}" if p_metric else ""
 
-    lines += [
-        f"## {suite.capitalize()}",
-        "",
-        f"| Test | Krackan Status | Krackan{k_metric_hdr} | Phoenix Status | Phoenix{p_metric_hdr} |",
-        "|---|---|---|---|---|",
-    ]
-    for test in all_tests:
-        k = arch_results["krackan"].get(test)
-        p = arch_results["phoenix"].get(test)
-        lines.append(
-            f"| {test} | {status_str(k)} | {metric_str(k)} | {status_str(p)} | {metric_str(p)} |"
-        )
-    lines.append("")
+    lines += [f"## {suite.capitalize()}", ""]
+
+    for directory in sorted(by_dir.keys()):
+        lines += [
+            "<details>",
+            f"<summary>{directory}</summary>",
+            "",
+            f"| Test | Krackan Status | Krackan{k_metric_hdr} | Phoenix Status | Phoenix{p_metric_hdr} |",
+            "|---|---|---|---|---|",
+        ]
+        for display in sorted(by_dir[directory]):
+            k = arch_results["krackan"].get((directory, display))
+            p = arch_results["phoenix"].get((directory, display))
+            lines.append(
+                f"| {display} | {status_str(k)} | {metric_str(k)} | {status_str(p)} | {metric_str(p)} |"
+            )
+        lines += ["", "</details>", ""]
 
 output_path = args.output
 with open(output_path, "w") as f:

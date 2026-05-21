@@ -1,7 +1,7 @@
 version = 1
 SPDX-PackageName = "iron"
 SPDX-PackageSupplier = "Advanced Micro Devices, Inc."
-SPDX-PackageDownloadLocation = "https://github.com/AARInternal/ironclad"
+SPDX-PackageDownloadLocation = "https://github.com/amd/IRON"
 
 [[annotations]]
 path = "iron/applications/llama_3.2_1b/prompt.txt"
