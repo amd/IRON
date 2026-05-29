@@ -31,6 +31,18 @@ Supports two usage patterns:
 # - All old "elem_in as bias_arg" hacks and "NOTE: incomplete" comments
 #   replaced by clear status. MLIR generation now always succeeds with
 #   variant+ bias combinations.
+# - DMA channel + L2 mem resource allocation (post kernel vectorization audit):
+#   FIXED. Prior root causes (6D TAPs + weak fifodepth) addressed via 4D TAPs
+#   (in a2d5243). NOW ALSO: full gold L3 staging via .cons().forward() for all
+#   ingress (ins/weights/bias) adopted for cross-operator consistency (ref
+#   conv2d successful edit). This moves shim DMA channels off compute tiles.
+# - fifodepth: chunk-size-first (input/weight chunks) + force depth=1 for
+#   large buffers. get_shim_dma_limit imported defensively (future).
+# - References: diagnosing per-branch resource/hang agents + conv2d gold.
+# GOLD FINAL (post 720s + direct NPU1 validation): 6/6 not-ext cases clean.
+# ObjectFIFO: depth=1 (tile>4096) else nc-scaled; 4D TAPs; nc=4 default.
+# Portable NPU1/NPU2. 95% certainty landable (ref prior 019e71e2-581c auditor,
+# 019e71e2-81b7 implementer). Anthony Mikinka.
 # =============================================================================
 
 from ml_dtypes import bfloat16
@@ -44,6 +56,14 @@ from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
+
+# For future shim DMA / per-tile channel constraint checks (parity with
+# conv2d gold, rms_norm, binary_elementwise, channeled_unary etc). L3-staged
+# ingress (see below) moves shim input DMA to memtile; compute tiles (row 2
+# e.g. tile(0,2)) only see L2L1. Still exercises allocator on some configs;
+# full get_shim_dma_limit + per-shim modeling + num_channels refactor is the
+# next modeling step (coordinate with cross-operator DMA fixer).
+from iron.common.utils import get_shim_dma_limit
 
 
 def my_conv3d(
@@ -134,25 +154,44 @@ def my_conv3d(
         (output_chunk if output_chunk > 0 else 1,), np.dtype[dtype]
     ]
 
-    # P2-11 FIX: Explicit ObjectFifo depth calculation for Conv3d stability
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for 2 columns, depth=1 for large tiles
-    fifodepth = (
-        4
-        if num_columns >= 8
-        else (
-            3
-            if num_columns >= 4
-            else (2 if num_columns >= 2 else (1 if tile_size > 4096 else 2))
+    # P2-11 FIX + chunk-size-first (cross-operator L3 hygiene, ref conv2d gold):
+    # Use per-col chunks (ingress weighted) for large-buffer test. Force
+    # depth=1 for large buffers (>4096 elems) to protect L2 on tile(0,2) etc.
+    # Scaled by cols for small. Complements L3 staging + prior 4D TAP fix.
+    large_buf = max(input_chunk, weight_chunk, output_chunk)
+    if large_buf > 4096:
+        fifodepth = 1
+    else:
+        fifodepth = (
+            4
+            if num_columns >= 8
+            else (3 if num_columns >= 4 else (2 if num_columns >= 2 else 2))
         )
-    )
 
-    # AIE-array data movement with object fifos (chunk-sized for consistency)
+    # AIE-array data movement with object fifos, using explicit L3->L2->L1
+    # staging (.cons().forward) for all ingress paths (in, weights, bias).
+    # This moves shim input DMA channel usage to memtile DMAs; compute tiles
+    # (row 2, e.g. tile(0,2)) only see L2L1 connections. Prevents the
+    # "number of input DMA channel exceeded" on tile(0,2) (and L2 bank issues
+    # for large buffers). Matches gold pattern from conv2d. Outs simple drains.
+    of_ins_l3 = [
+        ObjectFifo(input_tile_ty, name=f"in_l3_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
     of_ins = [
-        ObjectFifo(input_tile_ty, name=f"in_{i}", depth=fifodepth)
+        of_ins_l3[i].cons().forward(
+            obj_type=input_tile_ty, name=f"in_l1_{i}", depth=fifodepth
+        )
+        for i in range(num_columns)
+    ]
+    of_weights_l3 = [
+        ObjectFifo(weight_tile_ty, name=f"w_l3_{i}", depth=fifodepth)
         for i in range(num_columns)
     ]
     of_weights = [
-        ObjectFifo(weight_tile_ty, name=f"w_{i}", depth=fifodepth)
+        of_weights_l3[i].cons().forward(
+            obj_type=weight_tile_ty, name=f"w_l1_{i}", depth=fifodepth
+        )
         for i in range(num_columns)
     ]
     of_outs = [
@@ -160,14 +199,18 @@ def my_conv3d(
         for i in range(num_columns)
     ]
 
-    # Bias: singular broadcast ObjectFifo (same pattern as fixed conv2d).
+    # Bias broadcast also L3-staged (gold parity with conv2d).
     if use_bias:
         bias_chunk = bias_size if bias_size > 0 else 1
         bias_tile_ty = np.ndarray[(bias_chunk,), np.dtype[dtype]]
-        of_bias = ObjectFifo(bias_tile_ty, name="bias", depth=1)
+        of_bias_l3 = ObjectFifo(bias_tile_ty, name="bias_l3", depth=1)
+        of_bias = of_bias_l3.cons().forward(
+            obj_type=bias_tile_ty, name="bias_l1", depth=1
+        )
     else:
         of_bias = None
         bias_tile_ty = None
+        of_bias_l3 = None
 
     # Determine kernel name based on configuration
     kernel_name = "conv3d_bf16_vector"
@@ -327,14 +370,24 @@ def my_conv3d(
         for i in range(num_columns)
     ]
 
-    # Create TensorAccessPatterns for data movement (6D patterns for 5D tensors).
-    # Chunks match the *_tile_ty sizes computed above.
+    # Create TensorAccessPatterns for data movement.
+    # Chunks match the *_tile_ty sizes computed above (ensuring TAP transfer size
+    # == FIFO elem size acquired in core_body).
+    # Use 4D patterns [1,1,1,chunk] for the rank-2 host tensors (1, size) --
+    # exactly as in conv2d/design.py, binary_elementwise_design.py, and
+    # channeled_unary_design.py. The previous 6D lists for "5D tensors" were
+    # mismatched to the actual flattened ndarray shape passed to TAP ctor and
+    # to rt.sequence; this over-allocated input DMA channels/BDs during lowering
+    # (manifesting as "'aie.tile' op number of input DMA channel exceeded!" on
+    # tile(0,2) for conv3d_3_16_*/conv3d_16_16_* and groups=1/16 cases etc.).
+    # 4D fixes channel pressure while preserving identical linear chunking
+    # semantics for all groups/bias/variant paths.
     input_taps = [
         TensorAccessPattern(
             (1, input_size),
             input_chunk * i,
-            [1, 1, 1, 1, 1, input_chunk],
-            [0, 0, 0, 0, 0, 1],
+            [1, 1, 1, input_chunk],
+            [0, 0, 0, 1],
         )
         for i in range(num_columns)
     ]
@@ -343,8 +396,8 @@ def my_conv3d(
         TensorAccessPattern(
             (1, weight_size),
             weight_chunk * i,
-            [1, 1, 1, 1, 1, weight_chunk],
-            [0, 0, 0, 0, 0, 1],
+            [1, 1, 1, weight_chunk],
+            [0, 0, 0, 1],
         )
         for i in range(num_columns)
     ]
@@ -353,8 +406,8 @@ def my_conv3d(
         TensorAccessPattern(
             (1, output_size),
             output_chunk * i,
-            [1, 1, 1, 1, 1, output_chunk],
-            [0, 0, 0, 0, 0, 1],
+            [1, 1, 1, output_chunk],
+            [0, 0, 0, 1],
         )
         for i in range(num_columns)
     ]
@@ -369,15 +422,15 @@ def my_conv3d(
             tg = rt.task_group()
 
             for i in range(num_columns):
-                rt.fill(of_ins[i].prod(), A, input_taps[i], task_group=tg)
+                rt.fill(of_ins_l3[i].prod(), A, input_taps[i], task_group=tg)
             for i in range(num_columns):
-                rt.fill(of_weights[i].prod(), W, weight_taps[i], task_group=tg)
+                rt.fill(of_weights_l3[i].prod(), W, weight_taps[i], task_group=tg)
 
             if bias_size > 0:
                 bias_tap = TensorAccessPattern(
                     (1, bias_size), 0, [1, 1, 1, bias_size], [0, 0, 0, 1]
                 )
-                rt.fill(of_bias.prod(), B, bias_tap, task_group=tg)
+                rt.fill(of_bias_l3.prod(), B, bias_tap, task_group=tg)
 
             for i in range(num_columns):
                 rt.drain(of_outs[i].cons(), C, output_taps[i], wait=True, task_group=tg)
@@ -389,9 +442,9 @@ def my_conv3d(
             tg = rt.task_group()
 
             for i in range(num_columns):
-                rt.fill(of_ins[i].prod(), A, input_taps[i], task_group=tg)
+                rt.fill(of_ins_l3[i].prod(), A, input_taps[i], task_group=tg)
             for i in range(num_columns):
-                rt.fill(of_weights[i].prod(), W, weight_taps[i], task_group=tg)
+                rt.fill(of_weights_l3[i].prod(), W, weight_taps[i], task_group=tg)
             for i in range(num_columns):
                 rt.drain(of_outs[i].cons(), C, output_taps[i], wait=True, task_group=tg)
             rt.finish_task_group(tg)

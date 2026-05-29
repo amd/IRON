@@ -21,6 +21,9 @@ import logging
 from pathlib import Path
 from typing import Tuple, Union, Optional
 
+import aie.utils as aie_utils
+from aie.utils.npukernel import NPUKernel
+
 from iron.common import (
     AIEOperatorBase,
     AIEOperatorConstraintError,
@@ -29,7 +32,10 @@ from iron.common import (
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    AIERuntimeArgSpec,
+    DesignGenerator,
 )
+from iron.common.utils import get_shim_dma_limit
 
 
 class AIEConv2d(AIEOperatorBase):
@@ -129,71 +135,99 @@ class AIEConv2d(AIEOperatorBase):
         AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
-        """Set up compilation artifacts"""
+        """Set up compilation artifacts (updated for current PythonGeneratedMLIRArtifact / DesignGenerator / Xclbin ctors)"""
         operator_dir = Path(__file__).parent
+        design_path = operator_dir / "design.py"
 
-        # Determine kernel directory based on device
-        kernel_dir = (
-            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
-        )
+        # Determine kernel directory based on device (defensive, no device_manager on current AIEContext)
+        # Matches patterns in operator_bases.py and get_params() in test.py
+        try:
+            dev = aie_utils.get_current_device()
+            kernel_dir = "aie2p" if getattr(dev, "cols", 4) > 4 else "aie2"
+        except Exception:
+            kernel_dir = "aie2"
+            dev = None
+
+        # Build dev for design callback (live device or fallback) -- guarantees dev
+        if dev is None:
+            try:
+                dev = aie_utils.get_current_device()
+            except Exception:
+                from aie.iron.device import NPU1
+                dev = NPU1()
+
+        # Active get_shim_dma_limit + per-ingress channel budgeting (parity with design.py
+        # and iron/common/operator_bases.py + rms_norm/swiglu patterns). Ensures artifact
+        # names and DesignGenerator num_columns reflect the DMA-safe column count actually
+        # emitted by my_conv2d (resolves prior tile(0,2) input DMA errors for bias+4-col).
+        # Performed after guaranteed dev so budgeting uses real device limits.
+        shim_dma_limit = get_shim_dma_limit(dev)
+        channels_per_col = 2 + (1 if self.use_bias else 0)
+        safe_max_cols = max(1, shim_dma_limit // channels_per_col)
+        dev_cols = getattr(dev, "cols", 4)
+        effective_num_columns = min(self.num_aie_columns, safe_max_cols, dev_cols)
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
             f"{self.kernel_size[0]}x{self.kernel_size[1]}_"
             f"s{self.stride[0]}x{self.stride[1]}_"
             f"p{self.padding[0]}x{self.padding[1]}_"
-            f"g{self.groups}_{self.num_aie_columns}c"
+            f"g{self.groups}_{effective_num_columns}c"
         )
 
-        mlir_artifact = PythonGeneratedMLIRArtifact.new(
+        mlir_artifact = PythonGeneratedMLIRArtifact(
             f"{file_name_base}.mlir",
-            import_path=operator_dir / "design.py",
-            callback_fn="my_conv2d",
-            callback_kwargs={
-                "dev": self.context.device_manager.aie_device,
-                "N": 1,  # Will handle batch externally
-                "in_channels": self.in_channels,
-                "in_height": self.in_height,
-                "in_width": self.in_width,
-                "out_channels": self.out_channels,
-                "out_height": self.out_height,
-                "out_width": self.out_width,
-                "kernel_h": self.kernel_size[0],
-                "kernel_w": self.kernel_size[1],
-                "stride_h": self.stride[0],
-                "stride_w": self.stride[1],
-                "pad_h": self.padding[0],
-                "pad_w": self.padding[1],
-                "groups": self.groups,
-                "use_bias": self.use_bias,
-                "num_columns": self.num_aie_columns,
-                "tile_size": self.tile_size,
-                "trace_size": 0,
-            },
+            DesignGenerator(
+                design_path,
+                "my_conv2d",
+                args=(),
+                kwargs={
+                    "dev": dev,
+                    "N": 1,  # Will handle batch externally
+                    "in_channels": self.in_channels,
+                    "in_height": self.in_height,
+                    "in_width": self.in_width,
+                    "out_channels": self.out_channels,
+                    "out_height": self.out_height,
+                    "out_width": self.out_width,
+                    "kernel_h": self.kernel_size[0],
+                    "kernel_w": self.kernel_size[1],
+                    "stride_h": self.stride[0],
+                    "stride_w": self.stride[1],
+                    "pad_h": self.padding[0],
+                    "pad_w": self.padding[1],
+                    "groups": self.groups,
+                    "use_bias": self.use_bias,
+                    "num_columns": effective_num_columns,
+                    "tile_size": self.tile_size,
+                    "trace_size": 0,
+                },
+            ),
         )
 
-        xclbin_artifact = XclbinArtifact.new(
-            f"{file_name_base}.xclbin",
-            depends=[
-                mlir_artifact,
-                KernelObjectArtifact.new(
-                    "conv2d.o",
-                    extra_flags=[],
-                    depends=[
-                        SourceArtifact.new(
-                            self.context.base_dir
-                            / "aie_kernels"
-                            / kernel_dir
-                            / "conv2d.cc"
-                        )
-                    ],
-                ),
+        kernel_obj = KernelObjectArtifact(
+            "conv2d.o",
+            dependencies=[
+                SourceArtifact(
+                    self.context.base_dir
+                    / "aie_kernels"
+                    / kernel_dir
+                    / "conv2d.cc"
+                )
             ],
         )
 
-        insts_artifact = InstsBinArtifact.new(
+        xclbin_artifact = XclbinArtifact(
+            f"{file_name_base}.xclbin",
+            mlir_input=mlir_artifact,
+            dependencies=[mlir_artifact, kernel_obj],
+            extra_flags=[],
+        )
+
+        insts_artifact = InstsBinArtifact(
             f"{file_name_base}.bin",
-            depends=[mlir_artifact],
+            mlir_input=mlir_artifact,
+            dependencies=[mlir_artifact],
         )
 
         self.xclbin_artifact = xclbin_artifact
@@ -343,3 +377,52 @@ class AIEConv2d(AIEOperatorBase):
         )
 
         return result
+
+    # -------------------------------------------------------------------------
+    # Abstract method implementations required by AIEOperatorBase (post-refactor)
+    # Minimal production fix to enable run_test() + metrics path (and forward).
+    # These provide the modern callable + arg spec interface used by test_utils
+    # and AIEContext high-level paths. Order matches rt.sequence() in design.py
+    # (and dict insertion order in test.py input/output_buffers for bias cases).
+    # -------------------------------------------------------------------------
+
+    def get_arg_spec(self):
+        """Return runtime arg specs matching the kernel launch order from design.py.
+
+        Bias case (rt.sequence order): in, weight, bias, out
+        No-bias: in, weight, out
+
+        This also matches the insertion order of input_buffers/output_buffers
+        passed by the metrics test_conv2d and the FORWARD_CASES.
+        """
+        specs = [
+            AIERuntimeArgSpec("in", (self.input_size,)),
+            AIERuntimeArgSpec("in", (self.weight_size,)),
+        ]
+        if self.use_bias and getattr(self, "bias_size", 0) > 0:
+            specs.append(AIERuntimeArgSpec("in", (self.bias_size,)))
+        specs.append(AIERuntimeArgSpec("out", (self.output_size,)))
+        return specs
+
+    def get_callable(self):
+        """Return a callable that executes the compiled kernel on the NPU.
+
+        Uses the same NPUKernel / DefaultNPURuntime pattern as MLIROperator
+        for compatibility with run_test() buffer passing and XRT execution.
+        The arg order passed at call time must match get_arg_spec().
+        """
+        # Ensure we have the artifacts (caller should have done compile())
+        if self.xclbin_artifact is None or self.insts_artifact is None:
+            # Defensive: set_up_artifacts should have populated via compile()
+            self.set_up_artifacts()
+        npu_kernel = NPUKernel(
+            xclbin_path=self.xclbin_artifact.filename,
+            kernel_name=self.xclbin_artifact.kernel_name,
+            insts_path=self.insts_artifact.filename,
+        )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+
+        def call(*args):
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+
+        return call

@@ -38,8 +38,8 @@ Canonical shape delivered for NPU finalization wave:
 - Inlined construction (no fragile helpers), count_include_pad=False golden
   (mandatory for AIE kernel valid-pixel divisor semantics).
 - Exact main-tree metric prints for robust CSV capture.
-- bf16 semantics fully exercised (inputs, golden, tolerances 0.05/1e-5 primary
-  and 0.05/0.1 forward account for average accum/division).
+- bf16 semantics fully exercised (inputs, golden, tolerances 0.01/1e-4 primary
+  and 0.01/0.01 forward (tightened post cpu_test bfloat16 audit for not-ext)).
 - AIE2 (npu1, <=4 cols) and AIE2P (npu2, <=8 cols) paths covered via device
   query + kernel selection in op.py (no special op gating needed).
 - Strong cross-validation of shapes + output dim formulas (op.py vs reference
@@ -266,7 +266,7 @@ def test_avgpool2d(
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.05, abs_tol=1e-5
+        operator, input_buffers, output_buffers, rel_tol=0.01, abs_tol=1e-4
     )
 
     # Exactly the print format used by high-quality main-tree tests
@@ -409,11 +409,11 @@ def test_avgpool2d_forward(
 
     # bf16 tolerances for forward path (average accum/division):
     # - bf16 limited precision; avgpool sums over k*k window then / valid count (count_include_pad=False).
-    # - 0.05 rel + 0.1 abs for the per-batch Python forward + XRT IO path on top of AIE kernels.
-    # - Same rationale/contract as Conv3D gold forward and primary run_test path.
+    # - 0.01 rel + 0.01 abs (tightened post cpu_test audit) for per-batch forward + XRT IO.
+    # - Same rationale as Conv3D/conv2d gold; safe for not-ext sizes (cpu ref exact to F).
     # Golden generated exclusively via generate_golden_reference.
-    rel_tol = 0.05
-    abs_tol = 0.1
+    rel_tol = 0.01
+    abs_tol = 0.01
     if not torch.allclose(result, expected, rtol=rel_tol, atol=abs_tol):
         max_diff = (result - expected).abs().max().item()
         pytest.fail(f"Results don't match. Max diff: {max_diff}")

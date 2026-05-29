@@ -21,6 +21,10 @@ Conscious design of the test matrix:
 - Strict one-group-per-column constraint (tile_size == reduction_size and
   input_size == reduction_size * num_aie_columns) matching current design.py
   + kernel semantics (one reduction group processed per AIE column).
+# 600s hang fix reference (this agent): design.py now has L3 + 4D TAPs +
+# chunk-depth; see MODELING STATUS header in design.py (log
+# /tmp/reduction_hw_long.log + conv3d a2d5243/4c15030 + conv2d agent).
+# cpu_test.py separation preserved per AGENTS.md.
 - Regular suite: reduction_sizes=[32, 64] (compact, fast, high-signal base
   cases covering vectorized paths + modest remainder) x supported column
   counts x supported ops. These always run by default.

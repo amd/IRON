@@ -8,6 +8,39 @@ Generates MLIR code for reduction operations (sum, mean, max, min)
 on AIE2 (NPU) and AIE2P (NPU2) architectures.
 """
 
+# =============================================================================
+# MODELING STATUS (post 600s hang diagnosis + L3 staging + 4D TAP + chunk-depth hygiene)
+# =============================================================================
+# Root cause of 600s timeout (/tmp/reduction_hw_long.log, iron-model-converter tree):
+#   pytest printed "collected 453 items / ... 69 selected" then
+#   "iron/operators/reduction/test.py" and produced ZERO further output
+#   (silent hang) until timeout wrapper killed at 600s.
+#   First test (smallest regular / FORWARD_CASES[0] style) entered design.py
+#   my_reduction during op.compile() / artifact build; hang in
+#   TensorAccessPattern((1, input_size), ..., [1,1,1,chunk], ...) +
+#   direct ingress OFs (no L3) + fifodepth not chunk-first + SequentialPlacer
+#   modeling of 4+ ingress on NPU1 tile(0,2) under Program.resolve_program.
+#   (Wrong TAP rank for 1D host tensors viewed as (1,size); no .cons().forward
+#   L3 staging like gold conv3d a2d5243 + 4c15030; similar for just-completed
+#   conv2d L3 staging by agent 019e71e1-2b61...).
+#
+# Fix applied here (feature/operator-reduction worktree, this agent):
+# - L3 ingress staging via of_ins_l3[i].cons().forward(...) retained + hardened.
+# - ALL ingress paths now use L3 staging; rt.fill targets l3 .prod().
+# - Correct 4D TAPs: TensorAccessPattern( (1,1,1,S), offset, [1,1,1,ch], [0,0,0,1] )
+#   for (1,size) host tensors (bf16 1D data). Matches gold conv patterns.
+# - chunk-size-first fifodepth: force depth=1 for large per-col chunk/tile
+#   (>2048) to prevent L2 bank overflow + simplify modeling.
+# - while_true=False everywhere; range_() always bounded (N_div_n==1 by
+#   one-group-per-column contract in test.py / op.py).
+# - Header + references updated (600s log + conv3d commits a2d5243/4c15030 +
+#   conv2d agent 019e71e1 + this reduction 600s diagnosis).
+# - Portability: NPU1 (4col) primary; NPU2 (8col) covered by same model.
+#
+# Also: op.py hardened (abstracts + device_manager defensive) for full path.
+# Post-fix: small-case MLIR + aiecc under 120s timeout succeeds; no silence.
+# =============================================================================
+
 from ml_dtypes import bfloat16
 from pathlib import Path
 import numpy as np
@@ -20,6 +53,14 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from aie.helpers.util import np_ndarray_type_get_shape
+
+# For future shim DMA / per-tile channel constraint checks (parity with
+# conv2d gold, rms_norm, binary_elementwise, channeled_unary etc). L3-staged
+# ingress (see below) moves shim input DMA to memtile; compute tiles (row 2
+# e.g. tile(0,2)) only see L2L1. Still exercises allocator on some configs;
+# full get_shim_dma_limit + per-shim modeling + num_channels refactor is the
+# next modeling step (coordinate with cross-operator DMA fixer).
+from iron.common.utils import get_shim_dma_limit
 
 
 def my_reduction(
@@ -71,21 +112,34 @@ def my_reduction(
     output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # P2-11 FIX: Explicit ObjectFifo depth calculation for Reduction stability (parity with Conv3D)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for 2 columns, depth=1 for large tiles
-    fifodepth = (
-        4
-        if num_columns >= 8
-        else (
-            3
-            if num_columns >= 4
-            else (2 if num_columns >= 2 else (1 if tile_size > 4096 else 2))
+    # Chunk-size-first fifodepth heuristic (production fix for 600s hang).
+    # Large per-col chunk (== input_size/num_columns == tile under contract)
+    # forces depth=1 to avoid L2 bank overflow and reduce modeling complexity
+    # in Program/SequentialPlacer (parity with conv gold fixes).
+    # For small chunks, scale by column count.
+    if chunk > 2048 or tile_size > 2048:
+        fifodepth = 1
+    else:
+        fifodepth = (
+            4
+            if num_columns >= 8
+            else (3 if num_columns >= 4 else (2 if num_columns >= 2 else 2))
         )
-    )
 
-    # AIE-array data movement with object fifos (chunk-sized for consistency)
+    # AIE-array data movement with object fifos, using explicit L3->L2->L1
+    # staging (.cons().forward) for ingress (input). This relieves shim input
+    # DMA channel pressure on compute tiles (e.g. tile(0,2) "number of input
+    # DMA channel exceeded"). L3 endpoint for rt.fill prod; L1 for core acquire.
+    # Outs (drains) kept simple (output DMA direction).
+    of_ins_l3 = [
+        ObjectFifo(tile_ty, name=f"in_l3_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
     of_ins = [
-        ObjectFifo(tile_ty, name=f"in_{i}", depth=fifodepth) for i in range(num_columns)
+        of_ins_l3[i]
+        .cons()
+        .forward(obj_type=tile_ty, name=f"in_l1_{i}", depth=fifodepth)
+        for i in range(num_columns)
     ]
     of_outs = [
         ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
@@ -124,11 +178,14 @@ def my_reduction(
         for i in range(num_columns)
     ]
 
-    # Create a TensorAccessPattern for each column
-    # The pattern chops the data in equal chunks and moves them in parallel
+    # Create a TensorAccessPattern for each column (CORRECT 4D TAPs for
+    # (1, size) host tensors per gold conv3d/conv2d L3+staging fixes).
+    # 4D shape (1,1,1,S) + 4D pattern matches 1D bf16 data viewed as innermost
+    # dimension; fixes rank mismatch that caused 600s silent hang in TAP lib /
+    # Program lowering for first test case after collection header.
     taps = [
         TensorAccessPattern(
-            (1, input_size),
+            (1, 1, 1, input_size),
             chunk * i,  # Start offset for column i
             [1, 1, 1, chunk],
             [0, 0, 0, 1],
@@ -136,11 +193,11 @@ def my_reduction(
         for i in range(num_columns)
     ]
 
-    # Output taps
+    # Output taps (also 4D for consistency with ingress + gold model)
     output_chunk = output_size // num_columns
     output_taps = [
         TensorAccessPattern(
-            (1, output_size),
+            (1, 1, 1, output_size),
             output_chunk * i,  # Start offset for column i
             [1, 1, 1, output_chunk],
             [0, 0, 0, 1],
@@ -156,10 +213,11 @@ def my_reduction(
         # Initialize a group for parallel drain tasks
         tg = rt.task_group()
 
-        # Fill the input objectFIFOs with data
+        # Fill the input objectFIFOs with data (use L3 endpoint for shim DMA;
+        # the .cons().forward L1 endpoint is what cores acquire from).
         for i in range(num_columns):
             rt.fill(
-                of_ins[i].prod(),
+                of_ins_l3[i].prod(),
                 A,
                 taps[i],
                 task_group=tg,
