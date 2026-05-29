@@ -10,7 +10,6 @@
 #include "../aie_kernel_utils.h"
 
 #include <aie_api/aie.hpp>
-#include <aie_api/aie_bf16.hpp>
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
@@ -514,7 +513,7 @@ void pointwise_conv3d_bf16_vector(bfloat16 *input,
                         in_vec[i] = input[((n * in_channels + ic) * spatiotemporal_size) + sp];
                         w_vec[i] = weight[oc * in_channels + ic];
                     }
-                    acc += aie::mulacc(aie::zeros<bfloat16, vec_factor>(), in_vec, w_vec);
+                    acc += static_cast<bfloat16>(aie::reduce_add(aie::mul(in_vec, w_vec).to_vector<float>()));
                 }
 
                 // Handle remainder

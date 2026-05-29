@@ -142,7 +142,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                     // Vectorized accumulation over input channels
                     const int V = channels_per_group / vec_factor;
                     for (int v = 0; v < V; v++) {
-                        aie::vector<bfloat16, vec_factor> acc_vec = aie::zeros<bfloat16, vec_factor>();
+                        aie::accum<accfloat, vec_factor> acc_vec = aie::zeros<accfloat, vec_factor>();
 
                         for (int kh = 0; kh < kernel_h; kh++) {
                             for (int kw = 0; kw < kernel_w; kw++) {
@@ -171,7 +171,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        acc += aie::reduce_add(acc_vec);
+                        acc += static_cast<bfloat16>(aie::reduce_add(acc_vec.template to_vector<float>()));
                     }
 
                     // Handle remainder channels
@@ -271,7 +271,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        acc += aie::reduce_add(aie::mul(in_vec, w_vec));
+                        acc += static_cast<bfloat16>(aie::reduce_add(aie::mul(in_vec, w_vec).to_vector<float>()));
                     }
 
                     // Handle remainder
@@ -346,7 +346,7 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
                         w_vec[i] = weight[oc * in_channels + ic];
                     }
 
-                    acc += aie::reduce_add(aie::mul(in_vec, w_vec));
+                    acc += static_cast<bfloat16>(aie::reduce_add(aie::mul(in_vec, w_vec).to_vector<float>()));
                 }
 
                 // Handle remainder
