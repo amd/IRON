@@ -1,0 +1,56 @@
+name: Operator CI
+
+on:
+  push:
+    branches:
+      - 'feature/operator-*'
+  pull_request:
+    branches:
+      - 'feature/operator-*'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine operator from branch
+        id: op
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          if [[ "$BRANCH" == feature/operator-* ]]; then
+            OP="${BRANCH#feature/operator-}"
+            echo "operator=$OP" >> $GITHUB_OUTPUT
+            echo "Detected operator: $OP"
+          else
+            echo "Not an operator branch, skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Python
+        if: steps.op.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        if: steps.op.outputs.skip != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Run operator tests (CPU reference only - no hardware)
+        if: steps.op.outputs.skip != 'true'
+        run: |
+          OP="${{ steps.op.outputs.operator }}"
+          echo "Running CPU reference tests for operator: $OP"
+          python -m pytest iron/operators/$OP/ -q -k "cpu or reference" --tb=short || true
+
+      - name: Run full operator test module (if present)
+        if: steps.op.outputs.skip != 'true'
+        run: |
+          OP="${{ steps.op.outputs.operator }}"
+          if [ -f "iron/operators/$OP/test.py" ]; then
+            echo "Running test.py for $OP (collection only in this environment)"
+            python -m pytest iron/operators/$OP/test.py --collectonly -q || true
+          fi

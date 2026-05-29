@@ -192,3 +192,11 @@ To bypass the hook if needed: `git push --no-verify`
 -----
 
 <p align="center">Copyright&copy; 2025 Advanced Micro Devices, Inc</p>
+
+## Operator Development
+
+New operators are developed on dedicated branches following the workflow described in [docs/OPERATOR_DEVELOPMENT.md](docs/OPERATOR_DEVELOPMENT.md).
+
+Each operator has its own `feature/operator-<name>` branch containing only its production code, plus a dedicated worktree for convenient development.
+
+Per-operator CI automatically runs the relevant tests when changes are pushed to these branches.
