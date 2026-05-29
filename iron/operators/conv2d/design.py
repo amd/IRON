@@ -141,16 +141,17 @@ def my_conv2d(
         (output_chunk if output_chunk > 0 else 1,), np.dtype[dtype]
     ]
 
-    # P2-11 FIX: Explicit ObjectFifo depth calculation for Conv2d stability (parity with Conv3D)
-    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for 2 columns, depth=1 for large tiles
-    # (heuristic still references tile_size for large-tile case)
+    # P2-11 FIX + chunk-size-first (cross-operator hygiene): use per-col ingress chunk
+    # (input_chunk) for large-buffer depth=1 force. Depth=4 for 8+ cols, 3 for 4+,
+    # 2 for 2+; depth=1 when chunk >4096 elems to avoid L2 bank pressure on
+    # compute tiles (e.g. tile(0,2)). Complements the L3 .cons().forward() staging.
     fifodepth = (
         4
         if num_columns >= 8
         else (
             3
             if num_columns >= 4
-            else (2 if num_columns >= 2 else (1 if tile_size > 4096 else 2))
+            else (2 if num_columns >= 2 else (1 if input_chunk > 4096 else 2))
         )
     )
 
@@ -167,9 +168,9 @@ def my_conv2d(
         for i in range(num_columns)
     ]
     of_ins = [
-        of_ins_l3[i].cons().forward(
-            obj_type=input_tile_ty, name=f"in_l1_{i}", depth=fifodepth
-        )
+        of_ins_l3[i]
+        .cons()
+        .forward(obj_type=input_tile_ty, name=f"in_l1_{i}", depth=fifodepth)
         for i in range(num_columns)
     ]
     of_weights_l3 = [
@@ -177,9 +178,9 @@ def my_conv2d(
         for i in range(num_columns)
     ]
     of_weights = [
-        of_weights_l3[i].cons().forward(
-            obj_type=weight_tile_ty, name=f"w_l1_{i}", depth=fifodepth
-        )
+        of_weights_l3[i]
+        .cons()
+        .forward(obj_type=weight_tile_ty, name=f"w_l1_{i}", depth=fifodepth)
         for i in range(num_columns)
     ]
     of_outs = [
