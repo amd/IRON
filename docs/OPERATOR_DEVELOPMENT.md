@@ -106,6 +106,7 @@ feat(operator): Add conv3d production code (SPEC-015)
 
 - **Hygiene Agent**: Owns branch purity checks, file filtering for per-operator branches, pre-push hook maintenance, and enforcement of the production-code-only rule.
 - **CI Agent**: Maintains operator-ci.yml, ci-lint.yml, pytest configuration, and test selection logic to ensure reliable isolated validation of each operator.
+- **Authorship & Commit Hygiene Maintainer**: Ensures consistent use of "Anthony Mikinka" (or matching git author) for credit on documentation, workflows, commits, and GitHub content related to operator work.
 - Documentation for this workflow (including updates to this file and the corresponding section of README.md) is maintained solely on the integration branch.
 
 This model enables high-quality, independently verifiable operator additions while retaining complete analytical and historical context on the integration branch.
@@ -118,6 +119,10 @@ This model enables high-quality, independently verifiable operator additions whi
 - Branch inventory: `docs/MASTER-SPEC.md`
 - Certification status: `GOLD_STATUS.md`
 - Main README operator section
+
+## Authorship
+
+Git commit authorship carries credit for all contributions, following the established convention used throughout this repository. A minimal "Maintained by: Anthony Mikinka" line is present in this document only because it adds real value as the primary reference for the operator development workflow. No such attribution line is added to configuration files (e.g., workflows) or general documentation.
 
 ---
 
