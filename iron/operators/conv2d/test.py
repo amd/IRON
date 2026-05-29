@@ -448,6 +448,7 @@ FORWARD_CASES = [
 ]
 
 
+@pytest.mark.extensive
 @pytest.mark.parametrize(
     CONV2D_TEST_PARAM_NAMES,
     FORWARD_CASES,

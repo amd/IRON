@@ -136,10 +136,13 @@ class AIEConv2d(AIEOperatorBase):
         """Set up compilation artifacts"""
         operator_dir = Path(__file__).parent
 
-        # Determine kernel directory based on device
-        kernel_dir = (
-            "aie2p" if self.context.device_manager.device_str() == "npu2" else "aie2"
-        )
+        # Determine kernel directory based on device (defensive, no device_manager on current AIEContext)
+        # Matches patterns in operator_bases.py and get_params() in test.py
+        try:
+            dev = aie_utils.get_current_device()
+            kernel_dir = "aie2p" if getattr(dev, "cols", 4) > 4 else "aie2"
+        except Exception:
+            kernel_dir = "aie2"
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
