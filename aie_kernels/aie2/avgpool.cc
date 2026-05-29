@@ -8,7 +8,6 @@
 #include "../aie_kernel_utils.h"
 
 #include <aie_api/aie.hpp>
-#include <aie_api/aie_bf16.hpp>
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
