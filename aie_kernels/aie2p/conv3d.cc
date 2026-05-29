@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // 3D Convolution Kernel for AIE2P (NPU2)
@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
+
+extern "C" {
 
 /**
  * 3D Convolution Kernel - AIE2P enhanced vectorized version
@@ -531,114 +533,4 @@ void pointwise_conv3d_bf16_vector(bfloat16 *input,
 
     event1();
 }
-
-extern "C" {
-
-// Standard conv3d kernels
-void conv3d_bf16_vector(bfloat16 *input,
-                        bfloat16 *weight,
-                        bfloat16 *output,
-                        bfloat16 *bias,
-                        int N,
-                        int in_channels,
-                        int in_t,
-                        int in_h,
-                        int in_w,
-                        int out_channels,
-                        int out_t,
-                        int out_h,
-                        int out_w,
-                        int kernel_t,
-                        int kernel_h,
-                        int kernel_w,
-                        int stride_t,
-                        int stride_h,
-                        int stride_w,
-                        int pad_t,
-                        int pad_h,
-                        int pad_w,
-                        int groups);
-
-void conv3d_bf16_scalar(bfloat16 *input,
-                        bfloat16 *weight,
-                        bfloat16 *output,
-                        bfloat16 *bias,
-                        int in_channels,
-                        int in_t,
-                        int in_h,
-                        int in_w,
-                        int out_channels,
-                        int out_t,
-                        int out_h,
-                        int out_w,
-                        int kernel_t,
-                        int kernel_h,
-                        int kernel_w,
-                        int stride_t,
-                        int stride_h,
-                        int stride_w,
-                        int pad_t,
-                        int pad_h,
-                        int pad_w,
-                        int groups);
-
-void conv3d_bf16_large_kernel(bfloat16 *input,
-                              bfloat16 *weight,
-                              bfloat16 *output,
-                              bfloat16 *bias,
-                              int N,
-                              int in_channels,
-                              int in_t,
-                              int in_h,
-                              int in_w,
-                              int out_channels,
-                              int out_t,
-                              int out_h,
-                              int out_w,
-                              int kernel_t,
-                              int kernel_h,
-                              int kernel_w,
-                              int stride_t,
-                              int stride_h,
-                              int stride_w,
-                              int pad_t,
-                              int pad_h,
-                              int pad_w,
-                              int groups);
-
-// Depthwise conv3d
-void depthwise_conv3d_bf16_vector(bfloat16 *input,
-                                  bfloat16 *weight,
-                                  bfloat16 *output,
-                                  bfloat16 *bias,
-                                  int N,
-                                  int channels,
-                                  int in_t,
-                                  int in_h,
-                                  int in_w,
-                                  int out_t,
-                                  int out_h,
-                                  int out_w,
-                                  int kernel_t,
-                                  int kernel_h,
-                                  int kernel_w,
-                                  int stride_t,
-                                  int stride_h,
-                                  int stride_w,
-                                  int pad_t,
-                                  int pad_h,
-                                  int pad_w);
-
-// Pointwise (1x1x1) conv3d
-void pointwise_conv3d_bf16_vector(bfloat16 *input,
-                                  bfloat16 *weight,
-                                  bfloat16 *output,
-                                  bfloat16 *bias,
-                                  int N,
-                                  int in_channels,
-                                  int out_channels,
-                                  int in_t,
-                                  int in_h,
-                                  int in_w);
-
-} // extern "C"
+} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)

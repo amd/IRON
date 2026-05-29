@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -71,9 +71,26 @@ def my_reduction(
     output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
-    # AIE-array data movement with object fifos
-    of_ins = [ObjectFifo(tile_ty, name=f"in_{i}") for i in range(num_columns)]
-    of_outs = [ObjectFifo(tile_ty, name=f"out_{i}") for i in range(num_columns)]
+    # P2-11 FIX: Explicit ObjectFifo depth calculation for Reduction stability (parity with Conv3D)
+    # Depth=4 for 8+ columns, depth=3 for 4+ columns, depth=2 for 2 columns, depth=1 for large tiles
+    fifodepth = (
+        4
+        if num_columns >= 8
+        else (
+            3
+            if num_columns >= 4
+            else (2 if num_columns >= 2 else (1 if tile_size > 4096 else 2))
+        )
+    )
+
+    # AIE-array data movement with object fifos (chunk-sized for consistency)
+    of_ins = [
+        ObjectFifo(tile_ty, name=f"in_{i}", depth=fifodepth) for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # Select kernel based on reduction op
     kernel_suffix = reduction_op
@@ -102,6 +119,7 @@ def my_reduction(
                 of_outs[i].prod(),
                 eltwise_reduction,
             ],
+            while_true=False,
         )
         for i in range(num_columns)
     ]
@@ -268,7 +286,9 @@ if __name__ == "__main__":
             + str(tile_size * columns)
             + " (tile_size * columns)"
         )
-        raise ValueError
+        raise ValueError(
+            f"Input size {input_size} must be multiple of {tile_size * columns}"
+        )
 
     trace_size = int(opts.trace_size) if opts.trace_size is not None else 0
 

@@ -152,11 +152,18 @@ def pytest_runtest_makereport(item, call):
             # The pytest nodeid looks like this:
             # iron/operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
             # Extract only the stem out of that.
+            # NOTE: cpu_test.py (reference_cpu_only, get_params_invariants, etc.)
+            # and any other non-@metrics / bare / specially-parametrized tests
+            # may produce nodeids without the expected bracketed stable ID format.
+            # These intentionally do not feed the CSV/metrics reporter (no
+            # Latency/Bandwidth prints, no @metrics marker). Gracefully skip
+            # instead of raising to ensure cpu_test.py -k runs are hook-safe
+            # under iron314 for all 5 new ops.
             nodeid_components = re.match(
                 r"^(.+?)::(.+?)\[(iter\d+-)?(.+?)\]$", item.nodeid
             )
             if not nodeid_components:
-                raise RuntimeError(f"Unexpected test nodeid format: {item.nodeid}")
+                return
             test_name = nodeid_components.group(4)
 
             passed = report.outcome == "passed"

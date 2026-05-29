@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -73,9 +73,6 @@ class AIEReduction(AIEOperatorBase):
             "min",
         ], f"Unknown reduction op: {reduction_op}"
 
-        # Mean is only supported on AIE2P
-        self.supports_mean = True  # Will be checked at runtime
-
         # Calculate padded size
         max_multiple = num_aie_columns * tile_size
         padded_size = ((input_size + max_multiple - 1) // max_multiple) * max_multiple
@@ -113,7 +110,7 @@ class AIEReduction(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_reduction",
             callback_kwargs={
-                "dev": self.context.device_manager.device_str(),
+                "dev": self.context.device_manager.aie_device,
                 "input_size": self.input_size,
                 "reduction_size": self.reduction_size,
                 "num_columns": self.num_aie_columns,

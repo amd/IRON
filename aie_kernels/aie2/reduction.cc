@@ -1,18 +1,19 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // Reduction kernel for AIE2 (NPU)
-// Supports: sum, mean, max, min along the reduction dimension
+// Supports: sum, max, min along the reduction dimension (mean is AIE2P-only)
 
 #define NOCPP
 
 #include "../aie_kernel_utils.h"
 
 #include <aie_api/aie.hpp>
-#include <aie_api/aie_bf16.hpp>
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
+
+extern "C" {
 
 /**
  * Reduction Sum Kernel - AIE2 optimized
@@ -202,18 +203,4 @@ void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
     event1();
 }
 
-extern "C" {
-
-// Sum kernels
-void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Max kernels
-void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Min kernels
-void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-} // extern "C"
+} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)
