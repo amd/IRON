@@ -216,3 +216,14 @@ class AIERuntimeArgSpec:
             raise ValueError(
                 f"Invalid direction {self.direction!r}: must be one of 'in', 'out', 'inout'"
             )
+
+
+class AIEOperatorConstraintError(RuntimeError):
+    """Raised by AIE operators when runtime inputs violate constructor-time constraints
+    (e.g., shape, dtype, channel count, or spatial dimensions that were baked into the
+    compiled kernel at operator construction time).
+
+    This allows clean separation between construction-time specialization and
+    runtime validation without using generic exceptions.
+    """
+    pass
