@@ -21,6 +21,9 @@ import logging
 from pathlib import Path
 from typing import Tuple, Union, Optional
 
+import aie.utils as aie_utils
+from aie.utils.npukernel import NPUKernel
+
 from iron.common import (
     AIEOperatorBase,
     AIEOperatorConstraintError,
@@ -29,6 +32,7 @@ from iron.common import (
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    AIERuntimeArgSpec,
 )
 
 
@@ -343,3 +347,52 @@ class AIEConv2d(AIEOperatorBase):
         )
 
         return result
+
+    # -------------------------------------------------------------------------
+    # Abstract method implementations required by AIEOperatorBase (post-refactor)
+    # Minimal production fix to enable run_test() + metrics path (and forward).
+    # These provide the modern callable + arg spec interface used by test_utils
+    # and AIEContext high-level paths. Order matches rt.sequence() in design.py
+    # (and dict insertion order in test.py input/output_buffers for bias cases).
+    # -------------------------------------------------------------------------
+
+    def get_arg_spec(self):
+        """Return runtime arg specs matching the kernel launch order from design.py.
+
+        Bias case (rt.sequence order): in, weight, bias, out
+        No-bias: in, weight, out
+
+        This also matches the insertion order of input_buffers/output_buffers
+        passed by the metrics test_conv2d and the FORWARD_CASES.
+        """
+        specs = [
+            AIERuntimeArgSpec("in", (self.input_size,)),
+            AIERuntimeArgSpec("in", (self.weight_size,)),
+        ]
+        if self.use_bias and getattr(self, "bias_size", 0) > 0:
+            specs.append(AIERuntimeArgSpec("in", (self.bias_size,)))
+        specs.append(AIERuntimeArgSpec("out", (self.output_size,)))
+        return specs
+
+    def get_callable(self):
+        """Return a callable that executes the compiled kernel on the NPU.
+
+        Uses the same NPUKernel / DefaultNPURuntime pattern as MLIROperator
+        for compatibility with run_test() buffer passing and XRT execution.
+        The arg order passed at call time must match get_arg_spec().
+        """
+        # Ensure we have the artifacts (caller should have done compile())
+        if self.xclbin_artifact is None or self.insts_artifact is None:
+            # Defensive: set_up_artifacts should have populated via compile()
+            self.set_up_artifacts()
+        npu_kernel = NPUKernel(
+            xclbin_path=self.xclbin_artifact.filename,
+            kernel_name=self.xclbin_artifact.kernel_name,
+            insts_path=self.insts_artifact.filename,
+        )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+
+        def call(*args):
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+
+        return call
