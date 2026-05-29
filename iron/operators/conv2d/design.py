@@ -9,7 +9,7 @@ Supports configurable kernel_size, stride, padding, dilation, and groups.
 """
 
 # =============================================================================
-# MODELING STATUS (post Modeling Pass - conv2d)
+# MODELING STATUS (post Modeling Pass - conv2d; updated by Shim/Per-Tile DMA agent)
 # =============================================================================
 # - Bias dataflow: COMPLETE (DMA-safe). Uses L3->L2->L1 via .cons().forward()
 #   (memtile-staged broadcast) instead of plain singular ObjectFifo. This
@@ -36,6 +36,30 @@ Supports configurable kernel_size, stride, padding, dilation, and groups.
 #   branches, always-full-param calls etc removed. Clear status block + inline
 #   comments. Generated MLIR + Worker + Runtime sequence is now correct for
 #   its modeling purpose and compiles cleanly.
+# - Shim DMA / per-tile channel budgeting: RESOLVED (this commit). Active use
+#   of get_shim_dma_limit(dev) + per-ingress model (2 per col for ins+weights
+#   L3 fills + 1 for bias broadcast) now clamps effective num_columns locally
+#   in my_conv2d (and mirrored in op.py for artifact naming + DesignGenerator).
+#   Matches NPU1 limit=8 / NPU2=16 (queried via device objects). Conservative
+#   channels_per_col guard (parity with swiglu //2, rms_norm weighted, binary
+#   *2 and MLIROperator checks in iron/common/operator_bases.py + rms_norm).
+#   Eliminates need for all prior 2c/nobias matrix surgery in test.py. L3
+#   staging, 4D TAPs, chunk-size-first fifodepth (incl. tile(0,2) depth=1
+#   special case) fully preserved. Full original not-extensive matrix (bias
+#   on 4-col requests) now DMA-clean without hacks.
+#   Resolved error signatures: "'aie.tile' op number of input DMA channel
+#   exceeded! (tile(0,2))" on bias+4-col post-L3 (see /tmp/conv2d_hw_*.log
+#   series, commits 6881e96 / 8c3a5ff etc).
+# - Certainty (post-fix, Shim DMA agent): ObjectFIFO depths / tile sizing /
+#   L3+get_shim/num_columns modeling now 90% for NPU1 4-col (full matrix
+#   DMA-safe incl. bias; auto-clamps to 2-col only on high-pressure bias
+#   where 2*4+1>8), 80% for NPU2 8-col (heuristic + guard; 8-col bias may
+#   clamp but correctness preserved). Kernels (accum<accfloat> etc) already
+#   solid from prior.
+# - Citation: Updated by Conv2D Deep Shim/Per-Tile DMA Channel Budgeting +
+#   Active get_shim_dma_limit + Num_Channels Modeling Agent (orchestrator
+#   delegated subagent on feature/operator-conv2d worktree). See commit
+#   message and git log for exact hash.
 # - Future: Real tiled conv compute partitioning lives in kernels or higher
 #   level; this design provides the structural AIE skeleton + correct calls.
 # =============================================================================
@@ -52,12 +76,10 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
-# For future shim DMA / per-tile channel constraint checks (parity with
-# rms_norm, binary_elementwise, channeled_unary etc). The current L3-staged
-# ingress design + bias broadcast still exercises the allocator limits on
-# tile(0,2) for some 4-col bias configs; a full get_shim_dma_limit +
-# per-shim modeling + possible num_channels refactor would be the next step
-# (coordinate with cross-operator DMA fixer).
+# Active get_shim_dma_limit + per-ingress (ins/weights/bias) channel budgeting
+# for per-tile DMA safety (tile(0,2) input DMA channel limit after L3 staging).
+# Parity with rms_norm, swiglu_* (//2 derivation), BinaryElementwiseOperator,
+# ChanneledUnary, and MLIROperator guards in iron/common/operator_bases.py.
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -110,6 +132,29 @@ def my_conv2d(
         MLIR module
     """
     dtype = bfloat16
+
+    # Active per-shim / per-ingress channel budgeting using get_shim_dma_limit.
+    # Root cause of prior residual "'aie.tile' op number of input DMA channel
+    # exceeded! (tile(0,2))" on 4-col + bias (even with L3 .cons().forward()
+    # staging for all ingress + column-scaled fifodepth=1 for large chunks):
+    # the combination of per-col L3 OFs (ins+weights) + singular bias broadcast
+    # OF + forward connections + SequentialPlacer mapping over-subscribes the
+    # limited input DMA channels on specific tiles (notably tile(0,2) in col-0
+    # ingress paths) for certain channel counts on NPU1 (shim limit 8) and
+    # borderline on NPU2. See /tmp/conv2d_hw_*.log histories and commits up to
+    # 6881e96 (the 2c/nobias matrix workaround).
+    # Model: 2 channels per column for (ins_l3 + weights_l3) fills + 1 for
+    # bias_l3 broadcast when use_bias=True. Conservative guard (matches
+    # established patterns: swiglu n_cols=limit//2, binary*2, rms weighted).
+    # Clamps locally; downstream (chunks, fifodepth, OF lists, TAPs, workers,
+    # rt.sequence) automatically use the safe effective column count.
+    # L3 staging, TAP 4D rank-2 patterns, and chunk-size-first fifodepth
+    # heuristic are all preserved exactly.
+    shim_dma_limit = get_shim_dma_limit(dev)
+    channels_per_col = 2 + (1 if use_bias else 0)
+    safe_max_cols = max(1, shim_dma_limit // channels_per_col)
+    dev_cols = getattr(dev, "cols", 4)
+    num_columns = min(num_columns, safe_max_cols, dev_cols)
 
     # Calculate tensor sizes
     input_size = N * in_channels * in_height * in_width

@@ -35,6 +35,7 @@ from iron.common import (
     AIERuntimeArgSpec,
     DesignGenerator,
 )
+from iron.common.utils import get_shim_dma_limit
 
 
 class AIEConv2d(AIEOperatorBase):
@@ -147,21 +148,32 @@ class AIEConv2d(AIEOperatorBase):
             kernel_dir = "aie2"
             dev = None
 
-        file_name_base = (
-            f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
-            f"{self.kernel_size[0]}x{self.kernel_size[1]}_"
-            f"s{self.stride[0]}x{self.stride[1]}_"
-            f"p{self.padding[0]}x{self.padding[1]}_"
-            f"g{self.groups}_{self.num_aie_columns}c"
-        )
-
-        # Build dev for design callback (live device or fallback)
+        # Build dev for design callback (live device or fallback) -- guarantees dev
         if dev is None:
             try:
                 dev = aie_utils.get_current_device()
             except Exception:
                 from aie.iron.device import NPU1
                 dev = NPU1()
+
+        # Active get_shim_dma_limit + per-ingress channel budgeting (parity with design.py
+        # and iron/common/operator_bases.py + rms_norm/swiglu patterns). Ensures artifact
+        # names and DesignGenerator num_columns reflect the DMA-safe column count actually
+        # emitted by my_conv2d (resolves prior tile(0,2) input DMA errors for bias+4-col).
+        # Performed after guaranteed dev so budgeting uses real device limits.
+        shim_dma_limit = get_shim_dma_limit(dev)
+        channels_per_col = 2 + (1 if self.use_bias else 0)
+        safe_max_cols = max(1, shim_dma_limit // channels_per_col)
+        dev_cols = getattr(dev, "cols", 4)
+        effective_num_columns = min(self.num_aie_columns, safe_max_cols, dev_cols)
+
+        file_name_base = (
+            f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
+            f"{self.kernel_size[0]}x{self.kernel_size[1]}_"
+            f"s{self.stride[0]}x{self.stride[1]}_"
+            f"p{self.padding[0]}x{self.padding[1]}_"
+            f"g{self.groups}_{effective_num_columns}c"
+        )
 
         mlir_artifact = PythonGeneratedMLIRArtifact(
             f"{file_name_base}.mlir",
@@ -186,7 +198,7 @@ class AIEConv2d(AIEOperatorBase):
                     "pad_w": self.padding[1],
                     "groups": self.groups,
                     "use_bias": self.use_bias,
-                    "num_columns": self.num_aie_columns,
+                    "num_columns": effective_num_columns,
                     "tile_size": self.tile_size,
                     "trace_size": 0,
                 },

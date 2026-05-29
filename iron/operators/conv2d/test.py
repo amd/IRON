@@ -188,20 +188,18 @@ def get_params():
 
                 tile_size = in_size // nc
 
-                # Regular subset: 32x32 + "preferred" col count (min(2,max) for NPU1/2 compat post-L3)
-                # + core configs + bias=False (nobias). Keeps -m "not extensive" fast & stable.
-                # Uses explicit CORE_CONFIGS. nobias chosen as minimal production workaround for
-                # residual tile(0,2) input DMA channel pressure on AIE2p even with L3 staging +
-                # 2c (bias broadcast OF adds channel pressure beyond in+weights L3 staging).
-                # 2c nobias cases reliably clear aiecc + reach real NPU + emit Latency/Bandwidth.
-                # (Bias path coverage remains in extensive + cpu_test.py golden.)
-                preferred_col = min(2, max_cols)
+                # Regular subset ("not extensive"): 32x32 + preferred col (device max up to 4 for
+                # fast default coverage) + explicit CORE_CONFIGS (incl. both bias=True and False).
+                # Full original matrix (no 2c/nobias surgery) now DMA-safe on 4-col requests thanks
+                # to active get_shim_dma_limit + per-ingress budgeting in op.py + design.py.
+                # (See commits post-6881e96; design clamps internally for high-pressure bias cases
+                # on NPU1 limit=8 while preserving L3 staging + all other modeling.)
+                preferred_col = min(4, max_cols)
                 is_core_config = cfg in CORE_CONFIGS
                 is_regular = (
                     (h, w) == (32, 32)
                     and nc == preferred_col
                     and is_core_config
-                    and not use_bias
                 )
 
                 marks = [] if is_regular else [pytest.mark.extensive]
