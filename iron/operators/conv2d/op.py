@@ -33,6 +33,7 @@ from iron.common import (
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     AIERuntimeArgSpec,
+    DesignGenerator,
 )
 
 
@@ -133,8 +134,9 @@ class AIEConv2d(AIEOperatorBase):
         AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
-        """Set up compilation artifacts"""
+        """Set up compilation artifacts (updated for current PythonGeneratedMLIRArtifact / DesignGenerator / Xclbin ctors)"""
         operator_dir = Path(__file__).parent
+        design_path = operator_dir / "design.py"
 
         # Determine kernel directory based on device (defensive, no device_manager on current AIEContext)
         # Matches patterns in operator_bases.py and get_params() in test.py
@@ -143,6 +145,7 @@ class AIEConv2d(AIEOperatorBase):
             kernel_dir = "aie2p" if getattr(dev, "cols", 4) > 4 else "aie2"
         except Exception:
             kernel_dir = "aie2"
+            dev = None
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
@@ -152,55 +155,67 @@ class AIEConv2d(AIEOperatorBase):
             f"g{self.groups}_{self.num_aie_columns}c"
         )
 
-        mlir_artifact = PythonGeneratedMLIRArtifact.new(
+        # Build dev for design callback (live device or fallback)
+        if dev is None:
+            try:
+                dev = aie_utils.get_current_device()
+            except Exception:
+                from aie.iron.device import NPU1
+                dev = NPU1()
+
+        mlir_artifact = PythonGeneratedMLIRArtifact(
             f"{file_name_base}.mlir",
-            import_path=operator_dir / "design.py",
-            callback_fn="my_conv2d",
-            callback_kwargs={
-                "dev": self.context.device_manager.aie_device,
-                "N": 1,  # Will handle batch externally
-                "in_channels": self.in_channels,
-                "in_height": self.in_height,
-                "in_width": self.in_width,
-                "out_channels": self.out_channels,
-                "out_height": self.out_height,
-                "out_width": self.out_width,
-                "kernel_h": self.kernel_size[0],
-                "kernel_w": self.kernel_size[1],
-                "stride_h": self.stride[0],
-                "stride_w": self.stride[1],
-                "pad_h": self.padding[0],
-                "pad_w": self.padding[1],
-                "groups": self.groups,
-                "use_bias": self.use_bias,
-                "num_columns": self.num_aie_columns,
-                "tile_size": self.tile_size,
-                "trace_size": 0,
-            },
+            DesignGenerator(
+                design_path,
+                "my_conv2d",
+                args=(),
+                kwargs={
+                    "dev": dev,
+                    "N": 1,  # Will handle batch externally
+                    "in_channels": self.in_channels,
+                    "in_height": self.in_height,
+                    "in_width": self.in_width,
+                    "out_channels": self.out_channels,
+                    "out_height": self.out_height,
+                    "out_width": self.out_width,
+                    "kernel_h": self.kernel_size[0],
+                    "kernel_w": self.kernel_size[1],
+                    "stride_h": self.stride[0],
+                    "stride_w": self.stride[1],
+                    "pad_h": self.padding[0],
+                    "pad_w": self.padding[1],
+                    "groups": self.groups,
+                    "use_bias": self.use_bias,
+                    "num_columns": self.num_aie_columns,
+                    "tile_size": self.tile_size,
+                    "trace_size": 0,
+                },
+            ),
         )
 
-        xclbin_artifact = XclbinArtifact.new(
-            f"{file_name_base}.xclbin",
-            depends=[
-                mlir_artifact,
-                KernelObjectArtifact.new(
-                    "conv2d.o",
-                    extra_flags=[],
-                    depends=[
-                        SourceArtifact.new(
-                            self.context.base_dir
-                            / "aie_kernels"
-                            / kernel_dir
-                            / "conv2d.cc"
-                        )
-                    ],
-                ),
+        kernel_obj = KernelObjectArtifact(
+            "conv2d.o",
+            dependencies=[
+                SourceArtifact(
+                    self.context.base_dir
+                    / "aie_kernels"
+                    / kernel_dir
+                    / "conv2d.cc"
+                )
             ],
         )
 
-        insts_artifact = InstsBinArtifact.new(
+        xclbin_artifact = XclbinArtifact(
+            f"{file_name_base}.xclbin",
+            mlir_input=mlir_artifact,
+            dependencies=[mlir_artifact, kernel_obj],
+            extra_flags=[],
+        )
+
+        insts_artifact = InstsBinArtifact(
             f"{file_name_base}.bin",
-            depends=[mlir_artifact],
+            mlir_input=mlir_artifact,
+            dependencies=[mlir_artifact],
         )
 
         self.xclbin_artifact = xclbin_artifact
