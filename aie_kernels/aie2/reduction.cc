@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // Reduction kernel for AIE2 (NPU)
-// Supports: sum, mean, max, min along the reduction dimension
+// Supports: sum, max, min along the reduction dimension (mean is AIE2P-only)
 
 #define NOCPP
 
@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
+
+extern "C" {
 
 /**
  * Reduction Sum Kernel - AIE2 optimized
@@ -109,11 +111,10 @@ void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize with first element
-    bfloat16 max_val = pIn[0];
-    pIn++;
+    // Vectorized max using AIE native ops (no scalar inner loop for fast clean compile on AIE2/AIE2P)
+    aie::vector<bfloat16, vec_factor> max_v = aie::broadcast<bfloat16, vec_factor>(bfloat16(-3.4028235e+38f));
 
-    const int F = (reduction_size - 1) / vec_factor;
+    const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_MIN_ITERATION_COUNT(16)
@@ -121,19 +122,18 @@ void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
 
-        // Vector max reduction
-        for (int j = 0; j < vec_factor; j++) {
-            max_val = (in_vec[j] > max_val) ? in_vec[j] : max_val;
-        }
+        max_v = aie::max(max_v, in_vec);
     }
+
+    bfloat16 result = aie::reduce_max(max_v);
 
     // Handle remaining elements
-    const int remainder = (reduction_size - 1) % vec_factor;
+    const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        max_val = (pIn[i] > max_val) ? pIn[i] : max_val;
+        if (pIn[i] > result) result = pIn[i];
     }
 
-    pOut[0] = max_val;
+    pOut[0] = result;
 
     event1();
 }
@@ -172,11 +172,10 @@ void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize with first element
-    bfloat16 min_val = pIn[0];
-    pIn++;
+    // Vectorized min using AIE native ops (no scalar inner loop for fast clean compile on AIE2/AIE2P)
+    aie::vector<bfloat16, vec_factor> min_v = aie::broadcast<bfloat16, vec_factor>(bfloat16(3.4028235e+38f));
 
-    const int F = (reduction_size - 1) / vec_factor;
+    const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_MIN_ITERATION_COUNT(16)
@@ -184,35 +183,20 @@ void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
 
-        // Vector min reduction
-        for (int j = 0; j < vec_factor; j++) {
-            min_val = (in_vec[j] < min_val) ? in_vec[j] : min_val;
-        }
+        min_v = aie::min(min_v, in_vec);
     }
+
+    bfloat16 result = aie::reduce_min(min_v);
 
     // Handle remaining elements
-    const int remainder = (reduction_size - 1) % vec_factor;
+    const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        min_val = (pIn[i] < min_val) ? pIn[i] : min_val;
+        if (pIn[i] < result) result = pIn[i];
     }
 
-    pOut[0] = min_val;
+    pOut[0] = result;
 
     event1();
 }
 
-extern "C" {
-
-// Sum kernels
-void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Max kernels
-void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Min kernels
-void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-} // extern "C"
+} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)

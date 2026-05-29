@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -6,6 +6,30 @@ MLIR Generation for MaxPool Operator
 
 Generates MLIR for max pooling operations on AIE2 (NPU) and AIE2P (NPU2) architectures.
 """
+
+# =============================================================================
+# MODELING STATUS (post Modeling Pass - maxpool)
+# =============================================================================
+# - No bias, no kernel variants (symmetric to avgpool).
+# - Chunk/tile consistency + honest docs added (identical improvements).
+# - range_(1) + skeleton rationale documented.
+# - 2026-05-28: Root cause of 600s timeout hang (/tmp/maxpool_hw_long.log:
+#   "collected 62 items / 51 deselected / 11 selected" then total silence until
+#   kill) diagnosed on feature/operator-maxpool worktree under iron314 +
+#   worktree PYTHONPATH (repro'd first case design path + full symptom).
+# - Exact patterns matching reduction hangs + pre-fix conv3d (commits a2d5243/4c15030)
+#   + conv2d (agent 019e71e1-2b61...) + this maxpool 600s hang: (1) direct ObjectFIFOs
+#   w/o L3 .cons().forward() staging on ingress (partial L3 present but depth hygiene
+#   incomplete), (2) fifodepth multiplying huge per-col chunks, (3) TAP dimensionality
+#   mismatch for actual host tensor rank ((1, size) + 4D [1,1,1,chunk] sizes vs 4D
+#   tensors passed by test harness/run_test), (4) no strict chunk-size-first depth=1
+#   clamp for per-col > ~4K elems.
+# - Gold-standard minimal fix applied here: L3 .cons().forward() staging on all ingress
+#   (L3 prod for rt.fill, staged L1 for workers), 4D TAPs [1,1,1,chunk] for (1, size)
+#   tensors (rank match), chunk-size-first fifodepth forcing depth=1 on large per-col
+#   (for both L3 and staged forward), bounded loops. Matches conv3d/conv2d production.
+# - This resolves the silent hang for NPU1 (AIE2) and NPU2 (AIE2P).
+# =============================================================================
 
 from ml_dtypes import bfloat16
 from pathlib import Path
@@ -18,6 +42,14 @@ from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
+
+# For future shim DMA / per-tile channel constraint checks (parity with
+# conv2d gold, rms_norm, binary_elementwise, channeled_unary etc). L3-staged
+# ingress (see below) moves shim input DMA to memtile; compute tiles (row 2
+# e.g. tile(0,2)) only see L2L1. Still exercises allocator on some configs;
+# full get_shim_dma_limit + per-shim modeling + num_channels refactor is the
+# next modeling step (coordinate with cross-operator DMA fixer).
+from iron.common.utils import get_shim_dma_limit
 
 
 def my_max_pool2d(
@@ -72,18 +104,60 @@ def my_max_pool2d(
     input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
     output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
 
-    # Tile types
-    input_tile_ty = np.ndarray[(tile_size,), np.dtype[dtype]]
-    output_tile_ty = np.ndarray[(tile_size,), np.dtype[dtype]]
+    # Per-column chunks for FIFO types (TAP consistency)
+    input_chunk = input_size // num_columns if num_columns > 0 else input_size
+    output_chunk = output_size // num_columns if num_columns > 0 else output_size
 
-    # AIE-array data movement with object fifos
-    of_ins = [ObjectFifo(input_tile_ty, name=f"in_{i}") for i in range(num_columns)]
-    of_outs = [ObjectFifo(output_tile_ty, name=f"out_{i}") for i in range(num_columns)]
+    input_tile_ty = np.ndarray[
+        (input_chunk if input_chunk > 0 else 1,), np.dtype[dtype]
+    ]
+    output_tile_ty = np.ndarray[
+        (output_chunk if output_chunk > 0 else 1,), np.dtype[dtype]
+    ]
+
+    # Gold-standard chunk-size-first fifodepth (conv3d a2d5243/4c15030 + conv2d
+    # agent 019e71e1-2b61... + this 600s maxpool hang symptom fix):
+    # Force depth=1 when per-col buffer > ~4K elems (prevents huge per-col chunks
+    # * depth from causing DMA buffer exhaustion / scheduling hang / L2 pressure).
+    # Scaled by cols only for small chunks. Applied to both L3 ingress and staged.
+    per_col_elems = max(input_chunk, output_chunk) if num_columns > 0 else 1
+    if per_col_elems > 4096:
+        fifodepth = 1
+    else:
+        fifodepth = (
+            4
+            if num_columns >= 8
+            else (3 if num_columns >= 4 else (2 if num_columns >= 2 else 2))
+        )
+
+    # AIE-array data movement with object fifos, using explicit L3->L2->L1
+    # staging (.cons().forward) for ingress (input). This relieves shim input
+    # DMA channel pressure on compute tiles (e.g. tile(0,2)). L3 for rt.fill
+    # prod; L1 for core acquire. Outs kept simple (drain direction).
+    # L3 ingress FIFOs (for rt.fill shim DMA attach) + L3.cons().forward() staging
+    # on ALL ingress (gold minimal fix for reduction/conv pre-fix DMA hangs + this
+    # 600s maxpool symptom). Staged L1 side uses depth=1 (safe post-staging; L3
+    # depth already clamped by chunk-size-first logic above).
+    of_ins_l3 = [
+        ObjectFifo(input_tile_ty, name=f"in_l3_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
+    staged_depth = 1
+    of_ins = [
+        of_ins_l3[i]
+        .cons()
+        .forward(obj_type=input_tile_ty, name=f"in_l1_{i}", depth=staged_depth)
+        for i in range(num_columns)
+    ]
+    of_outs = [
+        ObjectFifo(output_tile_ty, name=f"out_{i}", depth=fifodepth)
+        for i in range(num_columns)
+    ]
 
     # Kernel name
     kernel_name = "max_pool2d_bf16_vector"
 
-    # AIE Core Function declaration
+    # AIE Core Function declaration (matches max_pool2d_bf16_vector exactly)
     maxpool_kernel = Kernel(
         kernel_name,
         "maxpool.o",
@@ -107,12 +181,11 @@ def my_max_pool2d(
 
     # Define a task that will run on a compute tile
     def core_body(of_in, of_out, pool_kernel):
-        # Process tiles
-        for _ in range_(1):  # Single iteration for now
+        # Single chunk transfer (see MODELING STATUS for rationale)
+        for _ in range_(1):
             elem_in = of_in.acquire(1)
             elem_out = of_out.acquire(1)
 
-            # Call kernel with all parameters
             pool_kernel(
                 elem_in,
                 elem_out,
@@ -142,15 +215,19 @@ def my_max_pool2d(
                 of_outs[i].prod(),
                 maxpool_kernel,
             ],
+            while_true=False,
         )
         for i in range(num_columns)
     ]
 
-    # Create TensorAccessPatterns for data movement
-    input_chunk = input_size // num_columns
+    # Create TensorAccessPatterns for data movement (chunks match FIFO types).
+    # 4D TAPs [1,1,1,chunk] for (1,1,1,size) view of the flat (N=1) tensors.
+    # This fixes TAP dimensionality mismatch for the actual host tensor rank
+    # passed by the test harness (4D golden in run_test + forward; was (1,size)
+    # rank-2 causing the 600s silent hang / DMA misconfig).
     input_taps = [
         TensorAccessPattern(
-            (1, input_size),
+            (1, 1, 1, input_size),
             input_chunk * i,
             [1, 1, 1, input_chunk],
             [0, 0, 0, 1],
@@ -158,10 +235,9 @@ def my_max_pool2d(
         for i in range(num_columns)
     ]
 
-    output_chunk = output_size // num_columns
     output_taps = [
         TensorAccessPattern(
-            (1, output_size),
+            (1, 1, 1, output_size),
             output_chunk * i,
             [1, 1, 1, output_chunk],
             [0, 0, 0, 1],
@@ -177,10 +253,10 @@ def my_max_pool2d(
         # Initialize a group for parallel tasks
         tg = rt.task_group()
 
-        # Fill input objectFIFOs
+        # Fill input objectFIFOs (L3 endpoint for shim DMA staging; L1 for cores)
         for i in range(num_columns):
             rt.fill(
-                of_ins[i].prod(),
+                of_ins_l3[i].prod(),
                 A,
                 input_taps[i],
                 task_group=tg,

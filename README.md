@@ -192,3 +192,35 @@ To bypass the hook if needed: `git push --no-verify`
 -----
 
 <p align="center">Copyright&copy; 2025 Advanced Micro Devices, Inc</p>
+
+## Operator Development
+
+Core NPU operators (those appearing in the operator dashboard table above) are developed and landed using a dedicated per-operator branch model. This ensures minimal, auditable pull requests while preserving full context for model analysis and conversion tooling.
+
+The complete workflow, including exact branch names from the inventory table, the production-code-only rule, dedicated worktree usage, per-operator CI behavior, and coordination requirements, is documented in [docs/OPERATOR_DEVELOPMENT.md](docs/OPERATOR_DEVELOPMENT.md).
+
+### Key Principles
+
+- **Table branches**: Development occurs on `feature/operator-<name>` branches (e.g., `feature/operator-conv2d`, `feature/operator-reduction`) as listed in the branch table of `docs/MASTER-SPEC.md`.
+- **Production-code-only**: Each such branch contains *only* the production files for its operator (`iron/operators/<name>/` and the matching AIE kernels in `aie_kernels/aie2/` and `aie_kernels/aie2p/`). Specifications, extra documentation, and unrelated code are never included; they live exclusively on the integration branch `feature/model-converter-analysis`.
+- **Worktrees**: Use `git worktree` for isolated, ergonomic development (recommended at `~/iron-worktrees/iron-operator-<name>`).
+- **Per-operator CI**: Pushes to `feature/operator-*` automatically trigger `.github/workflows/operator-ci.yml`, which runs CPU reference tests and collection validation only (no hardware required). General linting (licenses, Black, clang-format) is enforced on all changes.
+- **Hygiene and CI coordination**: The Hygiene agent validates branch contents and formatting; the CI agent maintains the targeted test workflows. All documentation updates for the workflow occur on the integration branch.
+
+### Quick Start for Operators
+
+See the full process in `docs/OPERATOR_DEVELOPMENT.md`. In summary:
+
+1. Perform analysis and specification work on the integration branch.
+2. Coordinate with the Hygiene agent for creation of the clean `feature/operator-<name>` branch.
+3. Activate the dedicated worktree and develop / validate the operator (heavy use of CPU reference paths under `pytest -k "cpu or reference"`).
+4. Ensure pre-push hygiene passes and per-operator CI is green.
+5. Open PR from the per-operator branch to `devel` once GOLD-certified, referencing the integration branch artifacts.
+
+For creating *custom* operators to support new model architectures (distinct from core NPU kernel development), refer instead to [`iron/model_analysis/CREATING_OPERATORS.md`](./iron/model_analysis/CREATING_OPERATORS.md).
+
+### Related Files
+
+- Per-operator CI: `.github/workflows/operator-ci.yml`
+- Linting and hygiene: `.github/workflows/ci-lint.yml`, `scripts/hooks/pre-push`
+- Status and inventory: `GOLD_STATUS.md`, `docs/MASTER-SPEC.md`

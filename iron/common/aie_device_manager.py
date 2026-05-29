@@ -53,7 +53,9 @@ class AIEDeviceManager:
                 "  - aie.iron MLIR toolchain\n"
                 "Tests using AIE hardware will be skipped on this platform."
             )
-        self.runtime = DefaultNPURuntime()
+        # DefaultNPURuntime in current aie wheels is already the live singleton instance
+        # (a CachedXRTRuntime), not a constructor. Do not call it.
+        self.runtime = DefaultNPURuntime
         # Accessing protected member _device as AIEContext needs pyxrt.device
         self.device = self.runtime._device
         self.device_type = self.runtime.device()
@@ -67,6 +69,11 @@ class AIEDeviceManager:
 
     def device_str(self) -> str:
         return self.device_type.resolve().name
+
+    @property
+    def aie_device(self):
+        """Return the aie.iron.device object (NPU1/NPU2) suitable for Program(dev, rt)."""
+        return self.device_type
 
     def cleanup(self):
         """Clean up all XRT resources"""

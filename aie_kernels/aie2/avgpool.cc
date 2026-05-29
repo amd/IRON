@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // 2D AveragePool Kernel for AIE2 (NPU)
@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
+
+extern "C" {
 
 /**
  * 2D AveragePool Kernel - Scalar version for AIE2
@@ -169,37 +171,4 @@ void avg_pool2d_bf16_vector(bfloat16 *input,
 
     event1();
 }
-
-extern "C" {
-
-void avg_pool2d_bf16_scalar(bfloat16 *input,
-                            bfloat16 *output,
-                            int N,
-                            int channels,
-                            int in_height,
-                            int in_width,
-                            int out_height,
-                            int out_width,
-                            int kernel_h,
-                            int kernel_w,
-                            int stride_h,
-                            int stride_w,
-                            int pad_h,
-                            int pad_w);
-
-void avg_pool2d_bf16_vector(bfloat16 *input,
-                            bfloat16 *output,
-                            int N,
-                            int channels,
-                            int in_height,
-                            int in_width,
-                            int out_height,
-                            int out_width,
-                            int kernel_h,
-                            int kernel_w,
-                            int stride_h,
-                            int stride_w,
-                            int pad_h,
-                            int pad_w);
-
-} // extern "C"
+} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)

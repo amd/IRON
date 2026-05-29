@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -52,12 +52,18 @@ class AIEConv3d(AIEOperatorBase):
         dilation: Union[int, Tuple[int, int, int]] = 1,
         groups: int = 1,
         use_bias: bool = True,
+        in_t: int = 16,
+        in_h: int = 32,
+        in_w: int = 32,
         num_aie_columns: int = None,
         tile_size: int = None,
         context=None,
     ):
         """
         Initialize the Conv3d operator.
+
+        Spatial dimensions are required (or defaulted) at construction so that
+        MLIR generation bakes the correct sizes; removes all placeholder hacks.
 
         Args:
             in_channels: Number of input channels
@@ -68,6 +74,9 @@ class AIEConv3d(AIEOperatorBase):
             dilation: Spacing between kernel elements (default: 1, only 1 supported)
             groups: Number of blocked connections (default: 1)
             use_bias: Whether to use bias (default: True)
+            in_t: Input temporal/depth (default 16)
+            in_h: Input height (default 32)
+            in_w: Input width (default 32)
             num_aie_columns: Number of AIE columns (1-4 for NPU, 1-8 for NPU2)
             tile_size: Size of each tile in elements
             context: AIE context
@@ -91,11 +100,25 @@ class AIEConv3d(AIEOperatorBase):
         self.dilation = dilation
         self.groups = groups
         self.use_bias = use_bias
+        self.in_t = in_t
+        self.in_h = in_h
+        self.in_w = in_w
 
         # Validate
         assert dilation == (1, 1, 1), "Only dilation=1 is currently supported"
         assert in_channels % groups == 0, "in_channels must be divisible by groups"
         assert out_channels % groups == 0, "out_channels must be divisible by groups"
+
+        # Compute output spatial dimensions (fixed at construction)
+        self.out_t = (in_t + 2 * self.padding[0] - self.kernel_size[0]) // self.stride[
+            0
+        ] + 1
+        self.out_h = (in_h + 2 * self.padding[1] - self.kernel_size[1]) // self.stride[
+            1
+        ] + 1
+        self.out_w = (in_w + 2 * self.padding[2] - self.kernel_size[2]) // self.stride[
+            2
+        ] + 1
 
         # Default tile_size and num_aie_columns
         if tile_size is None:
@@ -127,7 +150,7 @@ class AIEConv3d(AIEOperatorBase):
         )
 
         file_name_base = (
-            f"conv3d_{self.in_channels}_{self.out_channels}_"
+            f"conv3d_{self.in_channels}_{self.out_channels}_{self.in_t}x{self.in_h}x{self.in_w}_"
             f"{self.kernel_size[0]}x{self.kernel_size[1]}x{self.kernel_size[2]}_"
             f"s{self.stride[0]}x{self.stride[1]}x{self.stride[2]}_"
             f"p{self.padding[0]}x{self.padding[1]}x{self.padding[2]}_"
@@ -139,16 +162,16 @@ class AIEConv3d(AIEOperatorBase):
             import_path=operator_dir / "design.py",
             callback_fn="my_conv3d",
             callback_kwargs={
-                "dev": self.context.device_manager.device_str(),
+                "dev": self.context.device_manager.aie_device,
                 "N": 1,  # Will handle batch externally
                 "in_channels": self.in_channels,
-                "in_t": 16,  # Placeholder - actual size at runtime
-                "in_h": 32,
-                "in_w": 32,
+                "in_t": self.in_t,
+                "in_h": self.in_h,
+                "in_w": self.in_w,
                 "out_channels": self.out_channels,
-                "out_t": 16,
-                "out_h": 32,
-                "out_w": 32,
+                "out_t": self.out_t,
+                "out_h": self.out_h,
+                "out_w": self.out_w,
                 "kernel_t": self.kernel_size[0],
                 "kernel_h": self.kernel_size[1],
                 "kernel_w": self.kernel_size[2],
@@ -196,22 +219,13 @@ class AIEConv3d(AIEOperatorBase):
         artifacts = [xclbin_artifact, insts_artifact]
         self.add_artifacts(artifacts)
 
-    def set_up_runtime(self, in_t: int, in_h: int, in_w: int):
+    def set_up_runtime(self):
         """
         Set up runtime buffers and kernels.
-
-        Args:
-            in_t: Input temporal/depth dimension
-            in_h: Input height
-            in_w: Input width
+        Uses spatial dimensions provided at construction time.
         """
-        # Calculate output dimensions
-        out_t = (in_t + 2 * self.padding[0] - self.kernel_size[0]) // self.stride[0] + 1
-        out_h = (in_h + 2 * self.padding[1] - self.kernel_size[1]) // self.stride[1] + 1
-        out_w = (in_w + 2 * self.padding[2] - self.kernel_size[2]) // self.stride[2] + 1
-
-        # Calculate buffer sizes
-        input_size = self.in_channels * in_t * in_h * in_w
+        # Buffer sizes based on constructor sizes (MLIR-specialized)
+        input_size = self.in_channels * self.in_t * self.in_h * self.in_w
         weight_size = (
             self.out_channels
             * self.in_channels
@@ -220,17 +234,11 @@ class AIEConv3d(AIEOperatorBase):
             * self.kernel_size[1]
             * self.kernel_size[2]
         )
-        output_size = self.out_channels * out_t * out_h * out_w
+        output_size = self.out_channels * self.out_t * self.out_h * self.out_w
 
         self.input_size = input_size
         self.weight_size = weight_size
         self.output_size = output_size
-        self.in_t = in_t
-        self.in_h = in_h
-        self.in_w = in_w
-        self.out_t = out_t
-        self.out_h = out_h
-        self.out_w = out_w
 
         # Add buffers
         self.add_buffer("input", input_size)
@@ -283,17 +291,22 @@ class AIEConv3d(AIEOperatorBase):
                 f"AIEConv3d expects 5D input (N, C, T, H, W), got shape {x.shape}"
             )
 
-        batch_size, actual_in_channels, in_t, in_h, in_w = x.shape
+        batch_size, actual_in_channels, actual_in_t, actual_in_h, actual_in_w = x.shape
 
-        # Validate channels
+        # Validate channels and spatial dims (MLIR specialized at ctor time)
         if actual_in_channels != self.in_channels:
             raise AIEOperatorConstraintError(
                 f"Expected {self.in_channels} input channels, got {actual_in_channels}"
             )
-
-        # Setup runtime with actual dimensions if not already done
-        if not hasattr(self, "in_h") or self.in_h != in_h:
-            self.set_up_runtime(in_t, in_h, in_w)
+        if (
+            actual_in_t != self.in_t
+            or actual_in_h != self.in_h
+            or actual_in_w != self.in_w
+        ):
+            raise AIEOperatorConstraintError(
+                f"AIEConv3d configured for (T,H,W)=({self.in_t},{self.in_h},{self.in_w}), "
+                f"but got input spatial {actual_in_t}x{actual_in_h}x{actual_in_w} (shape {x.shape})"
+            )
 
         # Process batch one at a time (for now)
         outputs = []

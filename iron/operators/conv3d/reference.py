@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -35,6 +35,10 @@ def conv3d_cpu(
 ) -> torch.Tensor:
     """
     CPU reference implementation of 3D convolution.
+
+    This is the authoritative golden math reference (torch F.conv3d) used to
+    validate the AIE implementation (bf16 vectorized kernels + MLIR dataflow).
+    Any mismatch beyond tolerance in test indicates a real bug in op/design/kernel.
 
     Args:
         input: Input tensor of shape (N, C_in, T_in, H_in, W_in)
@@ -114,13 +118,26 @@ def generate_golden_reference(
     assert in_channels % groups == 0, "in_channels must be divisible by groups"
     assert out_channels % groups == 0, "out_channels must be divisible by groups"
 
-    # Create input tensor
+    # Compute expected output spatial dims using the reference formula (self-check)
+    # This validates both our formula and that F.conv3d produces matching shape.
+    # Formula: out = floor( (in + 2*pad - dil*(k-1) - 1) / s ) + 1
+    out_t = calculate_output_dim(
+        in_t, kernel_size[0], stride[0], padding[0], dilation[0]
+    )
+    out_h = calculate_output_dim(
+        in_h, kernel_size[1], stride[1], padding[1], dilation[1]
+    )
+    out_w = calculate_output_dim(
+        in_w, kernel_size[2], stride[2], padding[2], dilation[2]
+    )
+
+    # Create input tensor - direct in target dtype (modern main-tree pattern).
+    # *2.0 scaling ensures good dynamic range for bf16 ( ~7-8 bit mantissa)
+    # so accumulated MAC errors are measurable and test is sensitive to bugs.
     if dtype == torch.bfloat16:
         input_tensor = (
-            torch.randn(batch_size, in_channels, in_t, in_h, in_w, dtype=torch.float32)
-            * 2.0
+            torch.randn(batch_size, in_channels, in_t, in_h, in_w, dtype=dtype) * 2.0
         )
-        input_tensor = input_tensor.to(dtype)
     else:
         input_tensor = (
             torch.randn(batch_size, in_channels, in_t, in_h, in_w, dtype=dtype) * 2.0
@@ -135,8 +152,7 @@ def generate_golden_reference(
         kernel_size[2],
     )
     if dtype == torch.bfloat16:
-        weight_tensor = torch.randn(weight_shape, dtype=torch.float32) * 2.0
-        weight_tensor = weight_tensor.to(dtype)
+        weight_tensor = torch.randn(weight_shape, dtype=dtype) * 2.0
     else:
         weight_tensor = torch.randn(weight_shape, dtype=dtype) * 2.0
 
@@ -144,12 +160,11 @@ def generate_golden_reference(
     bias_tensor = None
     if use_bias:
         if dtype == torch.bfloat16:
-            bias_tensor = torch.randn(out_channels, dtype=torch.float32) * 2.0
-            bias_tensor = bias_tensor.to(dtype)
+            bias_tensor = torch.randn(out_channels, dtype=dtype) * 2.0
         else:
             bias_tensor = torch.randn(out_channels, dtype=dtype) * 2.0
 
-    # Compute expected output
+    # Compute expected output via authoritative CPU path
     expected_output = conv3d_cpu(
         input=input_tensor,
         weight=weight_tensor,
@@ -159,6 +174,13 @@ def generate_golden_reference(
         dilation=dilation,
         groups=groups,
     )
+
+    # Self-validation: F.conv3d output shape must match our dim formula exactly.
+    # Catches any divergence in padding/stride/dilation math between test ref and op.
+    computed_shape = (batch_size, out_channels, out_t, out_h, out_w)
+    assert (
+        expected_output.shape == computed_shape
+    ), f"Golden shape mismatch: F.conv3d gave {expected_output.shape}, formula gave {computed_shape}"
 
     return {
         "input": input_tensor,
@@ -190,10 +212,13 @@ def calculate_output_dim(
     dilation: int,
 ) -> int:
     """
-    Calculate output dimension for 3D convolution.
+    Calculate output dimension for 3D convolution (exact match to op.py and torch).
 
-    Formula:
-    output = floor((input + 2*padding - dilation*(kernel-1) - 1) / stride + 1)
+    Formula (dilation-aware):
+    output = floor( (input + 2*padding - dilation*(kernel-1) - 1) / stride + 1 )
+
+    Used in generate_golden_reference for self-validation of shapes against F.conv3d.
+    This makes the CPU reference path robust and able to catch formula bugs early.
     """
     return (input_dim + 2 * padding - dilation * (kernel_dim - 1) - 1) // stride + 1
 

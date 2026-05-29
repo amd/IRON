@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // Reduction kernel for AIE2P (NPU2)
@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
+
+extern "C" {
 
 /**
  * Reduction Sum Kernel - AIE2P optimized
@@ -43,36 +45,40 @@ void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  */
 void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
 {
-    constexpr int vec_factor = 32; // AIE2P supports larger vectors
+    constexpr int vec_factor = 16; // Use 16 for AIE2P accum<accfloat> compatibility (matches layer_norm/conv patterns; 32 can cause slow/erroneous peano compilation)
 
     event0();
 
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize accumulator vector
-    aie::vector<bfloat16, vec_factor> acc_vec = aie::zeros<bfloat16, vec_factor>();
+    // Initialize accumulator using from_vector pattern for AIE2P bf16<->accfloat compatibility (prevents compile hangs)
+    aie::accum<accfloat, vec_factor> acc_vec;
+    acc_vec.from_vector(aie::zeros<float, vec_factor>(), 0);
 
     const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(32)
+    AIE_LOOP_MIN_ITERATION_COUNT(16)
     for (int i = 0; i < F; i++) {
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
-        acc_vec = aie::add(acc_vec, in_vec);
+        // Use mac with ones vector for sum (mulacc-by-1 idiom) - addresses AIE2P bf16 accumulation compatibility
+        auto ones = aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
+        acc_vec = aie::mac(acc_vec, in_vec, ones);
     }
 
-    // Horizontal sum of the accumulator vector
-    bfloat16 result = aie::reduce_add(acc_vec);
+    // Horizontal sum using reduce_add on float vector (standard pattern, no .template needed here)
+    aie::vector<float, vec_factor> red = acc_vec.to_vector<float>();
+    float sum_f = aie::reduce_add(red);
 
-    // Handle remaining elements if reduction_size is not divisible by vec_factor
+    // Handle remaining elements (accumulate in float for precision)
     const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        result += pIn[i];
+        sum_f += static_cast<float>(pIn[i]);
     }
 
-    pOut[0] = result;
+    pOut[0] = static_cast<bfloat16>(sum_f);
 
     event1();
 }
@@ -104,37 +110,36 @@ void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  */
 void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
 {
-    constexpr int vec_factor = 32;
+    constexpr int vec_factor = 16; // Standardized to 16 for AIE2P vector/accum compatibility and fast compile
 
     event0();
 
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize with negative infinity for max
-    bfloat16 max_val = bfloat16(-3.4e38f);
+    // Vectorized max using AIE native max + reduce_max (eliminates scalar pointwise inner loop that caused slow compiles and matches auditor recommendations)
+    aie::vector<bfloat16, vec_factor> max_v = aie::broadcast<bfloat16, vec_factor>(bfloat16(-3.4028235e+38f));
 
     const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(32)
+    AIE_LOOP_MIN_ITERATION_COUNT(16)
     for (int i = 0; i < F; i++) {
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
 
-        // Vector max reduction using AIE2P native max
-        for (int j = 0; j < vec_factor; j++) {
-            max_val = (in_vec[j] > max_val) ? in_vec[j] : max_val;
-        }
+        max_v = aie::max(max_v, in_vec);
     }
+
+    bfloat16 result = aie::reduce_max(max_v);
 
     // Handle remaining elements
     const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        max_val = (pIn[i] > max_val) ? pIn[i] : max_val;
+        if (pIn[i] > result) result = pIn[i];
     }
 
-    pOut[0] = max_val;
+    pOut[0] = result;
 
     event1();
 }
@@ -166,37 +171,36 @@ void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_
  */
 void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
 {
-    constexpr int vec_factor = 32;
+    constexpr int vec_factor = 16; // Standardized to 16 for AIE2P vector/accum compatibility and fast compile
 
     event0();
 
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize with positive infinity for min
-    bfloat16 min_val = bfloat16(3.4e38f);
+    // Vectorized min using AIE native min + reduce_min (eliminates scalar pointwise inner loop)
+    aie::vector<bfloat16, vec_factor> min_v = aie::broadcast<bfloat16, vec_factor>(bfloat16(3.4028235e+38f));
 
     const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(32)
+    AIE_LOOP_MIN_ITERATION_COUNT(16)
     for (int i = 0; i < F; i++) {
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
 
-        // Vector min reduction using AIE2P native min
-        for (int j = 0; j < vec_factor; j++) {
-            min_val = (in_vec[j] < min_val) ? in_vec[j] : min_val;
-        }
+        min_v = aie::min(min_v, in_vec);
     }
+
+    bfloat16 result = aie::reduce_min(min_v);
 
     // Handle remaining elements
     const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        min_val = (pIn[i] < min_val) ? pIn[i] : min_val;
+        if (pIn[i] < result) result = pIn[i];
     }
 
-    pOut[0] = min_val;
+    pOut[0] = result;
 
     event1();
 }
@@ -211,57 +215,44 @@ void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_
  */
 void reduction_mean_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size)
 {
-    constexpr int vec_factor = 32;
+    constexpr int vec_factor = 16; // Use 16 for AIE2P accum<accfloat> compatibility (matches layer_norm/conv patterns)
 
     event0();
 
     bfloat16 *__restrict pIn = input;
     bfloat16 *__restrict pOut = output;
 
-    // Initialize accumulator vector
-    aie::vector<bfloat16, vec_factor> acc_vec = aie::zeros<bfloat16, vec_factor>();
+    // Initialize accumulator using from_vector pattern for AIE2P bf16<->accfloat compatibility (prevents compile hangs)
+    aie::accum<accfloat, vec_factor> acc_vec;
+    acc_vec.from_vector(aie::zeros<float, vec_factor>(), 0);
 
     const int F = reduction_size / vec_factor;
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(32)
+    AIE_LOOP_MIN_ITERATION_COUNT(16)
     for (int i = 0; i < F; i++) {
         aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(pIn);
         pIn += vec_factor;
-        acc_vec = aie::add(acc_vec, in_vec);
+        // Use mac with ones vector for sum (mulacc-by-1 idiom) - addresses AIE2P bf16 accumulation compatibility
+        auto ones = aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
+        acc_vec = aie::mac(acc_vec, in_vec, ones);
     }
 
-    // Horizontal sum of the accumulator vector
-    bfloat16 sum = aie::reduce_add(acc_vec);
+    // Horizontal sum using reduce_add on float vector (standard pattern)
+    aie::vector<float, vec_factor> red = acc_vec.to_vector<float>();
+    float sum_f = aie::reduce_add(red);
 
-    // Handle remaining elements
+    // Handle remaining elements (accumulate in float)
     const int remainder = reduction_size % vec_factor;
     for (int i = 0; i < remainder; i++) {
-        sum += pIn[i];
+        sum_f += static_cast<float>(pIn[i]);
     }
 
-    // Compute mean
-    bfloat16 mean = sum / bfloat16(static_cast<float>(reduction_size));
+    // Compute mean (in float then cast for better precision)
+    bfloat16 mean = static_cast<bfloat16>(sum_f / static_cast<float>(reduction_size));
     pOut[0] = mean;
 
     event1();
 }
 
-extern "C" {
-
-// Sum kernels
-void reduction_sum_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_sum_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Max kernels
-void reduction_max_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_max_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Min kernels
-void reduction_min_bf16_scalar(bfloat16 *input, bfloat16 *output, int reduction_size);
-void reduction_min_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-// Mean kernel (AIE2P only)
-void reduction_mean_bf16_vector(bfloat16 *input, bfloat16 *output, int reduction_size);
-
-} // extern "C"
+} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)
