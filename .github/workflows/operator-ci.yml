@@ -126,7 +126,7 @@ jobs:
           echo "=== types-runtime: foundational types + operator infrastructure (no dedicated cpu_test.py) ==="
           # Collection across operators package validates shared types.hpp usage and module structure
           python -m pytest iron/operators/ --collectonly -q --tb=no || true
-          python -c '
+          python3 - << 'PYEOF'
 import sys
 print("Python:", sys.version.split()[0])
 import torch
@@ -141,7 +141,7 @@ for mod in ["reduction", "conv2d", "conv3d", "maxpool", "avgpool"]:
     except Exception as e:
         print(f"  {mod}: note - {e}")
 print("types-runtime shared infrastructure validation complete.")
-' || true
+PYEOF
 
       - name: CI summary
         if: steps.detect.outputs.skip != 'true'
