@@ -8,7 +8,7 @@ Temporal fusion of multiple MLIR modules into one module with multiple devices a
 from __future__ import annotations
 
 import numpy as np
-import importlib.util
+import importlib
 from functools import partial
 from pathlib import Path
 from aie import ir
@@ -74,18 +74,17 @@ def extract_runtime_sequence_arg_types(dev_op: Any) -> list[Any]:
 def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
     """Extract MLIR module from a PythonGeneratedMLIRArtifact.
 
-    Uses the artifact's DesignGenerator to dynamically import the design
-    module and call the callback, returning the raw (non-stringified) MLIR
-    module object for further inspection by the fusion pass.
+    Imports the design module via the standard Python import mechanism
+    (relying on it having been registered in ``sys.modules`` by
+    ``DesignGenerator.__call__``) and calls the callback, returning the
+    raw (non-stringified) MLIR module object.
     """
     if not isinstance(mlir_artifact, PythonGeneratedMLIRArtifact):
         raise TypeError(
             f"Expected PythonGeneratedMLIRArtifact, got {type(mlir_artifact).__name__}"
         )
     gen = mlir_artifact.generator
-    spec = importlib.util.spec_from_file_location(gen.source_path.name, gen.source_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = importlib.import_module(gen.module_name)
     callback_function = getattr(module, gen.fn_name)
     return callback_function(*gen.args, **gen.kwargs)
 

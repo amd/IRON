@@ -56,18 +56,39 @@ from iron.common.device_utils import get_kernel_dir
 
 @dataclass
 class DesignGenerator:
-    """Lazy callable that imports source_path and calls fn_name(*args, **kwargs), returning MLIR as a string."""
+    """Lazy callable that imports *source_path* and calls *fn_name*, returning MLIR.
+
+    On first call the loaded module is registered in ``sys.modules`` under
+    its fully-qualified package name (e.g. ``iron.operators.axpy.design``) so
+    that subsequent code can import it through the standard Python import
+    mechanism.
+    """
 
     source_path: Path
     fn_name: str
     args: tuple = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def module_name(self) -> str:
+        """Python module path derived from *source_path*.
+
+        Walks up from *source_path* until the ``iron`` package root is found,
+        then builds a dotted path relative to it.
+        """
+        parts = list(self.source_path.resolve().parts)
+        try:
+            idx = parts.index("iron")
+        except ValueError:
+            return self.source_path.stem
+        rel_parts = parts[idx:-1] + [self.source_path.stem]
+        return ".".join(rel_parts)
+
     def __call__(self) -> str:
-        spec = importlib.util.spec_from_file_location(
-            self.source_path.name, self.source_path
-        )
+        module_name = self.module_name
+        spec = importlib.util.spec_from_file_location(module_name, self.source_path)
         module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
         spec.loader.exec_module(module)
         return str(getattr(module, self.fn_name)(*self.args, **self.kwargs))
 
