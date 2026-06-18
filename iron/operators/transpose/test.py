@@ -47,9 +47,28 @@ def get_params():
                                 m,
                                 n,
                                 s,
+                                1,
                                 marks=marks,
                             )
                         )
+
+    # num_batches>1: batch B independent same-shape transposes into one dispatch
+    # (regular shape, single column/channel). num_batches=2 runs in the default
+    # suite; the larger batch is extensive.
+    for nb in (2, 4):
+        params.append(
+            pytest.param(
+                2048,
+                64,
+                1,
+                1,
+                m,
+                n,
+                8,
+                nb,
+                marks=[] if nb == 2 else [pytest.mark.extensive],
+            )
+        )
 
     return params
 
@@ -58,9 +77,9 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s", get_params())
-def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
-    golden_ref = generate_golden_reference(rows=M, cols=N)
+@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s,num_batches", get_params())
+def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_context):
+    golden_ref = generate_golden_reference(rows=M, cols=N, num_batches=num_batches)
 
     operator = Transpose(
         M=M,
@@ -70,6 +89,7 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, aie_context):
         m=m,
         n=n,
         s=s,
+        num_batches=num_batches,
         context=aie_context,
     )
 
