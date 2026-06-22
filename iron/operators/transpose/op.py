@@ -104,8 +104,6 @@ class Transpose(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # num_batches==1 keeps the exact flat (M*N,) spec (unchanged behavior for existing callers);
-        # >1 prepends a batch dim over contiguous matrices.
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
         return [
             AIERuntimeArgSpec("in", batch_dim + (self.M * self.N,)),
