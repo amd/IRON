@@ -15,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from iron.common.test_utils import np_dtype_map
 import aie.utils as aie_utils
 
 
@@ -61,7 +62,9 @@ class GEMM(MLIROperator):
         if self.N % min_N != 0:
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
-        if self.emulate_bf16_mmul_with_bfp16:
+        if self.dtype_in == "i8":
+            min_tile_m, min_tile_k, min_tile_n = 16, 8, 16
+        elif self.emulate_bf16_mmul_with_bfp16:
             min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
         else:
             min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
@@ -75,9 +78,18 @@ class GEMM(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
+    def name(self) -> str:
+        """Include dtype in operator name to avoid xclbin filename collisions
+        between GEMM variants with identical dimensions but different dtypes."""
+        return f"{super().name}_{self.dtype_in}_{self.dtype_out}"
+
+    @property
     def _kernel_flags_suffix(self):
         """Suffix encoding compile-time flags that affect the kernel binary."""
-        return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
+        suffix = f"_{self.dtype_in}_{self.dtype_out}"
+        if self.dtype_in == "bf16":
+            suffix += f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
+        return suffix
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -117,14 +129,17 @@ class GEMM(MLIROperator):
             f"-DDIM_K={self.tile_k}",
             f"-DDIM_N={self.tile_n}",
         ]
-        if self.prio_accuracy:
-            kernel_flags.append("-Dbf16_f32_ONLY")
+        if self.dtype_in == "i8":
+            kernel_flags.append(f"-D{self.dtype_in}_{self.dtype_out}_ONLY")
         else:
-            kernel_flags.append("-Dbf16_bf16_ONLY")
-        if self.round_conv_even:
-            kernel_flags.append("-DROUND_CONV_EVEN")
-        if self.emulate_bf16_mmul_with_bfp16:
-            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
+            if self.prio_accuracy:
+                kernel_flags.append("-Dbf16_f32_ONLY")
+            else:
+                kernel_flags.append("-Dbf16_bf16_ONLY")
+            if self.round_conv_even:
+                kernel_flags.append("-DROUND_CONV_EVEN")
+            if self.emulate_bf16_mmul_with_bfp16:
+                kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
         if self.b_col_maj:
             kernel_flags.append("-DB_COL_MAJ")
         if self.c_col_maj:
@@ -150,13 +165,19 @@ class GEMM(MLIROperator):
         ]
 
     def get_arg_spec(self):
+        dtype_in_np = np_dtype_map[self.dtype_in]
+        dtype_out_np = np_dtype_map[self.dtype_out]
         return [
-            AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
+            AIERuntimeArgSpec("in", (self.M, self.K), dtype=dtype_in_np),  # input A
             AIERuntimeArgSpec(
-                "in", (self.K, self.N) if not self.b_col_maj else (self.N, self.K)
+                "in",
+                (self.K, self.N) if not self.b_col_maj else (self.N, self.K),
+                dtype=dtype_in_np,
             ),  # input B (weights)
             AIERuntimeArgSpec(
-                "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
+                "out",
+                (self.M, self.N) if not self.c_col_maj else (self.N, self.M),
+                dtype=dtype_out_np,
             ),  # output C
         ]
 

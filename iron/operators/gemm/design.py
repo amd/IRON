@@ -26,9 +26,7 @@ from aie.iron.controlflow import range_
 microkernel_mac_dim_map = {
     "npu1": {
         "bf16": (4, 8, 4),
-    },
-    "npu1": {
-        "bf16": (4, 8, 4),
+        "i8": (4, 8, 8),
     },
     "npu2": {
         "bf16": {
@@ -36,6 +34,7 @@ microkernel_mac_dim_map = {
             True: (8, 8, 8),
             False: (4, 8, 8),
         },
+        "i8": (8, 8, 8),
     },
 }
 
@@ -68,11 +67,13 @@ def main():
         default=None,
         help="Name of the archive file for the AIE kernels",
     )
-    argparser.add_argument("--dtype_in", type=str, choices=["bf16"], default="bf16")
+    argparser.add_argument(
+        "--dtype_in", type=str, choices=["bf16", "i8"], default="bf16"
+    )
     argparser.add_argument(
         "--dtype_out",
         type=str,
-        choices=["bf16", "f32"],
+        choices=["bf16", "f32", "i8", "i16", "i32"],
         default="bf16",
     )
     argparser.add_argument("--trace_size", type=int, default=0)
