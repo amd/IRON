@@ -10,10 +10,6 @@ def generate_golden_reference(
 ):
     torch.manual_seed(seed)
     val_range = 4
-    if num_batches == 1:
-        input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-        output_tensor = torch.transpose(input_tensor, 0, 1)
-        return {"input": input_tensor, "output": output_tensor}
     # num_batches>1: B independent (rows,cols) matrices laid back-to-back; each is
     # transposed independently and the results concatenated in the same order.
     input_tensor = (
@@ -22,4 +18,7 @@ def generate_golden_reference(
     output_tensor = torch.stack(
         [torch.transpose(input_tensor[b], 0, 1) for b in range(num_batches)]
     )
+    # drop batch dimension if num_batches == 1
+    input_tensor = torch.squeeze(input_tensor, 0)
+    output_tensor = torch.squeeze(output_tensor, 0)
     return {"input": input_tensor, "output": output_tensor}
