@@ -158,8 +158,7 @@ def shuffle_transpose(
         rt.start(*my_workers)
 
         # One task group per batch (each a parallel fill+drain over all columns/channels), so the
-        # num_batches contiguous matrices stream through the same FIFOs in sequence. At num_batches==1
-        # this is a single pass — identical to the original single-transpose schedule.
+        # num_batches contiguous matrices stream through the same FIFOs in sequence.
         for batch in range(num_batches):
             # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
             tg = rt.task_group()
