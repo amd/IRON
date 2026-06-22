@@ -50,11 +50,11 @@ def shuffle_transpose(
     # and channels. Partially transposes the input
     # data so that the kernel only needs to
     # transpose s*s-sized sub-tiles.
-    # For num_batches>1 the L3 tensors hold that many contiguous (M,N) matrices, stacked along
-    # the row dimension: in-dims (num_batches*M, N), out-dims (num_batches*N, M). At num_batches==1
-    # these reduce to (M,N)/(N,M) — identical to the original single-transpose patterns. Each (i,j)
-    # column/channel gets one TAP per batch (offset += batch*num_elements); the per-batch internal
-    # sizes/strides are unchanged because each matrix is contiguous and row-major.
+    # The L3 tensors hold num_batches contiguous (M,N) matrices stacked along the row
+    # dimension: in-dims (num_batches*M, N), out-dims (num_batches*N, M); at num_batches==1
+    # these are simply (M,N)/(N,M). Each (i,j) column/channel emits one TAP per batch, offset
+    # by batch*num_elements; the per-batch internal sizes/strides are the same for every batch
+    # because each matrix is contiguous and row-major.
     in_dims = (num_batches * M, N)
     out_dims = (num_batches * N, M)
     taps_in_L3L2 = [
