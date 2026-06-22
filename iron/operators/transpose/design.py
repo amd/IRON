@@ -172,7 +172,7 @@ def shuffle_transpose(
                         taps_in_L3L2[i * num_channels + j][batch],
                         task_group=tg,
                     )
-            # Drain the output objectFIFOs with data
+            # Drain the output objectFIFOs of data
             for i in range(num_columns):
                 for j in range(num_channels):
                     rt.drain(
