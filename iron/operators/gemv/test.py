@@ -6,7 +6,10 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.gemv.op import GEMV
-from iron.operators.gemv.reference import generate_golden_reference
+from iron.operators.gemv.reference import (
+    generate_golden_reference,
+    generate_golden_reference_batched,
+)
 from iron.common.test_utils import run_test
 
 
@@ -69,3 +72,51 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_cont
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+def get_batched_params():
+    max_cols = aie_utils.get_current_device().cols
+    # (M, K, cols, tsi, tso, num_batches): exercise the coalesced path + fallback.
+    plist = [
+        (256, 128, 1, 1, 256, 4),  # tiny, coalesced
+        (256, 128, 8, 1, 32, 100),  # large num_batches -> the size-uncapped dim
+        (448, 64, 8, 1, 56, 192),  # multi-dim run split + large num_batches together
+        (64, 1536, 1, 1, 64, 8),  # large K
+        (1026, 64, 1, 1, 2, 2),  # run needs an even (granularity-aligned) split
+        (1024, 1024, 1, 1, 64, 2),  # batch stride > 2**20 -> falls back to per-batch
+        (512, 64, 8, 4, 64, 32),  # attn-style: tile_size_input>1, num_batches=heads
+    ]
+    out = []
+    for p in plist:
+        if p[2] > max_cols:
+            continue
+        out.append(pytest.param(*p))
+    return out
+
+
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size_input,tile_size_output,num_batches",
+    get_batched_params(),
+)
+def test_gemv_batched(
+    M, K, num_aie_columns, tile_size_input, tile_size_output, num_batches, aie_context
+):
+    golden = generate_golden_reference_batched(M=M, K=K, num_batches=num_batches)
+    operator = GEMV(
+        M=M,
+        K=K,
+        num_aie_columns=num_aie_columns,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+        num_batches=num_batches,
+        context=aie_context,
+    )
+    input_buffers = {
+        "matrix": golden["A"].flatten(),
+        "vector": golden["B"].flatten(),
+    }
+    output_buffers = {"output": golden["C"].flatten()}
+    errors, *_ = run_test(
+        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
+    )
+    assert not errors, f"batched GEMV failed: {errors}"

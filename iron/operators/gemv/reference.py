@@ -40,3 +40,27 @@ def generate_golden_reference(
         "B": B,
         "C": C,
     }
+
+
+def generate_golden_reference_batched(M=128, K=128, num_batches=2, seed=42):
+    """
+    Generate golden reference data for a batched GEMV (num_batches independent
+    matrix-vector products stacked contiguously, matching the GEMV op layout).
+
+    Parameters:
+        M: Number of rows of each matrix A
+        K: Number of columns of each matrix A (equals vector B length)
+        num_batches: Number of independent GEMVs
+        seed: Random seed
+
+    Returns:
+        dict: Contains 'A' (matrices), 'B' (vectors), 'C' (output vectors)
+    """
+    torch.manual_seed(seed)
+    val_range = 4
+    A = torch.randn(num_batches, M, K, dtype=torch.bfloat16) * val_range
+    B = torch.randn(num_batches, K, dtype=torch.bfloat16) * val_range
+    C = torch.empty(num_batches, M, dtype=torch.bfloat16)
+    for b in range(num_batches):
+        C[b] = A[b] @ B[b]
+    return {"A": A, "B": B, "C": C}
