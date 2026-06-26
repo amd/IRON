@@ -165,6 +165,70 @@ def my_matvec(
         for col in range(cols)
     ]
 
+    # --- Batch-coalesce (default): one BD per column over all batches. ---
+    # Replaces the per-batch unroll with a single iterated BD; the stock A_taps/C_taps
+    # above remain the fallback (and the num_batches==1 path). Access-equivalent to the
+    # unroll (covered by test_gemv_batched).
+    # AIE shim BD limits (mlir-aie AIEXDialect.cpp verifyStridesWraps): the two wrap
+    # dims have a size cap (1023) while one dim is size-uncapped; TAP sizes are
+    # outermost-first and the verifier reverses them, so [1, num_batches, run_hi,
+    # run_lo] places num_batches in the uncapped dim and the contiguous run in the two
+    # wrap dims. Access-equivalent to the unroll (covered by test_gemv_batched).
+    # The shim also enforces a 4-byte address granularity on every transfer size and
+    # stride (NOT skipped, even for linear transfers); for bf16 (2 bytes) that means
+    # the innermost size (run_lo) and the batch stride must be even, so split_run only
+    # yields an even run_lo and the predicate requires even strides.
+    MAX_WRAP = 1023
+    MAX_STRIDE = (1 << 20) - 1  # conservative element-stride bound for the wrap dims
+    GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
+
+    def split_run(run, lim=MAX_WRAP, gran=GRAN_ELEMS):
+        """Factor a contiguous run into (hi, lo), both <= lim and lo a multiple of gran
+        (the address-granularity-aligned inner size), lo maximal. None if no such
+        split exists (caller then falls back to the per-batch path)."""
+        lo_start = (lim // gran) * gran
+        for lo in range(lo_start, 0, -gran):
+            if run % lo == 0 and (run // lo) <= lim:
+                return (run // lo, lo)
+        return None
+
+    A_run, A_bstride = (M // cols) * K, M * K
+    C_run, C_bstride = (M // cols), M
+    A_split, C_split = split_run(A_run), split_run(C_run)
+    coalesce = (
+        num_batches > 1
+        and A_bstride <= MAX_STRIDE
+        and C_bstride <= MAX_STRIDE
+        and A_bstride % GRAN_ELEMS == 0
+        and C_bstride % GRAN_ELEMS == 0
+        and A_split is not None
+        and C_split is not None
+    )
+
+    def coalesced_tap(L3_ty, col_off, split, bstride):
+        run_hi, run_lo = split
+        return TensorAccessPattern(
+            tensor_dims=L3_ty.__args__[0],
+            offset=col_off,
+            sizes=[1, num_batches, run_hi, run_lo],
+            strides=[0, bstride, run_lo, 1],
+        )
+
+    if coalesce:
+        # Backpressure replaces the per-batch drain wait, so the A/C ObjectFifos must
+        # be deep enough (>=2) for the producer not to overrun the consumer.
+        assert all(f.depth >= 2 for f in A_L3L1_fifos) and all(
+            f.depth >= 2 for f in C_L1L3_fifos
+        ), "coalesced GEMV needs A/C ObjectFifo depth>=2 (replaces the per-batch wait)"
+        A_taps_coalesced = [
+            coalesced_tap(L3_A_ty, col * (M // cols) * K, A_split, A_bstride)
+            for col in range(cols)
+        ]
+        C_taps_coalesced = [
+            coalesced_tap(L3_C_ty, col * (M // cols), C_split, C_bstride)
+            for col in range(cols)
+        ]
+
     rt = Runtime()
     with rt.sequence(L3_A_ty, L3_B_ty, L3_C_ty) as (A, B, C):
         rt.start(*workers)
@@ -172,21 +236,43 @@ def my_matvec(
         for col in range(cols):
             # Simple linear transfer of B, includes all batches in sequence
             rt.fill(B_L3L1_fifos[col].prod(), B, B_tap, task_group=tg_b)
-        for batch in range(num_batches):
+        if coalesce:
+            # One iterated BD per column over all batches; per-batch `wait` dropped
+            # in favor of ObjectFifo backpressure (asserted above).
             tg_ac = rt.task_group()
             for col in range(cols):
                 rt.fill(
-                    A_L3L1_fifos[col].prod(), A, A_taps[col][batch], task_group=tg_ac
+                    A_L3L1_fifos[col].prod(), A, A_taps_coalesced[col], task_group=tg_ac
                 )
             for col in range(cols):
                 rt.drain(
                     C_L1L3_fifos[col].cons(),
                     C,
-                    C_taps[col][batch],
+                    C_taps_coalesced[col],
                     task_group=tg_ac,
                     wait=True,
                 )
             rt.finish_task_group(tg_ac)
+        else:
+            # Fallback (also the num_batches==1 path): stock per-batch unroll.
+            for batch in range(num_batches):
+                tg_ac = rt.task_group()
+                for col in range(cols):
+                    rt.fill(
+                        A_L3L1_fifos[col].prod(),
+                        A,
+                        A_taps[col][batch],
+                        task_group=tg_ac,
+                    )
+                for col in range(cols):
+                    rt.drain(
+                        C_L1L3_fifos[col].cons(),
+                        C,
+                        C_taps[col][batch],
+                        task_group=tg_ac,
+                        wait=True,
+                    )
+                rt.finish_task_group(tg_ac)
         rt.finish_task_group(tg_b)
 
     return Program(dev, rt).resolve_program()
