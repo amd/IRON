@@ -10,7 +10,9 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
-def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix=""):
+def shuffle_transpose(
+    dev, M, N, num_columns, num_channels, m, n, s, num_batches=1, func_prefix=""
+):
     num_elements = M * N
     per_tile_elements = m * n
     dtype = bfloat16
@@ -34,8 +36,9 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix
     if s == 8 and (m <= 16 or n <= 16):
         raise ValueError(f"Kernel tile {s} needs AIE tile rows > 16 and columns > 16.")
 
-    # Define tensor types
-    tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
+    # Define tensor types. The runtime tensor spans all batches (contiguous matrices);
+    # per-tile work on the cores is identical regardless of batch count.
+    tensor_ty = np.ndarray[(num_batches * num_elements,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
     fifodepth = 1 if per_tile_elements > 4096 else 2
@@ -47,13 +50,25 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix
     # and channels. Partially transposes the input
     # data so that the kernel only needs to
     # transpose s*s-sized sub-tiles.
+    # The L3 tensors hold num_batches contiguous (M,N) matrices stacked along the row
+    # dimension: in-dims (num_batches*M, N), out-dims (num_batches*N, M); at num_batches==1
+    # these are simply (M,N)/(N,M). Each (i,j) column/channel emits one TAP per batch, offset
+    # by batch*num_elements; the per-batch internal sizes/strides are the same for every batch
+    # because each matrix is contiguous and row-major.
+    in_dims = (num_batches * M, N)
+    out_dims = (num_batches * N, M)
     taps_in_L3L2 = [
-        TensorAccessPattern(
-            (M, N),
-            (M // num_channels) * j * N + (N // num_columns) * i,
-            [M // num_channels // m, N // num_columns // n, m, n],
-            [m * N, n, N, 1],
-        )
+        [
+            TensorAccessPattern(
+                in_dims,
+                batch * num_elements
+                + (M // num_channels) * j * N
+                + (N // num_columns) * i,
+                [M // num_channels // m, N // num_columns // n, m, n],
+                [m * N, n, N, 1],
+            )
+            for batch in range(num_batches)
+        ]
         for i in range(num_columns)
         for j in range(num_channels)
     ]
@@ -68,12 +83,17 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix
         for j in range(num_channels)
     ]
     taps_out_L1L3 = [
-        TensorAccessPattern(
-            (N, M),
-            (N // num_columns) * i * M + (M // num_channels) * j,
-            [M // num_channels // m, N // num_columns // n, n, m],
-            [m, n * M, M, 1],
-        )
+        [
+            TensorAccessPattern(
+                out_dims,
+                batch * num_elements
+                + (N // num_columns) * i * M
+                + (M // num_channels) * j,
+                [M // num_channels // m, N // num_columns // n, n, m],
+                [m, n * M, M, 1],
+            )
+            for batch in range(num_batches)
+        ]
         for i in range(num_columns)
         for j in range(num_channels)
     ]
@@ -106,14 +126,17 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, transpose_kernel):
-        # Number of sub-matrix "tile" iterations
-        for _ in range_(N // n // num_columns):
-            for _ in range_(M // m // num_channels):
-                elem_in1 = of_in1.acquire(1)
-                elem_out = of_out.acquire(1)
-                transpose_kernel(elem_in1, elem_out)
-                of_out.release(1)
-                of_in1.release(1)
+        # Process num_batches contiguous matrices through the same FIFOs: num_batches x the per-matrix
+        # tile iterations. The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
+        for _ in range_(num_batches):
+            # Number of sub-matrix "tile" iterations
+            for _ in range_(N // n // num_columns):
+                for _ in range_(M // m // num_channels):
+                    elem_in1 = of_in1.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    transpose_kernel(elem_in1, elem_out)
+                    of_out.release(1)
+                    of_in1.release(1)
 
     # Create a worker to run the task on a compute tile
     my_workers = [
@@ -134,29 +157,32 @@ def shuffle_transpose(dev, M, N, num_columns, num_channels, m, n, s, func_prefix
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        # One task group per batch (each a parallel fill+drain over all columns/channels), so the
+        # num_batches contiguous matrices stream through the same FIFOs in sequence.
+        for batch in range(num_batches):
+            # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
+            tg = rt.task_group()
 
-        # Fill the input objectFIFOs with data
-        for i in range(num_columns):
-            for j in range(num_channels):
-                rt.fill(
-                    of_in1s_L3L2[i * num_channels + j].prod(),
-                    A,
-                    taps_in_L3L2[i * num_channels + j],
-                    task_group=tg,
-                )
-        # Drain the output objectFIFOs with data
-        for i in range(num_columns):
-            for j in range(num_channels):
-                rt.drain(
-                    of_outs[i * num_channels + j].cons(),
-                    C,
-                    taps_out_L1L3[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    task_group=tg,
-                )
-        rt.finish_task_group(tg)
+            # Fill the input objectFIFOs with data
+            for i in range(num_columns):
+                for j in range(num_channels):
+                    rt.fill(
+                        of_in1s_L3L2[i * num_channels + j].prod(),
+                        A,
+                        taps_in_L3L2[i * num_channels + j][batch],
+                        task_group=tg,
+                    )
+            # Drain the output objectFIFOs of data
+            for i in range(num_columns):
+                for j in range(num_channels):
+                    rt.drain(
+                        of_outs[i * num_channels + j].cons(),
+                        C,
+                        taps_out_L1L3[i * num_channels + j][batch],
+                        wait=True,  # wait for the transfer to complete and data to be available
+                        task_group=tg,
+                    )
+            rt.finish_task_group(tg)
 
     # Place program components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())

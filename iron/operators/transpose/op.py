@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from typing import ClassVar, Dict
 
 import aie.utils as aie_utils
 from iron.common import (
@@ -16,7 +17,13 @@ from iron.common import (
 
 @dataclass
 class Transpose(MLIROperator):
-    """AIE-accelerated transpose operator"""
+    """AIE-accelerated transpose operator.
+
+    ``num_batches`` > 1 performs that many independent (M,N)->(N,M) transposes on
+    contiguous matrices laid back-to-back in memory (results concatenated), mirroring
+    GEMV's batching — the per-batch tile work rides the same ObjectFifos, so B batched
+    transposes cost ONE dispatch instead of B unrolled ones.
+    """
 
     M: int
     N: int
@@ -25,7 +32,13 @@ class Transpose(MLIROperator):
     m: int
     n: int
     s: int
+    num_batches: int = 1
     context: object = field(default=None, repr=False)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        **MLIROperator._name_aliases,
+        "num_batches": "batch",
+    }
 
     def __post_init__(self):
         if self.M % self.m != 0:
@@ -66,6 +79,7 @@ class Transpose(MLIROperator):
                     self.m,
                     self.n,
                     self.s,
+                    self.num_batches,
                 ),
             ),
         )
@@ -90,7 +104,8 @@ class Transpose(MLIROperator):
         ]
 
     def get_arg_spec(self):
+        batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
         return [
-            AIERuntimeArgSpec("in", (self.M * self.N,)),
-            AIERuntimeArgSpec("out", (self.M * self.N,)),
+            AIERuntimeArgSpec("in", batch_dim + (self.M * self.N,)),
+            AIERuntimeArgSpec("out", batch_dim + (self.N * self.M,)),
         ]
