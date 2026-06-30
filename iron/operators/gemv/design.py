@@ -169,15 +169,31 @@ def my_matvec(
     # Replaces the per-batch unroll with a single iterated BD; the stock A_taps/C_taps
     # above remain the fallback (and the num_batches==1 path). Access-equivalent to the
     # unroll (covered by test_gemv_batched).
-    # AIE shim BD limits (mlir-aie AIEXDialect.cpp verifyStridesWraps): the two wrap
-    # dims have a size cap (1023) while one dim is size-uncapped; TAP sizes are
-    # outermost-first and the verifier reverses them, so [1, num_batches, run_hi,
-    # run_lo] places num_batches in the uncapped dim and the contiguous run in the two
-    # wrap dims. Access-equivalent to the unroll (covered by test_gemv_batched).
-    # The shim also enforces a 4-byte address granularity on every transfer size and
-    # stride (NOT skipped, even for linear transfers); for bf16 (2 bytes) that means
-    # the innermost size (run_lo) and the batch stride must be even, so split_run only
-    # yields an even run_lo and the predicate requires even strides.
+    #
+    # This is NOT a single linear transfer. Within one batch the run is contiguous
+    # (A_run = (M//cols)*K elements), but the batch stride is the full matrix
+    # (A_bstride = M*K), so for cols>1 each column gathers its own slice out of every
+    # batch with a gap in between. Only cols==1 degenerates to bstride==run. So the
+    # batch dim is a genuine size-uncapped iteration dim and the TAP is required.
+    #
+    # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
+    # the AIE shim's 10-bit (1023) wrap-size cap. TAP sizes are outermost-first and the
+    # verifier reverses them, so [1, num_batches, run_hi, run_lo] puts num_batches in the
+    # size-uncapped dim and the contiguous run in the two capped wrap dims. The shim also
+    # enforces a 4-byte address granularity on every size and stride (not skipped, even
+    # for linear transfers); for bf16 (2 bytes) that means run_lo and the batch stride
+    # must be even, so split_run only yields an even run_lo and the predicate requires
+    # even strides.
+    #
+    # FUTURE: this manual split is only needed on the current mlir_aie pin. Once IRON's
+    # pin moves past Xilinx/mlir-aie #3036 (LinearizeContiguousBDTransfer for the
+    # iteration dim, on top of #2924 which canonicalizes a contiguous run to linear form
+    # and bypasses the 1023 cap via the hardware buffer-length register), split_run /
+    # MAX_WRAP / GRAN_ELEMS can be dropped and the run supplied as one inner dim
+    # [num_batches, A_run]. The pin is currently frozen at the last pre-#3016 release.
+    # FIXME: pull these shim BD bounds from the MLIR-AIE target model rather than
+    # hard-coding them; they live in verifyStridesWraps in
+    # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
     MAX_WRAP = 1023
     MAX_STRIDE = (1 << 20) - 1  # conservative element-stride bound for the wrap dims
     GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
@@ -215,11 +231,15 @@ def my_matvec(
         )
 
     if coalesce:
-        # Backpressure replaces the per-batch drain wait, so the A/C ObjectFifos must
-        # be deep enough (>=2) for the producer not to overrun the consumer.
+        # Dropping the per-batch drain wait lets the single iterated fill BD run ahead of
+        # the core. ObjectFifo lock backpressure keeps that safe: a producer that gets
+        # ahead BLOCKS on the buffer lock (worst case a stall, never a corrupting
+        # overrun). depth>=2 only buys OVERLAP of fill with compute, so it is a
+        # performance guard here, not a correctness requirement (depth==1 is correct but
+        # fully serial).
         assert all(f.depth >= 2 for f in A_L3L1_fifos) and all(
             f.depth >= 2 for f in C_L1L3_fifos
-        ), "coalesced GEMV needs A/C ObjectFifo depth>=2 (replaces the per-batch wait)"
+        ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
         A_taps_coalesced = [
             coalesced_tap(L3_A_ty, col * (M // cols) * K, A_split, A_bstride)
             for col in range(cols)
@@ -236,43 +256,26 @@ def my_matvec(
         for col in range(cols):
             # Simple linear transfer of B, includes all batches in sequence
             rt.fill(B_L3L1_fifos[col].prod(), B, B_tap, task_group=tg_b)
-        if coalesce:
-            # One iterated BD per column over all batches; per-batch `wait` dropped
-            # in favor of ObjectFifo backpressure (asserted above).
+        # Coalesced: one iterated BD per column covers all batches (num_waits==1, a
+        # single drain wait for the whole column). Fallback (incl. num_batches==1): the
+        # stock per-batch unroll (num_waits==num_batches, one wait per batch). The fills
+        # and drains are otherwise identical; only the TAP and the wait count differ.
+        num_waits = 1 if coalesce else num_batches
+        for w in range(num_waits):
             tg_ac = rt.task_group()
             for col in range(cols):
-                rt.fill(
-                    A_L3L1_fifos[col].prod(), A, A_taps_coalesced[col], task_group=tg_ac
-                )
+                a_tap = A_taps_coalesced[col] if coalesce else A_taps[col][w]
+                rt.fill(A_L3L1_fifos[col].prod(), A, a_tap, task_group=tg_ac)
             for col in range(cols):
+                c_tap = C_taps_coalesced[col] if coalesce else C_taps[col][w]
                 rt.drain(
                     C_L1L3_fifos[col].cons(),
                     C,
-                    C_taps_coalesced[col],
+                    c_tap,
                     task_group=tg_ac,
                     wait=True,
                 )
             rt.finish_task_group(tg_ac)
-        else:
-            # Fallback (also the num_batches==1 path): stock per-batch unroll.
-            for batch in range(num_batches):
-                tg_ac = rt.task_group()
-                for col in range(cols):
-                    rt.fill(
-                        A_L3L1_fifos[col].prod(),
-                        A,
-                        A_taps[col][batch],
-                        task_group=tg_ac,
-                    )
-                for col in range(cols):
-                    rt.drain(
-                        C_L1L3_fifos[col].cons(),
-                        C,
-                        C_taps[col][batch],
-                        task_group=tg_ac,
-                        wait=True,
-                    )
-                rt.finish_task_group(tg_ac)
         rt.finish_task_group(tg_b)
 
     return Program(dev, rt).resolve_program()

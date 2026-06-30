@@ -94,6 +94,11 @@ def get_batched_params():
     return out
 
 
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output,num_batches",
     get_batched_params(),
@@ -116,7 +121,13 @@ def test_gemv_batched(
         "vector": golden["B"].flatten(),
     }
     output_buffers = {"output": golden["C"].flatten()}
-    errors, *_ = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
+
+    print(f"\nLatency: {latency_us:.1f} us")
+    gflops = (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9
+    print(f"Throughput: {gflops:.6e} GFLOP/s")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+
     assert not errors, f"batched GEMV failed: {errors}"
