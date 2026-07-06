@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+from aie.dialects.aie import get_target_model, WireBundle
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor, xrt as _pyxrt
 
 
@@ -11,7 +12,13 @@ def get_shim_dma_limit(dev) -> int:
     Each shim tile exposes a fixed number of DMA source connections; summing
     across all shim tiles gives the device-wide ShimDMA budget.
     """
-    return sum(dev.get_num_connections(t, output=True) for t in dev.get_shim_tiles())
+    tm = get_target_model(dev.resolve())
+    return sum(
+        tm.get_num_source_shim_mux_connections(col, row, WireBundle.DMA)
+        for col in range(tm.columns())
+        for row in range(tm.rows())
+        if tm.is_shim_noc_or_pl_tile(col, row)
+    )
 
 
 def float_to_name(v: float) -> str:

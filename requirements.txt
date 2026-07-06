@@ -11,7 +11,7 @@
 --extra-index-url https://pypi.org/simple
 
 mlir_aie==v1.3.4
-llvm-aie==21.0.0.2026062201+7820460e
+llvm-aie==21.0.0.2026062301+cb664e8c
 
 black
 reuse

@@ -701,6 +701,7 @@ class KernelCompilationRule(CompilationRule):
                         "-O2",
                         "-std=c++20",
                         f"--target={target}",
+                        "-D__AIE_API_AIE_ADF_HPP__",
                         "-Wno-parentheses",
                         "-Wno-attributes",
                         "-Wno-macro-redefined",
