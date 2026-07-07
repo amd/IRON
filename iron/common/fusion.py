@@ -74,19 +74,17 @@ class OperatorSequence(AIEOperatorBase):
         )  # Optional dict: buffer_name -> size_in_bytes
         self._dispatch = dispatch
 
-    def get_kernel_artifacts(self):
-        """Collect all kernel artifacts from child operators.
+    def _unique_operators(self):
+        """Operators in runlist order, de-duplicated by identity."""
+        seen = {}
+        for op, *_ in self.runlist:
+            seen.setdefault(id(op), op)
+        return list(seen.values())
 
-        Returns:
-            List of KernelObjectArtifact instances from all unique child operators,
-            with filenames and symbol prefixes disambiguated per operator index.
-        """
+    def get_kernel_artifacts(self):
+        """Kernel artifacts from all child operators, prefixed per operator index."""
         kernel_artifacts = []
-        seen: dict[int, object] = {}
-        unique_operators = [
-            seen.setdefault(id(op), op) for op, *_ in self.runlist if id(op) not in seen
-        ]
-        for idx, op in enumerate(unique_operators):
+        for idx, op in enumerate(self._unique_operators()):
             objs = op.get_kernel_artifacts()
             for obj in objs:
                 obj.filename = f"op{idx}_{obj.filename}"
@@ -95,28 +93,16 @@ class OperatorSequence(AIEOperatorBase):
         return kernel_artifacts
 
     def get_mlir_artifact(self):
-        """Build and return the fused MLIR source artifact.
+        """Build the fused MLIR source artifact.
 
-        Constructs the operator MLIR map and run-list, then wraps them in a
-        ``SequenceMLIRSource`` artifact.  Buffer layout attributes
-        (``subbuffer_layout``, ``buffer_sizes``, ``slice_info``) must already
-        be set by ``set_up_artifacts()`` before this method is called.
-
-        Returns:
-            A ``SequenceMLIRSource`` artifact ready for compilation.
+        The buffer layout attributes (``subbuffer_layout``, ``buffer_sizes``,
+        ``slice_info``) must already be set by ``set_up_artifacts()``.
         """
-        # Build operator_mlir_map: {op_name -> PythonGeneratedMLIRArtifact}
         operator_mlir_map = {}
         comp_runlist = []
         op_names = {}  # id(op) -> op_name
 
-        seen2: dict[int, object] = {}
-        unique_operators = [
-            seen2.setdefault(id(op), op)
-            for op, *_ in self.runlist
-            if id(op) not in seen2
-        ]
-        for idx, op in enumerate(unique_operators):
+        for idx, op in enumerate(self._unique_operators()):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
@@ -239,13 +225,7 @@ class OperatorSequence(AIEOperatorBase):
         return subbuffer_layout, buffer_sizes, slice_info
 
     def set_up_artifacts(self):
-        """Set up the artifact dependency graph for this fused operator.
-
-        Computes the buffer layout first, then builds the artifacts.
-        The dispatch mode (``"fused"`` vs ``"separate"``) is resolved here
-        when set to ``"auto"``.
-        """
-        # Calculate buffer layout (used by both paths for get_buffer())
+        """Resolve the dispatch mode and build the matching compile artifacts."""
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self._calculate_buffer_layout()
         )
@@ -257,23 +237,17 @@ class OperatorSequence(AIEOperatorBase):
         elif self._dispatch == "fused":
             if not is_npu2:
                 raise RuntimeError(
-                    "dispatch='fused' requires NPU2 (Strix); "
-                    "Phoenix/NPU1 does not support full-ELF dispatch"
+                    "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
                 )
             self._mode = "fused"
         else:
             self._mode = self._dispatch  # "separate", "reference", or "compare"
 
-        # Backwards-compat flag (used by get_callable/params_path).
-        self._use_full_elf = self._mode == "fused"
-
         if self._mode == "fused":
             self._set_up_full_elf_artifacts()
         elif self._mode in ("separate", "compare"):
             self._set_up_xclbin_artifacts()
-        else:
-            # "reference": no NPU artifacts to compile.
-            pass
+        # "reference" compiles nothing.
 
     def _set_up_full_elf_artifacts(self):
         """Full-ELF path (NPU2): fuse MLIR into a single ELF."""
@@ -288,36 +262,23 @@ class OperatorSequence(AIEOperatorBase):
         self.add_artifacts([full_elf_artifact])
 
     def _set_up_xclbin_artifacts(self):
-        """Chained xclbin path (NPU1/Phoenix): separate xclbin per unique operator.
-
-        Mirrors the pattern from ``chain_swiglu_artifacts`` in
-        ``iron/operators/swiglu_base.py``: each unique operator gets its own
-        xclbin + insts compiled separately, linked via ``--xclbin-input``.
-        """
-        seen: dict[int, object] = {}
-        unique_operators = [
-            seen.setdefault(id(op), op)
-            for op, *_ in self.runlist
-            if id(op) not in seen
-        ]
-
-        # Short hash to keep xclbin kernel names under 31 chars
-        # (xclbinutil limits m_name to 64 chars as "name:name")
+        """Chained-xclbin path: one xclbin+insts per unique operator, linked
+        via ``--xclbin-input``."""
+        # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
         name_hash = hashlib.sha1(self.name.encode()).hexdigest()[:6]
 
         artifacts = []
         prev_xclbin = None
-        self._op_xclbin_map = {}   # id(op) -> xclbin artifact
-        self._op_insts_map = {}    # id(op) -> insts artifact
+        self._op_xclbin_map = {}  # id(op) -> xclbin artifact
+        self._op_insts_map = {}  # id(op) -> insts artifact
         self._op_kernel_name_map = {}  # id(op) -> kernel_name
 
-        for idx, op in enumerate(unique_operators):
+        for idx, op in enumerate(self._unique_operators()):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
 
             xclbin, insts = op.get_artifacts(prefix=f"{op_label}_")
-            # Use list() to avoid mutating the shared extra_flags list
-            # (get_artifacts may alias the same list between xclbin and insts)
+            # Copy so we don't mutate the (possibly aliased) shared flags list.
             xclbin.extra_flags = list(xclbin.extra_flags) + [
                 f"--xclbin-instance-name={op_label}",
                 f"--xclbin-kernel-id={kernel_id}",
@@ -334,7 +295,7 @@ class OperatorSequence(AIEOperatorBase):
             self._op_kernel_name_map[id(op)] = op_label
             prev_xclbin = xclbin
 
-        # The last xclbin in the chain is the combined xclbin.
+        # The last xclbin in the chain carries all the linked instances.
         artifacts.append(prev_xclbin)
         self.combined_xclbin = prev_xclbin
         self.add_artifacts(artifacts)
@@ -346,12 +307,7 @@ class OperatorSequence(AIEOperatorBase):
         )
 
     def get_callable(self):
-        """Return a callable that executes the fused operator on the NPU.
-
-        Returns:
-            A ``SequenceFullELFCallable`` when using fused dispatch, or a
-            ``SequenceXclbinCallable`` when using separate dispatch.
-        """
+        """Return the runtime callable for the resolved dispatch mode."""
         if self._mode == "fused":
             return SequenceFullELFCallable(self)
         if self._mode == "reference":
@@ -383,44 +339,177 @@ class OperatorSequence(AIEOperatorBase):
 
 def load_elf(op):
     assert isinstance(op.artifacts[0], comp.FullElfArtifact)
-    elf_data = None
     with open(op.artifacts[0].filename, "rb") as f:
-        elf_data = np.frombuffer(f.read(), dtype=np.uint32)
-    return elf_data
+        return np.frombuffer(f.read(), dtype=np.uint32)
 
 
 def patch_elf(elf_data, patches):
     for i, patch in patches.items():
         val, mask = patch
         val = np.uint64(val)
-        mask = np.uint64(mask)  # avoid numpy overflow errors
+        mask = np.uint64(mask)  # uint32 arithmetic would overflow
         elf_data[i] = np.uint32((elf_data[i] & ~mask) | (val & mask))
     return elf_data
 
 
-class FullELFCallable:
-    def __init__(
-        self,
-        elf_data,
-        device_name="main",
-        sequence_name="sequence",
-    ):
+BF16 = np.dtype(ml_dtypes.bfloat16)
+
+
+def _n_elements(nbytes):
+    return max(nbytes, BF16.itemsize) // BF16.itemsize
+
+
+class SequenceCallable:
+    """Base for the runtime callables of an ``OperatorSequence``.
+
+    Subclasses provide a buffer model (``_allocate_buffers`` / ``get_buffer``)
+    and a step-execution primitive (``_run``). Shared here: step/arg zipping,
+    input and output syncing, and timing. Calling the object runs the whole
+    sequence once.
+    """
+
+    def __init__(self, op):
+        self.op = op
+        self.last_elapsed = 0.0
+        self._buffer_cache = {}
+        self._allocate_buffers()
+
+    def _allocate_buffers(self):
+        raise NotImplementedError
+
+    def get_buffer(self, buffer_name):
+        raise NotImplementedError
+
+    def _iter_steps(self):
+        """Yield ``(op, in_names, in_specs, out_name, out_spec)`` per runlist step."""
+        for step_op, *buf_names in self.op.runlist:
+            specs = step_op.get_arg_spec()
+            if len(specs) != len(buf_names):
+                raise ValueError(
+                    f"Operator {step_op!r} arg-spec count {len(specs)} does not "
+                    f"match runlist buffer count {len(buf_names)}"
+                )
+            *in_names, out_name = buf_names
+            *in_specs, out_spec = specs
+            yield step_op, in_names, in_specs, out_name, out_spec
+
+    def _sync_inputs(self):
+        pass
+
+    def _sync_outputs(self):
+        pass
+
+    def _run(self):
+        raise NotImplementedError
+
+    def __call__(self):
+        self._sync_inputs()
+        t0 = time.perf_counter()
+        self._run()
+        self.last_elapsed = time.perf_counter() - t0
+        self._sync_outputs()
+
+
+class _PerBufferCallable(SequenceCallable):
+    """Callable whose buffers are allocated one per name, with slice views into
+    their parent. Inputs sync to the device before the run, all non-input
+    buffers back to the host afterwards.
+    """
+
+    def _make_buffer(self, n_elements):
+        raise NotImplementedError
+
+    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
+        raise NotImplementedError
+
+    def _allocate_buffers(self):
+        self._buffers = {}
+        for name, (_, _, length) in self.op.subbuffer_layout.items():
+            self._buffers[name] = self._make_buffer(_n_elements(length))
+
+    def _resolve_buffer(self, buf_name):
+        if buf_name in self._buffers:
+            return self._buffers[buf_name]
+        if buf_name in self.op.slice_info:
+            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
+            sub = self._make_subbuffer(
+                self._buffers[base_name], start_bytes, end_bytes - start_bytes
+            )
+            self._buffers[buf_name] = sub
+            return sub
+        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
+
+    def get_buffer(self, buffer_name):
+        if buffer_name not in self._buffer_cache:
+            self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
+        return self._buffer_cache[buffer_name]
+
+    def _sync_inputs(self):
+        for name in self.op.input_args:
+            self._buffers[name].to("npu")
+
+    def _sync_outputs(self):
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                self._buffers[name].to("cpu")
+
+
+class SequenceXclbinCallable(_PerBufferCallable):
+    """Executes each runlist step as its own xclbin dispatch. Buffers shared by
+    name give zero-copy handoff between consecutive operators.
+    """
+
+    def _make_buffer(self, n_elements):
+        return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
+
+    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
+        return XRTSubBuffer(
+            parent_bo=parent.buffer_object(),
+            offset_bytes=offset_bytes,
+            size_bytes=size_bytes,
+            shape=(size_bytes // BF16.itemsize,),
+            dtype=ml_dtypes.bfloat16,
+            parent=parent,
+        )
+
+    def _allocate_buffers(self):
+        super()._allocate_buffers()
+        op = self.op
+        combined_xclbin_path = op.combined_xclbin.filename
+        self._op_callable_map = {}  # id(op) -> NPUKernel
+        for op_id, xclbin in op._op_xclbin_map.items():
+            self._op_callable_map[op_id] = NPUKernel(
+                xclbin_path=combined_xclbin_path,
+                kernel_name=op._op_kernel_name_map[op_id],
+                insts_path=op._op_insts_map[op_id].filename,
+            )
+        self._execution_plan = [
+            (
+                self._op_callable_map[id(step_op)],
+                [self._resolve_buffer(name) for name in buf_names],
+            )
+            for step_op, *buf_names in op.runlist
+        ]
+
+    def _run(self):
+        for kernel, args in self._execution_plan:
+            kernel(*args)
+
+
+class SequenceFullELFCallable(SequenceCallable):
+    """Single-ELF dispatch (NPU2): every operator shares three consolidated
+    input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
+    sub-view into whichever consolidated buffer holds the named argument.
+    """
+
+    def __init__(self, op, elf_data=None, device_name="main", sequence_name="sequence"):
         self.device_name = device_name
         self.sequence_name = sequence_name
-        self.reload_elf(elf_data)
-
-    def __call__(self, *args):
-        run = pyxrt.run(self.xrt_kernel)
-        for i, arg in enumerate(args):
-            assert isinstance(arg, pyxrt.bo), f"Argument {i} is not a pyxrt.bo"
-            run.set_arg(i, arg)
-        run.start()
-        ret_code = run.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
+        self.reload_elf(elf_data if elf_data is not None else load_elf(op))
+        super().__init__(op)
 
     def reload_elf(self, elf_data):
-        # Create a PyCapsule from the numpy array pointer for pybind11
+        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
         elf_data_u8 = elf_data.view(dtype=np.uint8)
         ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
         ctypes.pythonapi.PyCapsule_New.argtypes = [
@@ -435,222 +524,56 @@ class FullELFCallable:
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
 
-
-class SequenceFullELFCallable(FullELFCallable):
-    def __init__(self, op, elf_data=None):
-        if elf_data is None:
-            elf_data = load_elf(op)
-        super().__init__(elf_data)
-
-        self.op = op
-        input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
-        itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-
-        self.input_buffer = XRTTensor(
-            (max(input_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
-        )
-
-        self.output_buffer = XRTTensor(
-            (max(output_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
-        )
-
+    def _allocate_buffers(self):
+        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
+        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
+        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
         self.scratch_buffer = XRTTensor(
-            (max(scratch_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
+            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
-
-        self._buffer_cache = {}
 
     def get_buffer(self, buffer_name):
-        # Return cached buffer if already allocated
         if buffer_name in self._buffer_cache:
             return self._buffer_cache[buffer_name]
-
         buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-
-        # Select the appropriate main buffer
-        if buf_type == "input":
-            main_buffer = self.input_buffer
-        elif buf_type == "output":
-            main_buffer = self.output_buffer
-        elif buf_type == "scratch":
-            main_buffer = self.scratch_buffer
-        else:
-            raise ValueError(
-                f"Unknown buffer type '{buf_type}' for buffer '{buffer_name}'"
-            )
-
-        itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-        sub_buffer = XRTSubBuffer(
-            parent_bo=main_buffer.buffer_object(),
+        parent = {
+            "input": self.input_buffer,
+            "output": self.output_buffer,
+            "scratch": self.scratch_buffer,
+        }[buf_type]
+        sub = XRTSubBuffer(
+            parent_bo=parent.buffer_object(),
             offset_bytes=offset,
             size_bytes=length,
-            shape=(length // itemsize,),
+            shape=(length // BF16.itemsize,),
             dtype=ml_dtypes.bfloat16,
-            parent=main_buffer,
+            parent=parent,
         )
+        self._buffer_cache[buffer_name] = sub
+        return sub
 
-        self._buffer_cache[buffer_name] = sub_buffer
-        return sub_buffer
-
-    def __call__(self):
-        # Sub-views handed out by get_buffer() propagate their device state to
-        # these consolidated parents, so a caller that writes a sub-view via
-        # torch_view() and then calls .to("npu") on it leaves the parent marked
-        # host-dirty; the parent syncs to the device here. The kernel writes its
-        # results into the device-side output buffer, which is synced back to
-        # the host afterwards.
+    def _sync_inputs(self):
+        # Sub-views handed out by get_buffer() propagate their host-dirty state
+        # to this parent, so the parent syncs to the device here.
         self.input_buffer.to("npu")
-        super().__call__(
-            self.input_buffer.buffer_object(),
-            self.output_buffer.buffer_object(),
-            self.scratch_buffer.buffer_object(),
-        )
+
+    def _sync_outputs(self):
         self.output_buffer.to("cpu")
 
-
-class SequenceXclbinCallable:
-    """Callable for OperatorSequence on NPU1 (Phoenix) using chained xclbins.
-
-    Instead of a single ELF dispatch, each step in the runlist is executed as a
-    separate ``NPUKernel`` invocation.  Buffers are shared (same ``XRTTensor``)
-    across steps that reference the same buffer name, giving zero-copy handoff
-    between sequential operators.
-    """
-
-    def __init__(self, op):
-        self.op = op
-        self.last_elapsed = 0.0
-
-        combined_xclbin_path = op.combined_xclbin.filename
-
-        # Build an NPUKernel per unique operator
-        self._op_callable_map = {}  # id(op) -> NPUKernel
-        for op_id, xclbin in op._op_xclbin_map.items():
-            insts = op._op_insts_map[op_id]
-            kernel_name = op._op_kernel_name_map[op_id]
-            self._op_callable_map[op_id] = NPUKernel(
-                xclbin_path=combined_xclbin_path,
-                kernel_name=kernel_name,
-                insts_path=insts.filename,
-            )
-
-        # Allocate one XRTTensor per unique base buffer name.
-        # Buffers that appear in multiple runlist entries share the same tensor
-        # (zero-copy between operators).
-        itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-        self._buffers = {}  # base buffer name -> XRTTensor
-        for buf_name in list(op.subbuffer_layout.keys()):
-            _, _, length = op.subbuffer_layout[buf_name]
-            self._buffers[buf_name] = XRTTensor(
-                (max(length, itemsize) // itemsize,),
-                dtype=ml_dtypes.bfloat16,
-            )
-
-        # Pre-build the execution plan: list of (NPUKernel, [XRTTensor args])
-        self._execution_plan = []
-        for step_op, *buf_names in op.runlist:
-            kernel = self._op_callable_map[id(step_op)]
-            args = []
-            for buf_name in buf_names:
-                args.append(self._resolve_buffer(buf_name))
-            self._execution_plan.append((kernel, args))
-
-        # Cache for get_buffer() sub-buffer views (compatible with SequenceFullELFCallable API)
-        self._buffer_cache = {}
-
-        # Expose input/output/scratch buffers for API compatibility with
-        # SequenceFullELFCallable (used by tests for .to("cpu") etc.)
-        input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
-        self.input_buffer = XRTTensor(
-            (max(input_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
-        )
-        self.output_buffer = XRTTensor(
-            (max(output_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
-        )
-        self.scratch_buffer = XRTTensor(
-            (max(scratch_buffer_size, itemsize) // itemsize,),
-            dtype=ml_dtypes.bfloat16,
-        )
-
-    def _resolve_buffer(self, buf_name):
-        """Resolve a buffer name (possibly with slice notation) to an XRTTensor.
-
-        Regular buffer names map directly to an allocated XRTTensor.
-        Sliced buffer names (e.g. ``queries[0:128]``) create an XRTSubBuffer
-        view into the parent buffer.
-        """
-        if buf_name in self._buffers:
-            return self._buffers[buf_name]
-
-        # Sliced buffer: "base_name[start:end]"
-        if buf_name in self.op.slice_info:
-            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            parent = self._buffers[base_name]
-            itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-            size_bytes = end_bytes - start_bytes
-            sub = XRTSubBuffer(
-                parent_bo=parent.buffer_object(),
-                offset_bytes=start_bytes,
-                size_bytes=size_bytes,
-                shape=(size_bytes // itemsize,),
-                dtype=ml_dtypes.bfloat16,
-            )
-            # Cache so the same slice always returns the same object
-            self._buffers[buf_name] = sub
-            return sub
-
-        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
-
-    def get_buffer(self, buffer_name):
-        """Return an XRTTensor(-like) view for a named buffer.
-
-        Compatible with the ``SequenceFullELFCallable.get_buffer()`` API so that
-        test helpers (``_load_input``, ``_get_output_tensor``, etc.) work
-        unchanged.
-
-        For the xclbin path, each buffer is its own standalone XRTTensor (or
-        XRTSubBuffer for sliced buffers), so this just returns the resolved
-        buffer directly.
-        """
-        if buffer_name in self._buffer_cache:
-            return self._buffer_cache[buffer_name]
-        buf = self._resolve_buffer(buffer_name)
-        self._buffer_cache[buffer_name] = buf
-        return buf
-
-    def __call__(self):
-        # Sync all input buffers to device
-        for buf_name in self.op.input_args:
-            self._buffers[buf_name].to("npu")
-
-        t0 = time.perf_counter()
-        for kernel, args in self._execution_plan:
-            kernel(*args)
-        self.last_elapsed = time.perf_counter() - t0
-
-        # Sync all base buffers from device so callers can read results
-        # (covers both output and scratch buffers)
-        for buf_name in self.op.subbuffer_layout:
-            if buf_name not in self.op.input_args:
-                self._buffers[buf_name].to("cpu")
-
-
-# ---------------------------------------------------------------------------
-# Reference and compare dispatch
-# ---------------------------------------------------------------------------
+    def _run(self):
+        run = pyxrt.run(self.xrt_kernel)
+        run.set_arg(0, self.input_buffer.buffer_object())
+        run.set_arg(1, self.output_buffer.buffer_object())
+        run.set_arg(2, self.scratch_buffer.buffer_object())
+        run.start()
+        ret_code = run.wait()
+        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
+            raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
 
 
 class _CPUBuffer:
-    """Minimal buffer adapter compatible with the ``XRTTensor`` API used by
-    callers (``torch_view``, ``to("npu")``, ``to("cpu")``, ``fill_``).
-
-    Backed by a flat 1D ``torch.bfloat16`` tensor in host memory.  All device
-    sync calls are no-ops.
+    """Minimal host-side stand-in for ``XRTTensor``: a flat 1D ``torch.bfloat16``
+    tensor with no-op device syncs.
     """
 
     def __init__(self, n_elements):
@@ -671,20 +594,13 @@ class _CPUBuffer:
 
 
 def _reshape_for_spec(flat_tensor, spec):
-    """Slice a flat host buffer to the element count implied by ``spec`` and
-    reshape it to the operator-declared shape.
-
-    Returns a view (no copy)."""
+    """Slice a flat host buffer to ``spec``'s element count and reshape (a view)."""
     n = int(np.prod(spec.shape)) if spec.shape else 1
     return flat_tensor[:n].reshape(spec.shape)
 
 
 def _call_reference(step_op, inputs):
-    """Invoke ``step_op.reference(*inputs)`` if available.
-
-    Returns the reference output tensor, or ``None`` if the operator has no
-    reference implementation.  Propagates other exceptions.
-    """
+    """Return ``step_op.reference(*inputs)``, or ``None`` if unavailable."""
     ref_fn = getattr(step_op, "reference", None)
     if ref_fn is None:
         return None
@@ -694,138 +610,73 @@ def _call_reference(step_op, inputs):
         return None
 
 
-class SequenceReferenceCallable:
-    """Pure-CPU evaluation of a fused operator runlist.
-
-    No NPU compilation or dispatch occurs.  Each runlist step calls
-    ``op.reference(*inputs)`` on host-side ``torch.bfloat16`` buffers.
-
-    Useful for validating the reference implementations themselves and for
-    comparing layer-by-layer expected outputs against NPU output.
+class SequenceReferenceCallable(_PerBufferCallable):
+    """Pure-CPU evaluation via each operator's ``reference()``; no NPU dispatch.
+    Device syncs are no-ops on the CPU buffers.
     """
 
-    def __init__(self, op):
-        self.op = op
-        self.last_elapsed = 0.0
-        itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
+    def _make_buffer(self, n_elements):
+        return _CPUBuffer(n_elements)
 
-        self._buffers = {}  # base buffer name -> _CPUBuffer
-        for buf_name, (_, _, length) in op.subbuffer_layout.items():
-            n = max(length, itemsize) // itemsize
-            self._buffers[buf_name] = _CPUBuffer(n)
+    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
+        start = offset_bytes // BF16.itemsize
+        end = (offset_bytes + size_bytes) // BF16.itemsize
+        view = _CPUBuffer.__new__(_CPUBuffer)
+        view._t = parent.torch_view()[start:end]
+        return view
 
-        # API parity with SequenceFullELFCallable / SequenceXclbinCallable
-        input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
-        self.input_buffer = _CPUBuffer(max(input_buffer_size, itemsize) // itemsize)
-        self.output_buffer = _CPUBuffer(max(output_buffer_size, itemsize) // itemsize)
-        self.scratch_buffer = _CPUBuffer(max(scratch_buffer_size, itemsize) // itemsize)
-
-        self._buffer_cache = {}
-
-    def _resolve_buffer(self, buf_name):
-        if buf_name in self._buffers:
-            return self._buffers[buf_name]
-        if buf_name in self.op.slice_info:
-            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            parent = self._buffers[base_name]
-            itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
-            start = start_bytes // itemsize
-            end = end_bytes // itemsize
-            sliced = _CPUBuffer.__new__(_CPUBuffer)
-            sliced._t = parent.torch_view()[start:end]
-            self._buffers[buf_name] = sliced
-            return sliced
-        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
-
-    def get_buffer(self, buffer_name):
-        if buffer_name in self._buffer_cache:
-            return self._buffer_cache[buffer_name]
-        buf = self._resolve_buffer(buffer_name)
-        self._buffer_cache[buffer_name] = buf
-        return buf
-
-    def __call__(self):
-        t0 = time.perf_counter()
-        for step_op, *buf_names in self.op.runlist:
-            arg_specs = step_op.get_arg_spec()
-            if len(arg_specs) != len(buf_names):
-                raise ValueError(
-                    f"Operator {step_op!r} arg-spec count {len(arg_specs)} "
-                    f"does not match runlist buffer count {len(buf_names)}"
-                )
-            *in_names, out_name = buf_names
-            *in_specs, out_spec = arg_specs
-
-            inputs = []
-            for name, spec in zip(in_names, in_specs):
-                flat = self._resolve_buffer(name).torch_view()
-                inputs.append(_reshape_for_spec(flat, spec).clone())
-
+    def _run(self):
+        for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
+            inputs = [
+                _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
+                for n, s in zip(in_names, in_specs)
+            ]
             out = _call_reference(step_op, inputs)
             if out is None:
                 raise NotImplementedError(
                     f"Operator {type(step_op).__name__} has no reference "
                     f"implementation; cannot use dispatch='reference'"
                 )
-
             out_flat = self._resolve_buffer(out_name).torch_view()
             n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
             out_flat[:n_out].copy_(out.reshape(-1).to(torch.bfloat16))
-        self.last_elapsed = time.perf_counter() - t0
 
 
 class SequenceCompareCallable(SequenceXclbinCallable):
-    """Run the separate-xclbin NPU pipeline and, after each step, run the
-    operator's CPU reference on the same (NPU-produced) inputs.
-
-    Logs per-step max-abs and max-rel error.  The NPU output is what
-    propagates to the next step on both sides, so each comparison reflects
-    only the deviation of the current operator (no error accumulation).
+    """Runs the xclbin pipeline and, after each step, re-runs the operator's
+    reference on the same NPU-produced inputs, logging per-step deviation. The
+    NPU output propagates on both sides, so each comparison isolates a single
+    operator (no error accumulation).
     """
 
     def __init__(self, op, rel_tol=0.05, abs_tol=1e-2):
         super().__init__(op)
         self.rel_tol = rel_tol
         self.abs_tol = abs_tol
-        # Per-step diagnostic records populated on each __call__.
         self.last_step_stats = []
 
-    def _read_buffer_to_cpu(self, name, spec):
-        """Sync a device buffer to host and return a reshaped float32 view."""
+    def _read_to_cpu(self, name, spec):
         buf = self._resolve_buffer(name)
         buf.to("cpu")
-        flat = buf.torch_view()
         n = int(np.prod(spec.shape)) if spec.shape else 1
-        return flat[:n].clone().reshape(spec.shape)
+        return buf.torch_view()[:n].clone().reshape(spec.shape)
 
-    def __call__(self):
-        # Sync inputs to device.
-        for buf_name in self.op.input_args:
-            self._buffers[buf_name].to("npu")
-
+    def _run(self):
         self.last_step_stats = []
-        t0 = time.perf_counter()
+        for step_idx, ((kernel, args), step) in enumerate(
+            zip(self._execution_plan, self._iter_steps())
+        ):
+            step_op, in_names, in_specs, out_name, out_spec = step
 
-        for step_idx, (kernel, args) in enumerate(self._execution_plan):
-            step_op, *buf_names = self.op.runlist[step_idx]
-            arg_specs = step_op.get_arg_spec()
-            *in_names, out_name = buf_names
-            *in_specs, out_spec = arg_specs
-
-            # Snapshot NPU-side inputs before running the kernel.
             cpu_inputs = [
-                self._read_buffer_to_cpu(name, spec)
-                for name, spec in zip(in_names, in_specs)
+                self._read_to_cpu(name, spec) for name, spec in zip(in_names, in_specs)
             ]
 
-            # Run NPU step.
             kernel(*args)
 
-            # Read NPU output.
-            npu_out = self._read_buffer_to_cpu(out_name, out_spec).to(torch.float32)
-
-            # Run reference on the same inputs.
+            npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
             ref_out = _call_reference(step_op, cpu_inputs)
+
             stats = {
                 "step": step_idx,
                 "op": type(step_op).__name__,
@@ -871,10 +722,3 @@ class SequenceCompareCallable(SequenceXclbinCallable):
                     "  MISMATCH" if fail else "",
                 )
             self.last_step_stats.append(stats)
-
-        self.last_elapsed = time.perf_counter() - t0
-
-        # Sync all base buffers back so callers can read results.
-        for buf_name in self.op.subbuffer_layout:
-            if buf_name not in self.op.input_args:
-                self._buffers[buf_name].to("cpu")
