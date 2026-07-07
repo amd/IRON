@@ -162,16 +162,9 @@ class GEMM(MLIROperator):
 
     def reference(self, A, B):
         """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
-        import torch
+        from iron.operators.gemm.reference import reference
 
-        A32 = A.to(torch.float32)
-        B32 = B.to(torch.float32)
-        if self.b_col_maj:
-            B32 = B32.transpose(-1, -2)
-        C = A32 @ B32
-        if self.c_col_maj:
-            C = C.transpose(-1, -2)
-        return C.contiguous().to(torch.bfloat16)
+        return reference(A, B, self.b_col_maj, self.c_col_maj)
 
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""

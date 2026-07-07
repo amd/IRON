@@ -102,8 +102,6 @@ class GEMV(MLIROperator):
 
     def reference(self, A, B):
         """CPU reference: (optionally batched) matrix-vector product."""
-        import torch
+        from iron.operators.gemv.reference import reference
 
-        A32 = A.to(torch.float32)
-        B32 = B.to(torch.float32)
-        return (A32 @ B32.unsqueeze(-1)).squeeze(-1).to(torch.bfloat16)
+        return reference(A, B)

@@ -5,6 +5,11 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
+def reference(x):
+    """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth)."""
+    return torch.transpose(x, 0, 1)
+
+
 def generate_golden_reference(
     rows: int, cols: int, dtype="bf16", seed=42, num_batches=1
 ):
@@ -16,7 +21,7 @@ def generate_golden_reference(
         torch.rand(num_batches, rows, cols, dtype=torch_dtype_map[dtype]) * val_range
     )
     output_tensor = torch.stack(
-        [torch.transpose(input_tensor[b], 0, 1) for b in range(num_batches)]
+        [reference(input_tensor[b]) for b in range(num_batches)]
     )
     # drop batch dimension if num_batches == 1
     input_tensor = torch.squeeze(input_tensor, 0)

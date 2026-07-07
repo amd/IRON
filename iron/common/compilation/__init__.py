@@ -27,6 +27,6 @@ from .base import (
     ArchiveCompilationRule,
 )
 from .fusion import (
-    FusedMLIRSource,
+    SequenceMLIRSource,
     FusePythonGeneratedMLIRCompilationRule,
 )

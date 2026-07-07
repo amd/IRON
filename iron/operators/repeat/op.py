@@ -62,4 +62,6 @@ class Repeat(MLIROperator):
 
     def reference(self, x):
         """CPU reference: repeat-interleave along the leading dimension."""
-        return x.repeat_interleave(self.repeat, dim=0)
+        from iron.operators.repeat.reference import reference
+
+        return reference(x, self.repeat)

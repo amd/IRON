@@ -17,6 +17,6 @@ class ElementwiseMul(BinaryElementwiseOperator):
     callback_fn: ClassVar[str] = "my_eltwise_mul"
 
     def reference(self, a, b):
-        import torch
+        from iron.operators.elementwise_mul.reference import reference
 
-        return (a.to(torch.float32) * b.to(torch.float32)).to(torch.bfloat16)
+        return reference(a, b)

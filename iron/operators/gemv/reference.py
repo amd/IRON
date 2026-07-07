@@ -6,6 +6,11 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 
+def reference(A, B):
+    """CPU reference: matrix-vector product ``C = A @ B`` (ground truth)."""
+    return A @ B
+
+
 def generate_golden_reference(
     M=128, K=128, seed=42
 ):  # Defaults are tile-aligned minimums; tests always pass explicit values
@@ -28,7 +33,7 @@ def generate_golden_reference(
     B = torch.randn(K, dtype=torch.bfloat16) * val_range
 
     # Generate golden outputs
-    C = A @ B
+    C = reference(A, B)
 
     return {
         "A": A,

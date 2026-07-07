@@ -106,7 +106,6 @@ class Softmax(MLIROperator):
         reference always softmaxes over the full ``cols``. For decode-style
         usage with a masked tail, the trailing positions will not match the
         NPU output."""
-        import torch
+        from iron.operators.softmax.reference import reference
 
-        x2 = x.reshape(self.rows, self.cols).to(torch.float32)
-        return torch.softmax(x2, dim=-1).reshape(-1).to(torch.bfloat16)
+        return reference(x.reshape(self.rows, self.cols))

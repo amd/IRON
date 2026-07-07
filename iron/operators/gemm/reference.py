@@ -5,6 +5,20 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
+def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
+    """CPU reference GEMM ``C = A @ B`` from *stored* inputs (ground truth).
+
+    ``input_b`` is in the operator's storage layout: it is transposed back to
+    ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
+    transposed to ``(N, M)`` when ``c_col_maj`` is set.
+    """
+    B = input_b.T if b_col_maj else input_b
+    C = torch.matmul(input_a, B)
+    if c_col_maj:
+        C = C.T
+    return C
+
+
 def generate_golden_reference(
     M: int,
     K: int,
@@ -20,7 +34,6 @@ def generate_golden_reference(
     dtype_torch = torch_dtype_map[dtype]
     input_a = torch.randn(M, K, dtype=dtype_torch) * val_range
     input_b_full = torch.rand(K, N, dtype=dtype_torch) * val_range
-    output_full = torch.matmul(input_a, input_b_full)
     if False:
         # The following inputs are useful for debugging;
         # the A matrix becomes a matrix where each element encodes its row and column index,
@@ -33,10 +46,11 @@ def generate_golden_reference(
         input_b_full = torch.zeros(K, N, dtype=dtype_torch)
         diag_dim = min(K, N)
         input_b_full[:diag_dim, :diag_dim] = torch.eye(diag_dim, dtype=dtype_torch)
+    # Store B in the operator's expected layout, then compute the output via the
+    # shared reference so the test golden and the operator reference agree.
     if b_col_maj:
         input_b_full = input_b_full.T
-    if c_col_maj:
-        output_full = output_full.T
+    output_full = reference(input_a, input_b_full, b_col_maj, c_col_maj)
 
     # Create partitioned buffers for B
     input_b = []

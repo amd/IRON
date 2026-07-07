@@ -32,7 +32,7 @@ from . import (
 # ##########################################################################
 
 
-class FusedMLIRSource(CompilationArtifact):
+class SequenceMLIRSource(CompilationArtifact):
     def __init__(
         self,
         filename: str,
@@ -90,7 +90,7 @@ def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
     return callback_function(*gen.args, **gen.kwargs)
 
 
-def fuse_mlir(artifact: FusedMLIRSource) -> None:
+def fuse_mlir(artifact: SequenceMLIRSource) -> None:
     """Fuse multiple MLIR modules by inlining their device operations and adding a new main device and runtime sequence that call into sequence of operations based on a runlist."""
 
     input_buffer_size, output_buffer_size, scratch_buffer_size = artifact.buffer_sizes
@@ -241,11 +241,11 @@ class FusePythonGeneratedMLIRCompilationRule(CompilationRule):
     """Compilation rule that fuses multiple MLIR modules into one."""
 
     def matches(self, graph: CompilationArtifactGraph) -> bool:
-        return any(graph.get_worklist(FusedMLIRSource))
+        return any(graph.get_worklist(SequenceMLIRSource))
 
     def compile(self, graph: CompilationArtifactGraph) -> list[CompilationCommand]:
         commands: list[CompilationCommand] = []
-        worklist = graph.get_worklist(FusedMLIRSource)
+        worklist = graph.get_worklist(SequenceMLIRSource)
         for artifact in worklist:
             callback = partial(fuse_mlir, artifact)
             commands.append(PythonCallbackCompilationCommand(callback))

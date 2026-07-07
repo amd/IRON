@@ -27,7 +27,7 @@ from iron.common.context import AIEContext
 from iron.common.utils import XRTSubBuffer
 from iron.common.fusion import (
     OperatorSequence,
-    FusedFullELFCallable,
+    SequenceFullELFCallable,
     load_elf,
     patch_elf,
 )
@@ -640,7 +640,7 @@ class AIELlamaOperators:
         )
         assert len(self.decode.softmax_patch_offsets) == config.n_layers + 1
 
-        self.decode.fused = FusedFullELFCallable(
+        self.decode.fused = SequenceFullELFCallable(
             self.decode.fused_op, elf_data=self.decode.fused_elf_data
         )
 
@@ -1264,7 +1264,7 @@ def llama_forward_pass_decode(config, state):
 
     # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
     aie_ops.decode.fused.input_buffer.to("cpu")
-    aie_ops.decode.fused()  # FusedFullELFCallable.__call__() syncs output_buffer to cpu
+    aie_ops.decode.fused()  # SequenceFullELFCallable.__call__() syncs output_buffer to cpu
     logits = (
         aie_ops.decode.fused.get_buffer("logits")
         .to_torch()

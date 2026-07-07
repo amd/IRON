@@ -98,12 +98,12 @@ class OperatorSequence(AIEOperatorBase):
         """Build and return the fused MLIR source artifact.
 
         Constructs the operator MLIR map and run-list, then wraps them in a
-        ``FusedMLIRSource`` artifact.  Buffer layout attributes
+        ``SequenceMLIRSource`` artifact.  Buffer layout attributes
         (``subbuffer_layout``, ``buffer_sizes``, ``slice_info``) must already
         be set by ``set_up_artifacts()`` before this method is called.
 
         Returns:
-            A ``FusedMLIRSource`` artifact ready for compilation.
+            A ``SequenceMLIRSource`` artifact ready for compilation.
         """
         # Build operator_mlir_map: {op_name -> PythonGeneratedMLIRArtifact}
         operator_mlir_map = {}
@@ -128,7 +128,7 @@ class OperatorSequence(AIEOperatorBase):
             comp_runlist.append((op_names[id(op)], *bufs))
 
         filename = self.name + "_fused.mlir"
-        fused_artifact = comp.FusedMLIRSource(
+        fused_artifact = comp.SequenceMLIRSource(
             filename,
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,
@@ -349,16 +349,16 @@ class OperatorSequence(AIEOperatorBase):
         """Return a callable that executes the fused operator on the NPU.
 
         Returns:
-            A ``FusedFullELFCallable`` when using fused dispatch, or a
-            ``FusedXclbinCallable`` when using separate dispatch.
+            A ``SequenceFullELFCallable`` when using fused dispatch, or a
+            ``SequenceXclbinCallable`` when using separate dispatch.
         """
         if self._mode == "fused":
-            return FusedFullELFCallable(self)
+            return SequenceFullELFCallable(self)
         if self._mode == "reference":
-            return FusedReferenceCallable(self)
+            return SequenceReferenceCallable(self)
         if self._mode == "compare":
-            return FusedCompareCallable(self)
-        return FusedXclbinCallable(self)
+            return SequenceCompareCallable(self)
+        return SequenceXclbinCallable(self)
 
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
@@ -436,7 +436,7 @@ class FullELFCallable:
         )
 
 
-class FusedFullELFCallable(FullELFCallable):
+class SequenceFullELFCallable(FullELFCallable):
     def __init__(self, op, elf_data=None):
         if elf_data is None:
             elf_data = load_elf(op)
@@ -489,12 +489,19 @@ class FusedFullELFCallable(FullELFCallable):
             size_bytes=length,
             shape=(length // itemsize,),
             dtype=ml_dtypes.bfloat16,
+            parent=main_buffer,
         )
 
         self._buffer_cache[buffer_name] = sub_buffer
         return sub_buffer
 
     def __call__(self):
+        # Sub-views handed out by get_buffer() propagate their device state to
+        # these consolidated parents, so a caller that writes a sub-view via
+        # torch_view() and then calls .to("npu") on it leaves the parent marked
+        # host-dirty; the parent syncs to the device here. The kernel writes its
+        # results into the device-side output buffer, which is synced back to
+        # the host afterwards.
         self.input_buffer.to("npu")
         super().__call__(
             self.input_buffer.buffer_object(),
@@ -504,7 +511,7 @@ class FusedFullELFCallable(FullELFCallable):
         self.output_buffer.to("cpu")
 
 
-class FusedXclbinCallable:
+class SequenceXclbinCallable:
     """Callable for OperatorSequence on NPU1 (Phoenix) using chained xclbins.
 
     Instead of a single ELF dispatch, each step in the runlist is executed as a
@@ -551,11 +558,11 @@ class FusedXclbinCallable:
                 args.append(self._resolve_buffer(buf_name))
             self._execution_plan.append((kernel, args))
 
-        # Cache for get_buffer() sub-buffer views (compatible with FusedFullELFCallable API)
+        # Cache for get_buffer() sub-buffer views (compatible with SequenceFullELFCallable API)
         self._buffer_cache = {}
 
         # Expose input/output/scratch buffers for API compatibility with
-        # FusedFullELFCallable (used by tests for .to("cpu") etc.)
+        # SequenceFullELFCallable (used by tests for .to("cpu") etc.)
         input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
         self.input_buffer = XRTTensor(
             (max(input_buffer_size, itemsize) // itemsize,),
@@ -602,7 +609,7 @@ class FusedXclbinCallable:
     def get_buffer(self, buffer_name):
         """Return an XRTTensor(-like) view for a named buffer.
 
-        Compatible with the ``FusedFullELFCallable.get_buffer()`` API so that
+        Compatible with the ``SequenceFullELFCallable.get_buffer()`` API so that
         test helpers (``_load_input``, ``_get_output_tensor``, etc.) work
         unchanged.
 
@@ -687,7 +694,7 @@ def _call_reference(step_op, inputs):
         return None
 
 
-class FusedReferenceCallable:
+class SequenceReferenceCallable:
     """Pure-CPU evaluation of a fused operator runlist.
 
     No NPU compilation or dispatch occurs.  Each runlist step calls
@@ -707,7 +714,7 @@ class FusedReferenceCallable:
             n = max(length, itemsize) // itemsize
             self._buffers[buf_name] = _CPUBuffer(n)
 
-        # API parity with FusedFullELFCallable / FusedXclbinCallable
+        # API parity with SequenceFullELFCallable / SequenceXclbinCallable
         input_buffer_size, output_buffer_size, scratch_buffer_size = op.buffer_sizes
         self.input_buffer = _CPUBuffer(max(input_buffer_size, itemsize) // itemsize)
         self.output_buffer = _CPUBuffer(max(output_buffer_size, itemsize) // itemsize)
@@ -767,7 +774,7 @@ class FusedReferenceCallable:
         self.last_elapsed = time.perf_counter() - t0
 
 
-class FusedCompareCallable(FusedXclbinCallable):
+class SequenceCompareCallable(SequenceXclbinCallable):
     """Run the separate-xclbin NPU pipeline and, after each step, run the
     operator's CPU reference on the same (NPU-produced) inputs.
 

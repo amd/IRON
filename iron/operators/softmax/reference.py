@@ -7,6 +7,11 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
+def reference(x):
+    """CPU reference: row-wise softmax over the last dim (ground truth)."""
+    return torch.softmax(x, dim=-1)
+
+
 def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
     """
     Generate golden reference data for softmax.
@@ -17,5 +22,5 @@ def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
     torch.manual_seed(seed)
     val_range = 4
     input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    output_tensor = torch.softmax(input_tensor, dim=-1)
+    output_tensor = reference(input_tensor)
     return {"input": input_tensor, "output": output_tensor}

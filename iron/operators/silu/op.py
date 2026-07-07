@@ -19,7 +19,6 @@ class SiLU(ChanneledUnaryOperator):
     needs_lut_ops: ClassVar[bool] = True
 
     def reference(self, x):
-        import torch
+        from iron.operators.silu.reference import reference
 
-        x32 = x.to(torch.float32)
-        return (x32 * torch.sigmoid(x32)).to(torch.bfloat16)
+        return reference(x)
