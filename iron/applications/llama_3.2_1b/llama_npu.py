@@ -26,7 +26,7 @@ sys.path.insert(0, str(repo_root))
 from iron.common.context import AIEContext
 from iron.common.utils import XRTSubBuffer
 from iron.common.fusion import (
-    FusedMLIROperator,
+    OperatorSequence,
     FusedFullELFCallable,
     load_elf,
     patch_elf,
@@ -562,7 +562,7 @@ class AIELlamaOperators:
             (gemv_out_head_op, "W_out_head", "x", "logits"),
         ]
 
-        self.decode.fused_op = FusedMLIROperator(
+        self.decode.fused_op = OperatorSequence(
             "fused_op",
             runlist,
             input_args=[  # arguments that change between invocations of the fused kernel and therefore need to be synced on each token

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ##########################################################################
 
 
-class FusedMLIROperator(AIEOperatorBase):
+class OperatorSequence(AIEOperatorBase):
     """Operator that fuses multiple MLIROperators into one.
 
     Args:
@@ -341,7 +341,7 @@ class FusedMLIROperator(AIEOperatorBase):
 
     def get_arg_spec(self):
         raise NotImplementedError(
-            "FusedMLIROperator does not expose a unified arg spec; "
+            "OperatorSequence does not expose a unified arg spec; "
             "use get_layout_for_buffer() to inspect individual buffer layouts"
         )
 
@@ -505,7 +505,7 @@ class FusedFullELFCallable(FullELFCallable):
 
 
 class FusedXclbinCallable:
-    """Callable for FusedMLIROperator on NPU1 (Phoenix) using chained xclbins.
+    """Callable for OperatorSequence on NPU1 (Phoenix) using chained xclbins.
 
     Instead of a single ELF dispatch, each step in the runlist is executed as a
     separate ``NPUKernel`` invocation.  Buffers are shared (same ``XRTTensor``)

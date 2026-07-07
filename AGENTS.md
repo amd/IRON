@@ -140,7 +140,7 @@ reuse lint
 3. **Common Infrastructure** (`iron/common/`)
    - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`, `CompositeOperator`)
    - `compilation/`: Compilation artifact system (MLIR → xclbin)
-   - `fusion.py`: Operator fusion framework (`FusedMLIROperator`)
+   - `fusion.py`: Operator sequencing framework (`OperatorSequence`)
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
@@ -260,22 +260,28 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - Use `verify_buffer()` from `iron.common.test_utils`
 7. Register operator in `iron/operators/__init__.py`
 
-## Operator Fusion
+## Operator Sequences
 
-IRON supports fusing multiple operators into a single ELF file. This improves performance enabling a single runtime dispatch for a chain of operators. This works only with the "full ELF" flow, which uses ELF files at runtime. The ELF files take the place of `xclbin`s:
+IRON supports chaining multiple operators into a single ELF file, so they run
+back-to-back within a single dispatch. This is *temporal* sequencing (distinct
+kernels executed one after another, with the NPU command processor
+reconfiguring the array between steps) rather than *operator fusion* (a single
+kernel computing multiple operations at once). This works only with the "full
+ELF" flow, which uses ELF files at runtime. The ELF files take the place of
+`xclbin`s:
 
 ```python
-from iron.common.fusion import FusedMLIROperator
+from iron.common.fusion import OperatorSequence
 
 # Define individual operators
 gemm1 = AIEGEMM(...)
 relu = AIERELU(...)
 gemm2 = AIEGEMM(...)
 
-# Create fused operator with runlist
+# Create an operator sequence with a runlist
 # Intermediate buffers are automatically managed
-fused_op = FusedMLIROperator(
-    name="fused_gemm_relu_gemm",
+seq_op = OperatorSequence(
+    name="gemm_relu_gemm_seq",
     runlist=[
         (gemm1, "in", "temp1"),      # (operator, input_buffers, output_buffers)
         (relu, "temp1", "temp2"),
@@ -287,10 +293,10 @@ fused_op = FusedMLIROperator(
 )
 ```
 
-Benefits of fusion:
+Benefits of operator sequences:
 
 - Reduces host ↔ NPU data transfers
-- Runs a chain of operators using a single host-side dispatch (one CPU/host interrupt after fusion vs. one interrupt per operator without fusion)
+- Runs a chain of operators using a single host-side dispatch (one CPU/host interrupt for the whole sequence vs. one interrupt per operator otherwise)
 
 ## Common Patterns
 
