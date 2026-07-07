@@ -14,3 +14,8 @@ class ReLU(ChanneledUnaryOperator):
     kernel_name: ClassVar[str] = "relu"
     kernel_fn_name: ClassVar[str] = "relu_bf16"
     callback_fn: ClassVar[str] = "my_relu"
+
+    def reference(self, x):
+        from iron.operators.relu.reference import reference
+
+        return reference(x)

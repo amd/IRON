@@ -5,6 +5,10 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
+def reference(x):
+    return torch.nn.functional.relu(x)
+
+
 def generate_golden_reference(input_length: int, dtype="bf16", seed=42):
     torch.manual_seed(seed)
     val_range = 4

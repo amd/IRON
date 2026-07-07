@@ -599,17 +599,6 @@ def _reshape_for_spec(flat_tensor, spec):
     return flat_tensor[:n].reshape(spec.shape)
 
 
-def _call_reference(step_op, inputs):
-    """Return ``step_op.reference(*inputs)``, or ``None`` if unavailable."""
-    ref_fn = getattr(step_op, "reference", None)
-    if ref_fn is None:
-        return None
-    try:
-        return ref_fn(*inputs)
-    except NotImplementedError:
-        return None
-
-
 class SequenceReferenceCallable(_PerBufferCallable):
     """Pure-CPU evaluation via each operator's ``reference()``; no NPU dispatch.
     Device syncs are no-ops on the CPU buffers.
@@ -631,12 +620,7 @@ class SequenceReferenceCallable(_PerBufferCallable):
                 _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
                 for n, s in zip(in_names, in_specs)
             ]
-            out = _call_reference(step_op, inputs)
-            if out is None:
-                raise NotImplementedError(
-                    f"Operator {type(step_op).__name__} has no reference "
-                    f"implementation; cannot use dispatch='reference'"
-                )
+            out = step_op.reference(*inputs)
             out_flat = self._resolve_buffer(out_name).torch_view()
             n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
             out_flat[:n_out].copy_(out.reshape(-1).to(torch.bfloat16))
@@ -675,7 +659,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             kernel(*args)
 
             npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
-            ref_out = _call_reference(step_op, cpu_inputs)
+            ref_out = step_op.reference(*cpu_inputs)
 
             stats = {
                 "step": step_idx,
@@ -708,6 +692,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
                     ref_max=ref_max,
                 )
                 fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+                stats["mismatch"] = fail
                 level = logging.WARNING if fail else logging.INFO
                 logger.log(
                     level,

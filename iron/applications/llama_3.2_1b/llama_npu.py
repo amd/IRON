@@ -25,7 +25,7 @@ sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
 from iron.common.utils import XRTSubBuffer
-from iron.common.fusion import (
+from iron.common.sequence import (
     OperatorSequence,
     SequenceFullELFCallable,
     load_elf,

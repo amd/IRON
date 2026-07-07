@@ -6,8 +6,8 @@
 
 This is the first test module under ``iron/tests/`` and exercises the
 sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
-generation, cross-mode output parity and the pure-reference path) rather than
-any single operator.
+generation, cross-mode output parity and the compare-mode self-check) rather
+than any single operator.
 
 The ``OperatorSequence`` dispatch modes covered here are:
 
@@ -28,12 +28,11 @@ import torch
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
-from iron.common.fusion import OperatorSequence
-from iron.common.compilation.fusion import fuse_mlir
+from iron.common.sequence import OperatorSequence
+from iron.common.compilation.sequence import fuse_mlir
 from iron.common.test_utils import verify_buffer
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
-from iron.operators.gemv.op import GEMV
 
 
 def _is_npu2():
@@ -170,49 +169,20 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
 # 3. Every NPU dispatch mode produces bit-identical output.
 # ---------------------------------------------------------------------------
 
-_PARITY_M = 128
-_PARITY_K = 128
-
-
-def _run_gemv_relu(context, dispatch, mat, vec, name):
-    """out = relu(mat @ vec), returned as a host bf16 tensor."""
-    gemv = GEMV(
-        M=_PARITY_M,
-        K=_PARITY_K,
-        num_aie_columns=1,
-        tile_size_input=32,
-        tile_size_output=128,
-        context=context,
-    )
-    relu = ReLU(
-        size=_PARITY_M,
-        num_aie_columns=1,
-        num_channels=1,
-        tile_size=128,
-        context=context,
-    )
-    seq = OperatorSequence(
-        name=name,
-        runlist=[
-            (gemv, "mat", "vec", "hidden"),
-            (relu, "hidden", "out"),
-        ],
-        input_args=["mat", "vec"],
-        output_args=["out"],
-        dispatch=dispatch,
-        context=context,
-    )
+def _run_add_relu(context, dispatch, a, b, name):
+    """out = relu(a + b), returned as a host bf16 tensor."""
+    seq = _build_add_relu_sequence(context, dispatch, name)
     seq.compile()
     run = seq.get_callable()
-    _set_input(run, "mat", mat)
-    _set_input(run, "vec", vec)
+    _set_input(run, "a", a)
+    _set_input(run, "b", b)
     run()
-    return run.get_buffer("out").torch_view()[:_PARITY_M].clone()
+    return run.get_buffer("out").torch_view()[:_ADD_RELU_SIZE].clone()
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
 def test_dispatch_modes_bit_identical(dispatch, aie_context):
-    """GEMV -> ReLU must yield byte-for-byte identical output across every NPU
+    """add -> relu must yield byte-for-byte identical output across every NPU
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform)."""
@@ -220,13 +190,15 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
         pytest.skip("fused (single-ELF) dispatch requires NPU2")
 
     torch.manual_seed(0)
-    mat = torch.rand(_PARITY_M, _PARITY_K, dtype=torch.bfloat16)
-    vec = torch.rand(_PARITY_K, dtype=torch.bfloat16)
+    a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
 
-    baseline = _run_gemv_relu(
-        aie_context, "separate", mat, vec, "infra_parity_separate"
+    baseline = _run_add_relu(
+        aie_context, "separate", a, b, "infra_addrelu_parity_separate"
     )
-    out = _run_gemv_relu(aie_context, dispatch, mat, vec, f"infra_parity_{dispatch}")
+    out = _run_add_relu(
+        aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}"
+    )
 
     assert torch.equal(out, baseline), (
         f"dispatch={dispatch!r} output is not bit-identical to the separate "
@@ -235,63 +207,53 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 
 
 # ---------------------------------------------------------------------------
-# 4. Reference mode runs each operator's CPU reference; a wrong reference is
-#    detectable, a correct one is not.
+# 4. Compare mode flags a per-step reference/NPU mismatch on its own.
+#
+#    Normally the reference is trusted and the NPU kernel is the suspect; here
+#    we invert that (keep the NPU correct, vary the reference) because it is
+#    easier to inject a known-wrong reference than a known-wrong kernel.
 # ---------------------------------------------------------------------------
 
 
-class _CorrectAdd(ElementwiseAdd):
-    """ElementwiseAdd whose reference matches ground truth (a + b)."""
-
-    def reference(self, a, b):
-        return a + b
-
-
-class _WrongAdd(ElementwiseAdd):
-    """ElementwiseAdd whose reference is deliberately wrong (a + b + 1)."""
-
-    def reference(self, a, b):
-        return a + b + 1.0
-
-
-@pytest.mark.parametrize(
-    "op_cls,reference_is_correct",
-    [(_CorrectAdd, True), (_WrongAdd, False)],
-)
-def test_reference_mode_detects_wrong_reference(
-    op_cls, reference_is_correct, aie_context
-):
-    """dispatch="reference" evaluates the sequence purely on the CPU using each
-    operator's ``reference()``. Comparing that output to independent ground
-    truth must pass for a correct reference and fail (trigger) for a wrong
-    one."""
+@pytest.mark.parametrize("reference_is_correct", [True, False])
+def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context):
+    """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
+    operator's ``reference()`` on the same NPU inputs, flagging deviations in
+    ``last_step_stats``. A correct reference must produce no flagged step; a
+    wrong one must be flagged by compare mode itself (no external check)."""
     size = 256
     torch.manual_seed(0)
     a = torch.rand(size, dtype=torch.bfloat16)
     b = torch.rand(size, dtype=torch.bfloat16)
 
-    op = op_cls(size=size, tile_size=256, num_aie_columns=1, context=aie_context)
+    op = ElementwiseAdd(
+        size=size, tile_size=256, num_aie_columns=1, context=aie_context
+    )
+    if not reference_is_correct:
+        # Override the reference on this instance to disagree with the NPU
+        # kernel (which computes a + b). Keeping the real ElementwiseAdd class
+        # leaves its name/compilation intact for the xclbin compare path.
+        op.reference = lambda a, b: a + b + 1.0
+
     seq = OperatorSequence(
-        name=f"infra_ref_{op_cls.__name__}",
+        name="infra_compare_add",
         runlist=[(op, "a", "b", "out")],
         input_args=["a", "b"],
         output_args=["out"],
-        dispatch="reference",
+        dispatch="compare",
         context=aie_context,
     )
     seq.compile()
-    assert seq._mode == "reference"
+    assert seq._mode == "compare"
 
     run = seq.get_callable()
-    run.get_buffer("a").torch_view()[:size] = a
-    run.get_buffer("b").torch_view()[:size] = b
+    _set_input(run, "a", a)
+    _set_input(run, "b", b)
     run()
-    out = run.get_buffer("out").torch_view()[:size].clone()
 
-    ground_truth = a + b
-    errors = verify_buffer(out, "out", ground_truth, rel_tol=0.04, abs_tol=1e-6)
+    flagged = any(step.get("mismatch") for step in run.last_step_stats)
 
     if reference_is_correct:
-        assert not errors, "correct reference should match ground truth"
+        assert not flagged, "compare mode should not flag a matching reference"
     else:
-        assert errors, "wrong reference should be detected by the comparison"
+        assert flagged, "compare mode should flag the wrong reference on its own"

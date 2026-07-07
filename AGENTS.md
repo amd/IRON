@@ -271,7 +271,7 @@ ELF" flow, which uses ELF files at runtime. The ELF files take the place of
 `xclbin`s:
 
 ```python
-from iron.common.fusion import OperatorSequence
+from iron.common.sequence import OperatorSequence
 
 # Define individual operators
 gemm1 = AIEGEMM(...)
