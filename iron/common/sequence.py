@@ -11,7 +11,7 @@ import ctypes
 import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
-from .utils import XRTSubBuffer
+from .utils import XRTSubBuffer, CPUBuffer
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -19,7 +19,9 @@ from aie.utils.npukernel import NPUKernel
 
 logger = logging.getLogger(__name__)
 
-# Fused Operator
+
+# ##########################################################################
+# Compileable: operator sequence
 # ##########################################################################
 
 
@@ -337,6 +339,11 @@ class OperatorSequence(AIEOperatorBase):
         return buf_type, offset, length
 
 
+# ##########################################################################
+# Module helpers
+# ##########################################################################
+
+
 def load_elf(op):
     assert isinstance(op.artifacts[0], comp.FullElfArtifact)
     with open(op.artifacts[0].filename, "rb") as f:
@@ -357,6 +364,11 @@ BF16 = np.dtype(ml_dtypes.bfloat16)
 
 def _n_elements(nbytes):
     return max(nbytes, BF16.itemsize) // BF16.itemsize
+
+
+# ##########################################################################
+# Runtime callables
+# ##########################################################################
 
 
 class SequenceCallable:
@@ -408,6 +420,81 @@ class SequenceCallable:
         self._run()
         self.last_elapsed = time.perf_counter() - t0
         self._sync_outputs()
+
+
+class SequenceFullELFCallable(SequenceCallable):
+    """Single-ELF dispatch (NPU2): every operator shares three consolidated
+    input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
+    sub-view into whichever consolidated buffer holds the named argument.
+    """
+
+    def __init__(self, op, elf_data=None, device_name="main", sequence_name="sequence"):
+        self.device_name = device_name
+        self.sequence_name = sequence_name
+        self.reload_elf(elf_data if elf_data is not None else load_elf(op))
+        super().__init__(op)
+
+    def reload_elf(self, elf_data):
+        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
+        elf_data_u8 = elf_data.view(dtype=np.uint8)
+        ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
+        ctypes.pythonapi.PyCapsule_New.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+        ]
+        capsule = ctypes.pythonapi.PyCapsule_New(elf_data_u8.ctypes.data, None, None)
+        xrt_elf = pyxrt.elf(capsule, elf_data.nbytes)
+        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
+        self.xrt_kernel = pyxrt.ext.kernel(
+            xrt_context, f"{self.device_name}:{self.sequence_name}"
+        )
+
+    def _allocate_buffers(self):
+        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
+        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
+        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
+        self.scratch_buffer = XRTTensor(
+            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
+        )
+
+    def get_buffer(self, buffer_name):
+        if buffer_name in self._buffer_cache:
+            return self._buffer_cache[buffer_name]
+        buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+        parent = {
+            "input": self.input_buffer,
+            "output": self.output_buffer,
+            "scratch": self.scratch_buffer,
+        }[buf_type]
+        sub = XRTSubBuffer(
+            parent_bo=parent.buffer_object(),
+            offset_bytes=offset,
+            size_bytes=length,
+            shape=(length // BF16.itemsize,),
+            dtype=ml_dtypes.bfloat16,
+            parent=parent,
+        )
+        self._buffer_cache[buffer_name] = sub
+        return sub
+
+    def _sync_inputs(self):
+        # Sub-views handed out by get_buffer() propagate their host-dirty state
+        # to this parent, so the parent syncs to the device here.
+        self.input_buffer.to("npu")
+
+    def _sync_outputs(self):
+        self.output_buffer.to("cpu")
+
+    def _run(self):
+        run = pyxrt.run(self.xrt_kernel)
+        run.set_arg(0, self.input_buffer.buffer_object())
+        run.set_arg(1, self.output_buffer.buffer_object())
+        run.set_arg(2, self.scratch_buffer.buffer_object())
+        run.start()
+        ret_code = run.wait()
+        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
+            raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
 
 
 class _PerBufferCallable(SequenceCallable):
@@ -496,103 +583,6 @@ class SequenceXclbinCallable(_PerBufferCallable):
             kernel(*args)
 
 
-class SequenceFullELFCallable(SequenceCallable):
-    """Single-ELF dispatch (NPU2): every operator shares three consolidated
-    input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
-    sub-view into whichever consolidated buffer holds the named argument.
-    """
-
-    def __init__(self, op, elf_data=None, device_name="main", sequence_name="sequence"):
-        self.device_name = device_name
-        self.sequence_name = sequence_name
-        self.reload_elf(elf_data if elf_data is not None else load_elf(op))
-        super().__init__(op)
-
-    def reload_elf(self, elf_data):
-        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
-        elf_data_u8 = elf_data.view(dtype=np.uint8)
-        ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
-        ctypes.pythonapi.PyCapsule_New.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.c_void_p,
-        ]
-        capsule = ctypes.pythonapi.PyCapsule_New(elf_data_u8.ctypes.data, None, None)
-        xrt_elf = pyxrt.elf(capsule, elf_data.nbytes)
-        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
-        self.xrt_kernel = pyxrt.ext.kernel(
-            xrt_context, f"{self.device_name}:{self.sequence_name}"
-        )
-
-    def _allocate_buffers(self):
-        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
-        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
-        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
-        self.scratch_buffer = XRTTensor(
-            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
-        )
-
-    def get_buffer(self, buffer_name):
-        if buffer_name in self._buffer_cache:
-            return self._buffer_cache[buffer_name]
-        buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-        parent = {
-            "input": self.input_buffer,
-            "output": self.output_buffer,
-            "scratch": self.scratch_buffer,
-        }[buf_type]
-        sub = XRTSubBuffer(
-            parent_bo=parent.buffer_object(),
-            offset_bytes=offset,
-            size_bytes=length,
-            shape=(length // BF16.itemsize,),
-            dtype=ml_dtypes.bfloat16,
-            parent=parent,
-        )
-        self._buffer_cache[buffer_name] = sub
-        return sub
-
-    def _sync_inputs(self):
-        # Sub-views handed out by get_buffer() propagate their host-dirty state
-        # to this parent, so the parent syncs to the device here.
-        self.input_buffer.to("npu")
-
-    def _sync_outputs(self):
-        self.output_buffer.to("cpu")
-
-    def _run(self):
-        run = pyxrt.run(self.xrt_kernel)
-        run.set_arg(0, self.input_buffer.buffer_object())
-        run.set_arg(1, self.output_buffer.buffer_object())
-        run.set_arg(2, self.scratch_buffer.buffer_object())
-        run.start()
-        ret_code = run.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
-
-
-class _CPUBuffer:
-    """Minimal host-side stand-in for ``XRTTensor``: a flat 1D ``torch.bfloat16``
-    tensor with no-op device syncs.
-    """
-
-    def __init__(self, n_elements):
-        self._t = torch.zeros(n_elements, dtype=torch.bfloat16)
-
-    def torch_view(self):
-        return self._t
-
-    def to(self, *_args, **_kwargs):
-        return self
-
-    def fill_(self, value):
-        self._t.fill_(value)
-        return self
-
-    def buffer_object(self):
-        return None
-
-
 def _reshape_for_spec(flat_tensor, spec):
     """Slice a flat host buffer to ``spec``'s element count and reshape (a view)."""
     n = int(np.prod(spec.shape)) if spec.shape else 1
@@ -605,12 +595,12 @@ class SequenceReferenceCallable(_PerBufferCallable):
     """
 
     def _make_buffer(self, n_elements):
-        return _CPUBuffer(n_elements)
+        return CPUBuffer(n_elements)
 
     def _make_subbuffer(self, parent, offset_bytes, size_bytes):
         start = offset_bytes // BF16.itemsize
         end = (offset_bytes + size_bytes) // BF16.itemsize
-        view = _CPUBuffer.__new__(_CPUBuffer)
+        view = CPUBuffer.__new__(CPUBuffer)
         view._t = parent.torch_view()[start:end]
         return view
 
@@ -668,42 +658,34 @@ class SequenceCompareCallable(SequenceXclbinCallable):
                 "inputs": list(in_names),
                 "output": out_name,
             }
-            if ref_out is None:
-                stats["skipped"] = True
-                logger.info(
-                    "[compare step %d] %s -> %s: no reference (skipped)",
-                    step_idx,
-                    stats["op"],
-                    out_name,
-                )
-            else:
-                ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
-                diff = (npu_out - ref_flat).abs()
-                ref_mag = ref_flat.abs()
-                max_abs = float(diff.max())
-                ref_max = float(ref_mag.max())
-                rel = float((diff / (ref_mag + 1e-6)).max())
-                mean_abs = float(diff.mean())
-                stats.update(
-                    skipped=False,
-                    max_abs=max_abs,
-                    mean_abs=mean_abs,
-                    max_rel=rel,
-                    ref_max=ref_max,
-                )
-                fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
-                stats["mismatch"] = fail
-                level = logging.WARNING if fail else logging.INFO
-                logger.log(
-                    level,
-                    "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
-                    step_idx,
-                    stats["op"],
-                    out_name,
-                    max_abs,
-                    mean_abs,
-                    rel,
-                    ref_max,
-                    "  MISMATCH" if fail else "",
-                )
+
+            ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
+            diff = (npu_out - ref_flat).abs()
+            ref_mag = ref_flat.abs()
+            max_abs = float(diff.max())
+            ref_max = float(ref_mag.max())
+            rel = float((diff / (ref_mag + 1e-6)).max())
+            mean_abs = float(diff.mean())
+            stats.update(
+                skipped=False,
+                max_abs=max_abs,
+                mean_abs=mean_abs,
+                max_rel=rel,
+                ref_max=ref_max,
+            )
+            fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+            stats["mismatch"] = fail
+            level = logging.WARNING if fail else logging.INFO
+            logger.log(
+                level,
+                "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
+                step_idx,
+                stats["op"],
+                out_name,
+                max_abs,
+                mean_abs,
+                rel,
+                ref_max,
+                "  MISMATCH" if fail else "",
+            )
             self.last_step_stats.append(stats)
