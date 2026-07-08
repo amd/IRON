@@ -107,9 +107,9 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
     seq.compile()
 
     expected_mode = "fused" if _is_npu2() else "separate"
-    assert seq._mode == expected_mode, (
-        f"auto dispatch resolved to {seq._mode!r}, expected {expected_mode!r} "
-        f"on this device"
+    assert seq._dispatch.name == expected_mode, (
+        f"auto dispatch resolved to {seq._dispatch.name!r}, expected "
+        f"{expected_mode!r} on this device"
     )
 
     run = seq.get_callable()
@@ -143,9 +143,9 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what set_up_artifacts() feeds to the compiler.
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq._calculate_buffer_layout()
+        seq.calculate_buffer_layout()
     )
-    mlir_artifact = seq.get_mlir_artifact()
+    mlir_artifact = seq._dispatch.build_fused_mlir(seq)
     mlir_artifact.filename = str(tmp_path / mlir_artifact.filename)
     fuse_mlir(mlir_artifact)
 
@@ -244,7 +244,7 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
         context=aie_context,
     )
     seq.compile()
-    assert seq._mode == "compare"
+    assert seq._dispatch.name == "compare"
 
     run = seq.get_callable()
     _set_input(run, "a", a)

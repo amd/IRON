@@ -21,16 +21,226 @@ logger = logging.getLogger(__name__)
 
 
 # ##########################################################################
+# Dispatch policies
+# ##########################################################################
+
+
+class SequenceDispatch:
+    """Policy object that decides how an :class:`OperatorSequence` is compiled
+    and how its runtime callable is built.
+
+    One concrete policy corresponds to one dispatch mode. The three hooks are:
+
+    * ``resolve(device)`` -- the only device-aware step; expands ``"auto"`` to
+      a concrete policy and validates device requirements. Called once, at
+      ``set_up_artifacts()`` time (the device is not known at construction).
+    * ``set_up_artifacts(seq)`` -- registers the compile artifacts for this
+      mode on the owning sequence.
+    * ``make_callable(seq)`` -- returns the runtime callable for this mode.
+    """
+
+    name = None
+
+    def resolve(self, device):
+        """Return the concrete policy for ``device`` (default: unchanged)."""
+        return self
+
+    def set_up_artifacts(self, seq):
+        """Register the compile artifacts needed by this mode on ``seq``."""
+        raise NotImplementedError
+
+    def make_callable(self, seq):
+        """Return the runtime callable for this mode."""
+        raise NotImplementedError
+
+
+class AutoDispatch(SequenceDispatch):
+    """Selects the platform default: full-ELF on NPU2, chained-xclbin elsewhere."""
+
+    name = "auto"
+
+    def resolve(self, device):
+        if isinstance(device, NPU2):
+            return FusedDispatch()
+        return SeparateDispatch()
+
+
+class FusedDispatch(SequenceDispatch):
+    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
+
+    name = "fused"
+
+    def resolve(self, device):
+        if not isinstance(device, NPU2):
+            raise RuntimeError(
+                "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
+            )
+        return self
+
+    def set_up_artifacts(self, seq):
+        mlir_artifact = self.build_fused_mlir(seq)
+        kernel_objects = self._collect_kernel_artifacts(seq)
+        full_elf_artifact = comp.FullElfArtifact(
+            f"{seq.name}.elf",
+            mlir_input=mlir_artifact,
+            dependencies=[mlir_artifact] + kernel_objects,
+        )
+        seq.add_artifacts([full_elf_artifact])
+
+    def build_fused_mlir(self, seq):
+        """Build the fused MLIR source that inlines every operator into a single
+        module.
+
+        ``seq``'s buffer-layout attributes (``subbuffer_layout``,
+        ``buffer_sizes``, ``slice_info``) must already be set.
+        """
+        operator_mlir_map = {}
+        comp_runlist = []
+        op_names = {}  # id(op) -> op_name
+
+        for idx, op in enumerate(seq.unique_operators()):
+            mlir_artifact = op.get_mlir_artifact()
+            if len(op.get_kernel_artifacts()) > 0:
+                mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
+            op_name = f"op{idx}_{op.__class__.__name__}"
+            op_names[id(op)] = op_name
+            operator_mlir_map[op_name] = mlir_artifact
+
+        for op, *bufs in seq.runlist:
+            comp_runlist.append((op_names[id(op)], *bufs))
+
+        return comp.SequenceMLIRSource(
+            seq.name + "_fused.mlir",
+            operator_mlir_map=operator_mlir_map,
+            runlist=comp_runlist,
+            subbuffer_layout=seq.subbuffer_layout,
+            buffer_sizes=seq.buffer_sizes,
+            slice_info=seq.slice_info,
+        )
+
+    def _collect_kernel_artifacts(self, seq):
+        """Kernel artifacts from all child operators, prefixed per operator index."""
+        kernel_artifacts = []
+        for idx, op in enumerate(seq.unique_operators()):
+            objs = op.get_kernel_artifacts()
+            for obj in objs:
+                obj.filename = f"op{idx}_{obj.filename}"
+                obj.prefix_symbols = f"op{idx}_"
+            kernel_artifacts.extend(objs)
+        return kernel_artifacts
+
+    def make_callable(self, seq):
+        return SequenceFullELFCallable(seq)
+
+
+class SeparateDispatch(SequenceDispatch):
+    """Chained-xclbin dispatch: one xclbin+insts per unique operator, linked
+    via ``--xclbin-input`` and invoked sequentially. Owns the compiled
+    per-operator xclbin/insts maps consumed by the runtime callable.
+    """
+
+    name = "separate"
+
+    def __init__(self):
+        self.combined_xclbin = None
+        self.op_xclbin_map = {}  # id(op) -> xclbin artifact
+        self.op_insts_map = {}  # id(op) -> insts artifact
+        self.op_kernel_name_map = {}  # id(op) -> kernel_name
+
+    def set_up_artifacts(self, seq):
+        # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
+        name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
+
+        artifacts = []
+        prev_xclbin = None
+        for idx, op in enumerate(seq.unique_operators()):
+            op_label = f"f{name_hash}_op{idx}"
+            kernel_id = f"0x{0x901 + idx:x}"
+
+            xclbin, insts = op.get_artifacts(prefix=f"{op_label}_")
+            # Copy so we don't mutate the (possibly aliased) shared flags list.
+            xclbin.extra_flags = list(xclbin.extra_flags) + [
+                f"--xclbin-instance-name={op_label}",
+                f"--xclbin-kernel-id={kernel_id}",
+            ]
+            xclbin.kernel_name = op_label
+
+            if prev_xclbin is not None:
+                xclbin.xclbin_input = prev_xclbin
+                xclbin.dependencies.add(prev_xclbin)
+
+            artifacts.append(insts)
+            self.op_xclbin_map[id(op)] = xclbin
+            self.op_insts_map[id(op)] = insts
+            self.op_kernel_name_map[id(op)] = op_label
+            prev_xclbin = xclbin
+
+        # The last xclbin in the chain carries all the linked instances.
+        artifacts.append(prev_xclbin)
+        self.combined_xclbin = prev_xclbin
+        seq.add_artifacts(artifacts)
+
+    def make_callable(self, seq):
+        return SequenceXclbinCallable(seq, self)
+
+
+class CompareDispatch(SeparateDispatch):
+    """Same compile path as ``separate``, but the callable additionally re-runs
+    each operator's CPU ``reference()`` on the NPU-produced inputs and flags
+    per-step deviation.
+
+    Args:
+        rel_tol / abs_tol: Per-step tolerances; a step counts as a mismatch
+            only when it exceeds both.
+        raise_on_mismatch: When True (default), raise ``RuntimeError`` on the
+            first mismatching step instead of only logging it.
+    """
+
+    name = "compare"
+
+    def __init__(self, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
+        super().__init__()
+        self.rel_tol = rel_tol
+        self.abs_tol = abs_tol
+        self.raise_on_mismatch = raise_on_mismatch
+
+    def make_callable(self, seq):
+        return SequenceCompareCallable(seq, self)
+
+
+class ReferenceDispatch(SequenceDispatch):
+    """Pure-CPU evaluation via each operator's ``reference()``; compiles nothing."""
+
+    name = "reference"
+
+    def set_up_artifacts(self, seq):
+        pass  # reference mode compiles nothing
+
+    def make_callable(self, seq):
+        return SequenceReferenceCallable(seq)
+
+
+_DISPATCH_ALIASES = {
+    "auto": AutoDispatch,
+    "fused": FusedDispatch,
+    "separate": SeparateDispatch,
+    "compare": CompareDispatch,
+    "reference": ReferenceDispatch,
+}
+
+
+# ##########################################################################
 # Compileable: operator sequence
 # ##########################################################################
 
 
 class OperatorSequence(AIEOperatorBase):
-    """Operator that concatenates a runlist of operators into a 
+    """Operator that concatenates a runlist of operators into a
     single dispatch.
 
     Args:
-        dispatch: Dispatch strategy for the fused operator.
+        dispatch: Dispatch strategy, given either as a mode name or as a
+            :class:`SequenceDispatch` instance. Recognised names:
             ``"auto"`` (default) selects ``"fused"`` on NPU2 and
             ``"separate"`` on NPU1.  ``"fused"`` uses a single-ELF
             dispatch (requires NPU2).  ``"separate"`` compiles each
@@ -39,16 +249,9 @@ class OperatorSequence(AIEOperatorBase):
             implementations (no NPU compilation/dispatch).  ``"compare"``
             runs the ``"separate"`` xclbin path and, after each NPU step,
             also runs the operator's CPU reference on the NPU-produced
-            inputs and logs the deviation for testing/debugging.
-        compare_rel_tol / compare_abs_tol: Per-step tolerances used by
-            ``"compare"`` dispatch to decide whether an NPU/reference deviation
-            counts as a mismatch.
-        compare_raise_on_mismatch: When True (default), ``"compare"`` dispatch
-            raises ``RuntimeError`` on the first mismatching step instead of
-            only logging it.
+            inputs and logs the deviation for testing/debugging.  Pass a
+            :class:`CompareDispatch` instance to tune the compare tolerances.
     """
-
-    DISPATCH_MODES = ("auto", "fused", "separate", "reference", "compare")
 
     def __init__(
         self,
@@ -58,16 +261,10 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         dispatch="auto",
-        compare_rel_tol=0.05,
-        compare_abs_tol=1e-2,
-        compare_raise_on_mismatch=True,
         *args,
         **kwargs,
     ):
-        if dispatch not in self.DISPATCH_MODES:
-            raise ValueError(
-                f"dispatch must be one of {self.DISPATCH_MODES!r}, got {dispatch!r}"
-            )
+        dispatch = self._coerce_dispatch(dispatch)
         if not all(
             isinstance(op, MLIROperator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
@@ -85,62 +282,24 @@ class OperatorSequence(AIEOperatorBase):
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
         self._dispatch = dispatch
-        self.compare_rel_tol = compare_rel_tol
-        self.compare_abs_tol = compare_abs_tol
-        self.compare_raise_on_mismatch = compare_raise_on_mismatch
 
-    def _unique_operators(self):
+    @staticmethod
+    def _coerce_dispatch(dispatch):
+        """Normalise the ``dispatch`` argument to a :class:`SequenceDispatch`."""
+        if isinstance(dispatch, SequenceDispatch):
+            return dispatch
+        elif isinstance(dispatch, str) and dispatch in _DISPATCH_ALIASES:
+            return _DISPATCH_ALIASES[dispatch]()
+        raise TypeError("selected dispatch mode not supported")
+
+    def unique_operators(self):
         """Operators in runlist order, de-duplicated by identity."""
         seen = {}
         for op, *_ in self.runlist:
             seen.setdefault(id(op), op)
         return list(seen.values())
 
-    def get_kernel_artifacts(self):
-        """Kernel artifacts from all child operators, prefixed per operator index."""
-        kernel_artifacts = []
-        for idx, op in enumerate(self._unique_operators()):
-            objs = op.get_kernel_artifacts()
-            for obj in objs:
-                obj.filename = f"op{idx}_{obj.filename}"
-                obj.prefix_symbols = f"op{idx}_"
-            kernel_artifacts.extend(objs)
-        return kernel_artifacts
-
-    def get_mlir_artifact(self):
-        """Build the fused MLIR source artifact.
-
-        The buffer layout attributes (``subbuffer_layout``, ``buffer_sizes``,
-        ``slice_info``) must already be set by ``set_up_artifacts()``.
-        """
-        operator_mlir_map = {}
-        comp_runlist = []
-        op_names = {}  # id(op) -> op_name
-
-        for idx, op in enumerate(self._unique_operators()):
-            mlir_artifact = op.get_mlir_artifact()
-            if len(op.get_kernel_artifacts()) > 0:
-                mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
-            op_name = f"op{idx}_{op.__class__.__name__}"
-            op_names[id(op)] = op_name
-            operator_mlir_map[op_name] = mlir_artifact
-
-        for op, *bufs in self.runlist:
-            comp_runlist.append((op_names[id(op)], *bufs))
-
-        filename = self.name + "_fused.mlir"
-        fused_artifact = comp.SequenceMLIRSource(
-            filename,
-            operator_mlir_map=operator_mlir_map,
-            runlist=comp_runlist,
-            subbuffer_layout=self.subbuffer_layout,
-            buffer_sizes=self.buffer_sizes,
-            slice_info=self.slice_info,
-        )
-
-        return fused_artifact
-
-    def _calculate_buffer_layout(self):
+    def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> args_spec
         sliced_buffers = (
             {}
@@ -240,80 +399,12 @@ class OperatorSequence(AIEOperatorBase):
         return subbuffer_layout, buffer_sizes, slice_info
 
     def set_up_artifacts(self):
-        """Resolve the dispatch mode and build the matching compile artifacts."""
+        """Resolve the dispatch policy and build its compile artifacts."""
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
-            self._calculate_buffer_layout()
+            self.calculate_buffer_layout()
         )
-
-        is_npu2 = isinstance(aie_utils.get_current_device(), NPU2)
-
-        if self._dispatch == "auto":
-            self._mode = "fused" if is_npu2 else "separate"
-        elif self._dispatch == "fused":
-            if not is_npu2:
-                raise RuntimeError(
-                    "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
-                )
-            self._mode = "fused"
-        else:
-            self._mode = self._dispatch  # "separate", "reference", or "compare"
-
-        if self._mode == "fused":
-            self._set_up_full_elf_artifacts()
-        elif self._mode in ("separate", "compare"):
-            self._set_up_xclbin_artifacts()
-        # "reference" compiles nothing.
-
-    def _set_up_full_elf_artifacts(self):
-        """Full-ELF path (NPU2): fuse MLIR into a single ELF."""
-        operator_name = self.name
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_objects = self.get_kernel_artifacts()
-        full_elf_artifact = comp.FullElfArtifact(
-            f"{operator_name}.elf",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_objects,
-        )
-        self.add_artifacts([full_elf_artifact])
-
-    def _set_up_xclbin_artifacts(self):
-        """Chained-xclbin path: one xclbin+insts per unique operator, linked
-        via ``--xclbin-input``."""
-        # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
-        name_hash = hashlib.sha1(self.name.encode()).hexdigest()[:6]
-
-        artifacts = []
-        prev_xclbin = None
-        self._op_xclbin_map = {}  # id(op) -> xclbin artifact
-        self._op_insts_map = {}  # id(op) -> insts artifact
-        self._op_kernel_name_map = {}  # id(op) -> kernel_name
-
-        for idx, op in enumerate(self._unique_operators()):
-            op_label = f"f{name_hash}_op{idx}"
-            kernel_id = f"0x{0x901 + idx:x}"
-
-            xclbin, insts = op.get_artifacts(prefix=f"{op_label}_")
-            # Copy so we don't mutate the (possibly aliased) shared flags list.
-            xclbin.extra_flags = list(xclbin.extra_flags) + [
-                f"--xclbin-instance-name={op_label}",
-                f"--xclbin-kernel-id={kernel_id}",
-            ]
-            xclbin.kernel_name = op_label
-
-            if prev_xclbin is not None:
-                xclbin.xclbin_input = prev_xclbin
-                xclbin.dependencies.add(prev_xclbin)
-
-            artifacts.append(insts)
-            self._op_xclbin_map[id(op)] = xclbin
-            self._op_insts_map[id(op)] = insts
-            self._op_kernel_name_map[id(op)] = op_label
-            prev_xclbin = xclbin
-
-        # The last xclbin in the chain carries all the linked instances.
-        artifacts.append(prev_xclbin)
-        self.combined_xclbin = prev_xclbin
-        self.add_artifacts(artifacts)
+        self._dispatch = self._dispatch.resolve(aie_utils.get_current_device())
+        self._dispatch.set_up_artifacts(self)
 
     def get_arg_spec(self):
         raise NotImplementedError(
@@ -322,14 +413,8 @@ class OperatorSequence(AIEOperatorBase):
         )
 
     def get_callable(self):
-        """Return the runtime callable for the resolved dispatch mode."""
-        if self._mode == "fused":
-            return SequenceFullELFCallable(self)
-        if self._mode == "reference":
-            return SequenceReferenceCallable(self)
-        if self._mode == "compare":
-            return SequenceCompareCallable(self)
-        return SequenceXclbinCallable(self)
+        """Return the runtime callable for the resolved dispatch policy."""
+        return self._dispatch.make_callable(self)
 
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
@@ -557,7 +642,14 @@ class _PerBufferCallable(SequenceCallable):
 class SequenceXclbinCallable(_PerBufferCallable):
     """Executes each runlist step as its own xclbin dispatch. Buffers shared by
     name give zero-copy handoff between consecutive operators.
+
+    The compiled per-operator xclbin/insts maps live on the ``SeparateDispatch``
+    policy passed in as ``dispatch``.
     """
+
+    def __init__(self, op, dispatch):
+        self._dispatch = dispatch
+        super().__init__(op)
 
     def _make_buffer(self, n_elements):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
@@ -574,26 +666,34 @@ class SequenceXclbinCallable(_PerBufferCallable):
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
-        op = self.op
-        combined_xclbin_path = op.combined_xclbin.filename
+        dispatch = self._dispatch
+        combined_xclbin_path = dispatch.combined_xclbin.filename
         self._op_callable_map = {}  # id(op) -> NPUKernel
-        for op_id, xclbin in op._op_xclbin_map.items():
+        for op_id, xclbin in dispatch.op_xclbin_map.items():
             self._op_callable_map[op_id] = NPUKernel(
                 xclbin_path=combined_xclbin_path,
-                kernel_name=op._op_kernel_name_map[op_id],
-                insts_path=op._op_insts_map[op_id].filename,
+                kernel_name=dispatch.op_kernel_name_map[op_id],
+                insts_path=dispatch.op_insts_map[op_id].filename,
             )
         self._execution_plan = [
             (
                 self._op_callable_map[id(step_op)],
                 [self._resolve_buffer(name) for name in buf_names],
             )
-            for step_op, *buf_names in op.runlist
+            for step_op, *buf_names in self.op.runlist
         ]
 
     def _run(self):
-        for kernel, args in self._execution_plan:
-            kernel(*args)
+        # Walk the execution plan alongside the resolved runlist steps; the
+        # per-step behaviour is delegated to _run_step so that compare mode can
+        # reuse this loop verbatim.
+        for step_idx, ((kernel, args), step) in enumerate(
+            zip(self._execution_plan, self._iter_steps())
+        ):
+            self._run_step(step_idx, kernel, args, step)
+
+    def _run_step(self, step_idx, kernel, args, step):
+        kernel(*args)
 
 
 def _reshape_for_spec(flat_tensor, spec):
@@ -636,13 +736,11 @@ class SequenceCompareCallable(SequenceXclbinCallable):
     operator (no error accumulation).
     """
 
-    def __init__(self, op, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
-        super().__init__(op)
-        self.rel_tol = getattr(op, "compare_rel_tol", rel_tol)
-        self.abs_tol = getattr(op, "compare_abs_tol", abs_tol)
-        self.raise_on_mismatch = getattr(
-            op, "compare_raise_on_mismatch", raise_on_mismatch
-        )
+    def __init__(self, op, dispatch):
+        super().__init__(op, dispatch)
+        self.rel_tol = dispatch.rel_tol
+        self.abs_tol = dispatch.abs_tol
+        self.raise_on_mismatch = dispatch.raise_on_mismatch
         self.last_step_stats = []
 
     def _read_to_cpu(self, name, spec):
@@ -652,64 +750,66 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         return buf.torch_view()[:n].clone().reshape(spec.shape)
 
     def _run(self):
+        # Reset per-invocation stats, then reuse SequenceXclbinCallable._run's
+        # execution-plan loop; only the per-step behaviour (_run_step) differs.
         self.last_step_stats = []
-        for step_idx, ((kernel, args), step) in enumerate(
-            zip(self._execution_plan, self._iter_steps())
-        ):
-            step_op, in_names, in_specs, out_name, out_spec = step
+        super()._run()
 
-            cpu_inputs = [
-                self._read_to_cpu(name, spec) for name, spec in zip(in_names, in_specs)
-            ]
+    def _run_step(self, step_idx, kernel, args, step):
+        step_op, in_names, in_specs, out_name, out_spec = step
 
-            kernel(*args)
+        cpu_inputs = [
+            self._read_to_cpu(name, spec) for name, spec in zip(in_names, in_specs)
+        ]
 
-            npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
-            ref_out = step_op.reference(*cpu_inputs)
+        kernel(*args)
 
-            stats = {
-                "step": step_idx,
-                "op": type(step_op).__name__,
-                "op_name": getattr(step_op, "name", type(step_op).__name__),
-                "inputs": list(in_names),
-                "output": out_name,
-            }
+        npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
+        ref_out = step_op.reference(*cpu_inputs)
 
-            ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
-            diff = (npu_out - ref_flat).abs()
-            ref_mag = ref_flat.abs()
-            max_abs = float(diff.max())
-            ref_max = float(ref_mag.max())
-            rel = float((diff / (ref_mag + 1e-6)).max())
-            mean_abs = float(diff.mean())
-            stats.update(
-                skipped=False,
-                max_abs=max_abs,
-                mean_abs=mean_abs,
-                max_rel=rel,
-                ref_max=ref_max,
+        stats = {
+            "step": step_idx,
+            "op": type(step_op).__name__,
+            "op_name": getattr(step_op, "name", type(step_op).__name__),
+            "inputs": list(in_names),
+            "output": out_name,
+        }
+
+        ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
+        diff = (npu_out - ref_flat).abs()
+        ref_mag = ref_flat.abs()
+        max_abs = float(diff.max())
+        ref_max = float(ref_mag.max())
+        rel = float((diff / (ref_mag + 1e-6)).max())
+        mean_abs = float(diff.mean())
+        stats.update(
+            skipped=False,
+            max_abs=max_abs,
+            mean_abs=mean_abs,
+            max_rel=rel,
+            ref_max=ref_max,
+        )
+        fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+        stats["mismatch"] = fail
+        level = logging.ERROR if fail else logging.INFO
+        logger.log(
+            level,
+            "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
+            step_idx,
+            stats["op"],
+            out_name,
+            max_abs,
+            mean_abs,
+            rel,
+            ref_max,
+            "  MISMATCH" if fail else "",
+        )
+        if fail and self.raise_on_mismatch:
+            raise RuntimeError(
+                f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
+                f"-> {out_name}: NPU output deviates from reference "
+                f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
+                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
+                f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
             )
-            fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
-            stats["mismatch"] = fail
-            level = logging.ERROR if fail else logging.INFO
-            logger.log(
-                level,
-                "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
-                step_idx,
-                stats["op"],
-                out_name,
-                max_abs,
-                mean_abs,
-                rel,
-                ref_max,
-                "  MISMATCH" if fail else "",
-            )
-            if fail and self.raise_on_mismatch:
-                raise RuntimeError(
-                    f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
-                    f"-> {out_name}: NPU output deviates from reference "
-                    f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
-                    f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
-                    f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
-                )
-            self.last_step_stats.append(stats)
+        self.last_step_stats.append(stats)
