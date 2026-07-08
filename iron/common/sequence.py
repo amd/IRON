@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 class OperatorSequence(AIEOperatorBase):
-    """Operator that fuses multiple MLIROperators into one.
+    """Operator that concatenates a runlist of operators into a 
+    single dispatch.
 
     Args:
         dispatch: Dispatch strategy for the fused operator.
@@ -38,7 +39,7 @@ class OperatorSequence(AIEOperatorBase):
             implementations (no NPU compilation/dispatch).  ``"compare"``
             runs the ``"separate"`` xclbin path and, after each NPU step,
             also runs the operator's CPU reference on the NPU-produced
-            inputs and logs the deviation.
+            inputs and logs the deviation for testing/debugging.
         compare_rel_tol / compare_abs_tol: Per-step tolerances used by
             ``"compare"`` dispatch to decide whether an NPU/reference deviation
             counts as a mismatch.
