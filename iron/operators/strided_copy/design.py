@@ -11,7 +11,7 @@ input[0, :, 0] -> output[:, 0, 0]
 import numpy as np
 
 from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron import ObjectFifo, ScratchpadParameter, Program, Runtime
 
 
 def strided_copy(
@@ -27,8 +27,8 @@ def strided_copy(
     output_offset,
     transfer_size=None,
     num_aie_channels=1,
-    input_offset_patch_marker=0,
-    output_offset_patch_marker=0,
+    input_offset_parameter=None,
+    output_offset_parameter=None,
 ):
     assert len(input_sizes) == len(input_strides)
     assert len(output_sizes) == len(output_strides)
@@ -65,20 +65,28 @@ def strided_copy(
         np.dtype[dtype],
     ]
 
-    # input_offset_patch_marker (and output_offset_patch_marker) is a deferred-offset mechanism:
-    # When non-zero, it is used as a placeholder offset value in the TensorAccessPattern instead
-    # of the statically-computed input_offset. The actual offset is then patched at runtime by the
-    # caller (e.g., StridedCopy.forward()) by writing the real byte offset into the instruction
-    # stream. This allows the same compiled xclbin/insts to be reused with different runtime offsets
-    # into a shared buffer, without recompilation. The tensor_dims is also expanded by the marker
-    # value to prevent the compiler from flagging out-of-bounds accesses during code generation.
+    # input_offset_parameter (and output_offset_parameter) is the name of an
+    # aiex.scratchpad_parameter used to patch the DMA BD base address at runtime. The
+    # statically-computed offset is used as the base; the parameter's value is
+    # additively combined onto it inside the BD address registers via UPDATE_REG.
+    # The host writes the byte offset into the ctrl scratchpad before each
+    # dispatch via ParameterScratchpad.
+    in_offset_param = (
+        ScratchpadParameter(input_offset_parameter, np.int32)
+        if input_offset_parameter is not None
+        else None
+    )
+    out_offset_param = (
+        ScratchpadParameter(output_offset_parameter, np.int32)
+        if output_offset_parameter is not None
+        else None
+    )
+
     input_taps = [
         TensorAccessPattern(
-            tensor_dims=(int(input_buffer_size + input_offset_patch_marker),),
+            tensor_dims=(int(input_buffer_size),),
             offset=(
-                input_offset_patch_marker
-                if input_offset_patch_marker != 0
-                else input_offset
+                input_offset
                 + c
                 * (input_sizes[input_highest_sz_idx] // num_aie_channels)
                 * input_strides[input_highest_sz_idx]
@@ -95,11 +103,9 @@ def strided_copy(
 
     output_taps = [
         TensorAccessPattern(
-            tensor_dims=(int(output_buffer_size + output_offset_patch_marker),),
+            tensor_dims=(int(output_buffer_size),),
             offset=(
-                output_offset_patch_marker
-                if output_offset_patch_marker != 0
-                else output_offset
+                output_offset
                 + c
                 * (output_sizes[output_highest_sz_idx] // num_aie_channels)
                 * output_strides[output_highest_sz_idx]
@@ -126,10 +132,25 @@ def strided_copy(
 
     rt = Runtime()
     with rt.sequence(inp_ty, out_ty) as (inp, out):
+        if in_offset_param is not None or out_offset_param is not None:
+            rt.sync_parameters()
         tg = rt.task_group()
         for c in range(num_aie_channels):
-            rt.fill(fifos_in[c].prod(), inp, input_taps[c], task_group=tg)
-            rt.drain(fifos_out[c].cons(), out, output_taps[c], task_group=tg, wait=True)
+            rt.fill(
+                fifos_in[c].prod(),
+                inp,
+                input_taps[c],
+                task_group=tg,
+                offset_parameter=in_offset_param,
+            )
+            rt.drain(
+                fifos_out[c].cons(),
+                out,
+                output_taps[c],
+                task_group=tg,
+                wait=True,
+                offset_parameter=out_offset_param,
+            )
         rt.finish_task_group(tg)
 
     return Program(dev, rt).resolve_program()

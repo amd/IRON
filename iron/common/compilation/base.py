@@ -291,11 +291,15 @@ class _MLIRInputMixin:
 
     @property
     def mlir_input(self):
+        # Accept any MLIR-source-style artifact in dependencies. We name-check
+        # ``SequenceMLIRSource`` to avoid an import cycle with
+        # ``compilation/sequence.py`` (which itself imports from this module).
         result = next(
             (
                 d
                 for d in self.dependencies
                 if isinstance(d, (SourceArtifact, PythonGeneratedMLIRArtifact))
+                or type(d).__name__ == "SequenceMLIRSource"
             ),
             None,
         )

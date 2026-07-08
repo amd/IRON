@@ -7,6 +7,7 @@ import numpy as np
 from aie.iron import (
     Kernel,
     ObjectFifo,
+    ScratchpadParameter,
     Program,
     Runtime,
     Worker,
@@ -27,7 +28,7 @@ def softmax(
     trace_size,
     tile_size,
     rtp_vector_size=None,
-    mask_patch_value=0,
+    vector_size_parameter=None,
     func_prefix="",
     kernel_obj_file="softmax.o",
 ):
@@ -72,10 +73,24 @@ def softmax(
         [tile_ty, np.int32, np.int32],
     )
 
-    # Define a task that will run on a compute tile
-    def core_body(of_in1, of_out, softmax_kernel, mask_kernel, rtp, barrier):
+    # Vector size source: either a scratchpad Parameter (synced from host each
+    # dispatch) or a write-RTP buffer set via rt.inline_ops at compile time.
+    use_scratchpad = vector_size_parameter is not None
+    vector_size_param = (
+        ScratchpadParameter(vector_size_parameter, np.int32) if use_scratchpad else None
+    )
+
+    def core_body(
+        of_in1, of_out, softmax_kernel, mask_kernel, vector_size_src, barrier
+    ):
         barrier.wait_for_value(1)
-        vector_size = rtp[0]
+        # `use_scratchpad` is a compile-time constant, so only one of these
+        # branches is emitted into the core: a scratchpad Parameter read or a
+        # write-RTP buffer load.
+        if use_scratchpad:
+            vector_size = vector_size_src.read()
+        else:
+            vector_size = vector_size_src[0]
         for _ in range_(N_div_n):
             elem_in1 = of_in1.acquire(1)
             elem_out = of_out.acquire(1)
@@ -84,15 +99,19 @@ def softmax(
             of_in1.release(1)
             of_out.release(1)
 
-    rtps = [
-        Buffer(
-            np.ndarray[(1,), np.dtype[np.int32]],
-            name=f"rtp_{i}_{j}",
-            use_write_rtp=True,
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
+    rtps = (
+        []
+        if use_scratchpad
+        else [
+            Buffer(
+                np.ndarray[(1,), np.dtype[np.int32]],
+                name=f"rtp_{i}_{j}",
+                use_write_rtp=True,
+            )
+            for i in range(num_aie_columns)
+            for j in range(num_channels)
+        ]
+    )
 
     barriers = [
         WorkerRuntimeBarrier()
@@ -101,14 +120,18 @@ def softmax(
     ]
 
     # Create a worker to run the task on a compute tile
-    worker_args = lambda i, j: [
-        of_in1s[i * num_channels + j].cons(),
-        of_outs[i * num_channels + j].prod(),
-        softmax_kernel,
-        mask_kernel,
-        rtps[i * num_channels + j],
-        barriers[i * num_channels + j],
-    ]
+    def worker_args(i, j):
+        idx = i * num_channels + j
+        per_core_runtime = vector_size_param if use_scratchpad else rtps[idx]
+        return [
+            of_in1s[idx].cons(),
+            of_outs[idx].prod(),
+            softmax_kernel,
+            mask_kernel,
+            per_core_runtime,
+            barriers[idx],
+        ]
+
     my_workers = [
         Worker(core_body, worker_args(i, j))
         for i in range(num_aie_columns)
@@ -136,16 +159,19 @@ def softmax(
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
         rt.start(*my_workers)
 
-        # Set run-time parameter controlling how many elements each core processes:
-        # - Normal case (mask_patch_value == 0): set to rtp_vector_size (the actual active row width;
-        #   elements beyond this are padding and are ignored by the softmax computation).
-        # - Masked case (mask_patch_value != 0): set to mask_patch_value, which the mask kernel uses
-        #   as a threshold to zero out elements beyond the unmasked patch boundary before softmax.
-        def set_rtps(*args):
-            for rtp in args:
-                rtp[0] = mask_patch_value if mask_patch_value else rtp_vector_size
+        if use_scratchpad:
+            # The host writes vector_size into the scratchpad via
+            # ParameterScratchpad before each dispatch; sync delivers it to the
+            # per-core parameter buffer.
+            rt.sync_parameters()
+        else:
+            # Set the static (compile-time) run-time parameter controlling how
+            # many elements each core processes.
+            def set_rtps(*args):
+                for rtp in args:
+                    rtp[0] = rtp_vector_size
 
-        rt.inline_ops(set_rtps, rtps)
+            rt.inline_ops(set_rtps, rtps)
 
         for i in range(num_aie_columns * num_channels):
             rt.set_barrier(barriers[i], 1)

@@ -10,6 +10,7 @@ __pycache__
 build/*
 **/_build/**
 **/build/**
+**/build_elf/**
 *.exe
 *.csv
 secret_github_token
@@ -20,3 +21,4 @@ id_ed25519.pub
 *.model
 .cline_storage
 *.egg-info
+**/*.prj/**

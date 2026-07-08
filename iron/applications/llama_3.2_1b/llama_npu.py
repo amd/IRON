@@ -25,12 +25,7 @@ sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
 from iron.common.utils import XRTSubBuffer
-from iron.common.sequence import (
-    OperatorSequence,
-    SequenceFullELFCallable,
-    load_elf,
-    patch_elf,
-)
+from iron.common.sequence import OperatorSequence
 from iron.operators import (
     RMSNorm,
     GEMM,
@@ -312,18 +307,17 @@ class AIELlamaOperators:
             context=elf_ctx,
         )
 
-        strided_copy_cache_magic = 0xDEADBEE0
         strided_copy_cache_op = StridedCopy(
             input_sizes=(config.n_kv_groups, config.head_dim),
             input_strides=(config.head_dim, 1),
             input_offset=0,
             output_sizes=(1, config.n_kv_groups, config.head_dim),
             output_strides=(0, prompt_len * config.head_dim, 1),
-            output_offset=7 * config.head_dim * 2,  # Will be patched at runtime
+            output_offset=0,  # base; runtime addend supplied via cache_offset parameter
             input_buffer_size=1 * config.n_kv_groups * config.head_dim,
             output_buffer_size=config.n_kv_groups * prompt_len * config.head_dim,
             num_aie_channels=1,
-            kwargs={"output_offset_patch_marker": strided_copy_cache_magic},
+            output_offset_parameter="cache_offset",
             context=elf_ctx,
         )
 
@@ -347,14 +341,13 @@ class AIELlamaOperators:
         )
 
         # Softmax operators for attention weights
-        softmax_magic = 0xBA5EBA11
         softmax_op = Softmax(
             rows=config.n_heads,
             cols=prompt_len,
             num_aie_columns=1,
             num_channels=1,
-            rtp_vector_size=prompt_len,  # Compile with max size
-            mask_patch_value=softmax_magic,  # Magic value for patching
+            rtp_vector_size=prompt_len,  # Compile with max size (used as fallback / sanity)
+            vector_size_parameter="softmax_vector_size",
             context=elf_ctx,
         )
 
@@ -587,62 +580,7 @@ class AIELlamaOperators:
             context=elf_ctx,
         ).compile()
 
-        # Operator patching
-
-        self.decode.fused_elf_data = load_elf(self.decode.fused_op)
-
-        def get_patch_locs(elf_data, magic):
-            magic = magic & 0xFFFFFFFF
-            return np.where(elf_data == magic)[0]
-
-        keys_patches = {}
-        values_patches = {}
-        for layer_idx in range(config.n_layers):
-            _, keys_cache_offs, _ = self.decode.fused_op.get_layout_for_buffer(
-                f"keys_cache_{layer_idx}"
-            )
-            _, values_cache_offs, _ = self.decode.fused_op.get_layout_for_buffer(
-                f"values_cache_{layer_idx}"
-            )
-            keys_patches.update(
-                {
-                    int(l): keys_cache_offs
-                    for l in get_patch_locs(
-                        self.decode.fused_elf_data,
-                        (keys_cache_offs + strided_copy_cache_magic * 2),
-                    )
-                }
-            )
-            values_patches.update(
-                {
-                    int(l): values_cache_offs
-                    for l in get_patch_locs(
-                        self.decode.fused_elf_data,
-                        (values_cache_offs + strided_copy_cache_magic * 2),
-                    )
-                }
-            )
-        no_offset_patches = {
-            int(l): 0
-            for l in get_patch_locs(
-                self.decode.fused_elf_data, (strided_copy_cache_magic * 2)
-            )
-        }
-        self.decode.fused_patch_locations = {
-            **keys_patches,
-            **values_patches,
-            **no_offset_patches,
-        }
-        assert len(self.decode.fused_patch_locations) == 4 * config.n_layers + 2
-
-        self.decode.softmax_patch_offsets = get_patch_locs(
-            self.decode.fused_elf_data, softmax_magic
-        )
-        assert len(self.decode.softmax_patch_offsets) == config.n_layers + 1
-
-        self.decode.fused = SequenceFullELFCallable(
-            self.decode.fused_op, elf_data=self.decode.fused_elf_data
-        )
+        self.decode.fused = self.decode.fused_op.get_callable()
 
         # Operator static buffers (weights, LUTs)
 
@@ -1222,30 +1160,21 @@ def llama_forward_pass_prefill(config, state):
 # ##########################################################################
 
 
-def patch_fused_decode_operator(ops, config, num_preceding_tokens):
-    context_len = num_preceding_tokens + 1
-
-    # Patch fused operator for strided copy cache offset
-    output_offset = num_preceding_tokens * config.head_dim
-    offset_val = output_offset * 2  # Multiply by 2 for bfloat16 byte offset
-    strided_copy_patches = {
-        i: (base + offset_val, 0xFFFFFFFF)
-        for i, base in ops.fused_patch_locations.items()
-    }
-    softmax_patches = {i: (context_len, 0xFFFFFFFF) for i in ops.softmax_patch_offsets}
-    patches = {**strided_copy_patches, **softmax_patches}
-    patched_elf_data = ops.fused_elf_data.copy()
-    patch_elf(patched_elf_data, patches)
-
-    ops.fused.reload_elf(patched_elf_data)
-
-
 def llama_forward_pass_decode(config, state):
     batch, seq_len = state.token_ids.shape
     assert seq_len == 1
     assert state.num_preceding_tokens < max_seq_len
 
-    patch_fused_decode_operator(aie_ops.decode, config, state.num_preceding_tokens)
+    context_len = state.num_preceding_tokens + 1
+    cache_offset = state.num_preceding_tokens * config.head_dim
+    state.softmax_vector_size_cum = (
+        getattr(state, "softmax_vector_size_cum", 0) + context_len
+    )
+
+    params = aie_ops.decode.fused.params
+    params.write("cache_offset", np.int32(cache_offset))
+    params.write("softmax_vector_size", np.int32(state.softmax_vector_size_cum))
+    params.sync()
 
     # Prefill RoPE angle look-up tables
     angles_slice = config.angles[

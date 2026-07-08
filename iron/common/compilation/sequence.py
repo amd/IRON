@@ -95,15 +95,29 @@ def fuse_mlir(artifact: SequenceMLIRSource) -> None:
 
     input_buffer_size, output_buffer_size, scratch_buffer_size = artifact.buffer_sizes
 
-    # Extract device operations from each operator's MLIR artifact
+    # Extract device operations and module-level parameter decls from each
+    # operator's MLIR artifact.  Note: in the current MLIR-AIE pipeline,
+    # ``aiex.scratchpad_parameter`` ops are emitted at *module* scope (above the
+    # ``aie.device``), because the scratchpad is a single hardware resource
+    # shared across all PDIs in a runlist and the verifier on
+    # ``aiex.read_scratchpad_parameter`` requires the decl to be visible at module
+    # scope.  We collect those module-level decls per-operator so we can
+    # re-declare them once at the top of the fused module.
     device_mlir_strings = {}
+    operator_param_decls: dict[str, dict[str, ir.Type]] = {}
     device_ty = None
     sequence_arg_types = {}
     for op_name, mlir_artifact in artifact.operator_mlir_map.items():
         mlir_module = get_child_mlir_module(mlir_artifact)
-        device_ops = [
-            op for op in mlir_module.body.operations if isinstance(op, aie.DeviceOp)
-        ]
+        device_ops = []
+        params_here: dict[str, ir.Type] = {}
+        for op in mlir_module.body.operations:
+            if isinstance(op, aie.DeviceOp):
+                device_ops.append(op)
+            elif op.operation.name == "aiex.scratchpad_parameter":
+                sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
+                param_type = ir.TypeAttr(op.operation.attributes["type"]).value
+                params_here[sym_name] = param_type
         if len(device_ops) != 1:
             raise ValueError(
                 f"Expected exactly one device operation in MLIR artifact for operator '{op_name}', "
@@ -113,14 +127,47 @@ def fuse_mlir(artifact: SequenceMLIRSource) -> None:
         if device_ty is None:
             device_ty = device_op.device
         device_mlir_strings[op_name] = str(device_op)
+        operator_param_decls[op_name] = params_here
         sequence_arg_types[op_name] = extract_runtime_sequence_arg_types(device_op)
+
+    # Deduplicate parameter decls across operators (same name must have the
+    # same type; otherwise indices would collide in the global state table).
+    hoisted_params: dict[str, ir.Type] = {}
+    for op_name, params_here in operator_param_decls.items():
+        for sym_name, param_type in params_here.items():
+            existing = hoisted_params.get(sym_name)
+            if existing is not None and str(existing) != str(param_type):
+                raise ValueError(
+                    f"ScratchpadParameter '{sym_name}' is declared with conflicting "
+                    f"types across operators: {existing} vs {param_type}"
+                )
+            hoisted_params[sym_name] = param_type
 
     # Build fused MLIR module
     with mlir_mod_ctx() as ctx:
 
-        # Concatenate aie.device ops
+        # Emit hoisted parameters first.
+        with ir.InsertionPoint.at_block_begin(ctx.module.body):
+            for sym_name, param_type in hoisted_params.items():
+                aiex.scratchpad_parameter(sym_name, param_type)
+
+        # Concatenate aie.device ops.
+        params_preamble = "\n".join(
+            f"  aiex.scratchpad_parameter @{name} : {param_type}"
+            for name, param_type in hoisted_params.items()
+        )
         for op_name, device_str in device_mlir_strings.items():
-            dev_op = aie.DeviceOp.parse(device_str)
+            wrapped = f"module {{\n{params_preamble}\n{device_str}\n}}"
+            wrapper_module = ir.Module.parse(wrapped)
+            # Find the (sole) DeviceOp in the wrapper module.
+            dev_op = None
+            for op in wrapper_module.body.operations:
+                if isinstance(op, aie.DeviceOp):
+                    dev_op = op
+                    break
+            assert (
+                dev_op is not None
+            ), f"DeviceOp missing after re-parse for operator '{op_name}'"
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 

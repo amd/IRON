@@ -30,6 +30,8 @@ class StridedCopy(MLIROperator):
     dtype: object = field(default=bfloat16, repr=False)
     transfer_size: int | None = None
     num_aie_channels: int = 1
+    input_offset_parameter: str | None = None
+    output_offset_parameter: str | None = None
     kwargs: dict = field(default_factory=dict, repr=False)
     context: object = field(default=None, repr=False)
 
@@ -43,6 +45,8 @@ class StridedCopy(MLIROperator):
         "output_offset": "ooff",
         "transfer_size": "tr",
         "num_aie_channels": "ch",
+        "input_offset_parameter": "ipar",
+        "output_offset_parameter": "opar",
     }
 
     def __post_init__(self):
@@ -78,7 +82,11 @@ class StridedCopy(MLIROperator):
                     self.transfer_size,
                     self.num_aie_channels,
                 ),
-                self.kwargs,
+                {
+                    **self.kwargs,
+                    "input_offset_parameter": self.input_offset_parameter,
+                    "output_offset_parameter": self.output_offset_parameter,
+                },
             ),
         )
 

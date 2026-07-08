@@ -417,6 +417,27 @@ class OperatorSequence(AIEOperatorBase):
         """Return the runtime callable for the resolved dispatch policy."""
         return self._dispatch.make_callable(self)
 
+    @property
+    def params_path(self):
+        """Path to the ``params.txt`` emitted by ``aie-lower-parameters``.
+
+        ``aie-lower-parameters`` is a module-level pass that assigns
+        globally-unique state-table indices across all devices, so aiecc
+        writes a single ``params.txt`` (per sequence module) inside the
+        per-MLIR project directory it auto-creates next to the sequence MLIR
+        source (``<mlir>.prj/params.txt``).
+
+        Returns ``None`` if no parameters were declared in the sequence module
+        (in which case the file is not written).
+        """
+        from pathlib import Path
+
+        # FullElfArtifact's mlir_input filename is the sequence MLIR source.
+        elf_artifact = self.artifacts[0]
+        mlir_filename = elf_artifact.mlir_input.filename
+        candidate = Path(mlir_filename + ".prj") / "params.txt"
+        return candidate if candidate.exists() else None
+
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
 
@@ -447,15 +468,6 @@ def load_elf(op):
     assert isinstance(op.artifacts[0], comp.FullElfArtifact)
     with open(op.artifacts[0].filename, "rb") as f:
         return np.frombuffer(f.read(), dtype=np.uint32)
-
-
-def patch_elf(elf_data, patches):
-    for i, patch in patches.items():
-        val, mask = patch
-        val = np.uint64(val)
-        mask = np.uint64(mask)  # uint32 arithmetic would overflow
-        elf_data[i] = np.uint32((elf_data[i] & ~mask) | (val & mask))
-    return elf_data
 
 
 BF16 = np.dtype(ml_dtypes.bfloat16)
@@ -527,15 +539,14 @@ class SequenceFullELFCallable(SequenceCallable):
     sub-view into whichever consolidated buffer holds the named argument.
     """
 
-    def __init__(self, op, elf_data=None, device_name="main", sequence_name="sequence"):
+    def __init__(self, op, device_name="main", sequence_name="sequence"):
         self.device_name = device_name
         self.sequence_name = sequence_name
-        self.reload_elf(elf_data if elf_data is not None else load_elf(op))
-        super().__init__(op)
 
-    def reload_elf(self, elf_data):
-        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
+        # Build the XRT kernel from the sequence's compiled ELF.
+        elf_data = load_elf(op)
         elf_data_u8 = elf_data.view(dtype=np.uint8)
+        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
         ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
         ctypes.pythonapi.PyCapsule_New.argtypes = [
             ctypes.c_void_p,
@@ -548,6 +559,36 @@ class SequenceFullELFCallable(SequenceCallable):
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
+
+        super().__init__(op)
+
+        # Persistent run handle: reused across dispatches so that the
+        # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
+        # built on top of it) stays valid across calls.
+        self._run_handle = pyxrt.run(self.xrt_kernel)
+        self._run_handle.set_arg(0, self.input_buffer.buffer_object())
+        self._run_handle.set_arg(1, self.output_buffer.buffer_object())
+        self._run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+
+        self._params = None
+
+    @property
+    def params(self):
+        """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
+
+        Returns ``None`` if the sequence has no runtime parameters.
+        """
+        if self._params is not None:
+            return self._params
+        params_path = self.op.params_path
+        if params_path is None or not params_path.exists():
+            return None
+        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+            ParameterScratchpad,
+        )
+
+        self._params = ParameterScratchpad(self._run_handle, str(params_path))
+        return self._params
 
     def _allocate_buffers(self):
         in_sz, out_sz, scratch_sz = self.op.buffer_sizes
@@ -586,12 +627,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.output_buffer.to("cpu")
 
     def _run(self):
-        run = pyxrt.run(self.xrt_kernel)
-        run.set_arg(0, self.input_buffer.buffer_object())
-        run.set_arg(1, self.output_buffer.buffer_object())
-        run.set_arg(2, self.scratch_buffer.buffer_object())
-        run.start()
-        ret_code = run.wait()
+        self._run_handle.start()
+        ret_code = self._run_handle.wait()
         if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
             raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
 
