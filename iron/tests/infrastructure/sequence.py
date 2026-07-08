@@ -169,6 +169,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
 # 3. Every NPU dispatch mode produces bit-identical output.
 # ---------------------------------------------------------------------------
 
+
 def _run_add_relu(context, dispatch, a, b, name):
     """out = relu(a + b), returned as a host bf16 tensor."""
     seq = _build_add_relu_sequence(context, dispatch, name)
@@ -196,9 +197,7 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
     baseline = _run_add_relu(
         aie_context, "separate", a, b, "infra_addrelu_parity_separate"
     )
-    out = _run_add_relu(
-        aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}"
-    )
+    out = _run_add_relu(aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
     assert torch.equal(out, baseline), (
         f"dispatch={dispatch!r} output is not bit-identical to the separate "
