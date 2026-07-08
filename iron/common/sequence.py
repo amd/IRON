@@ -11,10 +11,11 @@ import ctypes
 import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
-from .utils import XRTSubBuffer, CPUBuffer
+from .utils import XRTSubBuffer
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 
 logger = logging.getLogger(__name__)
@@ -708,13 +709,16 @@ class SequenceReferenceCallable(_PerBufferCallable):
     """
 
     def _make_buffer(self, n_elements):
-        return CPUBuffer(n_elements)
+        return CPUOnlyTensor((n_elements,), dtype=BF16)
 
     def _make_subbuffer(self, parent, offset_bytes, size_bytes):
         start = offset_bytes // BF16.itemsize
         end = (offset_bytes + size_bytes) // BF16.itemsize
-        view = CPUBuffer.__new__(CPUBuffer)
-        view._t = parent.torch_view()[start:end]
+        # Alias the parent's memory (numpy slice is zero-copy) so a write to
+        # this slice is visible when a later step reads the parent by name.
+        view = CPUOnlyTensor((end - start,), dtype=BF16)
+        view._data = parent.data[start:end]
+        view._shape = view._data.shape
         return view
 
     def _run(self):

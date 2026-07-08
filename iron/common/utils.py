@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-import torch
 from aie.dialects.aie import get_target_model, WireBundle
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor, xrt as _pyxrt
 
@@ -132,25 +131,3 @@ class XRTSubBuffer(XRTTensor):
             dtype=dtype,
             parent=parent,
         )
-
-
-class CPUBuffer:
-    """Minimal host-side stand-in for ``XRTTensor``: a flat 1D ``torch.bfloat16``
-    tensor with no-op device syncs.
-    """
-
-    def __init__(self, n_elements):
-        self._t = torch.zeros(n_elements, dtype=torch.bfloat16)
-
-    def torch_view(self):
-        return self._t
-
-    def to(self, *_args, **_kwargs):
-        return self
-
-    def fill_(self, value):
-        self._t.fill_(value)
-        return self
-
-    def buffer_object(self):
-        return None
