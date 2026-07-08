@@ -4,6 +4,7 @@
 import hashlib
 import logging
 import time
+from pathlib import Path
 import numpy as np
 import ml_dtypes
 import pyxrt
@@ -411,27 +412,6 @@ class OperatorSequence(AIEOperatorBase):
         """Return the runtime callable for the resolved dispatch policy."""
         return self._dispatch.make_callable(self)
 
-    @property
-    def params_path(self):
-        """Path to the ``params.txt`` emitted by ``aie-lower-parameters``.
-
-        ``aie-lower-parameters`` is a module-level pass that assigns
-        globally-unique state-table indices across all devices, so aiecc
-        writes a single ``params.txt`` (per sequence module) inside the
-        per-MLIR project directory it auto-creates next to the sequence MLIR
-        source (``<mlir>.prj/params.txt``).
-
-        Returns ``None`` if no parameters were declared in the sequence module
-        (in which case the file is not written).
-        """
-        from pathlib import Path
-
-        # FullElfArtifact's mlir_input filename is the sequence MLIR source.
-        elf_artifact = self.artifacts[0]
-        mlir_filename = elf_artifact.mlir_input.filename
-        candidate = Path(mlir_filename + ".prj") / "params.txt"
-        return candidate if candidate.exists() else None
-
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
 
@@ -456,12 +436,6 @@ class OperatorSequence(AIEOperatorBase):
 # ##########################################################################
 # Module helpers
 # ##########################################################################
-
-
-def load_elf(op):
-    """Build a ``pyxrt.elf`` from the sequence's compiled full-ELF artifact."""
-    assert isinstance(op.artifacts[0], comp.FullElfArtifact)
-    return pyxrt.elf(str(op.artifacts[0].filename))
 
 
 BF16 = np.dtype(ml_dtypes.bfloat16)
@@ -537,7 +511,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.device_name = device_name
         self.sequence_name = sequence_name
 
-        xrt_elf = load_elf(op)
+        assert isinstance(op.artifacts[0], comp.FullElfArtifact)
+        xrt_elf = pyxrt.elf(str(op.artifacts[0].filename))
         xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
@@ -548,10 +523,10 @@ class SequenceFullELFCallable(SequenceCallable):
         # Persistent run handle: reused across dispatches so that the
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
         # built on top of it) stays valid across calls.
-        self._run_handle = pyxrt.run(self.xrt_kernel)
-        self._run_handle.set_arg(0, self.input_buffer.buffer_object())
-        self._run_handle.set_arg(1, self.output_buffer.buffer_object())
-        self._run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        self.run_handle = pyxrt.run(self.xrt_kernel)
+        self.run_handle.set_arg(0, self.input_buffer.buffer_object())
+        self.run_handle.set_arg(1, self.output_buffer.buffer_object())
+        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
 
         self._params = None
 
@@ -559,18 +534,22 @@ class SequenceFullELFCallable(SequenceCallable):
     def params(self):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
-        Returns ``None`` if the sequence has no runtime parameters.
+        The ``params.txt`` describing the runtime parameters is written by
+        ``aie-lower-parameters`` into the ``<mlir>.prj`` project directory next
+        to the fused MLIR source. Returns ``None`` if the sequence declared no
+        runtime parameters (in which case the file is not written).
         """
         if self._params is not None:
             return self._params
-        params_path = self.op.params_path
-        if params_path is None or not params_path.exists():
+        mlir_filename = self.op.artifacts[0].mlir_input.filename
+        params_path = Path(mlir_filename + ".prj") / "params.txt"
+        if not params_path.exists():
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
         )
 
-        self._params = ParameterScratchpad(self._run_handle, str(params_path))
+        self._params = ParameterScratchpad(self.run_handle, str(params_path))
         return self._params
 
     def _allocate_buffers(self):
@@ -610,8 +589,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.output_buffer.to("cpu")
 
     def _run(self):
-        self._run_handle.start()
-        ret_code = self._run_handle.wait()
+        self.run_handle.start()
+        ret_code = self.run_handle.wait()
         if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
             raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
 
