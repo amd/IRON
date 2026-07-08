@@ -207,7 +207,8 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 
 
 # ---------------------------------------------------------------------------
-# 4. Compare mode flags a per-step reference/NPU mismatch on its own.
+# 4. Compare mode flags (and by default raises on) a per-step reference/NPU
+#    mismatch on its own.
 #
 #    Normally the reference is trusted and the NPU kernel is the suspect; here
 #    we invert that (keep the NPU correct, vary the reference) because it is
@@ -218,9 +219,9 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 @pytest.mark.parametrize("reference_is_correct", [True, False])
 def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
-    operator's ``reference()`` on the same NPU inputs, flagging deviations in
-    ``last_step_stats``. A correct reference must produce no flagged step; a
-    wrong one must be flagged by compare mode itself (no external check)."""
+    operator's ``reference()`` on the same NPU inputs. A correct reference must
+    run cleanly (no flagged step); a wrong one must make compare mode raise on
+    its own (``compare_raise_on_mismatch`` defaults to True)."""
     size = 256
     torch.manual_seed(0)
     a = torch.rand(size, dtype=torch.bfloat16)
@@ -249,11 +250,11 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
     run = seq.get_callable()
     _set_input(run, "a", a)
     _set_input(run, "b", b)
-    run()
-
-    flagged = any(step.get("mismatch") for step in run.last_step_stats)
 
     if reference_is_correct:
+        run()  # must not raise
+        flagged = any(step.get("mismatch") for step in run.last_step_stats)
         assert not flagged, "compare mode should not flag a matching reference"
     else:
-        assert flagged, "compare mode should flag the wrong reference on its own"
+        with pytest.raises(RuntimeError):
+            run()  # compare mode reports the wrong reference by itself

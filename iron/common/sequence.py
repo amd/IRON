@@ -39,6 +39,12 @@ class OperatorSequence(AIEOperatorBase):
             runs the ``"separate"`` xclbin path and, after each NPU step,
             also runs the operator's CPU reference on the NPU-produced
             inputs and logs the deviation.
+        compare_rel_tol / compare_abs_tol: Per-step tolerances used by
+            ``"compare"`` dispatch to decide whether an NPU/reference deviation
+            counts as a mismatch.
+        compare_raise_on_mismatch: When True (default), ``"compare"`` dispatch
+            raises ``RuntimeError`` on the first mismatching step instead of
+            only logging it.
     """
 
     DISPATCH_MODES = ("auto", "fused", "separate", "reference", "compare")
@@ -51,6 +57,9 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         dispatch="auto",
+        compare_rel_tol=0.05,
+        compare_abs_tol=1e-2,
+        compare_raise_on_mismatch=True,
         *args,
         **kwargs,
     ):
@@ -75,6 +84,9 @@ class OperatorSequence(AIEOperatorBase):
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
         self._dispatch = dispatch
+        self.compare_rel_tol = compare_rel_tol
+        self.compare_abs_tol = compare_abs_tol
+        self.compare_raise_on_mismatch = compare_raise_on_mismatch
 
     def _unique_operators(self):
         """Operators in runlist order, de-duplicated by identity."""
@@ -623,10 +635,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
     operator (no error accumulation).
     """
 
-    def __init__(self, op, rel_tol=0.05, abs_tol=1e-2):
+    def __init__(self, op, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
         super().__init__(op)
-        self.rel_tol = rel_tol
-        self.abs_tol = abs_tol
+        self.rel_tol = getattr(op, "compare_rel_tol", rel_tol)
+        self.abs_tol = getattr(op, "compare_abs_tol", abs_tol)
+        self.raise_on_mismatch = getattr(
+            op, "compare_raise_on_mismatch", raise_on_mismatch
+        )
         self.last_step_stats = []
 
     def _read_to_cpu(self, name, spec):
@@ -675,7 +690,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             )
             fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
             stats["mismatch"] = fail
-            level = logging.WARNING if fail else logging.INFO
+            level = logging.ERROR if fail else logging.INFO
             logger.log(
                 level,
                 "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
@@ -688,4 +703,12 @@ class SequenceCompareCallable(SequenceXclbinCallable):
                 ref_max,
                 "  MISMATCH" if fail else "",
             )
+            if fail and self.raise_on_mismatch:
+                raise RuntimeError(
+                    f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
+                    f"-> {out_name}: NPU output deviates from reference "
+                    f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
+                    f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
+                    f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
+                )
             self.last_step_stats.append(stats)
