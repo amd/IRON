@@ -7,7 +7,6 @@ import time
 import numpy as np
 import ml_dtypes
 import pyxrt
-import ctypes
 import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
@@ -215,7 +214,7 @@ class ReferenceDispatch(SequenceDispatch):
     name = "reference"
 
     def set_up_artifacts(self, seq):
-        pass  # reference mode compiles nothing
+        pass
 
     def make_callable(self, seq):
         return SequenceReferenceCallable(seq)
@@ -306,7 +305,6 @@ class OperatorSequence(AIEOperatorBase):
             {}
         )  # full_buffer_name (with slice) -> (base_name, start, end, args_spec)
 
-        # Collect all buffer specs from operators
         for op, *bufs in self.runlist:
             args_specs = op.get_arg_spec()
             if len(args_specs) != len(bufs):
@@ -332,7 +330,6 @@ class OperatorSequence(AIEOperatorBase):
                             f"Sliced buffer '{buf_name}' requires explicit size for base buffer '{base_name}' in buffer_sizes parameter"
                         )
                 else:
-                    # Regular buffer (no slice)
                     if buf_name not in args:
                         args[buf_name] = args_spec
                     else:
@@ -345,14 +342,12 @@ class OperatorSequence(AIEOperatorBase):
         # Verify all input/output args are present (either as regular or sliced buffers)
         all_buffer_names = set(args.keys()) | set(sliced_buffers.keys())
         for arg in self.input_args:
-            # Check if it's a base buffer name in explicit_buffer_sizes
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
                 raise ValueError(f"Input argument {arg} not found in runlist buffers")
         for arg in self.output_args:
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
                 raise ValueError(f"Output argument {arg} not found in runlist buffers")
 
-        # Determine buffer types and create layout
         subbuffer_layout = {}
         slice_info = {}  # full_buffer_name -> (base_name, start, end)
 
@@ -365,7 +360,6 @@ class OperatorSequence(AIEOperatorBase):
                     subbuffer_layout[arg] = (buffer_type, offset, length)
                     offset += length
                 elif arg in args:
-                    # Regular buffer with inferred size
                     arg_spec = args[arg]
                     length = int(
                         np.prod(arg_spec.shape) * np.dtype(arg_spec.dtype).itemsize
@@ -465,9 +459,9 @@ class OperatorSequence(AIEOperatorBase):
 
 
 def load_elf(op):
+    """Build a ``pyxrt.elf`` from the sequence's compiled full-ELF artifact."""
     assert isinstance(op.artifacts[0], comp.FullElfArtifact)
-    with open(op.artifacts[0].filename, "rb") as f:
-        return np.frombuffer(f.read(), dtype=np.uint32)
+    return pyxrt.elf(str(op.artifacts[0].filename))
 
 
 BF16 = np.dtype(ml_dtypes.bfloat16)
@@ -543,18 +537,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.device_name = device_name
         self.sequence_name = sequence_name
 
-        # Build the XRT kernel from the sequence's compiled ELF.
-        elf_data = load_elf(op)
-        elf_data_u8 = elf_data.view(dtype=np.uint8)
-        # pyxrt.elf takes a PyCapsule wrapping the raw pointer.
-        ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
-        ctypes.pythonapi.PyCapsule_New.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.c_void_p,
-        ]
-        capsule = ctypes.pythonapi.PyCapsule_New(elf_data_u8.ctypes.data, None, None)
-        xrt_elf = pyxrt.elf(capsule, elf_data.nbytes)
+        xrt_elf = load_elf(op)
         xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
