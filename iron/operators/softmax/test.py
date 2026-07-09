@@ -85,3 +85,52 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Partial (online / tiled) softmax tests — enables long rows (S >= 8192)
+# ---------------------------------------------------------------------------
+
+
+def get_partial_params():
+    """GPT-2 style: 12 heads × S rows of S columns, tested via partial softmax."""
+    params = []
+    for S in [8192]:
+        H = 12  # GPT-2 Small heads
+        rows = H * S
+        cols = S
+        chunk_size = 1024
+        params.append(pytest.param(rows, cols, chunk_size, id=f"GPT2-S{S}"))
+    return params
+
+
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("rows,cols,chunk_size", get_partial_params())
+def test_softmax_partial(rows, cols, chunk_size, aie_context):
+    """Test partial / online softmax with sub-tile chunks for long rows."""
+
+    golden_ref = generate_golden_reference(rows=rows, cols=cols)
+
+    operator = Softmax(
+        rows=rows,
+        cols=cols,
+        num_aie_columns=1,
+        num_channels=1,
+        chunk_size=chunk_size,
+        context=aie_context,
+    )
+
+    input_buffers = {"in": golden_ref["input"]}
+    output_buffers = {"output": golden_ref["output"]}
+
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator, input_buffers, output_buffers, rel_tol=0.08, abs_tol=1e-6
+    )
+
+    print(f"\nLatency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+
+    assert not errors, f"Test failed with errors: {errors}"

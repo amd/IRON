@@ -4,8 +4,8 @@
 
 import pytest
 
-from iron.operators.mha.op import MHA
-from iron.operators.mha.reference import generate_golden_reference
+from iron.operators.mha_prefill_df.op import MHA
+from iron.operators.mha_prefill_df.reference import generate_golden_reference
 from iron.common.test_utils import run_test
 
 

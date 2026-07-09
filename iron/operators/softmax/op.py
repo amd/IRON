@@ -20,7 +20,12 @@ from iron.common import (
 
 @dataclass
 class Softmax(MLIROperator):
-    """AIE-accelerated Softmax operation"""
+    """AIE-accelerated Softmax operation
+
+    When *chunk_size* is set (and < cols), uses an online / tiled softmax
+    that processes each row in two passes with sub-tile chunks, avoiding the
+    local-memory exhaustion that occurs with very long rows (e.g. S >= 8192).
+    """
 
     rows: int
     cols: int
@@ -28,6 +33,7 @@ class Softmax(MLIROperator):
     num_channels: int = 1
     rtp_vector_size: int | None = None
     vector_size_parameter: str | None = None
+    chunk_size: int | None = None
     context: object = field(default=None, repr=False)
 
     @property
@@ -43,6 +49,15 @@ class Softmax(MLIROperator):
             raise ValueError(
                 f"rows ({self.rows}) must be a multiple of num_aie_columns ({self.num_aie_columns})"
             )
+        if self.chunk_size is not None:
+            if self.cols % self.chunk_size != 0:
+                raise ValueError(
+                    f"cols ({self.cols}) must be a multiple of chunk_size ({self.chunk_size})"
+                )
+            if self.chunk_size % 64 != 0:
+                raise ValueError(
+                    f"chunk_size ({self.chunk_size}) must be a multiple of 64"
+                )
         MLIROperator.__init__(self, context=self.context)
 
     @property
@@ -69,6 +84,7 @@ class Softmax(MLIROperator):
                     "rtp_vector_size": self.rtp_vector_size,
                     "vector_size_parameter": self.vector_size_parameter,
                     "kernel_obj_file": self._kernel_link_file,
+                    "chunk_size": self.chunk_size,
                 },
             ),
         )

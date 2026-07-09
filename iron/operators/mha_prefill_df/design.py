@@ -1,6 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Data-flow (DF) multi-head attention (MHA) prefill design.
+
+"Data-flow" (DF): the whole attention computation is a single fused data-flow
+design on the AIE array (one kernel / one dispatch), with data streaming
+between tiles via object FIFOs.  Contrast with the layer-by-layer (LxL) design
+in iron/operators/mha_prefill_lxl/, which chains one operator per attention
+stage into an OperatorSequence.
+"""
+
 import argparse
 import sys
 import math
