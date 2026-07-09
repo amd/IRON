@@ -45,9 +45,9 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].T.reshape(-1)
     fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].T.reshape(-1)
     fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].T.reshape(-1)
-    # Writing through a sub-view marks it CPU-dirty; pushing any weight sub-view
-    # syncs the whole shared scratch buffer (all weights) to the device once.
-    fc.get_buffer("w_gate").to("npu")
+    # Push the persistent weight buffers to the device.
+    for name in ("w_gate", "w_up", "w_down"):
+        fc.get_buffer(name).to("npu")
 
     # Set the per-invocation input.
     fc.get_buffer("in").torch_view()[:] = golden_ref["input"].reshape(-1)
@@ -66,8 +66,9 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
 
     errors = {}
 
-    # Bring the intermediate scratch buffers back to the host for verification.
-    fc.scratch_buffer.to("cpu")
+    # Bring the buffers we verify back to the host. 
+    for name in ("left_swished", "right", "intermediate", "out"):
+        fc.get_buffer(name).to("cpu")
 
     # Verify intermediate result (left_swished * right) against a chained
     # reference built from the observed AIE left_swished and right buffers.
