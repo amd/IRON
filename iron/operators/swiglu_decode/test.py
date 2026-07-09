@@ -66,7 +66,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
 
     errors = {}
 
-    # Bring the buffers we verify back to the host. 
+    # Bring the buffers we verify back to the host.
     for name in ("left_swished", "right", "intermediate", "out"):
         fc.get_buffer(name).to("cpu")
 
