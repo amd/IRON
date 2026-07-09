@@ -5,8 +5,6 @@
 import time
 import pytest
 
-from ml_dtypes import bfloat16
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 
 # swiglu_prefill shares the same reference implementation as swiglu_decode:
@@ -40,39 +38,49 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         prio_accuracy=bool(prio_accuracy),
         context=aie_context,
     )
-    operator.weights_1 = golden_ref["w_gate"].T
-    operator.weights_2 = golden_ref["w_up"].T
-    operator.weights_3 = golden_ref["w_down"].T
-
     operator.compile()
-    op_func = operator.get_callable()
+    fc = operator.get_callable()
 
-    input_buf = XRTTensor.from_torch(golden_ref["input"])
-    output_buf = XRTTensor(
-        (seq_len * embedding_dim,), dtype=bfloat16
-    )  # Output is flattened
+    # Upload the persistent weight buffers. GEMM takes its ``B`` operand in
+    # (K, N) layout, so the projection weights go in un-transposed.
+    fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].reshape(-1)
+    fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].reshape(-1)
+    fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].reshape(-1)
+    # Writing through a sub-view marks it CPU-dirty; pushing any weight sub-view
+    # syncs the whole shared scratch buffer (all weights) to the device once.
+    fc.get_buffer("w_gate").to("npu")
+
+    # Set the per-invocation input.
+    fc.get_buffer("in").torch_view()[:] = golden_ref["input"].reshape(-1)
 
     # Warmup
-    op_func(input_buf, output_buf)
+    fc()
 
     start = time.perf_counter()
-    op_func(input_buf, output_buf)
+    fc()
     elapsed_us = (time.perf_counter() - start) * 1e6
 
-    total_bytes = input_buf.buffer_object().size() + output_buf.buffer_object().size()
+    total_bytes = (golden_ref["input"].numel() + seq_len * embedding_dim) * 2  # bf16
     bandwidth_gbps = total_bytes / (elapsed_us * 1e-6) / 1e9
     print(f"Latency (us): {elapsed_us:.2f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
 
     errors = {}
 
+    # Bring the intermediate scratch buffers back to the host for verification.
+    fc.scratch_buffer.to("cpu")
+
     # Verify intermediate result (left_swished * right)
-    left_swished = op_func.left_swished.to_torch().reshape((seq_len, hidden_dim))
-    right = op_func.right.to_torch().reshape((seq_len, hidden_dim))
+    left_swished = (
+        fc.get_buffer("left_swished").torch_view().reshape((seq_len, hidden_dim))
+    )
+    right = fc.get_buffer("right").torch_view().reshape((seq_len, hidden_dim))
     ref_2 = left_swished * right
 
-    # Note: intermediate buffer in op_func stores the result of eltwise_mul
-    intermediate = op_func.intermediate.to_torch().reshape((seq_len, hidden_dim))
+    # Note: intermediate buffer stores the result of eltwise_mul
+    intermediate = (
+        fc.get_buffer("intermediate").torch_view().reshape((seq_len, hidden_dim))
+    )
     errors_2 = verify_buffer(
         intermediate, "intermediate", ref_2, rel_tol=0.04, abs_tol=0.4
     )
@@ -85,7 +93,7 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     # We allow up to 5% of values to exceed these tolerances to handle precision outliers.
     # TODO: investigate outliers in output
     ref_3 = intermediate @ golden_ref["w_down"]
-    output = output_buf.to_torch().reshape((seq_len, embedding_dim))
+    output = fc.get_buffer("out").torch_view().reshape((seq_len, embedding_dim))
     errors_3 = verify_buffer(
         output, "output", ref_3, rel_tol=0.08, abs_tol=0.4, max_error_rate=0.05
     )

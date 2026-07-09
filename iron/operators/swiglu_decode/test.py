@@ -5,8 +5,6 @@
 import time
 import pytest
 
-from ml_dtypes import bfloat16
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.operators.swiglu_decode.op import SwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.common.test_utils import verify_buffer
@@ -39,29 +37,37 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     operator = SwiGLUDecode(
         embedding_dim=embedding_dim, hidden_dim=hidden_dim, context=aie_context
     )
-    operator.weights_1 = golden_ref["w_gate"].T
-    operator.weights_2 = golden_ref["w_up"].T
-    operator.weights_3 = golden_ref["w_down"].T
-
     operator.compile()
-    op_func = operator.get_callable()
+    fc = operator.get_callable()
 
-    input_buf = XRTTensor.from_torch(golden_ref["input"])
-    output_buf = XRTTensor((1, embedding_dim), dtype=bfloat16)
+    # Upload the persistent weight buffers. GEMV takes its matrix in (M, K)
+    # layout, so the projection weights go in transposed.
+    fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].T.reshape(-1)
+    fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].T.reshape(-1)
+    fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].T.reshape(-1)
+    # Writing through a sub-view marks it CPU-dirty; pushing any weight sub-view
+    # syncs the whole shared scratch buffer (all weights) to the device once.
+    fc.get_buffer("w_gate").to("npu")
+
+    # Set the per-invocation input.
+    fc.get_buffer("in").torch_view()[:] = golden_ref["input"].reshape(-1)
 
     # Warmup
-    op_func(input_buf, output_buf)
+    fc()
 
     start = time.perf_counter()
-    op_func(input_buf, output_buf)
+    fc()
     elapsed_us = (time.perf_counter() - start) * 1e6
 
-    total_bytes = input_buf.buffer_object().size() + output_buf.buffer_object().size()
+    total_bytes = (golden_ref["input"].numel() + embedding_dim) * 2  # bf16
     bandwidth_gbps = total_bytes / (elapsed_us * 1e-6) / 1e9
     print(f"Latency (us): {elapsed_us:.2f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
 
     errors = {}
+
+    # Bring the intermediate scratch buffers back to the host for verification.
+    fc.scratch_buffer.to("cpu")
 
     # Verify intermediate result (left_swished * right) against a chained
     # reference built from the observed AIE left_swished and right buffers.
@@ -71,15 +77,11 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     # outputs that land near zero for very-negative inputs, where bf16
     # rounding asymmetrically flushes NPU vs fp32-CPU). This mirrors the
     # approach used by swiglu_prefill/test.py.
-    # Reshape to (1, hidden_dim) using the unpadded dimension to match the
-    # reference shape. Note: op.hidden_dim_padded may differ if padding was
-    # applied; we use hidden_dim here because the golden reference was
-    # generated with the unpadded hidden_dim.
-    left_swished = op_func.left_swished.to_torch().reshape((1, hidden_dim))
-    right = op_func.right.to_torch().reshape((1, hidden_dim))
+    left_swished = fc.get_buffer("left_swished").torch_view().reshape((1, hidden_dim))
+    right = fc.get_buffer("right").torch_view().reshape((1, hidden_dim))
     ref_intermediate = left_swished * right
 
-    intermediate = op_func.intermediate.to_torch().reshape((1, hidden_dim))
+    intermediate = fc.get_buffer("intermediate").torch_view().reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
         intermediate,
         "intermediate",
@@ -95,7 +97,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     # golden_ref["output"]) because this better matches the bfloat16 precision
     # path and isolates errors to gemv_2.
     ref_output = intermediate @ golden_ref["w_down"]
-    output = output_buf.to_torch().reshape((1, embedding_dim))
+    output = fc.get_buffer("out").torch_view().reshape((1, embedding_dim))
     errors_output = verify_buffer(
         output, "output", ref_output, rel_tol=0.04, abs_tol=0.4
     )
