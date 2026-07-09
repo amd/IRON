@@ -35,10 +35,6 @@ from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
 
 
-def _is_npu2():
-    return isinstance(aie_utils.get_current_device(), NPU2)
-
-
 def _set_input(run, name, data):
     """Write a host tensor into an input buffer and push it to the device.
 
@@ -106,7 +102,9 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
     seq = _build_add_relu_sequence(aie_context, "auto", "infra_auto_add_relu")
     seq.compile()
 
-    expected_mode = "fused" if _is_npu2() else "separate"
+    expected_mode = (
+        "fused" if isinstance(aie_utils.get_current_device(), NPU2) else "separate"
+    )
     assert seq._dispatch.name == expected_mode, (
         f"auto dispatch resolved to {seq._dispatch.name!r}, expected "
         f"{expected_mode!r} on this device"
@@ -187,7 +185,7 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform)."""
-    if dispatch == "fused" and not _is_npu2():
+    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
         pytest.skip("fused (single-ELF) dispatch requires NPU2")
 
     torch.manual_seed(0)
