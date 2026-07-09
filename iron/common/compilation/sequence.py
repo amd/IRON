@@ -19,20 +19,19 @@ import ml_dtypes
 from typing import Any
 
 from . import (
-    CompilationArtifact,
     CompilationArtifactGraph,
     CompilationRule,
     CompilationCommand,
     PythonCallbackCompilationCommand,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    MLIRArtifact,
 )
 
 # Compilation Artifacts
 # ##########################################################################
 
 
-class SequenceMLIRSource(CompilationArtifact):
+class SequenceMLIRArtifact(MLIRArtifact):
     def __init__(
         self,
         filename: str,
@@ -90,7 +89,7 @@ def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
     return callback_function(*gen.args, **gen.kwargs)
 
 
-def fuse_mlir(artifact: SequenceMLIRSource) -> None:
+def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
     """Fuse multiple MLIR modules by inlining their device operations and adding a new main device and runtime sequence that call into sequence of operations based on a runlist."""
 
     input_buffer_size, output_buffer_size, scratch_buffer_size = artifact.buffer_sizes
@@ -288,15 +287,13 @@ class FusePythonGeneratedMLIRCompilationRule(CompilationRule):
     """Compilation rule that fuses multiple MLIR modules into one."""
 
     def matches(self, graph: CompilationArtifactGraph) -> bool:
-        return any(graph.get_worklist(SequenceMLIRSource))
+        return any(graph.get_worklist(SequenceMLIRArtifact))
 
     def compile(self, graph: CompilationArtifactGraph) -> list[CompilationCommand]:
         commands: list[CompilationCommand] = []
-        worklist = graph.get_worklist(SequenceMLIRSource)
+        worklist = graph.get_worklist(SequenceMLIRArtifact)
         for artifact in worklist:
             callback = partial(fuse_mlir, artifact)
             commands.append(PythonCallbackCompilationCommand(callback))
-            new_artifact = SourceArtifact(artifact.filename)
-            new_artifact.available = True
-            graph.replace(artifact, new_artifact)
+            artifact.available = True
         return commands

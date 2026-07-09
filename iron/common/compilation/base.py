@@ -286,21 +286,23 @@ class SourceArtifact(CompilationArtifact):
     pass
 
 
+class MLIRArtifact(CompilationArtifact):
+    """Base class for artifacts whose file is an MLIR (.mlir) module usable as aiecc input.
+
+    ``_MLIRInputMixin.mlir_input`` locates the MLIR source of a downstream
+    target (elf/xclbin/insts.bin) by looking for a dependency of this type.
+    Using a shared base class (rather than name-checking) lets other modules
+    such as ``compilation/sequence.py`` opt in without creating an import cycle.
+    """
+
+
 class _MLIRInputMixin:
     """Mixin providing a mlir_input property that finds the MLIR source in dependencies."""
 
     @property
     def mlir_input(self):
-        # Accept any MLIR-source-style artifact in dependencies. We name-check
-        # ``SequenceMLIRSource`` to avoid an import cycle with
-        # ``compilation/sequence.py`` (which itself imports from this module).
         result = next(
-            (
-                d
-                for d in self.dependencies
-                if isinstance(d, (SourceArtifact, PythonGeneratedMLIRArtifact))
-                or type(d).__name__ == "SequenceMLIRSource"
-            ),
+            (d for d in self.dependencies if isinstance(d, MLIRArtifact)),
             None,
         )
         if result is None:
@@ -375,7 +377,7 @@ class KernelArchiveArtifact(CompilationArtifact):
     pass
 
 
-class PythonGeneratedMLIRArtifact(CompilationArtifact):
+class PythonGeneratedMLIRArtifact(MLIRArtifact):
     def __init__(
         self,
         filename: str,
@@ -471,11 +473,9 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         commands = []
         worklist = graph.get_worklist(PythonGeneratedMLIRArtifact)
         for artifact in worklist:
-            new_artifact = SourceArtifact(artifact.filename)
-            callback = partial(self.generate_mlir, new_artifact, artifact.generator)
+            callback = partial(self.generate_mlir, artifact, artifact.generator)
             commands.append(PythonCallbackCompilationCommand(callback))
-            new_artifact.available = True
-            graph.replace(artifact, new_artifact)
+            artifact.available = True
         return commands
 
     @staticmethod

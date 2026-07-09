@@ -25,7 +25,6 @@ from .compilation import (
     KernelObjectArtifact,
     KernelArchiveArtifact,
     SourceArtifact,
-    PythonGeneratedMLIRArtifact,
 )
 
 

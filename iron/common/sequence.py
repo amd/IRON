@@ -110,7 +110,7 @@ class FusedDispatch(SequenceDispatch):
         for op, *bufs in seq.runlist:
             comp_runlist.append((op_names[id(op)], *bufs))
 
-        return comp.SequenceMLIRSource(
+        return comp.SequenceMLIRArtifact(
             seq.name + "_fused.mlir",
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,

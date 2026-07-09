@@ -9,6 +9,7 @@ from .base import (
     CompilationArtifactGraph,
     CompilationArtifact,
     SourceArtifact,
+    MLIRArtifact,
     FullElfArtifact,
     XclbinArtifact,
     InstsBinArtifact,
@@ -27,6 +28,6 @@ from .base import (
     ArchiveCompilationRule,
 )
 from .sequence import (
-    SequenceMLIRSource,
+    SequenceMLIRArtifact,
     FusePythonGeneratedMLIRCompilationRule,
 )
