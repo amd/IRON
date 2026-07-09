@@ -22,8 +22,9 @@ void leaky_relu_vectorized_bf16(bfloat16 *restrict a,
     vector<bfloat16, 32> alpha_vec = aie::broadcast<bfloat16, 32>(alpha);
     vector<bfloat16, 32> zeroes = aie::zeros<bfloat16, 32>();
 
+    // Backed by LeakyReLU.min_line_size (>= 64 elements) / vector width 32.
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(32)
+    AIE_LOOP_MIN_ITERATION_COUNT(2)
     for (int i = 0; i < vector_size; i += 32) {
         vector<bfloat16, 32> input = *it_in++;
         // Leaky RELU: f(x) = max(x, alpha * x) where alpha is typically 0.01
