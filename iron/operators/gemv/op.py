@@ -8,11 +8,13 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
+    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from iron.common.device_utils import get_kernel_dir
 
 
 @dataclass
@@ -26,6 +28,10 @@ class GEMV(MLIROperator):
     tile_size_output: int | None = None
     num_batches: int = 1
     kernel_vector_size: int = field(default=64, repr=False)
+    # Optional fused activation applied to each output tile in the producing core.
+    # "none" (default) leaves the output unchanged; "gelu" applies GELU(tanh approx).
+    # repr=False keeps operator/artifact names stable for the default path.
+    epilogue: str = field(default="none", repr=False)
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
@@ -49,8 +55,24 @@ class GEMV(MLIROperator):
             self.K >= self.kernel_vector_size and self.K % self.kernel_vector_size == 0
         ):
             raise ValueError("K must be multiple of kernel_vector_size")
+        if self.epilogue not in ("none", "gelu"):
+            raise ValueError(
+                f"unknown epilogue {self.epilogue!r} (expected 'none' or 'gelu')"
+            )
+        if self.epilogue == "gelu" and self.tile_size_output % 16 != 0:
+            raise ValueError(
+                f"gelu epilogue needs tile_size_output % 16 == 0 (got {self.tile_size_output})"
+            )
 
         MLIROperator.__init__(self, context=self.context)
+
+    @property
+    def _kernel_link_file(self):
+        # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
+        # archive of (matvec, gelu); the plain matvec stays a single object.
+        if self.epilogue == "gelu":
+            return f"gemv_{self.K}k_{self.kernel_vector_size}vs_gelu_kernels.a"
+        return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
 
     def get_mlir_artifact(self):
         mlir_verbose = getattr(self.context, "mlir_verbose", False)
@@ -71,26 +93,46 @@ class GEMV(MLIROperator):
                 ),
                 {
                     "verbose": mlir_verbose,
-                    "kernel_object": f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
+                    "kernel_object": self._kernel_link_file,
+                    "epilogue": self.epilogue,
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
+        matvec_obj = KernelObjectArtifact(
+            f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
+            dependencies=[
+                SourceArtifact(
+                    self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
+                )
+            ],
+            extra_flags=[
+                f"-DDIM_K={self.K}",
+                f"-DVEC_SIZE={self.kernel_vector_size}",
+            ],
+        )
+        if self.epilogue == "gelu":
+            # The gelu kernel lives in aie2p/gelu.cc, so the fused epilogue is NPU2-only.
+            if get_kernel_dir() != "aie2p":
+                raise NotImplementedError(
+                    "gemv gelu epilogue is only available on NPU2 (aie2p); "
+                    f"current kernel dir is {get_kernel_dir()!r}"
+                )
+            gelu_obj = KernelObjectArtifact(
+                "gelu.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
+                        self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
                     )
                 ],
-                extra_flags=[
-                    f"-DDIM_K={self.K}",
-                    f"-DVEC_SIZE={self.kernel_vector_size}",
-                ],
-            ),
-        ]
+            )
+            return [
+                KernelArchiveArtifact(
+                    self._kernel_link_file, dependencies=[matvec_obj, gelu_obj]
+                )
+            ]
+        return [matvec_obj]
 
     def get_arg_spec(self):
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
