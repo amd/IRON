@@ -185,12 +185,14 @@ def my_matvec(
     # must be even, so split_run only yields an even run_lo and the predicate requires
     # even strides.
     #
-    # FUTURE: this manual split is only needed on the current mlir_aie pin. Once IRON's
-    # pin moves past Xilinx/mlir-aie #3036 (LinearizeContiguousBDTransfer for the
-    # iteration dim, on top of #2924 which canonicalizes a contiguous run to linear form
-    # and bypasses the 1023 cap via the hardware buffer-length register), split_run /
-    # MAX_WRAP / GRAN_ELEMS can be dropped and the run supplied as one inner dim
-    # [num_batches, A_run]. The pin is currently frozen at the last pre-#3016 release.
+    # NOTE: the split cannot be dropped in the cols>1 case, even on a pin with the
+    # contiguous-run linearization (mlir-aie #2924 + #3036, present in v1.3.4). That
+    # linearization only bypasses the 1023 wrap cap when the WHOLE transfer is
+    # contiguous, i.e. bstride==run (cols==1); there [1, num_batches, run] with strides
+    # [0, bstride, 1] lowers to one linear buffer-length transfer. For cols>1 the batch
+    # stride leaves a gap, so the inner run stays a genuine wrap dim: verified on v1.3.4
+    # that [1, num_batches, 4096] (a cols=8 run) fails aiecc with "Size 4096 exceeds the
+    # [0:1023] range", while the split below lowers and runs. So the split stays.
     # FIXME: pull these shim BD bounds from the MLIR-AIE target model rather than
     # hard-coding them; they live in verifyStridesWraps in
     # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
