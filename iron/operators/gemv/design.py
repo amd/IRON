@@ -168,8 +168,8 @@ def my_matvec(
     # Batch coalescing replaces the per-batch unroll with a single iterated BD.
     #
     # Within one batch the run is contiguous (A_run = (M//cols)*K elements).
-    # The batch stride is the full matrix (A_bstride = M*K), so for cols>1 each column 
-    # gathers its own slice out of every batch with a gap in between. 
+    # The batch stride is the full matrix (A_bstride = M*K), so for cols>1 each column
+    # gathers its own slice out of every batch with a gap in between.
     #
     # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
     # the AIE shim's 10-bit (1023) wrap-size cap.
