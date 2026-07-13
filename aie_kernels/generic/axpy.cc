@@ -25,7 +25,7 @@ static inline void saxpy_family(const bfloat16 *restrict x,
                                 const int32_t vector_size)
 {
     event0();
-    ::aie::vector<bfloat16, 64> a_v = ::aie::broadcast<bfloat16, 64>(aie::to_float<bfloat16>(a, 0));
+    ::aie::vector<bfloat16, 64> a_v = ::aie::broadcast<bfloat16, 64>((bfloat16)a);
     for (int i = 0; i < vector_size; i += 64) {
         ::aie::vector<bfloat16, 64> result;
         if constexpr (Mul && Add) {

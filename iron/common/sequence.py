@@ -646,13 +646,19 @@ class _PerBufferCallable(SequenceCallable):
         return self._buffer_cache[buffer_name]
 
     def _sync_inputs(self):
+        # Direct host writes via get_buffer(name).data[:] don't flip the buffer's
+        # device flag, so Tensor.to("npu") would no-op (the flag reads "npu"
+        # from construction) and strand the writes on the host.  Force the
+        # host->device upload for every input buffer.
         for name in self.op.input_args:
-            self._buffers[name].to("npu")
+            self._buffers[name]._sync_to_device()
 
     def _sync_outputs(self):
+        # Force device->host for every non-input buffer so callers read fresh
+        # device results regardless of the (unchanged) device flag.
         for name in self.op.subbuffer_layout:
             if name not in self.op.input_args:
-                self._buffers[name].to("cpu")
+                self._buffers[name]._sync_from_device()
 
 
 class SequenceXclbinCallable(_PerBufferCallable):
