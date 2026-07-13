@@ -81,6 +81,17 @@ void softmax_simple_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict out
     return;
 }
 
+// partial_softmax_alias_bf16 is a flash-attention style single-shot softmax
+// used by the projected-fused path. It shares the same three-pass structure as
+// softmax_simple_bf16 (find max, exp, normalize) but differs in two ways that
+// make code sharing awkward: (1) it folds the query scale into the log2e
+// multiply instead of using the fixed log2e constant, and (2) it maintains
+// per-row running max/sum in an externally-supplied scale_buffer (flash
+// accumulation across key tiles) rather than reducing a whole row locally. The
+// softmax_partial_stats_impl / softmax_partial_norm_impl pair below implement a
+// different (chunked, two-call) online softmax that keeps its running stats in
+// a compact softmax_stats buffer; those are used by the standalone softmax
+// operator, not by this projected-fused kernel.
 void partial_softmax_alias_bf16(bfloat16 *restrict input_vector,
                                 bfloat16 *restrict output_vector,
                                 bfloat16 *restrict scale_buffer,
@@ -160,22 +171,27 @@ void partial_softmax_alias_bf16(bfloat16 *restrict input_vector,
     return;
 }
 
-// ---------------------------------------------------------------------------
-// Online (partial / tiled) softmax helpers
+// Online (partial / tiled) softmax helpers.
 //
-// These three kernels implement a two-pass online softmax that processes a row
-// in sub-tile chunks, keeping running max and sum statistics in a small local
-// buffer (`stats`).  Layout of the stats buffer (bfloat16[16], only [0..1]
-// used):
-//   stats[0] = running max   (scaled by log2e)
-//   stats[1] = running sum   (of exp2(x*log2e - max))
-// ---------------------------------------------------------------------------
+// These kernels implement an online softmax that processes a row in sub-tile
+// chunks, keeping running max and sum statistics in a small per-core buffer.
+// The max is stored scaled by log2e and the sum accumulates exp2(x*log2e -
+// max), matching the exp2-based normalization used below. softmax_stats names
+// the two stats slots instead of using hard-coded array indices; it occupies
+// the first two bfloat16 elements of the stats buffer.
+struct softmax_stats {
+    bfloat16 max; // running max (scaled by log2e)
+    bfloat16 sum; // running sum of exp2(x*log2e - max)
+};
 
-void softmax_partial_stats_impl(bfloat16 *restrict input, bfloat16 *stats, const int32_t vector_size)
+void softmax_partial_stats_impl(bfloat16 *restrict input, softmax_stats *restrict stats, const int32_t vector_size)
 {
     event0();
 
     const int elem_iters = vector_size / SM_VEC_LEN;
+
+    float running_max = (float)stats->max;
+    float running_sum = (float)stats->sum;
 
     aie::vector<bfloat16, SM_VEC_LEN> input_bf16;
     aie::accum<accfloat, SM_VEC_LEN> scaled_accum, exp_in_accum;
@@ -183,63 +199,53 @@ void softmax_partial_stats_impl(bfloat16 *restrict input, bfloat16 *stats, const
 
     aie::vector<bfloat16, SM_VEC_LEN> log2e_vec = aie::broadcast<bfloat16, SM_VEC_LEN>((bfloat16)log2e);
 
-    // --- Phase 1: find local max (scaled by log2e) -------------------------
-    float local_max = -INFINITY;
-    auto it_in1 = aie::cbegin_restrict_vector<SM_VEC_LEN>((bfloat16 *)input);
+    auto it_in = aie::cbegin_restrict_vector<SM_VEC_LEN>((bfloat16 *)input);
+
+    // Single-pass online algorithm (matches aie_kernels/aie2/softmax.cc): for
+    // each vector chunk, update the running max if needed -- rescaling the
+    // partial accumulator and running sum by exp2(old_max - new_max) -- then
+    // accumulate exp2(x*log2e - max).
     for (int i = 0; i < elem_iters; i++) {
-        input_bf16 = *it_in1++;
+        input_bf16 = *it_in++;
         scaled_accum = aie::mul(input_bf16, log2e_vec);
         float chunk_max = aie::reduce_max(scaled_accum.to_vector<bfloat16>());
-        if (chunk_max > local_max) {
-            local_max = chunk_max;
+
+        if (chunk_max > running_max) {
+            aie::vector<float, SM_VEC_LEN> diff_vec = aie::broadcast<float, SM_VEC_LEN>(running_max - chunk_max);
+            aie::vector<bfloat16, SM_VEC_LEN> corr = aie::exp2<bfloat16>(diff_vec);
+            float scale = (float)corr[0];
+            aie::vector<bfloat16, SM_VEC_LEN> scale_vec = aie::broadcast<bfloat16, SM_VEC_LEN>((bfloat16)scale);
+            exp_val_accum = aie::mul(exp_val_accum.to_vector<bfloat16>(), scale_vec);
+            running_sum *= scale;
+            running_max = chunk_max;
         }
-    }
 
-    // --- Phase 2: update running max, rescale running sum ------------------
-    float old_max = (float)stats[0];
-    float old_sum = (float)stats[1];
-
-    if (local_max > old_max) {
-        // New max is larger — rescale the old sum by exp2(old_max - new_max)
-        aie::vector<float, SM_VEC_LEN> diff_vec = aie::broadcast<float, SM_VEC_LEN>(old_max - local_max);
-        aie::vector<bfloat16, SM_VEC_LEN> corr = aie::exp2<bfloat16>(diff_vec);
-        old_sum = old_sum * (float)corr[0];
-        old_max = local_max;
-    }
-
-    // --- Phase 3: accumulate exp2(input * log2e - max) for this chunk ------
-    aie::vector<bfloat16, SM_VEC_LEN> max_val_vec = aie::broadcast<bfloat16, SM_VEC_LEN>((bfloat16)old_max);
-
-    auto it_in2 = aie::cbegin_restrict_vector<SM_VEC_LEN>((bfloat16 *)input);
-    for (int i = 0; i < elem_iters; i++) {
-        input_bf16 = *it_in2++;
-        scaled_accum = aie::mul(input_bf16, log2e_vec);
+        aie::vector<bfloat16, SM_VEC_LEN> max_val_vec = aie::broadcast<bfloat16, SM_VEC_LEN>((bfloat16)running_max);
         exp_in_accum = aie::sub(scaled_accum, max_val_vec);
         aie::vector<bfloat16, SM_VEC_LEN> exp_val = aie::exp2<bfloat16>(exp_in_accum.to_vector<float>());
         exp_val_accum = add(exp_val_accum, exp_val);
     }
 
     aie::vector<float, SM_VEC_LEN> reduce = exp_val_accum.to_vector<float>();
-    float local_sum = aie::reduce_add(reduce);
+    running_sum += aie::reduce_add(reduce);
 
-    // --- Phase 4: store updated stats --------------------------------------
-    stats[0] = (bfloat16)old_max;
-    stats[1] = (bfloat16)(old_sum + local_sum);
+    stats->max = (bfloat16)running_max;
+    stats->sum = (bfloat16)running_sum;
 
     event1();
 }
 
 void softmax_partial_norm_impl(bfloat16 *restrict input,
                                bfloat16 *restrict output,
-                               bfloat16 *stats,
+                               softmax_stats *restrict stats,
                                const int32_t vector_size)
 {
     event0();
 
     const int elem_iters = vector_size / SM_VEC_LEN;
 
-    float max_val = (float)stats[0];
-    float sum_val = (float)stats[1];
+    float max_val = (float)stats->max;
+    float sum_val = (float)stats->sum;
     bfloat16 inv_sum = (bfloat16)aie::inv(sum_val);
 
     aie::vector<bfloat16, SM_VEC_LEN> log2e_vec = aie::broadcast<bfloat16, SM_VEC_LEN>((bfloat16)log2e);
@@ -281,20 +287,20 @@ void partial_softmax_bf16(bfloat16 *restrict input,
     partial_softmax_alias_bf16(input, output, scale_buffer, input_size, row_idx, num_rows, scale);
 }
 
-void softmax_partial_init_bf16(bfloat16 *stats)
+void softmax_partial_init_bf16(softmax_stats *restrict stats)
 {
-    stats[0] = (bfloat16)(-INFINITY);
-    stats[1] = (bfloat16)(0.0f);
+    stats->max = (bfloat16)(-INFINITY);
+    stats->sum = (bfloat16)(0.0f);
 }
 
-void softmax_partial_stats_bf16(bfloat16 *restrict input, bfloat16 *stats, const int32_t vector_size)
+void softmax_partial_stats_bf16(bfloat16 *restrict input, softmax_stats *restrict stats, const int32_t vector_size)
 {
     softmax_partial_stats_impl(input, stats, vector_size);
 }
 
 void softmax_partial_norm_bf16(bfloat16 *restrict input,
                                bfloat16 *restrict output,
-                               bfloat16 *stats,
+                               softmax_stats *restrict stats,
                                const int32_t vector_size)
 {
     softmax_partial_norm_impl(input, output, stats, vector_size);

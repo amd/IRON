@@ -56,7 +56,9 @@ class SequenceDispatch:
 
 
 class AutoDispatch(SequenceDispatch):
-    """Selects the platform default: full-ELF on NPU2, chained-xclbin elsewhere."""
+    """Selects the platform default: a single dispatch (full-ELF) on NPU2, and
+    a chained-xclbin dispatch elsewhere (NPU1 has no full-ELF support, so the
+    sequence degenerates into one dispatch per operator)."""
 
     name = "auto"
 
@@ -67,7 +69,11 @@ class AutoDispatch(SequenceDispatch):
 
 
 class FusedDispatch(SequenceDispatch):
-    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
+    """Single-dispatch execution (NPU2 only): every operator in the sequence is
+    inlined into one ELF and launched with a single dispatch. The array is
+    still reconfigured between operators; "fused" refers to collapsing the
+    per-operator dispatches into one, not to merging the compute. NPU1 has no
+    full-ELF support, so it cannot use this mode (see SeparateDispatch)."""
 
     name = "fused"
 
@@ -138,6 +144,10 @@ class SeparateDispatch(SequenceDispatch):
     """Chained-xclbin dispatch: one xclbin+insts per unique operator, linked
     via ``--xclbin-input`` and invoked sequentially. Owns the compiled
     per-operator xclbin/insts maps consumed by the runtime callable.
+
+    This is the default (and only) mode on NPU1. On NPU2 it can be selected
+    explicitly to debug or to benchmark the impact of single-dispatch
+    (``fused``) execution against per-operator dispatches.
     """
 
     name = "separate"

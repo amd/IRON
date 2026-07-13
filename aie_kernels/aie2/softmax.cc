@@ -58,25 +58,25 @@ void softmax_simple_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict out
     return;
 }
 
-// ---------------------------------------------------------------------------
-// Online (partial / tiled) softmax helpers
+// Online (partial / tiled) softmax helpers.
 //
-// These three kernels implement a two-pass online softmax that processes a row
-// in sub-tile chunks, keeping running max and sum statistics in a small local
-// buffer (`stats`).  Layout of the stats buffer (bfloat16[16], only [0..1]
-// used):
-//   stats[0] = running max
-//   stats[1] = running sum   (of exp(x - max))
-// ---------------------------------------------------------------------------
+// These kernels implement an online softmax that processes a row in sub-tile
+// chunks, keeping running max and sum statistics in a small per-core buffer.
+// softmax_stats names the two stats slots instead of using hard-coded array
+// indices. It occupies the first two bfloat16 elements of the stats buffer.
+struct softmax_stats {
+    bfloat16 max; // running max
+    bfloat16 sum; // running sum of exp(x - max)
+};
 
-void softmax_partial_stats_impl(bfloat16 *restrict input, bfloat16 *stats, const int32_t vector_size)
+void softmax_partial_stats_impl(bfloat16 *restrict input, softmax_stats *restrict stats, const int32_t vector_size)
 {
     event0();
 
     const int elem_iters = vector_size / 16;
 
-    float running_max = (float)stats[0];
-    float running_sum = (float)stats[1];
+    float running_max = (float)stats->max;
+    float running_sum = (float)stats->sum;
 
     aie::vector<bfloat16, 16> input_bf16;
     aie::accum<accfloat, 16> exp_val_accum = aie::zeros<accfloat, 16>();
@@ -112,23 +112,23 @@ void softmax_partial_stats_impl(bfloat16 *restrict input, bfloat16 *stats, const
     aie::vector<float, 16> reduce = exp_val_accum.to_vector<float>();
     running_sum += aie::reduce_add(reduce);
 
-    stats[0] = (bfloat16)running_max;
-    stats[1] = (bfloat16)running_sum;
+    stats->max = (bfloat16)running_max;
+    stats->sum = (bfloat16)running_sum;
 
     event1();
 }
 
 void softmax_partial_norm_impl(bfloat16 *restrict input,
                                bfloat16 *restrict output,
-                               bfloat16 *stats,
+                               softmax_stats *restrict stats,
                                const int32_t vector_size)
 {
     event0();
 
     const int elem_iters = vector_size / 16;
 
-    float max_val = (float)stats[0];
-    float sum_val = (float)stats[1];
+    float max_val = (float)stats->max;
+    float sum_val = (float)stats->sum;
     bfloat16 inv_sum = (bfloat16)aie::inv(sum_val);
 
     aie::vector<bfloat16, 16> max_val_vec = aie::broadcast<bfloat16, 16>((bfloat16)max_val);
@@ -157,20 +157,20 @@ void softmax_bf16(bfloat16 *restrict input, bfloat16 *restrict output, const int
     softmax_simple_bf16(input, output, input_size);
 }
 
-void softmax_partial_init_bf16(bfloat16 *stats)
+void softmax_partial_init_bf16(softmax_stats *restrict stats)
 {
-    stats[0] = (bfloat16)(-INFINITY);
-    stats[1] = (bfloat16)(0.0f);
+    stats->max = (bfloat16)(-INFINITY);
+    stats->sum = (bfloat16)(0.0f);
 }
 
-void softmax_partial_stats_bf16(bfloat16 *restrict input, bfloat16 *stats, const int32_t vector_size)
+void softmax_partial_stats_bf16(bfloat16 *restrict input, softmax_stats *restrict stats, const int32_t vector_size)
 {
     softmax_partial_stats_impl(input, stats, vector_size);
 }
 
 void softmax_partial_norm_bf16(bfloat16 *restrict input,
                                bfloat16 *restrict output,
-                               bfloat16 *stats,
+                               softmax_stats *restrict stats,
                                const int32_t vector_size)
 {
     softmax_partial_norm_impl(input, output, stats, vector_size);

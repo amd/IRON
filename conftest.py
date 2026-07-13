@@ -173,6 +173,12 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item in items:
+        # Benchmark tests are part of the extensive suite. Adding the marker here
+        # (before pytest's built-in '-m' deselection runs) ensures they are
+        # excluded by '-m "not extensive"' just like any other extensive test.
+        if item.get_closest_marker("benchmark"):
+            item.add_marker(pytest.mark.extensive)
+
         marker = item.get_closest_marker("supported_devices")
         if marker and device not in marker.args:
             item.add_marker(
