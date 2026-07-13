@@ -165,34 +165,15 @@ def my_matvec(
         for col in range(cols)
     ]
 
-    # --- Batch-coalesce (default): one BD per column over all batches. ---
-    # Replaces the per-batch unroll with a single iterated BD; the stock A_taps/C_taps
-    # above remain the fallback (and the num_batches==1 path). Access-equivalent to the
-    # unroll (covered by test_gemv_batched).
+    # Batch coalescing replaces the per-batch unroll with a single iterated BD.
     #
-    # This is NOT a single linear transfer. Within one batch the run is contiguous
-    # (A_run = (M//cols)*K elements), but the batch stride is the full matrix
-    # (A_bstride = M*K), so for cols>1 each column gathers its own slice out of every
-    # batch with a gap in between. Only cols==1 degenerates to bstride==run. So the
-    # batch dim is a genuine size-uncapped iteration dim and the TAP is required.
+    # Within one batch the run is contiguous (A_run = (M//cols)*K elements).
+    # The batch stride is the full matrix (A_bstride = M*K), so for cols>1 each column 
+    # gathers its own slice out of every batch with a gap in between. 
     #
     # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
-    # the AIE shim's 10-bit (1023) wrap-size cap. TAP sizes are outermost-first and the
-    # verifier reverses them, so [1, num_batches, run_hi, run_lo] puts num_batches in the
-    # size-uncapped dim and the contiguous run in the two capped wrap dims. The shim also
-    # enforces a 4-byte address granularity on every size and stride (not skipped, even
-    # for linear transfers); for bf16 (2 bytes) that means run_lo and the batch stride
-    # must be even, so split_run only yields an even run_lo and the predicate requires
-    # even strides.
+    # the AIE shim's 10-bit (1023) wrap-size cap.
     #
-    # NOTE: the split cannot be dropped in the cols>1 case, even on a pin with the
-    # contiguous-run linearization (mlir-aie #2924 + #3036, present in v1.3.4). That
-    # linearization only bypasses the 1023 wrap cap when the WHOLE transfer is
-    # contiguous, i.e. bstride==run (cols==1); there [1, num_batches, run] with strides
-    # [0, bstride, 1] lowers to one linear buffer-length transfer. For cols>1 the batch
-    # stride leaves a gap, so the inner run stays a genuine wrap dim: verified on v1.3.4
-    # that [1, num_batches, 4096] (a cols=8 run) fails aiecc with "Size 4096 exceeds the
-    # [0:1023] range", while the split below lowers and runs. So the split stays.
     # FIXME: pull these shim BD bounds from the MLIR-AIE target model rather than
     # hard-coding them; they live in verifyStridesWraps in
     # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
