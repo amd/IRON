@@ -21,4 +21,9 @@ runs:
         source ${{ inputs.env_name }}/bin/activate
         pip install --upgrade pip
         pip install -r requirements.txt
+        pip install -r requirements_stream.txt
+        # stream-dse's AIE codegen deps (snax-mlir/snaxc, xdsl-aie, aie-python-extras)
+        # are not PyPI dependencies; this console script installs them so the
+        # stream-backed operators can generate their MLIR at build time.
+        stream-setup-aie
         echo "Prerequisites installed into ${{ inputs.env_name }}"

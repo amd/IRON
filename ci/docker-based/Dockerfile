@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libboost-dev libboost-filesystem-dev libboost-program-options-dev uuid-dev \
     # Required by MHA kernel
     llvm-18 \
+    # graphviz provides the `dot` binary that stream-dse's codegen shells out to
+    # (via pydot) to render its workload graph; without it the stream-backed
+    # operators fail at MLIR-generation time with: "dot" not found in path.
+    graphviz \
     # GitHub Actions runner requirements
     git jq curl tar \
  && rm -rf /var/lib/apt/lists/*

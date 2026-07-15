@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Optional dependency for the stream-dse-backed fused SwiGLU-prefill operator
+# (iron/operators/swiglu_prefill_stream).
+#
+# It is NOT installed by the default CI (requirements.txt); the operator's test
+# skips itself (pytest.importorskip) when stream-dse is absent. Install this file
+# to build/run the operator and its test:
+#
+#     pip install -r requirements_stream.txt
+#     stream-setup-aie   # REQUIRED: installs stream-dse's AIE codegen deps that
+#                        # cannot be PyPI dependencies (snax-mlir/snaxc, xdsl-aie,
+#                        # aie-python-extras); also installs the mlir_aie/llvm-aie
+#                        # wheels, skipping any already provided by requirements.txt.
+#
+# Notes:
+# - stream-dse generates the fused MLIR design at build time (license-free
+#   OR-Tools GSCIP solver; no Gurobi needed) and writes its generated workload/
+#   mapping files into its own installed package directory, so that environment
+#   must be writable.
+# - >=1.13.6 is required: stream_design.py feeds IRON-authored operand layouts
+#   into code generation via optimize_allocation_co(kernels=...), the override
+#   hook added in stream-dse 1.13.4; the k=2 variant (op_k2.py) additionally needs
+#   the two-fusion-group support (make_swiglu_mapping(split_groups=...) + the
+#   multi-group AIE codegen pipeline) added in stream-dse 1.13.5; and 1.13.6 makes
+#   the debug workload-graph visualization non-fatal, so code generation no longer
+#   requires graphviz (`dot`) to be installed.
+
+stream-dse>=1.13.6
