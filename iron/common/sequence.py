@@ -85,6 +85,7 @@ class FusedDispatch(SequenceDispatch):
             f"{seq.name}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
+            extra_flags=seq.extra_flags,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -262,6 +263,7 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         dispatch="auto",
+        extra_flags=None,
         *args,
         **kwargs,
     ):
@@ -282,6 +284,10 @@ class OperatorSequence(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
+        # Extra aiecc flags forwarded to the full-ELF build (e.g. --dynamic-objFifos
+        # for placed/routed whole-array designs that would otherwise overflow AIE2p
+        # program memory). Empty by default, so other sequences are unaffected.
+        self.extra_flags = extra_flags or []
         self._dispatch = dispatch
 
     @staticmethod

@@ -318,10 +318,12 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         filename: str,
         mlir_input: CompilationArtifact,
         dependencies: list[CompilationArtifact],
+        extra_flags: list[str] | None = None,
     ) -> None:
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
+        self.extra_flags = extra_flags if extra_flags is not None else []
 
 
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
@@ -535,6 +537,7 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 "--generate-full-elf",
                 "--full-elf-name",
                 os.path.abspath(artifact.filename),
+                *artifact.extra_flags,
                 os.path.abspath(artifact.mlir_input.filename),
             ]
             commands.append(
