@@ -18,3 +18,4 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from .layout import Stride, TiledStride, TiledStridedLayout, tiled_2d
