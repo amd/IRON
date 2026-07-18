@@ -67,6 +67,17 @@ class GEMV(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
+    def name(self) -> str:
+        # epilogue is repr=False so the default path keeps a stable name, but the fused
+        # variant must not share an artifact name with the plain GEMV of the same shape:
+        # both would emit the same .mlir/.xclbin, and in a shared build dir a cached unfused
+        # build can then satisfy the fused op (running the raw matvec with no activation).
+        base = super().name
+        if self.epilogue == "none":
+            return base
+        return f"{base}_epi{self.epilogue}"
+
+    @property
     def _kernel_link_file(self):
         # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
         # archive of (matvec, gelu); the plain matvec stays a single object.
