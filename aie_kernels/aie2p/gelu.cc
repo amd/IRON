@@ -40,7 +40,7 @@ void gelu_tanh_approx_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict o
     auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(64)
+    AIE_LOOP_MIN_ITERATION_COUNT(1)
     for (int i = 0; i < vector_size; i += 16) {
         *it_out++ = gelu_tanh_approx_v16(*it_in++);
     }
@@ -53,7 +53,7 @@ static inline void gelu_tanh_approx_inplace_bf16(bfloat16 *restrict v, const int
     event0();
     auto it = aie::begin_restrict_vector<16>(v);
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(64)
+    AIE_LOOP_MIN_ITERATION_COUNT(1)
     for (int i = 0; i < vector_size; i += 16) {
         aie::vector<bfloat16, 16> x = *it;
         *it++ = gelu_tanh_approx_v16(x);
