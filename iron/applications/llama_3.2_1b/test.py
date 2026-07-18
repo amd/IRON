@@ -5,6 +5,7 @@
 import subprocess
 import pytest
 import os
+import sys
 from pathlib import Path
 
 test_dir = Path(__file__).parent
@@ -27,6 +28,7 @@ def generate_test_params():
 params, names = generate_test_params()
 
 
+@pytest.mark.skipif(not weights_dir.exists(), reason="llama3.2-1b not found")
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
@@ -34,7 +36,7 @@ params, names = generate_test_params()
 )
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
-    command = f"python3 {test_dir}/llama_npu.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --num-tokens {num_tokens} --prompt-len {prompt_len}"
+    command = f"{sys.executable} {test_dir}/llama_npu.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --num-tokens {num_tokens} --prompt-len {prompt_len}"
 
     result = subprocess.run(
         command,

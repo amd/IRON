@@ -746,13 +746,29 @@ class KernelCompilationRule(CompilationRule):
         nm_path = self._find_tool("llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
-        # Extract defined symbols and create symbol map
-        nm_cmd = [
-            "sh",
-            "-c",
-            f"{nm_path} --defined-only --extern-only {artifact.filename} | "
-            f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
-        ]
+        if os.name == "nt":
+            # Pure python code execution block wrapped cleanly for Windows
+            python_script = f"""
+import subprocess
+nm_cmd = [{repr(nm_path)}, '--defined-only', '--extern-only', {repr(artifact.filename)}]
+res = subprocess.run(nm_cmd, capture_output=True, text=True, check=True)
+lines = []
+for line in res.stdout.splitlines():
+    parts = line.strip().split()
+    if len(parts) >= 3:
+        sym = parts[-1]
+        lines.append(f"{{sym}} {prefix}{{sym}}\\n")
+with open({repr(symbol_map_file)}, 'w') as f:
+    f.writelines(lines)
+"""
+            nm_cmd = [sys.executable, "-c", python_script.strip()]
+        else:
+            # Standard Unix fallback path
+            nm_cmd = [
+                "sh", "-c", 
+                f"{nm_path} --defined-only --extern-only {artifact.filename} | "
+                f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
+            ]
 
         # Apply the renaming using the symbol map
         objcopy_cmd = [

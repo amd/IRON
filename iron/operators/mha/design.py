@@ -554,12 +554,12 @@ def fused_mha(
                 idx_buffer[0] += 1
                 ###
 
-                with if_(loop_idx_kv > 2) as if_op:
-                    for _ in range_(loop_idx_kv - 2):
-                        elem_in_p = of_p.acquire(1)
-                        elem_in_v = of_v.acquire(1)
-                        elt_of_out_scale2 = of_scale.acquire(1)
-
+                
+                for _ in range_(loop_idx_kv - 2):
+                    elem_in_p = of_p.acquire(1)
+                    elem_in_v = of_v.acquire(1)
+                    elt_of_out_scale2 = of_scale.acquire(1)
+                    with if_(loop_idx_kv > 2) as if_op:
                         matmul_PV(
                             elem_in_p,
                             elem_in_v,
@@ -569,19 +569,17 @@ def fused_mha(
                             1,
                             idx_buffer,
                         )
-
-                        of_p.release(1)
-                        of_v.release(1)
-                        of_scale.release(1)
-
                         idx_buffer[0] += 1
 
-                ### Last iteration, final rescaling
-                with if_(loop_idx_kv > 1) as if_op:
-                    elem_in_p = of_p.acquire(1)
-                    elem_in_v = of_v.acquire(1)
-                    elt_of_out_scale3 = of_scale.acquire(1)
+                    of_p.release(1)
+                    of_v.release(1)
+                    of_scale.release(1)
 
+                ### Last iteration, final rescaling
+                elem_in_p = of_p.acquire(1)
+                elem_in_v = of_v.acquire(1)
+                elt_of_out_scale3 = of_scale.acquire(1)
+                with if_(loop_idx_kv > 1) as if_op:
                     matmul_PV(
                         elem_in_p,
                         elem_in_v,
@@ -592,12 +590,11 @@ def fused_mha(
                         idx_buffer,
                     )
                     rescale_O(elem_o_out, elt_of_out_scale3, B_q, idx_buffer)
-
-                    of_p.release(1)
-                    of_v.release(1)
-                    of_scale.release(1)
-
                     idx_buffer[0] += 1
+                of_p.release(1)
+                of_v.release(1)
+                of_scale.release(1)
+
                 # else:
                 with else_(if_op):
                     rescale_O(elem_o_out, elt_of_out_scale, B_q, idx_buffer)
