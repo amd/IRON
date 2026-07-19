@@ -651,6 +651,45 @@ def _find_tool(name, peano_dir, mlir_aie_dir):
     )
 
 
+def _tool_runs(path):
+    """True if the tool at `path` actually executes. Guards against a binary that
+    is present on disk but cannot run -- e.g. one whose shared-library
+    dependency fails to load, so it exits nonzero and emits nothing rather than
+    producing output."""
+    try:
+        return (
+            subprocess.run([str(path), "--version"], capture_output=True).returncode
+            == 0
+        )
+    except OSError:
+        return False
+
+
+def _find_working_tool(name, peano_dir, mlir_aie_dir):
+    """Like _find_tool, but skip candidates that are present-but-broken (fail to
+    run) and fall through to the next, ending at the system PATH copy.
+
+    _find_tool returns the FIRST *existing* binary even if it cannot run. Used
+    silently in a `nm | awk > map` pipeline such a binary yields an EMPTY symbol
+    map (the pipe's exit status is awk's, so nm's failure is masked) -> the
+    fusion symbol prefix is never applied -> `undefined symbol: <prefix><sym>`
+    at the per-core link."""
+    candidates = [
+        Path(peano_dir) / "bin" / name,
+        Path(mlir_aie_dir) / "bin" / name,
+    ]
+    for tool_name in (name, f"{name}-18"):
+        found = shutil.which(tool_name)
+        if found:
+            candidates.append(Path(found))
+    for candidate in candidates:
+        if candidate.is_file() and _tool_runs(candidate):
+            return str(candidate)
+    # Nothing ran cleanly: defer to _find_tool (existence-only) so the caller
+    # still gets a path, or its clear FileNotFoundError if none exists at all.
+    return _find_tool(name, peano_dir, mlir_aie_dir)
+
+
 class KernelCompilationRule(CompilationRule):
     """Compile KernelObjectArtifacts using Peano (clang++) or xchesscc."""
 
@@ -730,8 +769,11 @@ class KernelCompilationRule(CompilationRule):
     def _find_tool(self, name):
         return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
 
+    def _find_working_tool(self, name):
+        return _find_working_tool(name, self.peano_dir, self.mlir_aie_dir)
+
     def _rename_symbols(self, artifact):
-        objcopy_path = self._find_tool("llvm-objcopy")
+        objcopy_path = self._find_working_tool("llvm-objcopy")
         cmd = [objcopy_path]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
@@ -742,16 +784,23 @@ class KernelCompilationRule(CompilationRule):
         return [ShellCompilationCommand(cmd)]
 
     def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = self._find_tool("llvm-objcopy")
-        nm_path = self._find_tool("llvm-nm")
+        objcopy_path = self._find_working_tool("llvm-objcopy")
+        nm_path = self._find_working_tool("llvm-nm")
         symbol_map_file = artifact.filename + ".symbol_map"
 
-        # Extract defined symbols and create symbol map
+        # Extract defined symbols and build the redefine-syms map. Run nm to a
+        # file, THEN awk (joined by `&&`) rather than `nm | awk`: a pipe reports
+        # only awk's exit status, so a failing nm silently produces an EMPTY map
+        # and the prefix rename is skipped, surfacing much later as
+        # `undefined symbol: {prefix}<sym>` at the per-core link. With `&&` a
+        # failed nm aborts here loudly instead.
         nm_cmd = [
             "sh",
             "-c",
-            f"{nm_path} --defined-only --extern-only {artifact.filename} | "
-            f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
+            f"{nm_path} --defined-only --extern-only {artifact.filename} "
+            f"> {symbol_map_file}.syms && "
+            f"awk '{{print $3 \" {prefix}\" $3}}' {symbol_map_file}.syms "
+            f"> {symbol_map_file}",
         ]
 
         # Apply the renaming using the symbol map
