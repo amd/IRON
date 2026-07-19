@@ -17,6 +17,7 @@ def my_rms_norm(
     num_channels,
     tile_size,
     trace_size,
+    epsilon=1e-5,
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
     total_cores = num_columns * num_channels
@@ -49,7 +50,7 @@ def my_rms_norm(
 
     # AIE Core Function declaration
     rms_norm_kernel = Kernel(
-        "rms_norm_bf16_vector", "rms_norm.o", [tile_ty, tile_ty, np.int32]
+        "rms_norm_bf16_vector", "rms_norm.o", [tile_ty, tile_ty, np.int32, np.float32]
     )
 
     # Define a task that will run on a compute tile
@@ -58,7 +59,7 @@ def my_rms_norm(
         for _ in range_(N_div_n):
             elem_in1 = of_in1.acquire(1)
             elem_out = of_out.acquire(1)
-            rms_norm_kernel(elem_in1, elem_out, per_tile_elements)
+            rms_norm_kernel(elem_in1, elem_out, per_tile_elements, epsilon)
             of_in1.release(1)
             of_out.release(1)
 

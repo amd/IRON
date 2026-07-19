@@ -26,15 +26,16 @@ class RMSNorm(MLIROperator):
     num_channels: int
     tile_size: int
     weighted: bool = False
+    epsilon: float = 1e-5  # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
         **MLIROperator._name_aliases,
         "weighted": "w",
+        "epsilon": "eps",
     }
 
     def __post_init__(self):
-        # Note: epsilon is hardcoded to 1e-5 in the AIE kernel and cannot be changed at runtime.
         dev = aie_utils.get_current_device()
         shim_dma_limit = get_shim_dma_limit(dev)
 
@@ -87,6 +88,7 @@ class RMSNorm(MLIROperator):
                     self.num_channels,
                     self.tile_size,
                     0,  # trace_size
+                    self.epsilon,
                 ),
             ),
         )
@@ -129,4 +131,4 @@ class RMSNorm(MLIROperator):
         """CPU reference: row-wise RMS normalization, optionally weighted."""
         from iron.operators.rms_norm.reference import reference
 
-        return reference(x, w=w, weighted=self.weighted)
+        return reference(x, w=w, weighted=self.weighted, eps=self.epsilon)

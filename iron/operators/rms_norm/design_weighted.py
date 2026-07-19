@@ -17,6 +17,7 @@ def my_weighted_rms_norm(
     num_channels,
     weight_length,
     trace_size,
+    epsilon=1e-5,
     func_prefix="",
 ):
     per_tile_elements = weight_length
@@ -63,7 +64,7 @@ def my_weighted_rms_norm(
     rms_norm_kernel = Kernel(
         f"{func_prefix}rms_norm_bf16_vector",
         f"{func_prefix}rms_norm.o",
-        [tile_ty, tile_ty, np.int32],
+        [tile_ty, tile_ty, np.int32, np.float32],
     )
     eltwise_mul_kernel = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
@@ -77,7 +78,7 @@ def my_weighted_rms_norm(
         for _ in range_(N_div_n):
             elem_in1 = of_in1.acquire(1)
             elem_out = of_out1.acquire(1)
-            rms_norm(elem_in1, elem_out, per_tile_elements)
+            rms_norm(elem_in1, elem_out, per_tile_elements, epsilon)
             of_in1.release(1)
             of_out1.release(1)
 
