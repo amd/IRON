@@ -78,6 +78,17 @@ class XRTSubBuffer(XRTTensor):
 
     @property
     def data(self) -> np.ndarray:
+        # `.data` is the write handle for this sub-view. Callers get it to write fresh
+        # host data (inputs, resident weights), but numpy gives us no write hook, so we
+        # conservatively mark this sub-view AND its parent host-dirty ("cpu") on any
+        # access. That makes a subsequent parent `.to("npu")` actually fire the
+        # host->device sync -- otherwise the residency guard no-ops (device already
+        # "npu" from allocation) and the freshly written bytes never reach the device,
+        # so the op computes on stale init-zeros. A redundant re-read sync is cheap;
+        # a silently-skipped write sync is a correctness bug.
+        self.device = "cpu"
+        if self._parent is not None:
+            self._parent.device = "cpu"
         return self._data
 
     def buffer_object(self):

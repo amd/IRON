@@ -581,11 +581,17 @@ class SequenceFullELFCallable(SequenceCallable):
         return sub
 
     def _sync_inputs(self):
-        # Sub-views handed out by get_buffer() propagate their host-dirty state
-        # to this parent, so the parent syncs to the device here.
+        # Sub-views handed out by get_buffer() mark this parent host-dirty on .data
+        # access (XRTSubBuffer.data), so `to("npu")` here actually fires the host->device
+        # sync for the freshly written inputs.
         self.input_buffer.to("npu")
 
     def _sync_outputs(self):
+        # _run just rewrote the output arena on the device, so the device holds the
+        # authoritative copy. Force the device->host sync: assert device residency first
+        # so `to("cpu")` fires even if a prior read of get_buffer(...).data marked the
+        # buffer "cpu" (otherwise a looped dispatch would read stale output).
+        self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
 
     def _run(self):
