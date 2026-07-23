@@ -30,8 +30,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+        # No ref: check out the default branch (trusted base code). This job
+        # runs from workflow_run with a write-scoped GITHUB_TOKEN and secrets,
+        # so it must not check out the fork's head_sha: actions/checkout now
+        # refuses that (pwn-request guard), and running the fork's copy of
+        # ci/scripts/pretty_aggregate.py under the write token would be the
+        # vulnerability itself. The job only needs the trusted aggregation
+        # script; artifacts and PR metadata come from the API, not the tree.
 
       - name: Set up Python
         uses: actions/setup-python@v5
