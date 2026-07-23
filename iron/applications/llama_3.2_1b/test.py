@@ -28,7 +28,13 @@ def generate_test_params():
 params, names = generate_test_params()
 
 
-@pytest.mark.skipif(not weights_dir.exists(), reason="llama3.2-1b not found")
+@pytest.mark.skipif(
+    not (
+        (weights_dir / "llama3.2-1b" / "model.safetensors").exists()
+        and (weights_dir / "llama3.2-1b" / "tokenizer.model").exists()
+    ),
+    reason="llama3.2-1b weights not found",
+)
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
