@@ -63,16 +63,14 @@ def _load_input(fc, name, tensor):
 
 
 def _get_scratch_tensor(fc, name, shape):
-    """Read a named buffer from the fused callable's scratch space."""
-    fc.scratch_buffer._sync_from_device()
-    sub = fc.get_buffer(name)
+    """Read a named buffer from the callable, syncing it device->host."""
+    sub = fc.read_host(name)
     return sub.data[: int(np.prod(shape))].reshape(shape).astype(np.float32)
 
 
 def _get_output_tensor(fc, name, shape):
-    """Read a named buffer from the fused callable's output space."""
-    fc.output_buffer._sync_from_device()
-    sub = fc.get_buffer(name)
+    """Read a named buffer from the callable, syncing it device->host."""
+    sub = fc.read_host(name)
     return sub.data[: int(np.prod(shape))].reshape(shape).astype(np.float32)
 
 
@@ -83,8 +81,7 @@ def _verify_output(fc, golden, H, d, S, E):
     ).bfloat16()
     chain_ref = (npu_context.float() @ golden["W_output"].float()).to(torch.bfloat16)
 
-    fc.output_buffer._sync_from_device()
-    output_np = fc.get_buffer("attn_output").data
+    output_np = fc.read_host("attn_output").data
     output = torch.from_numpy(output_np.reshape(S, E).astype(np.float32)).bfloat16()
 
     errors = verify_buffer(
