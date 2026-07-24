@@ -490,7 +490,14 @@ class AieccCompilationRule(CompilationRule):
         self, build_dir, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs
     ):
         self.build_dir = build_dir
-        self.aiecc_path = Path(mlir_aie_dir) / "bin" / "aiecc"
+        # AIECC_PATH lets a build point at a locally-built aiecc (e.g. a compiler under
+        # development) without replacing the installed one. Default = the installed aiecc.
+        _aiecc_override = os.environ.get("AIECC_PATH")
+        self.aiecc_path = (
+            Path(_aiecc_override)
+            if _aiecc_override
+            else Path(mlir_aie_dir) / "bin" / "aiecc"
+        )
         self.peano_dir = peano_dir
         self.use_chess = use_chess
         super().__init__(*args, **kwargs)
@@ -508,7 +515,7 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
             compile_cmd = [
                 str(self.aiecc_path),
                 "-v",
-                "-j1",
+                f"-j{os.environ.get('AIECC_JOBS', '1')}",
                 "--no-compile-host",
             ]
             if self.use_chess:
@@ -562,7 +569,7 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
             compile_cmd = [
                 str(self.aiecc_path),
                 "-v",
-                "-j1",
+                f"-j{os.environ.get('AIECC_JOBS', '1')}",
                 "--no-compile-host",
             ]
             if self.use_chess:
