@@ -496,11 +496,18 @@ class AttentionPrefillProjectedFused(OperatorSequence):
         )
 
         # ---- Reinterleave + output projection ----
+        # Scatter attn_context (H, S, d) -> context_interleaved (S, H*d). S is
+        # split into (S//256, 256) so no DMA dimension exceeds the BD size
+        # limit. The split dims must pair with their strides: the outer
+        # (S//256) block dim uses stride 256*H*d and the inner 256-row dim uses
+        # stride H*d, so a row s = outer*256 + inner lands at s*H*d. Swapping
+        # the two sizes makes the 256-dim take the 256*H*d stride and write far
+        # past the buffer -> host-heap corruption / segfaults.
         reinterleave = StridedCopy(
             input_sizes=(1, 1, 1, H * S * d),
             input_strides=(0, 0, 0, 1),
             input_offset=0,
-            output_sizes=(H, 256, S // 256, d),
+            output_sizes=(H, S // 256, 256, d),
             output_strides=(d, 256 * H * d, H * d, 1),
             output_offset=0,
             input_buffer_size=H * S * d,
