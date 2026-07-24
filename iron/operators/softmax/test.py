@@ -108,6 +108,10 @@ def get_partial_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
+# Single-column online softmax over a full GPT-2 batch (~800M elements) is too
+# slow for the NPU1/Phoenix ERT command timeout; restrict to NPU2. The online
+# path is still exercised on NPU2 here and via mha_prefill_lxl for S >= 8192.
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("rows,cols,chunk_size", get_partial_params())
 def test_softmax_partial(rows, cols, chunk_size, aie_context):
     """Test partial / online softmax with sub-tile chunks for long rows."""
