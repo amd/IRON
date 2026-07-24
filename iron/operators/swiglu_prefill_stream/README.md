@@ -26,10 +26,12 @@ stream-setup-aie          # required: installs stream-dse's AIE codegen deps
 Notes:
 - MLIR generation uses the open-source **OR-Tools GSCIP** solver (`backend="ortools_gscip"`),
   so **no Gurobi license** is required.
-- `stream-setup-aie` is **required**: it installs the AIE codegen packages stream-dse needs
-  that cannot be plain PyPI dependencies (`snax-mlir`/`snaxc`, `xdsl-aie`, `aie-python-extras`),
-  since they are direct git/URL installs. It also installs the `mlir_aie` / `llvm-aie` wheels,
-  but skips those if IRON's `requirements.txt` already provided them.
+- `stream-setup-aie` is **required**: it installs the pure-Python AIE codegen dialects
+  stream-dse needs that cannot be plain PyPI dependencies (`xdsl-aie`, `snax-mlir`), since they
+  are direct git installs. As of **stream-dse 1.13.7** it does **not** install `mlir_aie` /
+  `llvm-aie`: IRON's `requirements.txt` already pins those, and stream-dse's codegen only emits
+  text MLIR via xdsl (it never imports the `aie` bindings). Earlier releases reinstalled an
+  older `mlir_aie` here, which downgraded IRON's pinned wheel and broke the test suite.
 - Importing the operator does **not** require `stream-dse` (the launcher is imported lazily);
   only **building** (`operator.compile()` / running the test) does.
 

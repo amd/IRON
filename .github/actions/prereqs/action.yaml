@@ -22,8 +22,10 @@ runs:
         pip install --upgrade pip
         pip install -r requirements.txt
         pip install -r requirements_stream.txt
-        # stream-dse's AIE codegen deps (snax-mlir/snaxc, xdsl-aie, aie-python-extras)
-        # are not PyPI dependencies; this console script installs them so the
-        # stream-backed operators can generate their MLIR at build time.
+        # stream-dse's pure-Python AIE codegen dialects (xdsl-aie, snax-mlir) are
+        # git installs, not PyPI dependencies; this console script installs them so
+        # the stream-backed operators can generate their MLIR at build time. It does
+        # NOT install mlir_aie/llvm-aie -- those stay pinned by requirements.txt above
+        # (stream-dse>=1.13.7; older releases reinstalled/downgraded them here).
         stream-setup-aie
         echo "Prerequisites installed into ${{ inputs.env_name }}"
