@@ -772,7 +772,8 @@ with open({repr(symbol_map_file)}, 'w') as f:
         else:
             # Standard Unix fallback path
             nm_cmd = [
-                "sh", "-c", 
+                "sh",
+                "-c",
                 f"{nm_path} --defined-only --extern-only {artifact.filename} | "
                 f"awk '{{print $3 \" {prefix}\" $3}}' > {symbol_map_file}",
             ]
