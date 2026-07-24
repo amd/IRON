@@ -63,7 +63,7 @@ void softmax_simple_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict out
 // These kernels implement an online softmax that processes a row in sub-tile
 // chunks, keeping running max and sum statistics in a small per-core buffer.
 // softmax_stats names the two stats slots instead of using hard-coded array
-// indices. It occupies the first two bfloat16 elements of the stats buffer.
+// indices.
 struct softmax_stats {
     bfloat16 max; // running max
     bfloat16 sum; // running sum of exp(x - max)

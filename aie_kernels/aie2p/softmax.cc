@@ -177,8 +177,7 @@ void partial_softmax_alias_bf16(bfloat16 *restrict input_vector,
 // chunks, keeping running max and sum statistics in a small per-core buffer.
 // The max is stored scaled by log2e and the sum accumulates exp2(x*log2e -
 // max), matching the exp2-based normalization used below. softmax_stats names
-// the two stats slots instead of using hard-coded array indices; it occupies
-// the first two bfloat16 elements of the stats buffer.
+// the two stats slots instead of using hard-coded array indices.
 struct softmax_stats {
     bfloat16 max; // running max (scaled by log2e)
     bfloat16 sum; // running sum of exp2(x*log2e - max)

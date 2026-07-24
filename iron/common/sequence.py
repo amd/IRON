@@ -56,9 +56,7 @@ class SequenceDispatch:
 
 
 class AutoDispatch(SequenceDispatch):
-    """Selects the platform default: a single dispatch (full-ELF) on NPU2, and
-    a chained-xclbin dispatch elsewhere (NPU1 has no full-ELF support, so the
-    sequence degenerates into one dispatch per operator)."""
+    """Selects the platform default: full-ELF on NPU2, chained-xclbin elsewhere."""
 
     name = "auto"
 
@@ -69,11 +67,7 @@ class AutoDispatch(SequenceDispatch):
 
 
 class FusedDispatch(SequenceDispatch):
-    """Single-dispatch execution (NPU2 only): every operator in the sequence is
-    inlined into one ELF and launched with a single dispatch. The array is
-    still reconfigured between operators; "fused" refers to collapsing the
-    per-operator dispatches into one, not to merging the compute. NPU1 has no
-    full-ELF support, so it cannot use this mode (see SeparateDispatch)."""
+    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
     name = "fused"
 
@@ -144,10 +138,6 @@ class SeparateDispatch(SequenceDispatch):
     """Chained-xclbin dispatch: one xclbin+insts per unique operator, linked
     via ``--xclbin-input`` and invoked sequentially. Owns the compiled
     per-operator xclbin/insts maps consumed by the runtime callable.
-
-    This is the default (and only) mode on NPU1. On NPU2 it can be selected
-    explicitly to debug or to benchmark the impact of single-dispatch
-    (``fused``) execution against per-operator dispatches.
     """
 
     name = "separate"
@@ -646,19 +636,13 @@ class _PerBufferCallable(SequenceCallable):
         return self._buffer_cache[buffer_name]
 
     def _sync_inputs(self):
-        # Direct host writes via get_buffer(name).data[:] don't flip the buffer's
-        # device flag, so Tensor.to("npu") would no-op (the flag reads "npu"
-        # from construction) and strand the writes on the host.  Force the
-        # host->device upload for every input buffer.
         for name in self.op.input_args:
-            self._buffers[name]._sync_to_device()
+            self._buffers[name].to("npu")
 
     def _sync_outputs(self):
-        # Force device->host for every non-input buffer so callers read fresh
-        # device results regardless of the (unchanged) device flag.
         for name in self.op.subbuffer_layout:
             if name not in self.op.input_args:
-                self._buffers[name]._sync_from_device()
+                self._buffers[name].to("cpu")
 
 
 class SequenceXclbinCallable(_PerBufferCallable):
