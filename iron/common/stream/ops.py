@@ -157,16 +157,22 @@ def _to_mul(a, b):
 
 @dataclass(frozen=True)
 class StreamOp:
-    """How one torch operator is exported, and which kernel runs it."""
+    """How one torch operator is exported, and which kernel runs it.
+
+    ``translation`` overrides how the exporter lowers the operator, and is needed
+    only when its default lowering is not what stream-dse parses. Leaving it unset
+    keeps the exporter's own lowering and just binds the resulting ONNX operator to
+    a kernel.
+    """
 
     onnx_type: str
     kernel: StreamKernel
-    translation: Callable
+    translation: Callable | None = None
 
 
-# torch operator -> its ONNX form and AIE kernel. Gemm rather than MatMul because
-# stream-dse's Gemm parser iterates (m, k, n), which is the order the mappings
-# address as D0/D1/D2.
+# torch operator -> its ONNX form and AIE kernel. Gemm rather than the exporter's
+# default MatMul because stream-dse's Gemm parser iterates (m, k, n), which is the
+# order the mappings address as D0/D1/D2.
 TORCH_OPS: dict[Callable, StreamOp] = {
     torch.ops.aten.matmul.default: StreamOp("Gemm", GEMM, _to_gemm),
     torch.ops.aten.silu.default: StreamOp("Silu", SILU, _to_silu),
@@ -178,7 +184,11 @@ _BY_ONNX_TYPE = {op.onnx_type: op for op in TORCH_OPS.values()}
 
 def translation_table() -> dict[Callable, Callable]:
     """The ``custom_translation_table`` for :func:`torch.onnx.export`."""
-    return {target: op.translation for target, op in TORCH_OPS.items()}
+    return {
+        target: op.translation
+        for target, op in TORCH_OPS.items()
+        if op.translation is not None
+    }
 
 
 def op_for_onnx_type(onnx_type: str) -> StreamOp:
