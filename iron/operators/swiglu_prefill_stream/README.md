@@ -12,6 +12,30 @@ flow into one xclbin. Unlike the other operators, its MLIR is not written by han
 produced at build time by [`stream_design.py`](./stream_design.py), which calls the installed
 `stream` package (`stream.api.optimize_allocation_co(..., enable_codegen=True)`).
 
+## Where the design comes from
+
+Both inputs stream-dse needs are generated **by IRON**, from one source:
+
+| | Source | Built by |
+|---|---|---|
+| Workload (ONNX) | [`reference.py`](./reference.py) — the `SwiGLU` `nn.Module` | `torch.export` → [`iron/common/stream/workload.py`](../../common/stream/workload.py) |
+| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`iron/common/stream/mapping.py`](../../common/stream/mapping.py) |
+| Kernels (`.cc`) | IRON's `aie_kernels` library | [`iron/common/stream/ops.py`](../../common/stream/ops.py) registry |
+
+The module that generates the design is the same one the test checks the result
+against, so the two cannot drift. Mapping node names are taken from the exported
+graph rather than restated, so workload and mapping cannot disagree either. Both
+files are written into the experiment's output directory at build time — nothing
+is committed to the tree.
+
+Changing the problem size means re-exporting with different example shapes: the
+placement carries tile sizes and core sets but no absolute dimensions, so it is
+unaffected (within the divisibility limits `stream_design._check_shapes` enforces).
+
+Supporting another op (say a softmax block) is one `StreamKernel` plus one
+`ATEN_OPS` entry in `iron/common/stream/ops.py`, pointing at the existing
+`aie_kernels/<dir>/softmax.cc`, plus that operator's own placement.
+
 ## Enabling stream codegen
 
 `stream-dse` is an **optional, separately-installed** dependency (it is *not* in IRON's
@@ -51,5 +75,11 @@ The feasible/verified shape is **seq 256 / embedding 512 / hidden 2048**, tiles
 - The hardware-description YAML (`whole_array_strix.yaml` + `hardware/cores/*.yaml`) is
   resolved from the **installed `stream` package**, where it ships as package data
   (stream-dse >= 1.13.3); nothing is vendored in this operator.
-- `stream-dse` writes its generated ONNX workload / mapping YAML **into its installed package
-  directory**, so that environment must be writable.
+- Nodes and their results are renamed from the ATen names `torch.export` produces
+  (`matmul`, `matmul_1`, …). Those are prefixes of one another, which stream-dse's
+  tensor bookkeeping does not distinguish reliably (it raises a `KeyError` while
+  building the memory-capacity constraints).
+- Naming does not change the problem posed to the solver — same nodes, tensors,
+  shapes and connections — but it does change SCIP's presolve, and with it how
+  long the allocation takes to solve. The names here are the ones this operator
+  was measured with.

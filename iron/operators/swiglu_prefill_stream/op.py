@@ -9,13 +9,12 @@ import aie.utils as aie_utils
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
 from iron.common.sequence import OperatorSequence
+from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
 
 
 @dataclass
@@ -70,55 +69,28 @@ class _SwiGLUStreamGroup(MLIROperator):
             DesignGenerator(self.operator_dir / "stream_design.py", fn, args, kwargs),
         )
 
-    def _mm_kernel(self, tile_m, tile_k, tile_n):
-        # stream-dse emits dimension-suffixed kernel symbols so the gate/up and
-        # down GEMMs (different tile shapes) coexist; rename mm.cc's unsuffixed
-        # symbols to match.
-        base_dir = self.context.base_dir
-        suffix = f"{tile_m}_{tile_k}_{tile_n}"
-        return KernelObjectArtifact(
-            f"mm_{suffix}.o",
-            dependencies=[
-                SourceArtifact(base_dir / "aie_kernels" / get_kernel_dir() / "mm.cc")
-            ],
-            extra_flags=[
-                f"-DDIM_M={tile_m}",
-                f"-DDIM_K={tile_k}",
-                f"-DDIM_N={tile_n}",
-                "-Dbf16_bf16_ONLY",
-            ],
-            rename_symbols={
-                "matmul_bf16_bf16": f"matmul_bf16_bf16_{suffix}",
-                "zero_bf16": f"zero_bf16_{suffix}",
-            },
-        )
-
     def get_kernel_artifacts(self):
-        base_dir = self.context.base_dir
-        kernel_dir = get_kernel_dir()
-        gate_up = self._mm_kernel(
+        # Each kernel's source, compile flags and symbol names come from the
+        # stream op registry, so they stay in step with the design stream-dse
+        # generates against IRON's aie_kernels library.
+        from iron.operators.swiglu_prefill_stream.stream_design import gemm_tiles
+
+        base_dir, kernel_dir = self.context.base_dir, get_kernel_dir()
+        gate_up, down = gemm_tiles(
             self.seq_len_tile_size, self.embedding_tile_size, self.hidden_tile_size
         )
-        down = self._mm_kernel(
-            self.seq_len_tile_size, self.hidden_tile_size, self.embedding_tile_size
-        )
-        if self.group_index == 1:
-            return [down]
-        silu = KernelObjectArtifact(
-            "silu.o",
-            dependencies=[
-                SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "silu.cc")
-            ],
-        )
-        mul = KernelObjectArtifact(
-            "mul.o",
-            dependencies=[
-                SourceArtifact(base_dir / "aie_kernels" / "generic" / "mul.cc")
-            ],
-        )
-        if self.group_index == 0:
-            return [gate_up, silu, mul]
-        return [gate_up, down, silu, mul]
+        kernels = {
+            0: [(GEMM, gate_up), (SILU, None), (ELTWISE_MUL, None)],
+            1: [(GEMM, down)],
+            None: [(GEMM, gate_up), (GEMM, down), (SILU, None), (ELTWISE_MUL, None)],
+        }[self.group_index]
+        return [
+            artifact
+            for kernel, tiles in kernels
+            for artifact in kernel.kernel_artifacts(
+                base_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
+            )
+        ]
 
     def get_arg_spec(self):
         m, e, h = self.seq_len, self.embedding_dim, self.hidden_dim

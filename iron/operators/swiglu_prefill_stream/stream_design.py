@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stream-dse MLIR generation launcher for the fused SwiGLU-prefill operator.
+"""Generate the fused SwiGLU-prefill design with stream-dse.
 
-This is the in-IRON replacement for the previously hardcoded
-``/home/micas/stream_aie/main_swiglu.py`` entry point. It calls the *installed*
-``stream-dse`` package (``pip install stream-dse`` followed by ``stream-setup-aie``)
-to produce a single fused MLIR module for the whole SwiGLU-prefill block, which
-IRON then fuses into a single full-ELF via `OperatorSequence`.
+Both inputs stream-dse needs are produced here, from IRON:
 
-The function signature mirrors ``run_main_aie_codegen_swiglu`` from stream-dse's
-``scripts/main_swiglu.py`` reference entry point. Because ``scripts/`` is not
-shipped in the stream-dse wheel, that logic is vendored here; the hardware-
-description YAML is resolved from the installed ``stream`` package, where it ships
-as package data (stream-dse >= 1.13.3).
+* the **workload**, exported from :mod:`~iron.operators.swiglu_prefill_stream.reference`
+  -- the same module the test checks the result against;
+* the **mapping**, from the placement below.
+
+Both are written into the experiment's output directory at build time (never into
+the source tree), and the mapping's node names come from the exported workload, so
+the two cannot disagree. stream-dse then solves the allocation and emits the MLIR.
 
 This module is imported lazily (by ``DesignGenerator`` at compile time), so
 importing the operator does not require ``stream-dse`` to be installed -- only
@@ -25,11 +23,12 @@ import re
 from pathlib import Path
 
 import stream
+import torch
 from stream.api import optimize_allocation_co
-from stream.inputs.aie.mapping.make_swiglu_mapping import make_swiglu_mapping
-from stream.inputs.aie.workload.make_onnx_swiglu import make_swiglu_workload
 
-from iron.operators.swiglu_prefill_stream.stream_kernels import iron_kernels
+from iron.common.stream.mapping import FusedGroup, Placement, emit_mapping
+from iron.common.stream.workload import export_workload
+from iron.operators.swiglu_prefill_stream.reference import swiglu_module
 
 # Hardware description for the whole-array Strix (npu2) target, shipped as package
 # data inside the installed stream package (stream-dse >= 1.13.3).
@@ -40,6 +39,217 @@ _ACCELERATOR = os.path.join(
     "hardware",
     "whole_array_strix.yaml",
 )
+
+# Names for the exported graph's computation nodes, in topological order, and for
+# the tensors they produce. They name the roles rather than the ATen ops
+# torch.export captured, and they are what the mapping and the generated design
+# are read by.
+GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
+NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
+RESULT_NAMES = {
+    GATE: "left",
+    UP: "right",
+    SILU: "left_swished",
+    MUL: "intermediate",
+}
+
+# Compute-tile placement on the 4-row x 8-column array: each GEMM gets two
+# columns' worth of cores split 4-ways over rows (D0, the sequence dimension) and
+# 2-ways over D2, the two elementwise layers one column each. This is a property
+# of the array, not of the problem size, so it holds across shapes.
+_GEMM_SPLIT = [[("D0", 4), ("D2", 2)]]
+_ELEMENTWISE_SPLIT = [[("D0", 4)]]
+_CORES = {
+    GATE: [[2, 3, 4, 5, 8, 9, 10, 11]],
+    UP: [[14, 15, 16, 17, 20, 21, 22, 23]],
+    SILU: [[26, 27, 28, 29]],
+    MUL: [[32, 33, 34, 35]],
+    DOWN: [[38, 39, 40, 41, 44, 45, 46, 47]],
+}
+
+
+def gemm_tiles(seq_tile, embedding_tile, hidden_tile):
+    """Kernel tile shape ``(m, k, n)`` of the gate/up GEMMs and of the down GEMM.
+
+    The gate and up projections contract over the embedding dimension and produce
+    the hidden one; the down projection contracts the other way round.
+    """
+    return (seq_tile, embedding_tile, hidden_tile), (
+        seq_tile,
+        hidden_tile,
+        embedding_tile,
+    )
+
+
+def _placements(seq_tile, embedding_tile, hidden_tile):
+    gate_up, down = gemm_tiles(seq_tile, embedding_tile, hidden_tile)
+
+    def gemm(tiles):
+        m, k, n = tiles
+        return {"utilization": 61.8, "m": m, "k": k, "n": n, "layout": "default"}
+
+    elementwise = {"utilization": 50.0, "layout": "default"}
+    return {
+        GATE: Placement(_CORES[GATE], _GEMM_SPLIT, gemm(gate_up)),
+        UP: Placement(_CORES[UP], _GEMM_SPLIT, gemm(gate_up)),
+        SILU: Placement(_CORES[SILU], _ELEMENTWISE_SPLIT, elementwise),
+        MUL: Placement(_CORES[MUL], _ELEMENTWISE_SPLIT, elementwise),
+        DOWN: Placement(_CORES[DOWN], _GEMM_SPLIT, gemm(down)),
+    }
+
+
+def _groups(seq_tile, embedding_tile, hidden_tile, split_groups):
+    """Fusion groups: one fully fused design, or a front end plus down projection.
+
+    Splitting makes stream-dse emit one design per group, which IRON then deploys
+    as a single full-ELF. D0 is the sequence dimension, D1 the contraction and D2
+    the output dimension of the group's leading GEMM.
+    """
+    if split_groups:
+        return [
+            FusedGroup(
+                "Fused_Group_1",
+                [GATE, UP, SILU, MUL],
+                [
+                    (GATE, "D1", embedding_tile),
+                    (GATE, "D2", hidden_tile),
+                    (GATE, "D0", seq_tile),
+                ],
+            ),
+            FusedGroup(
+                "Fused_Group_2",
+                [DOWN],
+                [
+                    (DOWN, "D1", hidden_tile),
+                    (DOWN, "D2", embedding_tile),
+                    (DOWN, "D0", seq_tile),
+                ],
+            ),
+        ]
+    return [
+        FusedGroup(
+            "Fused_Group_1",
+            [GATE, UP, SILU, MUL, DOWN],
+            [
+                (GATE, "D1", embedding_tile),
+                (DOWN, "D2", embedding_tile),
+                (GATE, "D2", hidden_tile),
+                (GATE, "D0", seq_tile),
+            ],
+        )
+    ]
+
+
+def _check_shapes(
+    seq_len, embedding_dim, hidden_dim, seq_tile, embedding_tile, hidden_tile
+):
+    """Reject shapes the fixed 4x8 placement cannot tile evenly."""
+    rows, gemm_split = 4, 2
+    if seq_len % rows or seq_len < seq_tile * rows:
+        raise ValueError(
+            f"seq_len ({seq_len}) must be a multiple of {rows} and at least {seq_tile * rows}"
+        )
+    if embedding_dim % (embedding_tile * gemm_split):
+        raise ValueError(
+            f"embedding_dim ({embedding_dim}) must be a multiple of "
+            f"embedding_tile * {gemm_split} ({embedding_tile * gemm_split})"
+        )
+    if hidden_dim % (hidden_tile * gemm_split):
+        raise ValueError(
+            f"hidden_dim ({hidden_dim}) must be a multiple of "
+            f"hidden_tile * {gemm_split} ({hidden_tile * gemm_split})"
+        )
+
+
+def build_inputs(
+    seq_len,
+    embedding_dim,
+    hidden_dim,
+    seq_len_tile_size,
+    embedding_tile_size,
+    hidden_tile_size,
+    output_dir,
+    split_groups=False,
+):
+    """Write the workload and mapping for one configuration; return their paths."""
+    _check_shapes(
+        seq_len,
+        embedding_dim,
+        hidden_dim,
+        seq_len_tile_size,
+        embedding_tile_size,
+        hidden_tile_size,
+    )
+    module = swiglu_module(embedding_dim, hidden_dim)
+    workload = export_workload(
+        module,
+        (torch.zeros(seq_len, embedding_dim, dtype=torch.bfloat16),),
+        node_names=NODE_NAMES,
+        result_names=RESULT_NAMES,
+    )
+    output_dir = Path(output_dir)
+    return (
+        workload.write(output_dir / "workload.onnx"),
+        emit_mapping(
+            workload,
+            _placements(seq_len_tile_size, embedding_tile_size, hidden_tile_size),
+            _groups(
+                seq_len_tile_size, embedding_tile_size, hidden_tile_size, split_groups
+            ),
+            output_dir / "mapping.yaml",
+        ),
+    )
+
+
+def _experiment_id(seq_len, embedding_dim, hidden_dim, rows, cols, suffix=""):
+    hw_name = os.path.splitext(os.path.basename(_ACCELERATOR))[0]
+    return f"{hw_name}-swiglu{suffix}_{seq_len}_{embedding_dim}_{hidden_dim}-{rows}_row_{cols}_col"
+
+
+def _run_codegen(
+    seq_len,
+    embedding_dim,
+    hidden_dim,
+    rows,
+    cols,
+    npu,
+    seq_len_tile_size,
+    embedding_tile_size,
+    hidden_tile_size,
+    backend,
+    trace_size=0,
+    split_groups=False,
+    output_root="outputs",
+):
+    """Run stream-dse's constraint-optimization + code generation once."""
+    experiment_id = _experiment_id(
+        seq_len, embedding_dim, hidden_dim, rows, cols, "_k2" if split_groups else ""
+    )
+    output_dir = os.path.join(output_root, experiment_id)
+    workload_path, mapping_path = build_inputs(
+        seq_len,
+        embedding_dim,
+        hidden_dim,
+        seq_len_tile_size,
+        embedding_tile_size,
+        hidden_tile_size,
+        output_dir,
+        split_groups=split_groups,
+    )
+    ctx = optimize_allocation_co(
+        hardware=_ACCELERATOR,
+        workload=workload_path,
+        mapping=mapping_path,
+        experiment_id=experiment_id,
+        output_path=output_root,
+        skip_if_exists=False,
+        enable_codegen=True,
+        trace_size=trace_size,
+        nb_cols_to_use=cols,
+        npu=npu,
+        backend=backend,
+    )
+    return ctx, output_dir
 
 
 def run_main_aie_codegen_swiglu(
@@ -59,52 +269,27 @@ def run_main_aie_codegen_swiglu(
     backend="ortools_gscip",
     func_prefix="",
 ):
-    """Generate the fused SwiGLU-prefill MLIR module via stream-dse.
+    """Generate the fully fused SwiGLU-prefill MLIR module.
 
     Returns an ``aie`` MLIR module. ``func_prefix`` (injected by
     ``OperatorSequence``) prefixes the kernel symbols / ``link_with`` objects so
-    the design can be deployed as one fusion group; see ``region_module``.
+    the design can be deployed as one fusion group; see :func:`region_module`.
 
     The default ``ortools_gscip`` backend is the license-free OR-Tools GSCIP
     solver, so no Gurobi license is required.
     """
-    workload_path = make_swiglu_workload(
+    ctx, _ = _run_codegen(
         seq_len,
         embedding_dim,
         hidden_dim,
-        in_dtype,
-        out_dtype,
-        last_gemm_down=last_gemm_down,
-    )
-    mapping_path = make_swiglu_mapping(
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        last_gemm_down,
+        rows,
+        cols,
+        npu,
         seq_len_tile_size,
         embedding_tile_size,
         hidden_tile_size,
-    )
-
-    hw_name = os.path.splitext(os.path.basename(_ACCELERATOR))[0]
-    wl_name = re.split(r"/|\.", workload_path)[-1]
-    if wl_name == "onnx":
-        wl_name = re.split(r"/|\.", workload_path)[-2]
-    experiment_id = f"{hw_name}-{wl_name}-{rows}_row_{cols}_col"
-
-    ctx = optimize_allocation_co(
-        hardware=_ACCELERATOR,
-        workload=workload_path,
-        mapping=mapping_path,
-        experiment_id=experiment_id,
-        output_path="outputs",
-        skip_if_exists=False,
-        enable_codegen=True,
+        backend,
         trace_size=trace_size,
-        nb_cols_to_use=cols,
-        npu=npu,
-        backend=backend,
-        kernels=iron_kernels(),  # IRON-authored operand layouts drive the DMA tiling
     )
     return region_module(str(ctx.get("module")), func_prefix)
 
@@ -115,9 +300,7 @@ def run_main_aie_codegen_swiglu(
 #
 # stream-dse emits a separate ``aie.device`` design per fusion group (under
 # ``<output>/group_i/codegen/final.mlir``). IRON fuses the two groups into one
-# full-ELF via ``OperatorSequence``; each group is loaded below as a child
-# design. The split itself is expressed entirely in the stream mapping
-# (``make_swiglu_mapping(split_groups=True)``); see that function.
+# full-ELF via ``OperatorSequence``; each group is loaded below as a child design.
 
 
 def _prefixed(mlir_text: str, func_prefix: str) -> str:
@@ -159,71 +342,6 @@ def region_module(mlir_text: str, func_prefix: str = ""):
         return ir.Module.parse(_prefixed(mlir_text, func_prefix))
 
 
-def _swiglu_k2_experiment_id(seq_len, embedding_dim, hidden_dim, rows, cols):
-    hw_name = os.path.splitext(os.path.basename(_ACCELERATOR))[0]
-    return f"{hw_name}-swiglu_k2_{seq_len}_{embedding_dim}_{hidden_dim}-{rows}_row_{cols}_col"
-
-
-def _run_swiglu_k2_codegen(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    in_dtype,
-    out_dtype,
-    rows,
-    cols,
-    npu,
-    seq_len_tile_size,
-    embedding_tile_size,
-    hidden_tile_size,
-    backend,
-    output_root="outputs",
-):
-    """Run the two-group SwiGLU codegen once (cached by output existence).
-
-    Returns the experiment output directory containing ``group_0`` / ``group_1``.
-    Both group loaders call this; the first generates, the rest reuse the files.
-    """
-    experiment_id = _swiglu_k2_experiment_id(
-        seq_len, embedding_dim, hidden_dim, rows, cols
-    )
-    out_dir = os.path.join(output_root, experiment_id)
-    finals = [
-        os.path.join(out_dir, f"group_{i}", "codegen", "final.mlir") for i in (0, 1)
-    ]
-    if all(os.path.exists(f) for f in finals):
-        return out_dir
-
-    workload_path = make_swiglu_workload(
-        seq_len, embedding_dim, hidden_dim, in_dtype, out_dtype, last_gemm_down=True
-    )
-    mapping_path = make_swiglu_mapping(
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        True,  # last_gemm_down
-        seq_len_tile_size,
-        embedding_tile_size,
-        hidden_tile_size,
-        split_groups=True,
-    )
-    optimize_allocation_co(
-        hardware=_ACCELERATOR,
-        workload=workload_path,
-        mapping=mapping_path,
-        experiment_id=experiment_id,
-        output_path=output_root,
-        skip_if_exists=False,
-        enable_codegen=True,
-        trace_size=0,
-        nb_cols_to_use=cols,
-        npu=npu,
-        backend=backend,
-        kernels=iron_kernels(),
-    )
-    return out_dir
-
-
 def load_swiglu_k2_group(
     group_index,
     func_prefix="",
@@ -243,23 +361,29 @@ def load_swiglu_k2_group(
 ):
     """Generate the two-group design (cached) and return one group's aie module.
 
-    ``group_index`` 0 is the gate/up/SiLU/mul front end (``x, w1, w2 -> h``); 1 is
-    the down-projection (``h, w3 -> y``). ``func_prefix`` is injected by
-    ``OperatorSequence``.
+    ``group_index`` 0 is the gate/up/SiLU/mul front end (``x, w_gate, w_up -> h``);
+    1 is the down projection (``h, w_down -> y``). ``func_prefix`` is injected by
+    ``OperatorSequence``. Both group loaders call this; the first generates the
+    design, the second reuses the files on disk.
     """
-    out_dir = _run_swiglu_k2_codegen(
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        in_dtype,
-        out_dtype,
-        rows,
-        cols,
-        npu,
-        seq_len_tile_size,
-        embedding_tile_size,
-        hidden_tile_size,
-        backend,
+    output_dir = os.path.join(
+        "outputs", _experiment_id(seq_len, embedding_dim, hidden_dim, rows, cols, "_k2")
     )
-    text = Path(out_dir, f"group_{group_index}", "codegen", "final.mlir").read_text()
-    return region_module(text, func_prefix)
+    finals = [
+        os.path.join(output_dir, f"group_{i}", "codegen", "final.mlir") for i in (0, 1)
+    ]
+    if not all(os.path.exists(f) for f in finals):
+        _run_codegen(
+            seq_len,
+            embedding_dim,
+            hidden_dim,
+            rows,
+            cols,
+            npu,
+            seq_len_tile_size,
+            embedding_tile_size,
+            hidden_tile_size,
+            backend,
+            split_groups=True,
+        )
+    return region_module(Path(finals[group_index]).read_text(), func_prefix)

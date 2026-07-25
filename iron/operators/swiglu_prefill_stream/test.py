@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-import inspect
 
 import pytest
 import torch
@@ -15,22 +14,16 @@ pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
-from stream.inputs.aie.mapping.make_swiglu_mapping import make_swiglu_mapping
-
 from iron.operators.swiglu_prefill_stream.op import (
     SwiGLUPrefillStream,
     SwiGLUPrefillStreamK2,
 )
 
-# swiglu_prefill_stream shares swiglu_decode's reference: W3 @ (SiLU(W1@x)*(W2@x)).
+# The operator's design is generated from this module; the values it is checked
+# against come from swiglu_decode's reference, which it shares.
 from iron.operators.swiglu_decode.reference import generate_golden_reference
+from iron.operators.swiglu_prefill_stream.reference import WEIGHTS
 from iron.common.test_utils import verify_buffer
-
-# The k=2 variant needs stream-dse's two-fusion-group support; skip it on older
-# releases that lack the ``split_groups`` mapping option.
-_STREAM_HAS_SPLIT_GROUPS = (
-    "split_groups" in inspect.signature(make_swiglu_mapping).parameters
-)
 
 
 def get_params():
@@ -43,20 +36,13 @@ def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
     operator.compile()
     run = operator.get_callable()
 
-    # Populate inputs by name; the design consumes weights in their natural
-    # (K, N) layout (no transpose).
-    run.get_buffer("input").torch_view()[:] = (
-        golden_ref["input"].to(torch.bfloat16).flatten()
-    )
-    run.get_buffer("weights_1").torch_view()[:] = (
-        golden_ref["w_gate"].to(torch.bfloat16).flatten()
-    )
-    run.get_buffer("weights_2").torch_view()[:] = (
-        golden_ref["w_up"].to(torch.bfloat16).flatten()
-    )
-    run.get_buffer("weights_3").torch_view()[:] = (
-        golden_ref["w_down"].to(torch.bfloat16).flatten()
-    )
+    # Populate inputs by name; buffers are the reference module's parameters (see
+    # reference.WEIGHTS) and the design consumes weights in their natural (K, N)
+    # layout, no transpose.
+    for reference, buffer in (("input", "input"), *WEIGHTS.items()):
+        run.get_buffer(buffer).torch_view()[:] = (
+            golden_ref[reference].to(torch.bfloat16).flatten()
+        )
 
     # Correctness is checked on the FIRST run: creating the hw_context applies the
     # design's init CDO, so the first run on the freshly loaded full-ELF computes
@@ -120,10 +106,6 @@ def test_swiglu_prefill_stream(
     _run_and_verify(operator, seq_len, embedding_dim, golden_ref)
 
 
-@pytest.mark.skipif(
-    not _STREAM_HAS_SPLIT_GROUPS,
-    reason="installed stream-dse lacks two-fusion-group support (split_groups)",
-)
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",

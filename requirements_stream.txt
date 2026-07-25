@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Optional dependency for the stream-dse-backed fused SwiGLU-prefill operator
+# Optional dependencies for the stream-dse-backed fused SwiGLU-prefill operator
 # (iron/operators/swiglu_prefill_stream).
 #
 # It is NOT installed by the default CI (requirements.txt); the operator's test
@@ -32,4 +32,5 @@
 #   mlir_aie/llvm-aie, which previously downgraded IRON's pinned mlir_aie (1.3.5 ->
 #   0.0.1) and numpy (2.x -> 1.26.4) and broke the whole operator test suite.
 
+onnxscript>=0.7
 stream-dse>=1.13.7
