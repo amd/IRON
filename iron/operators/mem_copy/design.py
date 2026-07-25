@@ -20,6 +20,7 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from aie.iron.runtime.endpoint import RuntimeEndpoint
 from aie.iron.device import AnyShimTile
+from iron.operators._trace import maybe_enable_trace
 
 # The maximum value the 4th dimension of DMA BD can be set
 TAP_REPEAT_MAX = 64
@@ -245,6 +246,7 @@ def my_mem_copy(
     with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
         # Start the workers if not bypass
         if not bypass:
+            maybe_enable_trace(rt, trace_size, my_workers)
             rt.start(*my_workers)
 
         # Calculate how much of workload can be partitioned evenly and what's remaining

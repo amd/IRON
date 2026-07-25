@@ -23,6 +23,7 @@ from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
+from iron.operators._trace import maybe_enable_trace, resolve_trace_size
 
 dtype_map = {
     "bf16": bfloat16,
@@ -121,7 +122,7 @@ def fused_mha(
 
     of_depth = 2
     vectorized = True
-    enable_tracing = trace_size > 0
+    enable_tracing = resolve_trace_size(trace_size) > 0
     dtype_str = "bf16"
 
     if number_of_pipelines > 6:
@@ -790,6 +791,10 @@ def fused_mha(
         for j in range(3):
             for i in range(number_of_pipelines):
                 rt.set_barrier(worker_barrier_list[j][i], 1)
+
+        maybe_enable_trace(
+            rt, trace_size, matmul_workers + softmax_workers + matmul_pv_workers
+        )
 
         for i in range(number_of_pipelines):
             rt.start(matmul_workers[i])

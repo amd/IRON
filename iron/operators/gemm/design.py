@@ -21,6 +21,7 @@ from aie.iron import (
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._trace import maybe_enable_trace
 
 microkernel_mac_dim_map = {
     "npu1": {
@@ -552,6 +553,7 @@ def my_matmul(
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
     with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
+        maybe_enable_trace(rt, trace_size, workers)
         rt.start(*workers)
 
         # Set runtime parameters

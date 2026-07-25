@@ -18,6 +18,7 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16
+from iron.operators._trace import maybe_enable_trace
 
 
 def softmax(
@@ -157,6 +158,7 @@ def softmax(
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
     with rt.sequence(tensor_ty, tensor_ty) as (A, C):
+        maybe_enable_trace(rt, trace_size, my_workers)
         rt.start(*my_workers)
 
         if use_scratchpad:

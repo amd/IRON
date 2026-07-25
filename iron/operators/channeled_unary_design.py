@@ -7,6 +7,7 @@ import numpy as np
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._trace import maybe_enable_trace
 
 
 def channeled_unary_design(
@@ -98,6 +99,7 @@ def channeled_unary_design(
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
     with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
+        maybe_enable_trace(rt, trace_size, my_workers)
         rt.start(*my_workers)
 
         tg = rt.task_group()
