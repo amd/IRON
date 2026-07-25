@@ -10,21 +10,11 @@ from iron.common.test_utils import run_test, make_channeled_unary_params
 
 
 def get_params():
-    def _marks(ext, ts):
-        marks = []
-        if ext:
-            marks.append(pytest.mark.extensive)
-        # TODO: temporary - disable tile_size=8192 for GeLU, issue #113
-        if ts == 8192:
-            marks.append(
-                pytest.mark.skip(
-                    reason="temporary: tile_size=8192 disabled for GeLU, see issue #113"
-                )
-            )
-        return marks
+    def _marks(ext):
+        return [pytest.mark.extensive] if ext else []
 
     return [
-        pytest.param(il, nac, nc, ts, marks=_marks(ext, ts))
+        pytest.param(il, nac, nc, ts, marks=_marks(ext))
         for il, nac, nc, ts, ext in make_channeled_unary_params(
             [1024, 2048, 4096, 8192], 8192, [1, 2]
         )
