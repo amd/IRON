@@ -4,18 +4,42 @@
 """Reference SwiGLU-prefill block: ``(SiLU(x @ gate) * (x @ up)) @ down``.
 
 Running this module produces the golden output; exporting it produces the
-workload stream-dse generates the design from. Its parameter names are the ONNX
-tensor names, hence the operator's runtime buffer names.
+workload stream-dse generates the design from.
 
-Numerical values come from :mod:`iron.operators.swiglu_decode.reference`, which
-this operator shares; :func:`swiglu_module` loads them into the module.
+The names below are the block's vocabulary, and they are the ones
+:mod:`iron.operators.swiglu_decode.reference` -- the golden reference this
+operator shares -- gives the same tensors. Everything downstream is named from
+here: the ONNX tensors, the mapping's layers and runtime arguments, the runtime
+buffers, and the tensor handed between fusion groups.
 """
 
 import torch
 from torch import nn
 
-# Reference weight -> this module's parameter (and so the runtime buffer name).
+INPUT = "input"
+OUTPUT = "output"
+GATE_PROJECTION = "left"
+UP_PROJECTION = "right"
+ACTIVATION = "left_swished"
+HIDDEN = "intermediate"
+
+# Golden-reference weight -> this module's parameter, and so the ONNX tensor and
+# runtime buffer name. The weights are the one place the two vocabularies differ:
+# stream-dse's allocation solve is markedly slower under the golden names (>600 s
+# versus ~115 s for an otherwise identical model), so the parameters keep the
+# names the operator was measured with.
 WEIGHTS = {"w_gate": "weights_1", "w_up": "weights_2", "w_down": "weights_3"}
+
+# Every name this module exports, for the correspondence check in iron/tests/stream.
+TENSOR_NAMES = (
+    INPUT,
+    OUTPUT,
+    GATE_PROJECTION,
+    UP_PROJECTION,
+    ACTIVATION,
+    HIDDEN,
+    *WEIGHTS,
+)
 
 
 class SwiGLU(nn.Module):

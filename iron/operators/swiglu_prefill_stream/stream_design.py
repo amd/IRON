@@ -20,14 +20,21 @@ building it does.
 
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import stream
 import torch
 from stream.api import optimize_allocation_co
 
-from iron.common.stream.mapping import FusedGroup, Placement, emit_mapping
+from iron.common.stream.mapping import (
+    FusedGroup,
+    Placement,
+    emit_mapping,
+    group_boundaries,
+)
 from iron.common.stream.workload import export_workload
+from iron.operators.swiglu_prefill_stream import reference
 from iron.operators.swiglu_prefill_stream.reference import swiglu_module
 
 # Hardware description for the whole-array Strix (npu2) target, shipped as package
@@ -47,10 +54,18 @@ _ACCELERATOR = os.path.join(
 GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
 NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
 RESULT_NAMES = {
-    GATE: "left",
-    UP: "right",
-    SILU: "left_swished",
-    MUL: "intermediate",
+    GATE: reference.GATE_PROJECTION,
+    UP: reference.UP_PROJECTION,
+    SILU: reference.ACTIVATION,
+    MUL: reference.HIDDEN,
+}
+
+# Which layers each fused group contains. Splitting makes stream-dse emit one
+# design per group; the tensor handed from one to the next is derived from the
+# exported graph, not named here.
+GROUP_LAYERS = {
+    False: [[GATE, UP, SILU, MUL, DOWN]],
+    True: [[GATE, UP, SILU, MUL], [DOWN]],
 }
 
 # Compute-tile placement on the 4-row x 8-column array: each GEMM gets two
@@ -106,36 +121,31 @@ def _groups(seq_tile, embedding_tile, hidden_tile, split_groups):
     the output dimension of the group's leading GEMM.
     """
     if split_groups:
-        return [
-            FusedGroup(
-                "Fused_Group_1",
-                [GATE, UP, SILU, MUL],
-                [
-                    (GATE, "D1", embedding_tile),
-                    (GATE, "D2", hidden_tile),
-                    (GATE, "D0", seq_tile),
-                ],
-            ),
-            FusedGroup(
-                "Fused_Group_2",
-                [DOWN],
-                [
-                    (DOWN, "D1", hidden_tile),
-                    (DOWN, "D2", embedding_tile),
-                    (DOWN, "D0", seq_tile),
-                ],
-            ),
+        tiling = [
+            [
+                (GATE, "D1", embedding_tile),
+                (GATE, "D2", hidden_tile),
+                (GATE, "D0", seq_tile),
+            ],
+            [
+                (DOWN, "D1", hidden_tile),
+                (DOWN, "D2", embedding_tile),
+                (DOWN, "D0", seq_tile),
+            ],
         ]
-    return [
-        FusedGroup(
-            "Fused_Group_1",
-            [GATE, UP, SILU, MUL, DOWN],
+    else:
+        tiling = [
             [
                 (GATE, "D1", embedding_tile),
                 (DOWN, "D2", embedding_tile),
                 (GATE, "D2", hidden_tile),
                 (GATE, "D0", seq_tile),
-            ],
+            ]
+        ]
+    return [
+        FusedGroup(f"Fused_Group_{index + 1}", layers, group_tiling)
+        for index, (layers, group_tiling) in enumerate(
+            zip(GROUP_LAYERS[split_groups], tiling)
         )
     ]
 
@@ -161,6 +171,29 @@ def _check_shapes(
         )
 
 
+@lru_cache(maxsize=None)
+def workload_for(seq_len, embedding_dim, hidden_dim):
+    """The exported workload for one problem size."""
+    module = swiglu_module(embedding_dim, hidden_dim)
+    return export_workload(
+        module,
+        (torch.zeros(seq_len, embedding_dim, dtype=torch.bfloat16),),
+        node_names=NODE_NAMES,
+        result_names=RESULT_NAMES,
+    )
+
+
+def group_ports(seq_len, embedding_dim, hidden_dim, split_groups=False):
+    """Per fused group, the tensor names it takes in and hands on.
+
+    These are the operator's runtime arguments, including the tensor a split
+    design passes from its front end to its down projection.
+    """
+    return group_boundaries(
+        workload_for(seq_len, embedding_dim, hidden_dim), GROUP_LAYERS[split_groups]
+    )
+
+
 def build_inputs(
     seq_len,
     embedding_dim,
@@ -180,13 +213,7 @@ def build_inputs(
         embedding_tile_size,
         hidden_tile_size,
     )
-    module = swiglu_module(embedding_dim, hidden_dim)
-    workload = export_workload(
-        module,
-        (torch.zeros(seq_len, embedding_dim, dtype=torch.bfloat16),),
-        node_names=NODE_NAMES,
-        result_names=RESULT_NAMES,
-    )
+    workload = workload_for(seq_len, embedding_dim, hidden_dim)
     output_dir = Path(output_dir)
     return (
         workload.write(output_dir / "workload.onnx"),

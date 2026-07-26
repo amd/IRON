@@ -22,7 +22,7 @@ from iron.operators.swiglu_prefill_stream.op import (
 # The operator's design is generated from this module; the values it is checked
 # against come from swiglu_decode's reference, which it shares.
 from iron.operators.swiglu_decode.reference import generate_golden_reference
-from iron.operators.swiglu_prefill_stream.reference import WEIGHTS
+from iron.operators.swiglu_prefill_stream.reference import INPUT, OUTPUT, WEIGHTS
 from iron.common.test_utils import verify_buffer
 
 
@@ -36,12 +36,11 @@ def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
     operator.compile()
     run = operator.get_callable()
 
-    # Populate inputs by name; buffers are the reference module's parameters (see
-    # reference.WEIGHTS) and the design consumes weights in their natural (K, N)
-    # layout, no transpose.
-    for reference, buffer in (("input", "input"), *WEIGHTS.items()):
+    # Populate inputs by golden-reference name; the design consumes weights in
+    # their natural (K, N) layout, no transpose.
+    for name, buffer in ((INPUT, INPUT), *WEIGHTS.items()):
         run.get_buffer(buffer).torch_view()[:] = (
-            golden_ref[reference].to(torch.bfloat16).flatten()
+            golden_ref[name].to(torch.bfloat16).flatten()
         )
 
     # Correctness is checked on the FIRST run: creating the hw_context applies the
@@ -55,11 +54,11 @@ def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
     # amplifies relative error): ~20% of elements drift past the 8% bound, so allow
     # up to 25%. Tolerances are local to this test.
     run()
-    output = run.get_buffer("output").to_torch().reshape((seq_len, embedding_dim))
+    output = run.get_buffer(OUTPUT).to_torch().reshape((seq_len, embedding_dim))
     errors = verify_buffer(
         output,
-        "output",
-        golden_ref["output"],
+        OUTPUT,
+        golden_ref[OUTPUT],
         rel_tol=0.08,
         abs_tol=0.7,
         max_error_rate=0.25,

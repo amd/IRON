@@ -52,6 +52,45 @@ class FusedGroup:
     intra_core_tiling: Sequence[tuple[str, str, int]] = ()
 
 
+def group_boundaries(
+    workload: StreamWorkload, group_layers: Sequence[Sequence[str]]
+) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Per group, the tensors it consumes from outside and produces for outside.
+
+    These are the group's runtime arguments: what an operator built from several
+    fused groups has to hand from one to the next. Both sequences follow the order
+    the group's nodes use them, which is the order stream-dse gives the generated
+    design its arguments in.
+    """
+    graph = workload.model.graph
+    produced_by = {out: node.name for node in graph.node for out in node.output}
+    consumers: dict[str, list[str]] = {}
+    for node in graph.node:
+        for tensor in node.input:
+            consumers.setdefault(tensor, []).append(node.name)
+    graph_outputs = {out.name for out in graph.output}
+
+    boundaries = []
+    for layers in group_layers:
+        members = set(layers)
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for node in graph.node:
+            if node.name not in members:
+                continue
+            for tensor in node.input:
+                if produced_by.get(tensor) not in members and tensor not in inputs:
+                    inputs.append(tensor)
+            for tensor in node.output:
+                escapes = tensor in graph_outputs or any(
+                    consumer not in members for consumer in consumers.get(tensor, [])
+                )
+                if escapes and tensor not in outputs:
+                    outputs.append(tensor)
+        boundaries.append((tuple(inputs), tuple(outputs)))
+    return boundaries
+
+
 def _layer_entry(name: str, placement: Placement, kernel_key: str) -> dict:
     entry = {
         "name": name,
