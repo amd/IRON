@@ -22,15 +22,18 @@
 #   OR-Tools GSCIP solver; no Gurobi needed) and writes its generated workload/
 #   mapping files into its own installed package directory, so that environment
 #   must be writable.
-# - >=1.13.7 is required: stream_design.py feeds IRON-authored operand layouts
+# - >=1.13.8 is required: stream_design.py feeds IRON-authored operand layouts
 #   into code generation via optimize_allocation_co(kernels=...), the override
 #   hook added in stream-dse 1.13.4; the k=2 variant (op_k2.py) additionally needs
 #   the two-fusion-group support (make_swiglu_mapping(split_groups=...) + the
 #   multi-group AIE codegen pipeline) added in stream-dse 1.13.5; 1.13.6 makes
 #   the debug workload-graph visualization non-fatal, so code generation no longer
-#   requires graphviz (`dot`); and 1.13.7 makes `stream-setup-aie` stop reinstalling
+#   requires graphviz (`dot`); 1.13.7 makes `stream-setup-aie` stop reinstalling
 #   mlir_aie/llvm-aie, which previously downgraded IRON's pinned mlir_aie (1.3.5 ->
-#   0.0.1) and numpy (2.x -> 1.26.4) and broke the whole operator test suite.
+#   0.0.1) and numpy (2.x -> 1.26.4) and broke the whole operator test suite; and
+#   1.13.8 orders the generated design's runtime arguments by the exported graph
+#   instead of by tensor name, which is what lets the weights below carry their
+#   reference names.
 
 onnxscript>=0.7
-stream-dse>=1.13.7
+stream-dse>=1.13.8

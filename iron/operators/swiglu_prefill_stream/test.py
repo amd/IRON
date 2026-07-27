@@ -38,8 +38,8 @@ def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
 
     # Populate inputs by golden-reference name; the design consumes weights in
     # their natural (K, N) layout, no transpose.
-    for name, buffer in ((INPUT, INPUT), *WEIGHTS.items()):
-        run.get_buffer(buffer).torch_view()[:] = (
+    for name in (INPUT, *WEIGHTS):
+        run.get_buffer(name).torch_view()[:] = (
             golden_ref[name].to(torch.bfloat16).flatten()
         )
 

@@ -164,8 +164,8 @@ class SwiGLUPrefillStream(OperatorSequence):
     single full-ELF (``OperatorSequence`` default dispatch).
 
     Runtime buffers (``get_callable().get_buffer(name)``) are named by the
-    reference module: ``input``, ``weights_1`` (gate), ``weights_2`` (up),
-    ``weights_3`` (down), ``output``. Building requires
+    reference module: ``input``, ``w_gate``, ``w_up``, ``w_down``,
+    ``output``. Building requires
     ``stream-dse`` (``pip install stream-dse`` + ``stream-setup-aie``); importing
     this module does not.
     """

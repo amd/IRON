@@ -31,14 +31,14 @@ def test_name_is_a_golden_reference_key(name, golden_keys):
 
 def test_module_parameters_cover_the_golden_weights():
     module = reference.swiglu_module(SHAPE["K"], SHAPE["N"])
-    assert set(dict(module.named_parameters())) == set(reference.WEIGHTS.values())
+    assert set(dict(module.named_parameters())) == set(reference.WEIGHTS)
 
 
 def test_golden_weights_load_into_the_module():
     golden = generate_golden_reference(**SHAPE)
     module = reference.swiglu_module(SHAPE["K"], SHAPE["N"], golden)
-    for name, parameter in reference.WEIGHTS.items():
-        assert getattr(module, parameter).equal(golden[name])
+    for name in reference.WEIGHTS:
+        assert getattr(module, name).equal(golden[name])
 
 
 stream = pytest.importorskip(
