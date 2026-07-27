@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from iron.common.stream.hardware import ComputeArray
 from iron.common.stream.workload import StreamWorkload
 
 
@@ -29,13 +30,14 @@ from iron.common.stream.workload import StreamWorkload
 class Placement:
     """Where one workload node runs.
 
-    ``cores`` lists the compute tiles per allocation, ``splits`` the matching
-    inter-core tiling as ``(dim, split)`` pairs, and ``kernel_kwargs`` the
+    ``columns`` are the array columns it occupies, resolved to core ids against
+    the :class:`~iron.common.stream.hardware.ComputeArray`; ``splits`` is the
+    inter-core tiling as ``(dim, split)`` pairs; ``kernel_kwargs`` are the
     arguments of the node's stream-dse kernel (e.g. a GEMM's tile shape).
     """
 
-    cores: Sequence[Sequence[int]]
-    splits: Sequence[Sequence[tuple[str, int]]] = ()
+    columns: Sequence[int]
+    splits: Sequence[tuple[str, int]] = ()
     kernel_kwargs: dict = field(default_factory=dict)
 
 
@@ -91,23 +93,24 @@ def group_boundaries(
     return boundaries
 
 
-def _layer_entry(name: str, placement: Placement, kernel_key: str) -> dict:
-    entry = {
+def _layer_entry(
+    name: str, placement: Placement, kernel_key: str, array: ComputeArray
+) -> dict:
+    return {
         "name": name,
-        "core_allocation": [list(cores) for cores in placement.cores],
+        "core_allocation": [list(array.cores(placement.columns))],
         "inter_core_tiling": [
-            [{"dim": dim, "split": split} for dim, split in group]
-            for group in placement.splits
+            [{"dim": dim, "split": split} for dim, split in placement.splits]
         ],
         "kernel": {"name": kernel_key, "kwargs": dict(placement.kernel_kwargs)},
     }
-    return entry
 
 
 def build_mapping(
     workload: StreamWorkload,
     placements: dict[str, Placement],
     groups: Sequence[FusedGroup],
+    array: ComputeArray,
 ) -> dict:
     """The mapping for ``workload`` as a plain dict (validated against it)."""
     kernel_of = dict(workload.nodes)
@@ -123,7 +126,7 @@ def build_mapping(
         raise ValueError(f"fused groups refer to nodes without a placement: {missing}")
 
     layers = [
-        _layer_entry(name, placements[name], kernel)
+        _layer_entry(name, placements[name], kernel, array)
         for name, kernel in workload.nodes
         if name in placements
     ]
@@ -148,6 +151,7 @@ def emit_mapping(
     workload: StreamWorkload,
     placements: dict[str, Placement],
     groups: Sequence[FusedGroup],
+    array: ComputeArray,
     path,
 ) -> str:
     """Write the mapping YAML to ``path`` and return it."""
@@ -157,7 +161,7 @@ def emit_mapping(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         yaml.dump(
-            build_mapping(workload, placements, groups),
+            build_mapping(workload, placements, groups, array),
             f,
             default_flow_style=False,
             sort_keys=False,

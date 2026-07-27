@@ -27,6 +27,7 @@ import stream
 import torch
 from stream.api import optimize_allocation_co
 
+from iron.common.stream.hardware import ComputeArray
 from iron.common.stream.mapping import (
     FusedGroup,
     Placement,
@@ -68,19 +69,15 @@ GROUP_LAYERS = {
     True: [[GATE, UP, SILU, MUL], [DOWN]],
 }
 
-# Compute-tile placement on the 4-row x 8-column array: each GEMM gets two
-# columns' worth of cores split 4-ways over rows (D0, the sequence dimension) and
-# 2-ways over D2, the two elementwise layers one column each. This is a property
-# of the array, not of the problem size, so it holds across shapes.
-_GEMM_SPLIT = [[("D0", 4), ("D2", 2)]]
-_ELEMENTWISE_SPLIT = [[("D0", 4)]]
-_CORES = {
-    GATE: [[2, 3, 4, 5, 8, 9, 10, 11]],
-    UP: [[14, 15, 16, 17, 20, 21, 22, 23]],
-    SILU: [[26, 27, 28, 29]],
-    MUL: [[32, 33, 34, 35]],
-    DOWN: [[38, 39, 40, 41, 44, 45, 46, 47]],
-}
+ARRAY = ComputeArray.from_accelerator(_ACCELERATOR)
+
+# Columns per layer: two for each GEMM, one for each elementwise layer. The five
+# layers sit on disjoint columns so they pipeline across steady-state iterations.
+# Each layer splits over the array's rows (D0, the sequence dimension), and a GEMM
+# splits over its two columns as well (D2, the output dimension).
+_COLUMNS = dict(zip(NODE_NAMES, ARRAY.allocate([2, 2, 1, 1, 2])))
+_GEMM_SPLIT = (("D0", ARRAY.num_rows), ("D2", 2))
+_ELEMENTWISE_SPLIT = (("D0", ARRAY.num_rows),)
 
 
 def gemm_tiles(seq_tile, embedding_tile, hidden_tile):
@@ -105,11 +102,11 @@ def _placements(seq_tile, embedding_tile, hidden_tile):
 
     elementwise = {"utilization": 50.0, "layout": "default"}
     return {
-        GATE: Placement(_CORES[GATE], _GEMM_SPLIT, gemm(gate_up)),
-        UP: Placement(_CORES[UP], _GEMM_SPLIT, gemm(gate_up)),
-        SILU: Placement(_CORES[SILU], _ELEMENTWISE_SPLIT, elementwise),
-        MUL: Placement(_CORES[MUL], _ELEMENTWISE_SPLIT, elementwise),
-        DOWN: Placement(_CORES[DOWN], _GEMM_SPLIT, gemm(down)),
+        GATE: Placement(_COLUMNS[GATE], _GEMM_SPLIT, gemm(gate_up)),
+        UP: Placement(_COLUMNS[UP], _GEMM_SPLIT, gemm(gate_up)),
+        SILU: Placement(_COLUMNS[SILU], _ELEMENTWISE_SPLIT, elementwise),
+        MUL: Placement(_COLUMNS[MUL], _ELEMENTWISE_SPLIT, elementwise),
+        DOWN: Placement(_COLUMNS[DOWN], _GEMM_SPLIT, gemm(down)),
     }
 
 
@@ -154,7 +151,7 @@ def _check_shapes(
     seq_len, embedding_dim, hidden_dim, seq_tile, embedding_tile, hidden_tile
 ):
     """Reject shapes the fixed 4x8 placement cannot tile evenly."""
-    rows, gemm_split = 4, 2
+    rows, gemm_split = ARRAY.num_rows, 2
     if seq_len % rows or seq_len < seq_tile * rows:
         raise ValueError(
             f"seq_len ({seq_len}) must be a multiple of {rows} and at least {seq_tile * rows}"
@@ -223,6 +220,7 @@ def build_inputs(
             _groups(
                 seq_len_tile_size, embedding_tile_size, hidden_tile_size, split_groups
             ),
+            ARRAY,
             output_dir / "mapping.yaml",
         ),
     )
