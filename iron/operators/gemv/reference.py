@@ -64,3 +64,13 @@ def generate_golden_reference_batched(M=128, K=128, num_batches=2, seed=42):
     for b in range(num_batches):
         C[b] = A[b] @ B[b]
     return {"A": A, "B": B, "C": C}
+
+
+def gelu_tanh_approx(x):
+    """Tanh-approximation GELU, matching aie_kernels/aie2p/gelu.cc.
+
+    0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))). Computed in float32.
+    """
+    xf = np.asarray(x, dtype=np.float32)
+    inner = 0.79788456 * (xf + 0.044715 * xf**3)
+    return 0.5 * xf * (1.0 + np.tanh(inner))
