@@ -39,8 +39,7 @@ def resolve_trace_size(trace_size=None):
     if trace_size and trace_size > 0:
         return int(trace_size)
     # Deliberately unguarded: a malformed IRON_TRACE_SIZE should raise rather than
-    # silently disable tracing, which would reproduce the all-zeros trace.txt
-    # confusion this module exists to remove.
+    # silently disable tracing.
     return int(os.environ.get("IRON_TRACE_SIZE", "0"))
 
 
