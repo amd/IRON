@@ -3,30 +3,10 @@
 
 """Shared per-op NPU hardware-trace wiring for the iron/operators designs.
 
-Why this exists
----------------
-Every design in this package takes a ``trace_size`` argument, but a design only actually
-emits trace configuration if it calls ``Runtime.enable_trace``. Designs that accept
-``trace_size`` and never make that call compile and run fine and then hand back a
-``trace.txt`` full of zeros, which reads as "this op is untraceable" rather than
-"nobody wired it up".
-
-Before this helper the wiring had drifted three ways: ``channeled_unary_design`` honored
-the ``trace_size`` parameter *or* the ``IRON_TRACE_SIZE`` env var and passed a full
-core-tile event set; ``gemm/design`` honored *only* the env var, so passing
-``trace_size=`` did nothing; ``dequant/design`` honored only the parameter and passed no
-events at all. Nine other designs had no wiring whatsoever. Keeping one implementation
-here is what stops that from happening again.
-
-Semantics (the ``channeled_unary`` behaviour, which was the most complete):
+Semantics:
   * explicit ``trace_size`` wins; otherwise fall back to ``IRON_TRACE_SIZE``
   * ``IRON_TRACE_NTILES`` (default 1) caps how many workers get traced; 0 traces none
   * no-op when neither is set, so production paths are unaffected
-
-Note this is deliberately NOT the upstream mechanism being reimplemented:
-``Runtime.enable_trace`` is the same API upstream ships and upstream's own designs
-(``aie.iron.algorithms.reduce`` / ``transform``) already call it. This package is
-fork-carried, so the gap was ours alone.
 """
 
 import os
