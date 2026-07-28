@@ -32,9 +32,7 @@ void rms_norm_general(const T *restrict input, const T *restrict input2, T *rest
 
     float rms = sum_sq / cols + epsilon;
     float inv_rms = aie::invsqrt(rms);
-    // Normalize in f32 and round once. The previous code cast inv_rms to bf16 and did a
-    // bf16*bf16 multiply, a coherent per-norm scale error that accumulated over a deep
-    // residual stream and flipped near-tie argmaxes. Mirrors layer_norm.cc's accfloat path.
+    // Normalize in f32 and round once. Mirrors layer_norm.cc's accfloat path.
     ::aie::accum<accfloat, N> inv_rms_v;
     inv_rms_v.from_vector(::aie::broadcast<float, N>(inv_rms), 0);
 

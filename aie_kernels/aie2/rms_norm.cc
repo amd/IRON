@@ -34,9 +34,7 @@ void rms_norm_general(const T *restrict input, const T *restrict input2, T *rest
 
     float rms = sum_sq / cols + epsilon;
     float inv_rms = invsqrt(rms);
-    // Normalize in f32 and round once. The previous code cast inv_rms to bf16 and did a
-    // bf16*bf16 multiply, a coherent per-norm scale error that accumulated over a deep
-    // residual stream and flipped near-tie argmaxes. Mirrors layer_norm.cc's accfloat path.
+    // Normalize in f32 and round once/ Mirrors layer_norm.cc's accfloat path.
     ::aie::accum<accfloat, N> inv_rms_v;
     inv_rms_v.from_vector(::aie::broadcast<float, N>(inv_rms), 0);
 
@@ -71,13 +69,13 @@ void rms_norm_general(const T *restrict input, const T *restrict input2, T *rest
 extern "C" {
 void rms_norm_bf16_vector(bfloat16 *input, bfloat16 *output, int32_t size, float epsilon)
 {
-    ::aie::set_rounding(aie::rounding_mode::conv_even);  // round-to-nearest-even; do not inherit a floor rounding mode from a prior kernel
+    ::aie::set_rounding(aie::rounding_mode::conv_even);  // round-to-nearest-even
     rms_norm_general<bfloat16, 16>(input, nullptr, output, size, epsilon);
 }
 
 void weighted_rms_norm(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t size, float epsilon)
 {
-    ::aie::set_rounding(aie::rounding_mode::conv_even);  // round-to-nearest-even; do not inherit a floor rounding mode from a prior kernel
+    ::aie::set_rounding(aie::rounding_mode::conv_even);  // round-to-nearest-even
     rms_norm_general<bfloat16, 16>(a_in, b_in, c_out, size, epsilon);
 }
 }
