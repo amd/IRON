@@ -27,6 +27,9 @@ from . import (
     MLIRArtifact,
 )
 
+RESET_DEVICE = "reset_device"
+
+
 # Compilation Artifacts
 # ##########################################################################
 
@@ -87,6 +90,26 @@ def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
     spec.loader.exec_module(module)
     callback_function = getattr(module, gen.fn_name)
     return callback_function(*gen.args, **gen.kwargs)
+
+
+def needs_additional_reset(runlist: list[Any]) -> bool:
+    """Whether the sequence must configure one more device than the runlist asks for.
+
+    ``aiecc --expand-load-pdis`` marks each configure point by loading one of two
+    otherwise empty PDIs, alternating between them from a fixed start. A load of the
+    PDI already loaded has no effect, so a sequence with an odd number of configure
+    points ends on the one the next dispatch starts with, and that dispatch
+    reconfigures over the state the last design left. Configuring one more device
+    makes the count even. Consecutive entries running the same operator share a
+    configure point, as the fused sequence below skips reconfiguring for them.
+    """
+    points = 0
+    previous = None
+    for op_name, *_ in runlist:
+        if op_name != previous:
+            points += 1
+            previous = op_name
+    return points % 2 == 1
 
 
 def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
@@ -169,6 +192,19 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             ), f"DeviceOp missing after re-parse for operator '{op_name}'"
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
+
+        # An empty device, configured at the end of the sequence to leave the array
+        # in a state the next dispatch can start from.
+        needs_reset = needs_additional_reset(artifact.runlist)
+        if needs_reset:
+
+            @aie.device(device_ty)
+            def reset():
+                @aiex.runtime_sequence()
+                def sequence():
+                    pass
+
+            reset.operation.attributes["sym_name"] = ir.StringAttr.get(RESET_DEVICE)
 
         # Create the main device -- this contains the runtime sequence calling into the other devices
         @aie.device(device_ty)
@@ -273,6 +309,10 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                         # Run Op
                         sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
                         run_op = aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
+
+                if needs_reset:
+                    reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
+                    reset_op.body.blocks.append()
 
         # Write the fused MLIR to file
         with open(artifact.filename, "w") as f:
