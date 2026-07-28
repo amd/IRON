@@ -71,6 +71,12 @@ SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE = 32, 32, 64
 GATE_UP_TILES = (SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE)
 DOWN_TILES = (SEQ_TILE, HIDDEN_TILE, EMBEDDING_TILE)
 
+# Sequence positions an elementwise layer works at a time when it reads from and
+# writes to memory. Its tile is then this many whole rows, which is contiguous in
+# a row-major tensor, so each transfer runs the length of the rows rather than one
+# MAC tile at a time.
+ELEMENTWISE_ROWS = 1
+
 # Which layers each fused group contains, per number of groups ``k``. Splitting
 # makes stream-dse emit one design per group; the tensor handed from one to the
 # next is derived from the exported graph, not named here. k=5 is layer by layer,
@@ -91,7 +97,7 @@ def array() -> ComputeArray:
     return ComputeArray.from_device(aie_utils.get_current_device())
 
 
-def _placements(k):
+def _placements(k, hidden_dim):
     """Where each layer runs.
 
     Fused (k=1, k=2): the layers sit on disjoint columns, two per GEMM and one per
@@ -101,47 +107,52 @@ def _placements(k):
 
     Layer by layer (k=5): the layers run in turn, so each takes the whole array.
     The GEMMs use every row; the elementwise layers take one core per column and
-    split the sequence across them, the shape IRON's channeled operators use.
+    split the sequence across them, the shape IRON's channeled operators use. They
+    also read whole rows, so their transfers to and from memory are contiguous.
     """
     grid = array()
 
     def gemm(tiles):
         return dict(zip("mkn", tiles), utilization=61.8, layout="default")
 
-    elementwise = {"utilization": 50.0, "layout": "default"}
+    def elementwise(rows, columns, layout):
+        return {"utilization": 50.0, "layout": layout, "m": rows, "n": columns}
 
     if k == LAYER_BY_LAYER:
         wide = grid.all_columns
         gemm_split = (("D0", grid.num_rows), ("D2", grid.num_columns))
         elementwise_split = (("D0", grid.num_columns),)
+        rows_wide = elementwise(ELEMENTWISE_ROWS, hidden_dim, "contiguous")
         return {
             GATE: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
             UP: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
-            SILU: Placement(wide, elementwise_split, elementwise, rows=[0]),
-            MUL: Placement(wide, elementwise_split, elementwise, rows=[0]),
+            SILU: Placement(wide, elementwise_split, rows_wide, rows=[0]),
+            MUL: Placement(wide, elementwise_split, rows_wide, rows=[0]),
             DOWN: Placement(wide, gemm_split, gemm(DOWN_TILES)),
         }
 
     columns = dict(zip(NODE_NAMES, grid.allocate([2, 2, 1, 1, 2])))
     gemm_split = (("D0", grid.num_rows), ("D2", 2))
     elementwise_split = (("D0", grid.num_rows),)
+    # Fused behind a GEMM, so the operands keep the layout the GEMM writes.
+    fused = elementwise(SEQ_TILE, HIDDEN_TILE, "default")
     return {
         GATE: Placement(columns[GATE], gemm_split, gemm(GATE_UP_TILES)),
         UP: Placement(columns[UP], gemm_split, gemm(GATE_UP_TILES)),
-        SILU: Placement(columns[SILU], elementwise_split, elementwise),
-        MUL: Placement(columns[MUL], elementwise_split, elementwise),
+        SILU: Placement(columns[SILU], elementwise_split, fused),
+        MUL: Placement(columns[MUL], elementwise_split, fused),
         DOWN: Placement(columns[DOWN], gemm_split, gemm(DOWN_TILES)),
     }
 
 
-def _layer_tiling(layer):
+def _layer_tiling(layer, hidden_dim):
     """Intra-core tiling of one layer, over the dimensions it iterates."""
     if layer is DOWN:
         contraction, output = HIDDEN_TILE, EMBEDDING_TILE
     elif layer in (GATE, UP):
         contraction, output = EMBEDDING_TILE, HIDDEN_TILE
     else:
-        return [(layer, "D1", HIDDEN_TILE), (layer, "D0", SEQ_TILE)]
+        return [(layer, "D1", hidden_dim), (layer, "D0", ELEMENTWISE_ROWS)]
     return [
         (layer, "D1", contraction),
         (layer, "D2", output),
@@ -149,7 +160,7 @@ def _layer_tiling(layer):
     ]
 
 
-def _groups(k):
+def _groups(k, hidden_dim):
     """The fused groups, each with the intra-core tiling of its leading GEMM.
 
     Splitting makes stream-dse emit one design per group, which IRON then deploys
@@ -157,9 +168,9 @@ def _groups(k):
     the output dimension.
     """
     if k == LAYER_BY_LAYER:
-        tiling = [_layer_tiling(layers[0]) for layers in GROUP_LAYERS[k]]
+        tiling = [_layer_tiling(layers[0], hidden_dim) for layers in GROUP_LAYERS[k]]
     elif k == 2:
-        tiling = [_layer_tiling(GATE), _layer_tiling(DOWN)]
+        tiling = [_layer_tiling(GATE, hidden_dim), _layer_tiling(DOWN, hidden_dim)]
     else:
         tiling = [
             [
@@ -227,8 +238,8 @@ def build_inputs(seq_len, embedding_dim, hidden_dim, output_dir, k=1):
         workload.write(output_dir / "workload.onnx"),
         emit_mapping(
             workload,
-            _placements(k),
-            _groups(k),
+            _placements(k, hidden_dim),
+            _groups(k, hidden_dim),
             array(),
             output_dir / "mapping.yaml",
         ),
