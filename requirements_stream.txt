@@ -19,4 +19,4 @@
 # package directory, so that environment must be writable.
 
 onnxscript>=0.7
-stream-dse>=1.13.8
+stream-dse>=1.13.9
