@@ -12,7 +12,7 @@ from .silu.op import SiLU
 from .softmax.op import Softmax
 from .swiglu_decode.op import SwiGLUDecode
 from .swiglu_prefill.op import SwiGLUPrefill
-from .swiglu_prefill_stream.op import SwiGLUPrefillStream, SwiGLUPrefillStreamK2
+from .swiglu_prefill_stream.op import SwiGLUPrefillStream
 from .transpose.op import Transpose
 from .strided_copy.op import StridedCopy
 from .repeat.op import Repeat

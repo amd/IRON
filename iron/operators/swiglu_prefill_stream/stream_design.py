@@ -1,20 +1,20 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate the fused SwiGLU-prefill design with stream-dse.
+"""Generate the SwiGLU-prefill design with stream-dse.
 
 Both inputs stream-dse needs are produced here, from IRON:
 
-* the **workload**, exported from :mod:`~iron.operators.swiglu_prefill_stream.reference`
-  -- the same module the test checks the result against;
+* the **workload**, exported from :mod:`~iron.operators.swiglu_prefill_stream.reference`,
+  the same module the test checks the result against;
 * the **mapping**, from the placement below.
 
-Both are written into the experiment's output directory at build time (never into
-the source tree), and the mapping's node names come from the exported workload, so
+Both are written into the experiment's output directory at build time, never into
+the source tree, and the mapping's node names come from the exported workload, so
 the two cannot disagree. stream-dse then solves the allocation and emits the MLIR.
 
 This module is imported lazily (by ``DesignGenerator`` at compile time), so
-importing the operator does not require ``stream-dse`` to be installed -- only
+importing the operator does not require ``stream-dse`` to be installed, only
 building it does.
 """
 
@@ -39,8 +39,8 @@ from iron.operators.swiglu_prefill_stream import reference
 from iron.operators.swiglu_prefill_stream.reference import swiglu_module
 
 # Hardware description for the whole-array Strix (npu2) target, shipped as package
-# data inside the installed stream package (stream-dse >= 1.13.3).
-_ACCELERATOR = os.path.join(
+# data inside the installed stream package.
+ACCELERATOR = os.path.join(
     os.path.dirname(stream.__file__),
     "inputs",
     "aie",
@@ -48,10 +48,13 @@ _ACCELERATOR = os.path.join(
     "whole_array_strix.yaml",
 )
 
+BACKEND = "ortools_gscip"  # license-free OR-Tools GSCIP, no Gurobi needed
+OUTPUT_ROOT = "outputs"
+
 # Names for the exported graph's computation nodes, in topological order, and for
-# the tensors they produce. They name the roles rather than the ATen ops
-# torch.export captured, and they are what the mapping and the generated design
-# are read by.
+# the tensors they produce. They name the roles rather than the ATen ops the
+# exporter captured, and they are what the mapping and the generated design are
+# read by.
 GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
 NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
 RESULT_NAMES = {
@@ -61,271 +64,228 @@ RESULT_NAMES = {
     MUL: reference.HIDDEN,
 }
 
-# Which layers each fused group contains. Splitting makes stream-dse emit one
-# design per group; the tensor handed from one to the next is derived from the
-# exported graph, not named here.
+# The kernel tile every layer is compiled and mapped for. The mapping carries these
+# and no absolute dimension, so it holds across problem sizes; _check_shapes rejects
+# a workload they cannot tile evenly.
+SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE = 32, 32, 64
+GATE_UP_TILES = (SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE)
+DOWN_TILES = (SEQ_TILE, HIDDEN_TILE, EMBEDDING_TILE)
+
+# Which layers each fused group contains, per number of groups ``k``. Splitting
+# makes stream-dse emit one design per group; the tensor handed from one to the
+# next is derived from the exported graph, not named here. k=5 is layer by layer,
+# every layer its own design, as in :mod:`iron.operators.swiglu_prefill`.
+LAYER_BY_LAYER = 5
 GROUP_LAYERS = {
-    False: [[GATE, UP, SILU, MUL, DOWN]],
-    True: [[GATE, UP, SILU, MUL], [DOWN]],
+    1: [[GATE, UP, SILU, MUL, DOWN]],
+    2: [[GATE, UP, SILU, MUL], [DOWN]],
+    LAYER_BY_LAYER: [[GATE], [UP], [SILU], [MUL], [DOWN]],
 }
 
-ARRAY = ComputeArray.from_accelerator(_ACCELERATOR)
 
-# Columns per layer: two for each GEMM, one for each elementwise layer. The five
-# layers sit on disjoint columns so they pipeline across steady-state iterations.
-# Each layer splits over the array's rows (D0, the sequence dimension), and a GEMM
-# splits over its two columns as well (D2, the output dimension).
-_COLUMNS = dict(zip(NODE_NAMES, ARRAY.allocate([2, 2, 1, 1, 2])))
-_GEMM_SPLIT = (("D0", ARRAY.num_rows), ("D2", 2))
-_ELEMENTWISE_SPLIT = (("D0", ARRAY.num_rows),)
+@lru_cache(maxsize=None)
+def array() -> ComputeArray:
+    """The compute grid of the device being built for."""
+    import aie.utils as aie_utils
+
+    return ComputeArray.from_device(aie_utils.get_current_device())
 
 
-def gemm_tiles(seq_tile, embedding_tile, hidden_tile):
-    """Kernel tile shape ``(m, k, n)`` of the gate/up GEMMs and of the down GEMM.
+def _placements(k):
+    """Where each layer runs.
 
-    The gate and up projections contract over the embedding dimension and produce
-    the hidden one; the down projection contracts the other way round.
+    Fused (k=1, k=2): the layers sit on disjoint columns, two per GEMM and one per
+    elementwise layer, so they pipeline across steady-state iterations. Each splits
+    over the array's rows (D0, the sequence dimension) and a GEMM over its two
+    columns as well (D2, the output dimension).
+
+    Layer by layer (k=5): the layers run in turn, so each takes the whole array.
+    The GEMMs use every row; the elementwise layers take one core per column and
+    split the sequence across them, the shape IRON's channeled operators use.
     """
-    return (seq_tile, embedding_tile, hidden_tile), (
-        seq_tile,
-        hidden_tile,
-        embedding_tile,
-    )
-
-
-def _placements(seq_tile, embedding_tile, hidden_tile):
-    gate_up, down = gemm_tiles(seq_tile, embedding_tile, hidden_tile)
+    grid = array()
 
     def gemm(tiles):
-        m, k, n = tiles
-        return {"utilization": 61.8, "m": m, "k": k, "n": n, "layout": "default"}
+        return dict(zip("mkn", tiles), utilization=61.8, layout="default")
 
     elementwise = {"utilization": 50.0, "layout": "default"}
+
+    if k == LAYER_BY_LAYER:
+        wide = grid.all_columns
+        gemm_split = (("D0", grid.num_rows), ("D2", grid.num_columns))
+        elementwise_split = (("D0", grid.num_columns),)
+        return {
+            GATE: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
+            UP: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
+            SILU: Placement(wide, elementwise_split, elementwise, rows=[0]),
+            MUL: Placement(wide, elementwise_split, elementwise, rows=[0]),
+            DOWN: Placement(wide, gemm_split, gemm(DOWN_TILES)),
+        }
+
+    columns = dict(zip(NODE_NAMES, grid.allocate([2, 2, 1, 1, 2])))
+    gemm_split = (("D0", grid.num_rows), ("D2", 2))
+    elementwise_split = (("D0", grid.num_rows),)
     return {
-        GATE: Placement(_COLUMNS[GATE], _GEMM_SPLIT, gemm(gate_up)),
-        UP: Placement(_COLUMNS[UP], _GEMM_SPLIT, gemm(gate_up)),
-        SILU: Placement(_COLUMNS[SILU], _ELEMENTWISE_SPLIT, elementwise),
-        MUL: Placement(_COLUMNS[MUL], _ELEMENTWISE_SPLIT, elementwise),
-        DOWN: Placement(_COLUMNS[DOWN], _GEMM_SPLIT, gemm(down)),
+        GATE: Placement(columns[GATE], gemm_split, gemm(GATE_UP_TILES)),
+        UP: Placement(columns[UP], gemm_split, gemm(GATE_UP_TILES)),
+        SILU: Placement(columns[SILU], elementwise_split, elementwise),
+        MUL: Placement(columns[MUL], elementwise_split, elementwise),
+        DOWN: Placement(columns[DOWN], gemm_split, gemm(DOWN_TILES)),
     }
 
 
-def _groups(seq_tile, embedding_tile, hidden_tile, split_groups):
-    """Fusion groups: one fully fused design, or a front end plus down projection.
+def _layer_tiling(layer):
+    """Intra-core tiling of one layer, over the dimensions it iterates."""
+    if layer is DOWN:
+        contraction, output = HIDDEN_TILE, EMBEDDING_TILE
+    elif layer in (GATE, UP):
+        contraction, output = EMBEDDING_TILE, HIDDEN_TILE
+    else:
+        return [(layer, "D1", HIDDEN_TILE), (layer, "D0", SEQ_TILE)]
+    return [
+        (layer, "D1", contraction),
+        (layer, "D2", output),
+        (layer, "D0", SEQ_TILE),
+    ]
+
+
+def _groups(k):
+    """The fused groups, each with the intra-core tiling of its leading GEMM.
 
     Splitting makes stream-dse emit one design per group, which IRON then deploys
-    as a single full-ELF. D0 is the sequence dimension, D1 the contraction and D2
-    the output dimension of the group's leading GEMM.
+    as a single full ELF. D0 is the sequence dimension, D1 the contraction and D2
+    the output dimension.
     """
-    if split_groups:
-        tiling = [
-            [
-                (GATE, "D1", embedding_tile),
-                (GATE, "D2", hidden_tile),
-                (GATE, "D0", seq_tile),
-            ],
-            [
-                (DOWN, "D1", hidden_tile),
-                (DOWN, "D2", embedding_tile),
-                (DOWN, "D0", seq_tile),
-            ],
-        ]
+    if k == LAYER_BY_LAYER:
+        tiling = [_layer_tiling(layers[0]) for layers in GROUP_LAYERS[k]]
+    elif k == 2:
+        tiling = [_layer_tiling(GATE), _layer_tiling(DOWN)]
     else:
         tiling = [
             [
-                (GATE, "D1", embedding_tile),
-                (DOWN, "D2", embedding_tile),
-                (GATE, "D2", hidden_tile),
-                (GATE, "D0", seq_tile),
+                (GATE, "D1", EMBEDDING_TILE),
+                (DOWN, "D2", EMBEDDING_TILE),
+                (GATE, "D2", HIDDEN_TILE),
+                (GATE, "D0", SEQ_TILE),
             ]
         ]
     return [
         FusedGroup(f"Fused_Group_{index + 1}", layers, group_tiling)
-        for index, (layers, group_tiling) in enumerate(
-            zip(GROUP_LAYERS[split_groups], tiling)
-        )
+        for index, (layers, group_tiling) in enumerate(zip(GROUP_LAYERS[k], tiling))
     ]
 
 
-def _check_shapes(
-    seq_len, embedding_dim, hidden_dim, seq_tile, embedding_tile, hidden_tile
-):
-    """Reject shapes the fixed 4x8 placement cannot tile evenly."""
-    rows, gemm_split = ARRAY.num_rows, 2
-    if seq_len % rows or seq_len < seq_tile * rows:
+def _check_shapes(seq_len, embedding_dim, hidden_dim, k):
+    """Reject a problem size the placement and the kernel tiles cannot divide."""
+    grid = array()
+    gemm_split = grid.num_columns if k == LAYER_BY_LAYER else 2
+    if seq_len % grid.num_rows or seq_len < SEQ_TILE * grid.num_rows:
         raise ValueError(
-            f"seq_len ({seq_len}) must be a multiple of {rows} and at least {seq_tile * rows}"
+            f"seq_len ({seq_len}) must be a multiple of {grid.num_rows} and at "
+            f"least {SEQ_TILE * grid.num_rows}"
         )
-    if embedding_dim % (embedding_tile * gemm_split):
+    if embedding_dim % (EMBEDDING_TILE * gemm_split):
         raise ValueError(
             f"embedding_dim ({embedding_dim}) must be a multiple of "
-            f"embedding_tile * {gemm_split} ({embedding_tile * gemm_split})"
+            f"{EMBEDDING_TILE * gemm_split}"
         )
-    if hidden_dim % (hidden_tile * gemm_split):
+    if hidden_dim % (HIDDEN_TILE * gemm_split):
         raise ValueError(
             f"hidden_dim ({hidden_dim}) must be a multiple of "
-            f"hidden_tile * {gemm_split} ({hidden_tile * gemm_split})"
+            f"{HIDDEN_TILE * gemm_split}"
         )
 
 
 @lru_cache(maxsize=None)
 def workload_for(seq_len, embedding_dim, hidden_dim):
     """The exported workload for one problem size."""
-    module = swiglu_module(embedding_dim, hidden_dim)
     return export_workload(
-        module,
+        swiglu_module(embedding_dim, hidden_dim),
         (torch.zeros(seq_len, embedding_dim, dtype=torch.bfloat16),),
         node_names=NODE_NAMES,
         result_names=RESULT_NAMES,
     )
 
 
-def group_ports(seq_len, embedding_dim, hidden_dim, split_groups=False):
+def group_ports(seq_len, embedding_dim, hidden_dim, k=1):
     """Per fused group, the tensor names it takes in and hands on.
 
-    These are the operator's runtime arguments, including the tensor a split
-    design passes from its front end to its down projection.
+    These are the operator's runtime arguments, including the tensors a split
+    design passes from one group to the next.
     """
     return group_boundaries(
-        workload_for(seq_len, embedding_dim, hidden_dim), GROUP_LAYERS[split_groups]
+        workload_for(seq_len, embedding_dim, hidden_dim), GROUP_LAYERS[k]
     )
 
 
-def build_inputs(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    seq_len_tile_size,
-    embedding_tile_size,
-    hidden_tile_size,
-    output_dir,
-    split_groups=False,
-):
+def build_inputs(seq_len, embedding_dim, hidden_dim, output_dir, k=1):
     """Write the workload and mapping for one configuration; return their paths."""
-    _check_shapes(
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        seq_len_tile_size,
-        embedding_tile_size,
-        hidden_tile_size,
-    )
+    _check_shapes(seq_len, embedding_dim, hidden_dim, k)
     workload = workload_for(seq_len, embedding_dim, hidden_dim)
     output_dir = Path(output_dir)
     return (
         workload.write(output_dir / "workload.onnx"),
         emit_mapping(
             workload,
-            _placements(seq_len_tile_size, embedding_tile_size, hidden_tile_size),
-            _groups(
-                seq_len_tile_size, embedding_tile_size, hidden_tile_size, split_groups
-            ),
-            ARRAY,
+            _placements(k),
+            _groups(k),
+            array(),
             output_dir / "mapping.yaml",
         ),
     )
 
 
-def _experiment_id(seq_len, embedding_dim, hidden_dim, rows, cols, suffix=""):
-    hw_name = os.path.splitext(os.path.basename(_ACCELERATOR))[0]
-    return f"{hw_name}-swiglu{suffix}_{seq_len}_{embedding_dim}_{hidden_dim}-{rows}_row_{cols}_col"
-
-
-def _run_codegen(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    rows,
-    cols,
-    npu,
-    seq_len_tile_size,
-    embedding_tile_size,
-    hidden_tile_size,
-    backend,
-    trace_size=0,
-    split_groups=False,
-    output_root="outputs",
-):
-    """Run stream-dse's constraint-optimization + code generation once."""
-    experiment_id = _experiment_id(
-        seq_len, embedding_dim, hidden_dim, rows, cols, "_k2" if split_groups else ""
+def _experiment_id(seq_len, embedding_dim, hidden_dim, k):
+    grid = array()
+    hardware = os.path.splitext(os.path.basename(ACCELERATOR))[0]
+    suffix = f"_k{k}" if k > 1 else ""
+    return (
+        f"{hardware}-swiglu{suffix}_{seq_len}_{embedding_dim}_{hidden_dim}"
+        f"-{grid.num_rows}_row_{grid.num_columns}_col"
     )
-    output_dir = os.path.join(output_root, experiment_id)
+
+
+def _design_paths(seq_len, embedding_dim, hidden_dim, k):
+    """Where stream-dse writes each group's MLIR.
+
+    A single fused group goes through stream-dse's single-design pipeline and lands
+    in ``codegen/``; several groups each land in their own ``group_i/codegen/``.
+    """
+    output_dir = os.path.join(
+        OUTPUT_ROOT, _experiment_id(seq_len, embedding_dim, hidden_dim, k)
+    )
+    if k == 1:
+        return [os.path.join(output_dir, "codegen", "final.mlir")]
+    return [
+        os.path.join(output_dir, f"group_{index}", "codegen", "final.mlir")
+        for index in range(len(GROUP_LAYERS[k]))
+    ]
+
+
+def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k):
+    """Run stream-dse's constraint optimization and code generation once."""
+    grid = array()
+    experiment_id = _experiment_id(seq_len, embedding_dim, hidden_dim, k)
     workload_path, mapping_path = build_inputs(
         seq_len,
         embedding_dim,
         hidden_dim,
-        seq_len_tile_size,
-        embedding_tile_size,
-        hidden_tile_size,
-        output_dir,
-        split_groups=split_groups,
+        os.path.join(OUTPUT_ROOT, experiment_id),
+        k=k,
     )
-    ctx = optimize_allocation_co(
-        hardware=_ACCELERATOR,
+    optimize_allocation_co(
+        hardware=ACCELERATOR,
         workload=workload_path,
         mapping=mapping_path,
         experiment_id=experiment_id,
-        output_path=output_root,
+        output_path=OUTPUT_ROOT,
         skip_if_exists=False,
         enable_codegen=True,
-        trace_size=trace_size,
-        nb_cols_to_use=cols,
+        trace_size=0,
+        nb_cols_to_use=grid.num_columns,
         npu=npu,
-        backend=backend,
+        backend=BACKEND,
     )
-    return ctx, output_dir
-
-
-def run_main_aie_codegen_swiglu(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    in_dtype="bf16",
-    out_dtype="bf16",
-    trace_size=0,
-    rows=4,
-    cols=8,
-    npu="npu2",
-    seq_len_tile_size=32,
-    embedding_tile_size=32,
-    hidden_tile_size=64,
-    last_gemm_down=True,
-    backend="ortools_gscip",
-    func_prefix="",
-):
-    """Generate the fully fused SwiGLU-prefill MLIR module.
-
-    Returns an ``aie`` MLIR module. ``func_prefix`` (injected by
-    ``OperatorSequence``) prefixes the kernel symbols / ``link_with`` objects so
-    the design can be deployed as one fusion group; see :func:`region_module`.
-
-    The default ``ortools_gscip`` backend is the license-free OR-Tools GSCIP
-    solver, so no Gurobi license is required.
-    """
-    ctx, _ = _run_codegen(
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        rows,
-        cols,
-        npu,
-        seq_len_tile_size,
-        embedding_tile_size,
-        hidden_tile_size,
-        backend,
-        trace_size=trace_size,
-    )
-    return region_module(str(ctx.get("module")), func_prefix)
-
-
-# ---------------------------------------------------------------------------
-# k=2 variant: two fusion groups (gate/up/SiLU/mul -> h, then down-projection)
-# ---------------------------------------------------------------------------
-#
-# stream-dse emits a separate ``aie.device`` design per fusion group (under
-# ``<output>/group_i/codegen/final.mlir``). IRON fuses the two groups into one
-# full-ELF via ``OperatorSequence``; each group is loaded below as a child design.
 
 
 def _prefixed(mlir_text: str, func_prefix: str) -> str:
@@ -334,7 +294,7 @@ def _prefixed(mlir_text: str, func_prefix: str) -> str:
     ``OperatorSequence`` renames each child's kernel object files and symbols to
     ``op<idx>_...`` so the groups stay distinct inside one ELF; the group's MLIR
     must reference the same prefixed names. Prefix the ``link_with`` object files
-    and every privately-declared kernel symbol (and its call sites).
+    and every privately declared kernel symbol, and its call sites.
     """
     if not func_prefix:
         return mlir_text
@@ -348,15 +308,17 @@ def _prefixed(mlir_text: str, func_prefix: str) -> str:
         key=len,
         reverse=True,
     )
-    for sym in symbols:
-        mlir_text = re.sub(rf"@{re.escape(sym)}\b", f"@{func_prefix}{sym}", mlir_text)
+    for symbol in symbols:
+        mlir_text = re.sub(
+            rf"@{re.escape(symbol)}\b", f"@{func_prefix}{symbol}", mlir_text
+        )
     return mlir_text
 
 
 def region_module(mlir_text: str, func_prefix: str = ""):
-    """Parse a stream group's MLIR text into an ``aie`` module for fusion.
+    """Parse a group's MLIR text into an ``aie`` module for fusion.
 
-    ``OperatorSequence`` consumes ``aie.DeviceOp`` objects, so the (xDSL-emitted)
+    ``OperatorSequence`` consumes ``aie.DeviceOp`` objects, so the xDSL-emitted
     group text is re-parsed with the mlir-aie bindings, after ``func_prefix``
     rewriting.
     """
@@ -367,48 +329,16 @@ def region_module(mlir_text: str, func_prefix: str = ""):
         return ir.Module.parse(_prefixed(mlir_text, func_prefix))
 
 
-def load_swiglu_k2_group(
-    group_index,
-    func_prefix="",
-    *,
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    in_dtype="bf16",
-    out_dtype="bf16",
-    rows=4,
-    cols=8,
-    npu="npu2",
-    seq_len_tile_size=32,
-    embedding_tile_size=32,
-    hidden_tile_size=64,
-    backend="ortools_gscip",
+def load_group(
+    group_index, func_prefix="", *, k, seq_len, embedding_dim, hidden_dim, npu
 ):
-    """Generate the two-group design (cached) and return one group's aie module.
+    """Generate the ``k``-group design once and return one group's aie module.
 
-    ``group_index`` 0 is the gate/up/SiLU/mul front end (``x, w_gate, w_up -> h``);
-    1 is the down projection (``h, w_down -> y``). ``func_prefix`` is injected by
-    ``OperatorSequence``. Both group loaders call this; the first generates the
-    design, the second reuses the files on disk.
+    ``group_index`` selects the group, in the order :data:`GROUP_LAYERS` lists them.
+    ``func_prefix`` is injected by ``OperatorSequence``. Every group loader calls
+    this; the first generates the design and the rest reuse the files on disk.
     """
-    output_dir = os.path.join(
-        "outputs", _experiment_id(seq_len, embedding_dim, hidden_dim, rows, cols, "_k2")
-    )
-    finals = [
-        os.path.join(output_dir, f"group_{i}", "codegen", "final.mlir") for i in (0, 1)
-    ]
-    if not all(os.path.exists(f) for f in finals):
-        _run_codegen(
-            seq_len,
-            embedding_dim,
-            hidden_dim,
-            rows,
-            cols,
-            npu,
-            seq_len_tile_size,
-            embedding_tile_size,
-            hidden_tile_size,
-            backend,
-            split_groups=True,
-        )
+    finals = _design_paths(seq_len, embedding_dim, hidden_dim, k)
+    if not all(os.path.exists(final) for final in finals):
+        _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k)
     return region_module(Path(finals[group_index]).read_text(), func_prefix)

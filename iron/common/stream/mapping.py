@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Emit the stream-dse mapping for an exported workload.
@@ -31,7 +31,8 @@ class Placement:
     """Where one workload node runs.
 
     ``columns`` are the array columns it occupies, resolved to core ids against
-    the :class:`~iron.common.stream.hardware.ComputeArray`; ``splits`` is the
+    the :class:`~iron.common.stream.hardware.ComputeArray`; ``rows`` narrows that
+    to some rows of each column (all of them by default); ``splits`` is the
     inter-core tiling as ``(dim, split)`` pairs; ``kernel_kwargs`` are the
     arguments of the node's stream-dse kernel (e.g. a GEMM's tile shape).
     """
@@ -39,6 +40,7 @@ class Placement:
     columns: Sequence[int]
     splits: Sequence[tuple[str, int]] = ()
     kernel_kwargs: dict = field(default_factory=dict)
+    rows: Sequence[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,7 @@ def _layer_entry(
 ) -> dict:
     return {
         "name": name,
-        "core_allocation": [list(array.cores(placement.columns))],
+        "core_allocation": [list(array.cores(placement.columns, placement.rows))],
         "inter_core_tiling": [
             [{"dim": dim, "split": split} for dim, split in placement.splits]
         ],

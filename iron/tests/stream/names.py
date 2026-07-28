@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """The names the design is built from must be the golden reference's names.
@@ -41,6 +41,14 @@ def test_golden_weights_load_into_the_module():
         assert getattr(module, name).equal(golden[name])
 
 
+def test_module_computes_the_golden_reference():
+    """The design is generated from this module and the result is checked against
+    the golden reference, so the two have to be the same computation."""
+    golden = generate_golden_reference(**SHAPE)
+    module = reference.swiglu_module(SHAPE["K"], SHAPE["N"], golden)
+    assert module(golden[reference.INPUT]).equal(golden[reference.OUTPUT])
+
+
 stream = pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
@@ -50,25 +58,23 @@ from iron.operators.swiglu_prefill_stream import stream_design  # noqa: E402
 DIMS = (256, 512, 2048)
 
 
-@pytest.mark.parametrize("split_groups", [False, True])
-def test_group_ports_are_named_by_the_exported_graph(split_groups):
+@pytest.mark.parametrize("k", [1, 2, 5])
+def test_group_ports_are_named_by_the_exported_graph(k):
     workload = stream_design.workload_for(*DIMS)
     known = set(workload.buffers) | set(reference.TENSOR_NAMES)
-    for inputs, outputs in stream_design.group_ports(*DIMS, split_groups):
+    for inputs, outputs in stream_design.group_ports(*DIMS, k):
         assert set(inputs) | set(outputs) <= known
 
 
 def test_split_design_hands_on_the_hidden_state():
-    (_, front_outputs), (down_inputs, _) = stream_design.group_ports(
-        *DIMS, split_groups=True
-    )
+    (_, front_outputs), (down_inputs, _) = stream_design.group_ports(*DIMS, k=2)
     assert front_outputs == (reference.HIDDEN,)
     assert down_inputs[0] == reference.HIDDEN
 
 
 def test_external_arguments_match_the_runtime_buffers():
     workload = stream_design.workload_for(*DIMS)
-    boundaries = stream_design.group_ports(*DIMS, split_groups=True)
+    boundaries = stream_design.group_ports(*DIMS, k=2)
     produced = {name for _, outputs in boundaries for name in outputs}
     consumed = {name for inputs, _ in boundaries for name in inputs}
     external = [

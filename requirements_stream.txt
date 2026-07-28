@@ -1,39 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Optional dependencies for the stream-dse-backed fused SwiGLU-prefill operator
 # (iron/operators/swiglu_prefill_stream).
 #
-# It is NOT installed by the default CI (requirements.txt); the operator's test
-# skips itself (pytest.importorskip) when stream-dse is absent. Install this file
-# to build/run the operator and its test:
+# Not installed by the default CI (requirements.txt); the operator's test skips
+# itself (pytest.importorskip) when stream-dse is absent. Install this file to
+# build and run the operator and its test:
 #
 #     pip install -r requirements_stream.txt
 #     stream-setup-aie   # REQUIRED: installs stream-dse's pure-Python AIE codegen
-#                        # dialects (xdsl-aie, snax-mlir) that cannot be PyPI
-#                        # dependencies. As of stream-dse 1.13.7 it does NOT install
-#                        # mlir_aie/llvm-aie: IRON already pins those in
-#                        # requirements.txt, and codegen only emits text MLIR via
-#                        # xdsl (it never imports the aie bindings). Earlier releases
-#                        # reinstalled an older mlir_aie here, clobbering IRON's wheel.
+#                        # dialects (xdsl-aie, snax-mlir), which cannot be PyPI
+#                        # dependencies. It leaves mlir_aie/llvm-aie alone; IRON
+#                        # pins those in requirements.txt.
 #
-# Notes:
-# - stream-dse generates the fused MLIR design at build time (license-free
-#   OR-Tools GSCIP solver; no Gurobi needed) and writes its generated workload/
-#   mapping files into its own installed package directory, so that environment
-#   must be writable.
-# - >=1.13.8 is required: stream_design.py feeds IRON-authored operand layouts
-#   into code generation via optimize_allocation_co(kernels=...), the override
-#   hook added in stream-dse 1.13.4; the k=2 variant (op_k2.py) additionally needs
-#   the two-fusion-group support (make_swiglu_mapping(split_groups=...) + the
-#   multi-group AIE codegen pipeline) added in stream-dse 1.13.5; 1.13.6 makes
-#   the debug workload-graph visualization non-fatal, so code generation no longer
-#   requires graphviz (`dot`); 1.13.7 makes `stream-setup-aie` stop reinstalling
-#   mlir_aie/llvm-aie, which previously downgraded IRON's pinned mlir_aie (1.3.5 ->
-#   0.0.1) and numpy (2.x -> 1.26.4) and broke the whole operator test suite; and
-#   1.13.8 orders the generated design's runtime arguments by the exported graph
-#   instead of by tensor name, which is what lets the weights below carry their
-#   reference names.
+# stream-dse generates the fused MLIR design at build time with the license-free
+# OR-Tools GSCIP solver, and writes its workload and mapping into its own installed
+# package directory, so that environment must be writable.
 
 onnxscript>=0.7
 stream-dse>=1.13.8

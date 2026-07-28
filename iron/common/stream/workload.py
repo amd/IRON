@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Export a reference ``nn.Module`` into the ONNX workload stream-dse optimizes.
@@ -38,6 +38,23 @@ class StreamWorkload:
     model: object  # onnx.ModelProto
     nodes: tuple[tuple[str, str], ...]  # (node name, kernel key), topological order
     buffers: tuple[str, ...]  # runtime buffer names, in argument order
+
+    @property
+    def shapes(self) -> dict[str, tuple[int, ...]]:
+        """Every named tensor's shape, as the exported graph declares it."""
+        graph = self.model.graph
+        declared = list(graph.input) + list(graph.value_info) + list(graph.output)
+        shapes = {
+            value.name: tuple(d.dim_value for d in value.type.tensor_type.shape.dim)
+            for value in declared
+        }
+        shapes.update(
+            {
+                initializer.name: tuple(initializer.dims)
+                for initializer in graph.initializer
+            }
+        )
+        return shapes
 
     def write(self, path) -> str:
         """Write the ONNX model to ``path`` and return it.

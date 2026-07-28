@@ -1,12 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Address an accelerator's compute tiles the way the array is laid out.
+"""Address the device's compute tiles the way the array is laid out.
 
-stream identifies a tile by an integer core id, which says nothing on its own:
-which ids are compute tiles, and which column they sit in, is in the accelerator
-description. This turns that description into columns of core ids, so a placement
-is written in columns and no other IRON module has to know what an id means.
+stream identifies a tile by an integer core id, which says nothing on its own.
+IRON already describes the device: mlir-aie's :class:`~aie.iron.device.Device`
+knows the grid and the type of every tile in it. This turns that into columns of
+core ids, so a placement is written in columns and rows and no other IRON module
+has to know what a stream core id means.
 
 An operator that gives every layer the whole array (the layer-by-layer designs,
 and a single layer sent to stream for a performance estimate) asks for
@@ -17,55 +18,33 @@ array asks :meth:`ComputeArray.allocate` for a column budget per layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 from typing import Iterable, Sequence
 
-_COMPUTE_TYPE_SUFFIX = "compute"
-
-
-@lru_cache(maxsize=None)
-def _core_type(path: str) -> str:
-    import yaml
-
-    return yaml.safe_load(Path(path).read_text())["type"]
-
-
-def _core_description(accelerator: Path, reference: str) -> Path:
-    """Resolve a core reference, which is relative to the accelerator or to ``cores/``."""
-    path = accelerator.parent / reference
-    return (
-        path if path.exists() else accelerator.parent / "cores" / Path(reference).name
-    )
+from aie.iron.device.device import AIETileType
 
 
 @dataclass(frozen=True)
 class ComputeArray:
-    """The accelerator's compute tiles, as core ids grouped by column."""
+    """The device's compute tiles, as stream core ids grouped by column."""
 
     columns: tuple[tuple[int, ...], ...]
 
     @classmethod
-    def from_accelerator(cls, path) -> ComputeArray:
-        import yaml
+    def from_device(cls, device) -> ComputeArray:
+        """Read the compute grid from an mlir-aie ``Device``.
 
-        path = Path(path)
-        description = yaml.safe_load(path.read_text())
-        coordinates = description.get("core_coordinates", {})
-        by_column: dict[int, list[tuple[int, int]]] = {}
-        for core_id, reference in description["cores"].items():
-            if core_id not in coordinates:
-                continue
-            if not _core_type(str(_core_description(path, reference))).endswith(
-                _COMPUTE_TYPE_SUFFIX
-            ):
-                continue
-            column, row = coordinates[core_id]
-            by_column.setdefault(column, []).append((row, core_id))
+        stream numbers tiles ``column * rows + row`` across the device's whole
+        grid, so the stride is the device's row count -- shim and memory rows
+        included -- and not the number of compute rows.
+        """
         return cls(
             tuple(
-                tuple(core_id for _, core_id in sorted(rows))
-                for _, rows in sorted(by_column.items())
+                tuple(
+                    column * device.rows + row
+                    for row in range(device.rows)
+                    if device.get_tile_type(column, row) == AIETileType.CoreTile
+                )
+                for column in range(device.cols)
             )
         )
 
@@ -81,9 +60,19 @@ class ComputeArray:
     def all_columns(self) -> tuple[int, ...]:
         return tuple(range(self.num_columns))
 
-    def cores(self, columns: Iterable[int]) -> tuple[int, ...]:
-        """The core ids of ``columns``, column by column and row by row."""
-        return tuple(core for column in columns for core in self.columns[column])
+    def cores(
+        self, columns: Iterable[int], rows: Sequence[int] | None = None
+    ) -> tuple[int, ...]:
+        """The core ids of ``columns``, column by column and row by row.
+
+        ``rows`` takes only some rows of each column, for a layer that wants the
+        array's width but not its full depth -- an elementwise layer with one
+        worker per column, as IRON's own channeled operators place it.
+        """
+        selected = range(self.num_rows) if rows is None else rows
+        return tuple(
+            self.columns[column][row] for column in columns for row in selected
+        )
 
     def allocate(self, budgets: Sequence[int]) -> tuple[tuple[int, ...], ...]:
         """Consecutive, disjoint column ranges, one per budget.

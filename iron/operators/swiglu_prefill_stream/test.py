@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import time
@@ -14,10 +14,7 @@ pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
-from iron.operators.swiglu_prefill_stream.op import (
-    SwiGLUPrefillStream,
-    SwiGLUPrefillStreamK2,
-)
+from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream
 
 # The operator's design is generated from this module; the values it is checked
 # against come from swiglu_decode's reference, which it shares.
@@ -25,36 +22,58 @@ from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.operators.swiglu_prefill_stream.reference import INPUT, OUTPUT, WEIGHTS
 from iron.common.test_utils import verify_buffer
 
+# The MILP-feasible shape on the whole-array Strix (npu2) target.
+SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM = 256, 512, 2048
 
-def get_params():
-    # (seq_len, embedding_dim, hidden_dim, seq_tile, embedding_tile, hidden_tile):
-    # the MILP-feasible shape on the whole-array Strix (npu2) target.
-    return [pytest.param(256, 512, 2048, 32, 32, 64)]
+# Fused groups to deploy the block as: one design, a front end plus the down
+# projection, or one design per layer.
+FUSION_GROUPS = [1, 2, 5]
+
+# Timed dispatches per test; the reported latency is the fastest of them.
+TIMED_RUNS = 3
 
 
-def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
-    operator.compile()
+def _dispatch(operator, golden_ref):
+    """A callable on a freshly configured array, with its inputs staged.
+
+    Creating the hw_context applies the design's init CDO. The full-ELF path does
+    not reset array state between dispatches, so every dispatch takes a new
+    callable: reusing one reads stale state, and a design of several fused groups
+    deadlocks on the second dispatch. Inputs are named by the golden reference,
+    and the design consumes the weights in their natural (K, N) layout.
+    """
     run = operator.get_callable()
-
-    # Populate inputs by golden-reference name; the design consumes weights in
-    # their natural (K, N) layout, no transpose.
     for name in (INPUT, *WEIGHTS):
-        run.get_buffer(name).torch_view()[:] = (
-            golden_ref[name].to(torch.bfloat16).flatten()
-        )
+        buffer = run.get_buffer(name)
+        buffer.torch_view()[:] = golden_ref[name].to(torch.bfloat16).flatten()
+        buffer.to("npu")
+    return run
 
-    # Correctness is checked on the FIRST run: creating the hw_context applies the
-    # design's init CDO, so the first run on the freshly loaded full-ELF computes
-    # correctly. The full-ELF path does not re-initialize the array between runs,
-    # so later runs on the same callable read stale state and are used only for
-    # timing below.
-    #
-    # The whole block is fused in bf16, so rounding accumulates and reorders across
-    # the chain and the K=hidden_dim down-projection sum (near-cancellation
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("k", FUSION_GROUPS)
+def test_swiglu_prefill_stream(k, aie_context):
+    golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
+    operator = SwiGLUPrefillStream(
+        seq_len=SEQ_LEN,
+        embedding_dim=EMBEDDING_DIM,
+        hidden_dim=HIDDEN_DIM,
+        k=k,
+        context=aie_context,
+    )
+    operator.compile()
+
+    # The whole block is computed in bf16, so rounding accumulates and reorders
+    # across the chain and the K=hidden_dim down-projection sum (near-cancellation
     # amplifies relative error): ~20% of elements drift past the 8% bound, so allow
     # up to 25%. Tolerances are local to this test.
+    run = _dispatch(operator, golden_ref)
     run()
-    output = run.get_buffer(OUTPUT).to_torch().reshape((seq_len, embedding_dim))
+    output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
     errors = verify_buffer(
         output,
         OUTPUT,
@@ -65,71 +84,19 @@ def _run_and_verify(operator, seq_len, embedding_dim, golden_ref):
     )
     assert not errors, f"Test failed with errors: {errors}"
 
-    # Performance: time a run that reuses the hw_context, so it reflects the actual
-    # kernel latency without the one-off ELF/hw_context setup.
-    start = time.perf_counter()
-    run()
-    elapsed_us = (time.perf_counter() - start) * 1e6
-    total_bytes = 2 * (seq_len * embedding_dim + seq_len * embedding_dim)  # bf16 in+out
+    # Performance: time dispatches of their own, each on a freshly configured
+    # array, so every timed run is one that computed the verified result.
+    latencies = []
+    for _ in range(TIMED_RUNS):
+        run = _dispatch(operator, golden_ref)
+        start = time.perf_counter()
+        run()
+        latencies.append((time.perf_counter() - start) * 1e6)
+    elapsed_us = min(latencies)
+    total_bytes = 4 * SEQ_LEN * EMBEDDING_DIM  # bf16 in + out
     print(f"Latency (us): {elapsed_us:.2f}")
+    print(
+        f"Latency min/mean/max (us): {elapsed_us:.2f} / "
+        f"{sum(latencies) / len(latencies):.2f} / {max(latencies):.2f}"
+    )
     print(f"Effective Bandwidth: {total_bytes / (elapsed_us * 1e-6) / 1e9:.4f} GB/s")
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "seq_len,embedding_dim,hidden_dim,seq_tile,embedding_tile,hidden_tile", get_params()
-)
-def test_swiglu_prefill_stream(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    seq_tile,
-    embedding_tile,
-    hidden_tile,
-    aie_context,
-):
-    golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
-    operator = SwiGLUPrefillStream(
-        seq_len=seq_len,
-        embedding_dim=embedding_dim,
-        hidden_dim=hidden_dim,
-        seq_len_tile_size=seq_tile,
-        embedding_tile_size=embedding_tile,
-        hidden_tile_size=hidden_tile,
-        context=aie_context,
-    )
-    _run_and_verify(operator, seq_len, embedding_dim, golden_ref)
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "seq_len,embedding_dim,hidden_dim,seq_tile,embedding_tile,hidden_tile", get_params()
-)
-def test_swiglu_prefill_stream_k2(
-    seq_len,
-    embedding_dim,
-    hidden_dim,
-    seq_tile,
-    embedding_tile,
-    hidden_tile,
-    aie_context,
-):
-    golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
-    operator = SwiGLUPrefillStreamK2(
-        seq_len=seq_len,
-        embedding_dim=embedding_dim,
-        hidden_dim=hidden_dim,
-        seq_len_tile_size=seq_tile,
-        embedding_tile_size=embedding_tile,
-        hidden_tile_size=hidden_tile,
-        context=aie_context,
-    )
-    _run_and_verify(operator, seq_len, embedding_dim, golden_ref)
