@@ -18,6 +18,7 @@ importing the operator does not require ``stream-dse`` to be installed, only
 building it does.
 """
 
+import hashlib
 import os
 import re
 from functools import lru_cache
@@ -64,12 +65,13 @@ RESULT_NAMES = {
     MUL: reference.HIDDEN,
 }
 
-# The kernel tile every layer is compiled and mapped for. The mapping carries these
-# and no absolute dimension, so it holds across problem sizes; _check_shapes rejects
-# a workload they cannot tile evenly.
-SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE = 32, 32, 64
-GATE_UP_TILES = (SEQ_TILE, EMBEDDING_TILE, HIDDEN_TILE)
-DOWN_TILES = (SEQ_TILE, HIDDEN_TILE, EMBEDDING_TILE)
+# The kernel tile each layer is compiled and mapped for, as (sequence, embedding,
+# hidden). A core holds the operands of every layer in its group, so the tile a group
+# can afford shrinks as more layers fuse onto it. The mapping carries the tile and no
+# absolute dimension, so it holds across problem sizes; _check_shapes rejects a
+# workload it cannot tile evenly.
+FUSED_TILES = (32, 32, 64)  # k=1, k=2: several layers share a core
+LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 
 # Sequence positions an elementwise layer works at a time when it reads from and
 # writes to memory. Its tile is then this many whole rows, which is contiguous in
@@ -87,6 +89,21 @@ GROUP_LAYERS = {
     2: [[GATE, UP, SILU, MUL], [DOWN]],
     LAYER_BY_LAYER: [[GATE], [UP], [SILU], [MUL], [DOWN]],
 }
+
+
+def tiles_for(k):
+    """The kernel tile, as (sequence, embedding, hidden), for ``k`` fused groups."""
+    return LAYER_TILES if k == LAYER_BY_LAYER else FUSED_TILES
+
+
+def gemm_tiles(k):
+    """Each GEMM layer's kernel tile, in the (m, k, n) order the kernel takes."""
+    sequence, embedding, hidden = tiles_for(k)
+    return {
+        GATE: (sequence, embedding, hidden),
+        UP: (sequence, embedding, hidden),
+        DOWN: (sequence, hidden, embedding),
+    }
 
 
 @lru_cache(maxsize=None)
@@ -111,12 +128,22 @@ def _placements(k, hidden_dim):
     also read whole rows, so their transfers to and from memory are contiguous.
     """
     grid = array()
+    sequence_tile, _, hidden_tile = tiles_for(k)
+    tiles = gemm_tiles(k)
 
     def gemm(tiles):
-        return dict(zip("mkn", tiles), utilization=61.8, layout="default")
+        return dict(
+            zip("mkn", tiles), utilization=61.8, layout="default", bfp16_mmul=True
+        )
 
-    def elementwise(rows, columns, layout):
-        return {"utilization": 50.0, "layout": layout, "m": rows, "n": columns}
+    def elementwise(rows, columns, layout, bfp16_mmul=False):
+        return {
+            "utilization": 50.0,
+            "layout": layout,
+            "m": rows,
+            "n": columns,
+            "bfp16_mmul": bfp16_mmul,
+        }
 
     if k == LAYER_BY_LAYER:
         wide = grid.all_columns
@@ -124,39 +151,36 @@ def _placements(k, hidden_dim):
         elementwise_split = (("D0", grid.num_columns),)
         rows_wide = elementwise(ELEMENTWISE_ROWS, hidden_dim, "contiguous")
         return {
-            GATE: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
-            UP: Placement(wide, gemm_split, gemm(GATE_UP_TILES)),
+            GATE: Placement(wide, gemm_split, gemm(tiles[GATE])),
+            UP: Placement(wide, gemm_split, gemm(tiles[UP])),
             SILU: Placement(wide, elementwise_split, rows_wide, rows=[0]),
             MUL: Placement(wide, elementwise_split, rows_wide, rows=[0]),
-            DOWN: Placement(wide, gemm_split, gemm(DOWN_TILES)),
+            DOWN: Placement(wide, gemm_split, gemm(tiles[DOWN])),
         }
 
     columns = dict(zip(NODE_NAMES, grid.allocate([2, 2, 1, 1, 2])))
     gemm_split = (("D0", grid.num_rows), ("D2", 2))
     elementwise_split = (("D0", grid.num_rows),)
     # Fused behind a GEMM, so the operands keep the layout the GEMM writes.
-    fused = elementwise(SEQ_TILE, HIDDEN_TILE, "default")
+    fused = elementwise(sequence_tile, hidden_tile, "default", bfp16_mmul=True)
     return {
-        GATE: Placement(columns[GATE], gemm_split, gemm(GATE_UP_TILES)),
-        UP: Placement(columns[UP], gemm_split, gemm(GATE_UP_TILES)),
+        GATE: Placement(columns[GATE], gemm_split, gemm(tiles[GATE])),
+        UP: Placement(columns[UP], gemm_split, gemm(tiles[UP])),
         SILU: Placement(columns[SILU], elementwise_split, fused),
         MUL: Placement(columns[MUL], elementwise_split, fused),
-        DOWN: Placement(columns[DOWN], gemm_split, gemm(DOWN_TILES)),
+        DOWN: Placement(columns[DOWN], gemm_split, gemm(tiles[DOWN])),
     }
 
 
-def _layer_tiling(layer, hidden_dim):
+def _layer_tiling(layer, hidden_dim, k):
     """Intra-core tiling of one layer, over the dimensions it iterates."""
-    if layer is DOWN:
-        contraction, output = HIDDEN_TILE, EMBEDDING_TILE
-    elif layer in (GATE, UP):
-        contraction, output = EMBEDDING_TILE, HIDDEN_TILE
-    else:
+    if layer not in (GATE, UP, DOWN):
         return [(layer, "D1", hidden_dim), (layer, "D0", ELEMENTWISE_ROWS)]
+    sequence, contraction, output = gemm_tiles(k)[layer]
     return [
         (layer, "D1", contraction),
         (layer, "D2", output),
-        (layer, "D0", SEQ_TILE),
+        (layer, "D0", sequence),
     ]
 
 
@@ -167,17 +191,21 @@ def _groups(k, hidden_dim):
     as a single full ELF. D0 is the sequence dimension, D1 the contraction and D2
     the output dimension.
     """
+    sequence_tile, embedding_tile, hidden_tile = tiles_for(k)
     if k == LAYER_BY_LAYER:
-        tiling = [_layer_tiling(layers[0], hidden_dim) for layers in GROUP_LAYERS[k]]
+        tiling = [_layer_tiling(layers[0], hidden_dim, k) for layers in GROUP_LAYERS[k]]
     elif k == 2:
-        tiling = [_layer_tiling(GATE, hidden_dim), _layer_tiling(DOWN, hidden_dim)]
+        tiling = [
+            _layer_tiling(GATE, hidden_dim, k),
+            _layer_tiling(DOWN, hidden_dim, k),
+        ]
     else:
         tiling = [
             [
-                (GATE, "D1", EMBEDDING_TILE),
-                (DOWN, "D2", EMBEDDING_TILE),
-                (GATE, "D2", HIDDEN_TILE),
-                (GATE, "D0", SEQ_TILE),
+                (GATE, "D1", embedding_tile),
+                (DOWN, "D2", embedding_tile),
+                (GATE, "D2", hidden_tile),
+                (GATE, "D0", sequence_tile),
             ]
         ]
     return [
@@ -189,21 +217,22 @@ def _groups(k, hidden_dim):
 def _check_shapes(seq_len, embedding_dim, hidden_dim, k):
     """Reject a problem size the placement and the kernel tiles cannot divide."""
     grid = array()
+    sequence_tile, embedding_tile, hidden_tile = tiles_for(k)
     gemm_split = grid.num_columns if k == LAYER_BY_LAYER else 2
-    if seq_len % grid.num_rows or seq_len < SEQ_TILE * grid.num_rows:
+    if seq_len % grid.num_rows or seq_len < sequence_tile * grid.num_rows:
         raise ValueError(
             f"seq_len ({seq_len}) must be a multiple of {grid.num_rows} and at "
-            f"least {SEQ_TILE * grid.num_rows}"
+            f"least {sequence_tile * grid.num_rows}"
         )
-    if embedding_dim % (EMBEDDING_TILE * gemm_split):
+    if embedding_dim % (embedding_tile * gemm_split):
         raise ValueError(
             f"embedding_dim ({embedding_dim}) must be a multiple of "
-            f"{EMBEDDING_TILE * gemm_split}"
+            f"{embedding_tile * gemm_split}"
         )
-    if hidden_dim % (HIDDEN_TILE * gemm_split):
+    if hidden_dim % (hidden_tile * gemm_split):
         raise ValueError(
             f"hidden_dim ({hidden_dim}) must be a multiple of "
-            f"{HIDDEN_TILE * gemm_split}"
+            f"{hidden_tile * gemm_split}"
         )
 
 
@@ -340,6 +369,19 @@ def region_module(mlir_text: str, func_prefix: str = ""):
         return ir.Module.parse(_prefixed(mlir_text, func_prefix))
 
 
+def _group_text(group_index, *, k, seq_len, embedding_dim, hidden_dim, npu) -> str:
+    """One group's generated MLIR, before any ``func_prefix`` rewriting."""
+    finals = _design_paths(seq_len, embedding_dim, hidden_dim, k)
+    if not all(os.path.exists(final) for final in finals):
+        _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k)
+    return Path(finals[group_index]).read_text()
+
+
+def group_digest(group_index, **dims) -> str:
+    """Digest of a group's design, for recognising groups that share one."""
+    return hashlib.sha256(_group_text(group_index, **dims).encode()).hexdigest()
+
+
 def load_group(
     group_index, func_prefix="", *, k, seq_len, embedding_dim, hidden_dim, npu
 ):
@@ -349,7 +391,12 @@ def load_group(
     ``func_prefix`` is injected by ``OperatorSequence``. Every group loader calls
     this; the first generates the design and the rest reuse the files on disk.
     """
-    finals = _design_paths(seq_len, embedding_dim, hidden_dim, k)
-    if not all(os.path.exists(final) for final in finals):
-        _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k)
-    return region_module(Path(finals[group_index]).read_text(), func_prefix)
+    text = _group_text(
+        group_index,
+        k=k,
+        seq_len=seq_len,
+        embedding_dim=embedding_dim,
+        hidden_dim=hidden_dim,
+        npu=npu,
+    )
+    return region_module(text, func_prefix)

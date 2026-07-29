@@ -65,10 +65,11 @@ class _SwiGLUStreamGroup(MLIROperator):
         # op registry, so they stay in step with the design stream-dse generates
         # against IRON's aie_kernels library. Only this group's layers are built.
         design = self._design
+        gemm_tiles = design.gemm_tiles(self.k)
         per_layer = {
-            design.GATE: (GEMM, design.GATE_UP_TILES),
-            design.UP: (GEMM, design.GATE_UP_TILES),
-            design.DOWN: (GEMM, design.DOWN_TILES),
+            design.GATE: (GEMM, gemm_tiles[design.GATE]),
+            design.UP: (GEMM, gemm_tiles[design.UP]),
+            design.DOWN: (GEMM, gemm_tiles[design.DOWN]),
             design.SILU: (SILU, None),
             design.MUL: (ELTWISE_MUL, None),
         }
@@ -81,6 +82,17 @@ class _SwiGLUStreamGroup(MLIROperator):
                 base_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
             )
         ]
+
+    def design_key(self):
+        """Groups whose generated design is byte-identical share it."""
+        return self._design.group_digest(
+            self.group_index,
+            k=self.k,
+            seq_len=self.seq_len,
+            embedding_dim=self.embedding_dim,
+            hidden_dim=self.hidden_dim,
+            npu=aie_utils.get_current_device().resolve().name,
+        )
 
     def get_arg_spec(self):
         """The group's runtime arguments, shaped by the exported graph.
@@ -134,7 +146,9 @@ class SwiGLUPrefillStream(OperatorSequence):
     importing this module does not.
     """
 
-    def __init__(self, seq_len, embedding_dim, hidden_dim, k=1, context=None):
+    def __init__(
+        self, seq_len, embedding_dim, hidden_dim, k=1, context=None, share_designs=True
+    ):
         ports, inputs, outputs = _wiring(seq_len, embedding_dim, hidden_dim, k)
         groups = [
             _SwiGLUStreamGroup(
@@ -155,5 +169,6 @@ class SwiGLUPrefillStream(OperatorSequence):
             input_args=inputs,
             output_args=outputs,
             extra_flags=["--dynamic-objFifos"],
+            share_designs=share_designs,
             context=context,
         )
