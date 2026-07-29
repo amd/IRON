@@ -32,7 +32,10 @@ from iron.common.layout import TiledStridedLayout, tiled_2d
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel
 # objects agree on.
+# mm.cc takes an 8-row MAC tile when bf16 matmuls run on the bfp16 MACs and a
+# 4-row one when they do not.
 R, S, T = 4, 8, 8
+MAC_ROWS_BFP16 = 8
 
 # Element tile the stream-dse elementwise kernels are written against.
 ELEMENTWISE_TILE = (32, 64)
@@ -56,14 +59,24 @@ def custom_op(name: str, arity: int = 1) -> Op:
     return Op(CUSTOM_DOMAIN, name, schema)
 
 
-def gemm_layouts(m: int, k: int, n: int) -> tuple[TiledStridedLayout, ...]:
+def mac_rows(bfp16_mmul: bool) -> int:
+    """Rows of the MAC tile a kernel object compiled this way takes."""
+    return MAC_ROWS_BFP16 if bfp16_mmul else R
+
+
+def gemm_layouts(
+    m: int, k: int, n: int, bfp16_mmul: bool = False
+) -> tuple[TiledStridedLayout, ...]:
     """Layouts of a GEMM's ``A[m,k]``, ``B[k,n]`` and ``C[m,n]`` operands."""
-    return (tiled_2d(m, k, R, S), tiled_2d(k, n, S, T), tiled_2d(m, n, R, T))
+    rows = mac_rows(bfp16_mmul)
+    return (tiled_2d(m, k, rows, S), tiled_2d(k, n, S, T), tiled_2d(m, n, rows, T))
 
 
-def elementwise_layouts(nb_operands: int) -> tuple[TiledStridedLayout, ...]:
+def elementwise_layouts(
+    nb_operands: int, bfp16_mmul: bool = False
+) -> tuple[TiledStridedLayout, ...]:
     """Identical tiled layout for each operand of an elementwise kernel."""
-    return (tiled_2d(*ELEMENTWISE_TILE, R, T),) * nb_operands
+    return (tiled_2d(*ELEMENTWISE_TILE, mac_rows(bfp16_mmul), T),) * nb_operands
 
 
 def _gemm_artifacts(base_dir, kernel_dir, m: int, k: int, n: int):
@@ -87,6 +100,10 @@ def _gemm_artifacts(base_dir, kernel_dir, m: int, k: int, n: int):
                 f"-DDIM_K={k}",
                 f"-DDIM_N={n}",
                 "-Dbf16_bf16_ONLY",
+                # The tile operators build mm.cc this way by default: bf16 matmuls
+                # emulated on the bfp16 MACs, with even rounding on the conversion.
+                "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
+                "-DROUND_CONV_EVEN",
             ],
             rename_symbols={
                 "matmul_bf16_bf16": f"matmul_bf16_bf16_{suffix}",

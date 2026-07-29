@@ -35,17 +35,29 @@ def _assert_same(iron_layouts, stream_kernel):
     assert [str(layout) for layout in expected] == [str(layout) for layout in actual]
 
 
-@pytest.mark.parametrize("m,k,n", [(32, 32, 64), (32, 64, 32)])
-def test_gemm_layouts_match_stream(m, k, n):
-    _assert_same(gemm_layouts(m, k, n), AIEKernels[GEMM.key](61.8, m, k, n, "default"))
+@pytest.mark.parametrize("bfp16_mmul", [False, True])
+@pytest.mark.parametrize("m,k,n", [(32, 32, 64), (32, 64, 32), (64, 64, 64)])
+def test_gemm_layouts_match_stream(m, k, n, bfp16_mmul):
+    _assert_same(
+        gemm_layouts(m, k, n, bfp16_mmul),
+        AIEKernels[GEMM.key](61.8, m, k, n, "default", bfp16_mmul),
+    )
 
 
-def test_silu_layouts_match_stream():
-    _assert_same(elementwise_layouts(2), AIEKernels[SILU.key](50.0, "default"))
+@pytest.mark.parametrize("bfp16_mmul", [False, True])
+def test_silu_layouts_match_stream(bfp16_mmul):
+    _assert_same(
+        elementwise_layouts(2, bfp16_mmul),
+        AIEKernels[SILU.key](50.0, "default", bfp16_mmul=bfp16_mmul),
+    )
 
 
-def test_eltwise_mul_layouts_match_stream():
-    _assert_same(elementwise_layouts(3), AIEKernels[ELTWISE_MUL.key](50.0, "default"))
+@pytest.mark.parametrize("bfp16_mmul", [False, True])
+def test_eltwise_mul_layouts_match_stream(bfp16_mmul):
+    _assert_same(
+        elementwise_layouts(3, bfp16_mmul),
+        AIEKernels[ELTWISE_MUL.key](50.0, "default", bfp16_mmul=bfp16_mmul),
+    )
 
 
 @pytest.mark.parametrize("kernel", [GEMM, SILU, ELTWISE_MUL])
