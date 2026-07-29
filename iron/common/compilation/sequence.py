@@ -101,7 +101,7 @@ def needs_additional_reset(runlist: list[Any]) -> bool:
     points ends on the one the next dispatch starts with, and that dispatch
     reconfigures over the state the last design left. Configuring one more device
     makes the count even. Consecutive entries running the same operator share a
-    configure point, as the fused sequence below skips reconfiguring for them.
+    configure point.
     """
     points = 0
     previous = None
@@ -193,8 +193,6 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 
-        # An empty device, configured at the end of the sequence to leave the array
-        # in a state the next dispatch can start from.
         needs_reset = needs_additional_reset(artifact.runlist)
         if needs_reset:
 

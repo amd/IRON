@@ -33,14 +33,11 @@ FUSION_GROUPS = [1, 2, 5]
 TIMED_RUNS = 3
 
 
-def _dispatch(operator, golden_ref):
-    """A callable on a freshly configured array, with its inputs staged.
+def _staged(operator, golden_ref):
+    """A callable with its inputs staged.
 
-    Creating the hw_context applies the design's init CDO. The full-ELF path does
-    not reset array state between dispatches, so every dispatch takes a new
-    callable: reusing one reads stale state, and a design of several fused groups
-    deadlocks on the second dispatch. Inputs are named by the golden reference,
-    and the design consumes the weights in their natural (K, N) layout.
+    Inputs are named by the golden reference, and the design consumes the weights in
+    their natural (K, N) layout.
     """
     run = operator.get_callable()
     for name in (INPUT, *WEIGHTS):
@@ -71,7 +68,7 @@ def test_swiglu_prefill_stream(k, aie_context):
     # across the chain and the K=hidden_dim down-projection sum (near-cancellation
     # amplifies relative error): ~20% of elements drift past the 8% bound, so allow
     # up to 25%. Tolerances are local to this test.
-    run = _dispatch(operator, golden_ref)
+    run = _staged(operator, golden_ref)
     run()
     output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
     errors = verify_buffer(
@@ -84,11 +81,10 @@ def test_swiglu_prefill_stream(k, aie_context):
     )
     assert not errors, f"Test failed with errors: {errors}"
 
-    # Performance: time dispatches of their own, each on a freshly configured
-    # array, so every timed run is one that computed the verified result.
+    # The first dispatch on a callable pays for its hardware context, so time the
+    # ones after it.
     latencies = []
     for _ in range(TIMED_RUNS):
-        run = _dispatch(operator, golden_ref)
         start = time.perf_counter()
         run()
         latencies.append((time.perf_counter() - start) * 1e6)

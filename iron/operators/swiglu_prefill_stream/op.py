@@ -61,9 +61,8 @@ class _SwiGLUStreamGroup(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        # Each kernel's source, compile flags and symbol names come from the stream
-        # op registry, so they stay in step with the design stream-dse generates
-        # against IRON's aie_kernels library. Only this group's layers are built.
+        # The registry is the single place a kernel's source, compile flags and
+        # symbol names are declared, so the object and the design agree.
         design = self._design
         gemm_tiles = design.gemm_tiles(self.k)
         per_layer = {

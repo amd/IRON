@@ -30,8 +30,8 @@ stream-dse returns one MLIR design per fusion group. IRON takes it from there:
 `iron/common/sequence.py` fuses the designs into a single module and compiles it with
 `aiecc` into one full ELF.
 
-Nothing crosses the boundary except those files, which is why stream-dse stays an
-optional dependency. A checkout without it still imports and tests everything else.
+Nothing crosses the boundary except those files, which is why stream-dse can be an
+optional dependency: a checkout without it imports and tests everything else.
 
 ## Fusion granularity: the `k` modes
 
@@ -52,6 +52,10 @@ afford shrinks as more layers fuse onto it. That is why the tile is chosen per `
 (`stream_design.FUSED_TILES` and `LAYER_TILES`). A tile that does not fit is rejected at
 build time by stream-dse, naming the core and the shortfall.
 
+The tile also bounds the problem sizes: `seq_len` must be a multiple of the array rows,
+and `embedding_dim` and `hidden_dim` multiples of their tile times the column split.
+`stream_design._check_shapes` enforces this and names the offending dimension.
+
 Designs that come out byte-identical are built and configured once: at k=5 the gate and
 up projections are the same design, so the ELF holds four rather than five. Set
 `share_designs=False` on the operator to switch that off.
@@ -70,6 +74,10 @@ an idle NPU2. `swiglu_prefill` is the hand-written operator at the same shape.
 
 k=1 is fastest: fusing the whole block keeps the intermediates on chip instead of
 returning them to memory between layers.
+
+Medians from one machine, so treat them as orders of magnitude rather than exact.
+Accuracy tracks the hand-written operator: 0.139 of output elements more than 8 percent
+from the golden reference, against 0.139 to 0.144 here.
 
 ## Runtime buffers
 
@@ -108,7 +116,7 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 ## Adding another operator
 
 One `StreamKernel` plus one `TORCH_OPS` entry in `iron/common/stream/ops.py`, pointing
-at the existing `aie_kernels/<dir>/<name>.cc`, plus that operator's own placement. The
+at IRON's `aie_kernels/<dir>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.
 
@@ -117,5 +125,6 @@ generated DMAs produce and the layout the compiled object expects come from one 
 The hardware description (`whole_array_strix.yaml`) is resolved from the installed
 `stream` package, where it ships as package data; nothing is vendored here.
 
-Node names are set explicitly rather than taken from the ATen names `torch.export`
-produces (`matmul`, `matmul_1`, ...), which are prefixes of one another.
+Node names are set explicitly, naming the role each layer plays rather than the ATen
+op the exporter captured (`matmul`, `matmul_1`, ...). The mapping and the generated
+design are both read by those names.

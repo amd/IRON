@@ -67,9 +67,8 @@ RESULT_NAMES = {
 
 # The kernel tile each layer is compiled and mapped for, as (sequence, embedding,
 # hidden). A core holds the operands of every layer in its group, so the tile a group
-# can afford shrinks as more layers fuse onto it. The mapping carries the tile and no
-# absolute dimension, so it holds across problem sizes; _check_shapes rejects a
-# workload it cannot tile evenly.
+# can afford shrinks as more layers fuse onto it. Carrying the tile and no absolute
+# dimension is what lets one mapping hold across problem sizes.
 FUSED_TILES = (32, 32, 64)  # k=1, k=2: several layers share a core
 LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 
@@ -80,9 +79,8 @@ LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 ELEMENTWISE_ROWS = 1
 
 # Which layers each fused group contains, per number of groups ``k``. Splitting
-# makes stream-dse emit one design per group; the tensor handed from one to the
-# next is derived from the exported graph, not named here. k=5 is layer by layer,
-# every layer its own design, as in :mod:`iron.operators.swiglu_prefill`.
+# makes stream-dse emit one design per group; the tensor handed from one group to
+# the next comes from the exported graph.
 LAYER_BY_LAYER = 5
 GROUP_LAYERS = {
     1: [[GATE, UP, SILU, MUL, DOWN]],
@@ -161,7 +159,7 @@ def _placements(k, hidden_dim):
     columns = dict(zip(NODE_NAMES, grid.allocate([2, 2, 1, 1, 2])))
     gemm_split = (("D0", grid.num_rows), ("D2", 2))
     elementwise_split = (("D0", grid.num_rows),)
-    # Fused behind a GEMM, so the operands keep the layout the GEMM writes.
+    # Fused behind a GEMM, so the operands take the layout that GEMM writes.
     fused = elementwise(sequence_tile, hidden_tile, "default", bfp16_mmul=True)
     return {
         GATE: Placement(columns[GATE], gemm_split, gemm(tiles[GATE])),

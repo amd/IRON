@@ -100,8 +100,8 @@ def _gemm_artifacts(base_dir, kernel_dir, m: int, k: int, n: int):
                 f"-DDIM_K={k}",
                 f"-DDIM_N={n}",
                 "-Dbf16_bf16_ONLY",
-                # The tile operators build mm.cc this way by default: bf16 matmuls
-                # emulated on the bfp16 MACs, with even rounding on the conversion.
+                # Emulating the matmul on the bfp16 MACs is what makes the 8-row
+                # MAC tile available, so it and the layouts move together.
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
                 "-DROUND_CONV_EVEN",
             ],

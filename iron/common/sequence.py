@@ -292,8 +292,6 @@ class OperatorSequence(AIEOperatorBase):
         # for placed/routed whole-array designs that would otherwise overflow AIE2p
         # program memory). Empty by default, so other sequences are unaffected.
         self.extra_flags = extra_flags or []
-        # Build and configure a design once when several operators compile to it.
-        # Off by default so sequences that do not opt in are unaffected.
         self.share_designs = share_designs
         self._dispatch = dispatch
 
@@ -316,9 +314,8 @@ class OperatorSequence(AIEOperatorBase):
     def unique_designs(self):
         """The designs to build, and which design each operator uses.
 
-        Operators are de-duplicated by identity as above, and additionally by
-        ``design_key`` when ``share_designs`` is set, so a design that several
-        operators compile to is built and configured once.
+        With ``share_designs`` set, operators reporting the same ``design_key``
+        collapse onto one design, so it is built, prefixed and configured once.
         """
         designs = []
         design_of = {}
