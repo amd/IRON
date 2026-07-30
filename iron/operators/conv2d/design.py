@@ -7,42 +7,35 @@ MLIR Generation for 2D Convolution Operator
 Generates MLIR code for conv2d operations on AIE2 (NPU) and AIE2P (NPU2).
 
 ==============================================================================
-MODELING STATUS (Phase A: OC + depthwise channel tiling, 1-col, host bias)
+MODELING STATUS (Phase A L1 tiles + Phase B multi-col OC/channel split)
 ==============================================================================
 DMA legality (hard):
   Each AIE compute tile has only **2 input DMA channels**. Designs must attach
   at most two consumers per core (input + weight). Bias ObjectFifo is illegal;
   bias is applied on the host (op.py).
 
-Phase A — L1 tiling on a single column (no kernel ABI break):
+Phase A — L1 tiling per column (no kernel ABI break):
 
   1) Standard / pointwise (groups==1): **out-channel (OC) tiling**
-     Full input stays in L1; weight/output are OC-sliced per iteration.
-     - Worker ``range_(num_tiles)``; OF elems = tile footprints.
-     - Input TAP rebroadcasts full input per OC tile
-       (sizes=[num_tiles,1,1,input_size], strides=[0,0,0,1]).
-     - Weight/output: contiguous OC-major multi-packet (axpy style).
-     - Kernels run as mini-convs with out_channels=oc_tile.
+     Full input in L1; weight/output OC-sliced per worker iteration.
+     Input TAP rebroadcasts full input per tile when num_tiles>1.
 
-  2) Depthwise (groups==in_channels==out_channels): **channel tiling**
-     NCHW channels and depthwise weights [C,kh,kw] are channel-contiguous, so
-     input+weight+output are all multi-packet tiled with the same c_tile:
-     - OF elems = c_tile * {ih*iw, kh*kw, oh*ow}; no input rebroadcast.
-     - Kernel channels=c_tile.
+  2) Depthwise: **channel tiling** of in+w+out (channel-contiguous packets).
 
-  3) Other groups>1 (non-depthwise): full-tensor (must fit L1); spatial or
-     group-aware tiling is future work when input alone exceeds budget.
+  3) Other groups>1 (non-depthwise): full-tensor 1-col (must fit L1).
 
-Phase B (not started): multi-column OC-split with input broadcast, still
-  ≤2 input DMAs/core (in + weight); host bias unless packed-on-device lands.
-  Prior multi-col failures were from illegal 3-ingress (bias OF) and invalid
-  flattened chunking — not from OC-split itself. Phase B plan: split OC across
-  columns, broadcast full input TAP per column, per-col weight/out OC slices,
-  force columns so oc_per_col * tile fits L1 (compose with Phase A tiles).
+Phase B — multi-column split (this revision), still ≤2 input DMAs/core:
+  Prior multi-col failures were illegal 3-ingress (bias OF) + invalid flattened
+  chunking — not OC-split itself.
 
-Certainty: DMA 2-in ~95%; groups=1 OC + depthwise channel tiling HW-green on
-  AIE2P (incl. multi-tile 16@32); multi-col deferred to Phase B (design-ready,
-  not HW-blocked).
+  - groups==1: split out_channels across columns (requires OC % cols == 0,
+    else columns clamped down). Each column: full input broadcast + weight/out
+    TAP offset to its OC block; Phase A oc_tile applied to oc_per_col.
+  - depthwise: split channels across columns (C % cols == 0 or clamp).
+  - Host bias unchanged.
+
+Certainty: Phase A HW-green on AIE2P; Phase B multi-col design landing this
+  fire (validate with 1c regression + optional 2c smoke).
 ==============================================================================
 """
 
@@ -115,6 +108,29 @@ def _choose_channel_tile(
     return _largest_divisor_fit(channels, fits)
 
 
+def _resolve_num_columns(
+    requested: int,
+    out_channels: int,
+    in_channels: int,
+    groups: int,
+    is_depthwise: bool,
+    max_cols: int,
+) -> int:
+    """Clamp column count for legal OC/channel splits and device limits."""
+    n = max(1, int(requested) if requested is not None else 1)
+    n = min(n, max_cols)
+    if is_depthwise:
+        while n > 1 and in_channels % n != 0:
+            n -= 1
+        return n
+    if groups == 1:
+        while n > 1 and out_channels % n != 0:
+            n -= 1
+        return n
+    # Non-depthwise grouped: 1-col only (Phase A full-tensor).
+    return 1
+
+
 def my_conv2d(
     dev,
     N,  # batch size
@@ -137,19 +153,23 @@ def my_conv2d(
     trace_size,
 ):
     """
-    Generate MLIR for 2D convolution (single-column, Phase A tiling).
+    Generate MLIR for 2D convolution (Phase A L1 tiles + Phase B multi-col).
 
-    ``use_bias`` is accepted for API compatibility with op.py / DesignGenerator
-    but does **not** create a bias ObjectFifo (host applies bias). ``num_columns``
-    is forced to 1. L1 tiling:
-      - groups==1: OC tile (full input rebroadcast + weight/out slices)
-      - depthwise: channel tile (in+w+out all channel-sliced)
+    ``use_bias`` is accepted for API compatibility but does **not** create a
+    bias ObjectFifo (host applies bias). Columns: groups==1 OC-split and
+    depthwise channel-split when divisible; otherwise clamped to 1.
     """
     dtype = bfloat16
 
-    # Single-core path (see MODELING STATUS). Multi-col is Phase B.
-    _ = (use_bias, num_columns, tile_size, trace_size)
-    num_columns = 1
+    _ = (use_bias, tile_size, trace_size)
+
+    # Device column cap (NPU1≤4, NPU2≤8); SequentialPlacer places one worker/col.
+    if isinstance(dev, NPU1):
+        max_cols = 4
+    elif isinstance(dev, NPU2):
+        max_cols = 8
+    else:
+        max_cols = getattr(dev, "cols", 4) or 4
 
     input_size = N * in_channels * in_height * in_width
     weight_size = out_channels * in_channels // groups * kernel_h * kernel_w
@@ -172,38 +192,57 @@ def my_conv2d(
     else:
         kernel_name = "conv2d_bf16_vector"
 
-    # --- Phase A tile selection -------------------------------------------------
-    # rebroadcast_input: True => full input OF packet, repeated per tile (OC path).
-    # False => input is multi-packet channel-sliced (depthwise) or single full.
+    num_columns = _resolve_num_columns(
+        num_columns, out_channels, in_channels, groups, is_depthwise, max_cols
+    )
+
+    # --- Phase A tile selection (per column) + Phase B split sizes -------------
+    # rebroadcast_input: full input OF packet, repeated per tile (groups==1).
+    # depthwise_split: per-col channel blocks for in/w/out (no full-input broadcast).
     rebroadcast_input = False
+    depthwise_split = False
+    # Per-column tensor footprints for TAPs (bytes/elems along OC or channel axis).
+    weight_elems_per_col = weight_size
+    output_elems_per_col = output_size
+    input_elems_per_col = input_size
+
     if is_depthwise:
-        # Channel-contiguous in/w/out; tile all three together.
+        # Phase B: split channels across columns; Phase A tile within col.
+        c_per_col = in_channels // num_columns
         c_tile = _choose_channel_tile(
-            in_channels, in_spatial, out_spatial, weight_per_oc
+            c_per_col, in_spatial, out_spatial, weight_per_oc
         )
-        if in_channels % c_tile != 0:
-            c_tile = in_channels
-        num_tiles = in_channels // c_tile
+        if c_per_col % c_tile != 0:
+            c_tile = c_per_col
+        num_tiles = c_per_col // c_tile
         input_tile_elems = N * c_tile * in_spatial
         weight_tile_elems = c_tile * weight_per_oc
         output_tile_elems = N * c_tile * out_spatial
-        kernel_channels = c_tile  # depthwise kernel "channels" arg
-        oc_tile = c_tile  # unused for depthwise kernel path; keep defined
+        kernel_channels = c_tile
+        oc_tile = c_tile
+        depthwise_split = True
+        input_elems_per_col = N * c_per_col * in_spatial
+        weight_elems_per_col = c_per_col * weight_per_oc
+        output_elems_per_col = N * c_per_col * out_spatial
     elif groups == 1:
-        # Full input + OC-sliced weight/output.
+        # Phase B: OC split across columns; Phase A OC tile within col.
+        oc_per_col = out_channels // num_columns
         oc_tile = _choose_oc_tile(
-            out_channels, input_size, weight_per_oc, out_spatial
+            oc_per_col, input_size, weight_per_oc, out_spatial
         )
-        if out_channels % oc_tile != 0:
-            oc_tile = out_channels
-        num_tiles = out_channels // oc_tile
+        if oc_per_col % oc_tile != 0:
+            oc_tile = oc_per_col
+        num_tiles = oc_per_col // oc_tile
         input_tile_elems = input_size
         weight_tile_elems = oc_tile * weight_per_oc
         output_tile_elems = N * oc_tile * out_spatial
         rebroadcast_input = num_tiles > 1
         kernel_channels = in_channels
+        weight_elems_per_col = oc_per_col * weight_per_oc
+        output_elems_per_col = N * oc_per_col * out_spatial
     else:
-        # Non-depthwise grouped: full tensors (must fit L1).
+        # Non-depthwise grouped: full tensors, 1-col only.
+        num_columns = 1
         oc_tile = out_channels
         num_tiles = 1
         input_tile_elems = input_size
@@ -329,10 +368,20 @@ def my_conv2d(
         for i in range(num_columns)
     ]
 
-    # Input TAP:
-    #  - OC path with rebroadcast: outer dim repeats full input num_tiles times.
-    #  - Depthwise / single-tile: linear full-tensor multi-packet (OF = tile).
-    if rebroadcast_input:
+    # --- TAPs: Phase B per-column offsets; Phase A multi-packet within col -----
+    if depthwise_split:
+        # Channel blocks: in/w/out all offset by column * elems_per_col.
+        input_taps = [
+            TensorAccessPattern(
+                (1, input_size),
+                i * input_elems_per_col,
+                [1, 1, 1, input_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+    elif rebroadcast_input:
+        # Full input rebroadcast once per OC tile (same on every column).
         input_taps = [
             TensorAccessPattern(
                 (1, input_size),
@@ -343,6 +392,7 @@ def my_conv2d(
             for _ in range(num_columns)
         ]
     else:
+        # Single full-input transfer per column (num_tiles==1 groups==1 or grouped).
         input_taps = [
             TensorAccessPattern(
                 (1, input_size),
@@ -352,25 +402,24 @@ def my_conv2d(
             )
             for _ in range(num_columns)
         ]
-    # Weight/output: contiguous channel/OC-major stream; OF packetization = tile
-    # elems (axpy multi-packet: one TAP covering all tiles).
+
     weight_taps = [
         TensorAccessPattern(
             (1, weight_size),
-            0,
-            [1, 1, 1, weight_size],
+            i * weight_elems_per_col,
+            [1, 1, 1, weight_elems_per_col],
             [0, 0, 0, 1],
         )
-        for _ in range(num_columns)
+        for i in range(num_columns)
     ]
     output_taps = [
         TensorAccessPattern(
             (1, output_size),
-            0,
-            [1, 1, 1, output_size],
+            i * output_elems_per_col,
+            [1, 1, 1, output_elems_per_col],
             [0, 0, 0, 1],
         )
-        for _ in range(num_columns)
+        for i in range(num_columns)
     ]
 
     rt = Runtime()
@@ -432,7 +481,11 @@ if __name__ == "__main__":
     p.add_argument("-g", "--groups", type=int, default=1, help="Number of groups")
     p.add_argument("--use-bias", action="store_true", help="Use bias (host-side)")
     p.add_argument(
-        "-co", "--columns", type=int, default=1, help="AIE columns (forced to 1)"
+        "-co",
+        "--columns",
+        type=int,
+        default=1,
+        help="AIE columns (OC/channel split; clamped if not divisible)",
     )
     p.add_argument("-ts", "--tile-size", type=int, default=1024, help="Tile size")
     p.add_argument("-t", "--trace-size", type=int, default=0, help="Trace size")

@@ -14,10 +14,11 @@ Supports standard 2D convolution with configurable:
 Works on AIE2 (NPU) and AIE2P (NPU2) architectures.
 
 NPU dataflow notes (see design.py MODELING STATUS):
-- Single-column Phase A tiling: OC tiles for groups==1; channel tiles for
-  depthwise so L1 is not forced to hold full tensors.
-- Bias is applied on the host after the NPU kernel (compute tiles only have
-  2 input DMA channels; a third bias ObjectFifo is illegal).
+- Phase A L1 tiling: OC tiles for groups==1; channel tiles for depthwise.
+- Phase B multi-col: OC-split (groups==1) or channel-split (depthwise) when
+  dimensions are divisible; each core still has only 2 input DMAs (in+weight).
+- Bias is applied on the host after the NPU kernel (third bias ObjectFifo is
+  illegal on compute tiles).
 """
 
 import torch
@@ -79,8 +80,9 @@ class AIEConv2d(AIEOperatorBase):
                 after the NPU convolution (DMA channel limit on compute tiles).
             in_height: Input height (default 32)
             in_width: Input width (default 32)
-            num_aie_columns: Requested columns (currently forced to 1 in design)
-            tile_size: Size of each tile in elements (reserved / unused for 1-col)
+            num_aie_columns: Requested AIE columns (Phase B OC/channel split;
+                clamped when dimensions are not divisible)
+            tile_size: Reserved tile-size hint (L1 OC/channel tiles chosen in design)
             context: AIE context
         """
         self.in_channels = in_channels
@@ -120,11 +122,20 @@ class AIEConv2d(AIEOperatorBase):
         if num_aie_columns is None:
             num_aie_columns = 1
 
-        # Design forces 1 column (Phase B multi-col deferred); OC tiling is internal
-        # to design.py (L1 fit). Store requested columns for diagnostics only.
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
-        self.effective_num_columns = 1
+        # Match design.py _resolve_num_columns (device max applied at artifact build).
+        is_depthwise = groups == in_channels and groups == out_channels
+        eff = max(1, int(num_aie_columns))
+        if is_depthwise:
+            while eff > 1 and in_channels % eff != 0:
+                eff -= 1
+        elif groups == 1:
+            while eff > 1 and out_channels % eff != 0:
+                eff -= 1
+        else:
+            eff = 1
+        self.effective_num_columns = eff
 
         self.bias_size = out_channels if use_bias else 0
 
@@ -136,7 +147,7 @@ class AIEConv2d(AIEOperatorBase):
         AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
-        """Set up compilation artifacts for the 1-col full-tensor design."""
+        """Set up compilation artifacts (Phase A tiles + Phase B multi-col)."""
         operator_dir = Path(__file__).parent
         design_path = operator_dir / "design.py"
 
@@ -155,8 +166,23 @@ class AIEConv2d(AIEOperatorBase):
 
                 dev = NPU1()
 
-        # Artifact names use effective (1) column count to match design emission.
-        effective_num_columns = self.effective_num_columns
+        # Re-clamp against device column count (matches design.py max_cols).
+        max_cols = getattr(dev, "cols", 4) or 4
+        effective_num_columns = min(self.effective_num_columns, max_cols)
+        # Re-apply divisibility after device clamp.
+        is_depthwise = self.groups == self.in_channels and self.groups == self.out_channels
+        if is_depthwise:
+            while effective_num_columns > 1 and self.in_channels % effective_num_columns != 0:
+                effective_num_columns -= 1
+        elif self.groups == 1:
+            while (
+                effective_num_columns > 1
+                and self.out_channels % effective_num_columns != 0
+            ):
+                effective_num_columns -= 1
+        else:
+            effective_num_columns = 1
+        self.effective_num_columns = effective_num_columns
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
