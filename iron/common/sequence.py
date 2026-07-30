@@ -580,6 +580,22 @@ class SequenceFullELFCallable(SequenceCallable):
         self._buffer_cache[buffer_name] = sub
         return sub
 
+    def read_host(self, buffer_name):
+        """Sync the arena holding ``buffer_name`` device->host, return its view.
+
+        Sub-buffer syncs are ambiguous in XRT, so the whole parent arena is
+        synced (matching ``_sync_outputs``) before handing back the sub-view.
+        """
+        buf_type, _, _ = self.op.get_layout_for_buffer(buffer_name)
+        parent = {
+            "input": self.input_buffer,
+            "output": self.output_buffer,
+            "scratch": self.scratch_buffer,
+        }[buf_type]
+        parent.device = "npu"
+        parent.to("cpu")
+        return self.get_buffer(buffer_name)
+
     def _sync_inputs(self):
         # Sub-views handed out by get_buffer() mark this parent host-dirty on .data
         # access (XRTSubBuffer.data), so `to("npu")` here actually fires the host->device
@@ -634,6 +650,13 @@ class _PerBufferCallable(SequenceCallable):
         if buffer_name not in self._buffer_cache:
             self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
         return self._buffer_cache[buffer_name]
+
+    def read_host(self, buffer_name):
+        """Sync ``buffer_name`` device->host and return its per-name buffer."""
+        buf = self.get_buffer(buffer_name)
+        buf.device = "npu"
+        buf.to("cpu")
+        return buf
 
     def _sync_inputs(self):
         for name in self.op.input_args:

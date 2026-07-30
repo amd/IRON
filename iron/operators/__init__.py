@@ -5,7 +5,7 @@ from .elementwise_add.op import ElementwiseAdd
 from .elementwise_mul.op import ElementwiseMul
 from .gemm.op import GEMM
 from .gemv.op import GEMV
-from .mha.op import MHA
+from .mha_prefill_df.op import MHA
 from .rms_norm.op import RMSNorm
 from .rope.op import RoPE
 from .silu.op import SiLU

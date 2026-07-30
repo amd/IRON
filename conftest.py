@@ -82,6 +82,9 @@ class CSVReporter:
 
     def finalize_results(self):
         """Compute statistics for all collected metrics"""
+        # Rebuild from scratch so this is idempotent and safe to call after
+        # every test (incremental flushing) as well as at session finish.
+        self.results = []
         for (test_path, test_name), data in self.test_metrics.items():
             row = {
                 "Commit": self.commit,
@@ -161,10 +164,21 @@ def pytest_runtest_makereport(item, call):
                 test_path, test_name, passed, captured, metric_patterns
             )
 
+            # Flush the CSV incrementally after every test. If a later test
+            # crashes the interpreter (e.g. a native segfault), pytest_sessionfinish
+            # never runs, but the results gathered so far are already on disk so
+            # downstream CI steps (commit_results/pretty.py) still find the file.
+            csv_reporter.finalize_results()
+            csv_reporter.write_csv()
+
 
 def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     config._csv_reporter = CSVReporter(csv_path)
+    # Create the (empty) CSV up front so the file always exists for downstream
+    # CI steps, even if zero tests are collected or the very first test crashes
+    # the interpreter before any results are recorded.
+    config._csv_reporter.write_csv()
     config.addinivalue_line(
         "markers", "metrics(**patterns): specify metric patterns for this test"
     )
@@ -173,6 +187,12 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item in items:
+        # Benchmark tests are part of the extensive suite. Adding the marker here
+        # (before pytest's built-in '-m' deselection runs) ensures they are
+        # excluded by '-m "not extensive"' just like any other extensive test.
+        if item.get_closest_marker("benchmark"):
+            item.add_marker(pytest.mark.extensive)
+
         marker = item.get_closest_marker("supported_devices")
         if marker and device not in marker.args:
             item.add_marker(

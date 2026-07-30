@@ -46,8 +46,8 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Element-wise Mul](./aie_kernels/generic/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul/](./iron/operators/elementwise_mul/) |
 | [GEMM](./aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm/](./iron/operators/gemm/) |
 | [GEMV](./aie_kernels/generic/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv/](./iron/operators/gemv/) |
-| [GQA](./aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [MHA](./aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
+| [GQA](./aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha_prefill_df/](./iron/operators/mha_prefill_df/) |
+| [MHA](./aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha_prefill_df/](./iron/operators/mha_prefill_df/) |
 | [RMSNorm](./aie_kernels/aie2/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
 | [RoPE](./aie_kernels/generic/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope/](./iron/operators/rope/) |
 | [SiLU](./aie_kernels/aie2/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu/](./iron/operators/silu/) |
