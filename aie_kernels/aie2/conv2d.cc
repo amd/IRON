@@ -82,8 +82,9 @@ void conv2d_bf16_scalar(bfloat16 *input,
 
                             // Check bounds (handle padding)
                             if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
+                                // NCHW flat: (ic_global * H + ih) * W + iw (N=1 layout)
                                 int input_idx =
-                                    ((oc_global * in_channels + ic_global) * in_height + ih) * in_width + iw;
+                                    (ic_global * in_height + ih) * in_width + iw;
                                 int weight_idx =
                                     ((oc * channels_per_group + ic) * kernel_height + kh) * kernel_width + kw;
 
@@ -136,6 +137,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                         int apply_bias)
 {
     constexpr int vec_factor = 8; // Process 8 elements per vector operation
+    (void)vec_factor;
 
     event0();
 
@@ -159,8 +161,10 @@ void conv2d_bf16_vector(bfloat16 *input,
                     int ih_start = oh * stride_h - pad_h;
                     int iw_start = ow * stride_w - pad_w;
 
-                    // Accumulate over kernel and input channels
-                    bfloat16 acc = bfloat16(0.0f);
+                    // Float accum (matvec_scalar pattern): bf16*bf16 product
+                    // promotes into float acc; cast once on store. Fixes grouped
+                    // k3 cases where pure bf16 MAC chains diverge from torch.
+                    float acc = 0.0f;
 
                     for (int ic = 0; ic < channels_per_group; ic++) {
                         int ic_global = ic_start + ic;
@@ -172,16 +176,10 @@ void conv2d_bf16_vector(bfloat16 *input,
 
                                 // Check bounds (handle padding)
                                 if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                    // Load input value
                                     int input_idx = ((n * in_channels + ic_global) * in_height + ih) * in_width + iw;
-                                    bfloat16 in_val = input[input_idx];
-
-                                    // Load weight value
                                     int weight_idx = ((oc * channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
-                                    bfloat16 w_val = weight[weight_idx];
-
-                                    // Accumulate product
-                                    acc += in_val * w_val;
+                                    // Promote product into float accumulator (no C-style cast).
+                                    acc += input[input_idx] * weight[weight_idx];
                                 }
                             }
                         }
@@ -194,7 +192,7 @@ void conv2d_bf16_vector(bfloat16 *input,
 
                     // Store output
                     int out_idx = oh * out_width + ow;
-                    output_ptr[out_idx] = acc;
+                    output_ptr[out_idx] = static_cast<bfloat16>(acc);
                 }
             }
         }

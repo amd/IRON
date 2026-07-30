@@ -127,6 +127,10 @@ void conv2d_bf16_vector(bfloat16 *input,
     int out_channels_per_group = out_channels / groups;
     int spatial_size = out_height * out_width;
 
+    // Accumulate in float: pure bf16 MAC chains (36+ products for k3×cpg≥4)
+    // diverge from torch F.conv2d(bf16) by O(1–7) on large activations and
+    // fail verify (rel 0.1 / abs 1.0) on grouped 8→16 k3 cases. Cast once
+    // on store so host bias and golden remain bf16-compatible.
     for (int n = 0; n < N; n++) {
         for (int oc = 0; oc < out_channels; oc++) {
             int group_id = oc / out_channels_per_group;
@@ -139,7 +143,10 @@ void conv2d_bf16_vector(bfloat16 *input,
                     int ih_start = oh * stride_h - pad_h;
                     int iw_start = ow * stride_w - pad_w;
 
-                    bfloat16 acc = bfloat16(0.0f);
+                    // Float accum (matvec_scalar pattern): bf16*bf16 product
+                    // promotes into float acc; cast once on store. Avoid C-style
+                    // (float)bf16 which peano may mishandle vs static promotion.
+                    float acc = 0.0f;
 
                     // Vectorized accumulation over input channels
                     const int V = channels_per_group / vec_factor;
@@ -173,10 +180,10 @@ void conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        acc += static_cast<bfloat16>(aie::reduce_add(acc_vec.template to_vector<float>()));
+                        acc += aie::reduce_add(acc_vec.template to_vector<float>());
                     }
 
-                    // Handle remainder channels
+                    // Remainder channels: same float-acc promotion as matvec_scalar
                     for (int ic = V * vec_factor; ic < channels_per_group; ic++) {
                         int ic_global = ic_start + ic;
 
@@ -199,7 +206,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                     }
 
                     int out_idx = oh * out_width + ow;
-                    output_channel_ptr[out_idx] = acc;
+                    output_channel_ptr[out_idx] = static_cast<bfloat16>(acc);
                 }
             }
         }
