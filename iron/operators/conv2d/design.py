@@ -7,12 +7,12 @@ MLIR Generation for 2D Convolution Operator
 Generates MLIR code for conv2d operations on AIE2 (NPU) and AIE2P (NPU2).
 
 ==============================================================================
-MODELING STATUS (Phase A L1 tiles + Phase B multi-col OC/channel split)
+MODELING STATUS (Phase A L1 + Phase B multi-col + Phase C CI surface)
 ==============================================================================
 DMA legality (hard):
   Each AIE compute tile has only **2 input DMA channels**. Designs must attach
   at most two consumers per core (input + weight). Bias ObjectFifo is illegal;
-  bias is applied on the host (op.py).
+  bias is applied on the host (op.py) after the NPU run (+ ``_sync_to_device``).
 
 Phase A — L1 tiling per column (no kernel ABI break):
 
@@ -24,7 +24,7 @@ Phase A — L1 tiling per column (no kernel ABI break):
 
   3) Other groups>1 (non-depthwise): full-tensor 1-col (must fit L1).
 
-Phase B — multi-column split (this revision), still ≤2 input DMAs/core:
+Phase B — multi-column split, still ≤2 input DMAs/core:
   Prior multi-col failures were illegal 3-ingress (bias OF) + invalid flattened
   chunking — not OC-split itself.
 
@@ -32,10 +32,22 @@ Phase B — multi-column split (this revision), still ≤2 input DMAs/core:
     else columns clamped down). Each column: full input broadcast + weight/out
     TAP offset to its OC block; Phase A oc_tile applied to oc_per_col.
   - depthwise: split channels across columns (C % cols == 0 or clamp).
-  - Host bias unchanged.
+  - Host bias unchanged (no third OF).
 
-Certainty: Phase A HW-green on AIE2P; Phase B multi-col design landing this
-  fire (validate with 1c regression + optional 2c smoke).
+Phase C — mature-op CI / package surface (not a dataflow redesign):
+  - ``AIEConv2d`` exported from ``iron.operators`` (public package surface).
+  - not-extensive matrix: 16x16/32x32 CORE @ 1c (Phase A) **and** 16x16 CORE
+    @ 2c multi-col smoke (Phase B path). Larger multi-col (4c/8c, 32x32+) and
+    broader configs remain ``@pytest.mark.extensive``.
+  - Still optional / open beyond this gate: stricter construct-time
+    ``AIEOperatorConstraintError`` (L1-aware hard fails), on-device packed bias
+    under the 2-DMA limit, spatial tiling for configs that do not fit L1 even
+    with OC/channel tiles, kernel perf polish.
+
+Certainty (honest):
+  Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
+  (host bias, ≤2 DMA). Extensive multi-col and exotic shapes are best-effort
+  until explicitly promoted.
 ==============================================================================
 """
 
@@ -209,9 +221,7 @@ def my_conv2d(
     if is_depthwise:
         # Phase B: split channels across columns; Phase A tile within col.
         c_per_col = in_channels // num_columns
-        c_tile = _choose_channel_tile(
-            c_per_col, in_spatial, out_spatial, weight_per_oc
-        )
+        c_tile = _choose_channel_tile(c_per_col, in_spatial, out_spatial, weight_per_oc)
         if c_per_col % c_tile != 0:
             c_tile = c_per_col
         num_tiles = c_per_col // c_tile
@@ -227,9 +237,7 @@ def my_conv2d(
     elif groups == 1:
         # Phase B: OC split across columns; Phase A OC tile within col.
         oc_per_col = out_channels // num_columns
-        oc_tile = _choose_oc_tile(
-            oc_per_col, input_size, weight_per_oc, out_spatial
-        )
+        oc_tile = _choose_oc_tile(oc_per_col, input_size, weight_per_oc, out_spatial)
         if oc_per_col % oc_tile != 0:
             oc_tile = oc_per_col
         num_tiles = oc_per_col // oc_tile
