@@ -27,10 +27,11 @@ import torch
 import numpy as np
 from ml_dtypes import bfloat16
 from pathlib import Path
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, Callable, Any
 
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
+from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.common import (
     AIEOperatorBase,
@@ -189,10 +190,22 @@ class AIEConv2d(AIEOperatorBase):
 
         self.bias_size = out_channels if use_bias else 0
 
+        # Flattened N=1 sizes (batch looped in forward); used by get_arg_spec / forward.
+        self.input_size = in_channels * in_height * in_width
+        self.weight_size = (
+            out_channels
+            * (in_channels // groups)
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
+        self.output_size = out_channels * self.out_height * self.out_width
+
         self.xclbin_artifact = None
         self.insts_artifact = None
         self.weight_buffer = None
         self.bias_buffer = None
+        # Cached NPU callable (invalidated on compile).
+        self._callable: Callable[..., Any] | None = None
 
         AIEOperatorBase.__init__(self, context=context)
 
@@ -388,44 +401,27 @@ class AIEConv2d(AIEOperatorBase):
 
         self.add_artifacts([xclbin_artifact, insts_artifact])
 
-    def set_up_runtime(self):
-        """Set up runtime buffers and kernels (legacy path)."""
-        input_size = self.in_channels * self.in_height * self.in_width
-        weight_size = (
-            self.out_channels
-            * self.in_channels
-            // self.groups
-            * self.kernel_size[0]
-            * self.kernel_size[1]
-        )
-        output_size = self.out_channels * self.out_height * self.out_width
+    def compile(self, dry_run: bool = False):
+        """Compile artifacts; invalidate cached NPU callable."""
+        result = super().compile(dry_run=dry_run)
+        self._callable = None
+        return result
 
-        self.input_size = input_size
-        self.weight_size = weight_size
-        self.output_size = output_size
+    def _get_op_callable(self) -> Callable[..., Any]:
+        """Lazy get_callable after compile (maxpool-style cache)."""
+        if self._callable is None:
+            if not self.artifacts:
+                self.compile()
+            self._callable = self.get_callable()
+        return self._callable
 
-        self.add_buffer("input", input_size)
-        self.add_buffer("weight", weight_size)
-        self.add_buffer("output", output_size)
-
-        if self.use_bias:
-            self.add_buffer("bias", self.bias_size)
-
-        kernel_name = "conv2d_bf16_vector"
-        if self.groups == self.in_channels and self.groups == self.out_channels:
-            kernel_name = "depthwise_conv2d_bf16_vector"
-        elif self.kernel_size == (1, 1):
-            kernel_name = "pointwise_conv2d_bf16_vector"
-
-        self.add_kernel(
-            kernel_name,
-            self.xclbin_artifact,
-            self.xclbin_artifact.kernel_name,
-            self.insts_artifact,
-        )
-
-        # NPU runlist is always 3 buffers (bias is host-side).
-        self.add_to_runlist(kernel_name, "input", "weight", "output")
+    def __call__(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.forward(x, weight, bias)
 
     def forward(
         self,
@@ -434,7 +430,11 @@ class AIEConv2d(AIEOperatorBase):
         bias: Optional[torch.Tensor] = None,
     ):
         """
-        Forward pass for 2D convolution.
+        Forward pass for 2D convolution (torch API).
+
+        Uses modern MLIROperator runtime: ``compile()`` + ``get_callable()`` +
+        XRTTensor buffers. Bias stays host-side (≤2 input DMAs on device).
+        Batch N is looped in Python over N=1-specialized MLIR.
 
         Args:
             x: Input tensor of shape (N, in_channels, H_in, W_in)
@@ -475,7 +475,7 @@ class AIEConv2d(AIEOperatorBase):
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
-        """Process a single sample (C, H, W). Bias applied on host after NPU."""
+        """Process a single sample (C, H, W) via NPU + optional host bias."""
         x_flat = x.reshape(-1).contiguous()
         if x_flat.dtype != torch.bfloat16:
             x_flat = x_flat.to(torch.bfloat16)
@@ -484,27 +484,42 @@ class AIEConv2d(AIEOperatorBase):
         if weight_flat.dtype != torch.bfloat16:
             weight_flat = weight_flat.to(torch.bfloat16)
 
-        self.write_buffer("input", x_flat.numpy())
-        self.write_buffer("weight", weight_flat.numpy())
+        if x_flat.numel() != self.input_size:
+            raise AIEOperatorConstraintError(
+                f"Flattened input size {x_flat.numel()} != configured {self.input_size}"
+            )
+        if weight_flat.numel() != self.weight_size:
+            raise AIEOperatorConstraintError(
+                f"Flattened weight size {weight_flat.numel()} != configured {self.weight_size}"
+            )
 
-        output_np = np.zeros(self.output_size, dtype=bfloat16)
-        self.write_buffer("output", output_np)
+        op_func = self._get_op_callable()
+        in_b = XRTTensor.from_torch(x_flat)
+        w_b = XRTTensor.from_torch(weight_flat)
+        out_b = XRTTensor((self.output_size,), dtype=bfloat16)
 
-        self.run_runlist()
+        if self.use_bias and self.bias_size > 0:
+            # get_callable expects 4 args when use_bias; zeros if bias omitted.
+            if bias is None:
+                bias_t = torch.zeros(self.bias_size, dtype=torch.bfloat16)
+            else:
+                bias_t = bias.contiguous()
+                if bias_t.dtype != torch.bfloat16:
+                    bias_t = bias_t.to(torch.bfloat16)
+            bias_b = XRTTensor.from_torch(bias_t)
+            op_func(in_b, w_b, bias_b, out_b)
+        else:
+            op_func(in_b, w_b, out_b)
 
-        result = self.read_buffer_as_torch(
-            "output",
-            shape=(self.out_channels, self.out_height, self.out_width),
-            dtype=bfloat16,
-        )
+        # Clone off XRT BO before buffers leave scope (batch>1 stack safety).
+        result = out_b.to_torch()
+        if not isinstance(result, torch.Tensor):
+            result = torch.tensor(result)
+        if result.dtype != torch.bfloat16:
+            result = result.to(torch.bfloat16)
+        result = result.detach().cpu().contiguous().clone()
 
-        if self.use_bias and bias is not None:
-            b = bias.contiguous()
-            if b.dtype != torch.bfloat16:
-                b = b.to(torch.bfloat16)
-            result = result + b.reshape(self.out_channels, 1, 1)
-
-        return result
+        return result.reshape(self.out_channels, self.out_height, self.out_width)
 
     def _host_apply_bias(self, out_buf, bias_buf) -> None:
         """In-place host bias add on XRT output buffer (bf16).

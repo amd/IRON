@@ -16,7 +16,7 @@ cpu_test.py separation pattern. It meets the bar set by the strongest siblings:
 - main-tree axpy/gemm patterns
 
 It is fully compatible with the branch infrastructure:
-  conftest.py, AIEContext (use_runlist, compile_all, prepare_runtime),
+  conftest.py, AIEContext, operator.compile() + get_callable / forward,
   run_test + verify_buffer, CSV + @metrics reporter (stable pretty IDs from
   explicit pytest.param), pytest_generate_tests + --iterations, pytest.ini
   "extensive" marker, python 3.14 iron314 collection requirements (defensive
@@ -50,7 +50,7 @@ Quality attributes (consciously engineered final production shape):
 - Primary @metrics test + run_test (full compile/prepare/timed/verify path).
 - Explicit FORWARD_CASES (independent pytest.param list) exercising full
   lifecycle + batch>1 python forward over N=1 MLIR + varied column counts
-  + explicit compile_all + prepare_runtime calls.
+  + explicit operator.compile() before forward.
 - Exact two-line metric prints only (Latency + Bandwidth) matching the
   @metrics regexes and main-tree CSV reporter contract. No prefix lines.
 - Production bf16 tolerance documentation (0.01/1e-4 primary; 0.01/0.01 forward,
@@ -277,7 +277,7 @@ def test_conv2d(
 
     Exercises the complete AIE compilation + runtime path via run_test:
     - AIEConv2d construction (explicit nc/tile for column chunking coverage)
-    - run_test (which performs compile_all + prepare_runtime internally)
+    - run_test (which performs operator.compile() + get_callable internally)
     - Buffer registration/IO, timed runlist execution on NPU (AIE2 or AIE2P)
     - nearly_equal verification with documented bf16 tolerances
     - Emission of the exact two metric print lines for CSV/hooks
@@ -372,11 +372,11 @@ def test_conv2d(
 # - Stable, descriptive test IDs for CSV/metrics and reports
 # - No dependency on ordering/count of get_params() results (uses independent FORWARD_CASES)
 # - No fragile slicing or mark introspection
-# - Targeted coverage of column/tile variants (different MLIR + prepare_runtime paths)
+# - Targeted coverage of column/tile variants (different MLIR specializations)
 # - Bias on/off + key kernel variants (standard/depthwise/pointwise/strided)
 #
 # These deliberately stay small/fast even under --iterations while still
-# exercising the full AIEContext lifecycle (compile_all + prepare_runtime)
+# exercising operator.compile() + forward()/__call__ (get_callable + XRTTensor)
 # and the python-level batching over N=1-specialized MLIR.
 FORWARD_CASES = [
     # 16x16 + 1-col keeps full tensors inside L1 (~64KB) with depth=1.
@@ -481,18 +481,18 @@ def test_conv2d_forward(
 ):
     """Forward / __call__ API integration test (production quality).
 
-    Explicitly drives the complete AIEContext lifecycle (the key high-level path):
+    Explicitly drives the modern MLIROperator lifecycle:
       - Construction with explicit nc/tile (different MLIR specializations)
-      - compile_all() (design callback + full peano/xclbin toolchain)
-      - prepare_runtime() (BOs, runlist, conditional bias paths, XRT handles)
-      - operator(input, weight, bias) forward (per-batch Python loop over N=1 MLIR)
-      - Reuse of already-prepared operator for batch=2 (validates batching wrapper)
+      - operator.compile() (design callback + peano/xclbin toolchain)
+      - operator(input, weight, bias) → forward (XRTTensor + get_callable;
+        host bias; per-batch Python loop over N=1 MLIR)
+      - Reuse of compiled operator for batch=2 (validates batching wrapper)
 
     Golden data (including for batch=2) is generated exclusively via
     generate_golden_reference / conv2d_cpu (identical contract to metrics path).
     Independent FORWARD_CASES (stable IDs) guarantee coverage of column variants
     without coupling to the main matrix. Complements run_test path.
-    Uses tightened bf16 tolerances (0.01/0.01) for forward + Python batch loop.
+    Uses bf16 tolerances aligned with metrics (0.1/1.0) for forward + batch loop.
     """
     golden_ref = generate_golden_reference(
         batch_size=batch,
@@ -523,12 +523,11 @@ def test_conv2d_forward(
         context=aie_context,
     )
 
-    # Full integration exercise of the heavy branch AIEContext paths (exact
-    # pattern used by polished maxpool/avgpool forward tests for consistency).
-    operator.context.compile_all()
-    operator.context.prepare_runtime()
+    # Modern MLIROperator path (AIEContext no longer exposes compile_all /
+    # prepare_runtime). Matches maxpool/avgpool forward tests.
+    operator.compile()
 
-    # N=1 forward
+    # N=1 forward via __call__ / forward (XRTTensor + get_callable + host bias)
     result = operator(
         golden_ref["input"],
         golden_ref["weight"],
