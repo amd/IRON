@@ -3,6 +3,7 @@
 
 from .elementwise_add.op import ElementwiseAdd
 from .elementwise_mul.op import ElementwiseMul
+from .conv2d.op import AIEConv2d
 from .gemm.op import GEMM
 from .gemv.op import GEMV
 from .mha.op import MHA
