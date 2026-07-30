@@ -7,7 +7,7 @@ MLIR Generation for 2D Convolution Operator
 Generates MLIR code for conv2d operations on AIE2 (NPU) and AIE2P (NPU2).
 
 ==============================================================================
-MODELING STATUS (Phase A L1 + Phase B multi-col + Phase C CI surface)
+MODELING STATUS (Phase A–C MVP + Phase D.1 construction hardening)
 ==============================================================================
 DMA legality (hard):
   Each AIE compute tile has only **2 input DMA channels**. Designs must attach
@@ -39,15 +39,35 @@ Phase C — mature-op CI / package surface (not a dataflow redesign):
   - not-extensive matrix: 16x16/32x32 CORE @ 1c (Phase A) **and** 16x16 CORE
     @ 2c multi-col smoke (Phase B path). Larger multi-col (4c/8c, 32x32+) and
     broader configs remain ``@pytest.mark.extensive``.
-  - Still optional / open beyond this gate: stricter construct-time
-    ``AIEOperatorConstraintError`` (L1-aware hard fails), on-device packed bias
-    under the 2-DMA limit, spatial tiling for configs that do not fit L1 even
-    with OC/channel tiles, kernel perf polish.
+
+Phase D — full-parity remaining work (in progress):
+
+  D.1 DONE — Construct-time constraints (op.py mirrors this file):
+    - Column policy via ``_resolve_num_columns`` (divisibility + device max;
+      NPU1≤4, NPU2≤8). ``effective_num_columns`` / ``requested_num_columns``.
+    - L1 triple budget ``_L1_TRIPLE_BUDGET_BYTES`` (56 KiB): fail fast with
+      ``AIEOperatorConstraintError`` when min OC/channel tile (or full grouped
+      triple) cannot fit. groups==1 notes that multi-col does **not** shrink
+      input L1 (broadcast). Bare asserts → ConstraintError (dilation/groups/
+      positive dims/output spatial).
+    - Re-validated in ``set_up_artifacts`` after device column clamp.
+
+  D.2 OPEN — On-device packed bias (weights||bias, apply_bias=1) under ≤2
+    input DMAs; host path remains default until implemented or measured
+    evidence documents host-only as permanent.
+
+  D.3 OPEN — Spatial L1 tiling when full input still exceeds budget after
+    OC/channel tiles.
+
+  D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
+
+  D.5 OPEN — Kernel vector perf (only after D.1–D.2 stable).
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). Extensive multi-col and exotic shapes are best-effort
-  until explicitly promoted.
+  (host bias, ≤2 DMA). Construct-time L1/col errors are in place (D.1).
+  Extensive multi-col and exotic shapes are best-effort until promoted.
+  Packed bias and spatial tiling remain open (D.2–D.3).
 ==============================================================================
 """
 

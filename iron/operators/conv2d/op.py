@@ -19,6 +19,8 @@ NPU dataflow notes (see design.py MODELING STATUS):
   dimensions are divisible; each core still has only 2 input DMAs (in+weight).
 - Bias is applied on the host after the NPU kernel (third bias ObjectFifo is
   illegal on compute tiles).
+- Construct-time checks mirror design column clamp + L1 triple budget so
+  illegal configs fail with AIEOperatorConstraintError instead of late OOM.
 """
 
 import torch
@@ -40,6 +42,15 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     AIERuntimeArgSpec,
     DesignGenerator,
+)
+
+# Shared L1 / column policy with design.py (single source of truth).
+from iron.operators.conv2d.design import (
+    _BYTES_PER_BF16,
+    _L1_TRIPLE_BUDGET_BYTES,
+    _choose_channel_tile,
+    _choose_oc_tile,
+    _resolve_num_columns,
 )
 
 
@@ -106,9 +117,34 @@ class AIEConv2d(AIEOperatorBase):
         self.in_height = in_height
         self.in_width = in_width
 
-        assert dilation == (1, 1), "Only dilation=1 is currently supported"
-        assert in_channels % groups == 0, "in_channels must be divisible by groups"
-        assert out_channels % groups == 0, "out_channels must be divisible by groups"
+        if in_channels <= 0 or out_channels <= 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d requires positive in_channels/out_channels, "
+                f"got in_channels={in_channels}, out_channels={out_channels}"
+            )
+        if in_height <= 0 or in_width <= 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d requires positive in_height/in_width, "
+                f"got {in_height}x{in_width}"
+            )
+        if dilation != (1, 1):
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d only supports dilation=(1, 1), got {dilation}"
+            )
+        if groups <= 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d requires groups >= 1, got {groups}"
+            )
+        if in_channels % groups != 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d in_channels ({in_channels}) must be divisible by "
+                f"groups ({groups})"
+            )
+        if out_channels % groups != 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d out_channels ({out_channels}) must be divisible by "
+                f"groups ({groups})"
+            )
 
         self.out_height = (
             in_height + 2 * self.padding[0] - self.kernel_size[0]
@@ -116,26 +152,40 @@ class AIEConv2d(AIEOperatorBase):
         self.out_width = (
             in_width + 2 * self.padding[1] - self.kernel_size[1]
         ) // self.stride[1] + 1
+        if self.out_height <= 0 or self.out_width <= 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d produced non-positive output spatial size "
+                f"{self.out_height}x{self.out_width} from "
+                f"in={in_height}x{in_width}, kernel={self.kernel_size}, "
+                f"stride={self.stride}, padding={self.padding}"
+            )
 
         if tile_size is None:
             tile_size = 2048
         if num_aie_columns is None:
             num_aie_columns = 1
+        if int(num_aie_columns) < 1:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d num_aie_columns must be >= 1, got {num_aie_columns}"
+            )
 
         self.tile_size = tile_size
-        self.num_aie_columns = num_aie_columns
-        # Match design.py _resolve_num_columns (device max applied at artifact build).
+        self.num_aie_columns = int(num_aie_columns)
+        self.requested_num_columns = self.num_aie_columns
+        # Match design.py _resolve_num_columns. Device max_cols is applied in
+        # set_up_artifacts (and re-validated for L1 after the final clamp).
         is_depthwise = groups == in_channels and groups == out_channels
-        eff = max(1, int(num_aie_columns))
-        if is_depthwise:
-            while eff > 1 and in_channels % eff != 0:
-                eff -= 1
-        elif groups == 1:
-            while eff > 1 and out_channels % eff != 0:
-                eff -= 1
-        else:
-            eff = 1
-        self.effective_num_columns = eff
+        self.is_depthwise = is_depthwise
+        # Construct-time: allow up to NPU2 max; set_up_artifacts tightens further.
+        self.effective_num_columns = _resolve_num_columns(
+            self.num_aie_columns,
+            out_channels,
+            in_channels,
+            groups,
+            is_depthwise,
+            max_cols=8,
+        )
+        self._validate_l1_fit(self.effective_num_columns)
 
         self.bias_size = out_channels if use_bias else 0
 
@@ -145,6 +195,89 @@ class AIEConv2d(AIEOperatorBase):
         self.bias_buffer = None
 
         AIEOperatorBase.__init__(self, context=context)
+
+    def _validate_l1_fit(self, num_columns: int) -> None:
+        """Raise if the design's L1 triple (in+weight+out, bf16) cannot fit.
+
+        Mirrors design.py Phase A tile selection: groups==1 OC-tiles with full
+        input in L1; depthwise channel-tiles; other groups require full tensors.
+        Multi-column OC/channel split does not reduce full-input L1 for
+        groups==1 (input is broadcast per column). Spatial tiling is not yet
+        implemented — configs that still exceed budget fail here with a clear
+        message instead of a late device/compile OOM.
+        """
+        n = 1  # MLIR is specialized for N=1; batch is looped on host.
+        in_spatial = self.in_height * self.in_width
+        out_spatial = self.out_height * self.out_width
+        weight_per_oc = (
+            (self.in_channels // self.groups)
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
+        input_size = n * self.in_channels * in_spatial
+        budget = _L1_TRIPLE_BUDGET_BYTES
+        bpe = _BYTES_PER_BF16
+        cols = max(1, int(num_columns))
+
+        if self.is_depthwise:
+            c_per_col = self.in_channels // cols
+            c_tile = _choose_channel_tile(
+                c_per_col, in_spatial, out_spatial, weight_per_oc, budget
+            )
+            tile_elems = c_tile * (in_spatial + weight_per_oc + out_spatial)
+            if tile_elems * bpe > budget:
+                need = tile_elems * bpe
+                raise AIEOperatorConstraintError(
+                    f"AIEConv2d depthwise L1 footprint exceeds budget: "
+                    f"min channel tile needs ~{need} bytes "
+                    f"(budget {_L1_TRIPLE_BUDGET_BYTES} bytes for in+weight+out "
+                    f"bf16 at depth=1). Config: C={self.in_channels}, "
+                    f"spatial={self.in_height}x{self.in_width}→"
+                    f"{self.out_height}x{self.out_width}, "
+                    f"kernel={self.kernel_size}, cols={cols}. "
+                    f"Reduce spatial size/channels or wait for spatial L1 tiling."
+                )
+            return
+
+        if self.groups == 1:
+            oc_per_col = self.out_channels // cols
+            oc_tile = _choose_oc_tile(
+                oc_per_col, input_size, weight_per_oc, out_spatial, budget
+            )
+            tile_elems = input_size + oc_tile * weight_per_oc + oc_tile * out_spatial
+            if tile_elems * bpe > budget:
+                need = tile_elems * bpe
+                # Full input alone often dominates; call that out explicitly.
+                input_bytes = input_size * bpe
+                raise AIEOperatorConstraintError(
+                    f"AIEConv2d L1 footprint exceeds budget: "
+                    f"min OC tile needs ~{need} bytes "
+                    f"(budget {_L1_TRIPLE_BUDGET_BYTES} bytes; "
+                    f"full input alone is {input_bytes} bytes). "
+                    f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+                    f"spatial={self.in_height}x{self.in_width}→"
+                    f"{self.out_height}x{self.out_width}, "
+                    f"kernel={self.kernel_size}, cols={cols}. "
+                    f"Note: multi-column OC split does not reduce input L1 "
+                    f"(input is broadcast per column). "
+                    f"Reduce spatial size/channels or wait for spatial L1 tiling."
+                )
+            return
+
+        # Non-depthwise grouped: design uses full tensors, 1-col only.
+        weight_size = self.out_channels * weight_per_oc
+        output_size = n * self.out_channels * out_spatial
+        triple = (input_size + weight_size + output_size) * bpe
+        if triple > budget:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d grouped (groups={self.groups}, non-depthwise) "
+                f"requires full in+weight+out in L1 (~{triple} bytes) but "
+                f"budget is {_L1_TRIPLE_BUDGET_BYTES} bytes. "
+                f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+                f"spatial={self.in_height}x{self.in_width}. "
+                f"Only depthwise (groups==IC==OC) and groups==1 support "
+                f"channel/OC L1 tiling today."
+            )
 
     def set_up_artifacts(self):
         """Set up compilation artifacts (Phase A tiles + Phase B multi-col)."""
@@ -168,21 +301,27 @@ class AIEConv2d(AIEOperatorBase):
 
         # Re-clamp against device column count (matches design.py max_cols).
         max_cols = getattr(dev, "cols", 4) or 4
-        effective_num_columns = min(self.effective_num_columns, max_cols)
-        # Re-apply divisibility after device clamp.
-        is_depthwise = self.groups == self.in_channels and self.groups == self.out_channels
-        if is_depthwise:
-            while effective_num_columns > 1 and self.in_channels % effective_num_columns != 0:
-                effective_num_columns -= 1
-        elif self.groups == 1:
-            while (
-                effective_num_columns > 1
-                and self.out_channels % effective_num_columns != 0
-            ):
-                effective_num_columns -= 1
-        else:
-            effective_num_columns = 1
+        # Prefer NPU1/NPU2 class limits when available (same as design.py).
+        try:
+            from aie.iron.device import NPU1, NPU2
+
+            if isinstance(dev, NPU1):
+                max_cols = 4
+            elif isinstance(dev, NPU2):
+                max_cols = 8
+        except Exception:
+            pass
+        effective_num_columns = _resolve_num_columns(
+            self.requested_num_columns,
+            self.out_channels,
+            self.in_channels,
+            self.groups,
+            self.is_depthwise,
+            max_cols=max_cols,
+        )
         self.effective_num_columns = effective_num_columns
+        # Depthwise L1 grows when columns shrink after device clamp — re-check.
+        self._validate_l1_fit(effective_num_columns)
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
