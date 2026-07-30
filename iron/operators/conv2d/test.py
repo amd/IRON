@@ -61,8 +61,8 @@ Quality attributes (consciously engineered final production shape):
 - get_params matrix consciously exercises the complex design.py (per-col
   chunks for standard/depthwise/pointwise, singular bias OF only on use_bias,
   kernel signature variants, FIFO depth heuristics for 8-col, N=1 specialization).
-- Regular subset deliberately small/fast (32x32 + preferred_col<=4 + core +
-  bias) while still hitting the bias ObjectFifo + conditional paths.
+- Regular subset deliberately small/fast (16x16/32x32 CORE @ 1c + 16x16 CORE
+  @ 2c multi-col smoke) while still hitting host-bias + Phase A/C paths.
 - Implicit full coverage of AIE2 (NPU1, 4 cols) vs AIE2P (NPU2, 8 cols) paths:
   device query + kernel_dir selection in op.py + column/tile matrix (max_cols
   drives both regular and extensive cases).
@@ -101,8 +101,8 @@ def get_params():
       element sizes in design.py).
     - Uses explicit pytest.param(..., id=pretty_name, marks=...) so that
       the branch CSV/metrics reporter gets stable human-readable test names.
-    - Marks the majority as extensive; only a small core subset (32x32 +
-      preferred_col + core configs + bias=True) run by default ("not extensive").
+    - Marks the majority as extensive; only a small core subset (16x16/32x32
+      CORE @ 1c plus 16x16 CORE @ 2c multi-col) run by default ("not extensive").
 
     The divisibility filter (in+weight+out) prevents silent truncation/mismatch
     in (size // num_columns) logic and ensures generated MLIR is valid for the
@@ -144,10 +144,11 @@ def get_params():
     ]
 
     # Explicit core configs for regular marking (robust vs list order / slicing).
-    # Phase A CI coverage (1-col only via preferred_col below):
+    # Phase A/C CI coverage:
     #   - 3→16 bias/nobias: baseline host-bias + full/near-full L1
     #   - 16→16 groups=1 bias: multi-tile OC path at 32x32 (oc_tile=8)
     #   - 16 depthwise bias: multi-tile channel path at 32x32 (c_tile=8)
+    # Phase C also promotes 16x16 CORE @ 2c (OC/channel split, ≤2 DMA, host bias).
     CORE_CONFIGS = [
         (3, 16, 3, 1, 1, 1, True),
         (3, 16, 3, 1, 1, 1, False),
@@ -155,8 +156,8 @@ def get_params():
         (16, 16, 3, 1, 1, 16, True),  # depthwise multi-tile channels
     ]
 
-    # 16x16 + 32x32 CORE @ 1c are not-extensive targets for Phase A L1 fit.
-    # 64 retained as extensive.
+    # 16x16 + 32x32 CORE @ 1c: Phase A L1 fit. 16x16 CORE @ 2c: Phase C multi-col.
+    # 32x32+ multi-col and 64 spatial stay extensive until proven green.
     spatials = [(16, 16), (32, 32), (64, 64)]
     col_candidates = [1, 2, 4, 8]
 
@@ -194,16 +195,15 @@ def get_params():
 
                 tile_size = in_size // nc
 
-                # Regular subset ("not extensive"): 16x16 and 32x32 + 1 column +
-                # CORE_CONFIGS. Proves Phase A L1 tiling (incl. multi-tile OC and
-                # depthwise channel tiles at 32x32). Multi-col is Phase B; bias
-                # remains host-side (2 input DMA limit per compute tile).
-                preferred_col = 1
+                # Regular subset ("not extensive"):
+                #   - 16x16 / 32x32 CORE @ 1c — Phase A L1 OC/channel tiles
+                #   - 16x16 CORE @ 2c — Phase C multi-col OC/channel split smoke
+                # Bias remains host-side (2 input DMA limit per compute tile).
+                # Larger multi-col (4c/8c, 32x32+) stays extensive.
                 is_core_config = cfg in CORE_CONFIGS
-                is_regular = (
-                    (h, w) in ((16, 16), (32, 32))
-                    and nc == preferred_col
-                    and is_core_config
+                is_regular = is_core_config and (
+                    (nc == 1 and (h, w) in ((16, 16), (32, 32)))
+                    or (nc == 2 and (h, w) == (16, 16))
                 )
 
                 marks = [] if is_regular else [pytest.mark.extensive]
