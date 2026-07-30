@@ -14,8 +14,8 @@ Supports standard 2D convolution with configurable:
 Works on AIE2 (NPU) and AIE2P (NPU2) architectures.
 
 NPU dataflow notes (see design.py MODELING STATUS):
-- Single-column path with Phase A out-channel (OC) tiling when groups==1 so
-  L1 holds full input + weight/out OC tile (not necessarily full OC tensors).
+- Single-column Phase A tiling: OC tiles for groups==1; channel tiles for
+  depthwise so L1 is not forced to hold full tensors.
 - Bias is applied on the host after the NPU kernel (compute tiles only have
   2 input DMA channels; a third bias ObjectFifo is illegal).
 """
