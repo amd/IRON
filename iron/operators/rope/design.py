@@ -17,7 +17,7 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
 
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
@@ -128,38 +128,45 @@ def rope(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, angle_ty, tensor_ty) as (A, B, C):
-        maybe_enable_trace(rt, trace_size, my_workers)
-        rt.start(*my_workers)
+    def sequence(A, B, C, of_in_prods, of_lut_prods, of_out_conss):
 
         # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_aie_columns):
-            rt.fill(
-                of_in[i].prod(),
+            of_in_prods[i].fill(
                 A,
                 tensor_taps[i],
-                task_group=tg,
+                group=tg,
             )
-            rt.fill(
-                of_lut[i].prod(),
+            of_lut_prods[i].fill(
                 B,
                 angle_taps[i],
-                task_group=tg,
+                group=tg,
             )
         # Drain the output objectFIFOs with data
         for i in range(num_aie_columns):
-            rt.drain(
-                of_out[i].cons(),
+            of_out_conss[i].drain(
                 C,
                 tensor_taps[i],
                 wait=True,  # wait for the transfer to complete and data to be available
-                task_group=tg,
+                group=tg,
             )
-        rt.finish_task_group(tg)
+        tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            angle_ty,
+            tensor_ty,
+            [of.prod() for of in of_in],
+            [of.prod() for of in of_lut],
+            [of.cons() for of in of_out],
+        ],
+    )
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    prog = Program(dev, rt, workers=my_workers)
+    maybe_enable_trace(prog, trace_size, my_workers)
+    return prog.resolve_program()

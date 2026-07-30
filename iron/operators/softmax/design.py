@@ -10,9 +10,11 @@ from aie.iron import (
     ScratchpadParameter,
     Program,
     Runtime,
+    TaskGroup,
     Worker,
     Buffer,
     WorkerRuntimeBarrier,
+    sync_parameters,
 )
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
@@ -156,51 +158,54 @@ def softmax(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, tensor_ty) as (A, C):
-        maybe_enable_trace(rt, trace_size, my_workers)
-        rt.start(*my_workers)
-
+    def sequence(A, C, in1_prods, out_conses):
         if use_scratchpad:
             # The host writes vector_size into the scratchpad via
             # ParameterScratchpad before each dispatch; sync delivers it to the
             # per-core parameter buffer.
-            rt.sync_parameters()
+            sync_parameters()
         else:
             # Set the static (compile-time) run-time parameter controlling how
             # many elements each core processes.
-            def set_rtps(*args):
-                for rtp in args:
-                    rtp[0] = rtp_vector_size
-
-            rt.inline_ops(set_rtps, rtps)
+            for rtp in rtps:
+                rtp[0] = rtp_vector_size
 
         for i in range(num_aie_columns * num_channels):
-            rt.set_barrier(barriers[i], 1)
+            barriers[i].set(1)
 
         # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_aie_columns):
             for j in range(num_channels):
-                rt.fill(
-                    of_in1s[i * num_channels + j].prod(),
+                in1_prods[i * num_channels + j].fill(
                     A,
                     taps[i * num_channels + j],
-                    task_group=tg,
+                    group=tg,
                 )
         # Drain the output objectFIFOs with data
         for i in range(num_aie_columns):
             for j in range(num_channels):
-                rt.drain(
-                    of_outs[i * num_channels + j].cons(),
+                out_conses[i * num_channels + j].drain(
                     C,
                     taps[i * num_channels + j],
                     wait=True,  # wait for the transfer to complete and data to be available
-                    task_group=tg,
+                    group=tg,
                 )
-        rt.finish_task_group(tg)
+        tg.finish()
+
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            tensor_ty,
+            [of.prod() for of in of_in1s],
+            [of.cons() for of in of_outs],
+        ],
+    )
 
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    prog = Program(dev, rt, workers=my_workers)
+    maybe_enable_trace(prog, trace_size, my_workers)
+    return prog.resolve_program()

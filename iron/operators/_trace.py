@@ -39,13 +39,11 @@ def _default_coretile_events():
     ]
 
 
-def maybe_enable_trace(rt, trace_size, workers, coretile_events=None):
-    """Configure per-op hardware trace on ``rt`` if tracing is requested.
-
-    Call inside the ``rt.sequence(...)`` block, before ``rt.start(...)``.
+def maybe_enable_trace(prog, trace_size, workers, coretile_events=None):
+    """Configure per-op hardware trace if tracing is requested.
 
     Args:
-        rt: the ``Runtime`` being built.
+        prog: the ``Program`` being built.
         trace_size: the design's ``trace_size`` argument (may be None/0).
         workers: the design's workers; the first ``IRON_TRACE_NTILES`` are traced.
         coretile_events: override the default core-tile event set.
@@ -61,7 +59,7 @@ def maybe_enable_trace(rt, trace_size, workers, coretile_events=None):
     # meaningless (a negative slice index would silently drop the LAST worker).
     ntiles = max(0, int(os.environ.get("IRON_TRACE_NTILES", "1")))
 
-    rt.enable_trace(
+    prog.enable_trace(
         ts,
         workers=list(workers)[:ntiles],
         coretile_events=(

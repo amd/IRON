@@ -15,6 +15,7 @@ from aie.iron import (
     ObjectFifo,
     Program,
     Runtime,
+    TaskGroup,
     Worker,
     Buffer,
     WorkerRuntimeBarrier,
@@ -775,31 +776,27 @@ def fused_mha(
         # print_tap_seq_info(O_tiles, "O")
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(Q_ty, KV_ty, KV_ty, Q_ty) as (Q, K, V, O):
+    # The shim tile that used to be named per-transfer is now a property of the
+    # handle, so the handles are bound up front and passed into the sequence.
+    inQ_h = inQ.prod(tile=Tile(col=4, row=0))
+    inQ2_h = inQ2.prod(tile=Tile(col=4, row=0)) if number_of_pipelines > 6 else None
+    inK_h = inK.prod(tile=Tile(col=5, row=0))
+    inV_h = inV.prod(tile=Tile(col=6, row=0))
+    memO_h = memO.cons(tile=Tile(col=7, row=0))
+    memO2_h = memO2.cons(tile=Tile(col=7, row=0)) if number_of_pipelines > 6 else None
 
-        def set_mha_rtps():
-            for j in range(3):
-                for i in range(number_of_pipelines):
-                    mha_rtps_list[j][i][0] = num_q_block_per_pipeline
-                    mha_rtps_list[j][i][1] = num_kv_blocks
-                    mha_rtps_list[j][i][2] = S_q_eff
-                    mha_rtps_list[j][i][3] = S_kv_eff
-
-        rt.inline_ops(set_mha_rtps, ())
+    def sequence(Q, K, V, O, inQ_h, inQ2_h, inK_h, inV_h, memO_h, memO2_h):
+        # The body is eager now, so the RTP writes are a plain loop (was inline_ops).
+        for j in range(3):
+            for i in range(number_of_pipelines):
+                mha_rtps_list[j][i][0] = num_q_block_per_pipeline
+                mha_rtps_list[j][i][1] = num_kv_blocks
+                mha_rtps_list[j][i][2] = S_q_eff
+                mha_rtps_list[j][i][3] = S_kv_eff
 
         for j in range(3):
             for i in range(number_of_pipelines):
-                rt.set_barrier(worker_barrier_list[j][i], 1)
-
-        maybe_enable_trace(
-            rt, trace_size, matmul_workers + softmax_workers + matmul_pv_workers
-        )
-
-        for i in range(number_of_pipelines):
-            rt.start(matmul_workers[i])
-            rt.start(softmax_workers[i])
-            rt.start(matmul_pv_workers[i])
+                worker_barrier_list[j][i].set(1)
 
         for head_idx in range(heads):
 
@@ -808,67 +805,54 @@ def fused_mha(
             for q_block_idx in range(num_q_block_per_pipeline):
 
                 # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-                tg = rt.task_group()
+                tg = TaskGroup()
 
                 if number_of_pipelines > 6:
-                    rt.fill(
-                        inQ.prod(),
+                    inQ_h.fill(
                         Q,
                         tap=Q_tiles[
                             2 * head_idx * num_q_block_per_pipeline + q_block_idx * 2
                         ],
-                        tile=Tile(col=4, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
-                    rt.fill(
-                        inQ2.prod(),
+                    inQ2_h.fill(
                         Q,
                         tap=Q_tiles[
                             2 * head_idx * num_q_block_per_pipeline
                             + q_block_idx * 2
                             + 1
                         ],
-                        tile=Tile(col=4, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
                 else:
-                    rt.fill(
-                        inQ.prod(),
+                    inQ_h.fill(
                         Q,
                         tap=Q_tiles[head_idx * num_q_block_per_pipeline + q_block_idx],
-                        tile=Tile(col=4, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
 
                 # Thow on bd containing the full K and V in the object fifo, then does it transfer cunks of inKV size at the time?
-                rt.fill(
-                    inK.prod(),
+                inK_h.fill(
                     K,
                     tap=K_tiles[kv_head_idx],
-                    tile=Tile(col=5, row=0),
-                    task_group=tg,
+                    group=tg,
                 )
-                rt.fill(
-                    inV.prod(),
+                inV_h.fill(
                     V,
                     tap=V_tiles[kv_head_idx],
-                    tile=Tile(col=6, row=0),
-                    task_group=tg,
+                    group=tg,
                 )
 
                 if number_of_pipelines > 6:
-                    rt.drain(
-                        memO.cons(),
+                    memO_h.drain(
                         O,
                         tap=O_tiles[
                             2 * head_idx * num_q_block_per_pipeline + q_block_idx * 2
                         ],
                         wait=True,
-                        tile=Tile(col=7, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
-                    rt.drain(
-                        memO2.cons(),
+                    memO2_h.drain(
                         O,
                         tap=O_tiles[
                             2 * head_idx * num_q_block_per_pipeline
@@ -876,24 +860,31 @@ def fused_mha(
                             + 1
                         ],
                         wait=True,
-                        tile=Tile(col=7, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
                 else:
-                    rt.drain(
-                        memO.cons(),
+                    memO_h.drain(
                         O,
                         tap=O_tiles[head_idx * num_q_block_per_pipeline + q_block_idx],
                         wait=True,
-                        tile=Tile(col=7, row=0),
-                        task_group=tg,
+                        group=tg,
                     )
 
-                rt.finish_task_group(tg)
+                tg.finish()
+
+    rt = Runtime(
+        sequence,
+        [Q_ty, KV_ty, KV_ty, Q_ty, inQ_h, inQ2_h, inK_h, inV_h, memO_h, memO2_h],
+    )
 
     # Create the program from the device type and runtime
     dev_ty = NPU2()
-    my_program = Program(dev_ty, rt)
+    my_program = Program(
+        dev_ty, rt, workers=matmul_workers + softmax_workers + matmul_pv_workers
+    )
+    maybe_enable_trace(
+        my_program, trace_size, matmul_workers + softmax_workers + matmul_pv_workers
+    )
 
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program()

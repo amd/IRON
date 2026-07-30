@@ -574,13 +574,16 @@ class SequenceFullELFCallable(SequenceCallable):
         The ``params.txt`` describing the runtime parameters is written by
         ``aie-lower-parameters`` into the ``<mlir>.prj`` project directory next
         to the fused MLIR source. Returns ``None`` if the sequence declared no
-        runtime parameters (in which case the file is not written).
+        runtime parameters: the file is still written, but holds a count of
+        zero and there is no ctrl scratchpad buffer object to bind to.
         """
         if self._params is not None:
             return self._params
         mlir_filename = self.op.artifacts[0].mlir_input.filename
         params_path = Path(mlir_filename + ".prj") / "params.txt"
         if not params_path.exists():
+            return None
+        if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
