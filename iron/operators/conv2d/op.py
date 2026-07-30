@@ -14,7 +14,8 @@ Supports standard 2D convolution with configurable:
 Works on AIE2 (NPU) and AIE2P (NPU2) architectures.
 
 NPU dataflow notes (see design.py MODELING STATUS):
-- Single-column full-tensor path (kernels expect full NCHW / weights).
+- Single-column path with Phase A out-channel (OC) tiling when groups==1 so
+  L1 holds full input + weight/out OC tile (not necessarily full OC tensors).
 - Bias is applied on the host after the NPU kernel (compute tiles only have
   2 input DMA channels; a third bias ObjectFifo is illegal).
 """
@@ -119,7 +120,8 @@ class AIEConv2d(AIEOperatorBase):
         if num_aie_columns is None:
             num_aie_columns = 1
 
-        # Design forces 1 column; store requested value for diagnostics only.
+        # Design forces 1 column (Phase B multi-col deferred); OC tiling is internal
+        # to design.py (L1 fit). Store requested columns for diagnostics only.
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
         self.effective_num_columns = 1

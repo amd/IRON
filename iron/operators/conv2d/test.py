@@ -144,16 +144,16 @@ def get_params():
     ]
 
     # Explicit core configs for regular marking (robust vs list order / slicing).
-    # Keep 3→16 only: full-tensor L1 residency on AIE (~64KB) cannot hold
-    # 16ch×32×32 input+output simultaneously (2×32KB + weights). Larger
-    # configs remain extensive once true tiling lands.
+    # 3→16 groups=1 exercises Phase A OC tiling path (often oc_tile=full for
+    # small spatials; still validates design). 16ch full-spatial remains
+    # extensive until larger L1-fit matrix is proven on HW.
     CORE_CONFIGS = [
         (3, 16, 3, 1, 1, 1, True),
         (3, 16, 3, 1, 1, 1, False),
     ]
 
-    # 16x16 fits L1 for CORE (in≈1.5KB, out≈8KB, w≈0.8KB with depth=1).
-    # 32/64 retained for extensive coverage (may OOM until tiled design).
+    # 16x16 + 32x32 CORE @ 1c are not-extensive targets for Phase A L1 fit.
+    # 64 retained as extensive.
     spatials = [(16, 16), (32, 32), (64, 64)]
     col_candidates = [1, 2, 4, 8]
 
@@ -191,14 +191,16 @@ def get_params():
 
                 tile_size = in_size // nc
 
-                # Regular subset ("not extensive"): 16x16 + 1 column + CORE_CONFIGS
-                # (bias and nobias). Design forces single-column full-tensor execution
-                # (kernels expect full NCHW; multi-col flattened splits are invalid;
-                # compute tiles support only 2 input DMAs so bias is host-side).
+                # Regular subset ("not extensive"): 16x16 and 32x32 + 1 column +
+                # CORE_CONFIGS (bias and nobias). Design forces single-column with
+                # Phase A OC tiling for groups=1 L1 fit; multi-col is Phase B;
+                # bias remains host-side (2 input DMA limit per compute tile).
                 preferred_col = 1
                 is_core_config = cfg in CORE_CONFIGS
                 is_regular = (
-                    (h, w) == (16, 16) and nc == preferred_col and is_core_config
+                    (h, w) in ((16, 16), (32, 32))
+                    and nc == preferred_col
+                    and is_core_config
                 )
 
                 marks = [] if is_regular else [pytest.mark.extensive]
