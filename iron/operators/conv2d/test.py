@@ -144,12 +144,15 @@ def get_params():
     ]
 
     # Explicit core configs for regular marking (robust vs list order / slicing).
-    # 3→16 groups=1 exercises Phase A OC tiling path (often oc_tile=full for
-    # small spatials; still validates design). 16ch full-spatial remains
-    # extensive until larger L1-fit matrix is proven on HW.
+    # Phase A CI coverage (1-col only via preferred_col below):
+    #   - 3→16 bias/nobias: baseline host-bias + full/near-full L1
+    #   - 16→16 groups=1 bias: multi-tile OC path at 32x32 (oc_tile=8)
+    #   - 16 depthwise bias: multi-tile channel path at 32x32 (c_tile=8)
     CORE_CONFIGS = [
         (3, 16, 3, 1, 1, 1, True),
         (3, 16, 3, 1, 1, 1, False),
+        (16, 16, 3, 1, 1, 1, True),  # standard multi-tile OC
+        (16, 16, 3, 1, 1, 16, True),  # depthwise multi-tile channels
     ]
 
     # 16x16 + 32x32 CORE @ 1c are not-extensive targets for Phase A L1 fit.
@@ -192,9 +195,9 @@ def get_params():
                 tile_size = in_size // nc
 
                 # Regular subset ("not extensive"): 16x16 and 32x32 + 1 column +
-                # CORE_CONFIGS (bias and nobias). Design forces single-column with
-                # Phase A OC tiling for groups=1 L1 fit; multi-col is Phase B;
-                # bias remains host-side (2 input DMA limit per compute tile).
+                # CORE_CONFIGS. Proves Phase A L1 tiling (incl. multi-tile OC and
+                # depthwise channel tiles at 32x32). Multi-col is Phase B; bias
+                # remains host-side (2 input DMA limit per compute tile).
                 preferred_col = 1
                 is_core_config = cfg in CORE_CONFIGS
                 is_regular = (

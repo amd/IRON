@@ -31,10 +31,18 @@ Phase A — L1 tiling on a single column (no kernel ABI break):
      - Kernel channels=c_tile.
 
   3) Other groups>1 (non-depthwise): full-tensor (must fit L1); spatial or
-     group-aware tiling is future work. Multi-column OC-split is Phase B.
+     group-aware tiling is future work when input alone exceeds budget.
 
-Certainty: DMA 2-in ~95%; groups=1 OC tiling HW-green; depthwise channel
-tiling HW-pending this fire; multi-col deferred.
+Phase B (not started): multi-column OC-split with input broadcast, still
+  ≤2 input DMAs/core (in + weight); host bias unless packed-on-device lands.
+  Prior multi-col failures were from illegal 3-ingress (bias OF) and invalid
+  flattened chunking — not from OC-split itself. Phase B plan: split OC across
+  columns, broadcast full input TAP per column, per-col weight/out OC slices,
+  force columns so oc_per_col * tile fits L1 (compose with Phase A tiles).
+
+Certainty: DMA 2-in ~95%; groups=1 OC + depthwise channel tiling HW-green on
+  AIE2P (incl. multi-tile 16@32); multi-col deferred to Phase B (design-ready,
+  not HW-blocked).
 ==============================================================================
 """
 
