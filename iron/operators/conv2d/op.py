@@ -12,12 +12,16 @@ Supports standard 2D convolution with configurable:
 - groups (including depthwise convolution)
 
 Works on AIE2 (NPU) and AIE2P (NPU2) architectures.
+
+NPU dataflow notes (see design.py MODELING STATUS):
+- Single-column full-tensor path (kernels expect full NCHW / weights).
+- Bias is applied on the host after the NPU kernel (compute tiles only have
+  2 input DMA channels; a third bias ObjectFifo is illegal).
 """
 
 import torch
 import numpy as np
 from ml_dtypes import bfloat16
-import logging
 from pathlib import Path
 from typing import Tuple, Union, Optional
 
@@ -35,7 +39,6 @@ from iron.common import (
     AIERuntimeArgSpec,
     DesignGenerator,
 )
-from iron.common.utils import get_shim_dma_limit
 
 
 class AIEConv2d(AIEOperatorBase):
@@ -61,8 +64,7 @@ class AIEConv2d(AIEOperatorBase):
         Initialize the Conv2d operator.
 
         Spatial dimensions (in_height, in_width) are part of construction so MLIR
-        is specialized correctly for them (removes placeholder hacks and set_up_runtime
-        defaults).
+        is specialized correctly for them.
 
         Args:
             in_channels: Number of input channels
@@ -72,17 +74,17 @@ class AIEConv2d(AIEOperatorBase):
             padding: Zero padding added to both sides (default: 0)
             dilation: Spacing between kernel elements (default: 1, only 1 supported)
             groups: Number of blocked connections (default: 1)
-            use_bias: Whether to use bias (default: True)
-            in_height: Input height (default 32 for backward compat in some paths)
+            use_bias: Whether to use bias (default: True). Bias is applied on host
+                after the NPU convolution (DMA channel limit on compute tiles).
+            in_height: Input height (default 32)
             in_width: Input width (default 32)
-            num_aie_columns: Number of AIE columns (1-4 for NPU, 1-8 for NPU2)
-            tile_size: Size of each tile in elements
+            num_aie_columns: Requested columns (currently forced to 1 in design)
+            tile_size: Size of each tile in elements (reserved / unused for 1-col)
             context: AIE context
         """
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        # Normalize kernel_size, stride, padding, dilation to tuples
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         if isinstance(stride, int):
@@ -101,12 +103,10 @@ class AIEConv2d(AIEOperatorBase):
         self.in_height = in_height
         self.in_width = in_width
 
-        # Validate
         assert dilation == (1, 1), "Only dilation=1 is currently supported"
         assert in_channels % groups == 0, "in_channels must be divisible by groups"
         assert out_channels % groups == 0, "out_channels must be divisible by groups"
 
-        # Compute output spatial dimensions (fixed at construction)
         self.out_height = (
             in_height + 2 * self.padding[0] - self.kernel_size[0]
         ) // self.stride[0] + 1
@@ -114,19 +114,18 @@ class AIEConv2d(AIEOperatorBase):
             in_width + 2 * self.padding[1] - self.kernel_size[1]
         ) // self.stride[1] + 1
 
-        # Default tile_size and num_aie_columns
         if tile_size is None:
             tile_size = 2048
         if num_aie_columns is None:
-            num_aie_columns = 4
+            num_aie_columns = 1
 
+        # Design forces 1 column; store requested value for diagnostics only.
         self.tile_size = tile_size
         self.num_aie_columns = num_aie_columns
+        self.effective_num_columns = 1
 
-        # Bias size
         self.bias_size = out_channels if use_bias else 0
 
-        # Artifacts
         self.xclbin_artifact = None
         self.insts_artifact = None
         self.weight_buffer = None
@@ -135,12 +134,10 @@ class AIEConv2d(AIEOperatorBase):
         AIEOperatorBase.__init__(self, context=context)
 
     def set_up_artifacts(self):
-        """Set up compilation artifacts (updated for current PythonGeneratedMLIRArtifact / DesignGenerator / Xclbin ctors)"""
+        """Set up compilation artifacts for the 1-col full-tensor design."""
         operator_dir = Path(__file__).parent
         design_path = operator_dir / "design.py"
 
-        # Determine kernel directory based on device (defensive, no device_manager on current AIEContext)
-        # Matches patterns in operator_bases.py and get_params() in test.py
         try:
             dev = aie_utils.get_current_device()
             kernel_dir = "aie2p" if getattr(dev, "cols", 4) > 4 else "aie2"
@@ -148,24 +145,16 @@ class AIEConv2d(AIEOperatorBase):
             kernel_dir = "aie2"
             dev = None
 
-        # Build dev for design callback (live device or fallback) -- guarantees dev
         if dev is None:
             try:
                 dev = aie_utils.get_current_device()
             except Exception:
                 from aie.iron.device import NPU1
+
                 dev = NPU1()
 
-        # Active get_shim_dma_limit + per-ingress channel budgeting (parity with design.py
-        # and iron/common/operator_bases.py + rms_norm/swiglu patterns). Ensures artifact
-        # names and DesignGenerator num_columns reflect the DMA-safe column count actually
-        # emitted by my_conv2d (resolves prior tile(0,2) input DMA errors for bias+4-col).
-        # Performed after guaranteed dev so budgeting uses real device limits.
-        shim_dma_limit = get_shim_dma_limit(dev)
-        channels_per_col = 2 + (1 if self.use_bias else 0)
-        safe_max_cols = max(1, shim_dma_limit // channels_per_col)
-        dev_cols = getattr(dev, "cols", 4)
-        effective_num_columns = min(self.num_aie_columns, safe_max_cols, dev_cols)
+        # Artifact names use effective (1) column count to match design emission.
+        effective_num_columns = self.effective_num_columns
 
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
@@ -183,7 +172,7 @@ class AIEConv2d(AIEOperatorBase):
                 args=(),
                 kwargs={
                     "dev": dev,
-                    "N": 1,  # Will handle batch externally
+                    "N": 1,
                     "in_channels": self.in_channels,
                     "in_height": self.in_height,
                     "in_width": self.in_width,
@@ -209,10 +198,7 @@ class AIEConv2d(AIEOperatorBase):
             "conv2d.o",
             dependencies=[
                 SourceArtifact(
-                    self.context.base_dir
-                    / "aie_kernels"
-                    / kernel_dir
-                    / "conv2d.cc"
+                    self.context.base_dir / "aie_kernels" / kernel_dir / "conv2d.cc"
                 )
             ],
         )
@@ -233,15 +219,10 @@ class AIEConv2d(AIEOperatorBase):
         self.xclbin_artifact = xclbin_artifact
         self.insts_artifact = insts_artifact
 
-        artifacts = [xclbin_artifact, insts_artifact]
-        self.add_artifacts(artifacts)
+        self.add_artifacts([xclbin_artifact, insts_artifact])
 
     def set_up_runtime(self):
-        """
-        Set up runtime buffers and kernels.
-        Uses spatial dimensions provided at construction time.
-        """
-        # Buffer sizes based on constructor sizes (MLIR-specialized)
+        """Set up runtime buffers and kernels (legacy path)."""
         input_size = self.in_channels * self.in_height * self.in_width
         weight_size = (
             self.out_channels
@@ -256,7 +237,6 @@ class AIEConv2d(AIEOperatorBase):
         self.weight_size = weight_size
         self.output_size = output_size
 
-        # Add buffers
         self.add_buffer("input", input_size)
         self.add_buffer("weight", weight_size)
         self.add_buffer("output", output_size)
@@ -264,7 +244,6 @@ class AIEConv2d(AIEOperatorBase):
         if self.use_bias:
             self.add_buffer("bias", self.bias_size)
 
-        # Determine kernel name
         kernel_name = "conv2d_bf16_vector"
         if self.groups == self.in_channels and self.groups == self.out_channels:
             kernel_name = "depthwise_conv2d_bf16_vector"
@@ -278,11 +257,8 @@ class AIEConv2d(AIEOperatorBase):
             self.insts_artifact,
         )
 
-        # Build runlist
-        if self.use_bias:
-            self.add_to_runlist(kernel_name, "input", "weight", "output", "bias")
-        else:
-            self.add_to_runlist(kernel_name, "input", "weight", "output")
+        # NPU runlist is always 3 buffers (bias is host-side).
+        self.add_to_runlist(kernel_name, "input", "weight", "output")
 
     def forward(
         self,
@@ -301,7 +277,6 @@ class AIEConv2d(AIEOperatorBase):
         Returns:
             Output tensor of shape (N, out_channels, H_out, W_out)
         """
-        # Get input dimensions
         if len(x.shape) != 4:
             raise AIEOperatorConstraintError(
                 f"AIEConv2d expects 4D input (N, C, H, W), got shape {x.shape}"
@@ -309,7 +284,6 @@ class AIEConv2d(AIEOperatorBase):
 
         batch_size, actual_in_channels, actual_in_height, actual_in_width = x.shape
 
-        # Validate channels and spatial dims (MLIR specialized at ctor time)
         if actual_in_channels != self.in_channels:
             raise AIEOperatorConstraintError(
                 f"Expected {self.in_channels} input channels, got {actual_in_channels}"
@@ -320,10 +294,9 @@ class AIEConv2d(AIEOperatorBase):
                 f"but got input spatial {actual_in_height}x{actual_in_width} (shape {x.shape})"
             )
 
-        # Process batch one at a time (for now)
         outputs = []
         for n in range(batch_size):
-            x_n = x[n].contiguous()  # (C, H, W)
+            x_n = x[n].contiguous()
             result_n = self._process_single(x_n, weight, bias)
             outputs.append(result_n)
 
@@ -335,85 +308,105 @@ class AIEConv2d(AIEOperatorBase):
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
-        """Process a single sample (C, H, W)"""
-        # Flatten input
+        """Process a single sample (C, H, W). Bias applied on host after NPU."""
         x_flat = x.reshape(-1).contiguous()
-
-        # Convert to bfloat16 if needed
         if x_flat.dtype != torch.bfloat16:
             x_flat = x_flat.to(torch.bfloat16)
 
-        # Flatten weight
         weight_flat = weight.reshape(-1).contiguous()
         if weight_flat.dtype != torch.bfloat16:
             weight_flat = weight_flat.to(torch.bfloat16)
 
-        # Handle bias
-        bias_flat = None
-        if bias is not None and self.use_bias:
-            bias_flat = bias.contiguous()
-            if bias_flat.dtype != torch.bfloat16:
-                bias_flat = bias_flat.to(torch.bfloat16)
-
-        # Write buffers
         self.write_buffer("input", x_flat.numpy())
         self.write_buffer("weight", weight_flat.numpy())
 
-        if bias_flat is not None:
-            self.write_buffer("bias", bias_flat.numpy())
-
-        # Initialize output buffer
         output_np = np.zeros(self.output_size, dtype=bfloat16)
         self.write_buffer("output", output_np)
 
-        # Run kernel
         self.run_runlist()
 
-        # Read result
         result = self.read_buffer_as_torch(
             "output",
             shape=(self.out_channels, self.out_height, self.out_width),
             dtype=bfloat16,
         )
 
+        if self.use_bias and bias is not None:
+            b = bias.contiguous()
+            if b.dtype != torch.bfloat16:
+                b = b.to(torch.bfloat16)
+            result = result + b.reshape(self.out_channels, 1, 1)
+
         return result
 
-    # -------------------------------------------------------------------------
-    # Abstract method implementations required by AIEOperatorBase (post-refactor)
-    # Minimal production fix to enable run_test() + metrics path (and forward).
-    # These provide the modern callable + arg spec interface used by test_utils
-    # and AIEContext high-level paths. Order matches rt.sequence() in design.py
-    # (and dict insertion order in test.py input/output_buffers for bias cases).
-    # -------------------------------------------------------------------------
+    def _host_apply_bias(self, out_buf, bias_buf) -> None:
+        """In-place host bias add on XRT output buffer (bf16).
+
+        Uses to_torch() so any device→host sync performed by the runtime is
+        honored, then writes the summed result back through the mapped ``data``
+        view (verified writable for XRTTensor).
+        """
+        out_t = out_buf.to_torch().reshape(
+            self.out_channels, self.out_height, self.out_width
+        )
+        bias_t = (
+            bias_buf.to_torch().to(dtype=out_t.dtype).reshape(self.out_channels, 1, 1)
+        )
+        summed = (out_t + bias_t).contiguous().reshape(-1)
+        # Convert torch bf16 → numpy bf16 without float32 round-trip when possible.
+        if summed.dtype == torch.bfloat16:
+            np_sum = (
+                summed.detach()
+                .cpu()
+                .view(torch.uint16)
+                .numpy()
+                .view(np.dtype("bfloat16"))
+            )
+        else:
+            np_sum = summed.detach().cpu().numpy().astype(bfloat16, copy=False)
+        out_buf.data.reshape(-1)[:] = np_sum
+        # Critical: to_torch()/numpy() sync FROM device and would wipe host
+        # writes unless we push the biased result back to the device BO.
+        if hasattr(out_buf, "_sync_to_device"):
+            out_buf._sync_to_device()
 
     def get_arg_spec(self):
-        """Return runtime arg specs matching the kernel launch order from design.py.
+        """Runtime arg specs for run_test / high-level path.
 
-        Bias case (rt.sequence order): in, weight, bias, out
-        No-bias: in, weight, out
+        Host-facing order:
+          - with bias: in, weight, bias, out  (bias applied on host after NPU)
+          - without:   in, weight, out
 
-        This also matches the insertion order of input_buffers/output_buffers
-        passed by the metrics test_conv2d and the FORWARD_CASES.
+        NPU instruction sequence is always (in, weight, out); get_callable
+        strips the bias buffer before DefaultNPURuntime.run.
         """
+        # Sizes used by run_test buffer allocation / XRTTensor shapes.
+        input_size = self.in_channels * self.in_height * self.in_width
+        weight_size = (
+            self.out_channels
+            * self.in_channels
+            // self.groups
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
+        output_size = self.out_channels * self.out_height * self.out_width
+        # Cache for legacy paths that read these attributes.
+        self.input_size = input_size
+        self.weight_size = weight_size
+        self.output_size = output_size
+
         specs = [
-            AIERuntimeArgSpec("in", (self.input_size,)),
-            AIERuntimeArgSpec("in", (self.weight_size,)),
+            AIERuntimeArgSpec("in", (input_size,)),
+            AIERuntimeArgSpec("in", (weight_size,)),
         ]
-        if self.use_bias and getattr(self, "bias_size", 0) > 0:
+        if self.use_bias and self.bias_size > 0:
             specs.append(AIERuntimeArgSpec("in", (self.bias_size,)))
-        specs.append(AIERuntimeArgSpec("out", (self.output_size,)))
+        specs.append(AIERuntimeArgSpec("out", (output_size,)))
         return specs
 
     def get_callable(self):
-        """Return a callable that executes the compiled kernel on the NPU.
-
-        Uses the same NPUKernel / DefaultNPURuntime pattern as MLIROperator
-        for compatibility with run_test() buffer passing and XRT execution.
-        The arg order passed at call time must match get_arg_spec().
-        """
-        # Ensure we have the artifacts (caller should have done compile())
+        """Callable that runs NPU conv then optionally applies host-side bias."""
         if self.xclbin_artifact is None or self.insts_artifact is None:
-            # Defensive: set_up_artifacts should have populated via compile()
             self.set_up_artifacts()
         npu_kernel = NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
@@ -421,8 +414,18 @@ class AIEConv2d(AIEOperatorBase):
             insts_path=self.insts_artifact.filename,
         )
         handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+        use_bias = self.use_bias and self.bias_size > 0
 
         def call(*args):
+            if use_bias:
+                if len(args) != 4:
+                    raise ValueError(
+                        f"AIEConv2d with bias expects 4 args (in, weight, bias, out), got {len(args)}"
+                    )
+                in_b, w_b, bias_b, out_b = args
+                result = aie_utils.DefaultNPURuntime.run(handle, [in_b, w_b, out_b])
+                self._host_apply_bias(out_b, bias_b)
+                return result
             return aie_utils.DefaultNPURuntime.run(handle, list(args))
 
         return call

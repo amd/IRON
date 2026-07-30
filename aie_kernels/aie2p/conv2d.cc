@@ -42,7 +42,8 @@ void conv2d_bf16_scalar(bfloat16 *input,
                         int stride_w,
                         int pad_h,
                         int pad_w,
-                        int groups)
+                        int groups,
+                        int apply_bias)
 {
     int channels_per_group = in_channels / groups;
     int out_channels_per_group = out_channels / groups;
@@ -77,7 +78,7 @@ void conv2d_bf16_scalar(bfloat16 *input,
                         }
                     }
 
-                    if (bias != NULL) {
+                    if (apply_bias) {
                         acc += bias[oc];
                     }
 
@@ -115,7 +116,8 @@ void conv2d_bf16_vector(bfloat16 *input,
                         int stride_w,
                         int pad_h,
                         int pad_w,
-                        int groups)
+                        int groups,
+                        int apply_bias)
 {
     constexpr int vec_factor = 16; // AIE2P supports larger vectors
 
@@ -192,7 +194,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                         }
                     }
 
-                    if (bias != NULL) {
+                    if (apply_bias) {
                         acc += bias[oc];
                     }
 
@@ -230,7 +232,8 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                                   int stride_h,
                                   int stride_w,
                                   int pad_h,
-                                  int pad_w)
+                                  int pad_w,
+                                  int apply_bias)
 {
     constexpr int vec_factor = 16;
 
@@ -288,7 +291,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                         }
                     }
 
-                    if (bias != NULL) {
+                    if (apply_bias) {
                         acc += bias[c];
                     }
 
@@ -320,7 +323,8 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
                                   int in_channels,
                                   int out_channels,
                                   int height,
-                                  int width)
+                                  int width,
+                                  int apply_bias)
 {
     constexpr int vec_factor = 16;
 
@@ -354,7 +358,7 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
                     acc += input[((n * in_channels + ic) * height * width) + sp] * weight[oc * in_channels + ic];
                 }
 
-                if (bias != NULL) {
+                if (apply_bias) {
                     acc += bias[oc];
                 }
 
