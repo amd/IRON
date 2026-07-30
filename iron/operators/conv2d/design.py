@@ -51,13 +51,17 @@ Phase D — full-parity remaining work (in progress):
       input L1 (broadcast). Bare asserts → ConstraintError (dilation/groups/
       positive dims/output spatial).
     - Re-validated in ``set_up_artifacts`` after device column clamp.
+    - HW-proven: full-input L1 cannot hold 64×64 activations or fat pointwise
+      32→64@32×32 (aiecc "allocated buffers exceeded"). Those configs raise
+      ConstraintError at construct (no aiecc). Extensive tests ``pytest.skip``
+      on that error (honest unsupported, not silent wrong answers).
 
   D.2 OPEN — On-device packed bias (weights||bias, apply_bias=1) under ≤2
     input DMAs; host path remains default until implemented or measured
     evidence documents host-only as permanent.
 
   D.3 OPEN — Spatial L1 tiling when full input still exceeds budget after
-    OC/channel tiles.
+    OC/channel tiles (would un-skip the D.1 ConstraintError matrix above).
 
   D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
 
@@ -65,8 +69,8 @@ Phase D — full-parity remaining work (in progress):
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). Construct-time L1/col errors are in place (D.1).
-  Extensive multi-col and exotic shapes are best-effort until promoted.
+  (host bias, ≤2 DMA). Construct-time L1/col errors are in place (D.1);
+  oversized spatial/channel configs fail-fast + test-skip until D.3.
   Packed bias and spatial tiling remain open (D.2–D.3).
 ==============================================================================
 """

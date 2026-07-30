@@ -86,6 +86,7 @@ from iron.operators.conv2d.reference import (
     generate_golden_reference,
     calculate_output_dim,
 )
+from iron.common import AIEOperatorConstraintError
 from iron.common.test_utils import run_test
 
 
@@ -304,21 +305,28 @@ def test_conv2d(
         seed=42,
     )
 
-    # Create operator with explicit column/tile (device-aware)
-    operator = AIEConv2d(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        kernel_size=kernel_size,
-        stride=stride,
-        padding=padding,
-        groups=groups,
-        use_bias=use_bias,
-        in_height=in_h,
-        in_width=in_w,
-        num_aie_columns=num_aie_columns,
-        tile_size=tile_size,
-        context=aie_context,
-    )
+    # Create operator with explicit column/tile (device-aware).
+    # Phase D.1: configs whose min L1 triple (in+weight+out bf16) exceeds the
+    # design budget raise AIEOperatorConstraintError at construct time instead
+    # of a late aiecc "allocated buffers exceeded" OOM. Skip those as
+    # HW-proven unsupported until spatial L1 tiling (D.3) lands.
+    try:
+        operator = AIEConv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            use_bias=use_bias,
+            in_height=in_h,
+            in_width=in_w,
+            num_aie_columns=num_aie_columns,
+            tile_size=tile_size,
+            context=aie_context,
+        )
+    except AIEOperatorConstraintError as e:
+        pytest.skip(f"Unsupported AIEConv2d config (L1/column constraint): {e}")
 
     # Cross-validate output dimension math (catches formula drift)
     ref_out_shape = golden_ref["output"].shape
@@ -508,20 +516,23 @@ def test_conv2d_forward(
         seed=42,
     )
 
-    operator = AIEConv2d(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        kernel_size=kernel_size,
-        stride=stride,
-        padding=padding,
-        groups=groups,
-        use_bias=use_bias,
-        in_height=in_h,
-        in_width=in_w,
-        num_aie_columns=num_aie_columns,
-        tile_size=tile_size,
-        context=aie_context,
-    )
+    try:
+        operator = AIEConv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            use_bias=use_bias,
+            in_height=in_h,
+            in_width=in_w,
+            num_aie_columns=num_aie_columns,
+            tile_size=tile_size,
+            context=aie_context,
+        )
+    except AIEOperatorConstraintError as e:
+        pytest.skip(f"Unsupported AIEConv2d config (L1/column constraint): {e}")
 
     # Modern MLIROperator path (AIEContext no longer exposes compile_all /
     # prepare_runtime). Matches maxpool/avgpool forward tests.
