@@ -19,7 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  Test:
+  test_extensive_on_krackan:
+    name: Test Extensive Suite on Krackan
     runs-on: [self-hosted, krackan]
     steps:
       - name: Pull

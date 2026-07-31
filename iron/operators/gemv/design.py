@@ -36,6 +36,7 @@ def my_matvec(
     kernel_object="mv.o",
     func_prefix="",
     verbose=False,
+    epilogue="none",
 ):
     if m_output is None:
         m_output = m_input
@@ -85,6 +86,20 @@ def my_matvec(
         f"{func_prefix}{kernel_object}",
         [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
+    # Optional fused activation over the full m_output C-tile, applied once per tile in core_body
+    # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose m_input
+    # tile can be smaller than the 16-wide activation vector.
+    assert epilogue in ("none", "gelu")
+    gelu_kernel = None
+    if epilogue == "gelu":
+        assert (
+            m_output % 16 == 0
+        ), f"gelu epilogue needs m_output % 16 == 0 (got {m_output})"
+        gelu_kernel = Kernel(
+            f"{func_prefix}gelu_tile_bf16",
+            f"{func_prefix}{kernel_object}",
+            [np.int32, L1_C_ty],
+        )
 
     A_L3L1_fifos = [
         ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
@@ -96,7 +111,7 @@ def my_matvec(
         ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(cols)
     ]
 
-    def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec):
+    def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, gelu_kernel=None):
         one_idx = index.constant(1)
         for _ in range_(0xFFFFFFFF):  # batch dim handled as part of this loop
             b = B_L3L1_fifo.acquire(1)
@@ -110,6 +125,8 @@ def my_matvec(
                     a = A_L3L1_fifo.acquire(1)
                     matvec(m_input, output_row_offset, a, b, c)
                     A_L3L1_fifo.release(1)
+                if gelu_kernel is not None:
+                    gelu_kernel(m_output, c)
                 C_L1L3_fifo.release(1)
             B_L3L1_fifo.release(1)
 
@@ -121,7 +138,8 @@ def my_matvec(
                 B_L3L1_fifos[i].cons(),
                 C_L1L3_fifos[i].prod(),
                 matvec,
-            ],
+            ]
+            + ([gelu_kernel] if epilogue == "gelu" else []),
         )
         for i in range(cols)
     ]
