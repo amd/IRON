@@ -18,7 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  Test:
+  test_small_on_phoenix:
+    name: Test Small Suite on Phoenix
     runs-on: [self-hosted, phoenix]
     steps:
       - name: Pull

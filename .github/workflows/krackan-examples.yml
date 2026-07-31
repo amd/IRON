@@ -16,7 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  Test:
+  test_examples_on_krackan:
+    name: Test Examples on Krackan
     runs-on: [self-hosted, krackan]
     steps:
       - name: Checkout
