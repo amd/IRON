@@ -19,7 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  Test:
+  test_extensive_on_phoenix:
+    name: Test Extensive Suite on Phoenix
     runs-on: [self-hosted, phoenix]
     steps:
       - name: Pull
