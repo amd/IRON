@@ -9,8 +9,8 @@
 # CUDA build served from PyPI. We therefore also pin torch to the "+cpu" local
 # version below, which is only available from the PyTorch CPU index.
 --index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
---extra-index-url https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
+--find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
+--find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
 mlir_aie==1.3.5.dev20+g167f34d
