@@ -28,7 +28,6 @@ def get_params():
     ]
 
 
-@pytest.mark.skip(reason="Temporarily disabled")
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
