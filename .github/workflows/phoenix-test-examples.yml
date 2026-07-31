@@ -10,13 +10,15 @@ on:
     branches:
       - main
       - devel
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  Test:
+  test_examples_on_phoenix:
+    name: Test Examples on Phoenix
     runs-on: [self-hosted, phoenix]
     steps:
       - name: Checkout
