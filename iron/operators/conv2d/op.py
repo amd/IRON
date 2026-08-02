@@ -50,7 +50,9 @@ from iron.operators.conv2d.design import (
     _BYTES_PER_BF16,
     _L1_TRIPLE_BUDGET_BYTES,
     _choose_channel_tile,
+    _choose_h_tile_pointwise,
     _choose_oc_tile,
+    _l1_triple_fits,
     _resolve_num_columns,
 )
 
@@ -212,12 +214,12 @@ class AIEConv2d(AIEOperatorBase):
     def _validate_l1_fit(self, num_columns: int) -> None:
         """Raise if the design's L1 triple (in+weight+out, bf16) cannot fit.
 
-        Mirrors design.py Phase A tile selection: groups==1 OC-tiles with full
-        input in L1; depthwise channel-tiles; other groups require full tensors.
-        Multi-column OC/channel split does not reduce full-input L1 for
-        groups==1 (input is broadcast per column). Spatial tiling is not yet
-        implemented — configs that still exceed budget fail here with a clear
-        message instead of a late device/compile OOM.
+        Mirrors design.py Phase A/D.3 tile selection: groups==1 OC-tiles with
+        full input in L1, or pointwise H-strip spatial tiles when full input
+        exceeds budget; depthwise channel-tiles; other groups require full
+        tensors. Multi-column OC/channel split does not reduce full-input L1
+        for groups==1 (input is broadcast per column). Configs that still
+        exceed budget (e.g. large k>1 without halo-aware spatial) fail here.
         """
         n = 1  # MLIR is specialized for N=1; batch is looped on host.
         in_spatial = self.in_height * self.in_width
@@ -231,6 +233,11 @@ class AIEConv2d(AIEOperatorBase):
         budget = _L1_TRIPLE_BUDGET_BYTES
         bpe = _BYTES_PER_BF16
         cols = max(1, int(num_columns))
+        is_pointwise = (
+            (not self.is_depthwise)
+            and self.kernel_size[0] == 1
+            and self.kernel_size[1] == 1
+        )
 
         if self.is_depthwise:
             c_per_col = self.in_channels // cols
@@ -257,25 +264,63 @@ class AIEConv2d(AIEOperatorBase):
             oc_tile = _choose_oc_tile(
                 oc_per_col, input_size, weight_per_oc, out_spatial, budget
             )
-            tile_elems = input_size + oc_tile * weight_per_oc + oc_tile * out_spatial
-            if tile_elems * bpe > budget:
-                need = tile_elems * bpe
-                # Full input alone often dominates; call that out explicitly.
-                input_bytes = input_size * bpe
-                raise AIEOperatorConstraintError(
-                    f"AIEConv2d L1 footprint exceeds budget: "
-                    f"min OC tile needs ~{need} bytes "
-                    f"(budget {_L1_TRIPLE_BUDGET_BYTES} bytes; "
-                    f"full input alone is {input_bytes} bytes). "
-                    f"Config: IC={self.in_channels}, OC={self.out_channels}, "
-                    f"spatial={self.in_height}x{self.in_width}→"
-                    f"{self.out_height}x{self.out_width}, "
-                    f"kernel={self.kernel_size}, cols={cols}. "
-                    f"Note: multi-column OC split does not reduce input L1 "
-                    f"(input is broadcast per column). "
-                    f"Reduce spatial size/channels or wait for spatial L1 tiling."
+            full_fits = _l1_triple_fits(
+                input_size,
+                oc_tile * weight_per_oc,
+                n * oc_tile * out_spatial,
+                budget,
+            )
+            if full_fits:
+                return
+
+            # D.3: pointwise H-strip can still fit when full input does not.
+            # Prefer full oc_per_col per strip (num_oc_tiles=1; no DMA stride-0).
+            if is_pointwise:
+                tile_h = _choose_h_tile_pointwise(
+                    self.in_height,
+                    self.in_channels,
+                    self.in_width,
+                    oc_per_col,
+                    weight_per_oc,
+                    budget,
                 )
-            return
+                in_tile = n * self.in_channels * tile_h * self.in_width
+                out_tile_sp = tile_h * self.out_width
+                if _l1_triple_fits(
+                    in_tile,
+                    oc_per_col * weight_per_oc,
+                    n * oc_per_col * out_tile_sp,
+                    budget,
+                ):
+                    return
+                need = (
+                    in_tile + oc_per_col * weight_per_oc + n * oc_per_col * out_tile_sp
+                ) * bpe
+                raise AIEOperatorConstraintError(
+                    f"AIEConv2d pointwise L1 footprint exceeds budget even with "
+                    f"H-strip spatial tiling (full OC/col): needs ~{need} bytes "
+                    f"(budget {_L1_TRIPLE_BUDGET_BYTES}; tile_h={tile_h}). "
+                    f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+                    f"spatial={self.in_height}x{self.in_width}, cols={cols}."
+                )
+
+            need = (
+                input_size + oc_tile * weight_per_oc + n * oc_tile * out_spatial
+            ) * bpe
+            input_bytes = input_size * bpe
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d L1 footprint exceeds budget: "
+                f"min OC tile needs ~{need} bytes "
+                f"(budget {_L1_TRIPLE_BUDGET_BYTES} bytes; "
+                f"full input alone is {input_bytes} bytes). "
+                f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+                f"spatial={self.in_height}x{self.in_width}→"
+                f"{self.out_height}x{self.out_width}, "
+                f"kernel={self.kernel_size}, cols={cols}. "
+                f"Note: multi-column OC split does not reduce input L1 "
+                f"(input is broadcast per column). "
+                f"k>1 spatial (halo) tiling not yet implemented (D.3 remainder)."
+            )
 
         # Non-depthwise grouped: design uses full tensors, 1-col only.
         weight_size = self.out_channels * weight_per_oc

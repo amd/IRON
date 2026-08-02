@@ -7,7 +7,7 @@ MLIR Generation for 2D Convolution Operator
 Generates MLIR code for conv2d operations on AIE2 (NPU) and AIE2P (NPU2).
 
 ==============================================================================
-MODELING STATUS (Phase A–C MVP + Phase D.1 construction hardening)
+MODELING STATUS (Phase A–C MVP + Phase D.1 + D.3 partial spatial)
 ==============================================================================
 DMA legality (hard):
   Each AIE compute tile has only **2 input DMA channels**. Designs must attach
@@ -51,17 +51,26 @@ Phase D — full-parity remaining work (in progress):
       input L1 (broadcast). Bare asserts → ConstraintError (dilation/groups/
       positive dims/output spatial).
     - Re-validated in ``set_up_artifacts`` after device column clamp.
-    - HW-proven: full-input L1 cannot hold 64×64 activations or fat pointwise
-      32→64@32×32 (aiecc "allocated buffers exceeded"). Those configs raise
-      ConstraintError at construct (no aiecc). Extensive tests ``pytest.skip``
-      on that error (honest unsupported, not silent wrong answers).
 
   D.2 OPEN — On-device packed bias (weights||bias, apply_bias=1) under ≤2
     input DMAs; host path remains default until implemented or measured
     evidence documents host-only as permanent.
 
-  D.3 OPEN — Spatial L1 tiling when full input still exceeds budget after
-    OC/channel tiles (would un-skip the D.1 ConstraintError matrix above).
+  D.3 PARTIAL — Spatial L1 tiling when full input exceeds budget after OC tiles:
+    - DONE (pointwise only): **H-strip** tiling for groups==1 + k=1 (no halo).
+      When full-input L1 does not fit, choose largest ``tile_h | H`` such that
+      **full oc_per_col** fits (num_oc_tiles==1; avoids combined OC×spatial).
+      Worker iterations = num_spatial; multi-dim NCHW strip TAPs for in/out with
+      **leading size=1** so aiex does not treat the strip count as
+      repeat_count (transfer_len=prod(sizes[-3:])); weights rebroadcast with
+      leading num_spatial + stride 0 (Phase A pattern). Kernel ABI unchanged
+      (pointwise height=tile_h). HW-green: fat pointwise 32→64 @32×32 and
+      @64×64 (1–8c, bias/nobias).
+    - OPEN: standard k>1 (halo/pad-aware spatial), OC×spatial without illegal
+      mid-stride-0 rebroadcast, depthwise spatial if needed, W-strip/2D tiles,
+      non-depthwise groups>1.
+    - Still CE + extensive skip: large k3 / groups=2 shapes where min tile
+      cannot fit without halo-aware spatial (e.g. 16→16@64×64 k3).
 
   D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
 
@@ -69,9 +78,8 @@ Phase D — full-parity remaining work (in progress):
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). Construct-time L1/col errors are in place (D.1);
-  oversized spatial/channel configs fail-fast + test-skip until D.3.
-  Packed bias and spatial tiling remain open (D.2–D.3).
+  (host bias, ≤2 DMA). D.3 pointwise H-strip is implemented; k>1 spatial and
+  packed bias remain open (D.2 / D.3 remainder).
 ==============================================================================
 """
 
@@ -142,6 +150,55 @@ def _choose_channel_tile(
         return elems * _BYTES_PER_BF16 <= l1_budget_bytes
 
     return _largest_divisor_fit(channels, fits)
+
+
+def _choose_h_tile_pointwise(
+    height: int,
+    in_channels: int,
+    width: int,
+    oc_per_col: int,
+    weight_per_oc: int,
+    l1_budget_bytes: int = _L1_TRIPLE_BUDGET_BYTES,
+) -> int:
+    """Largest ``tile_h | height`` so the full ``oc_per_col`` triple fits.
+
+    Prefers **num_oc_tiles=1** with H-strip spatial only. AIE DMA BDs require
+    positive strides, so we avoid multi-dim rebroadcast (stride 0) of input
+    across OC tiles or weights across spatial tiles.
+
+    Pointwise: in = IC*th*W, weight = oc_per_col*weight_per_oc, out = oc*th*W.
+    Falls back to largest th where at least OC=1 fits (caller may still CE).
+    """
+
+    def fits_full_oc(th: int) -> bool:
+        elems = (
+            in_channels * th * width
+            + oc_per_col * weight_per_oc
+            + oc_per_col * th * width
+        )
+        return elems * _BYTES_PER_BF16 <= l1_budget_bytes
+
+    th = _largest_divisor_fit(height, fits_full_oc)
+    if fits_full_oc(th):
+        return th
+
+    def fits_min_oc(th: int) -> bool:
+        elems = in_channels * th * width + weight_per_oc + th * width
+        return elems * _BYTES_PER_BF16 <= l1_budget_bytes
+
+    return _largest_divisor_fit(height, fits_min_oc)
+
+
+def _l1_triple_fits(
+    input_elems: int,
+    weight_elems: int,
+    output_elems: int,
+    l1_budget_bytes: int = _L1_TRIPLE_BUDGET_BYTES,
+) -> bool:
+    """True if in+weight+out (bf16) fit the L1 triple budget."""
+    return (
+        input_elems + weight_elems + output_elems
+    ) * _BYTES_PER_BF16 <= l1_budget_bytes
 
 
 def _resolve_num_columns(
@@ -235,8 +292,13 @@ def my_conv2d(
     # --- Phase A tile selection (per column) + Phase B split sizes -------------
     # rebroadcast_input: full input OF packet, repeated per tile (groups==1).
     # depthwise_split: per-col channel blocks for in/w/out (no full-input broadcast).
+    # spatial_h_tiling: D.3 pointwise H-strip when full input exceeds L1.
     rebroadcast_input = False
     depthwise_split = False
+    spatial_h_tiling = False
+    tile_h = in_height
+    num_spatial = 1
+    num_oc_tiles = 1
     # Per-column tensor footprints for TAPs (bytes/elems along OC or channel axis).
     weight_elems_per_col = weight_size
     output_elems_per_col = output_size
@@ -249,6 +311,7 @@ def my_conv2d(
         if c_per_col % c_tile != 0:
             c_tile = c_per_col
         num_tiles = c_per_col // c_tile
+        num_oc_tiles = num_tiles
         input_tile_elems = N * c_tile * in_spatial
         weight_tile_elems = c_tile * weight_per_oc
         output_tile_elems = N * c_tile * out_spatial
@@ -260,15 +323,69 @@ def my_conv2d(
         output_elems_per_col = N * c_per_col * out_spatial
     elif groups == 1:
         # Phase B: OC split across columns; Phase A OC tile within col.
+        # D.3: if full input still OOMs L1 and this is pointwise, H-strip tile.
         oc_per_col = out_channels // num_columns
         oc_tile = _choose_oc_tile(oc_per_col, input_size, weight_per_oc, out_spatial)
         if oc_per_col % oc_tile != 0:
             oc_tile = oc_per_col
-        num_tiles = oc_per_col // oc_tile
-        input_tile_elems = input_size
-        weight_tile_elems = oc_tile * weight_per_oc
-        output_tile_elems = N * oc_tile * out_spatial
-        rebroadcast_input = num_tiles > 1
+        full_fits = _l1_triple_fits(
+            input_size, oc_tile * weight_per_oc, N * oc_tile * out_spatial
+        )
+        if (not full_fits) and is_pointwise:
+            # Pointwise H-strip (D.3): prefer full oc_per_col in L1 (num_oc=1)
+            # so TAPs need no stride-0 rebroadcast (illegal on aie.dma_bd).
+            tile_h = _choose_h_tile_pointwise(
+                in_height, in_channels, in_width, oc_per_col, weight_per_oc
+            )
+            if in_height % tile_h != 0:
+                tile_h = in_height
+            num_spatial = max(1, in_height // tile_h)
+            in_tile_elems_base = N * in_channels * tile_h * in_width
+            out_tile_sp = tile_h * out_width
+            # Prefer full OC block when it fits with this tile_h.
+            if _l1_triple_fits(
+                in_tile_elems_base,
+                oc_per_col * weight_per_oc,
+                N * oc_per_col * out_tile_sp,
+            ):
+                oc_tile = oc_per_col
+            else:
+                oc_tile = _choose_oc_tile(
+                    oc_per_col, in_tile_elems_base, weight_per_oc, out_tile_sp
+                )
+                if oc_per_col % oc_tile != 0:
+                    oc_tile = oc_per_col
+            num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
+            # Only enable multi-dim spatial TAPs when pure H-strip (no OC
+            # rebroadcast). Combined OC×spatial needs nested acquire (future).
+            if num_oc_tiles != 1:
+                # Cannot legally TAP-rebroadcast; keep full-input path (will
+                # OOM at aiecc) — op._validate_l1_fit CEs when min tile fails.
+                tile_h = in_height
+                num_spatial = 1
+                oc_tile = _choose_oc_tile(
+                    oc_per_col, input_size, weight_per_oc, out_spatial
+                )
+                if oc_per_col % oc_tile != 0:
+                    oc_tile = oc_per_col
+                input_tile_elems = input_size
+                weight_tile_elems = oc_tile * weight_per_oc
+                output_tile_elems = N * oc_tile * out_spatial
+                spatial_h_tiling = False
+            else:
+                spatial_h_tiling = num_spatial > 1
+                input_tile_elems = in_tile_elems_base
+                weight_tile_elems = oc_tile * weight_per_oc
+                output_tile_elems = N * oc_tile * out_tile_sp
+        else:
+            input_tile_elems = input_size
+            weight_tile_elems = oc_tile * weight_per_oc
+            output_tile_elems = N * oc_tile * out_spatial
+
+        num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
+        num_tiles = num_spatial * num_oc_tiles
+        if not spatial_h_tiling:
+            rebroadcast_input = num_oc_tiles > 1
         kernel_channels = in_channels
         weight_elems_per_col = oc_per_col * weight_per_oc
         output_elems_per_col = N * oc_per_col * out_spatial
@@ -334,13 +451,13 @@ def my_conv2d(
             apply_bias,
         ]
     elif kernel_name == "pointwise_conv2d_bf16_vector":
-        # Mini pointwise over oc_tile out-channels.
+        # Mini pointwise over oc_tile out-channels; height may be H-strip (D.3).
         kernel_int_types = [np.int32] * 6
         kernel_call_scalars = [
             N,
             in_channels,
             oc_tile,
-            in_height,
+            tile_h,
             in_width,
             apply_bias,
         ]
@@ -376,6 +493,8 @@ def my_conv2d(
 
     def core_body(of_in, of_w, of_out, conv_kernel):
         # One mini-conv per tile (num_tiles==1 => single full-tensor iter).
+        # Spatial H-strip: num_tiles == num_spatial (num_oc_tiles==1); weights
+        # rebroadcast via outermost TAP dim stride 0 (legal Phase A pattern).
         for _ in range_(num_tiles):
             elem_in = of_in.acquire(1)
             elem_w = of_w.acquire(1)
@@ -401,13 +520,68 @@ def my_conv2d(
     ]
 
     # --- TAPs: Phase B per-column offsets; Phase A multi-packet within col -----
-    if depthwise_split:
+    if spatial_h_tiling:
+        # D.3 pointwise H-strip, num_oc_tiles==1.
+        # CRITICAL (aiex.shim_dma_single_bd_task): sizes[0] becomes
+        # repeat_count=sizes[0]-1 and transfer_len=prod(sizes[-3:]).
+        # For strided multi-packet, put a leading 1 so repeat_count=0 and
+        # transfer_len covers all strips (one BD, no BD-ID blowup).
+        # Weight rebroadcast uses leading num_spatial + stride 0 (same as
+        # Phase A full-input rebroadcast).
+        strip_elems = tile_h * in_width
+        out_strip = tile_h * out_width
+        input_taps = [
+            TensorAccessPattern(
+                (1, input_size),
+                0,
+                [1, num_spatial, in_channels, strip_elems],
+                [0, strip_elems, in_height * in_width, 1],
+            )
+            for _ in range(num_columns)
+        ]
+        weight_taps = [
+            TensorAccessPattern(
+                (1, weight_size),
+                i * weight_elems_per_col,
+                [num_spatial, 1, 1, weight_tile_elems],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+        output_taps = [
+            TensorAccessPattern(
+                (1, output_size),
+                i * output_elems_per_col,
+                [1, num_spatial, oc_tile, out_strip],
+                [0, out_strip, out_height * out_width, 1],
+            )
+            for i in range(num_columns)
+        ]
+    elif depthwise_split:
         # Channel blocks: in/w/out all offset by column * elems_per_col.
         input_taps = [
             TensorAccessPattern(
                 (1, input_size),
                 i * input_elems_per_col,
                 [1, 1, 1, input_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+        weight_taps = [
+            TensorAccessPattern(
+                (1, weight_size),
+                i * weight_elems_per_col,
+                [1, 1, 1, weight_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+        output_taps = [
+            TensorAccessPattern(
+                (1, output_size),
+                i * output_elems_per_col,
+                [1, 1, 1, output_elems_per_col],
                 [0, 0, 0, 1],
             )
             for i in range(num_columns)
@@ -423,6 +597,24 @@ def my_conv2d(
             )
             for _ in range(num_columns)
         ]
+        weight_taps = [
+            TensorAccessPattern(
+                (1, weight_size),
+                i * weight_elems_per_col,
+                [1, 1, 1, weight_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+        output_taps = [
+            TensorAccessPattern(
+                (1, output_size),
+                i * output_elems_per_col,
+                [1, 1, 1, output_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
     else:
         # Single full-input transfer per column (num_tiles==1 groups==1 or grouped).
         input_taps = [
@@ -434,25 +626,24 @@ def my_conv2d(
             )
             for _ in range(num_columns)
         ]
-
-    weight_taps = [
-        TensorAccessPattern(
-            (1, weight_size),
-            i * weight_elems_per_col,
-            [1, 1, 1, weight_elems_per_col],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_columns)
-    ]
-    output_taps = [
-        TensorAccessPattern(
-            (1, output_size),
-            i * output_elems_per_col,
-            [1, 1, 1, output_elems_per_col],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_columns)
-    ]
+        weight_taps = [
+            TensorAccessPattern(
+                (1, weight_size),
+                i * weight_elems_per_col,
+                [1, 1, 1, weight_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
+        output_taps = [
+            TensorAccessPattern(
+                (1, output_size),
+                i * output_elems_per_col,
+                [1, 1, 1, output_elems_per_col],
+                [0, 0, 0, 1],
+            )
+            for i in range(num_columns)
+        ]
 
     rt = Runtime()
     # Always 3 host buffers: in, weight, out. Bias is host-side (op.py).
