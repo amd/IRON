@@ -57,7 +57,7 @@ Phase D — full-parity remaining work (in progress):
     evidence documents host-only as permanent.
 
   D.3 PARTIAL — Spatial L1 tiling when full input exceeds budget after OC tiles:
-    - DONE (pointwise only): **H-strip** tiling for groups==1 + k=1 (no halo).
+    - DONE (pointwise): **H-strip** tiling for groups==1 + k=1 (no halo).
       When full-input L1 does not fit, choose largest ``tile_h | H`` such that
       **full oc_per_col** fits (num_oc_tiles==1; avoids combined OC×spatial).
       Worker iterations = num_spatial; multi-dim NCHW strip TAPs for in/out with
@@ -66,11 +66,21 @@ Phase D — full-parity remaining work (in progress):
       leading num_spatial + stride 0 (Phase A pattern). Kernel ABI unchanged
       (pointwise height=tile_h). HW-green: fat pointwise 32→64 @32×32 and
       @64×64 (1–8c, bias/nobias).
-    - OPEN: standard k>1 (halo/pad-aware spatial), OC×spatial without illegal
-      mid-stride-0 rebroadcast, depthwise spatial if needed, W-strip/2D tiles,
-      non-depthwise groups>1.
-    - Still CE + extensive skip: large k3 / groups=2 shapes where min tile
-      cannot fit without halo-aware spatial (e.g. 16→16@64×64 k3).
+    - DONE (standard k>1, groups==1): **halo-aware H-strip** via host zero-pad.
+      When full-input L1 does not fit: host pads input to (H+2ph)×(W+2pw);
+      design L3 input is the padded tensor; kernel runs with pad_h=pad_w=0 and
+      fixed receptive-field strip height
+      ``in_h_tile = (tile_oh-1)*stride_h + kernel_h`` for output strips of
+      height ``tile_oh | out_height`` (prefer full oc_per_col, num_oc_tiles==1).
+      Overlapping input TAP stride = ``tile_oh * stride_h * padded_w``. Same
+      leading-size=1 multi-dim pattern as pointwise. Kernel ABI unchanged.
+      Enables e.g. 16→16 k3@64×64 and strided k3@64 that previously CE'd on
+      full input (~128 KiB) alone.
+    - OPEN: OC×spatial without illegal mid-stride-0 rebroadcast, depthwise
+      spatial if needed, W-strip/2D tiles, non-depthwise groups>1.
+    - Still CE + extensive skip: groups=2 (non-depthwise) full-tensor L1;
+      k>1 H-strip when strip dims are not 4-byte DMA-aligned (e.g. odd OW=31
+      from s2 p0 with only odd tile_oh divisors).
 
   D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
 
@@ -78,8 +88,8 @@ Phase D — full-parity remaining work (in progress):
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). D.3 pointwise H-strip is implemented; k>1 spatial and
-  packed bias remain open (D.2 / D.3 remainder).
+  (host bias, ≤2 DMA). D.3 pointwise + groups==1 k>1 host-pad H-strip are
+  implemented; packed bias and groups>1 non-DW spatial remain open.
 ==============================================================================
 """
 
@@ -189,6 +199,50 @@ def _choose_h_tile_pointwise(
     return _largest_divisor_fit(height, fits_min_oc)
 
 
+def _rf_in_h(tile_oh: int, stride_h: int, kernel_h: int) -> int:
+    """Input rows needed for ``tile_oh`` output rows (pad=0, fixed RF)."""
+    return (max(1, tile_oh) - 1) * stride_h + kernel_h
+
+
+def _choose_h_tile_standard(
+    out_height: int,
+    in_channels: int,
+    padded_w: int,
+    oc_per_col: int,
+    weight_per_oc: int,
+    out_width: int,
+    kernel_h: int,
+    stride_h: int,
+    l1_budget_bytes: int = _L1_TRIPLE_BUDGET_BYTES,
+) -> int:
+    """Largest ``tile_oh | out_height`` so full ``oc_per_col`` RF triple fits.
+
+    Host-padded k>1 path: input strip height =
+    ``(tile_oh-1)*stride_h + kernel_h``, width = padded_w, pad=0 in kernel.
+    Prefers num_oc_tiles=1 (same DMA constraint as pointwise H-strip).
+    """
+
+    def fits_full_oc(toh: int) -> bool:
+        ih = _rf_in_h(toh, stride_h, kernel_h)
+        elems = (
+            in_channels * ih * padded_w
+            + oc_per_col * weight_per_oc
+            + oc_per_col * toh * out_width
+        )
+        return elems * _BYTES_PER_BF16 <= l1_budget_bytes
+
+    th = _largest_divisor_fit(out_height, fits_full_oc)
+    if fits_full_oc(th):
+        return th
+
+    def fits_min_oc(toh: int) -> bool:
+        ih = _rf_in_h(toh, stride_h, kernel_h)
+        elems = in_channels * ih * padded_w + weight_per_oc + toh * out_width
+        return elems * _BYTES_PER_BF16 <= l1_budget_bytes
+
+    return _largest_divisor_fit(out_height, fits_min_oc)
+
+
 def _l1_triple_fits(
     input_elems: int,
     weight_elems: int,
@@ -292,11 +346,16 @@ def my_conv2d(
     # --- Phase A tile selection (per column) + Phase B split sizes -------------
     # rebroadcast_input: full input OF packet, repeated per tile (groups==1).
     # depthwise_split: per-col channel blocks for in/w/out (no full-input broadcast).
-    # spatial_h_tiling: D.3 pointwise H-strip when full input exceeds L1.
+    # spatial_h_tiling: D.3 H-strip when full input exceeds L1 (pointwise or k>1).
+    # spatial_halo_pad: k>1 host-padded RF strips (kernel pad=0; L3 input padded).
     rebroadcast_input = False
     depthwise_split = False
     spatial_h_tiling = False
-    tile_h = in_height
+    spatial_halo_pad = False
+    tile_h = in_height  # output strip height when spatial; else full in/out H
+    in_h_tile = in_height  # input strip height (RF size when spatial_halo_pad)
+    padded_h = in_height
+    padded_w = in_width
     num_spatial = 1
     num_oc_tiles = 1
     # Per-column tensor footprints for TAPs (bytes/elems along OC or channel axis).
@@ -323,7 +382,7 @@ def my_conv2d(
         output_elems_per_col = N * c_per_col * out_spatial
     elif groups == 1:
         # Phase B: OC split across columns; Phase A OC tile within col.
-        # D.3: if full input still OOMs L1 and this is pointwise, H-strip tile.
+        # D.3: if full input still OOMs L1 → pointwise H-strip or k>1 host-pad RF.
         oc_per_col = out_channels // num_columns
         oc_tile = _choose_oc_tile(oc_per_col, input_size, weight_per_oc, out_spatial)
         if oc_per_col % oc_tile != 0:
@@ -340,6 +399,7 @@ def my_conv2d(
             if in_height % tile_h != 0:
                 tile_h = in_height
             num_spatial = max(1, in_height // tile_h)
+            in_h_tile = tile_h
             in_tile_elems_base = N * in_channels * tile_h * in_width
             out_tile_sp = tile_h * out_width
             # Prefer full OC block when it fits with this tile_h.
@@ -362,6 +422,7 @@ def my_conv2d(
                 # Cannot legally TAP-rebroadcast; keep full-input path (will
                 # OOM at aiecc) — op._validate_l1_fit CEs when min tile fails.
                 tile_h = in_height
+                in_h_tile = in_height
                 num_spatial = 1
                 oc_tile = _choose_oc_tile(
                     oc_per_col, input_size, weight_per_oc, out_spatial
@@ -377,6 +438,87 @@ def my_conv2d(
                 input_tile_elems = in_tile_elems_base
                 weight_tile_elems = oc_tile * weight_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
+        elif not full_fits:
+            # Standard k>1 H-strip (D.3): host zero-pads to (H+2ph)×(W+2pw);
+            # kernel pad=0 with fixed RF strip height; overlapping input TAPs.
+            padded_h = in_height + 2 * pad_h
+            padded_w = in_width + 2 * pad_w
+            tile_oh = _choose_h_tile_standard(
+                out_height,
+                in_channels,
+                padded_w,
+                oc_per_col,
+                weight_per_oc,
+                out_width,
+                kernel_h,
+                stride_h,
+            )
+            if out_height % tile_oh != 0:
+                tile_oh = out_height
+            num_spatial = max(1, out_height // tile_oh)
+            in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
+            # Last strip must stay inside padded H (true when
+            # (padded_h - kernel_h) % stride_h == 0; else may need clamp —
+            # extensive matrix cases satisfy the identity OH formula).
+            last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
+            in_tile_elems_base = N * in_channels * in_h_tile * padded_w
+            out_tile_sp = tile_oh * out_width
+            if _l1_triple_fits(
+                in_tile_elems_base,
+                oc_per_col * weight_per_oc,
+                N * oc_per_col * out_tile_sp,
+            ):
+                oc_tile = oc_per_col
+            else:
+                oc_tile = _choose_oc_tile(
+                    oc_per_col, in_tile_elems_base, weight_per_oc, out_tile_sp
+                )
+                if oc_per_col % oc_tile != 0:
+                    oc_tile = oc_per_col
+            num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
+            # aie.dma_bd: each transfer size dim must be a multiple of 4 bytes.
+            # bf16 ⇒ even element counts. Odd out_width with odd tile_oh (e.g.
+            # s2 p0 → OW=31, only toh∈{1,31}) cannot form a legal H-strip TAP.
+            out_strip_elems = tile_oh * out_width
+            in_strip_elems = in_h_tile * padded_w
+            dma_aligned = (out_strip_elems % 2 == 0) and (in_strip_elems % 2 == 0)
+            can_spatial = (
+                num_oc_tiles == 1
+                and num_spatial > 1
+                and last_end <= padded_h
+                and dma_aligned
+                and _l1_triple_fits(
+                    in_tile_elems_base,
+                    oc_tile * weight_per_oc,
+                    N * oc_tile * out_tile_sp,
+                )
+            )
+            if can_spatial:
+                spatial_h_tiling = True
+                spatial_halo_pad = True
+                tile_h = tile_oh
+                input_tile_elems = in_tile_elems_base
+                weight_tile_elems = oc_tile * weight_per_oc
+                output_tile_elems = N * oc_tile * out_tile_sp
+                # L3 host buffer is the padded tensor (op.py pads before NPU).
+                input_size = N * in_channels * padded_h * padded_w
+                input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
+            else:
+                tile_h = out_height
+                in_h_tile = in_height
+                num_spatial = 1
+                padded_h = in_height
+                padded_w = in_width
+                oc_tile = _choose_oc_tile(
+                    oc_per_col, input_size, weight_per_oc, out_spatial
+                )
+                if oc_per_col % oc_tile != 0:
+                    oc_tile = oc_per_col
+                input_tile_elems = input_size
+                weight_tile_elems = oc_tile * weight_per_oc
+                output_tile_elems = N * oc_tile * out_spatial
+                spatial_h_tiling = False
+                spatial_halo_pad = False
         else:
             input_tile_elems = input_size
             weight_tile_elems = oc_tile * weight_per_oc
@@ -463,21 +605,27 @@ def my_conv2d(
         ]
     else:
         # Standard mini-conv: out_channels = oc_tile when groups==1 tiled.
+        # Halo H-strip: strip-local spatial dims + pad=0 (host supplies pad).
+        k_in_h = in_h_tile if spatial_halo_pad else in_height
+        k_in_w = padded_w if spatial_halo_pad else in_width
+        k_out_h = tile_h if spatial_halo_pad else out_height
+        k_pad_h = 0 if spatial_halo_pad else pad_h
+        k_pad_w = 0 if spatial_halo_pad else pad_w
         kernel_int_types = [np.int32] * 15
         kernel_call_scalars = [
             N,
             in_channels,
-            in_height,
-            in_width,
+            k_in_h,
+            k_in_w,
             oc_tile,
-            out_height,
+            k_out_h,
             out_width,
             kernel_h,
             kernel_w,
             stride_h,
             stride_w,
-            pad_h,
-            pad_w,
+            k_pad_h,
+            k_pad_w,
             groups,
             apply_bias,
         ]
@@ -521,21 +669,30 @@ def my_conv2d(
 
     # --- TAPs: Phase B per-column offsets; Phase A multi-packet within col -----
     if spatial_h_tiling:
-        # D.3 pointwise H-strip, num_oc_tiles==1.
+        # D.3 H-strip (pointwise or k>1 host-pad RF), num_oc_tiles==1.
         # CRITICAL (aiex.shim_dma_single_bd_task): sizes[0] becomes
         # repeat_count=sizes[0]-1 and transfer_len=prod(sizes[-3:]).
         # For strided multi-packet, put a leading 1 so repeat_count=0 and
         # transfer_len covers all strips (one BD, no BD-ID blowup).
         # Weight rebroadcast uses leading num_spatial + stride 0 (same as
         # Phase A full-input rebroadcast).
-        strip_elems = tile_h * in_width
+        if spatial_halo_pad:
+            # Overlapping RF strips on host-padded NCHW: step tile_oh * sh rows.
+            strip_elems = in_h_tile * padded_w
+            strip_step = tile_h * stride_h * padded_w
+            ch_plane = padded_h * padded_w
+        else:
+            # Pointwise: non-overlapping equal in/out H strips.
+            strip_elems = tile_h * in_width
+            strip_step = strip_elems
+            ch_plane = in_height * in_width
         out_strip = tile_h * out_width
         input_taps = [
             TensorAccessPattern(
                 (1, input_size),
                 0,
                 [1, num_spatial, in_channels, strip_elems],
-                [0, strip_elems, in_height * in_width, 1],
+                [0, strip_step, ch_plane, 1],
             )
             for _ in range(num_columns)
         ]

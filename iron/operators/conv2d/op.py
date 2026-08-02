@@ -51,9 +51,11 @@ from iron.operators.conv2d.design import (
     _L1_TRIPLE_BUDGET_BYTES,
     _choose_channel_tile,
     _choose_h_tile_pointwise,
+    _choose_h_tile_standard,
     _choose_oc_tile,
     _l1_triple_fits,
     _resolve_num_columns,
+    _rf_in_h,
 )
 
 
@@ -211,15 +213,129 @@ class AIEConv2d(AIEOperatorBase):
 
         AIEOperatorBase.__init__(self, context=context)
 
+    def _is_pointwise(self) -> bool:
+        return (
+            (not self.is_depthwise)
+            and self.kernel_size[0] == 1
+            and self.kernel_size[1] == 1
+        )
+
+    def _uses_halo_spatial_tiling(self, num_columns: Optional[int] = None) -> bool:
+        """True when design enables k>1 host-pad H-strip (groups==1).
+
+        Mirrors design.py: full-input L1 does not fit, not pointwise/depthwise,
+        and a pure H-strip (num_oc_tiles==1, num_spatial>1) RF triple fits.
+        """
+        if self.is_depthwise or self.groups != 1 or self._is_pointwise():
+            return False
+        n = 1
+        cols = max(
+            1,
+            int(num_columns if num_columns is not None else self.effective_num_columns),
+        )
+        in_spatial = self.in_height * self.in_width
+        out_spatial = self.out_height * self.out_width
+        weight_per_oc = (
+            (self.in_channels // self.groups)
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
+        input_size = n * self.in_channels * in_spatial
+        budget = _L1_TRIPLE_BUDGET_BYTES
+        oc_per_col = self.out_channels // cols
+        if oc_per_col <= 0:
+            return False
+        oc_tile = _choose_oc_tile(
+            oc_per_col, input_size, weight_per_oc, out_spatial, budget
+        )
+        if _l1_triple_fits(
+            input_size,
+            oc_tile * weight_per_oc,
+            n * oc_tile * out_spatial,
+            budget,
+        ):
+            return False
+        ph, pw = self.padding
+        padded_h = self.in_height + 2 * ph
+        padded_w = self.in_width + 2 * pw
+        kh, sh = self.kernel_size[0], self.stride[0]
+        tile_oh = _choose_h_tile_standard(
+            self.out_height,
+            self.in_channels,
+            padded_w,
+            oc_per_col,
+            weight_per_oc,
+            self.out_width,
+            kh,
+            sh,
+            budget,
+        )
+        if self.out_height % tile_oh != 0 or tile_oh <= 0:
+            return False
+        num_spatial = self.out_height // tile_oh
+        if num_spatial <= 1:
+            return False
+        in_h_tile = _rf_in_h(tile_oh, sh, kh)
+        last_end = (num_spatial - 1) * tile_oh * sh + in_h_tile
+        if last_end > padded_h:
+            return False
+        # dma_bd requires 4-byte-aligned sizes; bf16 needs even element counts.
+        out_strip = tile_oh * self.out_width
+        in_strip = in_h_tile * padded_w
+        if (out_strip % 2 != 0) or (in_strip % 2 != 0):
+            return False
+        in_tile = n * self.in_channels * in_h_tile * padded_w
+        out_tile_sp = tile_oh * self.out_width
+        return _l1_triple_fits(
+            in_tile,
+            oc_per_col * weight_per_oc,
+            n * oc_per_col * out_tile_sp,
+            budget,
+        )
+
+    def _host_pad_input_nchw(self, x_nchw: torch.Tensor) -> torch.Tensor:
+        """Zero-pad (C,H,W) to (C, H+2ph, W+2pw) for k>1 spatial design."""
+        ph, pw = self.padding
+        if ph == 0 and pw == 0:
+            return x_nchw.contiguous()
+        # F.pad pad order: (W_left, W_right, H_top, H_bottom)
+        return torch.nn.functional.pad(x_nchw, (pw, pw, ph, ph)).contiguous()
+
+    def _pad_input_xrt(self, in_b: XRTTensor) -> XRTTensor:
+        """Pad host/runtime input buffer when k>1 spatial L3 expects padded size."""
+        if not self._uses_halo_spatial_tiling():
+            return in_b
+        t = in_b.to_torch()
+        if not isinstance(t, torch.Tensor):
+            t = torch.tensor(t)
+        t = t.detach().cpu().contiguous()
+        if t.dtype != torch.bfloat16:
+            t = t.to(torch.bfloat16)
+        flat = t.reshape(-1)
+        expect = self.in_channels * self.in_height * self.in_width
+        if flat.numel() != expect:
+            # Already padded or wrong size — pass through if padded size matches.
+            ph, pw = self.padding
+            padded_n = (
+                self.in_channels * (self.in_height + 2 * ph) * (self.in_width + 2 * pw)
+            )
+            if flat.numel() == padded_n:
+                return in_b
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d halo-spatial pad expected {expect} elems, got {flat.numel()}"
+            )
+        x_nchw = flat.reshape(self.in_channels, self.in_height, self.in_width)
+        x_pad = self._host_pad_input_nchw(x_nchw).reshape(-1).contiguous()
+        return XRTTensor.from_torch(x_pad)
+
     def _validate_l1_fit(self, num_columns: int) -> None:
         """Raise if the design's L1 triple (in+weight+out, bf16) cannot fit.
 
         Mirrors design.py Phase A/D.3 tile selection: groups==1 OC-tiles with
-        full input in L1, or pointwise H-strip spatial tiles when full input
-        exceeds budget; depthwise channel-tiles; other groups require full
-        tensors. Multi-column OC/channel split does not reduce full-input L1
-        for groups==1 (input is broadcast per column). Configs that still
-        exceed budget (e.g. large k>1 without halo-aware spatial) fail here.
+        full input in L1, or H-strip spatial (pointwise or k>1 host-pad RF)
+        when full input exceeds budget; depthwise channel-tiles; other groups
+        require full tensors. Multi-column OC/channel split does not reduce
+        full-input L1 for groups==1 (input is broadcast per column).
         """
         n = 1  # MLIR is specialized for N=1; batch is looped on host.
         in_spatial = self.in_height * self.in_width
@@ -233,11 +349,7 @@ class AIEConv2d(AIEOperatorBase):
         budget = _L1_TRIPLE_BUDGET_BYTES
         bpe = _BYTES_PER_BF16
         cols = max(1, int(num_columns))
-        is_pointwise = (
-            (not self.is_depthwise)
-            and self.kernel_size[0] == 1
-            and self.kernel_size[1] == 1
-        )
+        is_pointwise = self._is_pointwise()
 
         if self.is_depthwise:
             c_per_col = self.in_channels // cols
@@ -304,22 +416,43 @@ class AIEConv2d(AIEOperatorBase):
                     f"spatial={self.in_height}x{self.in_width}, cols={cols}."
                 )
 
+            # D.3 k>1: host-pad RF H-strip with full oc_per_col.
+            if self._uses_halo_spatial_tiling(cols):
+                return
+
+            ph, pw = self.padding
+            padded_w = self.in_width + 2 * pw
+            kh, sh = self.kernel_size[0], self.stride[0]
+            tile_oh = _choose_h_tile_standard(
+                self.out_height,
+                self.in_channels,
+                padded_w,
+                oc_per_col,
+                weight_per_oc,
+                self.out_width,
+                kh,
+                sh,
+                budget,
+            )
+            in_h_tile = _rf_in_h(max(1, tile_oh), sh, kh)
+            in_tile = n * self.in_channels * in_h_tile * padded_w
+            out_tile_sp = max(1, tile_oh) * self.out_width
             need = (
-                input_size + oc_tile * weight_per_oc + n * oc_tile * out_spatial
+                in_tile + oc_per_col * weight_per_oc + n * oc_per_col * out_tile_sp
             ) * bpe
             input_bytes = input_size * bpe
             raise AIEOperatorConstraintError(
-                f"AIEConv2d L1 footprint exceeds budget: "
-                f"min OC tile needs ~{need} bytes "
+                f"AIEConv2d L1 footprint exceeds budget even with k>1 "
+                f"host-pad H-strip spatial tiling: needs ~{need} bytes "
                 f"(budget {_L1_TRIPLE_BUDGET_BYTES} bytes; "
-                f"full input alone is {input_bytes} bytes). "
+                f"full input alone is {input_bytes} bytes; "
+                f"tile_oh={tile_oh}). "
                 f"Config: IC={self.in_channels}, OC={self.out_channels}, "
                 f"spatial={self.in_height}x{self.in_width}→"
                 f"{self.out_height}x{self.out_width}, "
                 f"kernel={self.kernel_size}, cols={cols}. "
                 f"Note: multi-column OC split does not reduce input L1 "
-                f"(input is broadcast per column). "
-                f"k>1 spatial (halo) tiling not yet implemented (D.3 remainder)."
+                f"(input is broadcast per column)."
             )
 
         # Non-depthwise grouped: design uses full tensors, 1-col only.
@@ -644,15 +777,21 @@ class AIEConv2d(AIEOperatorBase):
         use_bias = self.use_bias and self.bias_size > 0
 
         def call(*args):
+            # k>1 spatial designs use host-padded L3 input (design input_ty).
+            # External API / run_test still pass unpadded C*H*W; pad here.
             if use_bias:
                 if len(args) != 4:
                     raise ValueError(
                         f"AIEConv2d with bias expects 4 args (in, weight, bias, out), got {len(args)}"
                     )
                 in_b, w_b, bias_b, out_b = args
+                in_b = self._pad_input_xrt(in_b)
                 result = aie_utils.DefaultNPURuntime.run(handle, [in_b, w_b, out_b])
                 self._host_apply_bias(out_b, bias_b)
                 return result
-            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+            args = list(args)
+            if args:
+                args[0] = self._pad_input_xrt(args[0])
+            return aie_utils.DefaultNPURuntime.run(handle, args)
 
         return call
