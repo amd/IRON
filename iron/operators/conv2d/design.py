@@ -341,60 +341,63 @@ def _plan_halo_h_strip(
         if design_oh <= 0 or design_ow <= 0:
             continue
 
-        tile_oh = _choose_h_tile_standard(
-            design_oh,
-            in_channels,
-            padded_w,
-            oc_per_col,
-            weight_per_oc,
-            design_ow,
-            kernel_h,
-            stride_h,
-            l1_budget_bytes,
-        )
-        if tile_oh <= 0 or design_oh % tile_oh != 0:
-            continue
-        num_spatial = design_oh // tile_oh
-        if num_spatial <= 1:
-            continue
-        # TAP size dims (num_spatial, oc, strip) must each be even for bf16 BDs.
-        if num_spatial % 2 != 0:
-            continue
-        in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
-        last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
-        if last_end > padded_h:
-            continue
-        out_strip = tile_oh * design_ow
-        in_strip = in_h_tile * padded_w
-        # aie.dma_bd: transfer size multiple of 4 bytes ⇒ even bf16 elems.
-        if (out_strip % 2 != 0) or (in_strip % 2 != 0):
-            continue
-        in_tile = in_channels * in_h_tile * padded_w
-        out_tile = oc_per_col * tile_oh * design_ow
-        w_tile = oc_per_col * weight_per_oc
-        if not _l1_triple_fits(in_tile, w_tile, out_tile, l1_budget_bytes):
-            continue
+        # Try all toh | design_oh (large→small), not only max L1 toh — larger
+        # toh can violate BD size dim max 1023 (strip = in_h_tile * padded_w).
+        for tile_oh in range(design_oh, 0, -1):
+            if design_oh % tile_oh != 0:
+                continue
+            num_spatial = design_oh // tile_oh
+            if num_spatial <= 1:
+                continue
+            # TAP size dims must be even for bf16 (4-byte BD granularity).
+            if num_spatial % 2 != 0:
+                continue
+            in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
+            last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
+            if last_end > padded_h:
+                continue
+            out_strip = tile_oh * design_ow
+            in_strip = in_h_tile * padded_w
+            if (out_strip % 2 != 0) or (in_strip % 2 != 0):
+                continue
+            # Each BD size dim is u10 [0:1023].
+            if (
+                in_strip > 1023
+                or out_strip > 1023
+                or in_channels > 1023
+                or oc_per_col > 1023
+                or num_spatial > 1023
+            ):
+                continue
+            in_tile = in_channels * in_h_tile * padded_w
+            out_tile = oc_per_col * tile_oh * design_ow
+            w_tile = oc_per_col * weight_per_oc
+            if not _l1_triple_fits(in_tile, w_tile, out_tile, l1_budget_bytes):
+                continue
 
-        # Prefer: zero extra, then smaller total extra, larger tile_oh, smaller pad.
-        key = (
-            extra_h + extra_w,
-            abs(extra_h - extra_w),
-            -tile_oh,
-            padded_h + padded_w,
-        )
-        if best is None or key < best_key:
-            best_key = key
-            best = {
-                "padded_h": padded_h,
-                "padded_w": padded_w,
-                "design_oh": design_oh,
-                "design_ow": design_ow,
-                "tile_oh": tile_oh,
-                "in_h_tile": in_h_tile,
-                "num_spatial": num_spatial,
-                "extra_h": extra_h,
-                "extra_w": extra_w,
-            }
+            # Prefer: zero extra, then smaller total extra, larger tile_oh.
+            key = (
+                extra_h + extra_w,
+                abs(extra_h - extra_w),
+                -tile_oh,
+                padded_h + padded_w,
+            )
+            if best is None or key < best_key:
+                best_key = key
+                best = {
+                    "padded_h": padded_h,
+                    "padded_w": padded_w,
+                    "design_oh": design_oh,
+                    "design_ow": design_ow,
+                    "tile_oh": tile_oh,
+                    "in_h_tile": in_h_tile,
+                    "num_spatial": num_spatial,
+                    "extra_h": extra_h,
+                    "extra_w": extra_w,
+                }
+            # First valid toh for this (extra_h,extra_w) is largest (range down);
+            # still continue outer extras search via best_key ranking.
+            break
             # Natural (0,0) with any valid toh is best-class; keep searching for
             # larger tile_oh only within same extra (key orders -tile_oh).
 
