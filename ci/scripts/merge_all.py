@@ -31,7 +31,7 @@ def limit_rows_by_date(rows, limit, date_fmt="%Y-%m-%d %H:%M:%S"):
                 ).timestamp(),
                 reverse=True,
             )
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             # Fallback to string sorting if date parsing fails
             test_rows.sort(key=lambda x: x.get("Date", ""), reverse=True)
 
