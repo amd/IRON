@@ -22,7 +22,8 @@ Phase A — L1 tiling per column (no kernel ABI break):
 
   2) Depthwise: **channel tiling** of in+w+out (channel-contiguous packets).
 
-  3) Other groups>1 (non-depthwise): full-tensor 1-col (must fit L1).
+  3) Other groups>1 (non-depthwise): 1-col full tensor, or k>1 host-pad
+     H-strip when the full triple exceeds L1 (same planner as groups==1).
 
 Phase B — multi-column split, still ≤2 input DMAs/core:
   Prior multi-col failures were illegal 3-ingress (bias OF) + invalid flattened
@@ -79,13 +80,17 @@ Phase D — full-parity remaining work (in progress):
     - DONE (DMA parity pad): when natural OH/OW only admit odd bf16 strip
       sizes (e.g. s2 p0 → 31×31, toh∈{1,31}), ``_plan_halo_h_strip`` adds a
       small **bottom/right** extra zero-pad so design OH/OW are DMA-legal
-      (e.g. pad 64→66 → design 32×32), runs pad=0 strips, and host **crops**
-      NPU output to true OH×OW. External API shapes stay true; staging out
-      buffer when design spatial > true. Shared plan helper in design.py.
+      (e.g. pad H 64→65 → design OH 32 with OW 31), runs pad=0 strips, and
+      host **crops** NPU output to true OH×OW. External API shapes stay true;
+      staging out buffer when design spatial > true. Shared plan helper.
+    - DONE (BD size u10): planner tries **all** ``tile_oh | design_oh`` (not
+      only max L1 toh). Large toh can make ``in_h_tile * padded_w > 1023``
+      (aie.dma_bd size dim limit); smaller toh with even ``num_spatial`` fixes
+      e.g. groups=2 4→8 k3@64 (toh=8 strip=660 vs toh=32 strip=2244).
+    - DONE (groups>1 non-DW): same k>1 host-pad H-strip at 1-col when full
+      triple OOMs (no multi-col split for grouped non-DW).
     - OPEN: OC×spatial without illegal mid-stride-0 rebroadcast, depthwise
-      spatial if needed, W-strip/2D tiles, non-depthwise groups>1.
-    - Still CE + extensive skip: groups=2 (non-depthwise) full-tensor L1
-      (no channel/OC tiling for non-DW groups>1 yet).
+      spatial if needed, W-strip/2D tiles.
 
   D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
 
@@ -93,9 +98,9 @@ Phase D — full-parity remaining work (in progress):
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). D.3 pointwise + groups==1 k>1 host-pad H-strip
-  (incl. DMA bottom/right extra-pad + crop) are implemented; packed bias and
-  groups>1 non-DW L1 tiling remain open.
+  (host bias, ≤2 DMA). D.3 pointwise + k>1 host-pad H-strip (groups==1 and
+  groups>1 non-DW) incl. DMA bottom/right extra-pad, BD u10 toh search, and
+  host crop are implemented; packed bias remains open.
 ==============================================================================
 """
 
@@ -310,22 +315,24 @@ def _plan_halo_h_strip(
     zero-pad so design OH/OW admit even bf16 strip lengths. Host crops the
     NPU output back to ``true_out_*``.
 
+    Also searches **all** ``tile_oh | design_oh`` (large→small). Max L1-legal
+    toh can still violate ``aie.dma_bd`` size-dim u10 max (1023) when
+    ``in_h_tile * padded_w`` is large — e.g. toh=32 on 66-wide → 2244.
+
     Returns a dict on success::
         padded_h, padded_w, design_oh, design_ow, tile_oh, in_h_tile,
         num_spatial, extra_h, extra_w
     or ``None`` if no legal pure-H-strip plan (num_oc_tiles==1) fits L1 with
-    DMA-aligned strip sizes.
+    DMA-aligned strip sizes and BD-legal size dims.
     """
     if oc_per_col <= 0 or true_out_height <= 0 or true_out_width <= 0:
         return None
 
-    # Prefer zero extra, then minimal total extra (symmetric first).
+    # Prefer zero extra, then minimal total extra (eh,ew partitions of total).
     candidates = [(0, 0)]
     for total in range(1, max_extra + 1):
         for eh in range(0, total + 1):
-            ew = total - eh
-            candidates.append((eh, ew))
-        # Also try equal-ish extras for square-ish outs (already covered).
+            candidates.append((eh, total - eh))
     best = None
     best_key = None
 
@@ -341,16 +348,13 @@ def _plan_halo_h_strip(
         if design_oh <= 0 or design_ow <= 0:
             continue
 
-        # Try all toh | design_oh (large→small), not only max L1 toh — larger
-        # toh can violate BD size dim max 1023 (strip = in_h_tile * padded_w).
+        # large→small toh: first legal is max toh for this pad (break after).
         for tile_oh in range(design_oh, 0, -1):
             if design_oh % tile_oh != 0:
                 continue
             num_spatial = design_oh // tile_oh
-            if num_spatial <= 1:
-                continue
-            # TAP size dims must be even for bf16 (4-byte BD granularity).
-            if num_spatial % 2 != 0:
+            # Need multi-strip spatial tiling; even packet count for bf16 BDs.
+            if num_spatial <= 1 or (num_spatial % 2 != 0):
                 continue
             in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
             last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
@@ -358,9 +362,9 @@ def _plan_halo_h_strip(
                 continue
             out_strip = tile_oh * design_ow
             in_strip = in_h_tile * padded_w
+            # bf16 BD granularity: even elem counts; u10 size dims ≤1023.
             if (out_strip % 2 != 0) or (in_strip % 2 != 0):
                 continue
-            # Each BD size dim is u10 [0:1023].
             if (
                 in_strip > 1023
                 or out_strip > 1023
@@ -395,11 +399,7 @@ def _plan_halo_h_strip(
                     "extra_h": extra_h,
                     "extra_w": extra_w,
                 }
-            # First valid toh for this (extra_h,extra_w) is largest (range down);
-            # still continue outer extras search via best_key ranking.
-            break
-            # Natural (0,0) with any valid toh is best-class; keep searching for
-            # larger tile_oh only within same extra (key orders -tile_oh).
+            break  # largest legal toh for this (extra_h, extra_w)
 
     return best
 
