@@ -76,11 +76,16 @@ Phase D — full-parity remaining work (in progress):
       leading-size=1 multi-dim pattern as pointwise. Kernel ABI unchanged.
       Enables e.g. 16→16 k3@64×64 and strided k3@64 that previously CE'd on
       full input (~128 KiB) alone.
+    - DONE (DMA parity pad): when natural OH/OW only admit odd bf16 strip
+      sizes (e.g. s2 p0 → 31×31, toh∈{1,31}), ``_plan_halo_h_strip`` adds a
+      small **bottom/right** extra zero-pad so design OH/OW are DMA-legal
+      (e.g. pad 64→66 → design 32×32), runs pad=0 strips, and host **crops**
+      NPU output to true OH×OW. External API shapes stay true; staging out
+      buffer when design spatial > true. Shared plan helper in design.py.
     - OPEN: OC×spatial without illegal mid-stride-0 rebroadcast, depthwise
       spatial if needed, W-strip/2D tiles, non-depthwise groups>1.
-    - Still CE + extensive skip: groups=2 (non-depthwise) full-tensor L1;
-      k>1 H-strip when strip dims are not 4-byte DMA-aligned (e.g. odd OW=31
-      from s2 p0 with only odd tile_oh divisors).
+    - Still CE + extensive skip: groups=2 (non-depthwise) full-tensor L1
+      (no channel/OC tiling for non-DW groups>1 yet).
 
   D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
 
@@ -88,8 +93,9 @@ Phase D — full-parity remaining work (in progress):
 
 Certainty (honest):
   Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). D.3 pointwise + groups==1 k>1 host-pad H-strip are
-  implemented; packed bias and groups>1 non-DW spatial remain open.
+  (host bias, ≤2 DMA). D.3 pointwise + groups==1 k>1 host-pad H-strip
+  (incl. DMA bottom/right extra-pad + crop) are implemented; packed bias and
+  groups>1 non-DW L1 tiling remain open.
 ==============================================================================
 """
 
@@ -204,6 +210,43 @@ def _rf_in_h(tile_oh: int, stride_h: int, kernel_h: int) -> int:
     return (max(1, tile_oh) - 1) * stride_h + kernel_h
 
 
+def _extend_in_for_dma_even_out(
+    in_h: int,
+    in_w: int,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_h: int,
+    pad_w: int,
+) -> tuple:
+    """Minimal bottom/right input growth so OH and OW are both even and >=1.
+
+    Odd OH/OW blocks H-strip TAP dims (bf16 BD sizes must be even). Extra
+    input pixels are zeros on the host; valid crop is the un-extended out
+    spatial (op crops after NPU). Returns (in_h', in_w', out_h', out_w').
+    """
+
+    def _out(h, w):
+        oh = (h + 2 * pad_h - kernel_h) // stride_h + 1
+        ow = (w + 2 * pad_w - kernel_w) // stride_w + 1
+        return oh, ow
+
+    h, w = int(in_h), int(in_w)
+    for _ in range(h + w + 8):
+        oh, ow = _out(h, w)
+        if oh >= 1 and ow >= 1 and (oh % 2 == 0) and (ow % 2 == 0):
+            return h, w, oh, ow
+        if oh < 1 or (oh % 2 != 0):
+            h += 1
+        elif ow < 1 or (ow % 2 != 0):
+            w += 1
+        else:
+            h += 1
+    oh, ow = _out(h, w)
+    return h, w, oh, ow
+
+
 def _choose_h_tile_standard(
     out_height: int,
     in_channels: int,
@@ -241,6 +284,121 @@ def _choose_h_tile_standard(
         return elems * _BYTES_PER_BF16 <= l1_budget_bytes
 
     return _largest_divisor_fit(out_height, fits_min_oc)
+
+
+def _plan_halo_h_strip(
+    in_height: int,
+    in_width: int,
+    true_out_height: int,
+    true_out_width: int,
+    in_channels: int,
+    oc_per_col: int,
+    weight_per_oc: int,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_h: int,
+    pad_w: int,
+    l1_budget_bytes: int = _L1_TRIPLE_BUDGET_BYTES,
+    max_extra: int = 16,
+):
+    """Plan k>1 host-pad RF H-strip; may add bottom/right DMA pad.
+
+    When natural padded spatial dims yield only odd DMA transfer sizes
+    (e.g. s2 p0 → OW=31, toh∈{1,31}), search a small bottom/right extra
+    zero-pad so design OH/OW admit even bf16 strip lengths. Host crops the
+    NPU output back to ``true_out_*``.
+
+    Returns a dict on success::
+        padded_h, padded_w, design_oh, design_ow, tile_oh, in_h_tile,
+        num_spatial, extra_h, extra_w
+    or ``None`` if no legal pure-H-strip plan (num_oc_tiles==1) fits L1 with
+    DMA-aligned strip sizes.
+    """
+    if oc_per_col <= 0 or true_out_height <= 0 or true_out_width <= 0:
+        return None
+
+    # Prefer zero extra, then minimal total extra (symmetric first).
+    candidates = [(0, 0)]
+    for total in range(1, max_extra + 1):
+        for eh in range(0, total + 1):
+            ew = total - eh
+            candidates.append((eh, ew))
+        # Also try equal-ish extras for square-ish outs (already covered).
+    best = None
+    best_key = None
+
+    for extra_h, extra_w in candidates:
+        padded_h = in_height + 2 * pad_h + extra_h
+        padded_w = in_width + 2 * pad_w + extra_w
+        if padded_h < kernel_h or padded_w < kernel_w:
+            continue
+        design_oh = (padded_h - kernel_h) // stride_h + 1
+        design_ow = (padded_w - kernel_w) // stride_w + 1
+        if design_oh < true_out_height or design_ow < true_out_width:
+            continue
+        if design_oh <= 0 or design_ow <= 0:
+            continue
+
+        tile_oh = _choose_h_tile_standard(
+            design_oh,
+            in_channels,
+            padded_w,
+            oc_per_col,
+            weight_per_oc,
+            design_ow,
+            kernel_h,
+            stride_h,
+            l1_budget_bytes,
+        )
+        if tile_oh <= 0 or design_oh % tile_oh != 0:
+            continue
+        num_spatial = design_oh // tile_oh
+        if num_spatial <= 1:
+            continue
+        # TAP size dims (num_spatial, oc, strip) must each be even for bf16 BDs.
+        if num_spatial % 2 != 0:
+            continue
+        in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
+        last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
+        if last_end > padded_h:
+            continue
+        out_strip = tile_oh * design_ow
+        in_strip = in_h_tile * padded_w
+        # aie.dma_bd: transfer size multiple of 4 bytes ⇒ even bf16 elems.
+        if (out_strip % 2 != 0) or (in_strip % 2 != 0):
+            continue
+        in_tile = in_channels * in_h_tile * padded_w
+        out_tile = oc_per_col * tile_oh * design_ow
+        w_tile = oc_per_col * weight_per_oc
+        if not _l1_triple_fits(in_tile, w_tile, out_tile, l1_budget_bytes):
+            continue
+
+        # Prefer: zero extra, then smaller total extra, larger tile_oh, smaller pad.
+        key = (
+            extra_h + extra_w,
+            abs(extra_h - extra_w),
+            -tile_oh,
+            padded_h + padded_w,
+        )
+        if best is None or key < best_key:
+            best_key = key
+            best = {
+                "padded_h": padded_h,
+                "padded_w": padded_w,
+                "design_oh": design_oh,
+                "design_ow": design_ow,
+                "tile_oh": tile_oh,
+                "in_h_tile": in_h_tile,
+                "num_spatial": num_spatial,
+                "extra_h": extra_h,
+                "extra_w": extra_w,
+            }
+            # Natural (0,0) with any valid toh is best-class; keep searching for
+            # larger tile_oh only within same extra (key orders -tile_oh).
+
+    return best
 
 
 def _l1_triple_fits(
@@ -439,70 +597,51 @@ def my_conv2d(
                 weight_tile_elems = oc_tile * weight_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
         elif not full_fits:
-            # Standard k>1 H-strip (D.3): host zero-pads to (H+2ph)×(W+2pw);
-            # kernel pad=0 with fixed RF strip height; overlapping input TAPs.
-            padded_h = in_height + 2 * pad_h
-            padded_w = in_width + 2 * pad_w
-            tile_oh = _choose_h_tile_standard(
+            # Standard k>1 H-strip (D.3): host zero-pads (conv pad + optional
+            # bottom/right DMA pad); kernel pad=0 with fixed RF strip height;
+            # overlapping input TAPs. May use design_oh/ow > true out (crop).
+            plan = _plan_halo_h_strip(
+                in_height,
+                in_width,
                 out_height,
+                out_width,
                 in_channels,
-                padded_w,
                 oc_per_col,
                 weight_per_oc,
-                out_width,
                 kernel_h,
+                kernel_w,
                 stride_h,
+                stride_w,
+                pad_h,
+                pad_w,
             )
-            if out_height % tile_oh != 0:
-                tile_oh = out_height
-            num_spatial = max(1, out_height // tile_oh)
-            in_h_tile = _rf_in_h(tile_oh, stride_h, kernel_h)
-            # Last strip must stay inside padded H (true when
-            # (padded_h - kernel_h) % stride_h == 0; else may need clamp —
-            # extensive matrix cases satisfy the identity OH formula).
-            last_end = (num_spatial - 1) * tile_oh * stride_h + in_h_tile
-            in_tile_elems_base = N * in_channels * in_h_tile * padded_w
-            out_tile_sp = tile_oh * out_width
-            if _l1_triple_fits(
-                in_tile_elems_base,
-                oc_per_col * weight_per_oc,
-                N * oc_per_col * out_tile_sp,
-            ):
-                oc_tile = oc_per_col
-            else:
-                oc_tile = _choose_oc_tile(
-                    oc_per_col, in_tile_elems_base, weight_per_oc, out_tile_sp
-                )
-                if oc_per_col % oc_tile != 0:
-                    oc_tile = oc_per_col
-            num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
-            # aie.dma_bd: each transfer size dim must be a multiple of 4 bytes.
-            # bf16 ⇒ even element counts. Odd out_width with odd tile_oh (e.g.
-            # s2 p0 → OW=31, only toh∈{1,31}) cannot form a legal H-strip TAP.
-            out_strip_elems = tile_oh * out_width
-            in_strip_elems = in_h_tile * padded_w
-            dma_aligned = (out_strip_elems % 2 == 0) and (in_strip_elems % 2 == 0)
-            can_spatial = (
-                num_oc_tiles == 1
-                and num_spatial > 1
-                and last_end <= padded_h
-                and dma_aligned
-                and _l1_triple_fits(
-                    in_tile_elems_base,
-                    oc_tile * weight_per_oc,
-                    N * oc_tile * out_tile_sp,
-                )
-            )
-            if can_spatial:
+            if plan is not None:
                 spatial_h_tiling = True
                 spatial_halo_pad = True
+                padded_h = plan["padded_h"]
+                padded_w = plan["padded_w"]
+                design_oh = plan["design_oh"]
+                design_ow = plan["design_ow"]
+                tile_oh = plan["tile_oh"]
+                in_h_tile = plan["in_h_tile"]
+                num_spatial = plan["num_spatial"]
                 tile_h = tile_oh
+                oc_tile = oc_per_col
+                num_oc_tiles = 1
+                in_tile_elems_base = N * in_channels * in_h_tile * padded_w
+                out_tile_sp = tile_oh * design_ow
                 input_tile_elems = in_tile_elems_base
                 weight_tile_elems = oc_tile * weight_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
-                # L3 host buffer is the padded tensor (op.py pads before NPU).
+                # L3: padded input; output may be design spatial (host crops).
                 input_size = N * in_channels * padded_h * padded_w
                 input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
+                if design_oh != out_height or design_ow != out_width:
+                    out_height = design_oh
+                    out_width = design_ow
+                    out_spatial = out_height * out_width
+                    output_size = N * out_channels * out_spatial
+                    output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
             else:
                 tile_h = out_height
                 in_h_tile = in_height
@@ -532,14 +671,68 @@ def my_conv2d(
         weight_elems_per_col = oc_per_col * weight_per_oc
         output_elems_per_col = N * oc_per_col * out_spatial
     else:
-        # Non-depthwise grouped: full tensors, 1-col only.
+        # Non-depthwise grouped: 1-col; full tensor or k>1 host-pad H-strip.
         num_columns = 1
+        oc_per_col = out_channels
         oc_tile = out_channels
-        num_tiles = 1
-        input_tile_elems = input_size
-        weight_tile_elems = weight_size
-        output_tile_elems = output_size
         kernel_channels = in_channels
+        weight_elems_per_col = weight_size
+        output_elems_per_col = output_size
+        if _l1_triple_fits(input_size, weight_size, output_size):
+            num_tiles = 1
+            input_tile_elems = input_size
+            weight_tile_elems = weight_size
+            output_tile_elems = output_size
+        else:
+            plan = _plan_halo_h_strip(
+                in_height,
+                in_width,
+                out_height,
+                out_width,
+                in_channels,
+                oc_per_col,
+                weight_per_oc,
+                kernel_h,
+                kernel_w,
+                stride_h,
+                stride_w,
+                pad_h,
+                pad_w,
+            )
+            if plan is not None:
+                spatial_h_tiling = True
+                spatial_halo_pad = True
+                padded_h = plan["padded_h"]
+                padded_w = plan["padded_w"]
+                design_oh = plan["design_oh"]
+                design_ow = plan["design_ow"]
+                tile_oh = plan["tile_oh"]
+                in_h_tile = plan["in_h_tile"]
+                num_spatial = plan["num_spatial"]
+                tile_h = tile_oh
+                oc_tile = oc_per_col
+                num_oc_tiles = 1
+                num_tiles = num_spatial
+                in_tile_elems_base = N * in_channels * in_h_tile * padded_w
+                out_tile_sp = tile_oh * design_ow
+                input_tile_elems = in_tile_elems_base
+                weight_tile_elems = oc_tile * weight_per_oc
+                output_tile_elems = N * oc_tile * out_tile_sp
+                input_size = N * in_channels * padded_h * padded_w
+                input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
+                if design_oh != out_height or design_ow != out_width:
+                    out_height = design_oh
+                    out_width = design_ow
+                    out_spatial = out_height * out_width
+                    output_size = N * out_channels * out_spatial
+                    output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
+                weight_elems_per_col = weight_tile_elems
+                output_elems_per_col = output_size
+            else:
+                num_tiles = 1
+                input_tile_elems = input_size
+                weight_tile_elems = weight_size
+                output_tile_elems = output_size
 
     # FIFO element types = per-iteration L1 footprints.
     input_tile_ty = np.ndarray[

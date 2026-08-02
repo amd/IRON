@@ -54,6 +54,7 @@ from iron.operators.conv2d.design import (
     _choose_h_tile_standard,
     _choose_oc_tile,
     _l1_triple_fits,
+    _plan_halo_h_strip,
     _resolve_num_columns,
     _rf_in_h,
 )
@@ -220,19 +221,30 @@ class AIEConv2d(AIEOperatorBase):
             and self.kernel_size[1] == 1
         )
 
-    def _uses_halo_spatial_tiling(self, num_columns: Optional[int] = None) -> bool:
-        """True when design enables k>1 host-pad H-strip (groups==1).
+    def _halo_plan(self, num_columns: Optional[int] = None):
+        """Return design ``_plan_halo_h_strip`` result when k>1 H-strip is active.
 
-        Mirrors design.py: full-input L1 does not fit, not pointwise/depthwise,
-        and a pure H-strip (num_oc_tiles==1, num_spatial>1) RF triple fits.
+        None when full-input L1 fits, or config is not groups==1 standard k>1,
+        or no DMA-legal L1 plan exists (including optional bottom/right extra pad).
         """
-        if self.is_depthwise or self.groups != 1 or self._is_pointwise():
-            return False
+        # Depthwise uses channel tiles; pointwise has its own H-strip path.
+        if self.is_depthwise or self._is_pointwise():
+            return None
+        # groups==1: multi-col OC split; groups>1 non-DW: design is 1-col full OC.
         n = 1
-        cols = max(
-            1,
-            int(num_columns if num_columns is not None else self.effective_num_columns),
-        )
+        if self.groups == 1:
+            cols = max(
+                1,
+                int(
+                    num_columns
+                    if num_columns is not None
+                    else self.effective_num_columns
+                ),
+            )
+            oc_per_col = self.out_channels // cols
+        else:
+            cols = 1
+            oc_per_col = self.out_channels
         in_spatial = self.in_height * self.in_width
         out_spatial = self.out_height * self.out_width
         weight_per_oc = (
@@ -242,68 +254,73 @@ class AIEConv2d(AIEOperatorBase):
         )
         input_size = n * self.in_channels * in_spatial
         budget = _L1_TRIPLE_BUDGET_BYTES
-        oc_per_col = self.out_channels // cols
         if oc_per_col <= 0:
-            return False
-        oc_tile = _choose_oc_tile(
-            oc_per_col, input_size, weight_per_oc, out_spatial, budget
-        )
-        if _l1_triple_fits(
-            input_size,
-            oc_tile * weight_per_oc,
-            n * oc_tile * out_spatial,
-            budget,
-        ):
-            return False
+            return None
+        if self.groups == 1:
+            oc_tile = _choose_oc_tile(
+                oc_per_col, input_size, weight_per_oc, out_spatial, budget
+            )
+            if _l1_triple_fits(
+                input_size,
+                oc_tile * weight_per_oc,
+                n * oc_tile * out_spatial,
+                budget,
+            ):
+                return None
+        else:
+            weight_size = self.out_channels * weight_per_oc
+            output_size = n * self.out_channels * out_spatial
+            if _l1_triple_fits(input_size, weight_size, output_size, budget):
+                return None
         ph, pw = self.padding
-        padded_h = self.in_height + 2 * ph
-        padded_w = self.in_width + 2 * pw
-        kh, sh = self.kernel_size[0], self.stride[0]
-        tile_oh = _choose_h_tile_standard(
+        kh, kw = self.kernel_size
+        sh, sw = self.stride
+        return _plan_halo_h_strip(
+            self.in_height,
+            self.in_width,
             self.out_height,
+            self.out_width,
             self.in_channels,
-            padded_w,
             oc_per_col,
             weight_per_oc,
-            self.out_width,
             kh,
+            kw,
             sh,
-            budget,
-        )
-        if self.out_height % tile_oh != 0 or tile_oh <= 0:
-            return False
-        num_spatial = self.out_height // tile_oh
-        if num_spatial <= 1:
-            return False
-        in_h_tile = _rf_in_h(tile_oh, sh, kh)
-        last_end = (num_spatial - 1) * tile_oh * sh + in_h_tile
-        if last_end > padded_h:
-            return False
-        # dma_bd requires 4-byte-aligned sizes; bf16 needs even element counts.
-        out_strip = tile_oh * self.out_width
-        in_strip = in_h_tile * padded_w
-        if (out_strip % 2 != 0) or (in_strip % 2 != 0):
-            return False
-        in_tile = n * self.in_channels * in_h_tile * padded_w
-        out_tile_sp = tile_oh * self.out_width
-        return _l1_triple_fits(
-            in_tile,
-            oc_per_col * weight_per_oc,
-            n * oc_per_col * out_tile_sp,
+            sw,
+            ph,
+            pw,
             budget,
         )
 
-    def _host_pad_input_nchw(self, x_nchw: torch.Tensor) -> torch.Tensor:
-        """Zero-pad (C,H,W) to (C, H+2ph, W+2pw) for k>1 spatial design."""
+    def _uses_halo_spatial_tiling(self, num_columns: Optional[int] = None) -> bool:
+        """True when design enables k>1 host-pad H-strip (groups==1)."""
+        return self._halo_plan(num_columns) is not None
+
+    def _host_pad_input_nchw(
+        self, x_nchw: torch.Tensor, plan: Optional[dict] = None
+    ) -> torch.Tensor:
+        """Zero-pad (C,H,W) for k>1 spatial design (conv pad + optional DMA pad).
+
+        Conv padding is applied symmetrically; any DMA extra is **bottom/right**
+        only so true top-left outputs match the unpadded formula.
+        """
         ph, pw = self.padding
-        if ph == 0 and pw == 0:
+        extra_h = 0
+        extra_w = 0
+        if plan is not None:
+            extra_h = int(plan.get("extra_h", 0))
+            extra_w = int(plan.get("extra_w", 0))
+        if ph == 0 and pw == 0 and extra_h == 0 and extra_w == 0:
             return x_nchw.contiguous()
         # F.pad pad order: (W_left, W_right, H_top, H_bottom)
-        return torch.nn.functional.pad(x_nchw, (pw, pw, ph, ph)).contiguous()
+        return torch.nn.functional.pad(
+            x_nchw, (pw, pw + extra_w, ph, ph + extra_h)
+        ).contiguous()
 
     def _pad_input_xrt(self, in_b: XRTTensor) -> XRTTensor:
         """Pad host/runtime input buffer when k>1 spatial L3 expects padded size."""
-        if not self._uses_halo_spatial_tiling():
+        plan = self._halo_plan()
+        if plan is None:
             return in_b
         t = in_b.to_torch()
         if not isinstance(t, torch.Tensor):
@@ -313,20 +330,41 @@ class AIEConv2d(AIEOperatorBase):
             t = t.to(torch.bfloat16)
         flat = t.reshape(-1)
         expect = self.in_channels * self.in_height * self.in_width
+        padded_n = self.in_channels * plan["padded_h"] * plan["padded_w"]
+        if flat.numel() == padded_n:
+            return in_b
         if flat.numel() != expect:
-            # Already padded or wrong size — pass through if padded size matches.
-            ph, pw = self.padding
-            padded_n = (
-                self.in_channels * (self.in_height + 2 * ph) * (self.in_width + 2 * pw)
-            )
-            if flat.numel() == padded_n:
-                return in_b
             raise AIEOperatorConstraintError(
-                f"AIEConv2d halo-spatial pad expected {expect} elems, got {flat.numel()}"
+                f"AIEConv2d halo-spatial pad expected {expect} elems "
+                f"(or already-padded {padded_n}), got {flat.numel()}"
             )
         x_nchw = flat.reshape(self.in_channels, self.in_height, self.in_width)
-        x_pad = self._host_pad_input_nchw(x_nchw).reshape(-1).contiguous()
+        x_pad = self._host_pad_input_nchw(x_nchw, plan).reshape(-1).contiguous()
         return XRTTensor.from_torch(x_pad)
+
+    def _crop_npu_output_to_true(
+        self, npu_out: XRTTensor, true_out: XRTTensor, plan: dict
+    ) -> None:
+        """Copy design-spatial NPU out into true OH×OW host out buffer."""
+        design_oh = plan["design_oh"]
+        design_ow = plan["design_ow"]
+        true_oh = self.out_height
+        true_ow = self.out_width
+        t = npu_out.to_torch()
+        if not isinstance(t, torch.Tensor):
+            t = torch.tensor(t)
+        t = t.detach().cpu().contiguous()
+        if t.dtype != torch.bfloat16:
+            t = t.to(torch.bfloat16)
+        vol = t.reshape(self.out_channels, design_oh, design_ow)
+        cropped = vol[:, :true_oh, :true_ow].contiguous().reshape(-1)
+        if cropped.dtype == torch.bfloat16:
+            np_c = cropped.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+        else:
+            np_c = cropped.numpy().astype(bfloat16, copy=False)
+        true_out.data.reshape(-1)[:] = np_c
+        if hasattr(true_out, "_sync_to_device"):
+            true_out._sync_to_device()
 
     def _validate_l1_fit(self, num_columns: int) -> None:
         """Raise if the design's L1 triple (in+weight+out, bf16) cannot fit.
@@ -416,8 +454,8 @@ class AIEConv2d(AIEOperatorBase):
                     f"spatial={self.in_height}x{self.in_width}, cols={cols}."
                 )
 
-            # D.3 k>1: host-pad RF H-strip with full oc_per_col.
-            if self._uses_halo_spatial_tiling(cols):
+            # D.3 k>1: host-pad RF H-strip with full oc_per_col (+ DMA pad).
+            if self._halo_plan(cols) is not None:
                 return
 
             ph, pw = self.padding
@@ -441,6 +479,17 @@ class AIEConv2d(AIEOperatorBase):
                 in_tile + oc_per_col * weight_per_oc + n * oc_per_col * out_tile_sp
             ) * bpe
             input_bytes = input_size * bpe
+            # Distinguish true L1 OOM from DMA-parity impossibility.
+            out_strip = max(1, tile_oh) * self.out_width
+            in_strip = in_h_tile * padded_w
+            dma_ok = (out_strip % 2 == 0) and (in_strip % 2 == 0)
+            dma_note = ""
+            if need <= budget and not dma_ok:
+                dma_note = (
+                    f" Natural strip sizes are not DMA-aligned "
+                    f"(out_strip={out_strip}, in_strip={in_strip} elems) and no "
+                    f"bottom/right DMA extra-pad plan found within search bound."
+                )
             raise AIEOperatorConstraintError(
                 f"AIEConv2d L1 footprint exceeds budget even with k>1 "
                 f"host-pad H-strip spatial tiling: needs ~{need} bytes "
@@ -452,23 +501,24 @@ class AIEConv2d(AIEOperatorBase):
                 f"{self.out_height}x{self.out_width}, "
                 f"kernel={self.kernel_size}, cols={cols}. "
                 f"Note: multi-column OC split does not reduce input L1 "
-                f"(input is broadcast per column)."
+                f"(input is broadcast per column).{dma_note}"
             )
 
-        # Non-depthwise grouped: design uses full tensors, 1-col only.
+        # Non-depthwise grouped: full tensor or k>1 host-pad H-strip (1-col).
         weight_size = self.out_channels * weight_per_oc
         output_size = n * self.out_channels * out_spatial
         triple = (input_size + weight_size + output_size) * bpe
-        if triple > budget:
-            raise AIEOperatorConstraintError(
-                f"AIEConv2d grouped (groups={self.groups}, non-depthwise) "
-                f"requires full in+weight+out in L1 (~{triple} bytes) but "
-                f"budget is {_L1_TRIPLE_BUDGET_BYTES} bytes. "
-                f"Config: IC={self.in_channels}, OC={self.out_channels}, "
-                f"spatial={self.in_height}x{self.in_width}. "
-                f"Only depthwise (groups==IC==OC) and groups==1 support "
-                f"channel/OC L1 tiling today."
-            )
+        if triple <= budget:
+            return
+        if self._halo_plan(1) is not None:
+            return
+        raise AIEOperatorConstraintError(
+            f"AIEConv2d grouped (groups={self.groups}, non-depthwise) "
+            f"requires full in+weight+out in L1 (~{triple} bytes) or a legal "
+            f"k>1 H-strip plan, but budget is {_L1_TRIPLE_BUDGET_BYTES} bytes. "
+            f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+            f"spatial={self.in_height}x{self.in_width}."
+        )
 
     def set_up_artifacts(self):
         """Set up compilation artifacts (Phase A tiles + Phase B multi-col)."""
@@ -779,19 +829,42 @@ class AIEConv2d(AIEOperatorBase):
         def call(*args):
             # k>1 spatial designs use host-padded L3 input (design input_ty).
             # External API / run_test still pass unpadded C*H*W; pad here.
+            # When DMA pad grows design OH/OW, stage a larger NPU out and crop.
+            plan = self._halo_plan()
+            need_stage_out = False
+            design_out_size = 0
+            if plan is not None:
+                design_out_size = (
+                    self.out_channels * plan["design_oh"] * plan["design_ow"]
+                )
+                need_stage_out = design_out_size > (
+                    self.out_channels * self.out_height * self.out_width
+                )
+
+            def _run_npu(in_buf, w_buf, out_buf):
+                in_p = self._pad_input_xrt(in_buf)
+                if need_stage_out:
+                    npu_out = XRTTensor((design_out_size,), dtype=bfloat16)
+                    result = aie_utils.DefaultNPURuntime.run(
+                        handle, [in_p, w_buf, npu_out]
+                    )
+                    self._crop_npu_output_to_true(npu_out, out_buf, plan)
+                    return result
+                return aie_utils.DefaultNPURuntime.run(handle, [in_p, w_buf, out_buf])
+
             if use_bias:
                 if len(args) != 4:
                     raise ValueError(
                         f"AIEConv2d with bias expects 4 args (in, weight, bias, out), got {len(args)}"
                     )
                 in_b, w_b, bias_b, out_b = args
-                in_b = self._pad_input_xrt(in_b)
-                result = aie_utils.DefaultNPURuntime.run(handle, [in_b, w_b, out_b])
+                result = _run_npu(in_b, w_b, out_b)
                 self._host_apply_bias(out_b, bias_b)
                 return result
-            args = list(args)
-            if args:
-                args[0] = self._pad_input_xrt(args[0])
-            return aie_utils.DefaultNPURuntime.run(handle, args)
+            if len(args) < 3:
+                raise ValueError(
+                    f"AIEConv2d expects (in, weight, out), got {len(args)} args"
+                )
+            return _run_npu(args[0], args[1], args[2])
 
         return call
