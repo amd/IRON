@@ -129,21 +129,21 @@ jobs:
           # Collection across operators package validates shared types.hpp usage and module structure
           python -m pytest iron/operators/ --collectonly -q --tb=no || true
           python3 - << 'PYEOF'
-import sys
-print("Python:", sys.version.split()[0])
-import torch
-print("torch:", torch.__version__)
-import iron.operators as ops
-print("iron.operators package import: SUCCESS")
-# Spot-check that key modules with types.hpp includes are importable at CPU level
-for mod in ["reduction", "conv2d", "conv3d", "maxpool", "avgpool"]:
-    try:
-        getattr(ops, mod)
-        print(f"  {mod}: import OK")
-    except Exception as e:
-        print(f"  {mod}: note - {e}")
-print("types-runtime shared infrastructure validation complete.")
-PYEOF
+          import sys
+          print("Python:", sys.version.split()[0])
+          import torch
+          print("torch:", torch.__version__)
+          import iron.operators as ops
+          print("iron.operators package import: SUCCESS")
+          # Spot-check that key modules with types.hpp includes are importable at CPU level
+          for mod in ["reduction", "conv2d", "conv3d", "maxpool", "avgpool"]:
+              try:
+                  getattr(ops, mod)
+                  print(f"  {mod}: import OK")
+              except Exception as e:
+                  print(f"  {mod}: note - {e}")
+          print("types-runtime shared infrastructure validation complete.")
+          PYEOF
 
       - name: CI summary
         if: steps.detect.outputs.skip != 'true'
