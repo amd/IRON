@@ -40,7 +40,7 @@ def parse_checks(checks: str) -> Tuple[int, int]:
     try:
         p, n = map(int, checks.split("/"))
         return p, n
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return 0, 0
 
 

@@ -107,7 +107,8 @@ jobs:
           CPU_TEST="${{ steps.detect.outputs.cpu_test }}"
           echo "=== Targeted CPU reference tests for ${OP} ==="
           echo "Executing: ${CPU_TEST}"
-          python -m pytest "${CPU_TEST}" -q --tb=short || true
+          # Fail the job on test failures (do not swallow exit codes).
+          python -m pytest "${CPU_TEST}" -q --tb=short
 
       - name: Run collection on operator test.py (if present)
         if: steps.detect.outputs.has_cpu_test == 'true'
@@ -115,7 +116,8 @@ jobs:
           OP="${{ steps.detect.outputs.operator }}"
           echo "=== Pytest collection for iron/operators/${OP}/test.py ==="
           if [ -f "iron/operators/${OP}/test.py" ]; then
-            python -m pytest "iron/operators/${OP}/test.py" --collectonly -q --tb=no || true
+            # Fail the job on collection errors (do not swallow exit codes).
+            python -m pytest "iron/operators/${OP}/test.py" --collectonly -q --tb=no
           else
             echo "No test.py found (expected for some layouts)."
           fi

@@ -83,8 +83,7 @@ void conv2d_bf16_scalar(bfloat16 *input,
                             // Check bounds (handle padding)
                             if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
                                 // NCHW flat: (ic_global * H + ih) * W + iw (N=1 layout)
-                                int input_idx =
-                                    (ic_global * in_height + ih) * in_width + iw;
+                                int input_idx = (ic_global * in_height + ih) * in_width + iw;
                                 int weight_idx =
                                     ((oc * channels_per_group + ic) * kernel_height + kh) * kernel_width + kw;
 

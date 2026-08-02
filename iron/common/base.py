@@ -226,4 +226,5 @@ class AIEOperatorConstraintError(RuntimeError):
     This allows clean separation between construction-time specialization and
     runtime validation without using generic exceptions.
     """
+
     pass
