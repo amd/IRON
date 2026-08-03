@@ -15,7 +15,7 @@ using namespace aie;
 static inline aie::vector<bfloat16, 32> gelu_tanh_approx(aie::vector<bfloat16, 32> x)
 {
     const bfloat16 k0_5 = 0.5f;
-    const bfloat16 sqrt_2_over_pi = 0.79788456f; // sqrt(2/pi)
+    const bfloat16 sqrt_2_over_pi = 0.79788456f;        // sqrt(2/pi)
     const bfloat16 s_beta = sqrt_2_over_pi * 0.044715f; // precomputed s*beta
 
     auto v05 = aie::broadcast<bfloat16, 32>(k0_5);
@@ -42,7 +42,8 @@ void gelu_tanh_approx_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict o
 
     // AIE_PREPARE_FOR_POSTPIPELINING is required: the pre-RA pipeliner finds no
     // schedule for this body; the post-RA pipeliner achieves II=18, NS=2.
-    auto body = [&]() __attribute__((always_inline)) {
+    auto body = [&]() __attribute__((always_inline))
+    {
         *it_out++ = gelu_tanh_approx(*it_in++);
     };
     VERSIONED_LOOP(2, (vector_size + 31) / 32, body, AIE_PREPARE_FOR_POSTPIPELINING);
@@ -54,7 +55,8 @@ static inline void gelu_tanh_approx_inplace_bf16(bfloat16 *restrict v, const int
 {
     event0();
     auto it = aie::begin_restrict_vector<32>(v);
-    auto body = [&]() __attribute__((always_inline)) {
+    auto body = [&]() __attribute__((always_inline))
+    {
         aie::vector<bfloat16, 32> x = *it;
         *it++ = gelu_tanh_approx(x);
     };
