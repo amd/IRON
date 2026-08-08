@@ -3,78 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Production-grade test suite for the AIE Conv2D operator (NPU/hardware paths only).
+NPU end-to-end tests for AIEConv2d.
 
-This module is the NPU-focused counterpart for Conv2D. Pure-CPU reference
-validation (the critical trustworthiness foundation) has been cleanly extracted
-to the sibling cpu_test.py following the established reduction operator
-cpu_test.py separation pattern. It meets the bar set by the strongest siblings:
-- reduction/test.py (post cpu_test.py extraction)
-- maxpool/test.py (the documented reference polished template)
-- conv3d/test.py
-- avgpool/test.py
-- main-tree axpy/gemm patterns
-
-It is fully compatible with the branch infrastructure:
-  conftest.py, AIEContext, operator.compile() + get_callable / forward,
-  run_test + verify_buffer, CSV + @metrics reporter (stable pretty IDs from
-  explicit pytest.param), pytest_generate_tests + --iterations, pytest.ini
-  "extensive" marker, python 3.14 iron314 collection requirements (defensive
-  device query, no hard XRT dependency at import/collection time).
-
-The sibling iron/operators/conv2d/cpu_test.py now owns all hardware-independent
-validation:
-  - test_conv2d_reference_cpu_only()
-  - test_conv2d_cpu_reference_only(...)  (parametrized, stable cpu_* ids)
-  - test_conv2d_reference_sanity()
-These exercise generate_golden_reference, conv2d_cpu, calculate_output_dim vs
-torch F.conv2d across full config space (bias, depthwise, pointwise, strided,
-grouped, batch>1, edge shapes). They run under iron314, --collectonly, and
-any CPU-only environment. cpu_test.py imports get_params from here for ID
-uniqueness / regular-case health checks.
-
-Quality attributes (consciously engineered final production shape):
-- Comprehensive production docstring + shebang.
-- Single get_params() as the canonical source (returns list of pytest.param
-  with human ids + marks). Direct get_params() invocation in @parametrize
-  (Conv3D gold "direct only" style; no top-level all_params assignment).
-- CONV2D_TEST_PARAM_NAMES constant (prevents collection name/value count
-  mismatches; matches the conv3d/reduction hardening).
-- Defensive aie_utils.get_current_device() with try/except fallback (4 cols)
-  so --collectonly / pure-CPU / minimal iron314 envs never crash. Matches
-  reduction/conv3d/avgpool/maxpool rigor.
-- Strict divisibility filtering (in/w/out sizes computed with authoritative
-  calculate_output_dim from reference) for design.py column chunking + TAP/FIFO
-  element sizing + bias ObjectFifo broadcast + conditional rt.sequence.
-- Explicit CORE_CONFIGS (no fragile slicing) for regular marking.
-- Primary @metrics test + run_test (full compile/prepare/timed/verify path).
-- Explicit FORWARD_CASES (independent pytest.param list) exercising full
-  lifecycle + batch>1 python forward over N=1 MLIR + varied column counts
-  + explicit operator.compile() before forward.
-- Exact two-line metric prints only (Latency + Bandwidth) matching the
-  @metrics regexes and main-tree CSV reporter contract. No prefix lines.
-- Production bf16 tolerance documentation (0.01/1e-4 primary; 0.01/0.01 forward,
-  tightened post cpu_test audit) with rationale. All golden via conv2d_cpu.
-- Stable pretty IDs for every parametrized case (CSV/metrics reporter safe).
-- Explicit seed=42 on all golden calls for determinism.
-- No direct execution (modern convention).
-- get_params matrix consciously exercises the complex design.py (per-col
-  chunks for standard/depthwise/pointwise, singular bias OF only on use_bias,
-  kernel signature variants, FIFO depth heuristics for 8-col, N=1 specialization).
-- Regular subset deliberately small/fast (16x16/32x32 CORE @ 1c + 16x16 CORE
-  @ 2c multi-col smoke) while still hitting host-bias + Phase A/C paths.
-- Implicit full coverage of AIE2 (NPU1, 4 cols) vs AIE2P (NPU2, 8 cols) paths:
-  device query + kernel_dir selection in op.py + column/tile matrix (max_cols
-  drives both regular and extensive cases).
-
-The get_params matrix (spatials 32/64, col 1/2/4/8 filtered by divis on
-in/w/out sizes, full bias/depthwise/pointwise/strided/groups coverage) is the
-right conscious set for the column-parallel + ObjectFifo + runtime complexity.
-
-Pure-CPU reference tests live exclusively in cpu_test.py (see that file for
-detailed hardening rationale and usage under iron314).
-
-Preserves full backward compat for existing CI / branch reporting.
+Parametrized via get_params(); CPU-only reference tests live in cpu_test.py.
+Regular (not extensive) cases cover small 1-col and 2-col smokes; larger
+shapes and multi-col matrices use @pytest.mark.extensive.
 """
 
 import pytest
@@ -145,11 +78,11 @@ def get_params():
     ]
 
     # Explicit core configs for regular marking (robust vs list order / slicing).
-    # Phase A/C CI coverage:
+    # Regular CI coverage:
     #   - 3→16 bias/nobias: baseline host-bias + full/near-full L1
     #   - 16→16 groups=1 bias: multi-tile OC path at 32x32 (oc_tile=8)
     #   - 16 depthwise bias: multi-tile channel path at 32x32 (c_tile=8)
-    # Phase C also promotes 16x16 CORE @ 2c (OC/channel split, ≤2 DMA, host bias).
+    # Also 16x16 CORE @ 2c (OC/channel split, ≤2 DMA, host bias).
     CORE_CONFIGS = [
         (3, 16, 3, 1, 1, 1, True),
         (3, 16, 3, 1, 1, 1, False),
@@ -157,7 +90,7 @@ def get_params():
         (16, 16, 3, 1, 1, 16, True),  # depthwise multi-tile channels
     ]
 
-    # 16x16 + 32x32 CORE @ 1c: Phase A L1 fit. 16x16 CORE @ 2c: Phase C multi-col.
+    # 16x16 + 32x32 CORE @ 1c: L1 fit. 16x16 CORE @ 2c: multi-col smoke.
     # 32x32+ multi-col and 64 spatial stay extensive until proven green.
     spatials = [(16, 16), (32, 32), (64, 64)]
     col_candidates = [1, 2, 4, 8]
@@ -197,8 +130,8 @@ def get_params():
                 tile_size = in_size // nc
 
                 # Regular subset ("not extensive"):
-                #   - 16x16 / 32x32 CORE @ 1c — Phase A L1 OC/channel tiles
-                #   - 16x16 CORE @ 2c — Phase C multi-col OC/channel split smoke
+                #   - 16x16 / 32x32 CORE @ 1c — L1 OC/channel tiles
+                #   - 16x16 CORE @ 2c — multi-col OC/channel split smoke
                 # Bias remains host-side (2 input DMA limit per compute tile).
                 # Larger multi-col (4c/8c, 32x32+) stays extensive.
                 is_core_config = cfg in CORE_CONFIGS
@@ -306,10 +239,10 @@ def test_conv2d(
     )
 
     # Create operator with explicit column/tile (device-aware).
-    # Phase D.1: configs whose min L1 triple (in+weight+out bf16) exceeds the
+    # Configs whose min L1 triple (in+weight+out bf16) exceeds the
     # design budget raise AIEOperatorConstraintError at construct time instead
     # of a late aiecc "allocated buffers exceeded" OOM. Skip those as
-    # HW-proven unsupported until spatial L1 tiling (D.3) lands.
+    # Rejected at construct time when no H-strip plan fits L1.
     try:
         operator = AIEConv2d(
             in_channels=in_channels,
@@ -353,7 +286,7 @@ def test_conv2d(
     # 1-col path): full-tensor vector kernels accumulate in a different order
     # than torch F.conv2d(bf16). Observed ~2-5% relative drift on large values
     # and absolute O(0.1-0.5) errors on near-zero outputs (sign flips possible).
-    # 0.01/1e-4 was too tight and rejected correct NPU results (Jun 2026 HW).
+    # bf16 NPU MAC order can differ from torch; use looser tols than pure CPU.
     # 0.1 rel + 1.0 abs catches catastrophic bugs while accepting AIE bf16 MAC
     # noise. Golden remains conv2d_cpu (F.conv2d) for identical semantics.
     errors, latency_us, bandwidth_gbps = run_test(

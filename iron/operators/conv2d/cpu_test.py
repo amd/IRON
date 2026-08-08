@@ -3,58 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Pure-CPU reference validation suite for the AIE Conv2D operator (bf16).
+Pure-CPU reference tests for AIEConv2d (no XRT / NPU).
 
-This module is the dedicated pure-CPU validation suite for Conv2D, created as
-part of the cpu_test.py separation phase (following the exact pattern
-established by reduction/cpu_test.py).
-
-It contains ONLY tests and supporting logic that:
-  - Never require the aie_context fixture
-  - Never call run_test or any metrics path
-  - Never exercise compile_all(), prepare_runtime(), or any AIE runtime / XRT paths
-  - Rely exclusively on the CPU reference implementations (conv2d_cpu +
-    generate_golden_reference + calculate_output_dim) plus torch for cross-validation
-
-Primary tests:
-  - test_conv2d_reference_cpu_only (parametrized with stable id for hook safety):
-    exercises a wide matrix of configs (bias/nobias, depthwise, pointwise, strided,
-    grouped, batch>1, awkward padding) + golden vs F.conv2d + conv2d_cpu wrapper +
-    calculate_output_dim + op formula cross-checks + live get_params health.
-  - test_conv2d_cpu_reference_only (parametrized with stable "cpu_*" ids):
-    the direct analogue of reduction's cpu reference test. Guarantees that the
-    *exact* generate_golden_reference call used by all HW tests produces output
-    bit-identical to direct conv2d_cpu. Covers reproducibility, shape/config
-    recording, and full config families.
-  - test_conv2d_reference_sanity: reproducibility across seeds, direct conv2d_cpu
-    edge usage, and bf16-vs-fp32 drift documentation for tolerance rationale.
-
-This file is ALWAYS runnable with zero hardware dependencies:
-  - Under iron314 conda env (pure CPU python 3.14)
-  - During pytest --collectonly (critical for collection safety)
-  - In CI jobs without NPU/XRT
-  - On developer laptops
-
-It safely imports get_params from the sibling .test (the single source of truth
-shared with the NPU parametrized tests) because get_params contains a fully
-defensive device query (try/except around aie_utils, never crashes on import).
-
-Usage (standalone, recommended for iron314 validation):
-    conda run -n iron314 python -m pytest iron/operators/conv2d/cpu_test.py -q --tb=short
-    conda run -n iron314 python -m pytest iron/operators/conv2d/cpu_test.py -q --iterations 1 -k "reference_cpu_only"
-    conda run -n iron314 python -m pytest iron/operators/conv2d/cpu_test.py -q --iterations 3
-
-The main iron/operators/conv2d/test.py is now strictly limited to NPU paths:
-the primary @metrics test_conv2d, the test_conv2d_forward high-level API test,
-FORWARD_CASES, and get_params() (plus shared defensive device logic and
-calculate_output_dim import required by the parametrization matrix).
-
-This separation improves maintainability: CPU reference validation can evolve
-independently of the hardware integration surface, and iron314 / CPU CI can
-gate on cpu_test.py alone before any NPU jobs.
-
-All golden data fed to HW verification is now doubly guarded by the contract
-tests in this file.
+Validates conv2d_cpu, generate_golden_reference, and calculate_output_dim
+against torch.nn.functional.conv2d. Imports get_params from test.py for
+shared config IDs; safe under --collect-only and CPU-only environments.
 """
 
 import pytest

@@ -2,25 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-AIE 2D Convolution Operator
+AIE 2D Convolution Operator (AIE2 / AIE2P, bfloat16).
 
-Supports standard 2D convolution with configurable:
-- kernel_size
-- stride
-- padding
-- dilation (currently fixed to 1)
-- groups (including depthwise convolution)
-
-Works on AIE2 (NPU) and AIE2P (NPU2) architectures.
-
-NPU dataflow notes (see design.py MODELING STATUS):
-- Phase A L1 tiling: OC tiles for groups==1; channel tiles for depthwise.
-- Phase B multi-col: OC-split (groups==1) or channel-split (depthwise) when
-  dimensions are divisible; each core still has only 2 input DMAs (in+weight).
-- Bias is applied on the host after the NPU kernel (third bias ObjectFifo is
-  illegal on compute tiles).
-- Construct-time checks mirror design column clamp + L1 triple budget so
-  illegal configs fail with AIEOperatorConstraintError instead of late OOM.
+Configurable kernel_size, stride, padding, groups (incl. depthwise).
+Dilation is fixed to 1. Bias is applied on the host after the NPU run
+(compute tiles have only 2 input DMA channels: input + weight).
+Construct-time checks enforce column policy and L1 triple budget via
+AIEOperatorConstraintError.
 """
 
 import torch
@@ -97,7 +85,7 @@ class AIEConv2d(AIEOperatorBase):
                 after the NPU convolution (DMA channel limit on compute tiles).
             in_height: Input height (default 32)
             in_width: Input width (default 32)
-            num_aie_columns: Requested AIE columns (Phase B OC/channel split;
+            num_aie_columns: Requested AIE columns (OC/channel split;
                 clamped when dimensions are not divisible)
             tile_size: Reserved tile-size hint (L1 OC/channel tiles chosen in design)
             context: AIE context
@@ -369,7 +357,7 @@ class AIEConv2d(AIEOperatorBase):
     def _validate_l1_fit(self, num_columns: int) -> None:
         """Raise if the design's L1 triple (in+weight+out, bf16) cannot fit.
 
-        Mirrors design.py Phase A/D.3 tile selection: groups==1 OC-tiles with
+        Mirrors design.py tile selection: groups==1 OC-tiles with
         full input in L1, or H-strip spatial (pointwise or k>1 host-pad RF)
         when full input exceeds budget; depthwise channel-tiles; other groups
         require full tensors. Multi-column OC/channel split does not reduce
@@ -423,7 +411,7 @@ class AIEConv2d(AIEOperatorBase):
             if full_fits:
                 return
 
-            # D.3: pointwise H-strip can still fit when full input does not.
+            # Pointwise H-strip can still fit when full input does not.
             # Prefer full oc_per_col per strip (num_oc_tiles=1; no DMA stride-0).
             if is_pointwise:
                 tile_h = _choose_h_tile_pointwise(
@@ -454,7 +442,7 @@ class AIEConv2d(AIEOperatorBase):
                     f"spatial={self.in_height}x{self.in_width}, cols={cols}."
                 )
 
-            # D.3 k>1: host-pad RF H-strip with full oc_per_col (+ DMA pad).
+            # k>1 host-pad RF H-strip with full oc_per_col (+ DMA pad).
             if self._halo_plan(cols) is not None:
                 return
 
@@ -521,7 +509,7 @@ class AIEConv2d(AIEOperatorBase):
         )
 
     def set_up_artifacts(self):
-        """Set up compilation artifacts (Phase A tiles + Phase B multi-col)."""
+        """Set up compilation artifacts (L1 tiles + multi-col split)."""
         operator_dir = Path(__file__).parent
         design_path = operator_dir / "design.py"
 
@@ -540,18 +528,8 @@ class AIEConv2d(AIEOperatorBase):
 
                 dev = NPU1()
 
-        # Re-clamp against device column count (matches design.py max_cols).
-        max_cols = getattr(dev, "cols", 4) or 4
-        # Prefer NPU1/NPU2 class limits when available (same as design.py).
-        try:
-            from aie.iron.device import NPU1, NPU2
-
-            if isinstance(dev, NPU1):
-                max_cols = 4
-            elif isinstance(dev, NPU2):
-                max_cols = 8
-        except Exception:
-            pass
+        # Column cap from target device model (NPU1.cols / NPU2.cols).
+        max_cols = getattr(dev, "cols", None) or 4
         effective_num_columns = _resolve_num_columns(
             self.requested_num_columns,
             self.out_channels,
@@ -800,7 +778,7 @@ class AIEConv2d(AIEOperatorBase):
             * self.kernel_size[1]
         )
         output_size = self.out_channels * self.out_height * self.out_width
-        # Cache for legacy paths that read these attributes.
+        # Cache for callers that read these attributes.
         self.input_size = input_size
         self.weight_size = weight_size
         self.output_size = output_size

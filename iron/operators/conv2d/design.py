@@ -2,106 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-MLIR Generation for 2D Convolution Operator
+MLIR generation for AIE conv2d (AIE2 / AIE2P).
 
-Generates MLIR code for conv2d operations on AIE2 (NPU) and AIE2P (NPU2).
-
-==============================================================================
-MODELING STATUS (Phase A–C MVP + Phase D.1 + D.3 partial spatial)
-==============================================================================
-DMA legality (hard):
-  Each AIE compute tile has only **2 input DMA channels**. Designs must attach
-  at most two consumers per core (input + weight). Bias ObjectFifo is illegal;
-  bias is applied on the host (op.py) after the NPU run (+ ``_sync_to_device``).
-
-Phase A — L1 tiling per column (no kernel ABI break):
-
-  1) Standard / pointwise (groups==1): **out-channel (OC) tiling**
-     Full input in L1; weight/output OC-sliced per worker iteration.
-     Input TAP rebroadcasts full input per tile when num_tiles>1.
-
-  2) Depthwise: **channel tiling** of in+w+out (channel-contiguous packets).
-
-  3) Other groups>1 (non-depthwise): 1-col full tensor, or k>1 host-pad
-     H-strip when the full triple exceeds L1 (same planner as groups==1).
-
-Phase B — multi-column split, still ≤2 input DMAs/core:
-  Prior multi-col failures were illegal 3-ingress (bias OF) + invalid flattened
-  chunking — not OC-split itself.
-
-  - groups==1: split out_channels across columns (requires OC % cols == 0,
-    else columns clamped down). Each column: full input broadcast + weight/out
-    TAP offset to its OC block; Phase A oc_tile applied to oc_per_col.
-  - depthwise: split channels across columns (C % cols == 0 or clamp).
-  - Host bias unchanged (no third OF).
-
-Phase C — mature-op CI / package surface (not a dataflow redesign):
-  - ``AIEConv2d`` exported from ``iron.operators`` (public package surface).
-  - not-extensive matrix: 16x16/32x32 CORE @ 1c (Phase A) **and** 16x16 CORE
-    @ 2c multi-col smoke (Phase B path). Larger multi-col (4c/8c, 32x32+) and
-    broader configs remain ``@pytest.mark.extensive``.
-
-Phase D — full-parity remaining work (in progress):
-
-  D.1 DONE — Construct-time constraints (op.py mirrors this file):
-    - Column policy via ``_resolve_num_columns`` (divisibility + device max;
-      NPU1≤4, NPU2≤8). ``effective_num_columns`` / ``requested_num_columns``.
-    - L1 triple budget ``_L1_TRIPLE_BUDGET_BYTES`` (56 KiB): fail fast with
-      ``AIEOperatorConstraintError`` when min OC/channel tile (or full grouped
-      triple) cannot fit. groups==1 notes that multi-col does **not** shrink
-      input L1 (broadcast). Bare asserts → ConstraintError (dilation/groups/
-      positive dims/output spatial).
-    - Re-validated in ``set_up_artifacts`` after device column clamp.
-
-  D.2 OPEN — On-device packed bias (weights||bias, apply_bias=1) under ≤2
-    input DMAs; host path remains default until implemented or measured
-    evidence documents host-only as permanent.
-
-  D.3 PARTIAL — Spatial L1 tiling when full input exceeds budget after OC tiles:
-    - DONE (pointwise): **H-strip** tiling for groups==1 + k=1 (no halo).
-      When full-input L1 does not fit, choose largest ``tile_h | H`` such that
-      **full oc_per_col** fits (num_oc_tiles==1; avoids combined OC×spatial).
-      Worker iterations = num_spatial; multi-dim NCHW strip TAPs for in/out with
-      **leading size=1** so aiex does not treat the strip count as
-      repeat_count (transfer_len=prod(sizes[-3:])); weights rebroadcast with
-      leading num_spatial + stride 0 (Phase A pattern). Kernel ABI unchanged
-      (pointwise height=tile_h). HW-green: fat pointwise 32→64 @32×32 and
-      @64×64 (1–8c, bias/nobias).
-    - DONE (standard k>1, groups==1): **halo-aware H-strip** via host zero-pad.
-      When full-input L1 does not fit: host pads input to (H+2ph)×(W+2pw);
-      design L3 input is the padded tensor; kernel runs with pad_h=pad_w=0 and
-      fixed receptive-field strip height
-      ``in_h_tile = (tile_oh-1)*stride_h + kernel_h`` for output strips of
-      height ``tile_oh | out_height`` (prefer full oc_per_col, num_oc_tiles==1).
-      Overlapping input TAP stride = ``tile_oh * stride_h * padded_w``. Same
-      leading-size=1 multi-dim pattern as pointwise. Kernel ABI unchanged.
-      Enables e.g. 16→16 k3@64×64 and strided k3@64 that previously CE'd on
-      full input (~128 KiB) alone.
-    - DONE (DMA parity pad): when natural OH/OW only admit odd bf16 strip
-      sizes (e.g. s2 p0 → 31×31, toh∈{1,31}), ``_plan_halo_h_strip`` adds a
-      small **bottom/right** extra zero-pad so design OH/OW are DMA-legal
-      (e.g. pad H 64→65 → design OH 32 with OW 31), runs pad=0 strips, and
-      host **crops** NPU output to true OH×OW. External API shapes stay true;
-      staging out buffer when design spatial > true. Shared plan helper.
-    - DONE (BD size u10): planner tries **all** ``tile_oh | design_oh`` (not
-      only max L1 toh). Large toh can make ``in_h_tile * padded_w > 1023``
-      (aie.dma_bd size dim limit); smaller toh with even ``num_spatial`` fixes
-      e.g. groups=2 4→8 k3@64 (toh=8 strip=660 vs toh=32 strip=2244).
-    - DONE (groups>1 non-DW): same k>1 host-pad H-strip at 1-col when full
-      triple OOMs (no multi-col split for grouped non-DW).
-    - OPEN: OC×spatial without illegal mid-stride-0 rebroadcast, depthwise
-      spatial if needed, W-strip/2D tiles.
-
-  D.4 OPEN — Expand extensive multi-col matrix (4c where safe) / tol audit.
-
-  D.5 OPEN — Kernel vector perf (only after D.1–D.2 stable).
-
-Certainty (honest):
-  Phase A 1c + Phase B/C 2c not-extensive paths are the supported CI surface
-  (host bias, ≤2 DMA). D.3 pointwise + k>1 host-pad H-strip (groups==1 and
-  groups>1 non-DW) incl. DMA bottom/right extra-pad, BD u10 toh search, and
-  host crop are implemented; packed bias remains open.
-==============================================================================
+Hard constraints (current design):
+- Each compute tile has 2 input DMA channels: ObjectFifos are input + weight only.
+  Bias is applied on the host after the NPU run (see op.py).
+- L1 holds one in+weight+out triple per iteration (budget
+  ``_L1_TRIPLE_BUDGET_BYTES``; FIFO depth 1 or 2 if 2× triple fits).
+- groups==1: optional multi-col OC split + OC or H-strip tiling to fit L1.
+- depthwise: channel split/tile across columns (no full-input broadcast).
+- other groups>1: 1 column; full triple or k>1 host-pad H-strip if needed.
+- H-strip TAPs use leading size 1 so aiex does not treat strip count as
+  repeat_count; k>1 path may host-pad input and crop design OH/OW on host.
 """
 
 from ml_dtypes import bfloat16
@@ -111,7 +23,6 @@ import argparse
 import sys
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
-from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -143,8 +54,8 @@ def _choose_oc_tile(
     """Largest ``oc_tile`` dividing ``out_channels`` whose L1 triple fits.
 
     Triple = full input + weight tile + output tile (bf16).
-    Returns 1 if even a single OC does not fit (caller may still OOM; spatial
-    tiling is future work).
+    Returns 1 if even a single OC does not fit; callers may then use H-strip
+    tiling or raise at construct time.
     """
 
     def fits(oc_t: int) -> bool:
@@ -435,7 +346,7 @@ def _resolve_num_columns(
         while n > 1 and out_channels % n != 0:
             n -= 1
         return n
-    # Non-depthwise grouped: 1-col only (Phase A full-tensor).
+    # Non-depthwise grouped: 1-col only (full tensor or H-strip).
     return 1
 
 
@@ -461,7 +372,7 @@ def my_conv2d(
     trace_size,
 ):
     """
-    Generate MLIR for 2D convolution (Phase A L1 tiles + Phase B multi-col).
+    Generate MLIR for 2D convolution (L1 tiles + multi-col OC/channel split).
 
     ``use_bias`` is accepted for API compatibility but does **not** create a
     bias ObjectFifo (host applies bias). Columns: groups==1 OC-split and
@@ -471,13 +382,8 @@ def my_conv2d(
 
     _ = (use_bias, tile_size, trace_size)
 
-    # Device column cap (NPU1≤4, NPU2≤8); SequentialPlacer places one worker/col.
-    if isinstance(dev, NPU1):
-        max_cols = 4
-    elif isinstance(dev, NPU2):
-        max_cols = 8
-    else:
-        max_cols = getattr(dev, "cols", 4) or 4
+    # Device column cap from target model (NPU1.cols==4, NPU2.cols==8).
+    max_cols = getattr(dev, "cols", None) or 4
 
     input_size = N * in_channels * in_height * in_width
     weight_size = out_channels * in_channels // groups * kernel_h * kernel_w
@@ -504,10 +410,10 @@ def my_conv2d(
         num_columns, out_channels, in_channels, groups, is_depthwise, max_cols
     )
 
-    # --- Phase A tile selection (per column) + Phase B split sizes -------------
+    # --- Per-column tile selection + multi-col split sizes --------------------
     # rebroadcast_input: full input OF packet, repeated per tile (groups==1).
     # depthwise_split: per-col channel blocks for in/w/out (no full-input broadcast).
-    # spatial_h_tiling: D.3 H-strip when full input exceeds L1 (pointwise or k>1).
+    # spatial_h_tiling: H-strip when full input exceeds L1 (pointwise or k>1).
     # spatial_halo_pad: k>1 host-padded RF strips (kernel pad=0; L3 input padded).
     rebroadcast_input = False
     depthwise_split = False
@@ -525,7 +431,7 @@ def my_conv2d(
     input_elems_per_col = input_size
 
     if is_depthwise:
-        # Phase B: split channels across columns; Phase A tile within col.
+        # Split channels across columns; tile within each column.
         c_per_col = in_channels // num_columns
         c_tile = _choose_channel_tile(c_per_col, in_spatial, out_spatial, weight_per_oc)
         if c_per_col % c_tile != 0:
@@ -542,8 +448,8 @@ def my_conv2d(
         weight_elems_per_col = c_per_col * weight_per_oc
         output_elems_per_col = N * c_per_col * out_spatial
     elif groups == 1:
-        # Phase B: OC split across columns; Phase A OC tile within col.
-        # D.3: if full input still OOMs L1 → pointwise H-strip or k>1 host-pad RF.
+        # OC split across columns; OC tile within each column.
+        # If full input still exceeds L1 → pointwise H-strip or k>1 host-pad RF.
         oc_per_col = out_channels // num_columns
         oc_tile = _choose_oc_tile(oc_per_col, input_size, weight_per_oc, out_spatial)
         if oc_per_col % oc_tile != 0:
@@ -552,7 +458,7 @@ def my_conv2d(
             input_size, oc_tile * weight_per_oc, N * oc_tile * out_spatial
         )
         if (not full_fits) and is_pointwise:
-            # Pointwise H-strip (D.3): prefer full oc_per_col in L1 (num_oc=1)
+            # Pointwise H-strip: prefer full oc_per_col in L1 (num_oc=1)
             # so TAPs need no stride-0 rebroadcast (illegal on aie.dma_bd).
             tile_h = _choose_h_tile_pointwise(
                 in_height, in_channels, in_width, oc_per_col, weight_per_oc
@@ -600,7 +506,7 @@ def my_conv2d(
                 weight_tile_elems = oc_tile * weight_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
         elif not full_fits:
-            # Standard k>1 H-strip (D.3): host zero-pads (conv pad + optional
+            # Standard k>1 H-strip: host zero-pads (conv pad + optional
             # bottom/right DMA pad); kernel pad=0 with fixed RF strip height;
             # overlapping input TAPs. May use design_oh/ow > true out (crop).
             plan = _plan_halo_h_strip(
@@ -789,7 +695,7 @@ def my_conv2d(
             apply_bias,
         ]
     elif kernel_name == "pointwise_conv2d_bf16_vector":
-        # Mini pointwise over oc_tile out-channels; height may be H-strip (D.3).
+        # Mini pointwise over oc_tile out-channels; height may be H-strip.
         kernel_int_types = [np.int32] * 6
         kernel_call_scalars = [
             N,
@@ -838,7 +744,7 @@ def my_conv2d(
     def core_body(of_in, of_w, of_out, conv_kernel):
         # One mini-conv per tile (num_tiles==1 => single full-tensor iter).
         # Spatial H-strip: num_tiles == num_spatial (num_oc_tiles==1); weights
-        # rebroadcast via outermost TAP dim stride 0 (legal Phase A pattern).
+        # rebroadcast via outermost TAP dim stride 0.
         for _ in range_(num_tiles):
             elem_in = of_in.acquire(1)
             elem_w = of_w.acquire(1)
@@ -863,15 +769,14 @@ def my_conv2d(
         for i in range(num_columns)
     ]
 
-    # --- TAPs: Phase B per-column offsets; Phase A multi-packet within col -----
+    # --- TAPs: per-column offsets; multi-packet within column when tiling ------
     if spatial_h_tiling:
-        # D.3 H-strip (pointwise or k>1 host-pad RF), num_oc_tiles==1.
+        # H-strip (pointwise or k>1 host-pad RF), num_oc_tiles==1.
         # CRITICAL (aiex.shim_dma_single_bd_task): sizes[0] becomes
         # repeat_count=sizes[0]-1 and transfer_len=prod(sizes[-3:]).
         # For strided multi-packet, put a leading 1 so repeat_count=0 and
         # transfer_len covers all strips (one BD, no BD-ID blowup).
-        # Weight rebroadcast uses leading num_spatial + stride 0 (same as
-        # Phase A full-input rebroadcast).
+        # Weight rebroadcast uses leading num_spatial + stride 0.
         if spatial_halo_pad:
             # Overlapping RF strips on host-padded NCHW: step tile_oh * sh rows.
             strip_elems = in_h_tile * padded_w
@@ -1017,7 +922,7 @@ def my_conv2d(
             )
         rt.finish_task_group(tg)
 
-    return Program(dev, rt).resolve_program(SequentialPlacer())
+    return Program(dev, rt).resolve_program()
 
 
 if __name__ == "__main__":
