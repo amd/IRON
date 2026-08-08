@@ -51,34 +51,13 @@ from iron.operators.conv2d.design import (
 
 
 class AIEConv2d(AIEOperatorBase):
-    """AIE-accelerated 2D convolution operator (bf16, AIE2 / AIE2P).
+    """AIE-accelerated 2D convolution (bf16, AIE2 / AIE2P).
 
-    **Supported (current product surface)**
-
-    - ``dtype``: bfloat16 activations/weights (host torch API).
-    - ``kernel_size``, ``stride``, ``padding``: positive ints or 2-tuples.
-    - ``dilation``: **only** ``(1, 1)`` (other values raise
-      :class:`~iron.common.AIEOperatorConstraintError` at construct).
-    - ``groups``: standard (1), grouped, and depthwise (``groups == C_in == C_out``).
-    - ``use_bias``: on-device packed ``[W_tile‖B_tile]`` (≤2 input DMAs).
-    - Spatial: any positive H×W that admits an L1 plan (full triple, pointwise
-      H-strip, or k>1 host-pad RF H-strip).
-    - Columns: 1…device max; OC-split (groups==1), channel-split (depthwise),
-      or **group-block split** (non-depthwise ``groups>1`` when
-      ``groups % cols == 0`` and the per-col IC/OC triple fits L1).
-    - Batch ``N``: host loop over N=1-specialized MLIR.
-
-    **Construct-time rejects** (``AIEOperatorConstraintError``)
-
-    - Non-positive channels/spatial; dilation ≠ 1; groups not dividing C_in/C_out.
-    - Non-positive output spatial from pad/stride/kernel.
-    - L1 triple (in + weight[+bias] + out) cannot fit budget even with H-strip.
-    - ``num_aie_columns < 1`` (request is then clamped by device/divisibility).
-
-    **Not supported yet**
-
-    - Dilation > 1; W-strip / joint OC×spatial BD-safe tiles; multi-col
-      grouped **with** H-strip; fused activations; true ``aie::mmul`` layouts.
+    Supports general k/stride/pad, groups (incl. depthwise), and on-device packed
+    bias (``[W_tile‖B_tile]``, ≤2 input DMAs). Dilation is only ``(1, 1)``.
+    Construct-time ``AIEOperatorConstraintError`` when dims, groups, or L1 plan
+    are illegal. Multi-col: OC-split, depthwise channel-split, or group-block
+    when ``groups % cols == 0``. Batch N is looped on the host over N=1 MLIR.
     """
 
     def __init__(
@@ -97,28 +76,10 @@ class AIEConv2d(AIEOperatorBase):
         tile_size: int = None,
         context=None,
     ):
-        """
-        Initialize the Conv2d operator.
+        """Build a specialized conv2d for the given channels and spatial size.
 
-        Spatial dimensions (in_height, in_width) are part of construction so MLIR
-        is specialized correctly for them.
-
-        Args:
-            in_channels: Number of input channels
-            out_channels: Number of output channels
-            kernel_size: Size of the convolving kernel (h, w) or single int for square
-            stride: Stride of the convolution (default: 1)
-            padding: Zero padding added to both sides (default: 0)
-            dilation: Spacing between kernel elements (default: 1, only 1 supported)
-            groups: Number of blocked connections (default: 1)
-            use_bias: Whether to use bias (default: True). Bias is packed into the
-                weight DMA buffer (``[W_tile‖B_tile]``) and applied on-device.
-            in_height: Input height (default 32)
-            in_width: Input width (default 32)
-            num_aie_columns: Requested AIE columns (OC/channel split;
-                clamped when dimensions are not divisible)
-            tile_size: Reserved tile-size hint (L1 OC/channel tiles chosen in design)
-            context: AIE context
+        ``in_height``/``in_width`` are compile-time; bias packs into the weight
+        DMA buffer when ``use_bias`` is true.
         """
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -721,21 +682,7 @@ class AIEConv2d(AIEOperatorBase):
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
-        """
-        Forward pass for 2D convolution (torch API).
-
-        Uses modern runtime: ``compile()`` + ``get_callable()`` + XRTTensor
-        buffers. Bias is packed into the weight DMA buffer on-device
-        (≤2 input DMAs). Batch N is looped in Python over N=1 MLIR.
-
-        Args:
-            x: Input tensor of shape (N, in_channels, H_in, W_in)
-            weight: Weight tensor of shape (out_channels, in_channels/groups, kH, kW)
-            bias: Optional bias tensor of shape (out_channels,)
-
-        Returns:
-            Output tensor of shape (N, out_channels, H_out, W_out)
-        """
+        """Run conv2d (compile if needed; pack bias into weight DMA when used)."""
         if len(x.shape) != 4:
             raise AIEOperatorConstraintError(
                 f"AIEConv2d expects 4D input (N, C, H, W), got shape {x.shape}"

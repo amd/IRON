@@ -1,32 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-CPU Reference Implementation for 2D Convolution
+"""CPU golden for AIEConv2d tests via torch F.conv2d.
 
-This module is the single source of truth for golden reference data used by
-Conv2D tests (test.py). It provides:
-
-- conv2d_cpu: thin, faithful wrapper around torch.nn.functional.conv2d.
-  Used identically for ALL golden generation passed to run_test (HW verification)
-  and to the Python forward path. This ensures the CPU reference semantics
-  match PyTorch exactly for the tested dtypes (primarily bfloat16).
-
-- generate_golden_reference: produces deterministic (seeded) input/weight/bias
-  tensors + the expected output computed via conv2d_cpu. Supports full
-  coverage of bias/no-bias, depthwise, pointwise, strided, grouped cases.
-
-The reference does NOT attempt low-level bf16 accumulation emulation (unlike
-reduction ops) because Conv2D MAC accumulation order/precision on AIE is
-vectorized and kernel-specific; instead, tolerances in tests account for
-bf16 numerical sensitivity (see test.py for rationale).
-
-Supports standard 2D convolution with configurable:
-- kernel_size
-- stride
-- padding
-- dilation (currently only 1 supported by AIE op)
-- groups (including depthwise convolution)
+``conv2d_cpu`` wraps F.conv2d; ``generate_golden_reference`` builds seeded
+tensors and expected output. HW tests use bf16 tolerances (tolerances.py).
 """
 
 import torch
@@ -43,31 +21,7 @@ def conv2d_cpu(
     dilation: Union[int, Tuple[int, int]] = 1,
     groups: int = 1,
 ) -> torch.Tensor:
-    """
-    CPU reference implementation of 2D convolution.
-
-    This is a *thin, direct* wrapper around torch.nn.functional.conv2d using
-    identical argument passing. It is the canonical definition of "correct"
-    output for all golden data in test.py (both the metrics run_test path
-    and the explicit forward batch>1 path).
-
-    IMPORTANT FOR ACCURACY: Any change here affects every Conv2D test's
-    expected values. It must remain a pure pass-through to F.conv2d.
-
-    Args:
-        input: Input tensor of shape (N, C_in, H_in, W_in)
-        weight: Weight tensor of shape (C_out, C_in/groups, kH, kW)
-        bias: Optional bias tensor of shape (C_out,)
-        stride: Stride of the convolution (default: 1)
-        padding: Zero padding added to both sides of input (default: 0)
-        dilation: Spacing between kernel elements (default: 1)
-        groups: Number of blocked connections from input to output channels (default: 1)
-
-    Returns:
-        Convolved output tensor of shape (N, C_out, H_out, W_out)
-    """
-    # Single source of truth: identical F.conv2d call used for golden
-    # in generate_golden_reference for both CPU-path validation and HW.
+    """F.conv2d wrapper used as the golden for all conv2d tests."""
     output = F.conv2d(
         input=input,
         weight=weight,
@@ -95,38 +49,7 @@ def generate_golden_reference(
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 42,
 ):
-    """
-    Generate golden reference data for testing conv2d.
-
-    Deterministic via explicit torch.manual_seed(seed) at entry.
-    Input/weight/bias creation for bf16 uses fp32 randn scaled then cast
-    (best-practice for stable dynamic range in low-precision tests).
-
-    The "output" is *always* produced by calling conv2d_cpu(...) which is
-    the thin F.conv2d wrapper. This golden dict (input/weight/bias/output)
-    is passed verbatim to run_test verification and forward() tests.
-
-    This function + conv2d_cpu together define the CPU/reference accuracy
-    contract for the entire Conv2D operator test suite.
-
-    Args:
-        batch_size: Batch size (N)
-        in_channels: Number of input channels (C_in)
-        in_height: Input height (H_in)
-        in_width: Input width (W_in)
-        out_channels: Number of output channels (C_out)
-        kernel_size: Size of the convolving kernel (kH, kW)
-        stride: Stride of the convolution
-        padding: Zero padding added to input
-        dilation: Spacing between kernel elements
-        groups: Number of blocked connections
-        use_bias: Whether to use bias
-        dtype: Data type for tensors
-        seed: Random seed for reproducibility
-
-    Returns:
-        Dictionary with input, weight, bias (if used), and expected output
-    """
+    """Seeded tensors + expected output via conv2d_cpu (bf16 drawn in fp32 then cast)."""
     torch.manual_seed(seed)
 
     # Normalize kernel_size, stride, padding, dilation to tuples
@@ -143,8 +66,6 @@ def generate_golden_reference(
     assert in_channels % groups == 0, "in_channels must be divisible by groups"
     assert out_channels % groups == 0, "out_channels must be divisible by groups"
 
-    # Compute expected output spatial dimensions using the standard formula.
-    # This cross-validates against F.conv2d and against the operator implementation.
     out_height = calculate_output_dim(
         in_height, kernel_size[0], stride[0], padding[0], dilation[0]
     )
@@ -152,7 +73,6 @@ def generate_golden_reference(
         in_width, kernel_size[1], stride[1], padding[1], dilation[1]
     )
 
-    # Create input tensor (use fp32 intermediate for stable bf16 generation range)
     if dtype == torch.bfloat16:
         input_tensor = (
             torch.randn(
@@ -183,8 +103,6 @@ def generate_golden_reference(
         else:
             bias_tensor = torch.randn(out_channels, dtype=dtype) * 2.0
 
-    # Compute expected output using the canonical CPU reference (F.conv2d).
-    # This ensures the golden matches PyTorch semantics for the given dtype (bf16 primary).
     expected_output = conv2d_cpu(
         input=input_tensor,
         weight=weight_tensor,
@@ -195,7 +113,6 @@ def generate_golden_reference(
         groups=groups,
     )
 
-    # Self-check: F.conv2d output shape must match the formula used by operator and calculate.
     assert (
         expected_output.shape[2] == out_height and expected_output.shape[3] == out_width
     ), (
@@ -233,12 +150,7 @@ def calculate_output_dim(
     padding: int,
     dilation: int,
 ) -> int:
-    """
-    Calculate output dimension for convolution.
-
-    Formula:
-    output = floor((input + 2*padding - dilation*(kernel-1) - 1) / stride + 1)
-    """
+    """floor((input + 2*pad - dilation*(kernel-1) - 1) / stride + 1)."""
     return (input_dim + 2 * padding - dilation * (kernel_dim - 1) - 1) // stride + 1
 
 

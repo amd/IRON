@@ -22,24 +22,7 @@ from .test import get_params
     [pytest.param(None, id="reference_cpu_only")],
 )
 def test_conv2d_reference_cpu_only(dummy):
-    """Pure-CPU reference path test (no AIE hardware, no aie_context fixture).
-
-    Validates the entire reference implementation in isolation:
-    - generate_golden_reference (the exact helper used by all AIE tests)
-    - conv2d_cpu wrapper around F.conv2d
-    - calculate_output_dim (used in get_params for out dim + divisibility)
-    against the authoritative torch.nn.functional.conv2d directly.
-
-    Covers: bias on/off, standard, depthwise (groups==in==out), pointwise (1x1),
-    strided+pad, groups>1, batch>1, multiple spatial sizes, and awkward padding.
-
-    This test *always* runs (even in minimal iron314 containers without XRT/NPU)
-    and is the critical regression guard for golden math/shape contract before
-    any column-chunked MLIR, ObjectFIFOs, or runtime paths are involved.
-
-    Also performs collection-time sanity on all_params / get_params to ensure
-    the matrix (and its regular/extensive marking) remains healthy.
-    """
+    """CPU-only checks of generate_golden_reference / conv2d_cpu / dims."""
     # Broad representative cases exercising all important golden + dim paths.
     # All cases satisfy F.conv2d validity (spatials after pad >= kernel).
     test_cases = [
@@ -160,23 +143,7 @@ CPU_REFERENCE_CASES = [
 def test_conv2d_cpu_reference_only(
     batch, in_ch, h, w, out_ch, k, s, p, g, use_bias, seed
 ):
-    """Pure-CPU validation of golden reference + conv2d_cpu (no HW, no aie_context).
-
-    This is the Conv2D analogue of reduction's test_reduction_cpu_reference_only.
-    It guarantees that the *exact* generate_golden_reference call (with the
-    identical args used by the metrics and forward tests) produces an "output"
-    that is bit-for-bit / numerically identical to a direct conv2d_cpu invocation
-    on the generated tensors.
-
-    Covers:
-    - Every major config family in get_params (bias, nobias, depthwise, pointwise,
-      strided p=0/1, grouped)
-    - batch=1 (the run_test path) and batch>1 (the forward batching path)
-    - Multiple seeds for reproducibility
-    - Shape/dtype agreement and exact match (same code path inside golden)
-
-    If this test ever fails, the golden data fed to HW verification is suspect.
-    """
+    """Golden output matches direct conv2d_cpu on the same tensors."""
     # Via the golden path (what HW tests actually use)
     golden = generate_golden_reference(
         batch_size=batch,

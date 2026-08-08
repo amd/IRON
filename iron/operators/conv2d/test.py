@@ -182,23 +182,7 @@ def test_conv2d(
     tile_size,
     aie_context,
 ):
-    """Primary metrics-enabled end-to-end test (production canonical shape).
-
-    Exercises the complete AIE compilation + runtime path via run_test:
-    - AIEConv2d construction (explicit nc/tile for column chunking coverage)
-    - run_test (which performs operator.compile() + get_callable internally)
-    - Buffer registration/IO, timed runlist execution on NPU (AIE2 or AIE2P)
-    - nearly_equal verification with documented bf16 tolerances
-    - Emission of the exact two metric print lines for CSV/hooks
-
-    Full matrix (varying nc/tile + bias + groups + stride etc) exercises
-    all design.py specializations and conditional runtime paths.
-    """
-    # tile_size from the test parameter (computed in get_params for
-    # the chosen num_aie_columns, guaranteeing the divisibility asserted in design).
-
-    # Generate golden reference (exercises use_bias=True/False paths).
-    # Explicit seed for full determinism (matches polished peers).
+    """NPU end-to-end test via run_test (compile, run, verify, metrics prints)."""
     golden_ref = generate_golden_reference(
         batch_size=batch,
         in_channels=in_channels,
@@ -213,11 +197,7 @@ def test_conv2d(
         seed=42,
     )
 
-    # Create operator with explicit column/tile (device-aware).
-    # Configs whose min L1 triple (in+weight+out bf16) exceeds the
-    # design budget raise AIEOperatorConstraintError at construct time instead
-    # of a late aiecc "allocated buffers exceeded" OOM. Skip those as
-    # Rejected at construct time when no H-strip plan fits L1.
+    # Construct may raise AIEOperatorConstraintError when no L1 plan fits.
     try:
         operator = AIEConv2d(
             in_channels=in_channels,
@@ -389,21 +369,7 @@ def test_conv2d_forward(
     tile_size,
     aie_context,
 ):
-    """Forward / __call__ API integration test (production quality).
-
-    Explicitly drives the modern MLIROperator lifecycle:
-      - Construction with explicit nc/tile (different MLIR specializations)
-      - operator.compile() (design callback + peano/xclbin toolchain)
-      - operator(input, weight, bias) → forward (XRTTensor + get_callable;
-        host bias; per-batch Python loop over N=1 MLIR)
-      - Reuse of compiled operator for batch=2 (validates batching wrapper)
-
-    Golden data (including for batch=2) is generated exclusively via
-    generate_golden_reference / conv2d_cpu (identical contract to metrics path).
-    Independent FORWARD_CASES (stable IDs) guarantee coverage of column variants
-    without coupling to the main matrix. Complements run_test path.
-    Uses bf16 tolerances aligned with metrics (0.1/1.0) for forward + batch loop.
-    """
+    """Forward / __call__ path: compile, run, verify (incl. batch loop)."""
     golden_ref = generate_golden_reference(
         batch_size=batch,
         in_channels=in_channels,
