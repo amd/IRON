@@ -14,6 +14,7 @@ import pytest
 
 import torch
 
+from iron.operators.conv2d.benchmark import BENCHMARK_SHAPES
 from iron.operators.conv2d.op import AIEConv2d
 from iron.operators.conv2d.reference import (
     generate_golden_reference,
@@ -188,6 +189,7 @@ CONV2D_TEST_PARAM_NAMES = (
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
+# Smoke path: mean NPU latency + BO-sum Effective BW (see ROADMAP §2.1).
 @pytest.mark.parametrize(
     CONV2D_TEST_PARAM_NAMES,
     get_params(),
@@ -523,22 +525,56 @@ def test_conv2d_forward(
         pytest.fail(f"Batch-2 results don't match. Max diff: {max_diff}")
 
 
-# =============================================================================
-# PURE-CPU REFERENCE VALIDATION LIVES IN cpu_test.py
-# =============================================================================
-# All hardware-independent reference validation (generate_golden_reference,
-# conv2d_cpu contract, calculate_output_dim cross-checks, get_params health,
-# reproducibility, bf16 sanity) has been extracted to iron/operators/conv2d/cpu_test.py
-# following the production reduction/cpu_test.py (and avgpool/maxpool/conv3d) pattern.
-#
-# Run under iron314 (no XRT/NPU required, full --collectonly / --iterations safe):
-#   conda run -n iron314 python -m pytest iron/operators/conv2d/cpu_test.py -q --tb=short
-#   conda run -n iron314 python -m pytest iron/operators/conv2d/cpu_test.py -q --iterations 3 -k "reference_cpu_only"
-#
-# This keeps test.py focused exclusively on NPU paths (@metrics + forward + design matrix).
-# The cpu_test.py sibling imports get_params from here (defensive, collection-safe).
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Frozen-shape multi-iter bench (Ring 1). Default smoke still uses mean @metrics.
+# ---------------------------------------------------------------------------
 
-# Tests are pytest-only (AGENTS.md convention).
-# CPU reference: python -m pytest iron/operators/conv2d/cpu_test.py
-# HW (NPU) tests:  python -m pytest iron/operators/conv2d/test.py -q -m "not extensive"
+
+def _bench_shape_id(s) -> str:
+    bias = "bias" if s.use_bias else "nobias"
+    return (
+        f"{s.id}_{s.kind}_{s.in_channels}x{s.out_channels}_"
+        f"k{s.kernel}_s{s.stride}_g{s.groups}_{bias}_"
+        f"{s.in_h}x{s.in_w}_{s.num_aie_columns}c"
+    )
+
+
+@pytest.mark.extensive
+@pytest.mark.parametrize("shape", list(BENCHMARK_SHAPES), ids=_bench_shape_id)
+def test_conv2d_benchmark_shapes(shape, aie_context):
+    """Multi-iter median/p99 + GFLOPS on frozen B1–B6 (ROADMAP Track D).
+
+    Skips construct-time L1/column rejects. Does not write CSV by default;
+    set IRON_CONV2D_BENCH_CSV to append real rows (no fabricated baselines).
+    """
+    import os
+    from pathlib import Path
+
+    from iron.operators.conv2d.benchmark import (
+        format_metrics_lines,
+        resolve_device_name,
+        resolve_git_commit,
+        run_shape_on_npu,
+        write_csv,
+    )
+
+    result = run_shape_on_npu(
+        shape,
+        aie_context,
+        device_name=resolve_device_name(),
+        commit=resolve_git_commit(),
+    )
+    print(format_metrics_lines(result))
+
+    csv_path = os.environ.get("IRON_CONV2D_BENCH_CSV")
+    if csv_path and result.correctness != "skip":
+        write_csv(Path(csv_path), [result], append=True)
+
+    if result.correctness == "skip":
+        pytest.skip(result.detail or "unsupported config")
+    assert result.correctness == "pass", result.detail
+    assert result.latency_median_us > 0
+    assert result.gflops_median > 0
+
+
+# CPU reference: cpu_test.py. NPU smoke: pytest -m "not extensive".
