@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pure-CPU tests for AIEConv2d reference + benchmark helpers (no XRT/NPU)."""
-
-import math
+"""Pure-CPU tests for AIEConv2d reference (no XRT/NPU)."""
 
 import pytest
 
@@ -303,133 +301,6 @@ def test_conv2d_reference_sanity(dummy):
     # Always pass; this is informational only.
 
 
-# ---------------------------------------------------------------------------
-# Benchmark harness (pure CPU: FLOPs, stats, CSV schema — no NPU)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_shapes")])
-def test_benchmark_shapes_frozen_and_divisible(dummy):
-    """B1–B6 exist; each shape has positive OH/OW and legal groups."""
-    from .benchmark import BENCHMARK_SHAPES, shape_flops, shapes_for_ids
-
-    ids = {s.id for s in BENCHMARK_SHAPES}
-    assert ids == {"B1", "B2", "B3", "B4", "B5", "B6"}
-    assert len(shapes_for_ids(["B2"])) == 2
-    for s in BENCHMARK_SHAPES:
-        assert s.out_h > 0 and s.out_w > 0
-        assert s.in_channels % s.groups == 0
-        assert s.out_channels % s.groups == 0
-        assert shape_flops(s) > 0
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_flops")])
-def test_benchmark_flops_and_gflops_formula(dummy):
-    """FLOPs = 2*N*Cout*OH*OW*(Cin/G)*KH*KW; GFLOPS uses latency_us."""
-    from .benchmark import arithmetic_intensity, conv2d_flops, gflops
-
-    # N=1, 16→32, 8x8 out, k=3, g=1 → 2*1*32*8*8*16*3*3 = 589824
-    flops = conv2d_flops(1, 16, 32, 8, 8, 3, 3, 1)
-    assert flops == 2 * 1 * 32 * 8 * 8 * 16 * 3 * 3
-    # 1e6 µs = 1 s → GFLOP/s = flops / 1e9
-    assert abs(gflops(flops, 1e6) - flops / 1e9) < 1e-12
-    assert math.isnan(gflops(flops, 0.0))
-    assert arithmetic_intensity(1000, 100) == 10.0
-    assert math.isnan(arithmetic_intensity(1000, 0))
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_stats")])
-def test_benchmark_latency_stats_and_percentile(dummy):
-    from .benchmark import latency_stats_us, percentile_nearest
-
-    # 1000, 2000, 3000 ns → 1.0, 2.0, 3.0 µs
-    stats = latency_stats_us([1000.0, 2000.0, 3000.0])
-    assert stats["mean_us"] == 2.0
-    assert stats["median_us"] == 2.0
-    assert stats["p99_us"] == 3.0
-    ordered = [1.0, 2.0, 3.0, 4.0]
-    assert percentile_nearest(ordered, 0) == 1.0
-    assert percentile_nearest(ordered, 100) == 4.0
-    assert math.isnan(percentile_nearest([], 50))
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_csv")])
-def test_benchmark_csv_roundtrip(dummy, tmp_path):
-    from .benchmark import (
-        BENCHMARK_SHAPES,
-        BenchResult,
-        shape_flops,
-        write_csv,
-        CSV_FIELDNAMES,
-    )
-
-    s = BENCHMARK_SHAPES[0]
-    r = BenchResult(
-        shape=s,
-        flops=shape_flops(s),
-        warmup_iters=5,
-        timed_iters=20,
-        latency_mean_us=10.0,
-        latency_median_us=9.5,
-        latency_p99_us=12.0,
-        gflops_median=1.23e2,
-        bandwidth_gbps_median=4.56e0,
-        correctness="pass",
-        device="NPU2_cols8",
-        commit="deadbee",
-        total_bytes=4096,
-        arithmetic_intensity=12.5,
-        cpu_latency_median_us=100.0,
-    )
-    path = tmp_path / "conv2d_bench.csv"
-    write_csv(path, [r])
-    text = path.read_text()
-    header = text.splitlines()[0].split(",")
-    assert header == list(CSV_FIELDNAMES)
-    assert "B1" in text and "deadbee" in text and "pass" in text
-    assert "arithmetic_intensity" in header
-    assert "cpu_latency_median_us" in header
-    # scientific format from BenchResult.to_csv_row
-    assert "1.250000e+01" in text
-    assert "100.0000" in text
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_cpu_wall")])
-def test_benchmark_torch_cpu_wall_clock(dummy):
-    """Ring 4 helper: positive median µs and AI on a small frozen shape."""
-    from .benchmark import BENCHMARK_SHAPES, run_shape_on_torch_cpu
-
-    # B1 pointwise 1-col is small and stable for host timing.
-    shape = next(s for s in BENCHMARK_SHAPES if s.id == "B1" and s.num_aie_columns == 1)
-    stats = run_shape_on_torch_cpu(shape, warmup_iters=1, timed_iters=3)
-    assert stats["median_us"] > 0
-    assert stats["mean_us"] > 0
-    assert stats["flops"] > 0
-    assert stats["arithmetic_intensity"] > 0
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_peer_protocol")])
-def test_benchmark_peer_and_mlir_aie_protocol(dummy):
-    """Peer ring notes and mlir-aie comparison protocol stay documented in code."""
-    from .benchmark import (
-        MLIR_AIE_COMPARISON_PROTOCOL,
-        PEER_BW_REFERENCES,
-        PEER_CSV_FIELDNAMES,
-        PeerBenchResult,
-        write_peer_csv,
-    )
-
-    assert len(PEER_BW_REFERENCES) >= 3
-    for row in PEER_BW_REFERENCES:
-        assert "peer" in row and "do_not_claim" in row
-        assert "runner" in row
-    proto = MLIR_AIE_COMPARISON_PROTOCOL
-    assert len(proto["examples"]) == 2
-    assert "hard_disclaimers" in proto and len(proto["hard_disclaimers"]) >= 2
-    assert "procedure" in proto and len(proto["procedure"]) >= 3
-    assert "dtype" in proto["required_columns"]
-    assert "peer" in PEER_CSV_FIELDNAMES and "disclaimer" in PEER_CSV_FIELDNAMES
-
 
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="hw_tolerances_audit")])
 def test_hw_tolerances_tighter_than_legacy(dummy):
@@ -518,36 +389,6 @@ def test_pack_weights_with_bias_grouped_multicol(dummy):
     mid = 8 * wpo + 8
     assert np.array_equal(packed[mid : mid + 8 * wpo], w[8 * wpo :])
     assert np.array_equal(packed[mid + 8 * wpo :], b[8:])
-
-
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_peer_csv_schema")])
-def test_peer_csv_schema(dummy, tmp_path):
-    """Peer CSV writer emits documented columns without inventing metrics."""
-    from .benchmark import PEER_CSV_FIELDNAMES, PeerBenchResult, write_peer_csv
-
-    r = PeerBenchResult(
-        peer="relu",
-        role="BW ceiling",
-        align_to="B1_in_elems",
-        problem_shape="size=32768",
-        total_bytes=131072,
-        flops=32768,
-        arithmetic_intensity=0.25,
-        warmup_iters=2,
-        timed_iters=5,
-        latency_median_us=12.5,
-        bandwidth_gbps_median=1.0,
-        gflops_median=0.5,
-        correctness="pass",
-        disclaimer="Ring-2 only",
-        device="NPU2_cols8",
-        commit="abc1234",
-    )
-    path = tmp_path / "peer.csv"
-    write_peer_csv(path, [r])
-    header = path.read_text().splitlines()[0].split(",")
-    assert header == list(PEER_CSV_FIELDNAMES)
-    assert "relu" in path.read_text() and "Ring-2" in path.read_text()
 
 
 # Tests are pytest-only (AGENTS.md convention).

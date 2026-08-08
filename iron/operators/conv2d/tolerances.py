@@ -3,9 +3,8 @@
 
 """NPU vs torch-bf16 golden tolerances for AIEConv2d (audit-backed).
 
-Semantics live in ROADMAP Track B (tolerance audit). Values are defaults for
-``verify_buffer`` / ``torch.allclose`` on hardware paths — not CPU reference
-bit-exactness.
+Defaults for ``verify_buffer`` / ``torch.allclose`` on hardware paths — not
+CPU reference bit-exactness.
 
 Audit (NPU2 / aie2p, float-accum kernels, seed=42 smoke-like matrix including
 3→16 k3, depthwise, groups=2, pointwise, strided, 16×16/32×32, 1–2 cols):

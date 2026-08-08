@@ -8,7 +8,6 @@ import pytest
 
 import torch
 
-from iron.operators.conv2d.benchmark import BENCHMARK_SHAPES
 from iron.operators.conv2d.op import AIEConv2d
 from iron.operators.conv2d.reference import (
     generate_golden_reference,
@@ -184,7 +183,7 @@ CONV2D_TEST_PARAM_NAMES = (
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-# Smoke path: mean NPU latency + BO-sum Effective BW (see ROADMAP §2.1).
+# Smoke path: mean NPU latency + BO-sum Effective BW.
 @pytest.mark.parametrize(
     CONV2D_TEST_PARAM_NAMES,
     get_params(),
@@ -517,113 +516,10 @@ def test_conv2d_forward(
 # ---------------------------------------------------------------------------
 
 
-def _bench_shape_id(s) -> str:
-    bias = "bias" if s.use_bias else "nobias"
-    return (
-        f"{s.id}_{s.kind}_{s.in_channels}x{s.out_channels}_"
-        f"k{s.kernel}_s{s.stride}_g{s.groups}_{bias}_"
-        f"{s.in_h}x{s.in_w}_{s.num_aie_columns}c"
-    )
-
-
-@pytest.mark.extensive
-@pytest.mark.parametrize("shape", list(BENCHMARK_SHAPES), ids=_bench_shape_id)
-def test_conv2d_benchmark_shapes(shape, aie_context):
-    """Multi-iter median/p99 + GFLOPS on frozen B1–B6 (ROADMAP Track D).
-
-    Skips construct-time L1/column rejects. Does not write CSV by default;
-    set IRON_CONV2D_BENCH_CSV to append real rows (no fabricated baselines).
-    Optional Ring 4 host wall-clock: IRON_CONV2D_BENCH_CPU=1.
-    """
-    import os
-    from pathlib import Path
-
-    from iron.operators.conv2d.benchmark import (
-        format_metrics_lines,
-        resolve_device_name,
-        resolve_git_commit,
-        run_shape_on_npu,
-        run_shape_on_torch_cpu,
-        write_csv,
-    )
-
-    result = run_shape_on_npu(
-        shape,
-        aie_context,
-        device_name=resolve_device_name(),
-        commit=resolve_git_commit(),
-    )
-    if os.environ.get("IRON_CONV2D_BENCH_CPU", "").strip() in ("1", "true", "yes"):
-        cpu = run_shape_on_torch_cpu(shape, warmup_iters=2, timed_iters=5)
-        result.cpu_latency_median_us = cpu["median_us"]
-    print(format_metrics_lines(result))
-
-    csv_path = os.environ.get("IRON_CONV2D_BENCH_CSV")
-    if csv_path and result.correctness != "skip":
-        write_csv(Path(csv_path), [result], append=True)
-
-    if result.correctness == "skip":
-        pytest.skip(result.detail or "unsupported config")
-    assert result.correctness == "pass", result.detail
-    assert result.latency_median_us > 0
-    assert result.gflops_median > 0
-    assert result.total_bytes > 0
-    assert result.arithmetic_intensity > 0
-
-
-@pytest.mark.extensive
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="peer_bw_suite")])
-def test_conv2d_peer_bw_suite(dummy, aie_context):
-    """Ring 2 live peer runners (relu / mem_copy / gemm) with real NPU numbers.
-
-    Writes optional CSV via IRON_CONV2D_PEER_CSV. Does not rank peers vs conv.
-    """
-    import os
-    from pathlib import Path
-
-    from iron.operators.conv2d.benchmark import (
-        resolve_device_name,
-        resolve_git_commit,
-        run_peer_suite_on_npu,
-        write_peer_csv,
-    )
-
-    results = run_peer_suite_on_npu(
-        aie_context,
-        # Slightly lighter defaults so the extensive suite stays practical.
-        warmup_iters=2,
-        timed_iters=5,
-        device_name=resolve_device_name(),
-        commit=resolve_git_commit(),
-    )
-    for r in results:
-        print(
-            f"\n[peer {r.peer}] shape={r.problem_shape} "
-            f"median_us={r.latency_median_us} bw={r.bandwidth_gbps_median} "
-            f"gflops={r.gflops_median} ok={r.correctness} {r.detail}"
-        )
-
-    csv_path = os.environ.get("IRON_CONV2D_PEER_CSV")
-    if csv_path:
-        write_peer_csv(
-            Path(csv_path),
-            [r for r in results if r.correctness != "skip"],
-            append=True,
-        )
-
-    assert len(results) == 3
-    fails = [r for r in results if r.correctness == "fail"]
-    assert not fails, "; ".join(f"{r.peer}: {r.detail}" for r in fails)
-    for r in results:
-        if r.correctness == "pass":
-            assert r.latency_median_us > 0
-            assert r.total_bytes > 0
-
-
 @pytest.mark.extensive
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="multi_col_4c_8c_matrix")])
 def test_conv2d_multi_col_4c_8c_matrix_present(dummy):
-    """P3: extensive matrix includes 4c/8c where device + divisibility allow."""
+    """Extensive matrix includes 4c/8c where device + divisibility allow."""
     import aie.utils as aie_utils
 
     params = get_params()
@@ -660,7 +556,7 @@ def test_conv2d_multi_col_4c_8c_matrix_present(dummy):
 def test_conv2d_grouped_multicol_npu(
     in_ch, out_ch, k, s, p, g, use_bias, h, w, nc, aie_context
 ):
-    """P3: non-depthwise grouped multi-col group-block split on NPU."""
+    """Non-depthwise grouped multi-col group-block split on NPU."""
     golden = generate_golden_reference(
         batch_size=1,
         in_channels=in_ch,
