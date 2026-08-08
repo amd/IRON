@@ -123,7 +123,7 @@ First-class track; Ring 1 harness landed (`benchmark.py`); ranking vs peers stil
 - [x] Define **frozen `BENCHMARK_SHAPES`** (see §2.3; `iron/operators/conv2d/benchmark.py`)  
 - [x] Multi-iter **warmup + median / p50 / p99** (bench path; smoke `@metrics` still mean)  
 - [x] Report **GFLOPS** (and optional arithmetic intensity) — GFLOPS + AI (FLOP/byte) on bench path  
-- [x] Capture **baseline CSV** on **NPU2** (B1–B6 suite; see `baselines/npu2_20260808_abc7224.csv`)  
+- [x] Capture **baseline CSV** on **NPU2** (B1–B6 suite; see `baselines/npu2_20260808_e9dc777.csv`)  
 - [ ] Capture **baseline CSV** on **NPU1** when Phoenix-class hardware is available  
 - [ ] **Regression tracking** in CI (same channel as other ops’ metric trends)  
 - [x] **Peer comparison fairness scaffold** (`PEER_BW_REFERENCES` in `benchmark.py`; §2.4 Ring 2 rules)  
@@ -254,7 +254,7 @@ Keep a **small fixed set** so trends mean something. Fill actual numbers when fi
 1. ~~Keep this document as the semantics source for Latency / BW.~~  
 2. ~~Freeze B1–B6 + runner (`benchmark.py` + extensive pytest).~~  
 3. ~~Add **GFLOPS** next to Latency / BW for those IDs only.~~  
-4. ~~Capture baseline CSV on one NPU2~~ (`baselines/npu2_20260808_abc7224.csv`; NPU1 still open)  
+4. ~~Capture baseline CSV on one NPU2~~ (`baselines/npu2_20260808_e9dc777.csv`; NPU1 still open)  
    (`IRON_CONV2D_BENCH_CSV=... IRON_CONV2D_BENCH_CPU=1 pytest iron/operators/conv2d/test.py -k benchmark_shapes`).  
 5. ~~Peer ring scaffold + AI + Ring 4 CPU wall-clock helpers.~~ Live peer runners optional.  
 6. Optional: run mlir-aie examples on the same machine using §2.4 protocol; **no ranking claim**.  
