@@ -41,6 +41,8 @@ CSV_FIELDNAMES = (
     "use_bias",
     "num_aie_columns",
     "flops",
+    "bytes",
+    "arithmetic_intensity",
     "warmup_iters",
     "timed_iters",
     "latency_mean_us",
@@ -48,6 +50,7 @@ CSV_FIELDNAMES = (
     "latency_p99_us",
     "gflops_median",
     "bandwidth_gbps_median",
+    "cpu_latency_median_us",
     "correctness",
 )
 
@@ -162,6 +165,17 @@ def bandwidth_gbps(total_bytes: int, latency_us: float) -> float:
     return total_bytes / (latency_us * 1e-6) / 1e9
 
 
+def arithmetic_intensity(flops: int, total_bytes: int) -> float:
+    """Roofline AI: FLOPs / host-visible BO bytes (same byte set as Effective BW).
+
+    Not DRAM traffic on-device; useful only for same-op trends and rough
+    compute-vs-bytes position. See ROADMAP §2.2.
+    """
+    if total_bytes <= 0:
+        return float("nan")
+    return float(flops) / float(total_bytes)
+
+
 def percentile_nearest(sorted_samples: Sequence[float], p: float) -> float:
     """Nearest-rank percentile; ``p`` in [0, 100]. Empty → nan."""
     if not sorted_samples:
@@ -231,9 +245,14 @@ class BenchResult:
     device: str = ""
     commit: str = ""
     detail: str = ""
+    total_bytes: int = 0
+    arithmetic_intensity: float = float("nan")
+    cpu_latency_median_us: float = float("nan")
 
     def to_csv_row(self) -> dict[str, Any]:
         s = self.shape
+        ai = self.arithmetic_intensity
+        cpu = self.cpu_latency_median_us
         return {
             "commit": self.commit,
             "device": self.device,
@@ -251,6 +270,10 @@ class BenchResult:
             "use_bias": int(s.use_bias),
             "num_aie_columns": s.num_aie_columns,
             "flops": self.flops,
+            "bytes": self.total_bytes,
+            "arithmetic_intensity": (
+                f"{ai:.6e}" if not math.isnan(ai) else ""
+            ),
             "warmup_iters": self.warmup_iters,
             "timed_iters": self.timed_iters,
             "latency_mean_us": f"{self.latency_mean_us:.4f}",
@@ -258,6 +281,9 @@ class BenchResult:
             "latency_p99_us": f"{self.latency_p99_us:.4f}",
             "gflops_median": f"{self.gflops_median:.6e}",
             "bandwidth_gbps_median": f"{self.bandwidth_gbps_median:.6e}",
+            "cpu_latency_median_us": (
+                f"{cpu:.4f}" if not math.isnan(cpu) else ""
+            ),
             "correctness": self.correctness,
         }
 
@@ -283,6 +309,10 @@ def write_csv(
 
 def format_metrics_lines(result: BenchResult) -> str:
     """Human-readable lines (includes GFLOPS; CI @metrics may ignore extras)."""
+    ai = result.arithmetic_intensity
+    ai_s = f"{ai:.4f}" if not math.isnan(ai) else "n/a"
+    cpu = result.cpu_latency_median_us
+    cpu_s = f"{cpu:.1f}" if not math.isnan(cpu) else "n/a"
     return (
         f"\n[bench {result.shape.id}/{result.shape.kind} "
         f"{result.shape.num_aie_columns}c bias={result.shape.use_bias}]\n"
@@ -290,7 +320,9 @@ def format_metrics_lines(result: BenchResult) -> str:
         f"Latency median (us): {result.latency_median_us:.1f}\n"
         f"Latency p99 (us): {result.latency_p99_us:.1f}\n"
         f"Throughput: {result.gflops_median:.6e} GFLOP/s\n"
+        f"Arithmetic intensity: {ai_s} FLOP/byte\n"
         f"Effective Bandwidth: {result.bandwidth_gbps_median:.6e} GB/s\n"
+        f"Torch CPU median (us): {cpu_s}\n"
         f"Correctness: {result.correctness}\n"
     )
 
@@ -333,6 +365,7 @@ def run_shape_on_npu(
         shape.groups,
         shape.use_bias,
     )
+    ai = arithmetic_intensity(flops, total_bytes)
 
     try:
         operator = AIEConv2d(
@@ -363,6 +396,8 @@ def run_shape_on_npu(
             device=device_name,
             commit=commit,
             detail=str(e),
+            total_bytes=total_bytes,
+            arithmetic_intensity=ai,
         )
 
     golden = generate_golden_reference(
@@ -436,7 +471,154 @@ def run_shape_on_npu(
         device=device_name,
         commit=commit,
         detail="" if correctness == "pass" else f"{len(errs)} mismatches",
+        total_bytes=total_bytes,
+        arithmetic_intensity=ai,
     )
+
+
+def run_shape_on_torch_cpu(
+    shape: BenchShape,
+    *,
+    warmup_iters: int = DEFAULT_WARMUP_ITERS,
+    timed_iters: int = DEFAULT_TIMED_ITERS,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Ring 4: host wall-clock of torch bf16 F.conv2d on a frozen shape.
+
+    Uses ``time.perf_counter`` around the reference path only (sanity vs NPU,
+    not an NPU peer ranking). Returns median/mean/p99 latency in µs plus
+    GFLOPS and arithmetic intensity for the same FLOP/byte definitions.
+    """
+    import time
+
+    import torch
+
+    from iron.operators.conv2d.reference import generate_golden_reference
+
+    golden = generate_golden_reference(
+        batch_size=shape.batch,
+        in_channels=shape.in_channels,
+        in_height=shape.in_h,
+        in_width=shape.in_w,
+        out_channels=shape.out_channels,
+        kernel_size=shape.kernel,
+        stride=shape.stride,
+        padding=shape.padding,
+        groups=shape.groups,
+        use_bias=shape.use_bias,
+        seed=seed,
+    )
+    x = golden["input"]
+    w = golden["weight"]
+    b = golden["bias"]
+
+    # Warmup (not timed).
+    for _ in range(warmup_iters):
+        torch.nn.functional.conv2d(
+            x, w, b, stride=shape.stride, padding=shape.padding, groups=shape.groups
+        )
+
+    samples_us: list[float] = []
+    for _ in range(timed_iters):
+        t0 = time.perf_counter()
+        y = torch.nn.functional.conv2d(
+            x, w, b, stride=shape.stride, padding=shape.padding, groups=shape.groups
+        )
+        # Touch result so backends cannot elide the work entirely.
+        _ = float(y.reshape(-1)[0].item())
+        t1 = time.perf_counter()
+        samples_us.append((t1 - t0) * 1e6)
+
+    ordered = sorted(samples_us)
+    med = float(statistics.median(samples_us))
+    flops = shape_flops(shape)
+    total_bytes = estimate_arg_bytes(
+        shape.in_channels,
+        shape.in_h,
+        shape.in_w,
+        shape.out_channels,
+        shape.out_h,
+        shape.out_w,
+        shape.kernel,
+        shape.groups,
+        shape.use_bias,
+    )
+    return {
+        "mean_us": float(statistics.fmean(samples_us)),
+        "median_us": med,
+        "p99_us": percentile_nearest(ordered, 99),
+        "gflops_median": gflops(flops, med),
+        "arithmetic_intensity": arithmetic_intensity(flops, total_bytes),
+        "flops": float(flops),
+        "bytes": float(total_bytes),
+    }
+
+
+# Ring 2 peer notes (fairness only). Spatial-size family refs for BW ceiling
+# discussion — not a FLOPs race. Documented in ROADMAP §2.4.
+PEER_BW_REFERENCES: tuple[dict[str, Any], ...] = (
+    {
+        "peer": "elementwise_or_relu",
+        "role": "BW ceiling reference",
+        "align_how": "Match total element count ~ B1/B5 in*out footprint",
+        "do_not_claim": "That conv should match elementwise latency or BW",
+    },
+    {
+        "peer": "maxpool_or_avgpool",
+        "role": "Same spatial-size family latency/BW",
+        "align_how": "Same HxW and channel ballpark as B2/B4 when those ops exist",
+        "do_not_claim": "Same FLOPs or that pooling is a compute peer",
+    },
+    {
+        "peer": "gemm",
+        "role": "Roofline / compute-bound check only",
+        "align_how": "Compare AI and GFLOPS position, not raw µs",
+        "do_not_claim": "Direct latency race between conv and GEMM",
+    },
+)
+
+
+# Ring 3: mlir-aie example comparison protocol (different product; no ranking).
+MLIR_AIE_COMPARISON_PROTOCOL: dict[str, Any] = {
+    "examples": (
+        {
+            "name": "mlir-aie conv2d",
+            "url": "https://github.com/Xilinx/mlir-aie/tree/main/programming_examples/ml/conv2d",
+            "dtype": "int8",
+            "layout": "blocked / DMA-packed",
+            "shape": "1x1 pointwise (+ optional fuse_relu)",
+        },
+        {
+            "name": "mlir-aie conv2d_14x14",
+            "url": "https://github.com/Xilinx/mlir-aie/tree/main/programming_examples/ml/conv2d_14x14",
+            "dtype": "uint8/int8",
+            "layout": "example-specific",
+            "shape": "fixed 14x14, stride 14",
+        },
+    ),
+    "required_columns": (
+        "commit",
+        "device",
+        "example_name",
+        "dtype",
+        "layout",
+        "problem_shape",
+        "measurement_surface",
+        "latency_note",
+        "disclaimer",
+    ),
+    "hard_disclaimers": (
+        "Different dtype/layout/problem than bf16 NCHW AIEConv2d",
+        "Do not rank 'faster/slower' vs AIEConv2d without same problem surface",
+        "Qualitative / different-product only unless harness equalizes all axes",
+    ),
+    "procedure": (
+        "Build and run each example with its own Makefile/lit harness on the same machine",
+        "Record wall-clock or example-reported time with dtype/layout/shape columns",
+        "Place results next to B1–B6 AIEConv2d rows only as a qualitative table",
+        "Never merge into a single ranked leaderboard with general bf16 conv",
+    ),
+}
 
 
 def resolve_device_name() -> str:

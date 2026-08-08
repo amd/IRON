@@ -257,9 +257,10 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                     int ih_start = oh * stride_h - pad_h;
                     int iw_start = ow * stride_w - pad_w;
 
-                    bfloat16 acc = bfloat16(0.0f);
+                    // Float accum for the full RF (same policy as standard path).
+                    float acc = 0.0f;
 
-                    // Vectorized kernel accumulation
+                    // Vectorized kernel accumulation into float.
                     const int V = (kernel_h * kernel_w) / vec_factor;
                     for (int v = 0; v < V; v++) {
                         aie::vector<bfloat16, vec_factor> in_vec, w_vec;
@@ -281,7 +282,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        acc += static_cast<bfloat16>(aie::reduce_add(aie::mul(in_vec, w_vec).to_vector<float>()));
+                        acc += aie::reduce_add(aie::mul(in_vec, w_vec).to_vector<float>());
                     }
 
                     // Handle remainder
@@ -303,7 +304,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                     }
 
                     int out_idx = oh * out_width + ow;
-                    output_channel_ptr[out_idx] = acc;
+                    output_channel_ptr[out_idx] = static_cast<bfloat16>(acc);
                 }
             }
         }

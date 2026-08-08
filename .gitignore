@@ -13,6 +13,9 @@ build/*
 **/build_elf/**
 *.exe
 *.csv
+# Versioned conv2d Ring-1 baselines (real NPU captures only)
+!iron/operators/conv2d/baselines/
+!iron/operators/conv2d/baselines/**
 secret_github_token
 id_ed25519
 id_ed25519.pub

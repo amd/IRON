@@ -2,13 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-NPU end-to-end tests for AIEConv2d.
-
-Parametrized via get_params(); CPU-only reference tests live in cpu_test.py.
-Regular (not extensive) cases cover small 1-col and 2-col smokes; larger
-shapes and multi-col matrices use @pytest.mark.extensive.
-"""
+"""NPU end-to-end tests for AIEConv2d (CPU-only coverage in cpu_test.py)."""
 
 import pytest
 
@@ -546,6 +540,7 @@ def test_conv2d_benchmark_shapes(shape, aie_context):
 
     Skips construct-time L1/column rejects. Does not write CSV by default;
     set IRON_CONV2D_BENCH_CSV to append real rows (no fabricated baselines).
+    Optional Ring 4 host wall-clock: IRON_CONV2D_BENCH_CPU=1.
     """
     import os
     from pathlib import Path
@@ -555,6 +550,7 @@ def test_conv2d_benchmark_shapes(shape, aie_context):
         resolve_device_name,
         resolve_git_commit,
         run_shape_on_npu,
+        run_shape_on_torch_cpu,
         write_csv,
     )
 
@@ -564,6 +560,9 @@ def test_conv2d_benchmark_shapes(shape, aie_context):
         device_name=resolve_device_name(),
         commit=resolve_git_commit(),
     )
+    if os.environ.get("IRON_CONV2D_BENCH_CPU", "").strip() in ("1", "true", "yes"):
+        cpu = run_shape_on_torch_cpu(shape, warmup_iters=2, timed_iters=5)
+        result.cpu_latency_median_us = cpu["median_us"]
     print(format_metrics_lines(result))
 
     csv_path = os.environ.get("IRON_CONV2D_BENCH_CSV")
@@ -575,6 +574,8 @@ def test_conv2d_benchmark_shapes(shape, aie_context):
     assert result.correctness == "pass", result.detail
     assert result.latency_median_us > 0
     assert result.gflops_median > 0
+    assert result.total_bytes > 0
+    assert result.arithmetic_intensity > 0
 
 
 # CPU reference: cpu_test.py. NPU smoke: pytest -m "not extensive".

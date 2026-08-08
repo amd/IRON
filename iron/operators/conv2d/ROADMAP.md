@@ -48,10 +48,13 @@ Same IRON smoke pattern as axpy / gemm / relu, plus a conv2d Ring 1 harness:
 
 - Pytest `@metrics` (smoke `test_conv2d`) → **Latency (µs)** + **Effective Bandwidth (GB/s)**  
   from `run_test` **mean** of `result.npu_time`
-- Frozen suite + multi-iter **median / p99 / GFLOPS**: `iron/operators/conv2d/benchmark.py`  
+- Frozen suite + multi-iter **median / p99 / GFLOPS / arithmetic intensity**:  
+  `iron/operators/conv2d/benchmark.py`  
   exercised by extensive `test_conv2d_benchmark_shapes`  
   - Warmup default 5, timed default 20  
-  - Optional real CSV: env `IRON_CONV2D_BENCH_CSV=/path/to.csv` (append; no fabricated rows)
+  - Optional real CSV: env `IRON_CONV2D_BENCH_CSV=/path/to.csv` (append; no fabricated rows)  
+  - Optional Ring 4 torch CPU wall-clock: `IRON_CONV2D_BENCH_CPU=1`  
+  - Peer / mlir-aie protocol constants: `PEER_BW_REFERENCES`, `MLIR_AIE_COMPARISON_PROTOCOL`
 
 | Metric | Good for | Bad for |
 |--------|----------|---------|
@@ -74,7 +77,10 @@ Same IRON smoke pattern as axpy / gemm / relu, plus a conv2d Ring 1 harness:
 - [x] Comment cleanup (current constraints only; no phase/DONE–OPEN diary)  
 - [x] Inline review threads replied and marked resolved  
 - [ ] Remote CI fully green on maintainer runners (re-run / fork approval as needed)  
-- [ ] Full design review + nits after high-level read  
+- [x] Full design review + nits after high-level read  
+  (high-level pass done; review threads answered; placers/cols/comments fixed;
+  depthwise float-accum parity aie2/aie2p; verbose diary comments kept out of source.
+  Remaining product gaps live in Tracks B–F, not merge-hygiene nits.)  
 - [x] Keep PR body scope honest (complementary; no unearned perf claims)
 
 ---
@@ -102,8 +108,9 @@ Largest technical gap vs “already well-tested and performant” examples.
 - [ ] True **vector / `aie::mmul`-class** bf16 paths (today: largely nested loops + light vector naming; float accum for accuracy)  
 - [ ] **Layout strategy** for contiguous vector loads (memtile reshape / blocked channels if needed)  
 - [ ] Specialize microkernels: pointwise, depthwise, k3, general k  
-- [ ] **AIE trace** via `event0` / `event1` → cycle counts (not only host NPU timer)  
-- [ ] aie2 vs aie2p **quality parity** (not just both compile)  
+- [x] **AIE trace markers** `event0` / `event1` present on aie2/aie2p entry points (cycle extraction tooling still open)  
+- [x] aie2 vs aie2p **accuracy policy parity** for depthwise float accum (vector density still diverges; true quality parity open)  
+- [ ] aie2 vs aie2p **performance / vector-density parity** (not just both compile)  
 - [ ] Permanent product decision: host bias OK for MVP vs packed on-device for latency
 
 ---
@@ -115,12 +122,15 @@ First-class track; Ring 1 harness landed (`benchmark.py`); ranking vs peers stil
 - [x] Document current Latency / Effective-BW semantics (this file; keep out of code diaries)  
 - [x] Define **frozen `BENCHMARK_SHAPES`** (see §2.3; `iron/operators/conv2d/benchmark.py`)  
 - [x] Multi-iter **warmup + median / p50 / p99** (bench path; smoke `@metrics` still mean)  
-- [x] Report **GFLOPS** (and optional arithmetic intensity) — GFLOPS on bench path; AI still optional  
-- [ ] Capture **baseline CSV** on NPU1 and NPU2 once shapes freeze  
+- [x] Report **GFLOPS** (and optional arithmetic intensity) — GFLOPS + AI (FLOP/byte) on bench path  
+- [x] Capture **baseline CSV** on **NPU2** (B1–B6 suite; see `baselines/npu2_20260808_abc7224.csv`)  
+- [ ] Capture **baseline CSV** on **NPU1** when Phoenix-class hardware is available  
 - [ ] **Regression tracking** in CI (same channel as other ops’ metric trends)  
-- [ ] **Peer comparison suite** (fair rings only — §2.4)  
-- [ ] **mlir-aie comparison protocol** with hard disclaimers (different problem)  
-- [ ] Optional: **torch CPU bf16** wall-clock on the same shapes (sanity only)  
+- [x] **Peer comparison fairness scaffold** (`PEER_BW_REFERENCES` in `benchmark.py`; §2.4 Ring 2 rules)  
+- [ ] Live **peer comparison runners/tables** (maxpool/elementwise/GEMM BW on aligned shapes)  
+- [x] **mlir-aie comparison protocol** with hard disclaimers (different problem) — `MLIR_AIE_COMPARISON_PROTOCOL` in `benchmark.py` + §2.4  
+- [ ] Captured mlir-aie side-table rows on a real machine (protocol ready; no fabricated rows)  
+- [x] Optional: **torch CPU bf16** wall-clock on the same shapes (sanity only) — `run_shape_on_torch_cpu`; NPU bench opt-in via `IRON_CONV2D_BENCH_CPU=1`  
 - [x] Document what Effective BW does **and does not** mean
 
 ---
@@ -176,8 +186,9 @@ test_conv2d prints:
 | **NPU latency** | Existing `npu_time`; multi-iter **median** | Primary timer for this design |
 | **Effective BW** | Existing; document BO set included | Memory proxy only |
 | **GFLOPS** | \(2 \cdot N \cdot C_{out} \cdot O_H \cdot O_W \cdot (C_{in}/G) \cdot K_H \cdot K_W / t\) | Conv compute rate |
-| **Arithmetic intensity** | FLOPs / bytes moved (define byte set) | Roofline position |
+| **Arithmetic intensity** | FLOPs / host-visible BO bytes (`estimate_arg_bytes`) | Roofline position (same-op only) |
 | **End-to-end host wall** | Optional wall clock around full call | Includes BO sync / host bias |
+| **Torch CPU median** | `run_shape_on_torch_cpu` perf_counter on F.conv2d bf16 | Ring 4 sanity only |
 | **Core cycles** | AIE trace `event0` / `event1` | Kernel vs DMA-bound truth |
 
 ### 2.3 Frozen shape suite (proposed)
@@ -225,20 +236,28 @@ Keep a **small fixed set** so trends mean something. Fill actual numbers when fi
 
 **Fair rule:** only rank after same dtype, layout, problem shape, and measurement surface — or label as **qualitative / different problem**.
 
+**Protocol (code + process):** `MLIR_AIE_COMPARISON_PROTOCOL` in `benchmark.py` freezes:
+
+1. Example identity columns: name, dtype, layout, problem shape, measurement surface  
+2. Procedure: build/run each example with **its** harness on the same machine; record times with the required columns  
+3. Hard disclaimers: different product; no single ranked leaderboard vs B1–B6  
+4. Output: qualitative side table only — never invent cross-op rankings
+
 #### Ring 4 — Torch CPU bf16 (sanity)
 
-- Same logical shapes; shows NPU win/loss vs host  
-- Not an NPU peer-quality ranking
+- Same logical shapes via `run_shape_on_torch_cpu` / `IRON_CONV2D_BENCH_CPU=1`  
+- Shows NPU win/loss vs host wall-clock; **not** an NPU peer-quality ranking  
+- CSV field `cpu_latency_median_us` when CPU path is enabled
 
 ### 2.5 Measurement work order
 
 1. ~~Keep this document as the semantics source for Latency / BW.~~  
 2. ~~Freeze B1–B6 + runner (`benchmark.py` + extensive pytest).~~  
 3. ~~Add **GFLOPS** next to Latency / BW for those IDs only.~~  
-4. Capture baseline CSV on one NPU2 (and NPU1 if available) — **first real numbers**  
-   (`IRON_CONV2D_BENCH_CSV=... pytest iron/operators/conv2d/test.py -k benchmark_shapes`).  
-5. Peer ring: B-family vs maxpool / elementwise BW where shapes align.  
-6. Optional: run mlir-aie examples on the same machine; table with dtype/layout columns; **no ranking claim**.  
+4. ~~Capture baseline CSV on one NPU2~~ (`baselines/npu2_20260808_abc7224.csv`; NPU1 still open)  
+   (`IRON_CONV2D_BENCH_CSV=... IRON_CONV2D_BENCH_CPU=1 pytest iron/operators/conv2d/test.py -k benchmark_shapes`).  
+5. ~~Peer ring scaffold + AI + Ring 4 CPU wall-clock helpers.~~ Live peer runners optional.  
+6. Optional: run mlir-aie examples on the same machine using §2.4 protocol; **no ranking claim**.  
 7. Wire CI trends for B1/B2 regular cases (like other operators).  
 8. Only **after** kernel work (Track C): re-baseline and publish before/after GFLOPS.
 
@@ -274,8 +293,8 @@ Keep a **small fixed set** so trends mean something. Fill actual numbers when fi
 
 ## 5. One-line truth
 
-- **Roadmap:** large — design gaps, **kernel quality**, **measurement**, optional specialized int8 wraps, integration.  
-- **Benchmarks today:** essentially **none** as a ranking system — only generic IRON `@metrics` Latency / Effective-BW smoke.  
+- **Roadmap:** large — design gaps, **kernel quality**, baseline capture, optional specialized int8 wraps, integration.  
+- **Benchmarks today:** Ring 1 harness (B1–B6, median/p99, GFLOPS, AI) + NPU2 baseline CSV + Ring 4 CPU helper + peer/mlir-aie **protocol**; **no** ranking vs examples yet; NPU1 baseline still open.  
 - **How to measure vs others:** **tiered rings** + GFLOPS + frozen shapes; never a single “is conv better than gemm / examples?” number without fairness rules.
 
 ---

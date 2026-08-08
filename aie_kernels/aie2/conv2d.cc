@@ -236,7 +236,9 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                     int ih_start = oh * stride_h - pad_h;
                     int iw_start = ow * stride_w - pad_w;
 
-                    bfloat16 acc = bfloat16(0.0f);
+                    // Float accum (same policy as conv2d_bf16_vector): reduce
+                    // bf16 MAC drift vs torch on deeper kH*kW chains.
+                    float acc = 0.0f;
 
                     for (int kh = 0; kh < kernel_h; kh++) {
                         for (int kw = 0; kw < kernel_w; kw++) {
@@ -257,7 +259,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                     }
 
                     int out_idx = ((n * channels + c) * out_height + oh) * out_width + ow;
-                    output[out_idx] = acc;
+                    output[out_idx] = static_cast<bfloat16>(acc);
                 }
             }
         }

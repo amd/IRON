@@ -2,13 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Pure-CPU reference tests for AIEConv2d (no XRT / NPU).
-
-Validates conv2d_cpu, generate_golden_reference, and calculate_output_dim
-against torch.nn.functional.conv2d. Imports get_params from test.py for
-shared config IDs; safe under --collect-only and CPU-only environments.
-"""
+"""Pure-CPU tests for AIEConv2d reference + benchmark helpers (no XRT/NPU)."""
 
 import math
 
@@ -24,9 +18,6 @@ from .reference import (
 )
 from .test import get_params
 
-# =============================================================================
-# Pure CPU reference validation (no hardware required) - trustworthiness foundation
-# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -336,7 +327,7 @@ def test_benchmark_shapes_frozen_and_divisible(dummy):
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_flops")])
 def test_benchmark_flops_and_gflops_formula(dummy):
     """FLOPs = 2*N*Cout*OH*OW*(Cin/G)*KH*KW; GFLOPS uses latency_us."""
-    from .benchmark import conv2d_flops, gflops
+    from .benchmark import arithmetic_intensity, conv2d_flops, gflops
 
     # N=1, 16→32, 8x8 out, k=3, g=1 → 2*1*32*8*8*16*3*3 = 589824
     flops = conv2d_flops(1, 16, 32, 8, 8, 3, 3, 1)
@@ -344,6 +335,8 @@ def test_benchmark_flops_and_gflops_formula(dummy):
     # 1e6 µs = 1 s → GFLOP/s = flops / 1e9
     assert abs(gflops(flops, 1e6) - flops / 1e9) < 1e-12
     assert math.isnan(gflops(flops, 0.0))
+    assert arithmetic_intensity(1000, 100) == 10.0
+    assert math.isnan(arithmetic_intensity(1000, 0))
 
 
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_stats")])
@@ -385,6 +378,9 @@ def test_benchmark_csv_roundtrip(dummy, tmp_path):
         correctness="pass",
         device="NPU2_cols8",
         commit="deadbee",
+        total_bytes=4096,
+        arithmetic_intensity=12.5,
+        cpu_latency_median_us=100.0,
     )
     path = tmp_path / "conv2d_bench.csv"
     write_csv(path, [r])
@@ -392,6 +388,40 @@ def test_benchmark_csv_roundtrip(dummy, tmp_path):
     header = text.splitlines()[0].split(",")
     assert header == list(CSV_FIELDNAMES)
     assert "B1" in text and "deadbee" in text and "pass" in text
+    assert "arithmetic_intensity" in header
+    assert "cpu_latency_median_us" in header
+    # scientific format from BenchResult.to_csv_row
+    assert "1.250000e+01" in text
+    assert "100.0000" in text
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_cpu_wall")])
+def test_benchmark_torch_cpu_wall_clock(dummy):
+    """Ring 4 helper: positive median µs and AI on a small frozen shape."""
+    from .benchmark import BENCHMARK_SHAPES, run_shape_on_torch_cpu
+
+    # B1 pointwise 1-col is small and stable for host timing.
+    shape = next(s for s in BENCHMARK_SHAPES if s.id == "B1" and s.num_aie_columns == 1)
+    stats = run_shape_on_torch_cpu(shape, warmup_iters=1, timed_iters=3)
+    assert stats["median_us"] > 0
+    assert stats["mean_us"] > 0
+    assert stats["flops"] > 0
+    assert stats["arithmetic_intensity"] > 0
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_peer_protocol")])
+def test_benchmark_peer_and_mlir_aie_protocol(dummy):
+    """Peer ring notes and mlir-aie comparison protocol stay documented in code."""
+    from .benchmark import MLIR_AIE_COMPARISON_PROTOCOL, PEER_BW_REFERENCES
+
+    assert len(PEER_BW_REFERENCES) >= 3
+    for row in PEER_BW_REFERENCES:
+        assert "peer" in row and "do_not_claim" in row
+    proto = MLIR_AIE_COMPARISON_PROTOCOL
+    assert len(proto["examples"]) == 2
+    assert "hard_disclaimers" in proto and len(proto["hard_disclaimers"]) >= 2
+    assert "procedure" in proto and len(proto["procedure"]) >= 3
+    assert "dtype" in proto["required_columns"]
 
 
 # Tests are pytest-only (AGENTS.md convention).
