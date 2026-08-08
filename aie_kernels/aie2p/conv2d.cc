@@ -153,7 +153,10 @@ void conv2d_bf16_vector(bfloat16 *input,
                 int ow = 0;
 
                 // Dense OW tiles: unit stride in W → contiguous input window.
-                if (stride_w == 1) {
+                // k>1 + H-strip (in_w may be padded RF width): OW-vector path
+                // miscomputed on NPU for 64x64 k3 (host strip math is fine).
+                // Restrict dense OW vector to pure pointwise (k=1); k>1 scalar.
+                if (stride_w == 1 && kernel_h == 1 && kernel_w == 1) {
                     for (; ow + vec_factor <= out_width; ow += vec_factor) {
                         aie::accum<accfloat, vec_factor> acc =
                             aie::zeros<accfloat, vec_factor>();
