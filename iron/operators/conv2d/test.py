@@ -14,6 +14,7 @@ from iron.operators.conv2d.reference import (
     generate_golden_reference,
     calculate_output_dim,
 )
+from iron.operators.conv2d.tolerances import hw_tolerances
 from iron.common import AIEOperatorConstraintError
 from iron.common.test_utils import run_test
 
@@ -278,21 +279,15 @@ def test_conv2d(
 
     output_buffers = {"output": golden_ref["output"]}
 
-    # bf16 Conv2D numerical sensitivity (measured on AIE2P NPU after DMA-safe
-    # 1-col path): full-tensor vector kernels accumulate in a different order
-    # than torch F.conv2d(bf16). Observed ~2-5% relative drift on large values
-    # and absolute O(0.1-0.5) errors on near-zero outputs (sign flips possible).
-    # bf16 NPU MAC order can differ from torch; use looser tols than pure CPU.
-    # 0.1 rel + 1.0 abs catches catastrophic bugs while accepting AIE bf16 MAC
-    # noise. Golden remains conv2d_cpu (F.conv2d) for identical semantics.
+    # Tolerances: see iron/operators/conv2d/tolerances.py (audit-backed HW policy).
+    tols = hw_tolerances()
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
         input_buffers,
         output_buffers,
-        rel_tol=0.1,
-        abs_tol=1.0,
-        # Allow a small fraction of near-zero outliers (bf16 sign flips).
-        max_error_rate=0.02,
+        rel_tol=tols.rel_tol,
+        abs_tol=tols.abs_tol,
+        max_error_rate=tols.max_error_rate,
     )
 
     # Exactly the two lines required by the @metrics regexes (main-tree style,
@@ -479,10 +474,8 @@ def test_conv2d_forward(
         result.shape == expected.shape
     ), f"Shape mismatch: got {result.shape}, expected {expected.shape}"
 
-    # Forward-path bf16 tolerances (aligned with metrics path; host bias add
-    # is exact on top of NPU nobias result).
-    rel_tol = 0.1
-    abs_tol = 1.0
+    tols = hw_tolerances()
+    rel_tol, abs_tol = tols.rel_tol, tols.abs_tol
     if not torch.allclose(result, expected, rtol=rel_tol, atol=abs_tol):
         max_diff = (result - expected).abs().max().item()
         pytest.fail(f"Results don't match. Max diff: {max_diff}")
@@ -576,6 +569,151 @@ def test_conv2d_benchmark_shapes(shape, aie_context):
     assert result.gflops_median > 0
     assert result.total_bytes > 0
     assert result.arithmetic_intensity > 0
+
+
+@pytest.mark.extensive
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="peer_bw_suite")])
+def test_conv2d_peer_bw_suite(dummy, aie_context):
+    """Ring 2 live peer runners (relu / mem_copy / gemm) with real NPU numbers.
+
+    Writes optional CSV via IRON_CONV2D_PEER_CSV. Does not rank peers vs conv.
+    """
+    import os
+    from pathlib import Path
+
+    from iron.operators.conv2d.benchmark import (
+        resolve_device_name,
+        resolve_git_commit,
+        run_peer_suite_on_npu,
+        write_peer_csv,
+    )
+
+    results = run_peer_suite_on_npu(
+        aie_context,
+        # Slightly lighter defaults so the extensive suite stays practical.
+        warmup_iters=2,
+        timed_iters=5,
+        device_name=resolve_device_name(),
+        commit=resolve_git_commit(),
+    )
+    for r in results:
+        print(
+            f"\n[peer {r.peer}] shape={r.problem_shape} "
+            f"median_us={r.latency_median_us} bw={r.bandwidth_gbps_median} "
+            f"gflops={r.gflops_median} ok={r.correctness} {r.detail}"
+        )
+
+    csv_path = os.environ.get("IRON_CONV2D_PEER_CSV")
+    if csv_path:
+        write_peer_csv(
+            Path(csv_path),
+            [r for r in results if r.correctness != "skip"],
+            append=True,
+        )
+
+    assert len(results) == 3
+    fails = [r for r in results if r.correctness == "fail"]
+    assert not fails, "; ".join(f"{r.peer}: {r.detail}" for r in fails)
+    for r in results:
+        if r.correctness == "pass":
+            assert r.latency_median_us > 0
+            assert r.total_bytes > 0
+
+
+@pytest.mark.extensive
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="multi_col_4c_8c_matrix")])
+def test_conv2d_multi_col_4c_8c_matrix_present(dummy):
+    """P3: extensive matrix includes 4c/8c where device + divisibility allow."""
+    import aie.utils as aie_utils
+
+    params = get_params()
+    # Collect nc from param ids / values (12-tuple: ... num_aie_columns is index 10)
+    cols_seen = {p.values[10] for p in params}
+    max_cols = 4
+    try:
+        max_cols = aie_utils.get_current_device().cols
+    except Exception:
+        pass
+    assert 1 in cols_seen and 2 in cols_seen
+    if max_cols >= 4:
+        assert 4 in cols_seen, f"expected 4c cases in matrix, saw {sorted(cols_seen)}"
+    if max_cols >= 8:
+        assert 8 in cols_seen, f"expected 8c cases in matrix, saw {sorted(cols_seen)}"
+    multi = [p for p in params if p.values[10] >= 4]
+    assert len(multi) >= 4, f"too few multi-col>=4 cases: {len(multi)}"
+
+
+@pytest.mark.parametrize(
+    "in_ch,out_ch,k,s,p,g,use_bias,h,w,nc",
+    [
+        pytest.param(
+            8, 16, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_2c_bias_16x16"
+        ),
+        pytest.param(
+            8, 16, 3, 1, 2, 2, False, 16, 16, 2, id="groups2_2c_nobias_pad2"
+        ),
+        pytest.param(
+            4, 8, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_small_2c_bias"
+        ),
+    ],
+)
+def test_conv2d_grouped_multicol_npu(
+    in_ch, out_ch, k, s, p, g, use_bias, h, w, nc, aie_context
+):
+    """P3: non-depthwise grouped multi-col group-block split on NPU."""
+    golden = generate_golden_reference(
+        batch_size=1,
+        in_channels=in_ch,
+        in_height=h,
+        in_width=w,
+        out_channels=out_ch,
+        kernel_size=k,
+        stride=s,
+        padding=p,
+        groups=g,
+        use_bias=use_bias,
+        seed=20260808,
+    )
+    try:
+        op = AIEConv2d(
+            in_channels=in_ch,
+            out_channels=out_ch,
+            kernel_size=k,
+            stride=s,
+            padding=p,
+            groups=g,
+            use_bias=use_bias,
+            in_height=h,
+            in_width=w,
+            num_aie_columns=nc,
+            context=aie_context,
+        )
+    except AIEOperatorConstraintError as e:
+        pytest.skip(f"Unsupported grouped multi-col config: {e}")
+
+    assert op.effective_num_columns == nc, (
+        f"expected effective cols={nc}, got {op.effective_num_columns}"
+    )
+
+    input_buffers = {
+        "input": golden["input"],
+        "weight": golden["weight"],
+    }
+    if use_bias and golden["bias"] is not None:
+        input_buffers["bias"] = golden["bias"]
+    output_buffers = {"output": golden["output"]}
+    tols = hw_tolerances()
+    errors, latency_us, bandwidth_gbps = run_test(
+        op,
+        input_buffers,
+        output_buffers,
+        rel_tol=tols.rel_tol,
+        abs_tol=tols.abs_tol,
+        max_error_rate=tols.max_error_rate,
+    )
+    print(f"\n[grouped multi-col] Latency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    assert not errors, f"grouped multi-col failed: {errors}"
 
 
 # CPU reference: cpu_test.py. NPU smoke: pytest -m "not extensive".

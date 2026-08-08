@@ -19,7 +19,6 @@ from .reference import (
 from .test import get_params
 
 
-
 @pytest.mark.parametrize(
     "dummy",
     [pytest.param(None, id="reference_cpu_only")],
@@ -412,16 +411,143 @@ def test_benchmark_torch_cpu_wall_clock(dummy):
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_peer_protocol")])
 def test_benchmark_peer_and_mlir_aie_protocol(dummy):
     """Peer ring notes and mlir-aie comparison protocol stay documented in code."""
-    from .benchmark import MLIR_AIE_COMPARISON_PROTOCOL, PEER_BW_REFERENCES
+    from .benchmark import (
+        MLIR_AIE_COMPARISON_PROTOCOL,
+        PEER_BW_REFERENCES,
+        PEER_CSV_FIELDNAMES,
+        PeerBenchResult,
+        write_peer_csv,
+    )
 
     assert len(PEER_BW_REFERENCES) >= 3
     for row in PEER_BW_REFERENCES:
         assert "peer" in row and "do_not_claim" in row
+        assert "runner" in row
     proto = MLIR_AIE_COMPARISON_PROTOCOL
     assert len(proto["examples"]) == 2
     assert "hard_disclaimers" in proto and len(proto["hard_disclaimers"]) >= 2
     assert "procedure" in proto and len(proto["procedure"]) >= 3
     assert "dtype" in proto["required_columns"]
+    assert "peer" in PEER_CSV_FIELDNAMES and "disclaimer" in PEER_CSV_FIELDNAMES
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="hw_tolerances_audit")])
+def test_hw_tolerances_tighter_than_legacy(dummy):
+    """Audit policy is centralized and stricter than pre-audit MVP defaults."""
+    from iron.operators.conv2d.tolerances import (
+        HW_DEFAULT,
+        HW_LEGACY_LOOSE,
+        hw_tolerances,
+    )
+
+    t = hw_tolerances()
+    assert t is HW_DEFAULT
+    assert t.rel_tol < HW_LEGACY_LOOSE.rel_tol
+    assert t.abs_tol < HW_LEGACY_LOOSE.abs_tol
+    assert 0 < t.max_error_rate <= HW_LEGACY_LOOSE.max_error_rate
+    assert t.rel_tol < 1.0 and t.abs_tol > 0
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="pack_weights_bias")])
+def test_pack_weights_with_bias_layout(dummy):
+    """Tile-interleaved W‖B pack matches design contract (groups==1, 2 cols)."""
+    import numpy as np
+    from ml_dtypes import bfloat16
+
+    from iron.operators.conv2d.design import pack_weights_with_bias
+
+    oc, ic, kh, kw = 8, 4, 3, 3
+    wpo = ic * kh * kw
+    w = np.arange(oc * wpo, dtype=np.float32).astype(bfloat16)
+    b = (np.arange(oc, dtype=np.float32) + 100).astype(bfloat16)
+    packed = pack_weights_with_bias(
+        w,
+        b,
+        out_channels=oc,
+        in_channels=ic,
+        groups=1,
+        kernel_h=kh,
+        kernel_w=kw,
+        num_columns=2,
+        is_depthwise=False,
+        tile_channels=4,
+    )
+    # 2 cols × 1 tile × (4*wpo + 4 bias)
+    assert packed.shape[0] == oc * wpo + oc
+    # First tile: OCs 0..3
+    assert np.array_equal(packed[: 4 * wpo], w[: 4 * wpo])
+    assert np.array_equal(packed[4 * wpo : 4 * wpo + 4], b[:4])
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="pack_weights_bias_grouped_2c")])
+def test_pack_weights_with_bias_grouped_multicol(dummy):
+    """Grouped multi-col pack: OC blocks per column (groups % cols == 0)."""
+    import numpy as np
+    from ml_dtypes import bfloat16
+
+    from iron.operators.conv2d.design import (
+        _resolve_num_columns,
+        pack_weights_with_bias,
+    )
+
+    # g=2, IC=8, OC=16 → 2 cols ⇒ g_per_col=1, ic_per_col=4, oc_per_col=8
+    oc, ic, g, kh, kw = 16, 8, 2, 3, 3
+    wpo = (ic // g) * kh * kw
+    assert _resolve_num_columns(2, oc, ic, g, False, max_cols=8) == 2
+    assert _resolve_num_columns(3, oc, ic, g, False, max_cols=8) == 2  # clamp
+    assert _resolve_num_columns(8, oc, ic, g, False, max_cols=8) == 2
+    w = np.arange(oc * wpo, dtype=np.float32).astype(bfloat16)
+    b = (np.arange(oc, dtype=np.float32) + 50).astype(bfloat16)
+    packed = pack_weights_with_bias(
+        w,
+        b,
+        out_channels=oc,
+        in_channels=ic,
+        groups=g,
+        kernel_h=kh,
+        kernel_w=kw,
+        num_columns=2,
+        is_depthwise=False,
+        tile_channels=8,  # full oc_per_col
+    )
+    assert packed.shape[0] == oc * wpo + oc
+    # Col0 tile: OC 0..7 weights then bias
+    assert np.array_equal(packed[: 8 * wpo], w[: 8 * wpo])
+    assert np.array_equal(packed[8 * wpo : 8 * wpo + 8], b[:8])
+    # Col1 tile: OC 8..15
+    mid = 8 * wpo + 8
+    assert np.array_equal(packed[mid : mid + 8 * wpo], w[8 * wpo :])
+    assert np.array_equal(packed[mid + 8 * wpo :], b[8:])
+
+
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="bench_peer_csv_schema")])
+def test_peer_csv_schema(dummy, tmp_path):
+    """Peer CSV writer emits documented columns without inventing metrics."""
+    from .benchmark import PEER_CSV_FIELDNAMES, PeerBenchResult, write_peer_csv
+
+    r = PeerBenchResult(
+        peer="relu",
+        role="BW ceiling",
+        align_to="B1_in_elems",
+        problem_shape="size=32768",
+        total_bytes=131072,
+        flops=32768,
+        arithmetic_intensity=0.25,
+        warmup_iters=2,
+        timed_iters=5,
+        latency_median_us=12.5,
+        bandwidth_gbps_median=1.0,
+        gflops_median=0.5,
+        correctness="pass",
+        disclaimer="Ring-2 only",
+        device="NPU2_cols8",
+        commit="abc1234",
+    )
+    path = tmp_path / "peer.csv"
+    write_peer_csv(path, [r])
+    header = path.read_text().splitlines()[0].split(",")
+    assert header == list(PEER_CSV_FIELDNAMES)
+    assert "relu" in path.read_text() and "Ring-2" in path.read_text()
 
 
 # Tests are pytest-only (AGENTS.md convention).

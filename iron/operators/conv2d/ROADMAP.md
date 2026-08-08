@@ -30,12 +30,20 @@ Do **not** claim higher performance than those examples without a fair harness a
 
 ---
 
+## 0b. Host hardware & full-suite verification
+
+| Item | Status |
+|------|--------|
+| This machine | **NPU2 only** (`pyxrt` → RyzenAI-npu4). **NPU1 / Phoenix is not available** — do not block work on NPU1 baselines. |
+| Full `test.py` | `pytest iron/operators/conv2d/test.py --iterations 1` → **155 passed** (~78s) on NPU2 (2026-08-08; log `/tmp/conv2d_full_npu.log`) |
+| Full `cpu_test.py` | `pytest iron/operators/conv2d/cpu_test.py --iterations 1` → **25 passed** |
+
 ## 0. What we have today (honest)
 
 | Area | Status |
 |------|--------|
 | General bf16 `AIEConv2d` (k / stride / pad / groups / depthwise / pointwise) | Implemented |
-| Multi-col OC or channel split; L1 OC / H-strip tiling; host bias | Implemented |
+| Multi-col OC or channel split; L1 OC / H-strip tiling; **on-device packed bias** | Implemented |
 | Construct-time L1 / column checks (`AIEOperatorConstraintError`) | Implemented |
 | Local correctness matrix (pytest; extensive reported green) | Correctness only |
 | Review response on PR (differentiation, placers, cols, comments) | Done |
@@ -87,16 +95,29 @@ Same IRON smoke pattern as axpy / gemm / relu, plus a conv2d Ring 1 harness:
 
 ### Track B — Design / product completeness
 
-- [ ] **On-device packed bias** (`weights‖bias`, `apply_bias=1`) under ≤2 input DMAs (today: **host-only** bias)  
+- [x] **On-device packed bias** (`weights‖bias`, `apply_bias=1`) under ≤2 input DMAs
+  (tile-interleaved `[W_tile‖B_tile]` in weight ObjectFifo; host API still
+  `(in, weight, bias, out)` with pack in `get_callable`; L1 accounting includes
+  +1 per OC/channel; NPU not-extensive + multi-col bias matrix green on NPU2)
 - [ ] **Dilation > 1** (currently hard-rejected; only `dilation=(1,1)`)  
 - [ ] **OC × spatial** joint tiling without illegal mid-BD stride-0 rebroadcast  
 - [ ] **Depthwise spatial** H-strip when maps do not fit channel tiling alone  
 - [ ] **W-strip / 2D tiles** (not only H-strip)  
-- [ ] **Multi-col for grouped non-depthwise** (today forced to 1 column)  
+- [x] **Multi-col for grouped non-depthwise** when ``groups % cols == 0``
+  and the per-col IC/OC triple fits L1 (group-block split TAP, same layout as
+  torch groups; dedicated NPU tests `test_conv2d_grouped_multicol_npu`; falls
+  back toward 1-col full/H-strip when multi-col L1 fails). **Not yet:** multi-col
+  + H-strip combined for groups.  
 - [ ] **Batch N>1 inside MLIR** (today often Python loop over N=1 design)  
-- [ ] Expand **extensive multi-col** matrix (4c / 8c where legal)  
-- [ ] **Tolerance audit** (HW tols are relatively loose for bf16; tighten if kernels improve)  
-- [ ] Clearer construct-time / user docs for supported vs CE-rejected shapes  
+- [x] Expand **extensive multi-col** matrix (4c / 8c where legal)
+  (`get_params` col_candidates; `test_conv2d_multi_col_4c_8c_matrix_present`;
+  sample 4c NPU cases green on NPU2)
+- [x] **Tolerance audit** (`iron/operators/conv2d/tolerances.py`; default
+  tightened **0.1/1.0 → 0.05/0.5** rel/abs with ``max_error_rate=0.02`` after
+  NPU2 smoke-like matrix audit under float-accum kernels; abs 0.25 still fails
+  groups=2 — leave headroom until kernels improve further)  
+- [x] Clearer construct-time / user docs for supported vs CE-rejected shapes
+  (`AIEConv2d` class docstring Supported / Construct-time rejects / Not yet)
 - [ ] Optional: fused activation after conv (examples have fuse_relu on int8 1×1)
 
 ---
@@ -107,11 +128,18 @@ Largest technical gap vs “already well-tested and performant” examples.
 
 - [ ] True **vector / `aie::mmul`-class** bf16 paths (today: largely nested loops + light vector naming; float accum for accuracy)  
 - [ ] **Layout strategy** for contiguous vector loads (memtile reshape / blocked channels if needed)  
-- [ ] Specialize microkernels: pointwise, depthwise, k3, general k  
+- [x] Specialize microkernels: pointwise, depthwise, k3, general k
+  (symbols + design dispatch for `pointwise_conv2d_bf16_vector` /
+  `depthwise_conv2d_bf16_vector` / `conv2d_bf16_vector`; still gather-based /
+  not `aie::mmul` blocked layouts)  
 - [x] **AIE trace markers** `event0` / `event1` present on aie2/aie2p entry points (cycle extraction tooling still open)  
 - [x] aie2 vs aie2p **accuracy policy parity** for depthwise float accum (vector density still diverges; true quality parity open)  
-- [ ] aie2 vs aie2p **performance / vector-density parity** (not just both compile)  
-- [ ] Permanent product decision: host bias OK for MVP vs packed on-device for latency
+- [ ] aie2 vs aie2p **performance / vector-density parity** (not just both compile)
+  (structure aligned: aie2 now uses channel-vector MAC + depthwise k-window
+  vectors + pointwise float accum like aie2p; lane widths still 8 vs 16;
+  no Phoenix-class head-to-head numbers yet)  
+- [x] Permanent product decision: **packed on-device bias** for latency/DMA
+  (host still exposes a separate bias arg; no host post-add when `use_bias`)
 
 ---
 
@@ -124,12 +152,19 @@ First-class track; Ring 1 harness landed (`benchmark.py`); ranking vs peers stil
 - [x] Multi-iter **warmup + median / p50 / p99** (bench path; smoke `@metrics` still mean)  
 - [x] Report **GFLOPS** (and optional arithmetic intensity) — GFLOPS + AI (FLOP/byte) on bench path  
 - [x] Capture **baseline CSV** on **NPU2** (B1–B6 suite; see `baselines/npu2_20260808_e9dc777.csv`)  
-- [ ] Capture **baseline CSV** on **NPU1** when Phoenix-class hardware is available  
-- [ ] **Regression tracking** in CI (same channel as other ops’ metric trends)  
+- [ ] Capture **baseline CSV** on **NPU1** when Phoenix-class hardware is available (**N/A on current host: NPU2-only RyzenAI-npu4; do not block roadmap**)  
+- [x] **Regression tracking** in CI (same channel as other ops’ metric trends)
+  (`test_conv2d` `@metrics` Latency + Effective Bandwidth → CI CSV / trends
+  like relu/gemm; Ring-1 B1–B6 optional via extensive + `IRON_CONV2D_BENCH_CSV`)
 - [x] **Peer comparison fairness scaffold** (`PEER_BW_REFERENCES` in `benchmark.py`; §2.4 Ring 2 rules)  
-- [ ] Live **peer comparison runners/tables** (maxpool/elementwise/GEMM BW on aligned shapes)  
+- [x] Live **peer comparison runners/tables** (`run_peer_suite_on_npu`: relu / mem_copy / gemm;
+  `write_peer_csv`; extensive `test_conv2d_peer_bw_suite`; NPU2 sample
+  `baselines/npu2_peer_*.csv`. No maxpool in tree — mem_copy is the BW ceiling peer.
+  Not a ranking vs AIEConv2d.)  
 - [x] **mlir-aie comparison protocol** with hard disclaimers (different problem) — `MLIR_AIE_COMPARISON_PROTOCOL` in `benchmark.py` + §2.4  
-- [ ] Captured mlir-aie side-table rows on a real machine (protocol ready; no fabricated rows)  
+- [ ] Captured mlir-aie side-table rows on a real machine (protocol ready; no fabricated rows;
+  2026-08-08 attempt: examples present at `/home/antmi/mlir-aie/programming_examples/ml/conv2d*`
+  but Makefile kernel compile failed — `/bin/clang` missing for aie2p target; leave open)  
 - [x] Optional: **torch CPU bf16** wall-clock on the same shapes (sanity only) — `run_shape_on_torch_cpu`; NPU bench opt-in via `IRON_CONV2D_BENCH_CPU=1`  
 - [x] Document what Effective BW does **and does not** mean
 
@@ -147,7 +182,8 @@ First-class track; Ring 1 harness landed (`benchmark.py`); ranking vs peers stil
 
 - [ ] `OperatorSequence` smoke (e.g. conv → activation → later GEMM-style chain)  
 - [ ] Real **application** path if IRON apps need vision / tokenizer-style layers  
-- [ ] User-facing docs: constraints, host bias, shape / column rules  
+- [x] User-facing docs: constraints, packed bias, shape / column rules
+  (operator class docstring + this ROADMAP; no separate Sphinx page yet)
 - [ ] Optional quant / int8 product path later if required
 
 ---
@@ -284,7 +320,7 @@ Keep a **small fixed set** so trends mean something. Fill actual numbers when fi
 | Dtype / layout | int8 or uint8/int8; blocked / DMA-packed | bfloat16 NCHW |
 | Shapes | 1×1 only, or fixed 14×14 stride-14 | Configurable k / stride / pad / groups |
 | Parallelism | 1-core or full 32-core (14×14) | Multi-col OC / channel split (≤2 input DMAs/core) |
-| Bias / fuse | Optional fused ReLU (1×1); quant scales | Host-side bias; no fused ReLU |
+| Bias / fuse | Optional fused ReLU (1×1); quant scales | On-device packed bias (`W‖B`); no fused ReLU |
 | Integration | Makefile / lit programming examples | `MLIROperator`, torch `forward`, pytest |
 
 **Merge justification for this PR is use-case + IRON packaging, not measured superiority.**
@@ -294,7 +330,8 @@ Keep a **small fixed set** so trends mean something. Fill actual numbers when fi
 ## 5. One-line truth
 
 - **Roadmap:** large — design gaps, **kernel quality**, baseline capture, optional specialized int8 wraps, integration.  
-- **Benchmarks today:** Ring 1 harness (B1–B6, median/p99, GFLOPS, AI) + NPU2 baseline CSV + Ring 4 CPU helper + peer/mlir-aie **protocol**; **no** ranking vs examples yet; NPU1 baseline still open.  
+- **Benchmarks today:** Ring 1 harness (B1–B6, median/p99, GFLOPS, AI) + NPU2 baseline CSV + Ring 4 CPU helper + Ring 2 **live peer runners** (relu/mem_copy/gemm) + peer/mlir-aie **protocol**; **no** ranking vs examples yet; NPU1 baseline **N/A on this host**; mlir-aie side-table still open (toolchain).  
+- **Grouped multi-col:** group-block split when `groups % cols == 0` + per-col L1 fit (P3).
 - **How to measure vs others:** **tiered rings** + GFLOPS + frozen shapes; never a single “is conv better than gemm / examples?” number without fairness rules.
 
 ---

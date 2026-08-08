@@ -5,10 +5,10 @@
 AIE 2D Convolution Operator (AIE2 / AIE2P, bfloat16).
 
 Configurable kernel_size, stride, padding, groups (incl. depthwise).
-Dilation is fixed to 1. Bias is applied on the host after the NPU run
-(compute tiles have only 2 input DMA channels: input + weight).
-Construct-time checks enforce column policy and L1 triple budget via
-AIEOperatorConstraintError.
+Dilation is fixed to 1. Bias is packed on-device as ``weights‖bias`` in the
+weight ObjectFifo (still ≤2 input DMAs: input + packed weight); kernels use
+``apply_bias=1``. Construct-time checks enforce column policy and L1 triple
+budget (including packed bias) via AIEOperatorConstraintError.
 """
 
 import torch
@@ -37,6 +37,7 @@ from iron.common import (
 from iron.operators.conv2d.design import (
     _BYTES_PER_BF16,
     _L1_TRIPLE_BUDGET_BYTES,
+    _bias_per_oc,
     _choose_channel_tile,
     _choose_h_tile_pointwise,
     _choose_h_tile_standard,
@@ -45,11 +46,40 @@ from iron.operators.conv2d.design import (
     _plan_halo_h_strip,
     _resolve_num_columns,
     _rf_in_h,
+    pack_weights_with_bias,
 )
 
 
 class AIEConv2d(AIEOperatorBase):
-    """AIE-accelerated 2D convolution operator"""
+    """AIE-accelerated 2D convolution operator (bf16, AIE2 / AIE2P).
+
+    **Supported (current product surface)**
+
+    - ``dtype``: bfloat16 activations/weights (host torch API).
+    - ``kernel_size``, ``stride``, ``padding``: positive ints or 2-tuples.
+    - ``dilation``: **only** ``(1, 1)`` (other values raise
+      :class:`~iron.common.AIEOperatorConstraintError` at construct).
+    - ``groups``: standard (1), grouped, and depthwise (``groups == C_in == C_out``).
+    - ``use_bias``: on-device packed ``[W_tile‖B_tile]`` (≤2 input DMAs).
+    - Spatial: any positive H×W that admits an L1 plan (full triple, pointwise
+      H-strip, or k>1 host-pad RF H-strip).
+    - Columns: 1…device max; OC-split (groups==1), channel-split (depthwise),
+      or **group-block split** (non-depthwise ``groups>1`` when
+      ``groups % cols == 0`` and the per-col IC/OC triple fits L1).
+    - Batch ``N``: host loop over N=1-specialized MLIR.
+
+    **Construct-time rejects** (``AIEOperatorConstraintError``)
+
+    - Non-positive channels/spatial; dilation ≠ 1; groups not dividing C_in/C_out.
+    - Non-positive output spatial from pad/stride/kernel.
+    - L1 triple (in + weight[+bias] + out) cannot fit budget even with H-strip.
+    - ``num_aie_columns < 1`` (request is then clamped by device/divisibility).
+
+    **Not supported yet**
+
+    - Dilation > 1; W-strip / joint OC×spatial BD-safe tiles; multi-col
+      grouped **with** H-strip; fused activations; true ``aie::mmul`` layouts.
+    """
 
     def __init__(
         self,
@@ -81,8 +111,8 @@ class AIEConv2d(AIEOperatorBase):
             padding: Zero padding added to both sides (default: 0)
             dilation: Spacing between kernel elements (default: 1, only 1 supported)
             groups: Number of blocked connections (default: 1)
-            use_bias: Whether to use bias (default: True). Bias is applied on host
-                after the NPU convolution (DMA channel limit on compute tiles).
+            use_bias: Whether to use bias (default: True). Bias is packed into the
+                weight DMA buffer (``[W_tile‖B_tile]``) and applied on-device.
             in_height: Input height (default 32)
             in_width: Input width (default 32)
             num_aie_columns: Requested AIE columns (OC/channel split;
@@ -171,13 +201,10 @@ class AIEConv2d(AIEOperatorBase):
         is_depthwise = groups == in_channels and groups == out_channels
         self.is_depthwise = is_depthwise
         # Construct-time: allow up to NPU2 max; set_up_artifacts tightens further.
-        self.effective_num_columns = _resolve_num_columns(
-            self.num_aie_columns,
-            out_channels,
-            in_channels,
-            groups,
-            is_depthwise,
-            max_cols=8,
+        # Grouped multi-col may further drop columns when per-col L1 does not fit
+        # (design then uses 1-col full/H-strip); keep host pack + design in sync.
+        self.effective_num_columns = self._resolve_columns_for_l1(
+            self.num_aie_columns, max_cols=8
         )
         self._validate_l1_fit(self.effective_num_columns)
 
@@ -209,26 +236,59 @@ class AIEConv2d(AIEOperatorBase):
             and self.kernel_size[1] == 1
         )
 
+    def _resolve_columns_for_l1(self, requested: int, max_cols: int) -> int:
+        """Divisibility clamp, then drop columns until L1 policy accepts.
+
+        For non-depthwise grouped multi-col, design requires the **per-col**
+        IC/OC triple to fit (no multi-col H-strip yet). If it does not, fall
+        back toward 1-col so full-tensor or 1-col H-strip can still succeed.
+        """
+        n = _resolve_num_columns(
+            requested,
+            self.out_channels,
+            self.in_channels,
+            self.groups,
+            self.is_depthwise,
+            max_cols=max_cols,
+        )
+        while n > 1:
+            try:
+                self._validate_l1_fit(n)
+                return n
+            except AIEOperatorConstraintError:
+                n = _resolve_num_columns(
+                    n - 1,
+                    self.out_channels,
+                    self.in_channels,
+                    self.groups,
+                    self.is_depthwise,
+                    max_cols=max_cols,
+                )
+        return n
+
     def _halo_plan(self, num_columns: Optional[int] = None):
         """Return design ``_plan_halo_h_strip`` result when k>1 H-strip is active.
 
-        None when full-input L1 fits, or config is not groups==1 standard k>1,
+        None when full-input L1 fits, or config is not standard k>1,
         or no DMA-legal L1 plan exists (including optional bottom/right extra pad).
+        Multi-col non-depthwise grouped uses group-block split (no H-strip).
         """
         # Depthwise uses channel tiles; pointwise has its own H-strip path.
         if self.is_depthwise or self._is_pointwise():
             return None
-        # groups==1: multi-col OC split; groups>1 non-DW: design is 1-col full OC.
         n = 1
+        cols = max(
+            1,
+            int(
+                num_columns
+                if num_columns is not None
+                else self.effective_num_columns
+            ),
+        )
+        # Grouped multi-col: design uses group-block split, not H-strip.
+        if self.groups > 1 and cols > 1:
+            return None
         if self.groups == 1:
-            cols = max(
-                1,
-                int(
-                    num_columns
-                    if num_columns is not None
-                    else self.effective_num_columns
-                ),
-            )
             oc_per_col = self.out_channels // cols
         else:
             cols = 1
@@ -240,23 +300,24 @@ class AIEConv2d(AIEOperatorBase):
             * self.kernel_size[0]
             * self.kernel_size[1]
         )
+        weight_store_per_oc = weight_per_oc + _bias_per_oc(self.use_bias)
         input_size = n * self.in_channels * in_spatial
         budget = _L1_TRIPLE_BUDGET_BYTES
         if oc_per_col <= 0:
             return None
         if self.groups == 1:
             oc_tile = _choose_oc_tile(
-                oc_per_col, input_size, weight_per_oc, out_spatial, budget
+                oc_per_col, input_size, weight_store_per_oc, out_spatial, budget
             )
             if _l1_triple_fits(
                 input_size,
-                oc_tile * weight_per_oc,
+                oc_tile * weight_store_per_oc,
                 n * oc_tile * out_spatial,
                 budget,
             ):
                 return None
         else:
-            weight_size = self.out_channels * weight_per_oc
+            weight_size = self.out_channels * weight_store_per_oc
             output_size = n * self.out_channels * out_spatial
             if _l1_triple_fits(input_size, weight_size, output_size, budget):
                 return None
@@ -270,7 +331,7 @@ class AIEConv2d(AIEOperatorBase):
             self.out_width,
             self.in_channels,
             oc_per_col,
-            weight_per_oc,
+            weight_store_per_oc,
             kh,
             kw,
             sh,
@@ -359,9 +420,10 @@ class AIEConv2d(AIEOperatorBase):
 
         Mirrors design.py tile selection: groups==1 OC-tiles with
         full input in L1, or H-strip spatial (pointwise or k>1 host-pad RF)
-        when full input exceeds budget; depthwise channel-tiles; other groups
-        require full tensors. Multi-column OC/channel split does not reduce
-        full-input L1 for groups==1 (input is broadcast per column).
+        when full input exceeds budget; depthwise channel-tiles; non-DW
+        groups multi-col uses per-col IC/OC group blocks (must fit L1);
+        1-col groups may use full triple or H-strip. Multi-column OC split
+        does not reduce full-input L1 for groups==1 (input broadcast).
         """
         n = 1  # MLIR is specialized for N=1; batch is looped on host.
         in_spatial = self.in_height * self.in_width
@@ -371,6 +433,8 @@ class AIEConv2d(AIEOperatorBase):
             * self.kernel_size[0]
             * self.kernel_size[1]
         )
+        # L1 weight footprint includes packed bias (+1 per OC/channel) when used.
+        weight_store_per_oc = weight_per_oc + _bias_per_oc(self.use_bias)
         input_size = n * self.in_channels * in_spatial
         budget = _L1_TRIPLE_BUDGET_BYTES
         bpe = _BYTES_PER_BF16
@@ -380,9 +444,9 @@ class AIEConv2d(AIEOperatorBase):
         if self.is_depthwise:
             c_per_col = self.in_channels // cols
             c_tile = _choose_channel_tile(
-                c_per_col, in_spatial, out_spatial, weight_per_oc, budget
+                c_per_col, in_spatial, out_spatial, weight_store_per_oc, budget
             )
-            tile_elems = c_tile * (in_spatial + weight_per_oc + out_spatial)
+            tile_elems = c_tile * (in_spatial + weight_store_per_oc + out_spatial)
             if tile_elems * bpe > budget:
                 need = tile_elems * bpe
                 raise AIEOperatorConstraintError(
@@ -400,11 +464,11 @@ class AIEConv2d(AIEOperatorBase):
         if self.groups == 1:
             oc_per_col = self.out_channels // cols
             oc_tile = _choose_oc_tile(
-                oc_per_col, input_size, weight_per_oc, out_spatial, budget
+                oc_per_col, input_size, weight_store_per_oc, out_spatial, budget
             )
             full_fits = _l1_triple_fits(
                 input_size,
-                oc_tile * weight_per_oc,
+                oc_tile * weight_store_per_oc,
                 n * oc_tile * out_spatial,
                 budget,
             )
@@ -419,20 +483,22 @@ class AIEConv2d(AIEOperatorBase):
                     self.in_channels,
                     self.in_width,
                     oc_per_col,
-                    weight_per_oc,
+                    weight_store_per_oc,
                     budget,
                 )
                 in_tile = n * self.in_channels * tile_h * self.in_width
                 out_tile_sp = tile_h * self.out_width
                 if _l1_triple_fits(
                     in_tile,
-                    oc_per_col * weight_per_oc,
+                    oc_per_col * weight_store_per_oc,
                     n * oc_per_col * out_tile_sp,
                     budget,
                 ):
                     return
                 need = (
-                    in_tile + oc_per_col * weight_per_oc + n * oc_per_col * out_tile_sp
+                    in_tile
+                    + oc_per_col * weight_store_per_oc
+                    + n * oc_per_col * out_tile_sp
                 ) * bpe
                 raise AIEOperatorConstraintError(
                     f"AIEConv2d pointwise L1 footprint exceeds budget even with "
@@ -454,7 +520,7 @@ class AIEConv2d(AIEOperatorBase):
                 self.in_channels,
                 padded_w,
                 oc_per_col,
-                weight_per_oc,
+                weight_store_per_oc,
                 self.out_width,
                 kh,
                 sh,
@@ -464,7 +530,9 @@ class AIEConv2d(AIEOperatorBase):
             in_tile = n * self.in_channels * in_h_tile * padded_w
             out_tile_sp = max(1, tile_oh) * self.out_width
             need = (
-                in_tile + oc_per_col * weight_per_oc + n * oc_per_col * out_tile_sp
+                in_tile
+                + oc_per_col * weight_store_per_oc
+                + n * oc_per_col * out_tile_sp
             ) * bpe
             input_bytes = input_size * bpe
             # Distinguish true L1 OOM from DMA-parity impossibility.
@@ -492,14 +560,36 @@ class AIEConv2d(AIEOperatorBase):
                 f"(input is broadcast per column).{dma_note}"
             )
 
-        # Non-depthwise grouped: full tensor or k>1 host-pad H-strip (1-col).
-        weight_size = self.out_channels * weight_per_oc
-        output_size = n * self.out_channels * out_spatial
-        triple = (input_size + weight_size + output_size) * bpe
-        if triple <= budget:
+        # Non-depthwise grouped: multi-col group-block (per-col IC/OC) or
+        # 1-col full tensor / k>1 host-pad H-strip.
+        if self.groups % cols != 0:
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d grouped multi-col requires groups % cols == 0, "
+                f"got groups={self.groups}, cols={cols}"
+            )
+        ic_per_col = self.in_channels // cols
+        oc_per_col = self.out_channels // cols
+        in_col = n * ic_per_col * in_spatial
+        w_col = oc_per_col * weight_store_per_oc
+        out_col = n * oc_per_col * out_spatial
+        if _l1_triple_fits(in_col, w_col, out_col, budget):
             return
+        if cols > 1:
+            # Multi-col grouped has no H-strip path; caller may drop columns.
+            need = (in_col + w_col + out_col) * bpe
+            raise AIEOperatorConstraintError(
+                f"AIEConv2d grouped multi-col (groups={self.groups}, cols={cols}) "
+                f"per-col L1 triple needs ~{need} bytes "
+                f"(budget {_L1_TRIPLE_BUDGET_BYTES}). "
+                f"Config: IC={self.in_channels}, OC={self.out_channels}, "
+                f"spatial={self.in_height}x{self.in_width}. "
+                f"Try fewer columns or smaller spatial (1-col may H-strip)."
+            )
         if self._halo_plan(1) is not None:
             return
+        weight_size = self.out_channels * weight_store_per_oc
+        output_size = n * self.out_channels * out_spatial
+        triple = (input_size + weight_size + output_size) * bpe
         raise AIEOperatorConstraintError(
             f"AIEConv2d grouped (groups={self.groups}, non-depthwise) "
             f"requires full in+weight+out in L1 (~{triple} bytes) or a legal "
@@ -530,24 +620,20 @@ class AIEConv2d(AIEOperatorBase):
 
         # Column cap from target device model (NPU1.cols / NPU2.cols).
         max_cols = getattr(dev, "cols", None) or 4
-        effective_num_columns = _resolve_num_columns(
-            self.requested_num_columns,
-            self.out_channels,
-            self.in_channels,
-            self.groups,
-            self.is_depthwise,
-            max_cols=max_cols,
+        effective_num_columns = self._resolve_columns_for_l1(
+            self.requested_num_columns, max_cols=max_cols
         )
         self.effective_num_columns = effective_num_columns
-        # Depthwise L1 grows when columns shrink after device clamp — re-check.
+        # L1 re-check after device/group/L1 column clamp.
         self._validate_l1_fit(effective_num_columns)
 
+        bias_tag = "bias" if self.use_bias else "nobias"
         file_name_base = (
             f"conv2d_{self.in_channels}_{self.out_channels}_{self.in_height}x{self.in_width}_"
             f"{self.kernel_size[0]}x{self.kernel_size[1]}_"
             f"s{self.stride[0]}x{self.stride[1]}_"
             f"p{self.padding[0]}x{self.padding[1]}_"
-            f"g{self.groups}_{effective_num_columns}c"
+            f"g{self.groups}_{effective_num_columns}c_{bias_tag}"
         )
 
         mlir_artifact = PythonGeneratedMLIRArtifact(
@@ -638,9 +724,9 @@ class AIEConv2d(AIEOperatorBase):
         """
         Forward pass for 2D convolution (torch API).
 
-        Uses modern MLIROperator runtime: ``compile()`` + ``get_callable()`` +
-        XRTTensor buffers. Bias stays host-side (≤2 input DMAs on device).
-        Batch N is looped in Python over N=1-specialized MLIR.
+        Uses modern runtime: ``compile()`` + ``get_callable()`` + XRTTensor
+        buffers. Bias is packed into the weight DMA buffer on-device
+        (≤2 input DMAs). Batch N is looped in Python over N=1 MLIR.
 
         Args:
             x: Input tensor of shape (N, in_channels, H_in, W_in)
@@ -792,8 +878,75 @@ class AIEConv2d(AIEOperatorBase):
         specs.append(AIERuntimeArgSpec("out", (output_size,)))
         return specs
 
+    def _design_tile_channels(self) -> int:
+        """OC/channel tile size matching design.py L1 selection (for bias pack)."""
+        n = 1
+        cols = max(1, int(self.effective_num_columns))
+        in_spatial = self.in_height * self.in_width
+        out_spatial = self.out_height * self.out_width
+        weight_per_oc = (
+            (self.in_channels // self.groups)
+            * self.kernel_size[0]
+            * self.kernel_size[1]
+        )
+        w_store = weight_per_oc + _bias_per_oc(self.use_bias)
+        budget = _L1_TRIPLE_BUDGET_BYTES
+        if self.is_depthwise:
+            c_per_col = self.in_channels // cols
+            c_tile = _choose_channel_tile(
+                c_per_col, in_spatial, out_spatial, w_store, budget
+            )
+            if c_per_col % c_tile != 0:
+                c_tile = c_per_col
+            return c_tile
+        if self.groups != 1:
+            # Grouped multi-col: full OC block per column (num_tiles=1).
+            # 1-col H-strip also uses full out_channels as the weight tile.
+            return self.out_channels // cols
+        oc_per_col = self.out_channels // cols
+        input_size = n * self.in_channels * in_spatial
+        oc_tile = _choose_oc_tile(oc_per_col, input_size, w_store, out_spatial, budget)
+        if oc_per_col % oc_tile != 0:
+            oc_tile = oc_per_col
+        full_fits = _l1_triple_fits(
+            input_size, oc_tile * w_store, n * oc_tile * out_spatial, budget
+        )
+        if full_fits:
+            return oc_tile
+        # H-strip paths prefer full oc_per_col (num_oc_tiles==1).
+        if self._is_pointwise() or self._halo_plan(cols) is not None:
+            return oc_per_col
+        return oc_tile
+
+    def _pack_weight_bias_xrt(self, w_buf, bias_buf) -> XRTTensor:
+        """Build L3 packed ``[W_tile‖B_tile]…`` tensor for on-device bias."""
+        w_t = w_buf.to_torch().reshape(-1).contiguous()
+        b_t = bias_buf.to_torch().reshape(-1).contiguous()
+        if w_t.dtype != torch.bfloat16:
+            w_t = w_t.to(torch.bfloat16)
+        if b_t.dtype != torch.bfloat16:
+            b_t = b_t.to(torch.bfloat16)
+        # pack_weights_with_bias is numpy-oriented; convert via uint16 view.
+        w_np = w_t.detach().cpu().view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+        b_np = b_t.detach().cpu().view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+        packed = pack_weights_with_bias(
+            w_np,
+            b_np,
+            out_channels=self.out_channels,
+            in_channels=self.in_channels,
+            groups=self.groups,
+            kernel_h=self.kernel_size[0],
+            kernel_w=self.kernel_size[1],
+            num_columns=self.effective_num_columns,
+            is_depthwise=self.is_depthwise,
+            tile_channels=self._design_tile_channels(),
+        )
+        packed_u16 = packed.view(np.uint16)
+        packed_t = torch.from_numpy(packed_u16.copy()).view(torch.bfloat16)
+        return XRTTensor.from_torch(packed_t.contiguous())
+
     def get_callable(self):
-        """Callable that runs NPU conv then optionally applies host-side bias."""
+        """Callable that packs bias into weights and runs NPU conv (≤2 DMAs)."""
         if self.xclbin_artifact is None or self.insts_artifact is None:
             self.set_up_artifacts()
         npu_kernel = NPUKernel(
@@ -836,9 +989,8 @@ class AIEConv2d(AIEOperatorBase):
                         f"AIEConv2d with bias expects 4 args (in, weight, bias, out), got {len(args)}"
                     )
                 in_b, w_b, bias_b, out_b = args
-                result = _run_npu(in_b, w_b, out_b)
-                self._host_apply_bias(out_b, bias_b)
-                return result
+                packed_w = self._pack_weight_bias_xrt(w_b, bias_b)
+                return _run_npu(in_b, packed_w, out_b)
             if len(args) < 3:
                 raise ValueError(
                     f"AIEConv2d expects (in, weight, out), got {len(args)} args"

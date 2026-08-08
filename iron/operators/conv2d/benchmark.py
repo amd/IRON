@@ -271,9 +271,7 @@ class BenchResult:
             "num_aie_columns": s.num_aie_columns,
             "flops": self.flops,
             "bytes": self.total_bytes,
-            "arithmetic_intensity": (
-                f"{ai:.6e}" if not math.isnan(ai) else ""
-            ),
+            "arithmetic_intensity": (f"{ai:.6e}" if not math.isnan(ai) else ""),
             "warmup_iters": self.warmup_iters,
             "timed_iters": self.timed_iters,
             "latency_mean_us": f"{self.latency_mean_us:.4f}",
@@ -281,9 +279,7 @@ class BenchResult:
             "latency_p99_us": f"{self.latency_p99_us:.4f}",
             "gflops_median": f"{self.gflops_median:.6e}",
             "bandwidth_gbps_median": f"{self.bandwidth_gbps_median:.6e}",
-            "cpu_latency_median_us": (
-                f"{cpu:.4f}" if not math.isnan(cpu) else ""
-            ),
+            "cpu_latency_median_us": (f"{cpu:.4f}" if not math.isnan(cpu) else ""),
             "correctness": self.correctness,
         }
 
@@ -333,9 +329,9 @@ def run_shape_on_npu(
     *,
     warmup_iters: int = DEFAULT_WARMUP_ITERS,
     timed_iters: int = DEFAULT_TIMED_ITERS,
-    rel_tol: float = 0.1,
-    abs_tol: float = 1.0,
-    max_error_rate: float = 0.02,
+    rel_tol: float | None = None,
+    abs_tol: float | None = None,
+    max_error_rate: float | None = None,
     commit: str = "",
     device_name: str = "",
 ) -> BenchResult:
@@ -352,6 +348,15 @@ def run_shape_on_npu(
     from iron.common.test_utils import verify_buffer
     from iron.operators.conv2d.op import AIEConv2d
     from iron.operators.conv2d.reference import generate_golden_reference
+    from iron.operators.conv2d.tolerances import hw_tolerances
+
+    tols = hw_tolerances()
+    if rel_tol is None:
+        rel_tol = tols.rel_tol
+    if abs_tol is None:
+        abs_tol = tols.abs_tol
+    if max_error_rate is None:
+        max_error_rate = tols.max_error_rate
 
     flops = shape_flops(shape)
     total_bytes = estimate_arg_bytes(
@@ -556,25 +561,48 @@ def run_shape_on_torch_cpu(
 
 # Ring 2 peer notes (fairness only). Spatial-size family refs for BW ceiling
 # discussion — not a FLOPs race. Documented in ROADMAP §2.4.
+# Live runners: run_peer_suite_on_npu / write_peer_csv (real NPU numbers only).
 PEER_BW_REFERENCES: tuple[dict[str, Any], ...] = (
     {
-        "peer": "elementwise_or_relu",
-        "role": "BW ceiling reference",
-        "align_how": "Match total element count ~ B1/B5 in*out footprint",
+        "peer": "relu",
+        "role": "BW ceiling reference (elementwise unary)",
+        "align_how": "Element count ~ B1 input plane (C*H*W)",
         "do_not_claim": "That conv should match elementwise latency or BW",
+        "runner": "run_peer_relu_on_npu",
     },
     {
-        "peer": "maxpool_or_avgpool",
-        "role": "Same spatial-size family latency/BW",
-        "align_how": "Same HxW and channel ballpark as B2/B4 when those ops exist",
-        "do_not_claim": "Same FLOPs or that pooling is a compute peer",
+        "peer": "mem_copy",
+        "role": "Memory-bound BW ceiling",
+        "align_how": "Same element count as relu peer (in+out BO bytes)",
+        "do_not_claim": "That conv should match mem_copy BW",
+        "runner": "run_peer_mem_copy_on_npu",
     },
     {
         "peer": "gemm",
         "role": "Roofline / compute-bound check only",
-        "align_how": "Compare AI and GFLOPS position, not raw µs",
+        "align_how": "Legal tile GEMM near B1 pointwise FLOP order; compare AI/GFLOPS",
         "do_not_claim": "Direct latency race between conv and GEMM",
+        "runner": "run_peer_gemm_on_npu",
     },
+)
+
+PEER_CSV_FIELDNAMES = (
+    "commit",
+    "device",
+    "peer",
+    "role",
+    "align_to",
+    "problem_shape",
+    "bytes",
+    "flops",
+    "arithmetic_intensity",
+    "warmup_iters",
+    "timed_iters",
+    "latency_median_us",
+    "bandwidth_gbps_median",
+    "gflops_median",
+    "correctness",
+    "disclaimer",
 )
 
 
@@ -646,3 +674,434 @@ def resolve_git_commit(cwd: Optional[Path] = None) -> str:
         return out.strip()
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Ring 2 live peer runners (real NPU measurements only; no fabricated rows).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PeerBenchResult:
+    """One live peer measurement for fairness tables (not a ranking)."""
+
+    peer: str
+    role: str
+    align_to: str
+    problem_shape: str
+    total_bytes: int
+    flops: int
+    arithmetic_intensity: float
+    warmup_iters: int
+    timed_iters: int
+    latency_median_us: float
+    bandwidth_gbps_median: float
+    gflops_median: float
+    correctness: str
+    disclaimer: str
+    device: str = ""
+    commit: str = ""
+    detail: str = ""
+
+    def to_csv_row(self) -> dict[str, Any]:
+        ai = self.arithmetic_intensity
+        return {
+            "commit": self.commit,
+            "device": self.device,
+            "peer": self.peer,
+            "role": self.role,
+            "align_to": self.align_to,
+            "problem_shape": self.problem_shape,
+            "bytes": self.total_bytes,
+            "flops": self.flops,
+            "arithmetic_intensity": (f"{ai:.6e}" if not math.isnan(ai) else ""),
+            "warmup_iters": self.warmup_iters,
+            "timed_iters": self.timed_iters,
+            "latency_median_us": (
+                f"{self.latency_median_us:.4f}"
+                if not math.isnan(self.latency_median_us)
+                else ""
+            ),
+            "bandwidth_gbps_median": (
+                f"{self.bandwidth_gbps_median:.6e}"
+                if not math.isnan(self.bandwidth_gbps_median)
+                else ""
+            ),
+            "gflops_median": (
+                f"{self.gflops_median:.6e}"
+                if not math.isnan(self.gflops_median)
+                else ""
+            ),
+            "correctness": self.correctness,
+            "disclaimer": self.disclaimer,
+        }
+
+
+def write_peer_csv(
+    path: Path | str,
+    results: Sequence[PeerBenchResult],
+    *,
+    append: bool = False,
+) -> None:
+    """Write/append PeerBenchResult rows. No header-only invent."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not append or not path.exists() or path.stat().st_size == 0
+    mode = "a" if append else "w"
+    with path.open(mode, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PEER_CSV_FIELDNAMES)
+        if write_header:
+            writer.writeheader()
+        for r in results:
+            writer.writerow(r.to_csv_row())
+
+
+def _peer_disclaimer() -> str:
+    return (
+        "Ring-2 peer only; not a FLOPs race vs AIEConv2d. "
+        "See ROADMAP §2.4 / PEER_BW_REFERENCES."
+    )
+
+
+def _b1_in_elems() -> int:
+    """B1 input plane element count (Cin*H*W) for peer size alignment."""
+    b1 = next(s for s in BENCHMARK_SHAPES if s.id == "B1" and s.num_aie_columns == 1)
+    return b1.in_channels * b1.in_h * b1.in_w
+
+
+def run_peer_relu_on_npu(
+    aie_context,
+    *,
+    size: Optional[int] = None,
+    num_aie_columns: int = 4,
+    num_channels: int = 1,
+    warmup_iters: int = DEFAULT_WARMUP_ITERS,
+    timed_iters: int = DEFAULT_TIMED_ITERS,
+    commit: str = "",
+    device_name: str = "",
+) -> PeerBenchResult:
+    """BW-ceiling peer: ReLU on ~B1 input element count."""
+    from ml_dtypes import bfloat16
+
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+    from iron.operators.relu.op import ReLU
+
+    if size is None:
+        size = _b1_in_elems()
+    # Enforce divisibility for channeled unary.
+    tile_size = size // (num_aie_columns * num_channels)
+    if tile_size <= 0 or size % (num_aie_columns * num_channels) != 0:
+        return PeerBenchResult(
+            peer="relu",
+            role="BW ceiling reference (elementwise unary)",
+            align_to="B1_in_elems",
+            problem_shape=f"size={size}",
+            total_bytes=0,
+            flops=0,
+            arithmetic_intensity=float("nan"),
+            warmup_iters=warmup_iters,
+            timed_iters=0,
+            latency_median_us=float("nan"),
+            bandwidth_gbps_median=float("nan"),
+            gflops_median=float("nan"),
+            correctness="skip",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+            detail="size not divisible by columns*channels",
+        )
+
+    total_bytes = size * 2 * 2  # in + out, bf16
+    flops = size  # approx 1 compare/select per elem (not MACs)
+    ai = arithmetic_intensity(flops, total_bytes)
+
+    try:
+        import torch
+
+        op = ReLU(
+            size=size,
+            num_aie_columns=num_aie_columns,
+            num_channels=num_channels,
+            tile_size=tile_size,
+            context=aie_context,
+        )
+        op.compile()
+        call = op.get_callable()
+        in_b = XRTTensor.from_torch(torch.randn(size, dtype=torch.bfloat16))
+        out_b = XRTTensor((size,), dtype=bfloat16)
+        for _ in range(warmup_iters):
+            call(in_b, out_b)
+        samples_ns: list[float] = []
+        for _ in range(timed_iters):
+            result = call(in_b, out_b)
+            samples_ns.append(float(result.npu_time))
+        stats = latency_stats_us(samples_ns)
+        med = stats["median_us"]
+        return PeerBenchResult(
+            peer="relu",
+            role="BW ceiling reference (elementwise unary)",
+            align_to="B1_in_elems",
+            problem_shape=(
+                f"size={size},cols={num_aie_columns},chans={num_channels},"
+                f"tile={tile_size}"
+            ),
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=timed_iters,
+            latency_median_us=med,
+            bandwidth_gbps_median=bandwidth_gbps(total_bytes, med),
+            gflops_median=gflops(flops, med),
+            correctness="pass",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+        )
+    except Exception as e:
+        return PeerBenchResult(
+            peer="relu",
+            role="BW ceiling reference (elementwise unary)",
+            align_to="B1_in_elems",
+            problem_shape=f"size={size}",
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=0,
+            latency_median_us=float("nan"),
+            bandwidth_gbps_median=float("nan"),
+            gflops_median=float("nan"),
+            correctness="fail",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+            detail=str(e),
+        )
+
+
+def run_peer_mem_copy_on_npu(
+    aie_context,
+    *,
+    size: Optional[int] = None,
+    num_cores: int = 4,
+    num_channels: int = 1,
+    warmup_iters: int = DEFAULT_WARMUP_ITERS,
+    timed_iters: int = DEFAULT_TIMED_ITERS,
+    commit: str = "",
+    device_name: str = "",
+) -> PeerBenchResult:
+    """Memory-bound peer: MemCopy on ~B1 input element count."""
+    from ml_dtypes import bfloat16
+
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+    from iron.operators.mem_copy.op import MemCopy
+
+    if size is None:
+        size = _b1_in_elems()
+    tile_size = size // (num_cores * num_channels)
+    if tile_size <= 0 or size % (num_cores * num_channels) != 0:
+        return PeerBenchResult(
+            peer="mem_copy",
+            role="Memory-bound BW ceiling",
+            align_to="B1_in_elems",
+            problem_shape=f"size={size}",
+            total_bytes=0,
+            flops=0,
+            arithmetic_intensity=float("nan"),
+            warmup_iters=warmup_iters,
+            timed_iters=0,
+            latency_median_us=float("nan"),
+            bandwidth_gbps_median=float("nan"),
+            gflops_median=float("nan"),
+            correctness="skip",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+            detail="size not divisible by cores*channels",
+        )
+
+    total_bytes = size * 2 * 2
+    flops = 0
+    ai = arithmetic_intensity(flops, total_bytes) if total_bytes else float("nan")
+
+    try:
+        import torch
+
+        op = MemCopy(
+            size=size,
+            num_cores=num_cores,
+            num_channels=num_channels,
+            bypass=False,
+            tile_size=tile_size,
+            context=aie_context,
+        )
+        op.compile()
+        call = op.get_callable()
+        in_b = XRTTensor.from_torch(torch.randn(size, dtype=torch.bfloat16))
+        out_b = XRTTensor((size,), dtype=bfloat16)
+        for _ in range(warmup_iters):
+            call(in_b, out_b)
+        samples_ns: list[float] = []
+        for _ in range(timed_iters):
+            result = call(in_b, out_b)
+            samples_ns.append(float(result.npu_time))
+        stats = latency_stats_us(samples_ns)
+        med = stats["median_us"]
+        return PeerBenchResult(
+            peer="mem_copy",
+            role="Memory-bound BW ceiling",
+            align_to="B1_in_elems",
+            problem_shape=(
+                f"size={size},cores={num_cores},chans={num_channels},"
+                f"tile={tile_size}"
+            ),
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=timed_iters,
+            latency_median_us=med,
+            bandwidth_gbps_median=bandwidth_gbps(total_bytes, med),
+            gflops_median=float("nan"),
+            correctness="pass",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+        )
+    except Exception as e:
+        return PeerBenchResult(
+            peer="mem_copy",
+            role="Memory-bound BW ceiling",
+            align_to="B1_in_elems",
+            problem_shape=f"size={size}",
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=0,
+            latency_median_us=float("nan"),
+            bandwidth_gbps_median=float("nan"),
+            gflops_median=float("nan"),
+            correctness="fail",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+            detail=str(e),
+        )
+
+
+def run_peer_gemm_on_npu(
+    aie_context,
+    *,
+    M: int = 256,
+    K: int = 64,
+    N: int = 256,
+    num_aie_columns: int = 4,
+    warmup_iters: int = DEFAULT_WARMUP_ITERS,
+    timed_iters: int = DEFAULT_TIMED_ITERS,
+    commit: str = "",
+    device_name: str = "",
+) -> PeerBenchResult:
+    """Roofline peer: legal bf16 GEMM (AI/GFLOPS only; not a latency race)."""
+    from ml_dtypes import bfloat16
+
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+    from iron.operators.gemm.op import GEMM
+
+    # 2*M*K*N MACs-as-FLOPs
+    flops = 2 * M * K * N
+    total_bytes = (M * K + K * N + M * N) * 2
+    ai = arithmetic_intensity(flops, total_bytes)
+    shape_s = f"M={M},K={K},N={N},cols={num_aie_columns}"
+
+    try:
+        import torch
+
+        op = GEMM(
+            M=M,
+            K=K,
+            N=N,
+            tile_m=64,
+            tile_k=64,
+            tile_n=64,
+            num_aie_columns=num_aie_columns,
+            context=aie_context,
+        )
+        op.compile()
+        call = op.get_callable()
+        a_b = XRTTensor.from_torch(torch.randn(M, K, dtype=torch.bfloat16))
+        b_b = XRTTensor.from_torch(torch.randn(K, N, dtype=torch.bfloat16))
+        c = XRTTensor((M, N), dtype=bfloat16)
+        for _ in range(warmup_iters):
+            call(a_b, b_b, c)
+        samples_ns: list[float] = []
+        for _ in range(timed_iters):
+            result = call(a_b, b_b, c)
+            samples_ns.append(float(result.npu_time))
+        stats = latency_stats_us(samples_ns)
+        med = stats["median_us"]
+        return PeerBenchResult(
+            peer="gemm",
+            role="Roofline / compute-bound check only",
+            align_to="B1_flop_order_legal_tiles",
+            problem_shape=shape_s,
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=timed_iters,
+            latency_median_us=med,
+            bandwidth_gbps_median=bandwidth_gbps(total_bytes, med),
+            gflops_median=gflops(flops, med),
+            correctness="pass",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+        )
+    except Exception as e:
+        return PeerBenchResult(
+            peer="gemm",
+            role="Roofline / compute-bound check only",
+            align_to="B1_flop_order_legal_tiles",
+            problem_shape=shape_s,
+            total_bytes=total_bytes,
+            flops=flops,
+            arithmetic_intensity=ai,
+            warmup_iters=warmup_iters,
+            timed_iters=0,
+            latency_median_us=float("nan"),
+            bandwidth_gbps_median=float("nan"),
+            gflops_median=float("nan"),
+            correctness="fail",
+            disclaimer=_peer_disclaimer(),
+            device=device_name,
+            commit=commit,
+            detail=str(e),
+        )
+
+
+def run_peer_suite_on_npu(
+    aie_context,
+    *,
+    warmup_iters: int = DEFAULT_WARMUP_ITERS,
+    timed_iters: int = DEFAULT_TIMED_ITERS,
+    commit: str = "",
+    device_name: str = "",
+) -> list[PeerBenchResult]:
+    """Run all Ring-2 live peers; returns real rows only (may include fail/skip)."""
+    common = dict(
+        aie_context=aie_context,
+        warmup_iters=warmup_iters,
+        timed_iters=timed_iters,
+        commit=commit or resolve_git_commit(),
+        device_name=device_name or resolve_device_name(),
+    )
+    return [
+        run_peer_relu_on_npu(**common),
+        run_peer_mem_copy_on_npu(**common),
+        run_peer_gemm_on_npu(**common),
+    ]

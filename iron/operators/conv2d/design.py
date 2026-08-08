@@ -6,12 +6,16 @@ MLIR generation for AIE conv2d (AIE2 / AIE2P).
 
 Hard constraints (current design):
 - Each compute tile has 2 input DMA channels: ObjectFifos are input + weight only.
-  Bias is applied on the host after the NPU run (see op.py).
-- L1 holds one in+weight+out triple per iteration (budget
+  When ``use_bias``, bias is **packed** after each weight tile
+  (``[W_tile ‖ B_tile]``) so apply_bias runs on-device without a 3rd DMA.
+  When ``use_bias`` is false, kernels run with apply_bias=0.
+- L1 holds one in+weight(+bias)+out triple per iteration (budget
   ``_L1_TRIPLE_BUDGET_BYTES``; FIFO depth 1 or 2 if 2× triple fits).
 - groups==1: optional multi-col OC split + OC or H-strip tiling to fit L1.
 - depthwise: channel split/tile across columns (no full-input broadcast).
-- other groups>1: 1 column; full triple or k>1 host-pad H-strip if needed.
+- other groups>1: multi-col **group-block** split when ``groups % cols == 0``
+  and the per-col IC/OC triple fits L1; else 1-col full triple or k>1
+  host-pad H-strip. Multi-col grouped does not yet combine with H-strip.
 - H-strip TAPs use leading size 1 so aiex does not treat strip count as
   repeat_count; k>1 path may host-pad input and crop design OH/OW on host.
 """
@@ -327,6 +331,84 @@ def _l1_triple_fits(
     ) * _BYTES_PER_BF16 <= l1_budget_bytes
 
 
+def _bias_per_oc(use_bias: bool) -> int:
+    """Extra L1/L3 weight-buffer elems per OC (or depthwise channel) for packed bias."""
+    return 1 if use_bias else 0
+
+
+def pack_weights_with_bias(
+    weight_flat,
+    bias_flat,
+    *,
+    out_channels: int,
+    in_channels: int,
+    groups: int,
+    kernel_h: int,
+    kernel_w: int,
+    num_columns: int,
+    is_depthwise: bool,
+    tile_channels: int,
+):
+    """Host pack tile-interleaved ``[W_tile ‖ B_tile]`` for on-device bias.
+
+    Matches design L3 weight buffer when ``use_bias``::
+        for col:
+          for tile in column:
+            weights for tile_channels OCs (or depthwise channels)
+            bias for those channels
+
+    ``tile_channels`` is ``oc_tile`` (groups==1 / grouped) or ``c_tile``
+    (depthwise) — the same value design uses for L1 weight tiles.
+    """
+    import numpy as np
+
+    w = np.asarray(weight_flat).reshape(-1)
+    b = np.asarray(bias_flat).reshape(-1)
+    if b.shape[0] != out_channels:
+        raise ValueError(f"bias length {b.shape[0]} != out_channels {out_channels}")
+    weight_per_oc = (in_channels // groups) * kernel_h * kernel_w
+    expected_w = out_channels * weight_per_oc
+    if w.shape[0] != expected_w:
+        raise ValueError(f"weight length {w.shape[0]} != expected {expected_w}")
+    tc = max(1, int(tile_channels))
+    cols = max(1, int(num_columns))
+    parts = []
+
+    if is_depthwise:
+        if in_channels % cols != 0:
+            raise ValueError("depthwise pack requires in_channels % cols == 0")
+        c_per_col = in_channels // cols
+        if c_per_col % tc != 0:
+            raise ValueError(
+                f"depthwise tile_channels={tc} must divide c_per_col={c_per_col}"
+            )
+        for i in range(cols):
+            c0 = i * c_per_col
+            for t in range(c_per_col // tc):
+                cs = c0 + t * tc
+                parts.append(w[cs * weight_per_oc : (cs + tc) * weight_per_oc])
+                parts.append(b[cs : cs + tc])
+        return np.concatenate(parts)
+
+    # groups==1 multi-col OC split, or grouped multi-col group-block OC split.
+    # Grouped multi-col requires groups % cols == 0 so each column owns a
+    # contiguous block of groups (contiguous IC/OC in torch layout).
+    if out_channels % cols != 0:
+        raise ValueError("pack requires out_channels % cols == 0")
+    if groups > 1 and groups % cols != 0:
+        raise ValueError("grouped pack requires groups % cols == 0")
+    oc_per_col = out_channels // cols
+    if oc_per_col % tc != 0:
+        raise ValueError(f"tile_channels={tc} must divide oc_per_col={oc_per_col}")
+    for i in range(cols):
+        o0 = i * oc_per_col
+        for t in range(oc_per_col // tc):
+            os_ = o0 + t * tc
+            parts.append(w[os_ * weight_per_oc : (os_ + tc) * weight_per_oc])
+            parts.append(b[os_ : os_ + tc])
+    return np.concatenate(parts)
+
+
 def _resolve_num_columns(
     requested: int,
     out_channels: int,
@@ -335,7 +417,7 @@ def _resolve_num_columns(
     is_depthwise: bool,
     max_cols: int,
 ) -> int:
-    """Clamp column count for legal OC/channel splits and device limits."""
+    """Clamp column count for legal OC/channel/group splits and device limits."""
     n = max(1, int(requested) if requested is not None else 1)
     n = min(n, max_cols)
     if is_depthwise:
@@ -346,8 +428,12 @@ def _resolve_num_columns(
         while n > 1 and out_channels % n != 0:
             n -= 1
         return n
-    # Non-depthwise grouped: 1-col only (full tensor or H-strip).
-    return 1
+    # Non-depthwise grouped: multi-col when groups (hence IC/OC) divide n.
+    while n > 1 and (
+        groups % n != 0 or in_channels % n != 0 or out_channels % n != 0
+    ):
+        n -= 1
+    return n
 
 
 def my_conv2d(
@@ -374,23 +460,30 @@ def my_conv2d(
     """
     Generate MLIR for 2D convolution (L1 tiles + multi-col OC/channel split).
 
-    ``use_bias`` is accepted for API compatibility but does **not** create a
-    bias ObjectFifo (host applies bias). Columns: groups==1 OC-split and
-    depthwise channel-split when divisible; otherwise clamped to 1.
+    When ``use_bias``, weights and bias are packed into one L3 buffer as
+    tile-interleaved ``[W_tile ‖ B_tile]`` (still one weight ObjectFifo — no
+    third DMA). Columns: groups==1 OC-split, depthwise channel-split, and
+    non-depthwise grouped **group-block** split when ``groups % cols == 0``
+    and the per-col triple fits L1; otherwise clamped toward 1.
     """
     dtype = bfloat16
 
-    _ = (use_bias, tile_size, trace_size)
+    _ = (tile_size, trace_size)
+    bias_extra = _bias_per_oc(bool(use_bias))
 
     # Device column cap from target model (NPU1.cols==4, NPU2.cols==8).
     max_cols = getattr(dev, "cols", None) or 4
 
     input_size = N * in_channels * in_height * in_width
-    weight_size = out_channels * in_channels // groups * kernel_h * kernel_w
+    weight_only_size = out_channels * in_channels // groups * kernel_h * kernel_w
+    # L3 weight BO: pure weights, or packed W‖B (one bias per OC/channel).
+    weight_size = weight_only_size + (out_channels if bias_extra else 0)
     output_size = N * out_channels * out_height * out_width
     in_spatial = in_height * in_width
     out_spatial = out_height * out_width
     weight_per_oc = (in_channels // groups) * kernel_h * kernel_w
+    # Storage elems per OC in the packed weight stream (weights + optional bias).
+    weight_store_per_oc = weight_per_oc + bias_extra
 
     input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
     weight_ty = np.ndarray[(weight_size,), np.dtype[dtype]]
@@ -413,10 +506,12 @@ def my_conv2d(
     # --- Per-column tile selection + multi-col split sizes --------------------
     # rebroadcast_input: full input OF packet, repeated per tile (groups==1).
     # depthwise_split: per-col channel blocks for in/w/out (no full-input broadcast).
+    # grouped_split: per-col IC/OC group blocks (non-DW groups>1 multi-col).
     # spatial_h_tiling: H-strip when full input exceeds L1 (pointwise or k>1).
     # spatial_halo_pad: k>1 host-padded RF strips (kernel pad=0; L3 input padded).
     rebroadcast_input = False
     depthwise_split = False
+    grouped_split = False
     spatial_h_tiling = False
     spatial_halo_pad = False
     tile_h = in_height  # output strip height when spatial; else full in/out H
@@ -429,39 +524,51 @@ def my_conv2d(
     weight_elems_per_col = weight_size
     output_elems_per_col = output_size
     input_elems_per_col = input_size
+    # Kernel scalar dims (overridden for grouped multi-col mini-convs).
+    kernel_in_channels = in_channels
+    kernel_groups = groups
+
+    # weight_only_tile_elems: pure weights in each L1 packet (kernel weight ptr).
+    # weight_tile_elems: packet size including trailing packed bias when enabled.
+    weight_only_tile_elems = 0
 
     if is_depthwise:
         # Split channels across columns; tile within each column.
         c_per_col = in_channels // num_columns
-        c_tile = _choose_channel_tile(c_per_col, in_spatial, out_spatial, weight_per_oc)
+        c_tile = _choose_channel_tile(
+            c_per_col, in_spatial, out_spatial, weight_store_per_oc
+        )
         if c_per_col % c_tile != 0:
             c_tile = c_per_col
         num_tiles = c_per_col // c_tile
         num_oc_tiles = num_tiles
         input_tile_elems = N * c_tile * in_spatial
-        weight_tile_elems = c_tile * weight_per_oc
+        weight_only_tile_elems = c_tile * weight_per_oc
+        weight_tile_elems = c_tile * weight_store_per_oc
         output_tile_elems = N * c_tile * out_spatial
         kernel_channels = c_tile
         oc_tile = c_tile
         depthwise_split = True
         input_elems_per_col = N * c_per_col * in_spatial
-        weight_elems_per_col = c_per_col * weight_per_oc
+        weight_elems_per_col = c_per_col * weight_store_per_oc
         output_elems_per_col = N * c_per_col * out_spatial
     elif groups == 1:
         # OC split across columns; OC tile within each column.
         # If full input still exceeds L1 → pointwise H-strip or k>1 host-pad RF.
         oc_per_col = out_channels // num_columns
-        oc_tile = _choose_oc_tile(oc_per_col, input_size, weight_per_oc, out_spatial)
+        oc_tile = _choose_oc_tile(
+            oc_per_col, input_size, weight_store_per_oc, out_spatial
+        )
         if oc_per_col % oc_tile != 0:
             oc_tile = oc_per_col
         full_fits = _l1_triple_fits(
-            input_size, oc_tile * weight_per_oc, N * oc_tile * out_spatial
+            input_size, oc_tile * weight_store_per_oc, N * oc_tile * out_spatial
         )
         if (not full_fits) and is_pointwise:
             # Pointwise H-strip: prefer full oc_per_col in L1 (num_oc=1)
             # so TAPs need no stride-0 rebroadcast (illegal on aie.dma_bd).
             tile_h = _choose_h_tile_pointwise(
-                in_height, in_channels, in_width, oc_per_col, weight_per_oc
+                in_height, in_channels, in_width, oc_per_col, weight_store_per_oc
             )
             if in_height % tile_h != 0:
                 tile_h = in_height
@@ -472,13 +579,13 @@ def my_conv2d(
             # Prefer full OC block when it fits with this tile_h.
             if _l1_triple_fits(
                 in_tile_elems_base,
-                oc_per_col * weight_per_oc,
+                oc_per_col * weight_store_per_oc,
                 N * oc_per_col * out_tile_sp,
             ):
                 oc_tile = oc_per_col
             else:
                 oc_tile = _choose_oc_tile(
-                    oc_per_col, in_tile_elems_base, weight_per_oc, out_tile_sp
+                    oc_per_col, in_tile_elems_base, weight_store_per_oc, out_tile_sp
                 )
                 if oc_per_col % oc_tile != 0:
                     oc_tile = oc_per_col
@@ -492,18 +599,20 @@ def my_conv2d(
                 in_h_tile = in_height
                 num_spatial = 1
                 oc_tile = _choose_oc_tile(
-                    oc_per_col, input_size, weight_per_oc, out_spatial
+                    oc_per_col, input_size, weight_store_per_oc, out_spatial
                 )
                 if oc_per_col % oc_tile != 0:
                     oc_tile = oc_per_col
                 input_tile_elems = input_size
-                weight_tile_elems = oc_tile * weight_per_oc
+                weight_only_tile_elems = oc_tile * weight_per_oc
+                weight_tile_elems = oc_tile * weight_store_per_oc
                 output_tile_elems = N * oc_tile * out_spatial
                 spatial_h_tiling = False
             else:
                 spatial_h_tiling = num_spatial > 1
                 input_tile_elems = in_tile_elems_base
-                weight_tile_elems = oc_tile * weight_per_oc
+                weight_only_tile_elems = oc_tile * weight_per_oc
+                weight_tile_elems = oc_tile * weight_store_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
         elif not full_fits:
             # Standard k>1 H-strip: host zero-pads (conv pad + optional
@@ -516,7 +625,7 @@ def my_conv2d(
                 out_width,
                 in_channels,
                 oc_per_col,
-                weight_per_oc,
+                weight_store_per_oc,
                 kernel_h,
                 kernel_w,
                 stride_h,
@@ -540,7 +649,8 @@ def my_conv2d(
                 in_tile_elems_base = N * in_channels * in_h_tile * padded_w
                 out_tile_sp = tile_oh * design_ow
                 input_tile_elems = in_tile_elems_base
-                weight_tile_elems = oc_tile * weight_per_oc
+                weight_only_tile_elems = oc_tile * weight_per_oc
+                weight_tile_elems = oc_tile * weight_store_per_oc
                 output_tile_elems = N * oc_tile * out_tile_sp
                 # L3: padded input; output may be design spatial (host crops).
                 input_size = N * in_channels * padded_h * padded_w
@@ -558,18 +668,20 @@ def my_conv2d(
                 padded_h = in_height
                 padded_w = in_width
                 oc_tile = _choose_oc_tile(
-                    oc_per_col, input_size, weight_per_oc, out_spatial
+                    oc_per_col, input_size, weight_store_per_oc, out_spatial
                 )
                 if oc_per_col % oc_tile != 0:
                     oc_tile = oc_per_col
                 input_tile_elems = input_size
-                weight_tile_elems = oc_tile * weight_per_oc
+                weight_only_tile_elems = oc_tile * weight_per_oc
+                weight_tile_elems = oc_tile * weight_store_per_oc
                 output_tile_elems = N * oc_tile * out_spatial
                 spatial_h_tiling = False
                 spatial_halo_pad = False
         else:
             input_tile_elems = input_size
-            weight_tile_elems = oc_tile * weight_per_oc
+            weight_only_tile_elems = oc_tile * weight_per_oc
+            weight_tile_elems = oc_tile * weight_store_per_oc
             output_tile_elems = N * oc_tile * out_spatial
 
         num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
@@ -577,71 +689,121 @@ def my_conv2d(
         if not spatial_h_tiling:
             rebroadcast_input = num_oc_tiles > 1
         kernel_channels = in_channels
-        weight_elems_per_col = oc_per_col * weight_per_oc
+        weight_elems_per_col = oc_per_col * weight_store_per_oc
         output_elems_per_col = N * oc_per_col * out_spatial
+        if weight_only_tile_elems == 0:
+            weight_only_tile_elems = oc_tile * weight_per_oc
+            weight_tile_elems = oc_tile * weight_store_per_oc
     else:
-        # Non-depthwise grouped: 1-col; full tensor or k>1 host-pad H-strip.
-        num_columns = 1
-        oc_per_col = out_channels
-        oc_tile = out_channels
-        kernel_channels = in_channels
-        weight_elems_per_col = weight_size
-        output_elems_per_col = output_size
-        if _l1_triple_fits(input_size, weight_size, output_size):
+        # Non-depthwise grouped: multi-col group-block split when L1 allows,
+        # else 1-col full tensor or k>1 host-pad H-strip.
+        # Each column owns groups/cols contiguous groups → contiguous IC/OC.
+        ic_per_col = in_channels // num_columns
+        oc_per_col = out_channels // num_columns
+        groups_per_col = groups // num_columns
+        input_elems_per_col = N * ic_per_col * in_spatial
+        weight_elems_per_col = oc_per_col * weight_store_per_oc
+        output_elems_per_col = N * oc_per_col * out_spatial
+        per_col_fits = _l1_triple_fits(
+            input_elems_per_col, weight_elems_per_col, output_elems_per_col
+        )
+        if per_col_fits:
+            # Full per-col triple (num_tiles=1). Multi-col uses grouped_split TAPs.
+            oc_tile = oc_per_col
+            num_oc_tiles = 1
             num_tiles = 1
-            input_tile_elems = input_size
-            weight_tile_elems = weight_size
-            output_tile_elems = output_size
-        else:
-            plan = _plan_halo_h_strip(
-                in_height,
-                in_width,
-                out_height,
-                out_width,
-                in_channels,
-                oc_per_col,
-                weight_per_oc,
-                kernel_h,
-                kernel_w,
-                stride_h,
-                stride_w,
-                pad_h,
-                pad_w,
-            )
-            if plan is not None:
-                spatial_h_tiling = True
-                spatial_halo_pad = True
-                padded_h = plan["padded_h"]
-                padded_w = plan["padded_w"]
-                design_oh = plan["design_oh"]
-                design_ow = plan["design_ow"]
-                tile_oh = plan["tile_oh"]
-                in_h_tile = plan["in_h_tile"]
-                num_spatial = plan["num_spatial"]
-                tile_h = tile_oh
-                oc_tile = oc_per_col
-                num_oc_tiles = 1
-                num_tiles = num_spatial
-                in_tile_elems_base = N * in_channels * in_h_tile * padded_w
-                out_tile_sp = tile_oh * design_ow
-                input_tile_elems = in_tile_elems_base
-                weight_tile_elems = oc_tile * weight_per_oc
-                output_tile_elems = N * oc_tile * out_tile_sp
-                input_size = N * in_channels * padded_h * padded_w
-                input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
-                if design_oh != out_height or design_ow != out_width:
-                    out_height = design_oh
-                    out_width = design_ow
-                    out_spatial = out_height * out_width
-                    output_size = N * out_channels * out_spatial
-                    output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
-                weight_elems_per_col = weight_tile_elems
-                output_elems_per_col = output_size
-            else:
-                num_tiles = 1
+            input_tile_elems = input_elems_per_col
+            weight_only_tile_elems = oc_per_col * weight_per_oc
+            weight_tile_elems = weight_elems_per_col
+            output_tile_elems = output_elems_per_col
+            kernel_channels = ic_per_col
+            kernel_in_channels = ic_per_col
+            kernel_groups = groups_per_col
+            grouped_split = num_columns > 1
+            if not grouped_split:
+                # 1-col: keep global sizes (same footprint; simpler TAPs).
                 input_tile_elems = input_size
+                weight_only_tile_elems = weight_only_size
                 weight_tile_elems = weight_size
                 output_tile_elems = output_size
+                kernel_in_channels = in_channels
+                kernel_groups = groups
+                kernel_channels = in_channels
+                weight_elems_per_col = weight_size
+                output_elems_per_col = output_size
+                input_elems_per_col = input_size
+        else:
+            # Multi-col H-strip for groups is not implemented: clamp to 1-col.
+            num_columns = 1
+            ic_per_col = in_channels
+            oc_per_col = out_channels
+            groups_per_col = groups
+            kernel_in_channels = in_channels
+            kernel_groups = groups
+            kernel_channels = in_channels
+            weight_elems_per_col = weight_size
+            output_elems_per_col = output_size
+            input_elems_per_col = input_size
+            if _l1_triple_fits(input_size, weight_size, output_size):
+                oc_tile = out_channels
+                num_tiles = 1
+                input_tile_elems = input_size
+                weight_only_tile_elems = weight_only_size
+                weight_tile_elems = weight_size
+                output_tile_elems = output_size
+            else:
+                plan = _plan_halo_h_strip(
+                    in_height,
+                    in_width,
+                    out_height,
+                    out_width,
+                    in_channels,
+                    oc_per_col,
+                    weight_store_per_oc,
+                    kernel_h,
+                    kernel_w,
+                    stride_h,
+                    stride_w,
+                    pad_h,
+                    pad_w,
+                )
+                if plan is not None:
+                    spatial_h_tiling = True
+                    spatial_halo_pad = True
+                    padded_h = plan["padded_h"]
+                    padded_w = plan["padded_w"]
+                    design_oh = plan["design_oh"]
+                    design_ow = plan["design_ow"]
+                    tile_oh = plan["tile_oh"]
+                    in_h_tile = plan["in_h_tile"]
+                    num_spatial = plan["num_spatial"]
+                    tile_h = tile_oh
+                    oc_tile = oc_per_col
+                    num_oc_tiles = 1
+                    num_tiles = num_spatial
+                    in_tile_elems_base = N * in_channels * in_h_tile * padded_w
+                    out_tile_sp = tile_oh * design_ow
+                    input_tile_elems = in_tile_elems_base
+                    weight_only_tile_elems = oc_tile * weight_per_oc
+                    weight_tile_elems = oc_tile * weight_store_per_oc
+                    output_tile_elems = N * oc_tile * out_tile_sp
+                    input_size = N * in_channels * padded_h * padded_w
+                    input_ty = np.ndarray[(input_size,), np.dtype[dtype]]
+                    if design_oh != out_height or design_ow != out_width:
+                        out_height = design_oh
+                        out_width = design_ow
+                        out_spatial = out_height * out_width
+                        output_size = N * out_channels * out_spatial
+                        output_ty = np.ndarray[(output_size,), np.dtype[dtype]]
+                    weight_elems_per_col = weight_tile_elems
+                    output_elems_per_col = output_size
+                else:
+                    oc_tile = out_channels
+                    num_tiles = 1
+                    input_tile_elems = input_size
+                    weight_only_tile_elems = weight_only_size
+                    weight_tile_elems = weight_size
+                    output_tile_elems = output_size
 
     # FIFO element types = per-iteration L1 footprints.
     input_tile_ty = np.ndarray[
@@ -673,8 +835,8 @@ def my_conv2d(
         for i in range(num_columns)
     ]
 
-    # apply_bias is always 0 here: host applies bias after NPU (DMA-safe).
-    apply_bias = 0
+    # On-device packed bias (weights‖bias in one ObjectFifo); no third DMA.
+    apply_bias = 1 if bias_extra else 0
 
     if kernel_name == "depthwise_conv2d_bf16_vector":
         # Mini depthwise over c_tile channels (or full when num_tiles==1).
@@ -699,7 +861,7 @@ def my_conv2d(
         kernel_int_types = [np.int32] * 6
         kernel_call_scalars = [
             N,
-            in_channels,
+            kernel_in_channels,
             oc_tile,
             tile_h,
             in_width,
@@ -707,6 +869,7 @@ def my_conv2d(
         ]
     else:
         # Standard mini-conv: out_channels = oc_tile when groups==1 tiled.
+        # Grouped multi-col: kernel sees local IC/OC/groups per column.
         # Halo H-strip: strip-local spatial dims + pad=0 (host supplies pad).
         k_in_h = in_h_tile if spatial_halo_pad else in_height
         k_in_w = padded_w if spatial_halo_pad else in_width
@@ -716,7 +879,7 @@ def my_conv2d(
         kernel_int_types = [np.int32] * 15
         kernel_call_scalars = [
             N,
-            in_channels,
+            kernel_in_channels,
             k_in_h,
             k_in_w,
             oc_tile,
@@ -728,11 +891,12 @@ def my_conv2d(
             stride_w,
             k_pad_h,
             k_pad_w,
-            groups,
+            kernel_groups,
             apply_bias,
         ]
 
-    # 4th buffer arg kept for ABI; dummy type = input tile (unused when apply_bias=0).
+    # 4th buffer arg kept for ABI. Kernels with apply_bias=1 read bias from the
+    # tail of the weight tile (packed W‖B); dummy pointer is unused then.
     bias_arg_ty = input_tile_ty
 
     conv2d_kernel = Kernel(
@@ -749,7 +913,7 @@ def my_conv2d(
             elem_in = of_in.acquire(1)
             elem_w = of_w.acquire(1)
             elem_out = of_out.acquire(1)
-            # Dummy bias pointer (apply_bias==0 => kernel does not read it).
+            # Dummy bias pointer (packed bias uses weight tail when apply_bias=1).
             elem_bias = elem_in
             conv_kernel(elem_in, elem_w, elem_out, elem_bias, *kernel_call_scalars)
             of_in.release(1)
@@ -815,8 +979,9 @@ def my_conv2d(
             )
             for i in range(num_columns)
         ]
-    elif depthwise_split:
-        # Channel blocks: in/w/out all offset by column * elems_per_col.
+    elif depthwise_split or grouped_split:
+        # Channel/group blocks: in/w/out offset by column * elems_per_col.
+        # Depthwise: per-col channels. Grouped multi-col: per-col IC/OC groups.
         input_taps = [
             TensorAccessPattern(
                 (1, input_size),
@@ -904,7 +1069,7 @@ def my_conv2d(
         ]
 
     rt = Runtime()
-    # Always 3 host buffers: in, weight, out. Bias is host-side (op.py).
+    # Always 3 host buffers: in, weight(+packed bias), out. ≤2 input DMAs.
     with rt.sequence(input_ty, weight_ty, output_ty) as (A, W, C):
         rt.start(*my_workers)
         tg = rt.task_group()
