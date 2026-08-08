@@ -19,30 +19,9 @@ from iron.common.test_utils import run_test
 
 
 def get_params():
-    """Generate all test parameters for conv2d (single source of truth).
+    """Generate conv2d pytest params (device cols, shapes, extensive marks).
 
-    Canonical main-tree / polished operator style (maxpool/avgpool/conv3d/reduction):
-    - Queries actual device column count at collection time (NPU1=4, NPU2=8).
-      Defensive try/except so --collectonly and pure-CPU reference environments
-      do not hard-crash (mirrors reduction test.py rigor).
-    - Varies num_aie_columns + derives matching tile_size (subject to divisibility
-      on in/weight/out sizes required by column-parallel chunking + TAPs + FIFO
-      element sizes in design.py).
-    - Uses explicit pytest.param(..., id=pretty_name, marks=...) so that
-      the branch CSV/metrics reporter gets stable human-readable test names.
-    - Marks the majority as extensive; only a small core subset (16x16/32x32
-      CORE @ 1c plus 16x16 CORE @ 2c multi-col) run by default ("not extensive").
-
-    The divisibility filter (in+weight+out) prevents silent truncation/mismatch
-    in (size // num_columns) logic and ensures generated MLIR is valid for the
-    chosen parallelism.
-
-    CRITICAL FOR GOLDEN FIDELITY: Output dim computation now uses the shared
-    calculate_output_dim from reference.py (single source of truth, matches
-    the formula used inside generate_golden_reference and AIEConv2d). This
-    eliminates duplication risk with op.py / design.py for padding/stride math.
-
-    Results are consumed via direct get_params() + CONV2D_TEST_PARAM_NAMES (prevents drift).
+    Defensive device query so collect-only / CPU-only envs do not crash.
     """
     import aie.utils as aie_utils
 
@@ -74,7 +53,7 @@ def get_params():
 
     # Explicit core configs for regular marking (robust vs list order / slicing).
     # Regular CI coverage:
-    #   - 3→16 bias/nobias: baseline host-bias + full/near-full L1
+    #   - 3→16 bias/nobias: host-bias + full/near-full L1
     #   - 16→16 groups=1 bias: multi-tile OC path at 32x32 (oc_tile=8)
     #   - 16 depthwise bias: multi-tile channel path at 32x32 (c_tile=8)
     # Also 16x16 CORE @ 2c (OC/channel split, ≤2 DMA, host bias).
@@ -164,7 +143,7 @@ def get_params():
 
 
 # get_params() (single source of truth) is invoked *directly* inside @parametrize
-# (Conv3D gold "direct only" style; no top-level all_params = get_params()).
+# Direct get_params() in @parametrize (no top-level all_params assignment).
 # Called at collection time; safe due to defensive device query inside.
 
 
@@ -215,7 +194,7 @@ def test_conv2d(
     Full matrix (varying nc/tile + bias + groups + stride etc) exercises
     all design.py specializations and conditional runtime paths.
     """
-    # tile_size now supplied by the test parameter (computed in get_params for
+    # tile_size from the test parameter (computed in get_params for
     # the chosen num_aie_columns, guaranteeing the divisibility asserted in design).
 
     # Generate golden reference (exercises use_bias=True/False paths).

@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // 2D Convolution Kernel for AIE2P (NPU2)
-// Enhanced version with larger vector operations and better parallelization
 
 #define NOCPP
 
 #include "../aie_kernel_utils.h"
 
 #include <aie_api/aie.hpp>
-// aie_bf16.hpp not required (bfloat16 support is in aie.hpp for this toolchain)
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
@@ -18,7 +16,7 @@ extern "C" {
 
 /**
  * 2D Convolution Kernel - AIE2P optimized
- * Uses larger vector factor (16) for AIE2P's enhanced capabilities
+ * Vector factor 16 (AIE2P).
  *
  * @param input - Input tensor [N, in_channels, in_height, in_width] (flattened)
  * @param weight - Weight tensor [out_channels, in_channels, kernel_height, kernel_width]
@@ -96,12 +94,8 @@ void conv2d_bf16_scalar(bfloat16 *input,
 /**
  * 2D Convolution Kernel - Vectorized version for AIE2P
  *
- * Dense strategy (NCHW, no host re-layout): vectorize over output width when
- * stride_w==1. Per (ic,kh,kw) the input window is contiguous in W so interior
- * tiles use aie::load_v (aligned) or sequential lane fill; weight is
- * broadcast into aie::mac float accumulators. Non-unit stride_w and OW tails
- * use a scalar float path. Peak aie::mmul density still needs blocked layout
- * (ROADMAP Track C).
+ * Pointwise (k=1): vectorize over OW with aie::mac float accum when stride_w==1.
+ * k>1 / non-unit stride_w: scalar float path.
  *
  * @param input - Input tensor [N, in_channels, in_height, in_width] (flattened)
  * @param weight - Weight tensor [out_channels, in_channels, kernel_height, kernel_width]
@@ -153,9 +147,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                 int ow = 0;
 
                 // Dense OW tiles: unit stride in W → contiguous input window.
-                // k>1 + H-strip (in_w may be padded RF width): OW-vector path
-                // miscomputed on NPU for 64x64 k3 (host strip math is fine).
-                // Restrict dense OW vector to pure pointwise (k=1); k>1 scalar.
+                // Dense OW vector only for k=1; k>1 uses scalar float below.
                 if (stride_w == 1 && kernel_h == 1 && kernel_w == 1) {
                     for (; ow + vec_factor <= out_width; ow += vec_factor) {
                         aie::accum<accfloat, vec_factor> acc =
@@ -396,8 +388,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
  * chain — contiguous `aie::load_v` over spatial, broadcast weight[oc, ic],
  * float accum via `aie::mac`, store vector. Tile a few OCs so one input
  * vector is reused (outer-product style), which is the NCHW-friendly dense
- * pipeline. Full `aie::mmul` needs blocked (spatial×IC)×(IC×OC) tiles; see
- * ROADMAP Track C layout notes.
+ * pipeline.
  *
  * @param input - Input tensor [N, in_channels, H, W]
  * @param weight - Weight tensor [out_channels, in_channels] (+ packed bias)
@@ -540,4 +531,4 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
 
     event1();
 }
-} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)
+} // extern "C"

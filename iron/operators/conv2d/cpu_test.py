@@ -302,20 +302,20 @@ def test_conv2d_reference_sanity(dummy):
 
 
 
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="hw_tolerances_audit")])
-def test_hw_tolerances_tighter_than_legacy(dummy):
-    """Audit policy is centralized and stricter than pre-audit MVP defaults."""
+@pytest.mark.parametrize("dummy", [pytest.param(None, id="hw_tolerances")])
+def test_hw_tolerances_defaults(dummy):
+    """Default HW tolerances are centralized and stricter than HW_LOOSE."""
     from iron.operators.conv2d.tolerances import (
         HW_DEFAULT,
-        HW_LEGACY_LOOSE,
+        HW_LOOSE,
         hw_tolerances,
     )
 
     t = hw_tolerances()
     assert t is HW_DEFAULT
-    assert t.rel_tol < HW_LEGACY_LOOSE.rel_tol
-    assert t.abs_tol < HW_LEGACY_LOOSE.abs_tol
-    assert 0 < t.max_error_rate <= HW_LEGACY_LOOSE.max_error_rate
+    assert t.rel_tol < HW_LOOSE.rel_tol
+    assert t.abs_tol < HW_LOOSE.abs_tol
+    assert 0 < t.max_error_rate <= HW_LOOSE.max_error_rate
     assert t.rel_tol < 1.0 and t.abs_tol > 0
 
 

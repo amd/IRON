@@ -9,7 +9,6 @@
 #include "../aie_kernel_utils.h"
 
 #include <aie_api/aie.hpp>
-// aie_bf16.hpp not required (bfloat16 support is in aie.hpp for this toolchain)
 #include <stdint.h>
 #include <stdio.h>
 #include <type_traits>
@@ -111,9 +110,8 @@ void conv2d_bf16_scalar(bfloat16 *input,
 /**
  * 2D Convolution Kernel - Vectorized version for AIE2
  *
- * Dense strategy (NCHW): vectorize over output width when stride_w==1 —
- * contiguous W loads + broadcast weight into aie::mac (float accum). See
- * aie2p counterpart. Peak aie::mmul needs blocked layout (ROADMAP Track C).
+ * Pointwise (k=1): vectorize over OW with aie::mac float accum when stride_w==1.
+ * k>1: scalar float path (OW-vector is unsafe for padded/H-strip RF widths).
  */
 void conv2d_bf16_vector(bfloat16 *input,
                         bfloat16 *weight,
@@ -160,9 +158,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                 int ih_base = oh * stride_h - pad_h;
                 int ow = 0;
 
-                // k>1 + H-strip (in_w may be padded RF width): OW-vector path
-                // miscomputed on NPU for 64x64 k3 (host strip math is fine).
-                // Restrict dense OW vector to pure pointwise (k=1); k>1 scalar.
+                // Dense OW vector only for k=1; k>1 uses scalar float below.
                 if (stride_w == 1 && kernel_h == 1 && kernel_w == 1) {
                     for (; ow + vec_factor <= out_width; ow += vec_factor) {
                         aie::accum<accfloat, vec_factor> acc =
@@ -531,4 +527,4 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
 
     event1();
 }
-} // end extern "C" for C-linkage kernels (fix for symbol resolution in aiecc link, matching reduction.cc fix)
+} // extern "C"

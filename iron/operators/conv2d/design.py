@@ -590,11 +590,10 @@ def my_conv2d(
                 if oc_per_col % oc_tile != 0:
                     oc_tile = oc_per_col
             num_oc_tiles = oc_per_col // oc_tile if oc_tile else 1
-            # Only enable multi-dim spatial TAPs when pure H-strip (no OC
-            # rebroadcast). Combined OC×spatial needs nested acquire (future).
+            # Multi-dim spatial TAPs only for pure H-strip (no OC rebroadcast).
             if num_oc_tiles != 1:
                 # Cannot legally TAP-rebroadcast; keep full-input path (will
-                # OOM at aiecc) — op._validate_l1_fit CEs when min tile fails.
+                # op._validate_l1_fit raises when the min tile cannot fit.
                 tile_h = in_height
                 in_h_tile = in_height
                 num_spatial = 1
