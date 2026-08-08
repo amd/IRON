@@ -240,11 +240,7 @@ class AIEConv2d(AIEOperatorBase):
         n = 1
         cols = max(
             1,
-            int(
-                num_columns
-                if num_columns is not None
-                else self.effective_num_columns
-            ),
+            int(num_columns if num_columns is not None else self.effective_num_columns),
         )
         # Grouped multi-col: design uses group-block split, not H-strip.
         if self.groups > 1 and cols > 1:

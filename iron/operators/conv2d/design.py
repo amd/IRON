@@ -429,9 +429,7 @@ def _resolve_num_columns(
             n -= 1
         return n
     # Non-depthwise grouped: multi-col when groups (hence IC/OC) divide n.
-    while n > 1 and (
-        groups % n != 0 or in_channels % n != 0 or out_channels % n != 0
-    ):
+    while n > 1 and (groups % n != 0 or in_channels % n != 0 or out_channels % n != 0):
         n -= 1
     return n
 

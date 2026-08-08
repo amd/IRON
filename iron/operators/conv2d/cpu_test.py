@@ -268,7 +268,6 @@ def test_conv2d_reference_sanity(dummy):
     # Always pass; this is informational only.
 
 
-
 @pytest.mark.parametrize("dummy", [pytest.param(None, id="hw_tolerances")])
 def test_hw_tolerances_defaults(dummy):
     """Default HW tolerances are centralized and stricter than HW_LOOSE."""
@@ -317,7 +316,9 @@ def test_pack_weights_with_bias_layout(dummy):
     assert np.array_equal(packed[4 * wpo : 4 * wpo + 4], b[:4])
 
 
-@pytest.mark.parametrize("dummy", [pytest.param(None, id="pack_weights_bias_grouped_2c")])
+@pytest.mark.parametrize(
+    "dummy", [pytest.param(None, id="pack_weights_bias_grouped_2c")]
+)
 def test_pack_weights_with_bias_grouped_multicol(dummy):
     """Grouped multi-col pack: OC blocks per column (groups % cols == 0)."""
     import numpy as np

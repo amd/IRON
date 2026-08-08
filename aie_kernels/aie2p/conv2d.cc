@@ -130,8 +130,7 @@ void conv2d_bf16_vector(bfloat16 *input,
     int out_channels_per_group = out_channels / groups;
     int spatial_size = out_height * out_width;
     const int w_only = out_channels * channels_per_group * kernel_h * kernel_w;
-    const aie::vector<bfloat16, vec_factor> ones =
-        aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
+    const aie::vector<bfloat16, vec_factor> ones = aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
 
     for (int n = 0; n < N; n++) {
         for (int oc = 0; oc < out_channels; oc++) {
@@ -139,8 +138,7 @@ void conv2d_bf16_vector(bfloat16 *input,
             int ic_start = group_id * channels_per_group;
 
             bfloat16 *__restrict out_ptr = output + (n * out_channels + oc) * spatial_size;
-            const bfloat16 *__restrict w_oc =
-                weight + oc * channels_per_group * kernel_h * kernel_w;
+            const bfloat16 *__restrict w_oc = weight + oc * channels_per_group * kernel_h * kernel_w;
 
             for (int oh = 0; oh < out_height; oh++) {
                 int ih_base = oh * stride_h - pad_h;
@@ -150,14 +148,10 @@ void conv2d_bf16_vector(bfloat16 *input,
                 // Dense OW vector only for k=1; k>1 uses scalar float below.
                 if (stride_w == 1 && kernel_h == 1 && kernel_w == 1) {
                     for (; ow + vec_factor <= out_width; ow += vec_factor) {
-                        aie::accum<accfloat, vec_factor> acc =
-                            aie::zeros<accfloat, vec_factor>();
+                        aie::accum<accfloat, vec_factor> acc = aie::zeros<accfloat, vec_factor>();
 
                         if (apply_bias) {
-                            acc = aie::mac(
-                                acc,
-                                aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc]),
-                                ones);
+                            acc = aie::mac(acc, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc]), ones);
                             (void)bias;
                         }
 
@@ -176,22 +170,18 @@ void conv2d_bf16_vector(bfloat16 *input,
                                 for (int kw = 0; kw < kernel_w; kw++) {
                                     int iw0 = ow - pad_w + kw;
                                     int iw_last = iw0 + vec_factor - 1;
-                                    aie::vector<bfloat16, vec_factor> w_vec =
-                                        aie::broadcast<bfloat16, vec_factor>(
-                                            w_oc[(ic * kernel_h + kh) * kernel_w + kw]);
+                                    aie::vector<bfloat16, vec_factor> w_vec = aie::broadcast<bfloat16, vec_factor>(
+                                        w_oc[(ic * kernel_h + kh) * kernel_w + kw]);
                                     aie::vector<bfloat16, vec_factor> in_vec;
                                     // Do not write vector lanes via operator[] (not reliable on AIE).
                                     // Interior aligned → load_v; else gather into aligned tmp then load_v.
-                                    if (iw0 >= 0 && iw_last < in_width &&
-                                        (iw0 & (vec_factor - 1)) == 0) {
+                                    if (iw0 >= 0 && iw_last < in_width && (iw0 & (vec_factor - 1)) == 0) {
                                         in_vec = aie::load_v<vec_factor>(in_row + iw0);
                                     } else {
                                         alignas(32) bfloat16 gather_tmp[vec_factor];
                                         for (int i = 0; i < vec_factor; i++) {
                                             int iw = iw0 + i;
-                                            gather_tmp[i] =
-                                                (iw >= 0 && iw < in_width) ? in_row[iw]
-                                                                          : bfloat16(0.0f);
+                                            gather_tmp[i] = (iw >= 0 && iw < in_width) ? in_row[iw] : bfloat16(0.0f);
                                         }
                                         in_vec = aie::load_v<vec_factor>(gather_tmp);
                                     }
@@ -201,8 +191,7 @@ void conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        aie::vector<bfloat16, vec_factor> out_vec =
-                            acc.template to_vector<bfloat16>();
+                        aie::vector<bfloat16, vec_factor> out_vec = acc.template to_vector<bfloat16>();
                         int out_off = oh * out_width + ow;
                         for (int i = 0; i < vec_factor; i++) {
                             out_ptr[out_off + i] = out_vec[i];
@@ -226,14 +215,8 @@ void conv2d_bf16_vector(bfloat16 *input,
                                 int ih = ih_start + kh;
                                 int iw = iw_start + kw;
                                 if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                    int input_idx =
-                                        ((n * in_channels + ic_global) * in_height + ih) *
-                                            in_width +
-                                        iw;
-                                    int weight_idx =
-                                        ((oc * channels_per_group + ic) * kernel_h + kh) *
-                                            kernel_w +
-                                        kw;
+                                    int input_idx = ((n * in_channels + ic_global) * in_height + ih) * in_width + iw;
+                                    int weight_idx = ((oc * channels_per_group + ic) * kernel_h + kh) * kernel_w + kw;
                                     acc += float(input[input_idx]) * float(weight[weight_idx]);
                                 }
                             }
@@ -283,14 +266,12 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
 
     int spatial_size = out_height * out_width;
     const int w_only = channels * kernel_h * kernel_w;
-    const aie::vector<bfloat16, vec_factor> ones =
-        aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
+    const aie::vector<bfloat16, vec_factor> ones = aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
 
     for (int n = 0; n < N; n++) {
         for (int c = 0; c < channels; c++) {
             bfloat16 *__restrict out_ptr = output + (n * channels + c) * spatial_size;
-            const bfloat16 *__restrict in_ch =
-                input + (n * channels + c) * in_height * in_width;
+            const bfloat16 *__restrict in_ch = input + (n * channels + c) * in_height * in_width;
             const bfloat16 *__restrict w_c = weight + c * kernel_h * kernel_w;
 
             for (int oh = 0; oh < out_height; oh++) {
@@ -299,14 +280,10 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
 
                 if (stride_w == 1) {
                     for (; ow + vec_factor <= out_width; ow += vec_factor) {
-                        aie::accum<accfloat, vec_factor> acc =
-                            aie::zeros<accfloat, vec_factor>();
+                        aie::accum<accfloat, vec_factor> acc = aie::zeros<accfloat, vec_factor>();
 
                         if (apply_bias) {
-                            acc = aie::mac(
-                                acc,
-                                aie::broadcast<bfloat16, vec_factor>(weight[w_only + c]),
-                                ones);
+                            acc = aie::mac(acc, aie::broadcast<bfloat16, vec_factor>(weight[w_only + c]), ones);
                             (void)bias;
                         }
 
@@ -325,16 +302,13 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
 
                                 int iw_last = iw0 + vec_factor - 1;
                                 // Avoid vector lane operator[] writes; gather via aligned tmp.
-                                if (iw0 >= 0 && iw_last < in_width &&
-                                    (iw0 & (vec_factor - 1)) == 0) {
+                                if (iw0 >= 0 && iw_last < in_width && (iw0 & (vec_factor - 1)) == 0) {
                                     in_vec = aie::load_v<vec_factor>(in_row + iw0);
                                 } else {
                                     alignas(32) bfloat16 gather_tmp[vec_factor];
                                     for (int i = 0; i < vec_factor; i++) {
                                         int iw = iw0 + i;
-                                        gather_tmp[i] =
-                                            (iw >= 0 && iw < in_width) ? in_row[iw]
-                                                                      : bfloat16(0.0f);
+                                        gather_tmp[i] = (iw >= 0 && iw < in_width) ? in_row[iw] : bfloat16(0.0f);
                                     }
                                     in_vec = aie::load_v<vec_factor>(gather_tmp);
                                 }
@@ -343,8 +317,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                             }
                         }
 
-                        aie::vector<bfloat16, vec_factor> out_vec =
-                            acc.template to_vector<bfloat16>();
+                        aie::vector<bfloat16, vec_factor> out_vec = acc.template to_vector<bfloat16>();
                         int out_off = oh * out_width + ow;
                         for (int i = 0; i < vec_factor; i++) {
                             out_ptr[out_off + i] = out_vec[i];
@@ -365,8 +338,7 @@ void depthwise_conv2d_bf16_vector(bfloat16 *input,
                             int ih = ih_start + kh;
                             int iw = iw_start + kw;
                             if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                int input_idx =
-                                    ((n * channels + c) * in_height + ih) * in_width + iw;
+                                int input_idx = ((n * channels + c) * in_height + ih) * in_width + iw;
                                 acc += float(input[input_idx]) * float(w_c[kh * kernel_w + kw]);
                             }
                         }
@@ -415,8 +387,7 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
 
     const int spatial_size = height * width;
     const int w_only = out_channels * in_channels;
-    const aie::vector<bfloat16, vec_factor> ones =
-        aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
+    const aie::vector<bfloat16, vec_factor> ones = aie::broadcast<bfloat16, vec_factor>(bfloat16(1.0f));
 
     for (int n = 0; n < N; n++) {
         bfloat16 *__restrict in_n = input + n * in_channels * spatial_size;
@@ -441,24 +412,15 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
                 aie::accum<accfloat, vec_factor> a3 = aie::zeros<accfloat, vec_factor>();
 
                 if (apply_bias) {
-                    a0 = aie::mac(a0,
-                                  aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 0]),
-                                  ones);
-                    a1 = aie::mac(a1,
-                                  aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 1]),
-                                  ones);
-                    a2 = aie::mac(a2,
-                                  aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 2]),
-                                  ones);
-                    a3 = aie::mac(a3,
-                                  aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 3]),
-                                  ones);
+                    a0 = aie::mac(a0, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 0]), ones);
+                    a1 = aie::mac(a1, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 1]), ones);
+                    a2 = aie::mac(a2, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 2]), ones);
+                    a3 = aie::mac(a3, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc + 3]), ones);
                     (void)bias;
                 }
 
                 for (int ic = 0; ic < in_channels; ic++) {
-                    aie::vector<bfloat16, vec_factor> in_vec =
-                        aie::load_v<vec_factor>(in_n + ic * spatial_size + sp);
+                    aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(in_n + ic * spatial_size + sp);
                     a0 = aie::mac(a0, in_vec, aie::broadcast<bfloat16, vec_factor>(w0[ic]));
                     a1 = aie::mac(a1, in_vec, aie::broadcast<bfloat16, vec_factor>(w1[ic]));
                     a2 = aie::mac(a2, in_vec, aie::broadcast<bfloat16, vec_factor>(w2[ic]));
@@ -504,14 +466,11 @@ void pointwise_conv2d_bf16_vector(bfloat16 *input,
             for (; sp + vec_factor <= spatial_size; sp += vec_factor) {
                 aie::accum<accfloat, vec_factor> acc = aie::zeros<accfloat, vec_factor>();
                 if (apply_bias) {
-                    acc = aie::mac(acc,
-                                   aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc]),
-                                   ones);
+                    acc = aie::mac(acc, aie::broadcast<bfloat16, vec_factor>(weight[w_only + oc]), ones);
                     (void)bias;
                 }
                 for (int ic = 0; ic < in_channels; ic++) {
-                    aie::vector<bfloat16, vec_factor> in_vec =
-                        aie::load_v<vec_factor>(in_n + ic * spatial_size + sp);
+                    aie::vector<bfloat16, vec_factor> in_vec = aie::load_v<vec_factor>(in_n + ic * spatial_size + sp);
                     acc = aie::mac(acc, in_vec, aie::broadcast<bfloat16, vec_factor>(w_row[ic]));
                 }
                 aie::store_v(out_ptr + sp, acc.template to_vector<bfloat16>());

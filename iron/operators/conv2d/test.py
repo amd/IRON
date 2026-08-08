@@ -487,15 +487,9 @@ def test_conv2d_multi_col_4c_8c_matrix_present(dummy):
 @pytest.mark.parametrize(
     "in_ch,out_ch,k,s,p,g,use_bias,h,w,nc",
     [
-        pytest.param(
-            8, 16, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_2c_bias_16x16"
-        ),
-        pytest.param(
-            8, 16, 3, 1, 2, 2, False, 16, 16, 2, id="groups2_2c_nobias_pad2"
-        ),
-        pytest.param(
-            4, 8, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_small_2c_bias"
-        ),
+        pytest.param(8, 16, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_2c_bias_16x16"),
+        pytest.param(8, 16, 3, 1, 2, 2, False, 16, 16, 2, id="groups2_2c_nobias_pad2"),
+        pytest.param(4, 8, 3, 1, 1, 2, True, 16, 16, 2, id="groups2_small_2c_bias"),
     ],
 )
 def test_conv2d_grouped_multicol_npu(
@@ -532,9 +526,9 @@ def test_conv2d_grouped_multicol_npu(
     except AIEOperatorConstraintError as e:
         pytest.skip(f"Unsupported grouped multi-col config: {e}")
 
-    assert op.effective_num_columns == nc, (
-        f"expected effective cols={nc}, got {op.effective_num_columns}"
-    )
+    assert (
+        op.effective_num_columns == nc
+    ), f"expected effective cols={nc}, got {op.effective_num_columns}"
 
     input_buffers = {
         "input": golden["input"],
