@@ -4,9 +4,10 @@
 # Optional dependencies for the stream-dse-backed fused SwiGLU-prefill operator
 # (iron/operators/swiglu_prefill_stream).
 #
-# Not installed by the default CI (requirements.txt); the operator's test skips
-# itself (pytest.importorskip) when stream-dse is absent. Install this file to
-# build and run the operator and its test:
+# Kept out of requirements.txt so an install without stream-dse still works: the
+# operator's test skips itself (pytest.importorskip) when it is absent. CI does
+# install this file (.github/actions/prereqs), so the operator runs there. To build
+# and run the operator and its test:
 #
 #     pip install -r requirements_stream.txt
 #     stream-setup-aie   # REQUIRED: installs stream-dse's pure-Python AIE codegen
@@ -19,4 +20,4 @@
 # package directory, so that environment must be writable.
 
 onnxscript>=0.7
-stream-dse>=1.13.11
+stream-dse>=1.13.12
