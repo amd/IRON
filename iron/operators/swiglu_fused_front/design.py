@@ -40,8 +40,6 @@ microkernel_mac_dim_map = {
 }
 
 
-
-
 def ceildiv(a, b):
     return (a + b - 1) // b
 
@@ -170,6 +168,7 @@ def my_swiglu_fused(
     # loop unrollings. Reducing the depth to 1 here will work around that at
     # a big performance cost.
     fifo_depth = 2
+    input_fifo_depth = 1
 
     if dev_name == "npu1":
         if n_aie_cols == 1:
@@ -189,7 +188,7 @@ def my_swiglu_fused(
 
     # Define tensor types
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
-    B_ty = np.ndarray[(K * N,), np.dtype[dtype_in]]
+    B_ty = np.ndarray[(2 * K * N,), np.dtype[dtype_in]]
     C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
     A_l2_ty = np.ndarray[(mem_tile_m_A * k,), np.dtype[dtype_in]]
     B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
@@ -251,6 +250,11 @@ def my_swiglu_fused(
         "silu_kernels.a" if dev_name == "npu1" else "silu.o",
         [C_l1_ty, C_l1_ty, np.int32],
     )
+    mul_kernel = Kernel(
+        "eltwise_mul_bf16_vector",
+        "mul.o",
+        [C_l1_ty, C_l1_ty, C_l1_ty, np.int32],
+    )
 
     # Tile declarations as tile[row][col]
     tiles = [[(col, row) for col in range(0, n_aie_cols)] for row in range(0, 6)]
@@ -288,7 +292,9 @@ def my_swiglu_fused(
 
     # Input A
     for i in range(n_shim_mem_A):
-        A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, name=f"A_L3L2_{i}", depth=fifo_depth)
+        A_l3l2_fifos[i] = ObjectFifo(
+            A_l2_ty, name=f"A_L3L2_{i}", depth=input_fifo_depth
+        )
         # If n_shim_mem_A == n_rows, n_A_tiles_per_shim is 1 and
         # this simply links a_l3l2_fifos[i] to a_l2l1_fifos[i] directly,
         # If n_shim_mem_A < n_rows, each column receives multiple rows of
@@ -321,9 +327,11 @@ def my_swiglu_fused(
         for j in range(stop_row - start_row):
             A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
 
-    # Input B
+    # Input B. The gate and up weights are serialized through this FIFO.
     for col in range(n_aie_cols):
-        B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth)
+        B_l3l2_fifos[col] = ObjectFifo(
+            B_l2_ty, name=f"B_L3L2_{col}", depth=input_fifo_depth
+        )
         if b_col_maj:
             dims_to_stream = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
         else:
@@ -376,9 +384,11 @@ def my_swiglu_fused(
         matmul,
         convert_copy,
         silu,
+        mul,
         my_rtp,
         barrier,
         elem_out_internal,
+        elem_gate,
     ):
         barrier.wait_for_value(1)
         rtp_K_div_k = my_rtp[0]
@@ -387,8 +397,6 @@ def my_swiglu_fused(
         if rtp_n_tiles_per_core > 1:
             loop = range_(rtp_n_tiles_per_core)
         for _ in loop:
-            if not use_larger_internal_buffer:
-                elem_out_internal = out_c.acquire(1)
             zero(elem_out_internal)
 
             for _ in range_(rtp_K_div_k):
@@ -399,13 +407,25 @@ def my_swiglu_fused(
                 in_b.release(1)
 
             if use_larger_internal_buffer:
-                elem_out_transfer = out_c.acquire(1)
-                convert_copy(elem_out_internal, elem_out_transfer, m * n)
-                elem_result = elem_out_transfer
+                convert_copy(elem_out_internal, elem_gate, m * n)
+                silu(elem_gate, elem_gate, m * n)
             else:
-                elem_result = elem_out_internal
+                silu(elem_out_internal, elem_gate, m * n)
 
-            silu(elem_result, elem_result, m * n)
+            zero(elem_out_internal)
+            for _ in range_(rtp_K_div_k):
+                elem_in_a = in_a.acquire(1)
+                elem_in_b = in_b.acquire(1)
+                matmul(elem_in_a, elem_in_b, elem_out_internal)
+                in_a.release(1)
+                in_b.release(1)
+
+            elem_out_transfer = out_c.acquire(1)
+            if use_larger_internal_buffer:
+                convert_copy(elem_out_internal, elem_out_transfer, m * n)
+                mul(elem_gate, elem_out_transfer, elem_out_transfer, m * n)
+            else:
+                mul(elem_gate, elem_out_internal, elem_out_transfer, m * n)
             out_c.release(1)
 
     # Set up compute tiles
@@ -418,7 +438,8 @@ def my_swiglu_fused(
                     type=C_l1_ty_internal, name=f"acc_buffer_{row}_{col}"
                 )
             else:
-                acc_buffer = None
+                acc_buffer = Buffer(type=C_l1_ty, name=f"acc_buffer_{row}_{col}")
+            gate_buffer = Buffer(type=C_l1_ty, name=f"gate_buffer_{row}_{col}")
 
             workers.append(
                 Worker(
@@ -431,9 +452,11 @@ def my_swiglu_fused(
                         matmul_kernel,
                         convert_copy_kernel if use_larger_internal_buffer else None,
                         silu_kernel,
+                        mul_kernel,
                         rtps[row][col],
                         workerBarriers[row][col],
                         acc_buffer,
+                        gate_buffer,
                     ],
                     tile=Tile(tile_col, tile_row),
                     stack_size=0xD00,
@@ -448,38 +471,33 @@ def my_swiglu_fused(
     # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
     # We only transfer 6 rows of tiles at once before starting a new transfer block.
     # tb = transfer block; block of transfers before sync call
-    tb_max_n_rows = 4 if not c_col_maj else 2
+    tb_max_n_rows = 2
 
     # Define tensor access patterns (tiling) for A, B, and C
     A_tiles = TensorTiler2D.group_tiler(
         (M, K),  # Size of A matrix
         (mem_tile_m_A, k),  # Size of A (smallest) tile
         (1, K_div_k),  # Size of "group" of tiles
-        # Repeat data so can distribute across whole column
-        pattern_repeat=n_c_col_tiles_per_core,
+        # Repeat each K-wide group for the gate and up GEMMs of every output tile.
+        pattern_repeat=2 * n_c_col_tiles_per_core,
         prune_step=False,
     )
-    if b_col_maj:
-        B_tiles = TensorTiler2D.step_tiler(
-            (N, K),  # Size of B matrix
-            (n, k),  # Size of B tile
-            # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
-            # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-            tile_group_steps=(n_aie_cols, 1),
-            prune_step=False,
+    # Each core receives [gate tile, up tile] for every output tile. The host
+    # packs the weights in this order, so one B FIFO is sufficient.
+    B_tiles = [
+        TensorAccessPattern(
+            (2 * K * N,),
+            offset=col * 2 * K_div_k * k * n,
+            sizes=[n_c_col_tiles_per_core, 2, K_div_k, k * n],
+            strides=[
+                2 * K_div_k * k * n * n_aie_cols,
+                K_div_k * k * n,
+                k * n,
+                1,
+            ],
         )
-    else:
-        B_tiles = TensorTiler2D.step_tiler(
-            (K, N),  # Size of B matrix
-            (k, n),  # Size of B tile
-            # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
-            # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-            tile_group_steps=(1, n_aie_cols),
-            tile_group_col_major=True,  # Send all tiles in column before moving on to next column
-            prune_step=False,
-        )
+        for col in range(n_aie_cols)
+    ]
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
@@ -631,12 +649,12 @@ def my_swiglu_fused(
                         #
                         # The smallest transfer unit is a (m*n_A_tiles_per_shim)-sized sub-tile of the input matrix.
                         # Transfer one such tile for every column, contiguously.
-                        # Repeat this transfer with identical tiles a total of (N//n//n_aie_cols) times.
+                        # Repeat each K-wide group twice per output tile.
                         # Each shim transfers the tiles for separate rows. For example, shim 0 may transfer the
                         # tiles marked 0 below, and shim 1 may transfer the tiles marked 1.
                         #             K
                         #      ----------------
-                        #     |0000000000000000|    (repeated N//n//n_aie_cols times)
+                        #     |0000000000000000|    (repeated twice per output tile)
                         #     |0000000000000000|
                         #     |1111111111111111|
                         # M   |1111111111111111|
@@ -664,8 +682,8 @@ def my_swiglu_fused(
                         # caused by the above call to npu_dma_memcpy_nd.
                         # This line does not change MLIR output at all.
 
-                        # B input transfer:
-                        # Transfer the first a (n)-wide block of columns of B,
+                        # B_gate and B_up input transfer:
+                        # Transfer the first a (n)-wide block of columns of each B,
                         # Then transfer the (n_aie_columns)-th such block, and so on.
                         # Each shim will start at a different column offset.
                         # For example, shim 0 may transfer the tiles marked 0 below,
@@ -693,9 +711,8 @@ def my_swiglu_fused(
                         # These lines do not change MLIR output at all - they are just for recording data movement
                         A_taps.append(A_tiles[tile_offset])
                         B_taps.append(B_tiles[col])
-                if tb > 0 or (tb == 0 and pingpong > 0):
-                    rt.finish_task_group(tg)
-                    tg = rt.task_group()
+                rt.finish_task_group(tg)
+                tg = rt.task_group()
         rt.finish_task_group(tg)
 
     if generate_taps:

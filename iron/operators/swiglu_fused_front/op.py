@@ -52,6 +52,9 @@ class SwigluFront(MLIROperator):
     }
 
     def __post_init__(self):
+        if self.b_col_maj:
+            raise ValueError("SwigluFront does not support column-major weights")
+
         num_aie_rows = 4
         min_M = self.tile_m * num_aie_rows
         min_K = self.tile_k
@@ -153,9 +156,7 @@ class SwigluFront(MLIROperator):
         silu_obj = KernelObjectArtifact(
             "silu.o",
             dependencies=[
-                SourceArtifact(
-                    base_dir / "aie_kernels" / kernel_dir / "silu.cc"
-                )
+                SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "silu.cc")
             ],
         )
         lut_objs = lut_based_ops_artifacts(kernel_dir)
@@ -168,24 +169,39 @@ class SwigluFront(MLIROperator):
             )
         else:
             artifacts.append(silu_obj)
+        artifacts.append(
+            KernelObjectArtifact(
+                "mul.o",
+                dependencies=[
+                    SourceArtifact(base_dir / "aie_kernels" / "generic" / "mul.cc")
+                ],
+            )
+        )
         return artifacts
 
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
-            AIERuntimeArgSpec(
-                "in", (self.K, self.N) if not self.b_col_maj else (self.N, self.K)
-            ),  # input B (weights)
+            AIERuntimeArgSpec("in", (2 * self.K * self.N,)),  # packed weights
             AIERuntimeArgSpec(
                 "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
             ),  # output C
         ]
 
     def reference(self, A, B):
-        """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
-        from iron.operators.gemm.reference import reference
+        """CPU reference: ``SiLU(A @ B_gate) * (A @ B_up)``."""
+        from iron.operators.swiglu_fused_front.reference import reference
 
-        return reference(A, B, self.b_col_maj, self.c_col_maj)
+        return reference(
+            A,
+            B,
+            self.K,
+            self.N,
+            self.tile_k,
+            self.tile_n,
+            self.num_aie_columns,
+            self.c_col_maj,
+        )
 
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""

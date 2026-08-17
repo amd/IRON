@@ -5,16 +5,71 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
-def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
-    """CPU reference GEMM ``C = A @ B`` from *stored* inputs (ground truth).
+def pack_weights(input_b_gate, input_b_up, tile_k, tile_n, num_aie_columns):
+    """Pack row-major gate/up weights in the order consumed by the AIE cores."""
+    if input_b_gate.shape != input_b_up.shape:
+        raise ValueError("Gate and up weights must have the same shape")
 
-    ``input_b`` is in the operator's storage layout: it is transposed back to
-    ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
-    transposed to ``(N, M)`` when ``c_col_maj`` is set.
+    K, N = input_b_gate.shape
+    if K % tile_k != 0:
+        raise ValueError(f"K ({K}) must be divisible by tile_k ({tile_k})")
+    tile_group_n = tile_n * num_aie_columns
+    if N % tile_group_n != 0:
+        raise ValueError(
+            f"N ({N}) must be divisible by tile_n * num_aie_columns "
+            f"({tile_group_n})"
+        )
+
+    K_div_k = K // tile_k
+    n_tile_groups = N // tile_group_n
+
+    def tile(weight):
+        return weight.reshape(
+            K_div_k, tile_k, n_tile_groups, num_aie_columns, tile_n
+        ).permute(2, 3, 0, 1, 4)
+
+    return torch.stack((tile(input_b_gate), tile(input_b_up)), dim=2).contiguous()
+
+
+def unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns):
+    """Unpack the fused operator's flat weight buffer into two ``(K, N)`` tensors."""
+    K_div_k = K // tile_k
+    n_tile_groups = N // (tile_n * num_aie_columns)
+    packed = packed_weights.reshape(
+        n_tile_groups,
+        num_aie_columns,
+        2,
+        K_div_k,
+        tile_k,
+        tile_n,
+    )
+
+    def untile(projection):
+        return (
+            packed[:, :, projection].permute(2, 3, 0, 1, 4).contiguous().reshape(K, N)
+        )
+
+    return untile(0), untile(1)
+
+
+def reference(
+    input_a,
+    packed_weights,
+    K,
+    N,
+    tile_k,
+    tile_n,
+    num_aie_columns,
+    c_col_maj=False,
+):
+    """CPU reference ``C = SiLU(A @ B_gate) * (A @ B_up)``.
+
+    The packed input is unpacked from the exact tile order consumed by the
+    fused operator. The result is transposed when ``c_col_maj`` is set.
     """
-    B = input_b.T if b_col_maj else input_b
-    C_raw = torch.matmul(input_a, B)
-    C = torch.nn.functional.silu(C_raw)
+    B_gate, B_up = unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns)
+    C = torch.nn.functional.silu(torch.matmul(input_a, B_gate))
+    C = C * torch.matmul(input_a, B_up)
     if c_col_maj:
         C = C.T
     return C
@@ -29,12 +84,19 @@ def generate_golden_reference(
     b_col_maj=False,
     c_col_maj=False,
     partition_N=1,
+    tile_k=64,
+    tile_n=64,
+    num_aie_columns=1,
 ):
+    if b_col_maj:
+        raise ValueError("SwigluFront does not support column-major weights")
+
     torch.manual_seed(seed)
     val_range = 4
     dtype_torch = torch_dtype_map[dtype]
     input_a = torch.randn(M, K, dtype=dtype_torch) * val_range
-    input_b_full = torch.rand(K, N, dtype=dtype_torch) * val_range
+    input_b_gate_full = torch.rand(K, N, dtype=dtype_torch) * val_range
+    input_b_up_full = torch.rand(K, N, dtype=dtype_torch) * val_range
     if False:
         # The following inputs are useful for debugging;
         # the A matrix becomes a matrix where each element encodes its row and column index,
@@ -44,24 +106,44 @@ def generate_golden_reference(
         row_indices = torch.arange(M, dtype=torch.int64).unsqueeze(1)
         col_indices = torch.arange(K, dtype=torch.int64).unsqueeze(0)
         input_a = (row_indices * factor + col_indices).to(dtype=dtype_torch)
-        input_b_full = torch.zeros(K, N, dtype=dtype_torch)
+        input_b_gate_full = torch.zeros(K, N, dtype=dtype_torch)
+        input_b_up_full = torch.zeros(K, N, dtype=dtype_torch)
         diag_dim = min(K, N)
-        input_b_full[:diag_dim, :diag_dim] = torch.eye(diag_dim, dtype=dtype_torch)
-    # Store B in the operator's expected layout, then compute the output via the
-    # shared reference so the test golden and the operator reference agree.
-    if b_col_maj:
-        input_b_full = input_b_full.T
-    output_full = reference(input_a, input_b_full, b_col_maj, c_col_maj)
+        identity = torch.eye(diag_dim, dtype=dtype_torch)
+        input_b_gate_full[:diag_dim, :diag_dim] = identity
+        input_b_up_full[:diag_dim, :diag_dim] = identity
+    packed_weights_full = pack_weights(
+        input_b_gate_full,
+        input_b_up_full,
+        tile_k,
+        tile_n,
+        num_aie_columns,
+    )
+    output_full = reference(
+        input_a,
+        packed_weights_full,
+        K,
+        N,
+        tile_k,
+        tile_n,
+        num_aie_columns,
+        c_col_maj,
+    )
 
-    # Create partitioned buffers for B
+    # Create partitioned packed weight buffers.
     input_b = []
     for i in range(partition_N):
         col_start = i * (N // partition_N)
         col_end = (i + 1) * (N // partition_N)
-        if b_col_maj:
-            input_b.append(input_b_full[col_start:col_end, :])
-        else:
-            input_b.append(input_b_full[:, col_start:col_end])
+        input_b.append(
+            pack_weights(
+                input_b_gate_full[:, col_start:col_end],
+                input_b_up_full[:, col_start:col_end],
+                tile_k,
+                tile_n,
+                num_aie_columns,
+            )
+        )
 
     # Create partitioned buffers for C (output)
     output = []
@@ -73,4 +155,8 @@ def generate_golden_reference(
         else:
             output.append(output_full[:, col_start:col_end])
 
-    return {"input": input_a, "input_b": input_b, "output": output}
+    return {
+        "input": input_a,
+        "input_b": input_b,
+        "output": output,
+    }
