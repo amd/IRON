@@ -10,11 +10,13 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
+    KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from iron.common.operator_bases import lut_based_ops_artifacts
 import aie.utils as aie_utils
 
 
@@ -112,6 +114,7 @@ class SwigluFront(MLIROperator):
 
     def get_kernel_artifacts(self):
         base_dir = self.context.base_dir
+        kernel_dir = get_kernel_dir()
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
             f"-DDIM_K={self.tile_k}",
@@ -130,8 +133,7 @@ class SwigluFront(MLIROperator):
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
-        kernel_dir = get_kernel_dir()
-        return [
+        artifacts = [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
@@ -148,6 +150,25 @@ class SwigluFront(MLIROperator):
                 ],
             ),
         ]
+        silu_obj = KernelObjectArtifact(
+            "silu.o",
+            dependencies=[
+                SourceArtifact(
+                    base_dir / "aie_kernels" / kernel_dir / "silu.cc"
+                )
+            ],
+        )
+        lut_objs = lut_based_ops_artifacts(kernel_dir)
+        if lut_objs:
+            artifacts.append(
+                KernelArchiveArtifact(
+                    "silu_kernels.a",
+                    dependencies=[silu_obj] + lut_objs,
+                )
+            )
+        else:
+            artifacts.append(silu_obj)
+        return artifacts
 
     def get_arg_spec(self):
         return [

@@ -246,6 +246,11 @@ def my_swiglu_fused(
             gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty],
         )
+    silu_kernel = Kernel(
+        "silu_bf16",
+        "silu_kernels.a" if dev_name == "npu1" else "silu.o",
+        [C_l1_ty, C_l1_ty, np.int32],
+    )
 
     # Tile declarations as tile[row][col]
     tiles = [[(col, row) for col in range(0, n_aie_cols)] for row in range(0, 6)]
@@ -370,6 +375,7 @@ def my_swiglu_fused(
         zero,
         matmul,
         convert_copy,
+        silu,
         my_rtp,
         barrier,
         elem_out_internal,
@@ -395,20 +401,24 @@ def my_swiglu_fused(
             if use_larger_internal_buffer:
                 elem_out_transfer = out_c.acquire(1)
                 convert_copy(elem_out_internal, elem_out_transfer, m * n)
-                out_c.release(1)
+                elem_result = elem_out_transfer
             else:
-                out_c.release(1)
+                elem_result = elem_out_internal
+
+            silu(elem_result, elem_result, m * n)
+            out_c.release(1)
 
     # Set up compute tiles
     workers = []
     for row in range(n_aie_rows):
         for col in range(n_aie_cols):
             tile_col, tile_row = core_tiles[row][col]
-            acc_buffer = None
             if use_larger_internal_buffer:
                 acc_buffer = Buffer(
                     type=C_l1_ty_internal, name=f"acc_buffer_{row}_{col}"
                 )
+            else:
+                acc_buffer = None
 
             workers.append(
                 Worker(
@@ -420,6 +430,7 @@ def my_swiglu_fused(
                         zero_kernel,
                         matmul_kernel,
                         convert_copy_kernel if use_larger_internal_buffer else None,
+                        silu_kernel,
                         rtps[row][col],
                         workerBarriers[row][col],
                         acc_buffer,
