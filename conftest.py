@@ -1,13 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+import os
+if "XILINX_XRT" not in os.environ:
+    os.environ["XILINX_XRT"] = "/opt/xilinx/xrt"
+    sys.path.append("/opt/xilinx/xrt/python")
+    os.environ["PATH"] = "/opt/xilinx/xrt/bin:" + os.environ.get("PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = "/opt/xilinx/xrt/lib:" + os.environ.get("LD_LIBRARY_PATH", "")
+
 import csv
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
 import pytest
-import sys
 import statistics
 
 from iron.common import AIEContext
