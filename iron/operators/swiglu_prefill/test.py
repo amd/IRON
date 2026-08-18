@@ -15,11 +15,19 @@ from iron.common.test_utils import verify_buffer
 
 
 def get_params():
-    params_list = [(256, 2048, 2048, False)]
+    params_list = [
+        (256, 2048, 2048, False, False),
+        (256, 2048, 2048, False, True),
+    ]
 
     params = []
     for p in params_list:
-        params.append(pytest.param(*p))
+        params.append(
+            pytest.param(
+                *p,
+                id="fused_front" if p[-1] else "sequential_front",
+            )
+        )
     return params
 
 
@@ -27,8 +35,17 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
-def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy,use_fused_front", get_params()
+)
+def test_swiglu_prefill(
+    seq_len,
+    embedding_dim,
+    hidden_dim,
+    prio_accuracy,
+    use_fused_front,
+    aie_context,
+):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
     operator = SwiGLUPrefill(
@@ -36,18 +53,25 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,
         prio_accuracy=bool(prio_accuracy),
+        use_fused_front=use_fused_front,
         context=aie_context,
     )
     operator.compile()
     fc = operator.get_callable()
 
-    # Upload the persistent weight buffers. GEMM takes its ``B`` operand in
-    # (K, N) layout, so the projection weights go in un-transposed.
-    fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].reshape(-1)
-    fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].reshape(-1)
+    if use_fused_front:
+        packed_weights = operator.pack_gate_up_weights(
+            golden_ref["w_gate"], golden_ref["w_up"]
+        )
+        fc.get_buffer("w_gate_up").torch_view()[:] = packed_weights.reshape(-1)
+        front_weight_buffers = ("w_gate_up",)
+    else:
+        fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].reshape(-1)
+        fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].reshape(-1)
+        front_weight_buffers = ("w_gate", "w_up")
+
     fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].reshape(-1)
-    # Push the persistent weight buffers to the device.
-    for name in ("w_gate", "w_up", "w_down"):
+    for name in (*front_weight_buffers, "w_down"):
         fc.get_buffer(name).to("npu")
 
     # Set the per-invocation input.
@@ -68,22 +92,35 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     errors = {}
 
     # Bring the buffers we verify back to the host.
-    for name in ("left_swished", "right", "intermediate", "out"):
+    intermediate_buffers = (
+        ("intermediate",)
+        if use_fused_front
+        else ("left_swished", "right", "intermediate")
+    )
+    for name in (*intermediate_buffers, "out"):
         fc.get_buffer(name).to("cpu")
 
-    # Verify intermediate result (left_swished * right)
-    left_swished = (
-        fc.get_buffer("left_swished").torch_view().reshape((seq_len, hidden_dim))
-    )
-    right = fc.get_buffer("right").torch_view().reshape((seq_len, hidden_dim))
-    ref_2 = left_swished * right
-
-    # Note: intermediate buffer stores the result of eltwise_mul
     intermediate = (
         fc.get_buffer("intermediate").torch_view().reshape((seq_len, hidden_dim))
     )
+    if use_fused_front:
+        # The fused front cannot expose its internal AIE buffers, so compare
+        # against the golden result using the existing accumulated-BF16 policy.
+        ref_2 = golden_ref["intermediate"]
+    else:
+        left_swished = (
+            fc.get_buffer("left_swished").torch_view().reshape((seq_len, hidden_dim))
+        )
+        right = fc.get_buffer("right").torch_view().reshape((seq_len, hidden_dim))
+        ref_2 = left_swished * right
+
     errors_2 = verify_buffer(
-        intermediate, "intermediate", ref_2, rel_tol=0.04, abs_tol=0.4
+        intermediate,
+        "intermediate",
+        ref_2,
+        rel_tol=0.08 if use_fused_front else 0.04,
+        abs_tol=0.4,
+        max_error_rate=0.05 if use_fused_front else 0.0,
     )
     if errors_2:
         errors["intermediate"] = errors_2
