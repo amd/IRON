@@ -246,13 +246,13 @@ def my_swiglu_fused(
             [A_l1_ty, B_l1_ty, C_l1_ty],
         )
     silu_kernel = Kernel(
-        "silu_bf16",
-        "silu_kernels.a" if dev_name == "npu1" else "silu.o",
+        f"{func_prefix}silu_bf16",
+        f"{func_prefix}{'silu_kernels.a' if dev_name == 'npu1' else 'silu.o'}",
         [C_l1_ty, C_l1_ty, np.int32],
     )
     mul_kernel = Kernel(
-        "eltwise_mul_bf16_vector",
-        "mul.o",
+        f"{func_prefix}eltwise_mul_bf16_vector",
+        f"{func_prefix}mul.o",
         [C_l1_ty, C_l1_ty, C_l1_ty, np.int32],
     )
 
