@@ -8,8 +8,8 @@ from iron.common.utils import get_shim_dma_limit
 from iron.operators.gemm.op import GEMM
 from iron.operators.silu.op import SiLU
 from iron.operators.elementwise_mul.op import ElementwiseMul
-from iron.operators.swiglu_fused_front.op import SwigluFront
-from iron.operators.swiglu_fused_front.reference import pack_weights
+from iron.operators.swiglu_prefill_front_fused.op import SwigluFrontFused
+from iron.operators.swiglu_prefill_front_fused.reference import pack_weights
 
 
 class SwiGLUPrefill(OperatorSequence):
@@ -49,7 +49,7 @@ class SwiGLUPrefill(OperatorSequence):
         n_cols = get_shim_dma_limit(dev) // 2
 
         if self.use_fused_front:
-            self.front = SwigluFront(
+            self.front = SwigluFrontFused(
                 M=self.seq_len,
                 K=self.embedding_dim,
                 N=self.hidden_dim,
@@ -60,6 +60,7 @@ class SwiGLUPrefill(OperatorSequence):
                 (self.front, "in", "w_gate_up", "intermediate"),
             ]
         else:
+            # TODO use other swiglu_prefill operator?
             gemm_1 = GEMM(
                 M=self.seq_len,
                 K=self.embedding_dim,

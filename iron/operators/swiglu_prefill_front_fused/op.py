@@ -21,7 +21,7 @@ import aie.utils as aie_utils
 
 
 @dataclass
-class SwigluFront(MLIROperator):
+class SwigluFrontFused(MLIROperator):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
 
     M: int
@@ -190,7 +190,7 @@ class SwigluFront(MLIROperator):
 
     def reference(self, A, B):
         """CPU reference: ``SiLU(A @ B_gate) * (A @ B_up)``."""
-        from iron.operators.swiglu_fused_front.reference import reference
+        from iron.operators.swiglu_prefill_front_fused.reference import reference
 
         return reference(
             A,

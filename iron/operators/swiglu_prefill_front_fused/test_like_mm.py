@@ -5,9 +5,9 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.operators.swiglu_fused_front.reference import generate_golden_reference
+from iron.operators.swiglu_prefill_front_fused.reference import generate_golden_reference
 from iron.common.test_utils import run_test
-from iron.operators.swiglu_fused_front.op import SwigluFront
+from iron.operators.swiglu_prefill_front_fused.op import SwigluFrontFused
 
 
 def get_params():
@@ -113,7 +113,7 @@ def test_swiglu_front(
         num_aie_columns=num_aie_columns,
     )
 
-    operator = SwigluFront(
+    operator = SwigluFrontFused(
         M=M,
         K=K,
         N=N,
