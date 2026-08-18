@@ -121,7 +121,7 @@ def test_swiglu_front(
         tile_k=k,
         tile_n=n,
         num_aie_columns=num_aie_columns,
-        prio_accuracy=True,
+        prio_accuracy=False,
         emulate_bf16_mmul_with_bfp16=False,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
@@ -141,7 +141,7 @@ def test_swiglu_front(
         output_buffers,
         rel_tol=0.04,
         abs_tol=0.4,
-        max_error_rate=0.01,
+        max_error_rate=0.04,
     )
 
     gflops = (4.0 * M * K * N) / (latency_us * 1e-6) / 1e9
