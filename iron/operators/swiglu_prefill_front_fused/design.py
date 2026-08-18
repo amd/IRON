@@ -419,14 +419,14 @@ def my_swiglu_fused(
         prune_step=False,
     )
     # Each core receives interleaved [gate tile, up tile] pairs for every K tile.
-    # The host packs the weights in this order, so one B FIFO is sufficient.
+    # The host packs weights by column so each B transfer has a legal stride.
     B_tiles = [
         TensorAccessPattern(
             (2 * K * N,),
-            offset=col * 2 * K_div_k * k * n,
+            offset=col * n_c_col_tiles_per_core * K_div_k * 2 * k * n,
             sizes=[n_c_col_tiles_per_core, K_div_k, 2 * k, n],
             strides=[
-                2 * K_div_k * k * n * n_aie_cols,
+                K_div_k * 2 * k * n,
                 2 * k * n,
                 n,
                 1,

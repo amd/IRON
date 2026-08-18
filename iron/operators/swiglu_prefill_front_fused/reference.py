@@ -6,7 +6,7 @@ from iron.common.test_utils import torch_dtype_map
 
 
 def pack_weights(input_b_gate, input_b_up, tile_k, tile_n, num_aie_columns):
-    """Pack row-major gate/up weights in the order consumed by the AIE cores."""
+    """Pack gate/up weights by AIE column for legal shim DMA strides."""
     if input_b_gate.shape != input_b_up.shape:
         raise ValueError("Gate and up weights must have the same shape")
 
@@ -28,7 +28,11 @@ def pack_weights(input_b_gate, input_b_up, tile_k, tile_n, num_aie_columns):
             K_div_k, tile_k, n_tile_groups, num_aie_columns, tile_n
         ).permute(2, 3, 0, 1, 4)
 
-    return torch.stack((tile(input_b_gate), tile(input_b_up)), dim=3).contiguous()
+    return (
+        torch.stack((tile(input_b_gate), tile(input_b_up)), dim=3)
+        .permute(1, 0, 2, 3, 4, 5)
+        .contiguous()
+    )
 
 
 def unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns):
@@ -36,8 +40,8 @@ def unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns):
     K_div_k = K // tile_k
     n_tile_groups = N // (tile_n * num_aie_columns)
     packed = packed_weights.reshape(
-        n_tile_groups,
         num_aie_columns,
+        n_tile_groups,
         K_div_k,
         2,
         tile_k,
@@ -47,7 +51,7 @@ def unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns):
     def untile(projection):
         return (
             packed[:, :, :, projection]
-            .permute(2, 3, 0, 1, 4)
+            .permute(2, 3, 1, 0, 4)
             .contiguous()
             .reshape(K, N)
         )
