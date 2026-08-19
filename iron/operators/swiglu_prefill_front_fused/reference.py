@@ -68,7 +68,6 @@ def reference(
     tile_k,
     tile_n,
     num_aie_columns,
-    c_col_maj=False,
 ):
     """CPU reference ``C = SiLU(A @ B_gate) * (A @ B_up)``.
 
@@ -78,8 +77,6 @@ def reference(
     B_gate, B_up = unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns)
     C = torch.nn.functional.silu(torch.matmul(input_a, B_gate))
     C = C * torch.matmul(input_a, B_up)
-    if c_col_maj:
-        C = C.T
     return C
 
 
@@ -89,16 +86,11 @@ def generate_golden_reference(
     N: int,
     dtype="bf16",
     seed=42,
-    b_col_maj=False,
-    c_col_maj=False,
     partition_N=1,
     tile_k=64,
     tile_n=64,
     num_aie_columns=1,
 ):
-    if b_col_maj:
-        raise ValueError("SwigluFront does not support column-major weights")
-
     torch.manual_seed(seed)
     val_range = 4
     dtype_torch = torch_dtype_map[dtype]
@@ -135,7 +127,6 @@ def generate_golden_reference(
         tile_k,
         tile_n,
         num_aie_columns,
-        c_col_maj,
     )
 
     # Create partitioned packed weight buffers.
@@ -158,10 +149,7 @@ def generate_golden_reference(
     for i in range(partition_N):
         col_start = i * (N // partition_N)
         col_end = (i + 1) * (N // partition_N)
-        if c_col_maj:
-            output.append(output_full[col_start:col_end, :])
-        else:
-            output.append(output_full[:, col_start:col_end])
+        output.append(output_full[:, col_start:col_end])
 
     return {
         "input": input_a,

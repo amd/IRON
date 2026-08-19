@@ -30,8 +30,6 @@ class SwigluFrontFused(MLIROperator):
     tile_m: int = 64
     tile_k: int = 64
     tile_n: int = 64
-    b_col_maj: bool = False
-    c_col_maj: bool = False
     num_aie_columns: int = field(default=8)
     emulate_bf16_mmul_with_bfp16: bool = field(default=True, repr=False)
     prio_accuracy: bool = field(default=False, repr=False)
@@ -52,9 +50,6 @@ class SwigluFrontFused(MLIROperator):
     }
 
     def __post_init__(self):
-        if self.b_col_maj:
-            raise ValueError("SwigluFront does not support column-major weights")
-
         num_aie_rows = 4
         min_M = self.tile_m * num_aie_rows
         min_K = self.tile_k
@@ -103,15 +98,13 @@ class SwigluFrontFused(MLIROperator):
                     "n_aie_cols": self.num_aie_columns,
                     "dtype_in_str": self.dtype_in,
                     "dtype_out_str": self.dtype_out,
-                    "b_col_maj": int(self.b_col_maj),
-                    "c_col_maj": int(self.c_col_maj),
                     "use_scalar": self.use_scalar,
                     "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
                     "prio_accuracy": self.prio_accuracy,
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
                     "generate_taps": False,
-                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}{self._kernel_flags_suffix}.o",
                 },
             ),
         )
@@ -133,14 +126,10 @@ class SwigluFrontFused(MLIROperator):
             kernel_flags.append("-DROUND_CONV_EVEN")
         if self.emulate_bf16_mmul_with_bfp16:
             kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
-        if self.b_col_maj:
-            kernel_flags.append("-DB_COL_MAJ")
-        if self.c_col_maj:
-            kernel_flags.append("-DC_COL_MAJ")
 
         artifacts = [
             KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
                     SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
@@ -169,9 +158,7 @@ class SwigluFrontFused(MLIROperator):
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
             AIERuntimeArgSpec("in", (2 * self.K * self.N,)),  # packed weights
-            AIERuntimeArgSpec(
-                "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
-            ),  # output C
+            AIERuntimeArgSpec("out", (self.M, self.N)),  # output C
         ]
 
     def reference(self, A, B):
@@ -186,56 +173,5 @@ class SwigluFrontFused(MLIROperator):
             self.tile_k,
             self.tile_n,
             self.num_aie_columns,
-            self.c_col_maj,
         )
 
-    def pad_A(self, A_np):
-        """Pad A matrix to match operator dimensions (M, K)"""
-        M, K = A_np.shape
-        if M > self.M:
-            raise ValueError(f"A rows ({M}) exceeds operator M ({self.M})")
-        if M == self.M and K == self.K:
-            return A_np
-
-        M_padded = ((M + self.M - 1) // self.M) * self.M
-        A_padded = np.zeros((M_padded, self.K), dtype=A_np.dtype)
-        A_padded[:M, :K] = A_np
-        return A_padded
-
-    def pad_B(self, B_np):
-        """Pad B matrix to match operator dimensions based on layout"""
-        if self.b_col_maj:
-            N, K = B_np.shape
-            if N > self.N or K > self.K:
-                raise ValueError(
-                    f"B (col-major) shape ({N}, {K}) exceeds operator N ({self.N}), K ({self.K})"
-                )
-            if N == self.N and K == self.K:
-                return B_np
-            B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
-            B_padded[:N, :K] = B_np
-        else:
-            K, N = B_np.shape
-            if N > self.N or K > self.K:
-                raise ValueError(
-                    f"B (row-major) shape ({K}, {N}) exceeds operator K ({self.K}), N ({self.N})"
-                )
-            if K == self.K and N == self.N:
-                return B_np
-            B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
-            B_padded[:K, :N] = B_np
-        return B_padded
-
-    def partition_B(self, B, partition_N):
-        B_parts = [None] * partition_N
-        if B is None:
-            return B_parts
-        for i in range(partition_N):
-            col_start = i * self.N
-            col_end = (i + 1) * self.N
-
-            if self.b_col_maj:
-                B_parts[i] = self.pad_B(B[col_start:col_end, :])
-            else:
-                B_parts[i] = self.pad_B(B[:, col_start:col_end])
-        return B_parts

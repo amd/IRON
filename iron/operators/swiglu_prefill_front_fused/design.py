@@ -55,8 +55,6 @@ def my_swiglu_fused(
     n_aie_cols,
     dtype_in_str,
     dtype_out_str,
-    b_col_maj,
-    c_col_maj,
     use_scalar,
     emulate_bf16_mmul_with_bfp16,
     prio_accuracy,
@@ -284,20 +282,12 @@ def my_swiglu_fused(
             B2_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth_weight
         )
         b_stream_n = 2 * n
-        if b_col_maj:
-            dims_to_stream = [
-                (b_stream_n // t, t * k),
-                (k // s, s),
-                (t, k),
-                (s, 1),
-            ]
-        else:
-            dims_to_stream = [
-                (k // s, s * b_stream_n),
-                (b_stream_n // t, t),
-                (s, b_stream_n),
-                (t, 1),
-            ]
+        dims_to_stream = [
+            (k // s, s * b_stream_n),
+            (b_stream_n // t, t),
+            (s, b_stream_n),
+            (t, 1),
+        ]
         B_l2l1_fifos[col] = (
             B_l3l2_fifos[col]
             .cons()
@@ -311,10 +301,7 @@ def my_swiglu_fused(
         )
 
         # Output C
-        if c_col_maj:
-            dims_to_stream = [(n // t, t * m), (t, r), (m // r, r * t), (r, 1)]
-        else:
-            dims_to_stream = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
+        dims_to_stream = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
         C_l2l3_fifos[col] = ObjectFifo(
             C_l2_ty,
             name=f"C_L2L3_{col}",
@@ -485,25 +472,18 @@ def my_swiglu_fused(
                         #     |                |
                         #     |                |
                         #      ----------------
-                        if not c_col_maj:
-                            C_row_offset = row_base * mem_tile_m_C * N
-                            C_col_offset = col * n
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [
-                                current_tb_n_rows,
-                                N // mem_tile_n,
-                                mem_tile_m_C,
-                                n,
-                            ]
-                            C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
-                        else:
-                            C_row_offset = row_base * mem_tile_m_C
-                            C_col_offset = col * n * M
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                            C_strides = [M * mem_tile_n, m, M, 1]
+                        C_row_offset = row_base * mem_tile_m_C * N
+                        C_col_offset = col * n
+                        C_offset = C_col_offset + C_row_offset
+                        C_sizes = [
+                            current_tb_n_rows,
+                            N // mem_tile_n,
+                            mem_tile_m_C,
+                            n,
+                        ]
+                        C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
                         C_tile = TensorAccessPattern(
-                            (N, M) if c_col_maj else (M, N),
+                            (M, N),
                             offset=C_offset,
                             sizes=C_sizes,
                             strides=C_strides,
@@ -541,28 +521,20 @@ def my_swiglu_fused(
                             #     |                |
                             #     |                |
                             #      ----------------
-                            C_col_offset = col * n if not c_col_maj else col * n * M
-                            if not c_col_maj:
-                                C_block_offset = (
+                            C_col_offset = col * n
+                            C_block_offset = (
                                     (row_base + tile_row) * n_aie_rows * m * N
-                                )  # base address for this transfer block for all BDs
-                                C_offset = C_col_offset + C_block_offset
-                                C_sizes = [
-                                    1,
-                                    n_c_col_tiles_per_core,
-                                    mem_tile_m_C,
-                                    n,
-                                ]
-                                C_strides = [0, mem_tile_n, N, 1]
-                            else:
-                                C_block_offset = (
-                                    (row_base + tile_row) * n_aie_rows * m
-                                )  # base address for this transfer block for all BDs
-                                C_offset = C_col_offset + C_block_offset
-                                C_sizes = [n_c_col_tiles_per_core, 1, n, m]
-                                C_strides = [M * mem_tile_n, 0, M, 1]
+                            )  # base address for this transfer block for all BDs
+                            C_offset = C_col_offset + C_block_offset
+                            C_sizes = [
+                                1,
+                                n_c_col_tiles_per_core,
+                                mem_tile_m_C,
+                                n,
+                            ]
+                            C_strides = [0, mem_tile_n, N, 1]
                             C_tile = TensorAccessPattern(
-                                (N, M) if c_col_maj else (M, N),
+                                (M, N),
                                 offset=C_offset,
                                 sizes=C_sizes,
                                 strides=C_strides,
@@ -663,7 +635,3 @@ def my_swiglu_fused(
     # Place components (assign them resources on the device) and generate an MLIR module
     module = my_program.resolve_program()
     return module
-
-
-if __name__ == "__main__":
-    main()

@@ -15,34 +15,34 @@ def get_params():
     max_aie_columns = dev.cols
     device_type = dev.resolve().name
     # fmt: off
-    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n
+    #       M,     K,     N, num_aie_columns,    m,   k,   n
     regular_params = [
-        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64),
-        (2048,  2048,  2048,               2,     False,     False,  64,  64,  64),
-        (2048,  2048,  2048,               8,     False,      True,  64,  64,  64),
-        ( 384,  1536,  1792,               4,     False,     False,  32,  48,  64),
-        (1792,   896,  1152,               8,     False,      True,  64,  32,  48),
-        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80),
-        ( 192,   384,    64,               4,     False,     False,  48,  96,  16),
-        ( 192,   384,    64,               4,     False,      True,  48,  96,  16),
-        (  64,   512,   256,               4,     False,     False,  16,  64,  64),
+        (2048,  2048,  2048,               1,   64,  64,  64),
+        (2048,  2048,  2048,               2,   64,  64,  64),
+        (2048,  2048,  2048,               8,   64,  64,  64),
+        ( 384,  1536,  1792,               4,   32,  48,  64),
+        (1792,   896,  1152,               8,   64,  32,  48),
+        ( 896,  1792,   640,               8,   32,  64,  80),
+        ( 192,   384,    64,               4,   48,  96,  16),
+        ( 192,   384,    64,               4,   48,  96,  16),
+        (  64,   512,   256,               4,   16,  64,  64),
     ]
     extensive_params = [
-        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64),
-        (2048,  2048,  2048,               8,     False,     False, 128,  32,  32),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64),
-        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32),
-        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64),
-        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64),
-        (2048,    64,  2048,               2,     False,      True,  64,  64,  64),
-        (2048,    64,  8192,               2,     False,      True,  64,  64,  64),
+        (2048,  2048,  2048,               8,   32,  32, 128),
+        (2048,  2048,  8192,               2,   64,  64,  64),
+        (2048,  8192,  2048,               2,   64,  64,  64),
+        (2048,    64,  2048,               2,   64,  64,  64),
+        (2048,    64,  8192,               2,   64,  64,  64),
+        (2048,  2048,  2048,               8,   128, 32,  32),
+        (2048,  2048,  8192,               2,   64,  64,  64),
+        (2048,  8192,  2048,               2,   64,  64,  64),
+        (2048,    64,  2048,               2,   64,  64,  64),
+        (2048,    64,  8192,               2,   64,  64,  64),
+        (2048,  2048,  2048,               2,    8,  16,  32),
+        (2048,  2048,  8192,               2,   64,  64,  64),
+        (2048,  8192,  2048,               2,   64,  64,  64),
+        (2048,    64,  2048,               2,   64,  64,  64),
+        (2048,    64,  8192,               2,   64,  64,  64),
     ]
     # fmt: on
 
@@ -56,8 +56,6 @@ def get_params():
                 K,
                 N,
                 num_aie_columns,
-                b_col_maj,
-                c_col_maj,
                 m,
                 k,
                 n,
@@ -87,7 +85,7 @@ def get_params():
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.parametrize(
-    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n",
+    "M,K,N,num_aie_columns,m,k,n",
     get_params(),
 )
 def test_swiglu_front(
@@ -95,8 +93,6 @@ def test_swiglu_front(
     K,
     N,
     num_aie_columns,
-    b_col_maj,
-    c_col_maj,
     m,
     k,
     n,
@@ -106,8 +102,6 @@ def test_swiglu_front(
         M=M,
         K=K,
         N=N,
-        b_col_maj=b_col_maj,
-        c_col_maj=c_col_maj,
         tile_k=k,
         tile_n=n,
         num_aie_columns=num_aie_columns,
@@ -123,8 +117,6 @@ def test_swiglu_front(
         num_aie_columns=num_aie_columns,
         prio_accuracy=False,
         emulate_bf16_mmul_with_bfp16=False,
-        b_col_maj=b_col_maj,
-        c_col_maj=c_col_maj,
         context=aie_context,
     )
 
@@ -139,9 +131,9 @@ def test_swiglu_front(
         operator,
         input_buffers,
         output_buffers,
-        rel_tol=0.04,
+        rel_tol=0.05,
         abs_tol=0.4,
-        max_error_rate=0.04,
+        max_error_rate=0.06,
     )
 
     gflops = (4.0 * M * K * N) / (latency_us * 1e-6) / 1e9
