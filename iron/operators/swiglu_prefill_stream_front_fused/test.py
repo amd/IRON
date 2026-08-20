@@ -19,7 +19,7 @@ from iron.operators.swiglu_prefill_stream_front_fused.op import SwiGLUPrefillStr
 # The operator's design is generated from this module; the values it is checked
 # against come from swiglu_decode's reference, which it shares.
 from iron.operators.swiglu_decode.reference import generate_golden_reference
-from iron.operators.swiglu_prefill_stream_front_fused.reference import INPUT, OUTPUT, WEIGHTS
+from iron.operators.swiglu_prefill_stream_front_fused.reference import NAME_INPUT, NAME_OUTPUT, NAME_WEIGHTS
 from iron.common.test_utils import verify_buffer
 
 # The MILP-feasible shape on the whole-array Strix (npu2) target.
@@ -35,7 +35,7 @@ def _staged(operator, golden_ref):
     their natural (K, N) layout.
     """
     run = operator.get_callable()
-    for name in (INPUT, *WEIGHTS):
+    for name in (NAME_INPUT, *NAME_WEIGHTS):
         buffer = run.get_buffer(name)
         buffer.torch_view()[:] = golden_ref[name].to(torch.bfloat16).flatten()
         buffer.to("npu")
@@ -63,11 +63,11 @@ def test_swiglu_prefill_stream_front_fused(aie_context):
     # up to 25%. Tolerances are local to this test.
     run = _staged(operator, golden_ref)
     run()
-    output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
+    output = run.get_buffer(NAME_OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
     errors = verify_buffer(
         output,
-        OUTPUT,
-        golden_ref[OUTPUT],
+        NAME_OUTPUT,
+        golden_ref[NAME_OUTPUT],
         rel_tol=0.08,
         abs_tol=0.7,
         max_error_rate=0.25,

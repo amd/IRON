@@ -28,6 +28,7 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.common.layout import TiledStridedLayout, tiled_2d
+from iron.operators.swiglu_prefill_stream_front_fused.reference import onnx_swiglu_front_fused
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel
@@ -159,6 +160,14 @@ ELTWISE_MUL = StreamKernel(
 
 Silu = custom_op("Silu")
 
+def swiglu_fused_front_layouts(*args, **kwargs):
+    print(args, kwargs)
+    breakpoint()
+    assert False, "TODO TODO"
+
+# TODO artifacts or source?
+SWIGLU_FUSED_FRONT = StreamKernel(key="swiglu_fused_front", layouts=swiglu_fused_front_layouts)
+
 
 def _to_gemm(a, b):
     return opset18.Gemm(a, b)
@@ -194,6 +203,7 @@ TORCH_OPS: dict[Callable, StreamOp] = {
     torch.ops.aten.matmul.default: StreamOp("Gemm", GEMM, _to_gemm),
     torch.ops.aten.silu.default: StreamOp("Silu", SILU, _to_silu),
     torch.ops.aten.mul.Tensor: StreamOp("Mul", ELTWISE_MUL, _to_mul),
+    torch.ops.custom.swiglu_fused_front.default: StreamOp("SwigluFrontFused", SWIGLU_FUSED_FRONT, onnx_swiglu_front_fused)
 }
 
 _BY_ONNX_TYPE = {op.onnx_type: op for op in TORCH_OPS.values()}

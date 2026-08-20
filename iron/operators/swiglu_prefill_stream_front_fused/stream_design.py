@@ -56,21 +56,12 @@ OUTPUT_ROOT = "outputs"
 # the tensors they produce. They name the roles rather than the ATen ops the
 # exporter captured, and they are what the mapping and the generated design are
 # read by.
-GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
-NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
+NAME_FUSED = "fused"
+NAME_DOWN = "down"
+NODE_NAMES = [NAME_FUSED, NAME_DOWN]
 RESULT_NAMES = {
-    GATE: reference.GATE_PROJECTION,
-    UP: reference.UP_PROJECTION,
-    SILU: reference.ACTIVATION,
-    MUL: reference.HIDDEN,
+    NAME_FUSED: reference.NAME_FUSED,
 }
-
-# The kernel tile each layer is compiled and mapped for, as (sequence, embedding,
-# hidden). A core holds the operands of every layer in its group, so the tile a group
-# can afford shrinks as more layers fuse onto it. Carrying the tile and no absolute
-# dimension is what lets one mapping hold across problem sizes.
-FUSED_TILES = (32, 32, 64)  # k=1, k=2: several layers share a core
-LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 
 # Sequence positions an elementwise layer works at a time when it reads from and
 # writes to memory. Its tile is then this many whole rows, which is contiguous in
@@ -78,21 +69,21 @@ LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 # MAC tile at a time.
 ELEMENTWISE_ROWS = 1
 
-GROUP_LAYERS = [[GATE, UP, SILU, MUL, DOWN]]
+GROUP_LAYERS = [[NAME_FUSED, NAME_DOWN]]
 
 
 def tiles_for():
     """The kernel tile, as (sequence, embedding, hidden), for ``k`` fused groups."""
-    return FUSED_TILES
+    # TODO tune this
+    return (32, 32, 64)
 
 
 def gemm_tiles():
     """Each GEMM layer's kernel tile, in the (m, k, n) order the kernel takes."""
     sequence, embedding, hidden = tiles_for()
     return {
-        GATE: (sequence, embedding, hidden),
-        UP: (sequence, embedding, hidden),
-        DOWN: (sequence, hidden, embedding),
+        NAME_FUSED: (sequence, embedding, hidden),
+        NAME_DOWN: (sequence, hidden, embedding),
     }
 
 

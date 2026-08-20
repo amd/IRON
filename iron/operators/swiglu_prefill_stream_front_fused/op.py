@@ -14,7 +14,7 @@ from iron.common import (
 )
 from iron.common.device_utils import get_kernel_dir
 from iron.common.sequence import OperatorSequence
-from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
+from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU, SWIGLU_FUSED_FRONT
 
 
 @dataclass
@@ -64,11 +64,8 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
         design = self._design
         gemm_tiles = design.gemm_tiles()
         per_layer = {
-            design.GATE: (GEMM, gemm_tiles[design.GATE]),
-            design.UP: (GEMM, gemm_tiles[design.UP]),
-            design.DOWN: (GEMM, gemm_tiles[design.DOWN]),
-            design.SILU: (SILU, None),
-            design.MUL: (ELTWISE_MUL, None),
+            design.NAME_FUSED: (SWIGLU_FUSED_FRONT, gemm_tiles[design.NAME_FUSED]),
+            design.NAME_DOWN: (GEMM, gemm_tiles[design.NAME_DOWN]),
         }
         layers = design.GROUP_LAYERS[self.group_index]
         base_dir, kernel_dir = self.context.base_dir, get_kernel_dir()
