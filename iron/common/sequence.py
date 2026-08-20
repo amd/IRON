@@ -85,6 +85,7 @@ class FusedDispatch(SequenceDispatch):
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
+            trace_size=seq.trace_size,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -118,6 +119,7 @@ class FusedDispatch(SequenceDispatch):
             subbuffer_layout=seq.subbuffer_layout,
             buffer_sizes=seq.buffer_sizes,
             slice_info=seq.slice_info,
+            trace_size=seq.trace_size,
         )
 
     def _collect_kernel_artifacts(self, seq):
@@ -264,6 +266,7 @@ class OperatorSequence(AIEOperatorBase):
         buffer_sizes=None,
         dispatch="auto",
         extra_flags=None,
+        trace_size=0,
         share_designs=False,
         *args,
         **kwargs,
@@ -289,6 +292,8 @@ class OperatorSequence(AIEOperatorBase):
         )  # Optional dict: buffer_name -> size_in_bytes
         # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
+        # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
+        self.trace_size = trace_size
         self.share_designs = share_designs
         self._dispatch = dispatch
 
@@ -561,6 +566,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(0, self.input_buffer.buffer_object())
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -598,6 +605,12 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
+        trace_size = self.op.trace_size
+        self.trace_buffer = (
+            XRTTensor((max(1, len(self.op.runlist) * trace_size),), dtype=np.int8)
+            if trace_size
+            else None
+        )
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -625,6 +638,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()

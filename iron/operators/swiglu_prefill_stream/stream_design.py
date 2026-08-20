@@ -277,10 +277,26 @@ def _experiment_id(seq_len, embedding_dim, hidden_dim, k):
     grid = array()
     hardware = os.path.splitext(os.path.basename(ACCELERATOR))[0]
     suffix = f"_k{k}" if k > 1 else ""
+    if trace_size():
+        suffix += "_traced"
     return (
         f"{hardware}-swiglu{suffix}_{seq_len}_{embedding_dim}_{hidden_dim}"
         f"-{grid.num_rows}_row_{grid.num_columns}_col"
     )
+
+
+def trace_size():
+    """DDR trace buffer in bytes, or 0 for an untraced build.
+
+    Tracing adds a trailing runtime-sequence argument, so it changes the operator's
+    calling convention and has to be asked for rather than defaulted on.
+    """
+    return int(os.environ.get("IRON_TRACE_SIZE", "0"))
+
+
+def trace_tiles():
+    """How many tiles to trace. Routing, not the packet id space, is the real limit."""
+    return int(os.environ.get("IRON_TRACE_NTILES", "4"))
 
 
 def _design_paths(seq_len, embedding_dim, hidden_dim, k):
@@ -319,7 +335,8 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k):
         output_path=OUTPUT_ROOT,
         skip_if_exists=False,
         enable_codegen=True,
-        trace_size=0,
+        trace_size=trace_size(),
+        trace_max_tiles=trace_tiles(),
         nb_cols_to_use=grid.num_columns,
         npu=npu,
         backend=BACKEND,

@@ -43,6 +43,7 @@ class SequenceMLIRArtifact(MLIRArtifact):
         subbuffer_layout: dict[str, tuple[str, int, int]],
         buffer_sizes: tuple[int, int, int],
         slice_info: dict[str, tuple[str, int, int]] | None = None,
+        trace_size: int = 0,
     ) -> None:
         dependencies = list(operator_mlir_map.values())
         super().__init__(filename, dependencies)
@@ -51,6 +52,8 @@ class SequenceMLIRArtifact(MLIRArtifact):
         self.subbuffer_layout = subbuffer_layout
         self.buffer_sizes = buffer_sizes
         self.slice_info = slice_info or {}
+        # Bytes of trace buffer per runlist step, 0 for an untraced build.
+        self.trace_size = trace_size
 
 
 # Helper Functions
@@ -213,12 +216,20 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
             # RuntimeSequenceOp
+            trace_size = getattr(artifact, "trace_size", 0)
+            n_traced = len(artifact.runlist) if trace_size else 0
+
             @aiex.runtime_sequence(
                 np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
+                *(
+                    [np.ndarray[(max(1, n_traced * trace_size),), np.dtype[np.int8]]]
+                    if trace_size
+                    else []
+                ),
             )
-            def sequence(input_buf, output_buf, scratch_buf):
+            def sequence(input_buf, output_buf, scratch_buf, *trace_bufs):
                 consolidated_buffers = {
                     "input": input_buf,
                     "output": output_buf,
@@ -228,6 +239,7 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                 # Execute operations in runlist order
                 configure_op = None
                 last_op_name = None
+                run_index = 0
                 for op_name, *buffer_names in artifact.runlist:
                     expected_arg_types = sequence_arg_types[op_name]
 
@@ -304,9 +316,22 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                             )
                             buffer_ssa_values.append(reinterpreted)
 
+                        # Trace lowering appends a buffer to the callee, so the call
+                        # has to carry one too. Each op writes its own slice.
+                        if trace_size:
+                            buffer_ssa_values.append(
+                                memref.subview(
+                                    trace_bufs[0],
+                                    [run_index * trace_size],
+                                    [trace_size],
+                                    [1],
+                                )
+                            )
+
                         # Run Op
                         sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
                         run_op = aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
+                        run_index += 1
 
                 if needs_reset:
                     reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
