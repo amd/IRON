@@ -64,7 +64,7 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
         design = self._design
         gemm_tiles = design.gemm_tiles()
         per_layer = {
-            design.NAME_FUSED: (SWIGLU_FUSED_FRONT, gemm_tiles[design.NAME_FUSED]),
+            design.NAME_FRONT: (SWIGLU_FUSED_FRONT, gemm_tiles[design.NAME_FRONT]),
             design.NAME_DOWN: (GEMM, gemm_tiles[design.NAME_DOWN]),
         }
         layers = design.GROUP_LAYERS[self.group_index]

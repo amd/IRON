@@ -56,11 +56,11 @@ OUTPUT_ROOT = "outputs"
 # the tensors they produce. They name the roles rather than the ATen ops the
 # exporter captured, and they are what the mapping and the generated design are
 # read by.
-NAME_FUSED = "fused"
+NAME_FRONT = "front"
 NAME_DOWN = "down"
-NODE_NAMES = [NAME_FUSED, NAME_DOWN]
+NODE_NAMES = [NAME_FRONT, NAME_DOWN]
 RESULT_NAMES = {
-    NAME_FUSED: reference.NAME_FUSED,
+    NAME_FRONT: reference.NAME_FRONT,
 }
 
 # Sequence positions an elementwise layer works at a time when it reads from and
@@ -69,7 +69,7 @@ RESULT_NAMES = {
 # MAC tile at a time.
 ELEMENTWISE_ROWS = 1
 
-GROUP_LAYERS = [[NAME_FUSED, NAME_DOWN]]
+GROUP_LAYERS = [[NAME_FRONT, NAME_DOWN]]
 
 
 def tiles_for():
@@ -82,7 +82,7 @@ def gemm_tiles():
     """Each GEMM layer's kernel tile, in the (m, k, n) order the kernel takes."""
     sequence, embedding, hidden = tiles_for()
     return {
-        NAME_FUSED: (sequence, embedding, hidden),
+        NAME_FRONT: (sequence, embedding, hidden),
         NAME_DOWN: (sequence, hidden, embedding),
     }
 
@@ -126,17 +126,12 @@ def _placements():
             "bfp16_mmul": bfp16_mmul,
         }
 
-    columns = dict(zip(NODE_NAMES, grid.allocate([2, 2, 1, 1, 2])))
+    # TODO rework/tune this
+    columns = dict(zip(NODE_NAMES, grid.allocate([2, 2])))
     gemm_split = (("D0", grid.num_rows), ("D2", 2))
-    elementwise_split = (("D0", grid.num_rows),)
-    # Fused behind a GEMM, so the operands take the layout that GEMM writes.
-    fused = elementwise(sequence_tile, hidden_tile, "default", bfp16_mmul=True)
     return {
-        GATE: Placement(columns[GATE], gemm_split, gemm(tiles[GATE])),
-        UP: Placement(columns[UP], gemm_split, gemm(tiles[UP])),
-        SILU: Placement(columns[SILU], elementwise_split, fused),
-        MUL: Placement(columns[MUL], elementwise_split, fused),
-        DOWN: Placement(columns[DOWN], gemm_split, gemm(tiles[DOWN])),
+        NAME_FRONT: Placement(columns[NAME_FRONT], gemm_split, gemm(tiles[NAME_FRONT])),
+        NAME_DOWN: Placement(columns[NAME_DOWN], gemm_split, gemm(tiles[NAME_DOWN])),
     }
 
 
@@ -160,12 +155,11 @@ def _groups():
     the output dimension.
     """
     sequence_tile, embedding_tile, hidden_tile = tiles_for()
+    # TODO what does this mean exactly?
     tiling = [
         [
-            (GATE, "D1", embedding_tile),
-            (DOWN, "D2", embedding_tile),
-            (GATE, "D2", hidden_tile),
-            (GATE, "D0", sequence_tile),
+            (NAME_FRONT, "D1", embedding_tile),
+            (NAME_DOWN, "D2", embedding_tile),
         ]
     ]
     return [
@@ -239,7 +233,7 @@ def _experiment_id(seq_len, embedding_dim, hidden_dim):
     grid = array()
     hardware = os.path.splitext(os.path.basename(ACCELERATOR))[0]
     return (
-        f"{hardware}-swiglu_{seq_len}_{embedding_dim}_{hidden_dim}"
+        f"{hardware}-swiglu_fused_front_{seq_len}_{embedding_dim}_{hidden_dim}"
         f"-{grid.num_rows}_row_{grid.num_columns}_col"
     )
 

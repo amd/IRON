@@ -166,7 +166,11 @@ def swiglu_fused_front_layouts(*args, **kwargs):
     assert False, "TODO TODO"
 
 # TODO artifacts or source?
-SWIGLU_FUSED_FRONT = StreamKernel(key="swiglu_fused_front", layouts=swiglu_fused_front_layouts)
+SWIGLU_FUSED_FRONT = StreamKernel(
+    key="swiglu_fused_front",
+    layouts=swiglu_fused_front_layouts,
+    source="front_fused",
+)
 
 
 def _to_gemm(a, b):

@@ -18,16 +18,16 @@ import torch
 from torch import nn
 
 NAME_INPUT = "input"
-NAME_FUSED = "fused"
+NAME_FRONT = "front"
 NAME_OUTPUT = "output"
 
-NAME_WEIGHTS = ("w_fused", "w_down")
+NAME_WEIGHTS = ("w_front", "w_down")
 
 # Every name this module exports, for the correspondence check in iron/tests/stream.
 TENSOR_NAMES = (
     NAME_INPUT,
     NAME_OUTPUT,
-    NAME_FUSED,
+    NAME_FRONT,
     *NAME_WEIGHTS,
 )
 
