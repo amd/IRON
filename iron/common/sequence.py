@@ -3,6 +3,7 @@
 
 import hashlib
 import logging
+import json
 import time
 from pathlib import Path
 import numpy as np
@@ -568,9 +569,22 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
         if self.trace_buffer is not None:
-            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
+            # Trace lowering appends the trace buffer to the runtime sequence it
+            # configures, so the kernel takes it as its last argument rather than
+            # after the three consolidated ones.
+            self.run_handle.set_arg(
+                self._kernel_arg_count() - 1, self.trace_buffer.buffer_object()
+            )
 
         self._params = None
+
+    def _kernel_arg_count(self):
+        """How many arguments the built ELF declares, from aiecc's own config."""
+        config = (
+            Path(self.op.artifacts[0].mlir_input.filename + ".prj")
+            / "full_elf_config.json"
+        )
+        return len(json.loads(config.read_text())["xrt-kernels"][0]["arguments"])
 
     @property
     def params(self):

@@ -218,18 +218,40 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             # RuntimeSequenceOp
             trace_size = getattr(artifact, "trace_size", 0)
             n_traced = len(artifact.runlist) if trace_size else 0
+            # Trace lowering patches the buffer's address by the index it holds in the
+            # sequence it configures, and that index is resolved against the dispatched
+            # kernel rather than the callee. Giving it the same index here is what makes
+            # the two agree. Each operator would need its own index, and they collide
+            # with the consolidated buffers once an operator takes three arguments or
+            # fewer, so this covers a single-operator sequence only.
+            trace_arg_idx = 0
+            if trace_size:
+                indices = {
+                    len(sequence_arg_types[name]) for name, *_ in artifact.runlist
+                }
+                if len(indices) > 1 or min(indices) <= 2:
+                    raise NotImplementedError(
+                        "tracing a sequence needs one trace buffer per operator at the "
+                        "index that operator gives it, and these operators want "
+                        f"{sorted(indices)}, which does not leave room for the "
+                        "consolidated buffers. Trace one operator at a time."
+                    )
+                trace_arg_idx = indices.pop()
+            n_pad = max(0, trace_arg_idx - 3) if trace_size else 0
 
             @aiex.runtime_sequence(
                 np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
+                *([np.ndarray[(1,), buf_dtype]] * n_pad),
                 *(
                     [np.ndarray[(max(1, n_traced * trace_size),), np.dtype[np.int8]]]
                     if trace_size
                     else []
                 ),
             )
-            def sequence(input_buf, output_buf, scratch_buf, *trace_bufs):
+            def sequence(input_buf, output_buf, scratch_buf, *rest):
+                trace_bufs = rest[n_pad:]
                 consolidated_buffers = {
                     "input": input_buf,
                     "output": output_buf,
