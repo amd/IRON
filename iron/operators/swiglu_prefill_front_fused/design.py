@@ -177,11 +177,12 @@ def my_swiglu_fused(
     B_ty = np.ndarray[(2 * K * N,), np.dtype[dtype_in]]
     C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
     A_l2_ty = np.ndarray[(mem_tile_m_A * k,), np.dtype[dtype_in]]
-    B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
+    B2_l2_ty = np.ndarray[(k * 2 * n,), np.dtype[dtype_in]]
     C_l2_ty = np.ndarray[(mem_tile_m_C * n,), np.dtype[dtype_out]]
     A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
-    B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-    C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+    B2_l1_ty = np.ndarray[(k, 2 * n), np.dtype[dtype_in]]
+    C1_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+    C2_l1_ty = np.ndarray[(m, 2 * n), np.dtype[dtype_out]]
 
     # AIE Core Function declarations
     scalar_suffix = "_scalar" if use_scalar else ""
@@ -193,22 +194,17 @@ def my_swiglu_fused(
     zero_kernel = Kernel(
         f"{func_prefix}zero{scalar_suffix}_{dtype_out_str}",
         gemm_object,
-        [C_l1_ty],
+        [C2_l1_ty],
     )
     matmul_kernel = Kernel(
         f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}",
         gemm_object,
-        [A_l1_ty, B_l1_ty, C_l1_ty],
+        [A_l1_ty, B2_l1_ty, C2_l1_ty],
     )
-    silu_kernel = Kernel(
-        f"{func_prefix}silu_bf16",
-        f"{func_prefix}{'silu_kernels.a' if dev_name == 'npu1' else 'silu.o'}",
-        [C_l1_ty, C_l1_ty, np.int32],
-    )
-    mul_kernel = Kernel(
-        f"{func_prefix}eltwise_mul_bf16_vector",
-        f"{func_prefix}mul.o",
-        [C_l1_ty, C_l1_ty, C_l1_ty, np.int32],
+    swiglu_kernel = Kernel(
+        f"{func_prefix}swiglu_bf16",
+        f"{func_prefix}{'swiglu_kernels.a' if dev_name == 'npu1' else 'swiglu.o'}",
+        [C2_l1_ty, C1_l1_ty, np.int32, np.int32, np.int32],
     )
 
     # Tile declarations as tile[row][col]
@@ -285,17 +281,28 @@ def my_swiglu_fused(
     # Input B. The gate and up weights are serialized through this FIFO.
     for col in range(n_aie_cols):
         B_l3l2_fifos[col] = ObjectFifo(
-            B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth_weight
+            B2_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth_weight
         )
+        b_stream_n = 2 * n
         if b_col_maj:
-            dims_to_stream = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
+            dims_to_stream = [
+                (b_stream_n // t, t * k),
+                (k // s, s),
+                (t, k),
+                (s, 1),
+            ]
         else:
-            dims_to_stream = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
+            dims_to_stream = [
+                (k // s, s * b_stream_n),
+                (b_stream_n // t, t),
+                (s, b_stream_n),
+                (t, 1),
+            ]
         B_l2l1_fifos[col] = (
             B_l3l2_fifos[col]
             .cons()
             .forward(
-                obj_type=B_l1_ty,
+                obj_type=B2_l1_ty,
                 name=f"B_L2L1_{col}",
                 depth=fifo_depth_weight,
                 dims_to_stream=dims_to_stream,
@@ -322,7 +329,7 @@ def my_swiglu_fused(
             .prod()
             .join(
                 of_offsets,
-                obj_types=[C_l1_ty] * n_aie_rows,
+                obj_types=[C1_l1_ty] * n_aie_rows,
                 names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
                 depths=[fifo_depth_output] * n_aie_rows,
                 tile=Tile(col, 1),
@@ -338,12 +345,10 @@ def my_swiglu_fused(
         out_c,
         zero,
         matmul,
-        silu,
-        mul,
+        swiglu,
         my_rtp,
         barrier,
-        elem_out_internal_0,
-        elem_out_internal_1,
+        acc_buffer,
     ):
         barrier.wait_for_value(1)
         rtp_K_div_k = my_rtp[0]
@@ -352,22 +357,17 @@ def my_swiglu_fused(
         if rtp_n_tiles_per_core > 1:
             loop = range_(rtp_n_tiles_per_core)
         for _ in loop:
-            zero(elem_out_internal_0)
-            zero(elem_out_internal_1)
+            zero(acc_buffer)
 
             for _ in range_(rtp_K_div_k):
                 elem_in_a = in_a.acquire(1)
                 elem_in_b = in_b.acquire(1)
-                matmul(elem_in_a, elem_in_b, elem_out_internal_0)
-                in_b.release(1)
-                elem_in_b = in_b.acquire(1)
-                matmul(elem_in_a, elem_in_b, elem_out_internal_1)
+                matmul(elem_in_a, elem_in_b, acc_buffer)
                 in_a.release(1)
                 in_b.release(1)
 
-            silu(elem_out_internal_0, elem_out_internal_0, m * n)
             elem_out_transfer = out_c.acquire(1)
-            mul(elem_out_internal_0, elem_out_internal_1, elem_out_transfer, m * n)
+            swiglu(acc_buffer, elem_out_transfer, m, n, r)
             out_c.release(1)
 
     # Set up compute tiles
@@ -375,8 +375,7 @@ def my_swiglu_fused(
     for row in range(n_aie_rows):
         for col in range(n_aie_cols):
             tile_col, tile_row = core_tiles[row][col]
-            acc_buffer_0 = Buffer(type=C_l1_ty, name=f"acc_buffer_{row}_{col}_0")
-            acc_buffer_1 = Buffer(type=C_l1_ty, name=f"acc_buffer_{row}_{col}_1")
+            acc_buffer = Buffer(type=C2_l1_ty, name=f"acc_buffer_{row}_{col}")
 
             workers.append(
                 Worker(
@@ -387,12 +386,10 @@ def my_swiglu_fused(
                         C_l1l2_fifos[row][col].prod(),
                         zero_kernel,
                         matmul_kernel,
-                        silu_kernel,
-                        mul_kernel,
+                        swiglu_kernel,
                         rtps[row][col],
                         workerBarriers[row][col],
-                        acc_buffer_0,
-                        acc_buffer_1,
+                        acc_buffer,
                     ],
                     tile=Tile(tile_col, tile_row),
                     stack_size=0xD00,
@@ -424,11 +421,11 @@ def my_swiglu_fused(
         TensorAccessPattern(
             (2 * K * N,),
             offset=col * n_c_col_tiles_per_core * K_div_k * 2 * k * n,
-            sizes=[n_c_col_tiles_per_core, K_div_k, 2 * k, n],
+            sizes=[n_c_col_tiles_per_core, K_div_k, k, 2 * n],
             strides=[
                 K_div_k * 2 * k * n,
                 2 * k * n,
-                n,
+                2 * n,
                 1,
             ],
         )

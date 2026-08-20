@@ -16,8 +16,8 @@ from iron.common.test_utils import verify_buffer
 
 def get_params():
     params_list = [
-        (256, 2048, 2048, False, False),
-        (256, 2048, 2048, False, True),
+        (256, 512, 2048, False, False),
+        (256, 512, 2048, False, True),
     ]
 
     params = []

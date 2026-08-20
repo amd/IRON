@@ -30,7 +30,8 @@ def pack_weights(input_b_gate, input_b_up, tile_k, tile_n, num_aie_columns):
 
     return (
         torch.stack((tile(input_b_gate), tile(input_b_up)), dim=3)
-        .permute(1, 0, 2, 3, 4, 5)
+        .permute(1, 0, 2, 4, 3, 5)
+        .reshape(num_aie_columns, n_tile_groups, K_div_k, tile_k, 2 * tile_n)
         .contiguous()
     )
 
@@ -43,14 +44,14 @@ def unpack_weights(packed_weights, K, N, tile_k, tile_n, num_aie_columns):
         num_aie_columns,
         n_tile_groups,
         K_div_k,
-        2,
         tile_k,
+        2,
         tile_n,
     )
 
     def untile(projection):
         return (
-            packed[:, :, :, projection]
+            packed[:, :, :, :, projection]
             .permute(2, 3, 1, 0, 4)
             .contiguous()
             .reshape(K, N)

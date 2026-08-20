@@ -85,6 +85,7 @@ class SwigluFrontFused(MLIROperator):
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
     def get_mlir_artifact(self):
+        kernel_tile_n = 2 * self.tile_n
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
@@ -110,7 +111,7 @@ class SwigluFrontFused(MLIROperator):
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
                     "generate_taps": False,
-                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 },
             ),
         )
@@ -118,10 +119,11 @@ class SwigluFrontFused(MLIROperator):
     def get_kernel_artifacts(self):
         base_dir = self.context.base_dir
         kernel_dir = get_kernel_dir()
+        kernel_tile_n = 2 * self.tile_n
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
             f"-DDIM_K={self.tile_k}",
-            f"-DDIM_N={self.tile_n}",
+            f"-DDIM_N={kernel_tile_n}",
         ]
         if self.prio_accuracy:
             kernel_flags.append("-Dbf16_f32_ONLY")
@@ -138,23 +140,15 @@ class SwigluFrontFused(MLIROperator):
 
         artifacts = [
             KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                f"gemm_{self.tile_m}x{self.tile_k}x{kernel_tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
                     SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
                 ],
             ),
-            KernelObjectArtifact(
-                "convert_copy.o",
-                [
-                    SourceArtifact(
-                        base_dir / "aie_kernels" / "generic" / "convert_copy.cc"
-                    )
-                ],
-            ),
         ]
-        silu_obj = KernelObjectArtifact(
-            "silu.o",
+        swiglu_obj = KernelObjectArtifact(
+            "swiglu.o",
             dependencies=[
                 SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "silu.cc")
             ],
@@ -163,20 +157,12 @@ class SwigluFrontFused(MLIROperator):
         if lut_objs:
             artifacts.append(
                 KernelArchiveArtifact(
-                    "silu_kernels.a",
-                    dependencies=[silu_obj] + lut_objs,
+                    "swiglu_kernels.a",
+                    dependencies=[swiglu_obj] + lut_objs,
                 )
             )
         else:
-            artifacts.append(silu_obj)
-        artifacts.append(
-            KernelObjectArtifact(
-                "mul.o",
-                dependencies=[
-                    SourceArtifact(base_dir / "aie_kernels" / "generic" / "mul.cc")
-                ],
-            )
-        )
+            artifacts.append(swiglu_obj)
         return artifacts
 
     def get_arg_spec(self):
