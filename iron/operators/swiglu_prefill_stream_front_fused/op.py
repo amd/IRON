@@ -30,7 +30,6 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
     seq_len: int
     embedding_dim: int
     hidden_dim: int
-    k: int
     group_index: int
     context: Any = field(default=None, repr=False, compare=False)
 
@@ -51,7 +50,6 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
                 "load_group",
                 (self.group_index,),
                 {
-                    "k": self.k,
                     "seq_len": self.seq_len,
                     "embedding_dim": self.embedding_dim,
                     "hidden_dim": self.hidden_dim,
@@ -64,7 +62,7 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
         # The registry is the single place a kernel's source, compile flags and
         # symbol names are declared, so the object and the design agree.
         design = self._design
-        gemm_tiles = design.gemm_tiles(self.k)
+        gemm_tiles = design.gemm_tiles()
         per_layer = {
             design.GATE: (GEMM, gemm_tiles[design.GATE]),
             design.UP: (GEMM, gemm_tiles[design.UP]),
@@ -72,7 +70,7 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
             design.SILU: (SILU, None),
             design.MUL: (ELTWISE_MUL, None),
         }
-        layers = design.GROUP_LAYERS[self.k][self.group_index]
+        layers = design.GROUP_LAYERS[self.group_index]
         base_dir, kernel_dir = self.context.base_dir, get_kernel_dir()
         return [
             artifact
@@ -86,7 +84,6 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
         """Groups whose generated design is byte-identical share it."""
         return self._design.group_digest(
             self.group_index,
-            k=self.k,
             seq_len=self.seq_len,
             embedding_dim=self.embedding_dim,
             hidden_dim=self.hidden_dim,
@@ -101,13 +98,13 @@ class _SwiGLUStreamGroupFrontFused(MLIROperator):
         """
         dims = (self.seq_len, self.embedding_dim, self.hidden_dim)
         shapes = self._design.workload_for(*dims).shapes
-        inputs, outputs = self._design.group_ports(*dims, k=self.k)[self.group_index]
+        inputs, outputs = self._design.group_ports(*dims)[self.group_index]
         return [AIERuntimeArgSpec("in", shapes[name]) for name in inputs] + [
             AIERuntimeArgSpec("out", shapes[name]) for name in outputs
         ]
 
 
-def _wiring(seq_len, embedding_dim, hidden_dim, k):
+def _wiring(seq_len, embedding_dim, hidden_dim):
     """Each group's arguments, and the operator's own inputs and outputs.
 
     A group's arguments are the tensors it consumes and produces, in the order the
@@ -117,7 +114,7 @@ def _wiring(seq_len, embedding_dim, hidden_dim, k):
     """
     from iron.operators.swiglu_prefill_stream_front_fused.stream_design import group_ports
 
-    boundaries = group_ports(seq_len, embedding_dim, hidden_dim, k)
+    boundaries = group_ports(seq_len, embedding_dim, hidden_dim)
     produced = {name for _, outputs in boundaries for name in outputs}
     consumed = {name for inputs, _ in boundaries for name in inputs}
     ports = [inputs + outputs for inputs, outputs in boundaries]
@@ -146,22 +143,21 @@ class SwiGLUPrefillStreamFrontFused(OperatorSequence):
     """
 
     def __init__(
-        self, seq_len, embedding_dim, hidden_dim, k=1, context=None, share_designs=True
+        self, seq_len, embedding_dim, hidden_dim, context=None, share_designs=True
     ):
-        ports, inputs, outputs = _wiring(seq_len, embedding_dim, hidden_dim, k)
+        ports, inputs, outputs = _wiring(seq_len, embedding_dim, hidden_dim)
         groups = [
             _SwiGLUStreamGroupFrontFused(
                 seq_len=seq_len,
                 embedding_dim=embedding_dim,
                 hidden_dim=hidden_dim,
-                k=k,
                 group_index=index,
                 context=context,
             )
             for index in range(len(ports))
         ]
         super().__init__(
-            name=f"swiglu_prefill_stream_front_fused_k{k}_m{seq_len}_e{embedding_dim}_h{hidden_dim}",
+            name=f"swiglu_prefill_stream_front_fused_m{seq_len}_e{embedding_dim}_h{hidden_dim}",
             runlist=[
                 (group, *group_ports) for group, group_ports in zip(groups, ports)
             ],

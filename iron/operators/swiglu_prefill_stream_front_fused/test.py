@@ -25,13 +25,8 @@ from iron.common.test_utils import verify_buffer
 # The MILP-feasible shape on the whole-array Strix (npu2) target.
 SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM = 256, 512, 2048
 
-# Fused groups to deploy the block as: one design, a front end plus the down
-# projection, or one design per layer.
-FUSION_GROUPS = [1, 2, 5]
-
 # Timed dispatches per test; the reported latency is the fastest of them.
 TIMED_RUNS = 3
-
 
 def _staged(operator, golden_ref):
     """A callable with its inputs staged.
@@ -52,14 +47,12 @@ def _staged(operator, golden_ref):
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("k", FUSION_GROUPS)
-def test_swiglu_prefill_stream_front_fused(k, aie_context):
+def test_swiglu_prefill_stream_front_fused(aie_context):
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
     operator = SwiGLUPrefillStreamFrontFused(
         seq_len=SEQ_LEN,
         embedding_dim=EMBEDDING_DIM,
         hidden_dim=HIDDEN_DIM,
-        k=k,
         context=aie_context,
     )
     operator.compile()

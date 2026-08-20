@@ -148,7 +148,7 @@ def pytest_runtest_makereport(item, call):
             #   test_path: iron/operators/dequant/test.py::test_dequant
             #   test_name: just the parametrize id (without iter prefix)
             nodeid_components = re.match(
-                r"^(.+?::[^\[]+)\[(iter\d+-)?(.+?)\]$", item.nodeid
+                r"^(.+?::[^\[]+)(?:\[(iter\d+-)?(.*)])?$", item.nodeid
             )
             if not nodeid_components:
                 raise RuntimeError(f"Unexpected test nodeid format: {item.nodeid}")
