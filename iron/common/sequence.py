@@ -3,7 +3,6 @@
 
 import hashlib
 import logging
-import json
 import time
 from pathlib import Path
 import numpy as np
@@ -565,26 +564,22 @@ class SequenceFullELFCallable(SequenceCallable):
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
         # built on top of it) stays valid across calls.
         self.run_handle = pyxrt.run(self.xrt_kernel)
-        self.run_handle.set_arg(0, self.input_buffer.buffer_object())
-        self.run_handle.set_arg(1, self.output_buffer.buffer_object())
-        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
-        if self.trace_buffer is not None:
-            # Trace lowering appends the trace buffer to the runtime sequence it
-            # configures, so the kernel takes it as its last argument rather than
-            # after the three consolidated ones.
-            self.run_handle.set_arg(
-                self._kernel_arg_count() - 1, self.trace_buffer.buffer_object()
-            )
+        consolidated_idx, trace_slots, _ = comp.trace_argument_layout(
+            {
+                f"op{i}_{o.__class__.__name__}": len(o.get_arg_spec())
+                for i, (o, *_) in enumerate(self.op.runlist)
+            },
+            self.op.trace_size,
+        )
+        for idx, buf in zip(
+            consolidated_idx,
+            (self.input_buffer, self.output_buffer, self.scratch_buffer),
+        ):
+            self.run_handle.set_arg(idx, buf.buffer_object())
+        for name, idx in trace_slots.items():
+            self.run_handle.set_arg(idx, self.trace_buffers[name].buffer_object())
 
         self._params = None
-
-    def _kernel_arg_count(self):
-        """How many arguments the built ELF declares, from aiecc's own config."""
-        config = (
-            Path(self.op.artifacts[0].mlir_input.filename + ".prj")
-            / "full_elf_config.json"
-        )
-        return len(json.loads(config.read_text())["xrt-kernels"][0]["arguments"])
 
     @property
     def params(self):
@@ -619,10 +614,13 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         trace_size = self.op.trace_size
-        self.trace_buffer = (
-            XRTTensor((max(1, len(self.op.runlist) * trace_size),), dtype=np.int8)
+        self.trace_buffers = (
+            {
+                f"op{i}_{o.__class__.__name__}": XRTTensor((trace_size,), dtype=np.int8)
+                for i, (o, *_) in enumerate(self.op.runlist)
+            }
             if trace_size
-            else None
+            else {}
         )
 
     def get_buffer(self, buffer_name):
@@ -651,9 +649,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
-        if self.trace_buffer is not None:
-            self.trace_buffer.device = "npu"
-            self.trace_buffer.to("cpu")
+        for buf in self.trace_buffers.values():
+            buf.device = "npu"
+            buf.to("cpu")
 
     def _run(self):
         self.run_handle.start()
