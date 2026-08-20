@@ -286,10 +286,9 @@ def _experiment_id(seq_len, embedding_dim, hidden_dim, k):
 
 
 def trace_size():
-    """DDR trace buffer in bytes, or 0 for an untraced build.
+    """DDR trace buffer in bytes, 0 for an untraced build.
 
-    Tracing adds a trailing runtime-sequence argument, so it changes the operator's
-    calling convention and has to be asked for rather than defaulted on.
+    Opt-in: tracing adds a runtime-sequence argument, so it changes the ABI.
     """
     return int(os.environ.get("IRON_TRACE_SIZE", "0"))
 
