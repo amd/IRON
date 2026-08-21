@@ -26,7 +26,10 @@ from pathlib import Path
 
 import stream
 import torch
+from xdsl.ir.affine import AffineMap
 from stream.api import optimize_allocation_co
+from stream.parser.onnx.operator_parser import OnnxOperatorParser
+from stream.workload.workload import ComputationNode, Tensor
 
 from iron.common.stream.hardware import ComputeArray
 from iron.common.stream.mapping import (
@@ -70,6 +73,33 @@ RESULT_NAMES = {
 ELEMENTWISE_ROWS = 1
 
 GROUP_LAYERS = [[NAME_FRONT, NAME_DOWN]]
+
+
+class SwigluFrontFusedParser(OnnxOperatorParser):
+    def generate_node(self, name_to_tensor_dict: dict[str, Tensor]) -> ComputationNode:
+        inputs = tuple(name_to_tensor_dict[name] for name in self.node.input)
+
+        # check input and shape validness
+        assert len(inputs) == 2
+        input_data, input_weight = inputs
+        assert len(input_data.shape) == 2 and len(input_weight.shape) == 3
+        dm, dk = input_data.shape
+        wk, two, wn = input_weight.shape
+        assert dk == wk
+        assert two == 2
+
+        mappings = (
+            AffineMap.from_callable(lambda m, k, n: (m, k)),
+            AffineMap.from_callable(lambda m, k, n: (k, 0, n)),
+            AffineMap.from_callable(lambda m, k, n: (m, n)),
+        )
+        return ComputationNode(
+            type=self.node.op_type,
+            name=self.node.name,
+            inputs=inputs,
+            outputs=self.get_output_tensors(),
+            operand_mapping=mappings,
+        )
 
 
 def tiles_for():
@@ -252,6 +282,10 @@ def _design_paths(seq_len, embedding_dim, hidden_dim):
 
 def _run_codegen(seq_len, embedding_dim, hidden_dim, npu):
     """Run stream-dse's constraint optimization and code generation once."""
+    from stream.parser.onnx.model import register_onnx_parser
+
+    register_onnx_parser("SwigluFrontFused", SwigluFrontFusedParser)
+
     grid = array()
     experiment_id = _experiment_id(seq_len, embedding_dim, hidden_dim)
     workload_path, mapping_path = build_inputs(
