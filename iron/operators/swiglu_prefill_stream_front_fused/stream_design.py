@@ -52,7 +52,7 @@ ACCELERATOR = os.path.join(
     "whole_array_strix.yaml",
 )
 
-BACKEND = "ortools_gscip"  # license-free OR-Tools GSCIP, no Gurobi needed
+BACKEND = "gurobi"
 OUTPUT_ROOT = "outputs"
 
 # Names for the exported graph's computation nodes, in topological order, and for
@@ -143,38 +143,17 @@ def _placements():
     tiles = gemm_tiles()
 
     def gemm(tiles):
+        # TODO probably not correct?
         return dict(
             zip("mkn", tiles), utilization=61.8, layout="default", bfp16_mmul=True
         )
 
-    def elementwise(rows, columns, layout, bfp16_mmul=False):
-        return {
-            "utilization": 50.0,
-            "layout": layout,
-            "m": rows,
-            "n": columns,
-            "bfp16_mmul": bfp16_mmul,
-        }
-
     # TODO rework/tune this
     columns = dict(zip(NODE_NAMES, grid.allocate([2, 2])))
-    gemm_split = (("D0", grid.num_rows), ("D2", 2))
     return {
-        NAME_FRONT: Placement(columns[NAME_FRONT], gemm_split, gemm(tiles[NAME_FRONT])),
-        NAME_DOWN: Placement(columns[NAME_DOWN], gemm_split, gemm(tiles[NAME_DOWN])),
+        NAME_FRONT: Placement(columns[NAME_FRONT], (("D0", grid.num_rows), ("D3", 2)), gemm(tiles[NAME_FRONT])),
+        NAME_DOWN: Placement(columns[NAME_DOWN], (("D0", grid.num_rows), ("D2", 2)), gemm(tiles[NAME_DOWN])),
     }
-
-
-def _layer_tiling(layer, hidden_dim, k):
-    """Intra-core tiling of one layer, over the dimensions it iterates."""
-    if layer not in (GATE, UP, DOWN):
-        return [(layer, "D1", hidden_dim), (layer, "D0", ELEMENTWISE_ROWS)]
-    sequence, contraction, output = gemm_tiles()[layer]
-    return [
-        (layer, "D1", contraction),
-        (layer, "D2", output),
-        (layer, "D0", sequence),
-    ]
 
 
 def _groups():
@@ -188,7 +167,9 @@ def _groups():
     # TODO what does this mean exactly?
     tiling = [
         [
+            (NAME_FRONT, "D0", sequence_tile),
             (NAME_FRONT, "D1", embedding_tile),
+            (NAME_FRONT, "D3", hidden_tile),
             (NAME_DOWN, "D2", embedding_tile),
         ]
     ]
@@ -364,7 +345,7 @@ def group_digest(group_index, **dims) -> str:
 
 
 def load_group(
-    group_index, func_prefix="", *, seq_len, embedding_dim, hidden_dim, npu
+        group_index, func_prefix="", *, seq_len, embedding_dim, hidden_dim, npu
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
