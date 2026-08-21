@@ -164,13 +164,13 @@ def _groups():
     the output dimension.
     """
     sequence_tile, embedding_tile, hidden_tile = tiles_for()
-    # TODO what does this mean exactly?
+    # TODO what does this mean exactly? why does the order matter here?
     tiling = [
         [
-            (NAME_FRONT, "D0", sequence_tile),
             (NAME_FRONT, "D1", embedding_tile),
-            (NAME_FRONT, "D3", hidden_tile),
             (NAME_DOWN, "D2", embedding_tile),
+            (NAME_FRONT, "D3", hidden_tile),
+            (NAME_FRONT, "D0", sequence_tile),
         ]
     ]
     return [
