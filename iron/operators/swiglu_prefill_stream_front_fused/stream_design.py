@@ -26,6 +26,8 @@ from pathlib import Path
 
 import stream
 import torch
+from fontTools.afmLib import kernRE
+from fontTools.feaLib.ast import FontRevisionStatement
 from xdsl.ir.affine import AffineMap
 from stream.api import optimize_allocation_co
 from stream.parser.onnx.operator_parser import OnnxOperatorParser
@@ -40,6 +42,7 @@ from iron.common.stream.mapping import (
 )
 from iron.common.stream.workload import export_workload
 from iron.operators.swiglu_prefill_stream_front_fused import reference
+from iron.operators.swiglu_prefill_stream_front_fused.front_kernel import SwigluFrontFusedKernel
 from iron.operators.swiglu_prefill_stream_front_fused.reference import swiglu_module
 
 # Hardware description for the whole-array Strix (npu2) target, shipped as package
@@ -275,6 +278,12 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu):
         hidden_dim,
         os.path.join(OUTPUT_ROOT, experiment_id),
     )
+
+    def front_fused_kernel(m: int, k: int, n: int, utilization: float, layout: str, bfp16_mmul: bool):
+        # TODO what is the point of utilization and these other extra params?
+        del layout, bfp16_mmul
+        return SwigluFrontFusedKernel(m=m, k=k, n=n, utilization=utilization)
+
     optimize_allocation_co(
         hardware=ACCELERATOR,
         workload=workload_path,
@@ -287,6 +296,7 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu):
         nb_cols_to_use=grid.num_columns,
         npu=npu,
         backend=BACKEND,
+        kernels={"swiglu_fused_front": front_fused_kernel},
     )
 
 
