@@ -89,9 +89,9 @@ class SwigluFrontFusedParser(OnnxOperatorParser):
         assert two == 2
 
         mappings = (
-            AffineMap.from_callable(lambda m, k, n: (m, k)),
-            AffineMap.from_callable(lambda m, k, n: (k, 0, n)),
-            AffineMap.from_callable(lambda m, k, n: (m, n)),
+            AffineMap.from_callable(lambda m, k, t, n: (m, k)),
+            AffineMap.from_callable(lambda m, k, t, n: (k, t, n)),
+            AffineMap.from_callable(lambda m, k, t, n: (m, n)),
         )
         return ComputationNode(
             type=self.node.op_type,
