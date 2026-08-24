@@ -204,6 +204,73 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 
 
 # ---------------------------------------------------------------------------
+# 3b. dispatch="reference" resolves slice-notation buffers the same way the
+#     NPU dispatch paths do: via NpuTensor.subview() on the CPU backend,
+#     rather than a hand-rolled numpy view. Not covered by
+#     test_dispatch_modes_bit_identical above, since reference() is a CPU
+#     re-implementation and only expected to match the NPU output within
+#     tolerance, not bit-for-bit (see CompareDispatch's rel_tol/abs_tol).
+# ---------------------------------------------------------------------------
+
+_SLICE_SIZE = 1024
+_SLICE_BYTES = _SLICE_SIZE * 2  # bf16
+
+
+def _build_packed_output_sequence(context, dispatch, name):
+    """Two independent adds writing into disjoint halves of one explicitly
+    sized buffer via slice notation ("packed[start:end]"). Unlike
+    _build_add_relu_sequence's "temp" hand-off (a whole-buffer alias), this
+    exercises slice_info/explicit_buffer_sizes resolution directly."""
+    add0 = ElementwiseAdd(
+        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
+    )
+    add1 = ElementwiseAdd(
+        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
+    )
+    return OperatorSequence(
+        name=name,
+        runlist=[
+            (add0, "a0", "b0", f"packed[0:{_SLICE_BYTES}]"),
+            (add1, "a1", "b1", f"packed[{_SLICE_BYTES}:{2 * _SLICE_BYTES}]"),
+        ],
+        input_args=["a0", "b0", "a1", "b1"],
+        output_args=["packed"],
+        buffer_sizes={"packed": 2 * _SLICE_BYTES},
+        dispatch=dispatch,
+        context=context,
+    )
+
+
+def test_reference_dispatch_resolves_sliced_buffer(aie_context):
+    """dispatch="reference" must resolve slice-notation buffers via
+    subview() on the CPU backend, matching SequenceXclbinCallable's behaviour,
+    and each slice's write must be visible through the parent buffer name."""
+    torch.manual_seed(0)
+    a0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+    b0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+    a1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+    b1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+
+    seq = _build_packed_output_sequence(
+        aie_context, "reference", "infra_reference_sliced_packed"
+    )
+    seq.compile()
+    run = seq.get_callable()
+    _set_input(run, "a0", a0)
+    _set_input(run, "b0", b0)
+    _set_input(run, "a1", a1)
+    _set_input(run, "b1", b1)
+    run()
+    packed = run.get_buffer("packed").torch_view()[: 2 * _SLICE_SIZE].clone()
+
+    expected = torch.cat([a0 + b0, a1 + b1])
+    errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
+    assert not errors, (
+        f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. Compare mode flags (and by default raises on) a per-step reference/NPU
 #    mismatch on its own.
 #

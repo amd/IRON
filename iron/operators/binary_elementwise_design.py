@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -83,37 +83,44 @@ def binary_elementwise_design(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, tensor_ty, tensor_ty) as (A, B, C):
-        maybe_enable_trace(rt, trace_size, my_workers)
-        rt.start(*my_workers)
-
-        tg = rt.task_group()
+    def sequence(A, B, C, in1_prods, in2_prods, out_conses):
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
-            rt.fill(
-                of_in1s[i].prod(),
+            in1_prods[i].fill(
                 A,
                 taps[i],
-                task_group=tg,
+                group=tg,
             )
-            rt.fill(
-                of_in2s[i].prod(),
+            in2_prods[i].fill(
                 B,
                 taps[i],
-                task_group=tg,
+                group=tg,
             )
         # Drain the output objectFIFOs with data
         for i in range(num_columns):
-            rt.drain(
-                of_outs[i].cons(),
+            out_conses[i].drain(
                 C,
                 taps[i],
                 wait=True,
-                task_group=tg,
+                group=tg,
             )
-        rt.finish_task_group(tg)
+        tg.finish()
+
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            tensor_ty,
+            tensor_ty,
+            [of_in1s[i].prod() for i in range(num_columns)],
+            [of_in2s[i].prod() for i in range(num_columns)],
+            [of_outs[i].cons() for i in range(num_columns)],
+        ],
+    )
 
     # Place program components and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    prog = Program(dev, rt, workers=my_workers)
+    maybe_enable_trace(prog, trace_size, my_workers)
+    return prog.resolve_program()

@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -94,33 +94,38 @@ def my_rms_norm(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, tensor_ty) as (A, C):
-        rt.start(*my_workers)
+    def sequence(A, C, of_in1s_prods, of_outs_conss):
 
         # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
-                rt.fill(
-                    of_in1s[i * num_channels + j].prod(),
+                of_in1s_prods[i * num_channels + j].fill(
                     A,
                     taps[i * num_channels + j],
-                    task_group=tg,
+                    group=tg,
                 )
         # Drain the output objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
-                rt.drain(
-                    of_outs[i * num_channels + j].cons(),
+                of_outs_conss[i * num_channels + j].drain(
                     C,
                     taps[i * num_channels + j],
                     wait=True,  # wait for the transfer to complete and data to be available
-                    task_group=tg,
+                    group=tg,
                 )
-        rt.finish_task_group(tg)
+        tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            tensor_ty,
+            [of.prod() for of in of_in1s],
+            [of.cons() for of in of_outs],
+        ],
+    )
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    return Program(dev, rt, workers=my_workers).resolve_program()

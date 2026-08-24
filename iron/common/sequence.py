@@ -11,7 +11,6 @@ import pyxrt
 import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
-from .utils import XRTSubBuffer
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -288,9 +287,8 @@ class OperatorSequence(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
-        # Extra aiecc flags forwarded to the full-ELF build (e.g. --dynamic-objFifos
-        # for placed/routed whole-array designs that would otherwise overflow AIE2p
-        # program memory). Empty by default, so other sequences are unaffected.
+        # Extra aiecc flags forwarded to the full-ELF build. Empty by default, so
+        # other sequences are unaffected.
         self.extra_flags = extra_flags or []
         self.share_designs = share_designs
         self._dispatch = dispatch
@@ -572,14 +570,17 @@ class SequenceFullELFCallable(SequenceCallable):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
         The ``params.txt`` describing the runtime parameters is written by
-        ``aie-lower-parameters`` into the ``<mlir>.prj`` project directory next
-        to the fused MLIR source. Returns ``None`` if the sequence declared no
-        runtime parameters (in which case the file is not written).
+        ``aie-lower-parameters`` directly into the aiecc work dir (see
+        ``_aiecc_work_dir``) for the fused MLIR source -- compile_mlir_module()
+        passes that dir as aiecc's explicit ``--tmpdir``, so aiecc uses it as
+        the project dir itself rather than nesting a "<input>.prj" subdirectory
+        under it. Returns ``None`` if the sequence declared no runtime
+        parameters (in which case the file is not written).
         """
         if self._params is not None:
             return self._params
         mlir_filename = self.op.artifacts[0].mlir_input.filename
-        params_path = Path(mlir_filename + ".prj") / "params.txt"
+        params_path = comp._aiecc_work_dir(mlir_filename) / "params.txt"
         if not params_path.exists():
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
@@ -606,28 +607,21 @@ class SequenceFullELFCallable(SequenceCallable):
             "output": self.output_buffer,
             "scratch": self.scratch_buffer,
         }[buf_type]
-        sub = XRTSubBuffer(
-            parent_bo=parent.buffer_object(),
-            offset_bytes=offset,
-            size_bytes=length,
-            shape=(length // BF16.itemsize,),
-            dtype=ml_dtypes.bfloat16,
-            parent=parent,
-        )
+        sub = parent.subview(offset, (length // BF16.itemsize,), ml_dtypes.bfloat16)
         self._buffer_cache[buffer_name] = sub
         return sub
 
     def _sync_inputs(self):
-        # Sub-views handed out by get_buffer() mark this parent host-dirty on .data
-        # access (XRTSubBuffer.data), so `to("npu")` here actually fires the host->device
-        # sync for the freshly written inputs.
+        # Sub-views handed out by get_buffer() share the parent's coherence map, so
+        # a write through one (e.g. torch_view()) marks its byte range host-dirty
+        # there too, and `to("npu")` here syncs every dirty range in one pass.
         self.input_buffer.to("npu")
 
     def _sync_outputs(self):
         # _run just rewrote the output arena on the device, so the device holds the
         # authoritative copy. Force the device->host sync: assert device residency first
-        # so `to("cpu")` fires even if a prior read of get_buffer(...).data marked the
-        # buffer "cpu" (otherwise a looped dispatch would read stale output).
+        # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
+        # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
 
@@ -647,9 +641,6 @@ class _PerBufferCallable(SequenceCallable):
     def _make_buffer(self, n_elements):
         raise NotImplementedError
 
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        raise NotImplementedError
-
     def _allocate_buffers(self):
         self._buffers = {}
         for name, (_, _, length) in self.op.subbuffer_layout.items():
@@ -660,8 +651,9 @@ class _PerBufferCallable(SequenceCallable):
             return self._buffers[buf_name]
         if buf_name in self.op.slice_info:
             base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            sub = self._make_subbuffer(
-                self._buffers[base_name], start_bytes, end_bytes - start_bytes
+            size_bytes = end_bytes - start_bytes
+            sub = self._buffers[base_name].subview(
+                start_bytes, (size_bytes // BF16.itemsize,), BF16
             )
             self._buffers[buf_name] = sub
             return sub
@@ -696,16 +688,6 @@ class SequenceXclbinCallable(_PerBufferCallable):
 
     def _make_buffer(self, n_elements):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
-
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        return XRTSubBuffer(
-            parent_bo=parent.buffer_object(),
-            offset_bytes=offset_bytes,
-            size_bytes=size_bytes,
-            shape=(size_bytes // BF16.itemsize,),
-            dtype=ml_dtypes.bfloat16,
-            parent=parent,
-        )
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
@@ -752,16 +734,6 @@ class SequenceReferenceCallable(_PerBufferCallable):
 
     def _make_buffer(self, n_elements):
         return CPUOnlyTensor((n_elements,), dtype=BF16)
-
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        start = offset_bytes // BF16.itemsize
-        end = (offset_bytes + size_bytes) // BF16.itemsize
-        # Alias the parent's memory (numpy slice is zero-copy) so a write to
-        # this slice is visible when a later step reads the parent by name.
-        view = CPUOnlyTensor((end - start,), dtype=BF16)
-        view._data = parent.data[start:end]
-        view._shape = view._data.shape
-        return view
 
     def _run(self):
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():

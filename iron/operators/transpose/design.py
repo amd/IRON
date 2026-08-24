@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
@@ -152,36 +152,41 @@ def shuffle_transpose(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, tensor_ty) as (A, C):
-        rt.start(*my_workers)
+    def sequence(A, C, of_in1s_L3L2_prods, of_outs_conss):
 
         # One task group per batch (each a parallel fill+drain over all columns/channels), so the
         # num_batches contiguous matrices stream through the same FIFOs in sequence.
         for batch in range(num_batches):
             # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-            tg = rt.task_group()
+            tg = TaskGroup()
 
             # Fill the input objectFIFOs with data
             for i in range(num_columns):
                 for j in range(num_channels):
-                    rt.fill(
-                        of_in1s_L3L2[i * num_channels + j].prod(),
+                    of_in1s_L3L2_prods[i * num_channels + j].fill(
                         A,
                         taps_in_L3L2[i * num_channels + j][batch],
-                        task_group=tg,
+                        group=tg,
                     )
             # Drain the output objectFIFOs of data
             for i in range(num_columns):
                 for j in range(num_channels):
-                    rt.drain(
-                        of_outs[i * num_channels + j].cons(),
+                    of_outs_conss[i * num_channels + j].drain(
                         C,
                         taps_out_L1L3[i * num_channels + j][batch],
                         wait=True,  # wait for the transfer to complete and data to be available
-                        task_group=tg,
+                        group=tg,
                     )
-            rt.finish_task_group(tg)
+            tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            tensor_ty,
+            [of.prod() for of in of_in1s_L3L2],
+            [of.cons() for of in of_outs],
+        ],
+    )
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    return Program(dev, rt, workers=my_workers).resolve_program()

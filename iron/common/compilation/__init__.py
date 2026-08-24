@@ -3,6 +3,7 @@
 
 from .base import (
     DesignGenerator,
+    _aiecc_work_dir,
     plan,
     execute,
     compile,

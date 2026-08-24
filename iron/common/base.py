@@ -156,23 +156,20 @@ class MLIROperator(AIEOperatorBase):
         pass
 
     def get_artifacts(
-        self, prefix: str = "", dynamic_obj_fifos: bool = False
+        self, prefix: str = ""
     ) -> tuple[XclbinArtifact, InstsBinArtifact]:
         operator_name = prefix + self.name
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps = self.get_kernel_artifacts()
-        extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=extra_flags,
         )
         insts_artifact = InstsBinArtifact(
             f"{operator_name}.bin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact],
-            extra_flags=extra_flags,
         )
         return xclbin_artifact, insts_artifact
 

@@ -167,7 +167,6 @@ class SwiGLUPrefillStream(OperatorSequence):
             ],
             input_args=inputs,
             output_args=outputs,
-            extra_flags=["--dynamic-objFifos"],
             share_designs=share_designs,
             context=context,
         )

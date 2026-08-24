@@ -108,9 +108,6 @@ class MHA(MLIROperator):
             ),
         ]
 
-    def get_artifacts(self):
-        return super().get_artifacts(dynamic_obj_fifos=True)
-
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
         buffer_size = self.num_heads * self.d * seq_padding

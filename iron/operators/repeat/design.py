@@ -8,7 +8,7 @@ Repeat interleave
 import numpy as np
 
 from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup
 
 
 def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
@@ -61,11 +61,19 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
     fifo_in = ObjectFifo(transfer_ty, name="fifo_in", depth=2)
     fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
 
-    rt = Runtime()
-    with rt.sequence(inp_ty, out_ty) as (inp, out):
-        tg = rt.task_group()
-        rt.fill(fifo_in.prod(), inp, input_tap, task_group=tg)
-        rt.drain(fifo_out.cons(), out, output_tap, task_group=tg, wait=True)
-        rt.finish_task_group(tg)
+    def sequence(inp, out, fifo_in_prod, fifo_out_cons):
+        tg = TaskGroup()
+        fifo_in_prod.fill(inp, input_tap, group=tg)
+        fifo_out_cons.drain(out, output_tap, group=tg, wait=True)
+        tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            inp_ty,
+            out_ty,
+            fifo_in.prod(),
+            fifo_out.cons(),
+        ],
+    )
     return Program(dev, rt).resolve_program()

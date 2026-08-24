@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -97,33 +97,39 @@ def channeled_unary_design(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(transfer_type, transfer_type) as (a_in, b_out):
-        maybe_enable_trace(rt, trace_size, my_workers)
-        rt.start(*my_workers)
-
-        tg = rt.task_group()
+    def sequence(a_in, b_out, in_prods, out_conses):
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
-                rt.fill(
-                    of_ins[i * num_channels + j].prod(),
+                in_prods[i * num_channels + j].fill(
                     a_in,
                     taps[i * num_channels + j],
-                    task_group=tg,
+                    group=tg,
                 )
         # Drain the output objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
-                rt.drain(
-                    of_outs[i * num_channels + j].cons(),
+                out_conses[i * num_channels + j].drain(
                     b_out,
                     taps[i * num_channels + j],
                     wait=True,
-                    task_group=tg,
+                    group=tg,
                 )
-        rt.finish_task_group(tg)
+        tg.finish()
+
+    rt = Runtime(
+        sequence,
+        [
+            transfer_type,
+            transfer_type,
+            [of.prod() for of in of_ins],
+            [of.cons() for of in of_outs],
+        ],
+    )
 
     # Place components and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    prog = Program(dev, rt, workers=my_workers)
+    maybe_enable_trace(prog, trace_size, my_workers)
+    return prog.resolve_program()

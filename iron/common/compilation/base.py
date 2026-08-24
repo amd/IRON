@@ -49,6 +49,7 @@ from typing import Any, Callable
 import sys
 
 from iron.common.device_utils import get_kernel_dir
+from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_module
 
 # Global Functions
 # ##########################################################################
@@ -487,20 +488,42 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
             f.write(mlir_code)
 
 
+def _aiecc_work_dir(mlir_filename: str) -> Path:
+    """Directory aiecc writes its own 'aie.mlir' copy and '.prj' project directory
+    into for the given MLIR source artifact's filename.
+
+    compile_mlir_module() always names its copy of the source "aie.mlir" inside
+    the work_dir it's given, rather than reusing the artifact's own filename, so
+    each MLIR source needs its own work_dir to avoid colliding with every other
+    artifact's aiecc output in the flat build directory. Callers that need to
+    find aiecc's project directory afterward (e.g. for a runtime-parameters
+    scratchpad) should derive it from this same function rather than
+    re-deriving the convention.
+    """
+    p = Path(mlir_filename)
+    return p.parent / (p.name + ".d")
+
+
+def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
+    """Symlink every file already built in build_dir into work_dir.
+
+    aiecc resolves an MLIR module's relative kernel-object references (e.g.
+    ``link_with = "axpy.o"``, produced by KernelCompilationRule /
+    ArchiveCompilationRule into the flat build_dir) against work_dir, since
+    that's where compile_mlir_module() writes its own copy of the MLIR
+    source. Symlinking makes those lookups succeed without copying kernel
+    objects into every artifact's own work_dir.
+    """
+    for entry in build_dir.iterdir():
+        if entry.is_dir():
+            continue
+        link = work_dir / entry.name
+        if not link.exists():
+            link.symlink_to(entry.resolve())
+
+
 class AieccCompilationRule(CompilationRule):
-    def __init__(
-        self, build_dir, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs
-    ):
-        self.build_dir = build_dir
-        # AIECC_PATH lets a build point at a locally-built aiecc (e.g. a compiler under
-        # development) without replacing the installed one. Default = the installed aiecc.
-        _aiecc_override = os.environ.get("AIECC_PATH")
-        self.aiecc_path = (
-            Path(_aiecc_override)
-            if _aiecc_override
-            else Path(mlir_aie_dir) / "bin" / "aiecc"
-        )
-        self.peano_dir = peano_dir
+    def __init__(self, use_chess=False, *args, **kwargs):
         self.use_chess = use_chess
         super().__init__(*args, **kwargs)
 
@@ -514,35 +537,31 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
         commands = []
 
         for artifact in worklist:
-            compile_cmd = [
-                str(self.aiecc_path),
-                "-v",
+            mlir_source = artifact.mlir_input
+            work_dir = _aiecc_work_dir(mlir_source.filename)
+            options = [
                 f"-j{os.environ.get('AIECC_JOBS', '1')}",
-                "--no-compile-host",
-            ]
-            if self.use_chess:
-                compile_cmd += [
-                    "--xchesscc",
-                    "--xbridge",
-                ]
-            else:
-                compile_cmd += [
-                    "--no-xchesscc",
-                    "--no-xbridge",
-                    "--peano",
-                    str(self.peano_dir),
-                ]
-            compile_cmd += [
                 "--expand-load-pdis",
-                "--generate-full-elf",
-                "--full-elf-name",
-                os.path.abspath(artifact.filename),
-                *artifact.extra_flags,
-                os.path.abspath(artifact.mlir_input.filename),
-            ]
-            commands.append(
-                ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
-            )
+            ] + artifact.extra_flags
+
+            def _compile(
+                artifact=artifact,
+                mlir_source=mlir_source,
+                work_dir=work_dir,
+                options=options,
+            ):
+                work_dir.mkdir(parents=True, exist_ok=True)
+                _link_build_outputs_into(work_dir, Path(mlir_source.filename).parent)
+                compile_mlir_module(
+                    Path(mlir_source.filename).read_text(),
+                    full_elf_path=os.path.abspath(artifact.filename),
+                    work_dir=str(work_dir),
+                    options=options,
+                    use_chess=self.use_chess,
+                    verbose=True,
+                )
+
+            commands.append(PythonCallbackCompilationCommand(_compile))
             artifact.available = True
 
         return commands
@@ -569,58 +588,53 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         commands = []
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
         for mlir_source in mlir_sources:
-            compile_cmd = [
-                str(self.aiecc_path),
-                "-v",
-                f"-j{os.environ.get('AIECC_JOBS', '1')}",
-                "--no-compile-host",
-            ]
-            if self.use_chess:
-                compile_cmd += [
-                    "--xchesscc",
-                    "--xbridge",
-                ]
-            else:
-                compile_cmd += [
-                    "--no-xchesscc",
-                    "--no-xbridge",
-                    "--peano",
-                    str(self.peano_dir),
-                ]
-            compile_cmd += [
-                "--dynamic-objFifos",
-            ]
+            options = [f"-j{os.environ.get('AIECC_JOBS', '1')}"]
+            xclbin_path = None
+            insts_path = None
             do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
             do_compile_insts_bin = mlir_source in mlir_sources_to_insts
             if do_compile_xclbin:
                 first_xclbin = mlir_sources_to_xclbins[mlir_source][
                     0
                 ]  # TODO: this does not handle the case of multiple xclbins with different kernel names or flags from the same MLIR
-                compile_cmd += first_xclbin.extra_flags + [
-                    "--aie-generate-xclbin",
-                    "--xclbin-name=" + os.path.abspath(first_xclbin.filename),
-                    "--xclbin-kernel-name=" + first_xclbin.kernel_name,
+                xclbin_path = os.path.abspath(first_xclbin.filename)
+                options += first_xclbin.extra_flags + [
+                    f"--xclbin-kernel-name={first_xclbin.kernel_name}",
                 ]
                 if first_xclbin.xclbin_input is not None:
-                    compile_cmd += [
+                    options.append(
                         "--xclbin-input="
                         + os.path.abspath(first_xclbin.xclbin_input.filename)
-                    ]
+                    )
             if do_compile_insts_bin:
                 first_insts_bin = mlir_sources_to_insts[mlir_source][
                     0
                 ]  # TODO: this does not handle the case of multiple insts.bins with different flags from the same MLIR
-                if not do_compile_xclbin:
-                    compile_cmd += ["--no-compile"]
-                compile_cmd += first_insts_bin.extra_flags + [
-                    "--aie-generate-npu-insts",
-                    "--npu-insts-name=" + os.path.abspath(first_insts_bin.filename),
-                ]
-            compile_cmd += [os.path.abspath(mlir_source.filename)]
+                insts_path = os.path.abspath(first_insts_bin.filename)
+                options += first_insts_bin.extra_flags
 
-            commands.append(
-                ShellCompilationCommand(compile_cmd, cwd=str(self.build_dir))
-            )
+            work_dir = _aiecc_work_dir(mlir_source.filename)
+
+            def _compile(
+                mlir_source=mlir_source,
+                xclbin_path=xclbin_path,
+                insts_path=insts_path,
+                options=options,
+                work_dir=work_dir,
+            ):
+                work_dir.mkdir(parents=True, exist_ok=True)
+                _link_build_outputs_into(work_dir, Path(mlir_source.filename).parent)
+                compile_mlir_module(
+                    Path(mlir_source.filename).read_text(),
+                    insts_path=insts_path,
+                    xclbin_path=xclbin_path,
+                    work_dir=str(work_dir),
+                    options=options,
+                    use_chess=self.use_chess,
+                    verbose=True,
+                )
+
+            commands.append(PythonCallbackCompilationCommand(_compile))
 
             # There may be multiple targets that require an xclbin/insts.bin from the same MLIR with different names; copy them
             for sources_to in [mlir_sources_to_xclbins, mlir_sources_to_insts]:
@@ -713,7 +727,6 @@ class KernelCompilationRule(CompilationRule):
         return any(artifacts.get_worklist(KernelObjectArtifact))
 
     def compile(self, artifacts):
-        include_path = Path(self.mlir_aie_dir) / "include"
         worklist = artifacts.get_worklist(KernelObjectArtifact)
         commands = []
 
@@ -733,41 +746,28 @@ class KernelCompilationRule(CompilationRule):
                     "Expected KernelObject dependency to be a C source file"
                 )
 
-            if self.use_chess:
-                wrapper_path = Path(self.mlir_aie_dir) / "bin" / "xchesscc_wrapper"
-                cmd = (
-                    [
-                        str(wrapper_path),
-                        kernel_dir,  # e.g. "aie2" or "aie2p"
-                        f"-I{str(include_path)}",
-                        f"-I{str(runtime_lib_include_path)}",
-                    ]
-                    + artifact.extra_flags
-                    + ["-c", source_file.filename, "-o", artifact.filename]
-                )
-            else:
-                clang_path = Path(self.peano_dir) / "bin" / "clang++"
-                target = f"{kernel_dir}-none-unknown-elf"
-                cmd = (
-                    [
-                        str(clang_path),
-                        "-O2",
-                        "-std=c++20",
-                        f"--target={target}",
-                        "-D__AIE_API_AIE_ADF_HPP__",
-                        "-Wno-parentheses",
-                        "-Wno-attributes",
-                        "-Wno-macro-redefined",
-                        "-Wno-empty-body",
-                        "-Wno-missing-template-arg-list-after-template-kw",
-                        f"-I{str(include_path)}",
-                        f"-I{str(runtime_lib_include_path)}",
-                    ]
-                    + artifact.extra_flags
-                    + ["-c", source_file.filename, "-o", artifact.filename]
-                )
+            # -Wno-missing-template-arg-list-after-template-kw only applies to
+            # the Peano (clang) path: xchesscc's own front end doesn't
+            # recognize it, and upstream's chess branch never carried it.
+            compile_args = list(artifact.extra_flags)
+            if not self.use_chess:
+                compile_args = [
+                    "-Wno-missing-template-arg-list-after-template-kw"
+                ] + compile_args
 
-            commands.append(ShellCompilationCommand(cmd))
+            commands.append(
+                PythonCallbackCompilationCommand(
+                    partial(
+                        compile_cxx_core_function,
+                        source_path=source_file.filename,
+                        target_arch=kernel_dir,
+                        output_path=artifact.filename,
+                        include_dirs=[str(runtime_lib_include_path)],
+                        compile_args=compile_args,
+                        use_chess=self.use_chess,
+                    )
+                )
+            )
             if artifact.rename_symbols:
                 commands.extend(self._rename_symbols(artifact))
             if artifact.prefix_symbols:
