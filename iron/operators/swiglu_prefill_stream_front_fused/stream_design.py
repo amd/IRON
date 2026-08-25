@@ -108,7 +108,7 @@ class SwigluFrontFusedParser(OnnxOperatorParser):
 def tiles_for():
     """The kernel tile, as (sequence, embedding, hidden), for ``k`` fused groups."""
     # TODO tune this
-    return (32, 32, 64)
+    return (16, 32, 64)
 
 
 def gemm_tiles():
@@ -152,10 +152,11 @@ def _placements():
         )
 
     # TODO rework/tune this
-    columns = dict(zip(NODE_NAMES, grid.allocate([2, 2])))
+    columns = dict(zip([NAME_FRONT, "dummy0", NAME_DOWN], grid.allocate([2, 4, 2])))
     return {
-        NAME_FRONT: Placement(columns[NAME_FRONT], (("D0", grid.num_rows), ("D3", 2)), gemm(tiles[NAME_FRONT])),
-        NAME_DOWN: Placement(columns[NAME_DOWN], (("D0", grid.num_rows), ("D2", 2)), gemm(tiles[NAME_DOWN])),
+        # TODO try adding more D0 unrolling, to make up for the lost hidden/embedding urolling
+        NAME_FRONT: Placement(columns[NAME_FRONT], (("D0", grid.num_rows), ("D0", 2)), gemm(tiles[NAME_FRONT])),
+        NAME_DOWN: Placement(columns[NAME_DOWN], (("D0", grid.num_rows), ("D0", 2)), gemm(tiles[NAME_DOWN])),
     }
 
 

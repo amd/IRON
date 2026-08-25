@@ -49,7 +49,7 @@ ACCELERATOR = os.path.join(
     "whole_array_strix.yaml",
 )
 
-BACKEND = "ortools_gscip"  # license-free OR-Tools GSCIP, no Gurobi needed
+BACKEND = "gurobi"  # license-free OR-Tools GSCIP, no Gurobi needed
 OUTPUT_ROOT = "outputs"
 
 # Names for the exported graph's computation nodes, in topological order, and for
