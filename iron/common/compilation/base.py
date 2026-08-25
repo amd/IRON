@@ -542,6 +542,7 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
             options = [
                 f"-j{os.environ.get('AIECC_JOBS', '1')}",
                 "--expand-load-pdis",
+                "--get-scratchpad-parameters",
             ] + artifact.extra_flags
 
             def _compile(

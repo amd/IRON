@@ -569,13 +569,11 @@ class SequenceFullELFCallable(SequenceCallable):
     def params(self):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
-        The ``params.txt`` describing the runtime parameters is written by
-        ``aie-lower-parameters`` directly into the aiecc work dir (see
-        ``_aiecc_work_dir``) for the fused MLIR source -- compile_mlir_module()
-        passes that dir as aiecc's explicit ``--tmpdir``, so aiecc uses it as
-        the project dir itself rather than nesting a "<input>.prj" subdirectory
-        under it. Returns ``None`` if the sequence declared no runtime
-        parameters (in which case the file is not written).
+        The ``params.txt`` describing the runtime parameters is requested from
+        aiecc via ``--get-scratchpad-parameters``; it is a graph output, so it
+        lands in aiecc's ``--output-dir``, which compile_mlir_module() points at
+        the work dir (see ``_aiecc_work_dir``) for the fused MLIR source.
+        Returns ``None`` if the file is absent.
         """
         if self._params is not None:
             return self._params
