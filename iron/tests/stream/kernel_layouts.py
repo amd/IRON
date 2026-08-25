@@ -6,7 +6,7 @@
 
 stream-dse generates the DMAs that feed the kernel objects IRON compiles from
 ``aie_kernels``; both sides must agree on how an operand is tiled in memory. The
-layouts declared in :mod:`iron.common.stream.ops` are that contract. They happen
+layouts declared in :mod:`iron.common.stream.kernels` are that contract. They happen
 to coincide with stream-dse's built-in kernel layouts today, so no override is
 needed -- this test fails if a future stream-dse release changes them, which would
 otherwise corrupt results silently.
@@ -20,7 +20,7 @@ pytest.importorskip(
 
 from stream.compiler.kernels import AIEKernels  # noqa: E402
 
-from iron.common.stream.ops import (  # noqa: E402
+from iron.common.stream.kernels import (  # noqa: E402
     ELTWISE_MUL,
     GEMM,
     SILU,

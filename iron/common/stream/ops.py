@@ -12,9 +12,9 @@ Ops stream-dse implements with a fused kernel but ONNX has no operator for are
 declared with :func:`custom_op`, which gives them a schema in a private domain so
 the exporter emits them as a single node.
 
-Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
-the kernel source is IRON's existing ``aie_kernels/<dir>/<name>.cc``, exactly as the
-hand-written operators use it.
+Supporting a new op is one :class:`~iron.common.stream.kernels.StreamKernel` plus one
+:data:`TORCH_OPS` entry -- the kernel source is IRON's existing
+``aie_kernels/<dir>/<name>.cc``, exactly as the hand-written operators use it.
 """
 
 from __future__ import annotations
@@ -27,18 +27,7 @@ from onnx import defs
 from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
-from iron.common.layout import TiledStridedLayout, tiled_2d
-
-# Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
-# operand layouts are the contract the generated DMAs and the compiled kernel
-# objects agree on.
-# mm.cc takes an 8-row MAC tile when bf16 matmuls run on the bfp16 MACs and a
-# 4-row one when they do not.
-R, S, T = 4, 8, 8
-MAC_ROWS_BFP16 = 8
-
-# Element tile the stream-dse elementwise kernels are written against.
-ELEMENTWISE_TILE = (32, 64)
+from iron.common.stream.kernels import ELTWISE_MUL, GEMM, SILU, StreamKernel
 
 # Private domain for ops that exist as an AIE kernel but not as an ONNX operator.
 CUSTOM_DOMAIN = Opset("com.example", 1)
@@ -58,99 +47,6 @@ def custom_op(name: str, arity: int = 1) -> Op:
     )
     return Op(CUSTOM_DOMAIN, name, schema)
 
-
-def mac_rows(bfp16_mmul: bool) -> int:
-    """Rows of the MAC tile a kernel object compiled this way takes."""
-    return MAC_ROWS_BFP16 if bfp16_mmul else R
-
-
-def gemm_layouts(
-    m: int, k: int, n: int, bfp16_mmul: bool = False
-) -> tuple[TiledStridedLayout, ...]:
-    """Layouts of a GEMM's ``A[m,k]``, ``B[k,n]`` and ``C[m,n]`` operands."""
-    rows = mac_rows(bfp16_mmul)
-    return (tiled_2d(m, k, rows, S), tiled_2d(k, n, S, T), tiled_2d(m, n, rows, T))
-
-
-def elementwise_layouts(
-    nb_operands: int, bfp16_mmul: bool = False
-) -> tuple[TiledStridedLayout, ...]:
-    """Identical tiled layout for each operand of an elementwise kernel."""
-    return (tiled_2d(*ELEMENTWISE_TILE, mac_rows(bfp16_mmul), T),) * nb_operands
-
-
-def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
-    """The ``mm.cc`` object specialized for one tile shape.
-
-    stream-dse emits dimension-suffixed symbols so GEMMs of different tile shapes
-    coexist in one design (``GemmKernel.function_name``/``zero_name``); rename
-    ``mm.cc``'s unsuffixed symbols to match.
-    """
-    from iron.common.compilation import KernelObjectArtifact, SourceArtifact
-
-    suffix = f"{m}_{k}_{n}"
-    return [
-        KernelObjectArtifact(
-            f"mm_{suffix}.o",
-            dependencies=[SourceArtifact(kernels_dir / kernel_dir / "mm.cc")],
-            extra_flags=[
-                f"-DDIM_M={m}",
-                f"-DDIM_K={k}",
-                f"-DDIM_N={n}",
-                "-Dbf16_bf16_ONLY",
-                # Emulating the matmul on the bfp16 MACs is what makes the 8-row
-                # MAC tile available, so it and the layouts move together.
-                "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-                "-DROUND_CONV_EVEN",
-            ],
-            rename_symbols={
-                "matmul_bf16_bf16": f"matmul_bf16_bf16_{suffix}",
-                "zero_bf16": f"zero_bf16_{suffix}",
-            },
-        )
-    ]
-
-
-@dataclass(frozen=True)
-class StreamKernel:
-    """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
-
-    ``source``/``subdir`` name the file in IRON's ``aie_kernels`` library the same
-    way the hand-written operators do (``subdir=None`` means the device directory,
-    e.g. ``aie2p``). The object name must equal the kernel's ``linkwith_name`` in
-    stream-dse, since the generated MLIR links against it.
-    """
-
-    key: str  # stream-dse AIEKernels key
-    layouts: Callable[..., tuple[TiledStridedLayout, ...]]
-    source: str | None = None
-    subdir: str | None = None
-    artifacts: Callable | None = None  # overrides source/subdir when tile-specialized
-
-    def kernel_artifacts(self, kernels_dir, kernel_dir, **kwargs):
-        """Compilation artifacts building this kernel's object file."""
-        if self.artifacts is not None:
-            return self.artifacts(kernels_dir, kernel_dir, **kwargs)
-        from iron.common.compilation import KernelObjectArtifact, SourceArtifact
-
-        subdir = self.subdir or kernel_dir
-        return [
-            KernelObjectArtifact(
-                f"{self.source}.o",
-                dependencies=[
-                    SourceArtifact(kernels_dir / subdir / f"{self.source}.cc")
-                ],
-            )
-        ]
-
-
-GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, artifacts=_gemm_artifacts)
-SILU = StreamKernel(key="silu", layouts=lambda: elementwise_layouts(2), source="silu")
-ELTWISE_MUL = StreamKernel(
-    key="eltwise_mul",
-    layouts=lambda: elementwise_layouts(3),
-    source="mul",
-)
 
 Silu = custom_op("Silu")
 

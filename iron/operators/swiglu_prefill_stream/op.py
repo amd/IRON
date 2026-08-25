@@ -14,7 +14,7 @@ from iron.common import (
 )
 from iron.common.device_utils import get_kernel_dir
 from iron.common.sequence import OperatorSequence
-from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
+from iron.common.stream.kernels import ELTWISE_MUL, GEMM, SILU
 
 
 @dataclass
