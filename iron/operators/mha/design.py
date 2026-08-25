@@ -776,8 +776,6 @@ def fused_mha(
         # print_tap_seq_info(O_tiles, "O")
 
     # Runtime operations to move data to/from the AIE-array
-    # The shim tile that used to be named per-transfer is now a property of the
-    # handle, so the handles are bound up front and passed into the sequence.
     inQ_h = inQ.prod(tile=Tile(col=4, row=0))
     inQ2_h = inQ2.prod(tile=Tile(col=4, row=0)) if number_of_pipelines > 6 else None
     inK_h = inK.prod(tile=Tile(col=5, row=0))
@@ -786,7 +784,6 @@ def fused_mha(
     memO2_h = memO2.cons(tile=Tile(col=7, row=0)) if number_of_pipelines > 6 else None
 
     def sequence(Q, K, V, O, inQ_h, inQ2_h, inK_h, inV_h, memO_h, memO2_h):
-        # The body is eager now, so the RTP writes are a plain loop (was inline_ops).
         for j in range(3):
             for i in range(number_of_pipelines):
                 mha_rtps_list[j][i][0] = num_q_block_per_pipeline

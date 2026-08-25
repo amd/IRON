@@ -749,7 +749,7 @@ class KernelCompilationRule(CompilationRule):
 
             # -Wno-missing-template-arg-list-after-template-kw only applies to
             # the Peano (clang) path: xchesscc's own front end doesn't
-            # recognize it, and upstream's chess branch never carried it.
+            # recognize it.
             compile_args = list(artifact.extra_flags)
             if not self.use_chess:
                 compile_args = [

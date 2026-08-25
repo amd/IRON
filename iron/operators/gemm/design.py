@@ -757,8 +757,6 @@ def my_matmul(
             A_ty,
             B_ty,
             C_ty,
-            # The shim tile that used to be named per-transfer is now a property
-            # of the handle, so it is bound here instead.
             [
                 f.prod(tile=Tile(2 * c if n_aie_cols == 8 else c, 0))
                 for c, f in enumerate(A_l3l2_fifos)
