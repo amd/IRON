@@ -573,13 +573,17 @@ class SequenceFullELFCallable(SequenceCallable):
         aiecc via ``--get-scratchpad-parameters``; it is a graph output, so it
         lands in aiecc's ``--output-dir``, which compile_mlir_module() points at
         the work dir (see ``_aiecc_work_dir``) for the fused MLIR source.
-        Returns ``None`` if the file is absent.
+        Returns ``None`` if the sequence declared no runtime parameters: the
+        file is still written, but holds a count of zero and there is no ctrl
+        scratchpad buffer object to bind to.
         """
         if self._params is not None:
             return self._params
         mlir_filename = self.op.artifacts[0].mlir_input.filename
         params_path = comp._aiecc_work_dir(mlir_filename) / "params.txt"
         if not params_path.exists():
+            return None
+        if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
