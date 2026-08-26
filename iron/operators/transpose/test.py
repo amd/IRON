@@ -97,7 +97,13 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_contex
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
+        # A transpose is a permutation. Any tolerance here also accepts some class of
+        # wrong permutation, so gate it exactly.
+        operator,
+        input_buffers,
+        output_buffers,
+        rel_tol=0.0,
+        abs_tol=0.0,
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

@@ -78,7 +78,12 @@ def test_mem_copy(
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.01, abs_tol=1e-6
+        # A copy that alters a value is a broken copy, so gate it exactly.
+        operator,
+        input_buffers,
+        output_buffers,
+        rel_tol=0.0,
+        abs_tol=0.0,
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")
