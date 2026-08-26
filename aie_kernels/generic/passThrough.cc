@@ -20,7 +20,9 @@ passThrough_aie(T *restrict in, T *restrict out, const int32_t height, const int
     v64uint8 *restrict inPtr = (v64uint8 *)in;
 
     AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(6)
+    // No minimum trip count: the caller supplies all of height, width and N. The 6 that
+    // was asserted here is false for mem_copy's 64-element bf16 tile, which runs two
+    // iterations at N=32 and hangs on device.
     for (int j = 0; j < (height * width); j += N) // Nx samples per loop
     {
         *outPtr++ = *inPtr++;
