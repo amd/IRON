@@ -99,7 +99,11 @@ def verify_buffer(
         + np.abs(expected_np[:compare_len].astype(float)),
         np.finfo(np.float32).max,
     )
-    mask = diff >= np.maximum(abs_tol, rel_tol * norm)
+    # Fail on diff STRICTLY past the threshold. With >=, rel_tol=abs_tol=0 makes the
+    # threshold 0 and every element fails, so a bit-identical buffer scores 100% errors
+    # and exact equality -- the honest gate for an operator that does no arithmetic --
+    # cannot be expressed at all.
+    mask = diff > np.maximum(abs_tol, rel_tol * norm)
     error_indices = np.where(mask)[0].tolist()
     for i in error_indices[:10]:
         print(
