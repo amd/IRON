@@ -12,20 +12,32 @@ from aie.iron import ObjectFifo, Program, Runtime, TaskGroup
 
 
 def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
+    elem_bytes = np.dtype(dtype).itemsize
     dtype = np.dtype[dtype]
 
-    # Try to work around hardware size limitations by breaking transfers into smaller chunks
-    cols_split = 1
-    if cols > 1023:
-        for divisor in range(2, cols + 1):
-            if cols % divisor == 0 and cols // divisor <= 1023:
-                cols_split = divisor
-                break
-        else:
-            raise ValueError(
-                f"Cannot split cols={cols} into chunks <= 1023; hardware limits cols to not exceed 1023"
-            )
-    assert cols_split <= 1023, "cols is too large, can't split into smaller transfers"
+    # Split cols into cols_split chunks of cols // cols_split. Both land on a BD dimension
+    # and each carries its own hardware constraint, so the search has to satisfy all three
+    # at once rather than the chunk length alone:
+    #   - the chunk length is the innermost dim: <= 1023 (10-bit wrap) AND a whole number
+    #     of 32-bit words, since the BD's innermost size is denominated in words
+    #   - the chunk count is the next dim out: <= 1023, the same wrap field
+    # An odd cols has only odd divisors, so no split of it is ever word-aligned at bf16;
+    # that is reported here rather than left to the BD verifier.
+    granule = max(1, 4 // elem_bytes)  # elements per 32-bit word
+    cols_split = None
+    for divisor in range(1, cols + 1):
+        if cols % divisor:
+            continue
+        chunk = cols // divisor
+        if chunk <= 1023 and divisor <= 1023 and chunk % granule == 0:
+            cols_split = divisor
+            break
+    if cols_split is None:
+        raise ValueError(
+            f"Cannot split cols={cols} at {elem_bytes} bytes/element: need a divisor d "
+            f"with cols//d <= 1023, d <= 1023, and cols//d a multiple of {granule} "
+            f"({granule} elements = one 32-bit word). No divisor of {cols} satisfies all three."
+        )
 
     if transfer_size is None:
         transfer_size = cols
@@ -46,15 +58,20 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
     input_tap = TensorAccessPattern(
         tensor_dims=(rows, cols),
         offset=0,
-        sizes=[repeat, rows, cols // cols_split, cols_split],
-        strides=[0, cols, cols_split, 1],
+        # The chunk LENGTH is innermost so the contiguous run is the innermost dim; the
+        # chunk COUNT sits outside it. Swapping these two produces the same address
+        # sequence, but putting the count innermost makes the unsplit case (cols_split
+        # == 1) a 1-element innermost dim, which is not a whole 32-bit word for any
+        # sub-word dtype and is rejected by the BD verifier.
+        sizes=[repeat, rows, cols_split, cols // cols_split],
+        strides=[0, cols, cols // cols_split, 1],
     )
 
     output_tap = TensorAccessPattern(
         tensor_dims=(rows * repeat, cols),
         offset=0,
-        sizes=[repeat, rows, cols // cols_split, cols_split],
-        strides=[cols, cols * repeat, cols_split, 1],
+        sizes=[repeat, rows, cols_split, cols // cols_split],
+        strides=[cols, cols * repeat, cols // cols_split, 1],
     )
 
     # Use smaller FIFOs for the transfer amount
