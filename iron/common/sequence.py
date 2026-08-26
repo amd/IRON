@@ -65,6 +65,12 @@ class AutoDispatch(SequenceDispatch):
         return SeparateDispatch()
 
 
+def _trace_tag(seq):
+    """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
+    untraced one's ELF. Empty when untraced, leaving those artifacts named as before."""
+    return f"_traced{seq.trace_size}" if seq.trace_size else ""
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -81,7 +87,7 @@ class FusedDispatch(SequenceDispatch):
         mlir_artifact = self.build_fused_mlir(seq)
         kernel_objects = self._collect_kernel_artifacts(seq)
         full_elf_artifact = comp.FullElfArtifact(
-            f"{seq.name}.elf",
+            f"{seq.name}{_trace_tag(seq)}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
@@ -113,7 +119,7 @@ class FusedDispatch(SequenceDispatch):
             comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
         return comp.SequenceMLIRArtifact(
-            seq.name + "_fused.mlir",
+            f"{seq.name}{_trace_tag(seq)}_fused.mlir",
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,
             subbuffer_layout=seq.subbuffer_layout,
