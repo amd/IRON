@@ -8,7 +8,7 @@ import aie.dialects.index as index
 from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import Buffer, Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 
 """
 Matrix-vector design
@@ -37,6 +37,7 @@ def my_matvec(
     func_prefix="",
     verbose=False,
     epilogue="none",
+    prologue="none",
 ):
     if m_output is None:
         m_output = m_input
@@ -101,6 +102,26 @@ def my_matvec(
             [np.int32, L1_C_ty],
         )
 
+    # Optional norm applied to the shared B vector once per acquire, before it feeds every
+    # matvec call in this batch -- so the cost is O(K) per batch, not O(M) as re-normalizing
+    # per output tile would be. Both kernels take separate in/out pointers (restrict on
+    # both), so normalizing needs a second L1 buffer rather than an in-place call.
+    assert prologue in ("none", "rms", "ln")
+    norm_kernel = None
+    b_norm_bufs = [None] * cols
+    PROLOGUE_EPSILON = 1e-5  # matches layer_norm.cc's hardcoded epsilon
+    if prologue != "none":
+        norm_fn = "rms_norm_bf16_vector" if prologue == "rms" else "layer_norm"
+        norm_args = (
+            [L1_B_ty, L1_B_ty, np.int32, np.float32]
+            if prologue == "rms"
+            else [L1_B_ty, L1_B_ty, np.int32]
+        )
+        norm_kernel = Kernel(
+            f"{func_prefix}{norm_fn}", f"{func_prefix}{kernel_object}", norm_args
+        )
+        b_norm_bufs = [Buffer(type=L1_B_ty, name=f"B_norm_{i}") for i in range(cols)]
+
     A_L3L1_fifos = [
         ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
     ]
@@ -111,10 +132,20 @@ def my_matvec(
         ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(cols)
     ]
 
-    def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, gelu_kernel=None):
+    def core_body(
+        A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, norm_kernel, b_norm, gelu_kernel
+    ):
         one_idx = index.constant(1)
         for _ in range_(0xFFFFFFFF):  # batch dim handled as part of this loop
-            b = B_L3L1_fifo.acquire(1)
+            b_raw = B_L3L1_fifo.acquire(1)
+            if norm_kernel is not None:
+                if prologue == "rms":
+                    norm_kernel(b_raw, b_norm, K, PROLOGUE_EPSILON)
+                else:
+                    norm_kernel(b_raw, b_norm, K)
+                b = b_norm
+            else:
+                b = b_raw
             # The kernel function computes m output rows; each core is responsible for (M/cols) output rows, so we need to call the kernel (M/cols)/m times.
             for i_idx in range_(M // m_output // cols):
                 c = C_L1L3_fifo.acquire(1)
@@ -138,8 +169,10 @@ def my_matvec(
                 B_L3L1_fifos[i].cons(),
                 C_L1L3_fifos[i].prod(),
                 matvec,
-            ]
-            + ([gelu_kernel] if epilogue == "gelu" else []),
+                norm_kernel,
+                b_norm_bufs[i],
+                gelu_kernel,
+            ],
         )
         for i in range(cols)
     ]
