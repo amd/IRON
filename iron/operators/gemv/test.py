@@ -10,6 +10,8 @@ from iron.operators.gemv.reference import (
     generate_golden_reference,
     generate_golden_reference_batched,
     gelu_tanh_approx,
+    rms_norm_ref,
+    layer_norm_ref,
 )
 from iron.common.device_utils import get_kernel_dir
 import numpy as np
@@ -178,6 +180,63 @@ def test_gemv_gelu(
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.06, abs_tol=2e-2
+    )
+
+    print(f"\nLatency: {latency_us:.1f} us")
+    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
+    print(f"Throughput: {gflops:.6e} GFLOP/s")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+
+    assert not errors, f"Test failed with errors: {errors}"
+
+
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+)
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size_input,tile_size_output,prologue,norm_ref",
+    [
+        pytest.param(128, 128, 1, 32, 128, "rms", rms_norm_ref),
+        pytest.param(2048, 8192, 1, 1, 2048, "rms", rms_norm_ref),
+        pytest.param(8192, 2048, 1, 4, 1024, "rms", rms_norm_ref),
+        pytest.param(128, 128, 1, 32, 128, "ln", layer_norm_ref),
+        pytest.param(2048, 8192, 1, 1, 2048, "ln", layer_norm_ref),
+        pytest.param(8192, 2048, 1, 4, 1024, "ln", layer_norm_ref),
+    ],
+)
+def test_gemv_norm_prologue(
+    M,
+    K,
+    num_aie_columns,
+    tile_size_input,
+    tile_size_output,
+    prologue,
+    norm_ref,
+    aie_context,
+):
+    """GEMV with a fused RMSNorm/LayerNorm prologue vs an A @ norm(B) golden."""
+    golden_ref = generate_golden_reference(M=M, K=K)
+    b_ref = golden_ref["B"].to(torch.float32).numpy()
+    b_norm = torch.from_numpy(norm_ref(b_ref).astype(np.float32)).to(torch.bfloat16)
+    c_pro = (golden_ref["A"] @ b_norm).to(torch.bfloat16)
+
+    operator = GEMV(
+        M=M,
+        K=K,
+        num_aie_columns=num_aie_columns,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+        prologue=prologue,
+        context=aie_context,
+    )
+
+    input_buffers = {"matrix": golden_ref["A"].flatten(), "vector": golden_ref["B"]}
+    output_buffers = {"output": c_pro}
+
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator, input_buffers, output_buffers, rel_tol=0.05, abs_tol=1e-2
     )
 
     print(f"\nLatency: {latency_us:.1f} us")

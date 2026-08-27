@@ -32,6 +32,10 @@ class GEMV(MLIROperator):
     # "none" (default) leaves the output unchanged; "gelu" applies GELU(tanh approx).
     # repr=False keeps operator/artifact names stable for the default path.
     epilogue: str = field(default="none", repr=False)
+    # Optional norm applied to the shared vector once before the matvec, fusing a
+    # RMSNorm/LayerNorm decode prologue into the same dispatch. Affine-free (gamma/beta
+    # fold into the weight matrix host-side, same convention the norm kernels already use).
+    prologue: str = field(default="none", repr=False)
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
@@ -63,6 +67,10 @@ class GEMV(MLIROperator):
             raise ValueError(
                 f"gelu epilogue needs tile_size_output % 16 == 0 (got {self.tile_size_output})"
             )
+        if self.prologue not in ("none", "rms", "ln"):
+            raise ValueError(
+                f"unknown prologue {self.prologue!r} (expected 'none', 'rms' or 'ln')"
+            )
 
         MLIROperator.__init__(self, context=self.context)
 
@@ -73,17 +81,25 @@ class GEMV(MLIROperator):
         # both would emit the same .mlir/.xclbin, and in a shared build dir a cached unfused
         # build can then satisfy the fused op (running the raw matvec with no activation).
         base = super().name
-        if self.epilogue == "none":
-            return base
-        return f"{base}_epi{self.epilogue}"
+        suffix = ""
+        if self.prologue != "none":
+            suffix += f"_pro{self.prologue}"
+        if self.epilogue != "none":
+            suffix += f"_epi{self.epilogue}"
+        return base + suffix
 
     @property
     def _kernel_link_file(self):
-        # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
-        # archive of (matvec, gelu); the plain matvec stays a single object.
-        if self.epilogue == "gelu":
-            return f"gemv_{self.K}k_{self.kernel_vector_size}vs_gelu_kernels.a"
-        return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
+        # With a prologue and/or the gelu epilogue the core links extra kernels, so the
+        # object becomes an archive; with neither, the plain matvec stays a single object.
+        if self.prologue == "none" and self.epilogue == "none":
+            return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
+        suffix = ""
+        if self.prologue != "none":
+            suffix += f"_pro{self.prologue}"
+        if self.epilogue != "none":
+            suffix += f"_epi{self.epilogue}"
+        return f"gemv_{self.K}k_{self.kernel_vector_size}vs{suffix}_kernels.a"
 
     def get_mlir_artifact(self):
         mlir_verbose = getattr(self.context, "mlir_verbose", False)
@@ -106,6 +122,7 @@ class GEMV(MLIROperator):
                     "verbose": mlir_verbose,
                     "kernel_object": self._kernel_link_file,
                     "epilogue": self.epilogue,
+                    "prologue": self.prologue,
                 },
             ),
         )
@@ -123,6 +140,24 @@ class GEMV(MLIROperator):
                 f"-DVEC_SIZE={self.kernel_vector_size}",
             ],
         )
+        extra_objs = []
+        if self.prologue != "none":
+            # rms_norm.cc / layer_norm.cc exist under both aie2 and aie2p with the same
+            # extern-C signature, so the prologue works on NPU1 and NPU2 alike.
+            norm_src = "rms_norm.cc" if self.prologue == "rms" else "layer_norm.cc"
+            extra_objs.append(
+                KernelObjectArtifact(
+                    norm_src.replace(".cc", ".o"),
+                    dependencies=[
+                        SourceArtifact(
+                            self.context.base_dir
+                            / "aie_kernels"
+                            / get_kernel_dir()
+                            / norm_src
+                        )
+                    ],
+                )
+            )
         if self.epilogue == "gelu":
             # The gelu kernel lives in aie2p/gelu.cc, so the fused epilogue is NPU2-only.
             if get_kernel_dir() != "aie2p":
@@ -130,20 +165,23 @@ class GEMV(MLIROperator):
                     "gemv gelu epilogue is only available on NPU2 (aie2p); "
                     f"current kernel dir is {get_kernel_dir()!r}"
                 )
-            gelu_obj = KernelObjectArtifact(
-                "gelu.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
-                    )
-                ],
-            )
-            return [
-                KernelArchiveArtifact(
-                    self._kernel_link_file, dependencies=[matvec_obj, gelu_obj]
+            extra_objs.append(
+                KernelObjectArtifact(
+                    "gelu.o",
+                    dependencies=[
+                        SourceArtifact(
+                            self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
+                        )
+                    ],
                 )
-            ]
-        return [matvec_obj]
+            )
+        if not extra_objs:
+            return [matvec_obj]
+        return [
+            KernelArchiveArtifact(
+                self._kernel_link_file, dependencies=[matvec_obj] + extra_objs
+            )
+        ]
 
     def get_arg_spec(self):
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()

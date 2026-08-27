@@ -74,3 +74,22 @@ def gelu_tanh_approx(x):
     xf = np.asarray(x, dtype=np.float32)
     inner = 0.79788456 * (xf + 0.044715 * xf**3)
     return 0.5 * xf * (1.0 + np.tanh(inner))
+
+
+def rms_norm_ref(x, epsilon=1e-5):
+    """RMSNorm, matching aie_kernels/{aie2,aie2p}/rms_norm.cc's rms_norm_bf16_vector:
+    f32 sum-of-squares reduction, affine-free (gamma=1), computed in float32.
+    """
+    xf = np.asarray(x, dtype=np.float32)
+    inv_rms = 1.0 / np.sqrt(np.mean(xf * xf) + epsilon)
+    return xf * inv_rms
+
+
+def layer_norm_ref(x, epsilon=1e-5):
+    """LayerNorm, matching aie_kernels/{aie2,aie2p}/layer_norm.cc's layer_norm:
+    f32 mean/var reduction, affine-free (gamma=1, beta=0), computed in float32.
+    """
+    xf = np.asarray(x, dtype=np.float32)
+    mean = np.mean(xf)
+    var = np.mean(xf * xf) - mean * mean
+    return (xf - mean) / np.sqrt(var + epsilon)
