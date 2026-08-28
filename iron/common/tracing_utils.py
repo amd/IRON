@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read a traced run's hardware trace buffers back and write Perfetto JSON.
+"""Read a traced run's hardware trace buffer back and write Perfetto JSON.
 
 Tracing is configured at build time (``IRON_TRACE_SIZE`` / ``IRON_TRACE_NTILES``,
 consumed by the operator's design) and the runtime already syncs the resulting
-buffers device->host after every dispatch. Nothing reads them, though, so a traced
+buffer device->host after every dispatch. Nothing reads it, though, so a traced
 run leaves its data sitting in host memory. This module is that last step: one call
-after ``run()`` turns those buffers into files.
+after ``run()`` turns it into files.
 
     from iron.common.tracing_utils import dump_traces
 
@@ -17,7 +17,7 @@ after ``run()`` turns those buffers into files.
 
 No-op on an untraced build, so the call can stay in a test unconditionally.
 
-Two files land per traced dispatch: the raw 32-bit words as hex text, and the
+Two files land per traced design: the raw 32-bit words as hex text, and the
 parsed JSON for https://ui.perfetto.dev. The raw text is kept because reparsing is
 free and re-dispatching is not - see :func:`parse_trace_words` to reparse it with a
 different column shift without touching the device.
@@ -64,13 +64,12 @@ KERNEL_START, KERNEL_END = "INSTR_EVENT_0", "INSTR_EVENT_1"
 def lowered_mlir(run) -> tuple[Path, str]:
     """The post-lowering MLIR for a callable, as ``(path, text)``.
 
-    mlir-aie's trace parser recovers which tiles and events were traced by scanning
-    for ``aiex.npu.write32`` ops and pattern-matching the trace-unit config
-    addresses. It does not understand the declarative ``aie.trace`` ops a design is
-    written with, so the module handed to aiecc is useless to it: those ops only
-    become register writes inside aiecc, in ``aie-insert-trace-flows``. A traced
-    build asks aiecc for ``--get-input-with-addresses``, which lands the lowered
-    module in the work dir beside the source (``<source>.mlir.d/``).
+    mlir-aie's trace parser reads ``aiex.npu.write32`` ops and matches the
+    trace-unit config addresses. ``aie-insert-trace-flows`` produces those writes
+    from the declarative ``aie.trace`` ops inside aiecc, so the module handed to
+    aiecc carries none of them. A traced build passes
+    ``--get-input-with-addresses``, which lands the lowered module in the work dir
+    beside the source (``<source>.mlir.d/``).
     """
     override = os.environ.get("IRON_TRACE_MLIR")
     if override:
@@ -111,9 +110,9 @@ def parse_trace_words(
     want by default: a design configured for one column may be loaded into another.
     Override it only when the tiles in the output do not match the placement.
 
-    ``device`` names the ``aie.device`` whose trace configuration these words were
-    written by. A fused sequence holds one per sub-design, and they routinely share
-    tile coordinates, so leaving it unset merges their event assignments.
+    ``device`` names the ``aie.device`` that wrote these words. A fused sequence
+    holds one per sub-design, and two often share tile coordinates, so an unset
+    ``device`` merges their event assignments.
 
     The parser calls ``sys.exit`` rather than raising on some malformed input, so
     SystemExit is caught here - a visualisation failure should never take a test
@@ -300,15 +299,15 @@ def dump_traces(
     colshift: int | None = None,
     summary: bool = True,
 ) -> list[Path]:
-    """Write every trace buffer of a completed run out as hex text and Perfetto JSON.
+    """Write a completed run's trace buffer as hex text and Perfetto JSON.
 
-    Call it after ``run()``: the callable syncs its trace buffers device->host as
+    Call it after ``run()``: the callable syncs its trace buffer device->host as
     part of the dispatch, so this only reads host memory. Returns the JSON paths
     written, empty on an untraced build.
 
     ``tag`` distinguishes one dump from another - a test name or parameter id. The
-    buffer is split by the layout the compiler recorded on the dispatched sequence,
-    so a fused sequence yields one pair of files per configured design.
+    layout the compiler recorded on the dispatched sequence splits the buffer, so a
+    fused sequence yields one pair of files per configured design.
     """
     buffer = getattr(run, "trace_buffer", None)
     if buffer is None:

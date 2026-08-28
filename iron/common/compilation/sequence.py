@@ -37,10 +37,10 @@ RESET_DEVICE = "reset_device"
 def trace_buffer_layout(mlir_text: str):
     """Regions of the fused trace buffer, one per traced operator.
 
-    `-aie-fuse-trace-buffers` gives the dispatched sequence a single trace buffer
+    `-aie-fuse-trace-buffers` gives the dispatched sequence one trace buffer
     covering every design it configures, and records the split on the sequence.
-    Reading it back is how the host learns the buffer's size and how the parser
-    learns which design wrote which bytes.
+    The host reads it for the buffer's size, the parser for which design wrote
+    which bytes.
 
     Returns `(total_bytes, slices)`; `(0, [])` for an untraced build.
     """

@@ -612,9 +612,9 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         # Trace lowering appends one buffer covering every configured design,
-        # after the consolidated three. Its size comes from the lowered module
-        # rather than from trace_size, which is per design and says nothing
-        # about how many channels or sub-designs claim a share.
+        # after the consolidated three. trace_size is per design and says
+        # nothing about how many channels or sub-designs claim a share, so the
+        # size comes from the lowered module.
         self.trace_buffer = None
         self.trace_slices = []
         if self.op.trace_size:
