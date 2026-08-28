@@ -147,10 +147,8 @@ def pytest_runtest_makereport(item, call):
                 test_path = nodeid_components.group(1)
                 test_name = nodeid_components.group(3)
             else:
-                # A test with no parameters carries no [...] suffix at all. The
-                # iteration parametrize that would otherwise supply one is only
-                # added when --iterations > 1, so this is reachable at
-                # --iterations 1 and used to abort the whole session.
+                # A test with no parameters carries no [...] suffix, so won't
+                # match the regex above.
                 test_path = item.nodeid
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
