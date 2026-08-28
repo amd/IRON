@@ -518,8 +518,14 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
         if entry.is_dir():
             continue
         link = work_dir / entry.name
-        if not link.exists():
-            link.symlink_to(entry.resolve())
+        if link.exists():
+            continue
+        target = entry.resolve()
+        try:
+            link.symlink_to(target)
+        except OSError:
+            # Windows without Developer Mode cannot create symlinks.
+            shutil.copy2(target, link)
 
 
 class AieccCompilationRule(CompilationRule):
