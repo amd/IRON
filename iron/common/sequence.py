@@ -569,20 +569,11 @@ class SequenceFullELFCallable(SequenceCallable):
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
         # built on top of it) stays valid across calls.
         self.run_handle = pyxrt.run(self.xrt_kernel)
-        consolidated_idx, trace_slots, _ = comp.trace_argument_layout(
-            {
-                f"op{i}_{o.__class__.__name__}": len(o.get_arg_spec())
-                for i, (o, *_) in enumerate(self.op.runlist)
-            },
-            self.op.trace_size,
-        )
-        for idx, buf in zip(
-            consolidated_idx,
-            (self.input_buffer, self.output_buffer, self.scratch_buffer),
-        ):
-            self.run_handle.set_arg(idx, buf.buffer_object())
-        for name, idx in trace_slots.items():
-            self.run_handle.set_arg(idx, self.trace_buffers[name].buffer_object())
+        self.run_handle.set_arg(0, self.input_buffer.buffer_object())
+        self.run_handle.set_arg(1, self.output_buffer.buffer_object())
+        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -620,15 +611,24 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
-        trace_size = self.op.trace_size
-        self.trace_buffers = (
-            {
-                f"op{i}_{o.__class__.__name__}": XRTTensor((trace_size,), dtype=np.int8)
-                for i, (o, *_) in enumerate(self.op.runlist)
-            }
-            if trace_size
-            else {}
-        )
+        # Trace lowering appends one buffer covering every configured design,
+        # after the consolidated three. Its size comes from the lowered module
+        # rather than from trace_size, which is per design and says nothing
+        # about how many channels or sub-designs claim a share.
+        self.trace_buffer = None
+        self.trace_slices = []
+        if self.op.trace_size:
+            total, self.trace_slices = comp.trace_buffer_layout(
+                self.lowered_mlir_text()
+            )
+            if total:
+                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+
+    def lowered_mlir_text(self) -> str:
+        """aiecc's post-lowering module, which carries the trace buffer layout."""
+        mlir_filename = self.op.artifacts[0].mlir_input.filename
+        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
+        return path.read_text()
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -656,9 +656,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
-        for buf in self.trace_buffers.values():
-            buf.device = "npu"
-            buf.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()

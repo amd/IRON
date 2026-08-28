@@ -547,6 +547,10 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 "--expand-load-pdis",
                 "--get-scratchpad-parameters",
             ] + artifact.extra_flags
+            if artifact.trace_size:
+                # The trace parser reads the lowered module to recover the
+                # buffer layout and each design's traced tiles and events.
+                options.append("--get-input-with-addresses")
 
             def _compile(
                 artifact=artifact,

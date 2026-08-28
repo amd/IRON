@@ -68,12 +68,9 @@ def lowered_mlir(run) -> tuple[Path, str]:
     for ``aiex.npu.write32`` ops and pattern-matching the trace-unit config
     addresses. It does not understand the declarative ``aie.trace`` ops a design is
     written with, so the module handed to aiecc is useless to it: those ops only
-    become register writes inside aiecc, in ``aie-insert-trace-flows``. What we want
-    is one of aiecc's own intermediates, which it leaves in the work dir beside the
-    source (``<source>.mlir.d/``).
-
-    Picks the file with the most ``write32`` ops rather than hardcoding a stage name,
-    since those names are aiecc's business and have changed before.
+    become register writes inside aiecc, in ``aie-insert-trace-flows``. A traced
+    build asks aiecc for ``--get-input-with-addresses``, which lands the lowered
+    module in the work dir beside the source (``<source>.mlir.d/``).
     """
     override = os.environ.get("IRON_TRACE_MLIR")
     if override:
@@ -81,20 +78,13 @@ def lowered_mlir(run) -> tuple[Path, str]:
         return path, path.read_text()
 
     source = Path(run.op.artifacts[0].mlir_input.filename)
-    work_dir = comp._aiecc_work_dir(str(source))
-    candidates = []
-    for path in sorted(work_dir.rglob("*.mlir")):
-        text = path.read_text()
-        if "write32" in text:
-            candidates.append((text.count("write32"), path, text))
-    if not candidates:
+    path = comp._aiecc_work_dir(str(source)) / "input_with_addresses.mlir"
+    if not path.exists():
         raise FileNotFoundError(
-            f"no lowered MLIR with write32 ops under {work_dir}. aiecc may not be "
-            "retaining its intermediates for this build; point IRON_TRACE_MLIR at a "
-            "lowered module to override."
+            f"{path} is missing; a traced build passes --get-input-with-addresses "
+            "to aiecc. Point IRON_TRACE_MLIR at a lowered module to override."
         )
-    _, path, text = max(candidates, key=lambda c: c[0])
-    return path, text
+    return path, path.read_text()
 
 
 def trace_words(buf) -> np.ndarray:
@@ -112,12 +102,18 @@ def trace_words(buf) -> np.ndarray:
     return words[: int(np.nonzero(words)[0][-1]) + 1]
 
 
-def parse_trace_words(words, mlir_text: str, colshift: int | None = None):
+def parse_trace_words(
+    words, mlir_text: str, colshift: int | None = None, device: str | None = None
+):
     """Trace words plus the lowered MLIR into Trace Event Format events.
 
     ``colshift`` of None lets the parser align the columns itself, which is what you
     want by default: a design configured for one column may be loaded into another.
     Override it only when the tiles in the output do not match the placement.
+
+    ``device`` names the ``aie.device`` whose trace configuration these words were
+    written by. A fused sequence holds one per sub-design, and they routinely share
+    tile coordinates, so leaving it unset merges their event assignments.
 
     The parser calls ``sys.exit`` rather than raising on some malformed input, so
     SystemExit is caught here - a visualisation failure should never take a test
@@ -126,7 +122,9 @@ def parse_trace_words(words, mlir_text: str, colshift: int | None = None):
     from aie.utils.trace.parse import parse_trace
 
     try:
-        return parse_trace(np.asarray(words, dtype=np.uint32), mlir_text, colshift)
+        return parse_trace(
+            np.asarray(words, dtype=np.uint32), mlir_text, colshift, device
+        )
     except SystemExit as exc:
         raise RuntimeError(
             "mlir-aie's trace parser exited; the usual cause is an MLIR without the "
@@ -308,16 +306,16 @@ def dump_traces(
     part of the dispatch, so this only reads host memory. Returns the JSON paths
     written, empty on an untraced build.
 
-    ``tag`` distinguishes one dump from another - a test name or parameter id. Each
-    buffer is named for the runlist entry it belongs to, so a fused sequence yields
-    one pair of files per operator in the sequence.
+    ``tag`` distinguishes one dump from another - a test name or parameter id. The
+    buffer is split by the layout the compiler recorded on the dispatched sequence,
+    so a fused sequence yields one pair of files per configured design.
     """
-    buffers = getattr(run, "trace_buffers", None)
-    if not buffers:
+    buffer = getattr(run, "trace_buffer", None)
+    if buffer is None:
         if getattr(getattr(run, "op", None), "trace_size", 0):
             raise TypeError(
                 f"{type(run).__name__} was built with tracing enabled but exposes no "
-                "trace_buffers; only the full-ELF sequence callable allocates them."
+                "trace_buffer; only the full-ELF sequence callable allocates one."
             )
         return []
 
@@ -331,17 +329,20 @@ def dump_traces(
     mlir_path, mlir_text = lowered_mlir(run)
     print(f"[trace] parsing against {mlir_path}")
 
+    all_words = buffer.to_torch().numpy().astype(np.uint8).view(np.uint32)
     tag = _slug(tag)
     written = []
-    for name, buf in buffers.items():
-        words = trace_words(buf)
+    for index, entry in enumerate(run.trace_slices):
+        name = f"{index}_{entry['device']}"
+        start = entry["offset"] // 4
+        region = all_words[start : start + entry["size"] // 4]
+        words = region[: int(np.nonzero(region)[0][-1]) + 1] if region.any() else region
         if not words.size:
             print(f"[trace] {name}: buffer is all zeros, no trace data captured")
             continue
-        capacity = buf.to_torch().numel() // 4
-        if words.size == capacity:
+        if words.size == region.size:
             print(
-                f"[trace] {name}: buffer full ({capacity * 4} B), trace is likely "
+                f"[trace] {name}: slice full ({entry['size']} B), trace is likely "
                 "truncated - raise IRON_TRACE_SIZE"
             )
 
@@ -349,7 +350,7 @@ def dump_traces(
         stem.with_suffix(".txt").write_text("\n".join(f"{w:08x}" for w in words) + "\n")
 
         try:
-            events = parse_trace_words(words, mlir_text, colshift)
+            events = parse_trace_words(words, mlir_text, colshift, entry["device"])
         except Exception as exc:  # never let a visualisation failure fail a run
             print(f"[trace] {name}: parse failed ({exc}); raw words kept at {stem}.txt")
             continue
