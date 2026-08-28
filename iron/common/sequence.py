@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import ml_dtypes
 import pyxrt
-import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
 import aie.utils as aie_utils
@@ -18,6 +17,18 @@ from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 
 logger = logging.getLogger(__name__)
+
+
+def _torch():
+    """Import torch for CPU reference/compare paths. Compile and NPU dispatch do not."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "OperatorSequence CPU reference/compare modes need torch. "
+            "Compile and NPU dispatch do not."
+        ) from exc
+    return torch
 
 
 # ##########################################################################
@@ -754,6 +765,7 @@ class SequenceReferenceCallable(_PerBufferCallable):
         return view
 
     def _run(self):
+        torch = _torch()
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
             inputs = [
                 _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
@@ -800,6 +812,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
         kernel(*args)
 
+        torch = _torch()
         npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
         ref_out = step_op.reference(*cpu_inputs)
 

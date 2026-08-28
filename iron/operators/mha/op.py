@@ -4,9 +4,7 @@
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
-import torch
 import numpy as np
-from ml_dtypes import bfloat16
 
 from iron.common import (
     MLIROperator,
@@ -130,10 +128,9 @@ class MHA(MLIROperator):
             return tensor
 
         pad_size = padded_seq_len - seq_len
-        pad_dims = [0] * (2 * tensor.ndim)
-        pad_dims[2 * (tensor.ndim - 1 - seq_dim) + 1] = pad_size
-
-        return torch.nn.functional.pad(tensor, pad_dims)
+        pad_width = [(0, 0)] * tensor.ndim
+        pad_width[seq_dim] = (0, pad_size)
+        return np.pad(tensor, pad_width)
 
     def _pack_compact_to_padded(
         self, src: np.ndarray, H: int, S: int, S_pad: int, D: int
