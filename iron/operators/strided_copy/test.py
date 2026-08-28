@@ -47,10 +47,6 @@ def _flat(size, num_aie_channels=1, transfer_size=None):
 def get_params():
     return [
         pytest.param(_flat(1024), id="contiguous"),
-        # num_aie_channels splits the highest dimension across that many shim channels.
-        # Sweep it at the default transfer_size and at a divisor of the per-channel share:
-        # the object has to divide the per-channel BD, and the default used to be sized
-        # against the whole tensor, which hung every channel count above 1.
         pytest.param(_flat(1024, num_aie_channels=2), id="two_channels"),
         pytest.param(_flat(1024, num_aie_channels=4), id="four_channels"),
         pytest.param(
@@ -78,11 +74,6 @@ def get_params():
 @pytest.mark.parametrize("kwargs", get_params())
 def test_strided_copy(kwargs, aie_context):
     """StridedCopy moves data and computes nothing, so the gate is exact equality.
-
-    The kv_slot arms write one token into a cache slot and leave the rest of the
-    buffer alone, which is the shape that matters: a tolerance gate would accept a
-    copy that landed in the wrong slot, and a wrong slot is what a mis-scaled offset
-    produces.
     """
     # transfer_size only sizes the ObjectFifo; it does not move the data anywhere else,
     # so the golden is computed without it.
