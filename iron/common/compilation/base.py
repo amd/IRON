@@ -119,9 +119,12 @@ def compile(
     build_dir: str = "build",
     dry_run: bool = False,
 ) -> None:
-    if not Path(build_dir).exists() and not dry_run:
-        Path(build_dir).mkdir(parents=True, exist_ok=True)
     artifacts.move_artifacts(build_dir)
+    if not dry_run:
+        # move_artifacts() may place kernel objects under a per-arch
+        # subdirectory of build_dir, so mkdir per artifact rather than once.
+        for artifact in artifacts.bfs():
+            Path(artifact.filename).parent.mkdir(parents=True, exist_ok=True)
     artifacts.populate_availability_from_filesystem()
     plan_steps = plan(rules, artifacts)
     if not dry_run:
@@ -215,10 +218,22 @@ class CompilationArtifactGraph:
         ]
 
     def move_artifacts(self, new_root: str) -> None:
-        """Make all artifacts paths point into a build directory"""
+        """Make all artifact paths point into a build directory.
+
+        Kernel objects/archives get an extra get_kernel_dir() segment: their
+        filename (e.g. "mul.o") does not encode arch, but their compiled
+        content does, and is_available_in_filesystem() only compares mtimes --
+        so two arches sharing one path would silently reuse each other's object.
+        """
+        kernel_dir = None
         for artifact in self.bfs():
             if not Path(artifact.filename).is_absolute():
-                artifact.filename = str(Path(new_root) / Path(artifact.filename).name)
+                root = new_root
+                if isinstance(artifact, (KernelObjectArtifact, KernelArchiveArtifact)):
+                    if kernel_dir is None:
+                        kernel_dir = get_kernel_dir()
+                    root = Path(new_root) / kernel_dir
+                artifact.filename = str(Path(root) / Path(artifact.filename).name)
 
     def add(self, artifact: CompilationArtifact) -> None:
         self.artifacts.append(artifact)
