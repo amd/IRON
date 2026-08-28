@@ -1,17 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from .elementwise_add.op import ElementwiseAdd
-from .elementwise_mul.op import ElementwiseMul
-from .gemm.op import GEMM
-from .gemv.op import GEMV
-from .mha.op import MHA
-from .rms_norm.op import RMSNorm
-from .rope.op import RoPE
-from .silu.op import SiLU
-from .softmax.op import Softmax
-from .swiglu_decode.op import SwiGLUDecode
-from .swiglu_prefill.op import SwiGLUPrefill
-from .transpose.op import Transpose
-from .strided_copy.op import StridedCopy
-from .repeat.op import Repeat
+"""The IRON operator library.
+
+Operators are re-exported lazily (PEP 562):
+
+    from iron.operators import GEMM  # imports iron.operators.gemm.op, nothing else
+"""
+
+import importlib
+
+_OPERATOR_MODULES = {
+    "ElementwiseAdd": "elementwise_add",
+    "ElementwiseMul": "elementwise_mul",
+    "GEMM": "gemm",
+    "GEMV": "gemv",
+    "MHA": "mha",
+    "RMSNorm": "rms_norm",
+    "RoPE": "rope",
+    "SiLU": "silu",
+    "Softmax": "softmax",
+    "SwiGLUDecode": "swiglu_decode",
+    "SwiGLUPrefill": "swiglu_prefill",
+    "Transpose": "transpose",
+    "StridedCopy": "strided_copy",
+    "Repeat": "repeat",
+}
+
+__all__ = sorted(_OPERATOR_MODULES)
+
+
+def __getattr__(name):
+    """Import the operator that defines `name`, on first access."""
+    module = _OPERATOR_MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(f".{module}.op", __name__), name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_OPERATOR_MODULES))
