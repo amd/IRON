@@ -15,8 +15,8 @@ def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
     elem_bytes = np.dtype(dtype).itemsize
     dtype = np.dtype[dtype]
 
-    # Split cols into cols_split chunks of cols // cols_split. This is required to 
-    # satisfy hardware constraints on BD dimensions. We must choose a split that 
+    # Split cols into cols_split chunks of cols // cols_split. This is required to
+    # satisfy hardware constraints on BD dimensions. We must choose a split that
     # does not exceed the hardware register sizes:
     #   - the chunk length is the innermost dim: <= 1023 (10-bit wrap) AND a whole number
     #     of 32-bit words, since the BD's innermost size is denominated in words
