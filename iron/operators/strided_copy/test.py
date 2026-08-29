@@ -73,8 +73,7 @@ def get_params():
 )
 @pytest.mark.parametrize("kwargs", get_params())
 def test_strided_copy(kwargs, aie_context):
-    """StridedCopy moves data and computes nothing, so the gate is exact equality.
-    """
+    """StridedCopy moves data and computes nothing, so the gate is exact equality."""
     # transfer_size only sizes the ObjectFifo; it does not move the data anywhere else,
     # so the golden is computed without it.
     golden_kwargs = {k: v for k, v in kwargs.items() if k != "transfer_size"}
