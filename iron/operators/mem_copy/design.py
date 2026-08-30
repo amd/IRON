@@ -172,6 +172,7 @@ def my_mem_copy(
     bypass,
     tile_size,
     trace_size,
+    func_prefix=""
 ):
     # --------------------------------------------------------------------------
     # Configuration
@@ -207,8 +208,8 @@ def my_mem_copy(
 
         # External, binary kernel definition
         mem_copy_fcn = Kernel(
-            "passThroughLine",
-            "mem_copy.o",
+            f"{func_prefix}passThroughLine",
+            f"{func_prefix}mem_copy.o",
             [line_type, line_type, np.int32],
         )
 
