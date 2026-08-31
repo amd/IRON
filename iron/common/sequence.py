@@ -97,6 +97,12 @@ class AutoDispatch(SequenceDispatch):
         return SeparateDispatch()
 
 
+def _trace_tag(seq):
+    """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
+    untraced one's ELF. Empty when untraced, leaving those artifacts named as before."""
+    return f"_traced{seq.trace_size}" if seq.trace_size else ""
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -113,10 +119,11 @@ class FusedDispatch(SequenceDispatch):
         mlir_artifact = self.build_fused_mlir(seq)
         kernel_objects = self._collect_kernel_artifacts(seq)
         full_elf_artifact = comp.FullElfArtifact(
-            f"{seq.name}.elf",
+            f"{seq.name}{_trace_tag(seq)}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
+            trace_size=seq.trace_size,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -144,12 +151,13 @@ class FusedDispatch(SequenceDispatch):
             comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
         return comp.SequenceMLIRArtifact(
-            seq.name + "_fused.mlir",
+            f"{seq.name}{_trace_tag(seq)}_fused.mlir",
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,
             subbuffer_layout=seq.subbuffer_layout,
             buffer_sizes=seq.buffer_sizes,
             slice_info=seq.slice_info,
+            trace_size=seq.trace_size,
         )
 
     def _collect_kernel_artifacts(self, seq):
@@ -296,6 +304,7 @@ class OperatorSequence(AIEOperatorBase):
         buffer_sizes=None,
         dispatch="auto",
         extra_flags=None,
+        trace_size=0,
         share_designs=False,
         *args,
         **kwargs,
@@ -321,6 +330,8 @@ class OperatorSequence(AIEOperatorBase):
         )  # Optional dict: buffer_name -> size_in_bytes
         # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
+        # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
+        self.trace_size = trace_size
         self.share_designs = share_designs
         self._dispatch = dispatch
 
@@ -594,6 +605,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(0, self.input_buffer.buffer_object())
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -631,6 +644,24 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
+        # Trace lowering appends one buffer covering every configured design,
+        # after the consolidated three. trace_size is per design and says
+        # nothing about how many channels or sub-designs claim a share, so the
+        # size comes from the lowered module.
+        self.trace_buffer = None
+        self.trace_slices = []
+        if self.op.trace_size:
+            total, self.trace_slices = comp.trace_buffer_layout(
+                self.lowered_mlir_text()
+            )
+            if total:
+                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+
+    def lowered_mlir_text(self) -> str:
+        """aiecc's post-lowering module, which carries the trace buffer layout."""
+        mlir_filename = self.op.artifacts[0].mlir_input.filename
+        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
+        return path.read_text()
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -658,6 +689,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()

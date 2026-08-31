@@ -14,6 +14,7 @@ from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
+from aie.utils.trace import get_trace_slices
 import ml_dtypes
 
 from typing import Any
@@ -34,6 +35,22 @@ RESET_DEVICE = "reset_device"
 # ##########################################################################
 
 
+def trace_buffer_layout(mlir_text: str):
+    """Regions of the fused trace buffer, one per traced operator.
+
+    `-aie-fuse-trace-buffers` gives the dispatched sequence one trace buffer
+    covering every design it configures, and records the split on the sequence.
+    The host reads it for the buffer's size, the parser for which design wrote
+    which bytes.
+
+    Returns `(total_bytes, slices)`; `(0, [])` for an untraced build.
+    """
+    slices = get_trace_slices(mlir_text)
+    if not slices:
+        return 0, []
+    return max(s["offset"] + s["size"] for s in slices), slices
+
+
 class SequenceMLIRArtifact(MLIRArtifact):
     def __init__(
         self,
@@ -43,6 +60,7 @@ class SequenceMLIRArtifact(MLIRArtifact):
         subbuffer_layout: dict[str, tuple[str, int, int]],
         buffer_sizes: tuple[int, int, int],
         slice_info: dict[str, tuple[str, int, int]] | None = None,
+        trace_size: int = 0,
     ) -> None:
         dependencies = list(operator_mlir_map.values())
         super().__init__(filename, dependencies)
@@ -51,6 +69,8 @@ class SequenceMLIRArtifact(MLIRArtifact):
         self.subbuffer_layout = subbuffer_layout
         self.buffer_sizes = buffer_sizes
         self.slice_info = slice_info or {}
+        # Bytes of trace buffer per runlist step, 0 for an untraced build.
+        self.trace_size = trace_size
 
 
 # Helper Functions
