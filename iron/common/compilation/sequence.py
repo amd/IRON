@@ -14,6 +14,7 @@ from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
+from aie.utils.trace import get_trace_slices
 import ml_dtypes
 
 from typing import Any
@@ -44,8 +45,6 @@ def trace_buffer_layout(mlir_text: str):
 
     Returns `(total_bytes, slices)`; `(0, [])` for an untraced build.
     """
-    from aie.utils.trace import get_trace_slices
-
     slices = get_trace_slices(mlir_text)
     if not slices:
         return 0, []

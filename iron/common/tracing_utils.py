@@ -42,6 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
+from aie.utils.trace.parse import parse_trace
+
 from . import compilation as comp
 
 __all__ = [
@@ -118,8 +120,6 @@ def parse_trace_words(
     SystemExit is caught here - a visualisation failure should never take a test
     down with it.
     """
-    from aie.utils.trace.parse import parse_trace
-
     try:
         return parse_trace(
             np.asarray(words, dtype=np.uint32), mlir_text, colshift, device
