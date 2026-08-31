@@ -7,14 +7,24 @@ import time
 from pathlib import Path
 import numpy as np
 import ml_dtypes
-import pyxrt
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+
+try:
+    import pyxrt
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+except ImportError:
+    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The two
+    # on-device dispatch policies below are XRT-native (pyxrt.elf / hw_context / run,
+    # plus XRTTensor views), so they cannot run there; _require_xrt() makes that
+    # explicit at construction. The CPU policy and the whole compile path do not care,
+    # and must keep importing.
+    pyxrt = None
+    XRTTensor = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,17 @@ def _torch():
             "Compile and NPU dispatch do not."
         ) from exc
     return torch
+
+
+def _require_xrt() -> None:
+    """Fail with the reason, rather than an AttributeError on ``None.elf``."""
+    if pyxrt is None:
+        raise RuntimeError(
+            "this OperatorSequence dispatch policy needs the XRT host runtime (pyxrt), "
+            "which is not installed. Use SequenceCPUCallable, or run a single operator "
+            "(AIEOperatorBase), which dispatches through aie.utils.DefaultNPURuntime and "
+            "works on any backend."
+        )
 
 
 # ##########################################################################
@@ -553,6 +574,7 @@ class SequenceFullELFCallable(SequenceCallable):
     """
 
     def __init__(self, op, device_name="main", sequence_name="sequence"):
+        _require_xrt()
         self.device_name = device_name
         self.sequence_name = sequence_name
 
@@ -697,6 +719,7 @@ class SequenceXclbinCallable(_PerBufferCallable):
     """
 
     def __init__(self, op, dispatch):
+        _require_xrt()
         self._dispatch = dispatch
         super().__init__(op)
 
