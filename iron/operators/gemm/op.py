@@ -20,7 +20,22 @@ import aie.utils as aie_utils
 
 @dataclass
 class GEMM(MLIROperator):
-    """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
+    """AIE-accelerated General Matrix Multiplication (GEMM) layer.
+
+    Supported integer data types: ``dtype_in="i8"`` / ``"i16"`` with
+    ``dtype_out="i32"`` (the only bit-exact integer output — integer
+    microkernels accumulate in 32 bits, and narrower outputs truncate and
+    are rejected). ``dtype_in="bf16"`` with ``"bf16"`` or ``"f32"`` output
+    is the default floating-point path.
+
+    Known flake (XRT/amdxdna, not this operator): on NPU2 (Strix Halo) a
+    dispatch can rarely (~5% per process) return a wrong result after
+    several *distinct* xclbins have been compiled in one process — the
+    zero/accumulate write races the first submit on a freshly-registered
+    context. It self-heals on the next dispatch. The repo test harness
+    already warms up and verifies; production callers should do the same
+    (warm-up once, verify the first result, retry once on mismatch).
+    """
 
     M: int
     K: int
