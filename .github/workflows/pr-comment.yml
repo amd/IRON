@@ -201,6 +201,7 @@ jobs:
             ];
 
             let details = '';
+            let detailsNoTrends = '';
             for (const suite of suites) {
               const suiteDir = path.join(root, suite.dir);
               let readme = '', trends = '';
@@ -208,12 +209,15 @@ jobs:
               try { trends = fs.readFileSync(path.join(suiteDir, 'trends.md'), 'utf8'); } catch {}
               if (!readme && !trends) continue;
 
-              details += `<details>\n<summary>${suite.label}</summary>\n\n`;
+              const open = `<details>\n<summary>${suite.label}</summary>\n\n`;
+              details += open;
               if (readme) details += readme + '\n\n';
               if (trends) {
                 details += `**Trends:**\n\n${trends}\n\n`;
               }
               details += `</details>\n\n`;
+
+              if (readme) detailsNoTrends += open + readme + `\n\n</details>\n\n`;
             }
 
             const marker = '<!-- iron-ci-aggregate -->';
@@ -224,23 +228,23 @@ jobs:
 
             `;
 
-            // GitHub rejects an issue comment body over 65536 characters. A run
-            // where most tests fail produces a per-suite table several times
-            // that, so shed the details and then the summary rather than lose
-            // the comment entirely (422 Validation Failed, no results posted).
-            const LIMIT = 65536;
             const runUrl = `${server}/${repo}/actions/runs/${context.payload.workflow_run.id}`;
-            const elided = `\n_Truncated: the full report exceeds GitHub's ${LIMIT}-character comment limit. See the [workflow run](${runUrl}) for complete results._\n`;
+            const note = (what) => `\n_${what} omitted, the comment hit GitHub's size limit. Full report in the [workflow run](${runUrl})._\n`;
 
-            let body = header + summaryContent + '\n\n' + details;
-            if (body.length > LIMIT) {
-              body = header + summaryContent + elided;
-              core.warning('Per-suite details omitted: comment over the size limit.');
-            }
-            if (body.length > LIMIT) {
-              const room = LIMIT - header.length - elided.length;
-              body = header + summaryContent.slice(0, room) + elided;
-              core.warning('Summary truncated: comment over the size limit.');
+            // Bodies to try, largest first. GitHub decides which one fits: it
+            // rejects an oversized body with 422, but the 65536 characters its
+            // message names is not the enforced ceiling (140k bodies post), so
+            // there is no constant here worth comparing against. Trend tables
+            // are the bulk of an oversized body, so they are shed first.
+            function* candidates() {
+              yield header + summaryContent + '\n\n' + details;
+              yield header + summaryContent + '\n\n' + detailsNoTrends + note('Trend tables');
+              let summary = summaryContent;
+              yield header + summary + note('Per-suite details');
+              while (summary) {
+                summary = summary.slice(0, Math.floor(summary.length / 2));
+                yield header + summary + note('Per-suite details and most of the summary');
+              }
             }
 
             // Update existing comment if present, otherwise create new one
@@ -252,20 +256,37 @@ jobs:
             });
 
             const existing = comments.data.find(c => c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                comment_id: existing.id,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: body,
-              });
-              core.info(`Updated comment ${existing.id}`);
-            } else {
-              await github.rest.issues.createComment({
-                issue_number: prNumber,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: body,
-              });
-              core.info('Created new comment');
+            const post = (body) => existing
+              ? github.rest.issues.updateComment({
+                  comment_id: existing.id,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: body,
+                })
+              : github.rest.issues.createComment({
+                  issue_number: prNumber,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: body,
+                });
+
+            let shed = 0;
+            let posted = false;
+            for (const body of candidates()) {
+              try {
+                await post(body);
+                posted = true;
+              } catch (error) {
+                if (!(error.status === 422 && /too long/i.test(error.message))) throw error;
+                shed++;
+                continue;
+              }
+              if (shed) {
+                core.warning(`Comment shortened ${shed} time(s) to fit GitHub's size limit.`);
+              }
+              core.info(existing ? `Updated comment ${existing.id}` : 'Created new comment');
+              break;
+            }
+            if (!posted) {
+              throw new Error('Comment rejected as too long at every size.');
             }
