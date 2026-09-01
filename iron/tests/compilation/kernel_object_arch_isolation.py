@@ -24,6 +24,7 @@ from aie.iron.device import NPU1, NPU2
 
 from iron.common import AIEContext
 from iron.common.compilation import KernelObjectArtifact
+from iron.common.compilation.base import _link_build_outputs_into
 from iron.operators.elementwise_mul.op import ElementwiseMul
 
 
@@ -63,3 +64,25 @@ def test_a_stale_object_from_one_arch_is_not_silently_reused_by_another(tmp_path
         "aie2p build reused a leftover aie2 kernel object -- both resolved "
         f"to {aie2p.filename}"
     )
+
+
+def test_the_arch_scoped_object_is_linked_into_the_aiecc_work_dir(tmp_path):
+    """Scoping the object under build_dir/<arch> must not hide it from the
+    link step. aiecc resolves link_with="mul.o" against its own work_dir, fed
+    by _link_build_outputs_into(), which skips directories -- so an object
+    moved into a subdirectory stops being linked and ld.lld fails with
+    "cannot open .../mul.o: No such file or directory"."""
+    obj = _mul_kernel_object(tmp_path, NPU2())
+    Path(obj.filename).parent.mkdir(parents=True, exist_ok=True)
+    Path(obj.filename).write_bytes(b"aie2p-machine-code")
+
+    work_dir = tmp_path / "design.mlir.d"
+    work_dir.mkdir()
+    _link_build_outputs_into(work_dir, tmp_path)
+
+    linked = work_dir / Path(obj.filename).name
+    assert linked.exists(), (
+        f"{Path(obj.filename).name} was not linked into the aiecc work dir; "
+        f"the object is at {obj.filename}"
+    )
+    assert linked.read_bytes() == b"aie2p-machine-code"

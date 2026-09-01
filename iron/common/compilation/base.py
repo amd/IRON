@@ -524,23 +524,36 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
 
     aiecc resolves an MLIR module's relative kernel-object references (e.g.
     ``link_with = "axpy.o"``, produced by KernelCompilationRule /
-    ArchiveCompilationRule into the flat build_dir) against work_dir, since
-    that's where compile_mlir_module() writes its own copy of the MLIR
-    source. Symlinking makes those lookups succeed without copying kernel
-    objects into every artifact's own work_dir.
+    ArchiveCompilationRule) against work_dir, since that's where
+    compile_mlir_module() writes its own copy of the MLIR source. Symlinking
+    makes those lookups succeed without copying kernel objects into every
+    artifact's own work_dir.
+
+    Kernel objects live under build_dir/<arch> (see move_artifacts), so they
+    are linked from there too, flattened -- the reference in the MLIR carries
+    no directory. Only the current arch's subdirectory is linked: walking all
+    of them would put both arches' "mul.o" in one work_dir and reinstate the
+    collision the per-arch scoping exists to prevent.
     """
-    for entry in build_dir.iterdir():
-        if entry.is_dir():
-            continue
-        link = work_dir / entry.name
-        if link.exists():
-            continue
-        target = entry.resolve()
-        try:
-            link.symlink_to(target)
-        except OSError:
-            # Windows without Developer Mode cannot create symlinks.
-            shutil.copy2(target, link)
+
+    def link_files_from(directory: Path) -> None:
+        if not directory.is_dir():
+            return
+        for entry in directory.iterdir():
+            if entry.is_dir():
+                continue
+            link = work_dir / entry.name
+            if link.exists():
+                continue
+            target = entry.resolve()
+            try:
+                link.symlink_to(target)
+            except OSError:
+                # Windows without Developer Mode cannot create symlinks.
+                shutil.copy2(target, link)
+
+    link_files_from(build_dir)
+    link_files_from(build_dir / get_kernel_dir())
 
 
 class AieccCompilationRule(CompilationRule):
