@@ -217,14 +217,31 @@ jobs:
             }
 
             const marker = '<!-- iron-ci-aggregate -->';
-            const body = `${marker}
+            const header = `${marker}
             ## CI Test Results
 
             [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
 
-            ${summaryContent}
+            `;
 
-            ${details}`;
+            // GitHub rejects an issue comment body over 65536 characters. A run
+            // where most tests fail produces a per-suite table several times
+            // that, so shed the details and then the summary rather than lose
+            // the comment entirely (422 Validation Failed, no results posted).
+            const LIMIT = 65536;
+            const runUrl = `${server}/${repo}/actions/runs/${context.payload.workflow_run.id}`;
+            const elided = `\n_Truncated: the full report exceeds GitHub's ${LIMIT}-character comment limit. See the [workflow run](${runUrl}) for complete results._\n`;
+
+            let body = header + summaryContent + '\n\n' + details;
+            if (body.length > LIMIT) {
+              body = header + summaryContent + elided;
+              core.warning('Per-suite details omitted: comment over the size limit.');
+            }
+            if (body.length > LIMIT) {
+              const room = LIMIT - header.length - elided.length;
+              body = header + summaryContent.slice(0, room) + elided;
+              core.warning('Summary truncated: comment over the size limit.');
+            }
 
             // Update existing comment if present, otherwise create new one
             const comments = await github.rest.issues.listComments({
