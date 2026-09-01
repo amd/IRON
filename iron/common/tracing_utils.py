@@ -64,16 +64,9 @@ KERNEL_START, KERNEL_END = "INSTR_EVENT_0", "INSTR_EVENT_1"
 def lowered_mlir(run) -> tuple[Path, str]:
     """The post-lowering MLIR for a callable, as ``(path, text)``.
 
-    mlir-aie's trace parser recovers which tiles and events were traced by scanning
-    for ``aiex.npu.write32`` ops and pattern-matching the trace-unit config
-    addresses. It does not understand the declarative ``aie.trace`` ops a design is
-    written with, so the module handed to aiecc is useless to it: those ops only
-    become register writes inside aiecc, in ``aie-insert-trace-flows``. What we want
-    is one of aiecc's own intermediates, which it leaves in the work dir beside the
-    source (``<source>.mlir.d/``).
-
-    Picks the file with the most ``write32`` ops rather than hardcoding a stage name,
-    since those names are aiecc's business and have changed before.
+    The parser reads the trace register writes and the buffer layout, neither of
+    which exists in the module handed to aiecc: both appear in aiecc's own
+    intermediates, which it leaves beside the source in ``<source>.mlir.d/``.
     """
     override = os.environ.get("IRON_TRACE_MLIR")
     if override:
@@ -82,19 +75,15 @@ def lowered_mlir(run) -> tuple[Path, str]:
 
     source = Path(run.op.artifacts[0].mlir_input.filename)
     work_dir = comp._aiecc_work_dir(str(source))
-    candidates = []
     for path in sorted(work_dir.rglob("*.mlir")):
         text = path.read_text()
-        if "write32" in text:
-            candidates.append((text.count("write32"), path, text))
-    if not candidates:
-        raise FileNotFoundError(
-            f"no lowered MLIR with write32 ops under {work_dir}. aiecc may not be "
-            "retaining its intermediates for this build; point IRON_TRACE_MLIR at a "
-            "lowered module to override."
-        )
-    _, path, text = max(candidates, key=lambda c: c[0])
-    return path, text
+        if "trace_slices" in text or "trace_buffer" in text:
+            return path, text
+    raise FileNotFoundError(
+        f"no lowered MLIR recording a trace layout under {work_dir}. aiecc may not "
+        "be retaining its intermediates for this build; point IRON_TRACE_MLIR at a "
+        "lowered module to override."
+    )
 
 
 def trace_words(buf) -> np.ndarray:
@@ -312,12 +301,12 @@ def dump_traces(
     buffer is named for the runlist entry it belongs to, so a fused sequence yields
     one pair of files per operator in the sequence.
     """
-    buffers = getattr(run, "trace_buffers", None)
-    if not buffers:
+    buffer = getattr(run, "trace_buffer", None)
+    if buffer is None:
         if getattr(getattr(run, "op", None), "trace_size", 0):
             raise TypeError(
                 f"{type(run).__name__} was built with tracing enabled but exposes no "
-                "trace_buffers; only the full-ELF sequence callable allocates them."
+                "trace_buffer; only the full-ELF sequence callable allocates one."
             )
         return []
 
@@ -328,32 +317,16 @@ def dump_traces(
         env = os.environ.get("IRON_TRACE_COLSHIFT")
         colshift = int(env) if env else None
 
+    from aie.utils.trace.parse import parse_trace_slices
+
     mlir_path, mlir_text = lowered_mlir(run)
     print(f"[trace] parsing against {mlir_path}")
 
     tag = _slug(tag)
     written = []
-    for name, buf in buffers.items():
-        words = trace_words(buf)
-        if not words.size:
-            print(f"[trace] {name}: buffer is all zeros, no trace data captured")
-            continue
-        capacity = buf.to_torch().numel() // 4
-        if words.size == capacity:
-            print(
-                f"[trace] {name}: buffer full ({capacity * 4} B), trace is likely "
-                "truncated - raise IRON_TRACE_SIZE"
-            )
-
+    for entry, events in parse_trace_slices(buffer, mlir_text, colshift):
+        name = entry["sequence"] if entry else "sequence"
         stem = out_dir / f"{tag}_{_slug(name)}"
-        stem.with_suffix(".txt").write_text("\n".join(f"{w:08x}" for w in words) + "\n")
-
-        try:
-            events = parse_trace_words(words, mlir_text, colshift)
-        except Exception as exc:  # never let a visualisation failure fail a run
-            print(f"[trace] {name}: parse failed ({exc}); raw words kept at {stem}.txt")
-            continue
-
         target = stem.with_suffix(".json")
         target.write_text(json.dumps(events))
         print(f"[trace] {target} ({len(events)} events)")

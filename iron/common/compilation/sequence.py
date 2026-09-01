@@ -7,8 +7,6 @@ Temporal fusion of multiple MLIR modules into one module with multiple devices a
 
 from __future__ import annotations
 
-from itertools import count, islice
-
 import numpy as np
 import importlib.util
 from functools import partial
@@ -34,27 +32,6 @@ RESET_DEVICE = "reset_device"
 
 # Compilation Artifacts
 # ##########################################################################
-
-
-def trace_argument_layout(arg_counts: dict[str, int], trace_size: int):
-    """Buffer slots for the fused runtime sequence, as (consolidated, trace, count).
-
-    Lowering patches a trace address against the dispatched kernel, not the callee, so
-    each operator needs its buffer at the index it uses. The rest take what is left.
-    """
-    if not trace_size:
-        return [0, 1, 2], {}, 3
-    trace_slots = dict(arg_counts)
-    counts = list(trace_slots.values())
-    shared = sorted({n for n in counts if counts.count(n) > 1})
-    if shared:
-        raise NotImplementedError(
-            "operators taking the same number of arguments would share one trace "
-            f"buffer (slots {shared}); trace them in separate dispatches"
-        )
-    trace_indices = sorted(set(counts))
-    consolidated_idx = list(islice((i for i in count() if i not in trace_indices), 3))
-    return consolidated_idx, trace_slots, max(trace_indices + consolidated_idx) + 1
 
 
 class SequenceMLIRArtifact(MLIRArtifact):
@@ -239,33 +216,17 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
             # RuntimeSequenceOp
-            trace_size = artifact.trace_size
-            consolidated_idx, trace_slots, n_args = trace_argument_layout(
-                {name: len(sequence_arg_types[name]) for name, *_ in artifact.runlist},
-                trace_size,
-            )
-            trace_indices = sorted(set(trace_slots.values()))
-
-            sizes = dict(
-                zip(
-                    consolidated_idx,
-                    (input_buffer_size, output_buffer_size, scratch_buffer_size),
-                )
-            )
             arg_types = [
-                (
-                    np.ndarray[(max(1, trace_size),), np.dtype[np.int8]]
-                    if i in trace_indices
-                    else np.ndarray[(max(1, sizes.get(i, 0) // itemsize),), buf_dtype]
+                np.ndarray[(max(1, size // itemsize),), buf_dtype]
+                for size in (
+                    input_buffer_size,
+                    output_buffer_size,
+                    scratch_buffer_size,
                 )
-                for i in range(n_args)
             ]
 
             @aiex.runtime_sequence(*arg_types)
-            def sequence(*all_bufs):
-                input_buf, output_buf, scratch_buf = (
-                    all_bufs[i] for i in consolidated_idx
-                )
+            def sequence(input_buf, output_buf, scratch_buf):
                 consolidated_buffers = {
                     "input": input_buf,
                     "output": output_buf,
@@ -350,10 +311,6 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                                 static_strides=strides,
                             )
                             buffer_ssa_values.append(reinterpreted)
-
-                        # Trace lowering appends a buffer to the callee's signature.
-                        if trace_size:
-                            buffer_ssa_values.append(all_bufs[trace_slots[op_name]])
 
                         # Run Op
                         sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")

@@ -31,5 +31,4 @@ from .base import (
 from .sequence import (
     SequenceMLIRArtifact,
     FusePythonGeneratedMLIRCompilationRule,
-    trace_argument_layout,
 )

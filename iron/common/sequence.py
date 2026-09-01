@@ -569,20 +569,11 @@ class SequenceFullELFCallable(SequenceCallable):
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
         # built on top of it) stays valid across calls.
         self.run_handle = pyxrt.run(self.xrt_kernel)
-        consolidated_idx, trace_slots, _ = comp.trace_argument_layout(
-            {
-                f"op{i}_{o.__class__.__name__}": len(o.get_arg_spec())
-                for i, (o, *_) in enumerate(self.op.runlist)
-            },
-            self.op.trace_size,
-        )
-        for idx, buf in zip(
-            consolidated_idx,
-            (self.input_buffer, self.output_buffer, self.scratch_buffer),
-        ):
+        buffers = [self.input_buffer, self.output_buffer, self.scratch_buffer]
+        if self.trace_buffer is not None:
+            buffers.append(self.trace_buffer)
+        for idx, buf in enumerate(buffers):
             self.run_handle.set_arg(idx, buf.buffer_object())
-        for name, idx in trace_slots.items():
-            self.run_handle.set_arg(idx, self.trace_buffers[name].buffer_object())
 
         self._params = None
 
@@ -621,13 +612,10 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         trace_size = self.op.trace_size
-        self.trace_buffers = (
-            {
-                f"op{i}_{o.__class__.__name__}": XRTTensor((trace_size,), dtype=np.int8)
-                for i, (o, *_) in enumerate(self.op.runlist)
-            }
+        self.trace_buffer = (
+            XRTTensor((trace_size * len(self.op.runlist),), dtype=np.int8)
             if trace_size
-            else {}
+            else None
         )
 
     def get_buffer(self, buffer_name):
@@ -656,9 +644,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
-        for buf in self.trace_buffers.values():
-            buf.device = "npu"
-            buf.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()
