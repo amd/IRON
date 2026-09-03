@@ -14,6 +14,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from iron.common.device_utils import get_kernel_dir
 import aie.utils as aie_utils
 
 
@@ -64,7 +65,7 @@ class Dequant(MLIROperator):
     def get_kernel_artifacts(self):
         return [
             KernelObjectArtifact(
-                f"expand_aie2_{self.tile_size}.o",
+                f"expand_{get_kernel_dir()}_{self.tile_size}.o",
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir / "aie_kernels" / "generic" / "expand.cc"
