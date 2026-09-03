@@ -165,13 +165,7 @@ def create_partial_workload_config(
 
 
 def my_mem_copy(
-    dev,
-    size,
-    num_cores,
-    num_channels,
-    bypass,
-    tile_size,
-    trace_size,
+    dev, size, num_cores, num_channels, bypass, tile_size, trace_size, func_prefix=""
 ):
     # --------------------------------------------------------------------------
     # Configuration
@@ -207,8 +201,8 @@ def my_mem_copy(
 
         # External, binary kernel definition
         mem_copy_fcn = Kernel(
-            "passThroughLine",
-            "mem_copy.o",
+            f"{func_prefix}passThroughLine",
+            f"{func_prefix}mem_copy.o",
             [line_type, line_type, np.int32],
         )
 
