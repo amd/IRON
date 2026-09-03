@@ -335,11 +335,14 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         mlir_input: CompilationArtifact,
         dependencies: list[CompilationArtifact],
         extra_flags: list[str] | None = None,
+        trace_size: int = 0,
     ) -> None:
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
+        # Bytes of trace buffer per runlist step, 0 for an untraced build.
+        self.trace_size = trace_size
 
 
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
