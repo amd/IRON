@@ -50,7 +50,7 @@ class MHA(MLIROperator):
                 "fused_mha",
                 (),
                 {
-                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "dev": aie_utils.get_current_device(),
                     "heads": self.num_heads,
                     "S_q": self.seq_len,
                     "S_kv": self.seq_len,
