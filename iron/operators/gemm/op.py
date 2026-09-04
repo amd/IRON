@@ -15,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from aie.iron import str_to_dtype
 import aie.utils as aie_utils
 
 
@@ -150,13 +151,19 @@ class GEMM(MLIROperator):
         ]
 
     def get_arg_spec(self):
+        dtype_in = str_to_dtype(self.dtype_in)
+        dtype_out = str_to_dtype(self.dtype_out)
         return [
-            AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
+            AIERuntimeArgSpec("in", (self.M, self.K), dtype=dtype_in),  # input A
             AIERuntimeArgSpec(
-                "in", (self.K, self.N) if not self.b_col_maj else (self.N, self.K)
+                "in",
+                (self.K, self.N) if not self.b_col_maj else (self.N, self.K),
+                dtype=dtype_in,
             ),  # input B (weights)
             AIERuntimeArgSpec(
-                "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
+                "out",
+                (self.M, self.N) if not self.c_col_maj else (self.N, self.M),
+                dtype=dtype_out,
             ),  # output C
         ]
 
