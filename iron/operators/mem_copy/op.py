@@ -68,6 +68,9 @@ class MemCopy(MLIROperator):
                         / "passThrough.cc"
                     )
                 ],
+                # design.py types the line buffers bf16. Without this, passThrough.cc
+                # falls through to its int32 branch and copies twice the tile.
+                extra_flags=["-DBIT_WIDTH=16"],
             )
         ]
 
