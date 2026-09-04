@@ -27,9 +27,8 @@ from iron.operators._trace import maybe_enable_trace
 microkernel_mac_dim_map = {
     "npu1": {
         "bf16": (4, 8, 4),
-    },
-    "npu1": {
-        "bf16": (4, 8, 4),
+        "i8": (8, 8, 8),
+        "i16": (4, 4, 8),
     },
     "npu2": {
         "bf16": {
@@ -37,6 +36,8 @@ microkernel_mac_dim_map = {
             True: (8, 8, 8),
             False: (4, 8, 8),
         },
+        "i8": (8, 8, 8),
+        "i16": (4, 4, 8),
     },
 }
 
@@ -138,6 +139,7 @@ def my_matmul(
     n_aie_cols,
     dtype_in_str,
     dtype_out_str,
+    dtype_b_str,
     b_col_maj,
     c_col_maj,
     use_scalar,
@@ -197,11 +199,16 @@ def my_matmul(
     ), f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
-    mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
-    if dev_name == "npu2" and dtype_in_str == "bf16":
-        r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
+    if dtype_in_str == "i8" and dtype_b_str == "i4":
+        # Asymmetric 4-bit weights: AIE2P 4x16x16 mmul (1024 MACs/instr, 2x
+        # int8xint8 density).
+        r, s, t = 4, 16, 16
     else:
-        r, s, t = mac_dims
+        mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
+        if dev_name == "npu2" and dtype_in_str == "bf16":
+            r, s, t = mac_dims[emulate_bf16_mmul_with_bfp16]
+        else:
+            r, s, t = mac_dims
 
     # npu1 is a 4 row x 4 col array
     if dev_name == "npu1" and n_aie_cols > 4:
@@ -269,14 +276,22 @@ def my_matmul(
     C_taps = []
 
     # Define tensor types
+    # B storage type: for asymmetric INT4 weights (dtype_b="i4"), B is packed
+    # two-nibbles-per-byte and lives in an int8 buffer with half the element
+    # count; the kernel reinterprets it to int4. All other cases use the plain
+    # input type at full element count.
+    b_packed = dtype_b_str == "i4"
+    b_storage_str = "i8" if b_packed else dtype_in_str
+    b_storage = str_to_dtype(b_storage_str)
+    b_n_div = 2 if b_packed else 1
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
-    B_ty = np.ndarray[(K * N,), np.dtype[dtype_in]]
+    B_ty = np.ndarray[(K * N // b_n_div,), np.dtype[b_storage]]
     C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
     A_l2_ty = np.ndarray[(mem_tile_m_A * k,), np.dtype[dtype_in]]
-    B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
+    B_l2_ty = np.ndarray[(k * n // b_n_div,), np.dtype[b_storage]]
     C_l2_ty = np.ndarray[(mem_tile_m_C * n,), np.dtype[dtype_out]]
     A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
-    B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
+    B_l1_ty = np.ndarray[(k, n // b_n_div), np.dtype[b_storage]]
     C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
 
     # AIE Core Function declarations
@@ -322,6 +337,9 @@ def my_matmul(
         matmul_func_name = (
             f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
         )
+        if dtype_b_str == "i4":
+            # Asymmetric 4-bit weights: the kernel symbol is matmul_i8_i4.
+            matmul_func_name = f"{func_prefix}matmul{scalar_suffix}_i8_i4"
         matmul_kernel = Kernel(
             matmul_func_name,
             gemm_object,
@@ -401,9 +419,25 @@ def my_matmul(
     for col in range(n_aie_cols):
         B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth)
         if b_col_maj:
-            dims_to_stream = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
+            # Tile is (n // b_n_div, k) i8 (packed N halves the i8 width).
+            # Mirrors the working i8 col-major dims with the packed width:
+            # n-blocks (outer) at stride t*k, k-blocks at stride s//b_n_div
+            # (packed), t rows at stride k (the tile row length -- k is NOT
+            # packed), s//b_n_div bytes (innermost).
+            dims_to_stream = [(n // t, t * k), (k // s, s // b_n_div),
+                              (t, k), (s // b_n_div, 1)]
         else:
-            dims_to_stream = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
+            # Tile is (k, n // b_n_div) i8. Stream each mac-block: the
+            # 128-byte read window (kk, nn) covers s rows x (t//b_n_div)
+            # packed bytes -- 16 rows x 8 bytes = the mac's 16x16 int4 B
+            # block for the 4x16x16 mmul: t//b_n_div bytes (innermost) at
+            # stride 1, s rows at stride n//b_n_div (the tile row length),
+            # n//t n-blocks at stride t//b_n_div (packed), k//s k-blocks
+            # (outer) at stride s*(n//b_n_div). (Verified: the generated
+            # L2->L1 BD is [4,4,16,8]/[512,8,32,1] and the mac sees
+            # B(kk',nn) = B4[16kk+kk', 16nn+nn].)
+            dims_to_stream = [(k // s, s * n // b_n_div), (n // t, t // b_n_div),
+                              (s, n // b_n_div), (t // b_n_div, 1)]
         B_l2l1_fifos[col] = (
             B_l3l2_fifos[col]
             .cons()
@@ -531,8 +565,8 @@ def my_matmul(
     )
     if b_col_maj:
         B_tiles = TensorTiler2D.step_tiler(
-            (N, K),  # Size of B matrix
-            (n, k),  # Size of B tile
+            (N // b_n_div, K),  # Size of B matrix (packed N halves the i8 width)
+            (n // b_n_div, k),  # Size of B tile
             # Number of tiles per transfer in each dimension (whole col, partial row)
             tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
             # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
@@ -541,8 +575,8 @@ def my_matmul(
         )
     else:
         B_tiles = TensorTiler2D.step_tiler(
-            (K, N),  # Size of B matrix
-            (k, n),  # Size of B tile
+            (K, N // b_n_div),  # Size of B matrix (packed N halves the i8 width)
+            (k, n // b_n_div),  # Size of B tile
             # Number of tiles per transfer in each dimension (whole col, partial row)
             tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
             # Contiguous tile group in col, but send every n_aie_cols-th tile in the row

@@ -60,7 +60,13 @@ class AIEDecodeOperations:
 
 class AIELlamaOperators:
 
-    def __init__(self, config, prompt_len):
+    def __init__(self, config, prompt_len, prefill_len=None):
+        # prompt_len = max context (decode ops, KV caches).
+        # prefill_len = tile-padded real prompt length (prefill ops only);
+        # defaults to prompt_len when not given (back-compat).
+        if prefill_len is None:
+            prefill_len = prompt_len
+        self.prefill_len = prefill_len
         self.context = AIEContext()
         self.context.build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -72,7 +78,7 @@ class AIELlamaOperators:
 
         self.prefill.rms_norm = (
             RMSNorm(
-                size=prompt_len * config.emb_dim,
+                size=self.prefill_len * config.emb_dim,
                 num_aie_columns=8,
                 num_channels=1,  # weighted=True with 8 columns needs 9 ShimDMA fills/channel; max 16 total forces num_channels=1
                 tile_size=config.emb_dim,
@@ -84,7 +90,7 @@ class AIELlamaOperators:
         )
 
         self.prefill.residual_add = (
-            ElementwiseAdd(size=prompt_len * config.emb_dim, tile_size=config.emb_dim)
+            ElementwiseAdd(size=self.prefill_len * config.emb_dim, tile_size=config.emb_dim)
             .compile()
             .get_callable()
         )
@@ -93,7 +99,7 @@ class AIELlamaOperators:
         config.padded_vocab_size = (config.vocab_size + min_N - 1) // min_N * min_N
         config.vocab_partitions = 4
         self.prefill.gemv_out_head_compilable = GEMM(
-            M=prompt_len,
+            M=self.prefill_len,
             K=config.emb_dim,
             N=config.padded_vocab_size // config.vocab_partitions,
             num_aie_columns=8,
@@ -107,13 +113,14 @@ class AIELlamaOperators:
         self.prefill.out_head = self.prefill.gemv_out_head_compilable.get_callable()
 
         # SwiGLU FFN operators
-        # Prefill: M=prompt_len, K=emb_dim, N=hidden_dim
+        # Prefill: M=self.prefill_len, K=emb_dim, N=hidden_dim
         self.prefill.ffn_up_gate = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.emb_dim,
                 N=config.hidden_dim,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -126,10 +133,11 @@ class AIELlamaOperators:
 
         self.prefill.ffn_down = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.hidden_dim,
                 N=config.emb_dim,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -142,7 +150,7 @@ class AIELlamaOperators:
 
         self.prefill.ffn_silu = (
             SiLU(
-                size=prompt_len * config.hidden_dim,
+                size=self.prefill_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
                 context=self.context,
@@ -153,7 +161,7 @@ class AIELlamaOperators:
 
         self.prefill.eltwise_mul_ffn = (
             ElementwiseMul(
-                size=prompt_len * config.hidden_dim,
+                size=self.prefill_len * config.hidden_dim,
                 tile_size=config.hidden_dim,
                 num_aie_columns=8,
                 context=self.context,
@@ -162,12 +170,54 @@ class AIELlamaOperators:
             .get_callable()
         )
 
+        # Fused FFN path (LLAMA_FUSED_FFN=1): one ELF for
+        # gate/up GEMM -> SiLU -> mul -> down GEMM -> residual.
+        self.prefill.ffn_fused = None
+        if __import__("os").environ.get("LLAMA_FUSED_FFN"):
+            elf_ctx = AIEContext(build_dir="build_elf_prefill_ffn")
+            ffg = GEMM(M=self.prefill_len, K=config.emb_dim, N=config.hidden_dim,
+                       tile_m=64, tile_k=64, tile_n=64, num_aie_columns=8,
+                       b_col_maj=False, emulate_bf16_mmul_with_bfp16=False,
+                       context=elf_ctx)
+            ffu = GEMM(M=self.prefill_len, K=config.emb_dim, N=config.hidden_dim,
+                       tile_m=64, tile_k=64, tile_n=64, num_aie_columns=8,
+                       b_col_maj=False, emulate_bf16_mmul_with_bfp16=False,
+                       context=elf_ctx)
+            ffd = GEMM(M=self.prefill_len, K=config.hidden_dim, N=config.emb_dim,
+                       tile_m=64, tile_k=64, tile_n=64, num_aie_columns=8,
+                       b_col_maj=False, emulate_bf16_mmul_with_bfp16=False,
+                       context=elf_ctx)
+            ffs = SiLU(size=self.prefill_len * config.hidden_dim,
+                       tile_size=config.hidden_dim, num_aie_columns=8,
+                       context=elf_ctx)
+            ffm = ElementwiseMul(size=self.prefill_len * config.hidden_dim,
+                                 tile_size=config.hidden_dim, num_aie_columns=8,
+                                 context=elf_ctx)
+            ffa = ElementwiseAdd(size=self.prefill_len * config.emb_dim,
+                                 tile_size=config.emb_dim, num_aie_columns=8,
+                                 context=elf_ctx)
+            runlist = [
+                (ffg, "x_norm", "W_ffn_gate", "ffn_gate"),
+                (ffu, "x_norm", "W_ffn_up", "ffn_up"),
+                (ffs, "ffn_gate", "ffn_gate"),
+                (ffm, "ffn_gate", "ffn_up", "ffn_hidden"),
+                (ffd, "ffn_hidden", "W_ffn_down", "ffn_output"),
+                (ffa, "x", "ffn_output", "x"),
+            ]
+            _seq = OperatorSequence(
+                "prefill_ffn", runlist,
+                input_args=["x_norm", "W_ffn_gate", "W_ffn_up", "W_ffn_down", "x"],
+                output_args=["x"], context=elf_ctx,
+            ).compile()
+            self.prefill.ffn_fused = _seq.get_callable()
+            print("[fused-ffn] built fused prefill FFN ELF", flush=True)
+
         # Attention score scaling operators
         # FIXME: Using elementwise mul is very wasteful (of bandwidth) here since it's the same scalar factor for all values; need a kernel that allows scalar multiplication of a vector; maybe use AXPY
         self.prefill.attn_scale = (
             ElementwiseMul(
-                size=config.n_heads * prompt_len * prompt_len,
-                tile_size=prompt_len,
+                size=config.n_heads * self.prefill_len * self.prefill_len,
+                tile_size=self.prefill_len,
                 num_aie_columns=8,
                 context=self.context,
             )
@@ -181,9 +231,9 @@ class AIELlamaOperators:
         # angle_rows=1 because all rows use the same angle row (angles are per position)
         self.prefill.rope_queries = (
             RoPE(
-                rows=prompt_len * config.n_heads,
+                rows=self.prefill_len * config.n_heads,
                 cols=config.head_dim,
-                angle_rows=prompt_len,
+                angle_rows=self.prefill_len,
                 context=self.context,
             )
             .compile()
@@ -192,9 +242,9 @@ class AIELlamaOperators:
 
         self.prefill.rope_keys = (
             RoPE(
-                rows=prompt_len * config.n_kv_groups,
+                rows=self.prefill_len * config.n_kv_groups,
                 cols=config.head_dim,
-                angle_rows=prompt_len,
+                angle_rows=self.prefill_len,
                 context=self.context,
             )
             .compile()
@@ -205,10 +255,11 @@ class AIELlamaOperators:
         # Query projection: (seq_len, emb_dim) -> (seq_len, n_heads * head_dim)
         self.prefill.attn_query = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.emb_dim,
                 N=config.n_heads * config.head_dim,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -222,10 +273,11 @@ class AIELlamaOperators:
         # Key projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_key = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -239,10 +291,11 @@ class AIELlamaOperators:
         # Value projection: (seq_len, emb_dim) -> (seq_len, n_kv_groups * head_dim)
         self.prefill.attn_value = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.emb_dim,
                 N=config.n_kv_groups * config.head_dim,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -257,10 +310,11 @@ class AIELlamaOperators:
         # For prefill: (seq_len, head_dim) @ (head_dim, seq_len) = (seq_len, seq_len) per head
         self.prefill.attn_scores = (
             GEMM(
-                M=prompt_len,
+                M=self.prefill_len,
                 K=config.head_dim,
-                N=prompt_len,
+                N=self.prefill_len,
                 num_aie_columns=8,
+                emulate_bf16_mmul_with_bfp16=False,
                 tile_m=64,
                 tile_k=64,
                 tile_n=64,
@@ -645,59 +699,59 @@ class AIELlamaOperators:
 
 
 class AIEPrefillBuffers:
-    def __init__(self, prompt_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
-        self.x = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.x_norm = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.attn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
-        self.ffn_output = XRTTensor((prompt_len, emb_dim), dtype=ml_dtypes.bfloat16)
+    def __init__(self, prefill_len, emb_dim, hidden_dim, n_heads, n_kv_groups, head_dim):
+        self.x = XRTTensor((prefill_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.x_norm = XRTTensor((prefill_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.attn_output = XRTTensor((prefill_len, emb_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_output = XRTTensor((prefill_len, emb_dim), dtype=ml_dtypes.bfloat16)
         # SwiGLU intermediate buffers
-        self.ffn_gate = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
-        self.ffn_up = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
-        self.ffn_hidden = XRTTensor((prompt_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_gate = XRTTensor((prefill_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_up = XRTTensor((prefill_len, hidden_dim), dtype=ml_dtypes.bfloat16)
+        self.ffn_hidden = XRTTensor((prefill_len, hidden_dim), dtype=ml_dtypes.bfloat16)
         # Attention buffers: queries and keys serve as both projection output and RoPE input/output
         self.queries = XRTTensor(
-            (prompt_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
+            (prefill_len * n_heads, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.keys = XRTTensor(
-            (prompt_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
+            (prefill_len * n_kv_groups, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.values = XRTTensor(
-            (prompt_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
+            (prefill_len, n_kv_groups * head_dim), dtype=ml_dtypes.bfloat16
         )
-        self.rope_angles = XRTTensor((prompt_len, head_dim), dtype=ml_dtypes.bfloat16)
+        self.rope_angles = XRTTensor((prefill_len, head_dim), dtype=ml_dtypes.bfloat16)
         # Attention score computation buffers (per-head) - parent buffers with subbuffers
-        # Parent buffer for all heads' queries: (n_heads, prompt_len, head_dim) stored contiguously
+        # Parent buffer for all heads' queries: (n_heads, prefill_len, head_dim) stored contiguously
         self.attn_scores_queries_all = XRTTensor(
-            (n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
+            (n_heads * prefill_len, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_queries_per_head = [
             self.attn_scores_queries_all.subview(
-                h * prompt_len * head_dim * np.dtype(ml_dtypes.bfloat16).itemsize,
-                (prompt_len, head_dim),
+                h * prefill_len * head_dim * np.dtype(ml_dtypes.bfloat16).itemsize,
+                (prefill_len, head_dim),
                 ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
-        # Parent buffer for all KV groups' keys: (n_kv_groups, head_dim, prompt_len) stored contiguously
+        # Parent buffer for all KV groups' keys: (n_kv_groups, head_dim, prefill_len) stored contiguously
         self.attn_scores_keys_all = XRTTensor(
-            (n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_kv_groups * head_dim, prefill_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_keys_per_kv_group = [
             self.attn_scores_keys_all.subview(
-                g * head_dim * prompt_len * np.dtype(ml_dtypes.bfloat16).itemsize,
-                (head_dim, prompt_len),
+                g * head_dim * prefill_len * np.dtype(ml_dtypes.bfloat16).itemsize,
+                (head_dim, prefill_len),
                 ml_dtypes.bfloat16,
             )
             for g in range(n_kv_groups)
         ]
-        # Parent buffer for all heads' scores: (n_heads * prompt_len, prompt_len)
+        # Parent buffer for all heads' scores: (n_heads * prefill_len, prefill_len)
         self.attn_scores = XRTTensor(
-            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prefill_len, prefill_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_per_head = [
             self.attn_scores.subview(
-                h * prompt_len * prompt_len * np.dtype(ml_dtypes.bfloat16).itemsize,
-                (prompt_len, prompt_len),
+                h * prefill_len * prefill_len * np.dtype(ml_dtypes.bfloat16).itemsize,
+                (prefill_len, prefill_len),
                 ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
@@ -705,20 +759,25 @@ class AIEPrefillBuffers:
         # Attention score scaling buffer (pre-initialized with 1/sqrt(head_dim))
         scale_factor = 1.0 / math.sqrt(head_dim)
         self.attn_scale_factor = XRTTensor(
-            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prefill_len, prefill_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scale_factor.fill_(scale_factor)  # fill_() syncs to device
         # Attention weights buffer (output of softmax)
         self.attn_weights = XRTTensor(
-            (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
+            (n_heads * prefill_len, prefill_len), dtype=ml_dtypes.bfloat16
         )
 
 
 class AIELlamaBuffers:
-    def __init__(self, config, prompt_len, aie_ops):
+    def __init__(self, config, prompt_len, aie_ops, prefill_len=None):
+        # prompt_len = max context (KV caches sized for full generation).
+        # prefill_len = tile-padded real prompt length (prefill buffers only);
+        # defaults to prompt_len when not given (back-compat).
+        if prefill_len is None:
+            prefill_len = prompt_len
         # Vector of the current token(s) being processed through the pipeline
         self.prefill = AIEPrefillBuffers(
-            prompt_len,
+            prefill_len,
             config.emb_dim,
             config.hidden_dim,
             config.n_heads,
@@ -824,19 +883,19 @@ class AIELlamaBuffers:
         self.prefill.logits = XRTTensor(
             (
                 config.vocab_partitions,
-                prompt_len,
+                prefill_len,
                 config.padded_vocab_size // config.vocab_partitions,
             ),
             dtype=ml_dtypes.bfloat16,
         )
-        logits_part_len = prompt_len * (
+        logits_part_len = prefill_len * (
             config.padded_vocab_size // config.vocab_partitions
         )
         self.prefill.logits_parts = [
             self.prefill.logits.subview(
                 i * logits_part_len * np.dtype(ml_dtypes.bfloat16).itemsize,
                 (
-                    prompt_len,
+                    prefill_len,
                     config.padded_vocab_size // config.vocab_partitions,
                 ),
                 ml_dtypes.bfloat16,
@@ -991,6 +1050,40 @@ def grouped_query_attention_forward_prefill(
 
 
 def swiglu_ffn_forward_prefill(layer_idx):
+    if aie_ops.prefill.ffn_fused is not None:
+        c = aie_ops.prefill.ffn_fused
+        # Per-layer weights (host round-trip into the shared fused buffers).
+        c.get_buffer("W_ffn_gate").torch_view()[:] = (
+            aie_buffers.W_ffn_gate_prefill[layer_idx].to_torch().flatten())
+        c.get_buffer("W_ffn_up").torch_view()[:] = (
+            aie_buffers.W_ffn_up_prefill[layer_idx].to_torch().flatten())
+        c.get_buffer("W_ffn_down").torch_view()[:] = (
+            aie_buffers.W_ffn_down_prefill[layer_idx].to_torch().flatten())
+        # x_norm and x (residual stream) into the fused buffers.
+        c.get_buffer("x_norm").torch_view()[:] = (
+            aie_buffers.prefill.x_norm.to_torch().flatten())
+        c.get_buffer("x").torch_view()[:] = (
+            aie_buffers.prefill.x.to_torch().flatten())
+        c()
+        # Debug: dump fused intermediates for comparison against the
+        # verified separate-path dumps (LLAMA_FUSED_DUMP=/path/prefix).
+        _dfd = __import__("os").environ.get("LLAMA_FUSED_DUMP")
+        if _dfd and layer_idx < 2:
+            c.scratch_buffer.to("cpu")
+            for _bn in ("ffn_gate", "ffn_up", "ffn_hidden", "ffn_output"):
+                np.save(f"{_dfd}_{_bn}{layer_idx:02d}.npy",
+                        c.get_buffer(_bn).to_torch().float().numpy())
+            np.save(f"{_dfd}_x_out{layer_idx:02d}.npy",
+                    c.get_buffer("x").to_torch().float().numpy())
+        # Read the fused residual back into the app's x buffer.
+        # get_buffer("x") is a flat 1-D subview of the output BO; the app's
+        # buffer is (max_seq_len, emb_dim), so reshape (not flatten) to match.
+        aie_buffers.prefill.x.torch_view()[:] = c.get_buffer("x").to_torch().reshape(
+            aie_buffers.prefill.x.shape
+        )
+        aie_buffers.prefill.x.to("npu")
+        return
+
     # Step 1: Gate projection
     aie_ops.prefill.ffn_up_gate(
         aie_buffers.prefill.x_norm,
@@ -998,12 +1091,21 @@ def swiglu_ffn_forward_prefill(layer_idx):
         aie_buffers.prefill.ffn_gate,
     )
 
+    _df = __import__("os").environ.get("LLAMA_FFN_DUMP")
+    if _df and layer_idx < 2:
+        np.save(f"{_df}_gate{layer_idx:02d}.npy",
+                aie_buffers.prefill.ffn_gate.to_torch().float().numpy())
+
     # Step 2: Up projection
     aie_ops.prefill.ffn_up_gate(
         aie_buffers.prefill.x_norm,
         aie_buffers.W_ffn_up_prefill[layer_idx],
         aie_buffers.prefill.ffn_up,
     )
+
+    if _df and layer_idx < 2:
+        np.save(f"{_df}_up{layer_idx:02d}.npy",
+                aie_buffers.prefill.ffn_up.to_torch().float().numpy())
 
     # Step 3: Apply SiLU activation
     aie_ops.prefill.ffn_silu(aie_buffers.prefill.ffn_gate, aie_buffers.prefill.ffn_gate)
@@ -1015,12 +1117,20 @@ def swiglu_ffn_forward_prefill(layer_idx):
         aie_buffers.prefill.ffn_hidden,
     )
 
+    if _df and layer_idx < 2:
+        np.save(f"{_df}_hidden{layer_idx:02d}.npy",
+                aie_buffers.prefill.ffn_hidden.to_torch().float().numpy())
+
     # Step 5: Down projection
     aie_ops.prefill.ffn_down(
         aie_buffers.prefill.ffn_hidden,
         aie_buffers.W_ffn_down_prefill[layer_idx],
         aie_buffers.prefill.ffn_output,
     )
+
+    if _df and layer_idx < 2:
+        np.save(f"{_df}_output{layer_idx:02d}.npy",
+                aie_buffers.prefill.ffn_output.to_torch().float().numpy())
 
 
 def transformer_block_forward_prefill(
@@ -1057,6 +1167,10 @@ def transformer_block_forward_prefill(
     aie_ops.prefill.residual_add(
         aie_buffers.prefill.x, aie_buffers.prefill.attn_output, aie_buffers.prefill.x
     )
+    _dxin = __import__("os").environ.get("LLAMA_XIN_DUMP")
+    if _dxin and layer_idx in (0, 1, 5, 10, 20, 31):
+        np.save(f"{_dxin}_layer{layer_idx:02d}.npy",
+                aie_buffers.prefill.x.to_torch().float().numpy())
     x = aie_buffers.prefill.x.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 4: Post-norm
@@ -1067,15 +1181,25 @@ def transformer_block_forward_prefill(
         aie_buffers.W_norm2[layer_idx],
         aie_buffers.prefill.x_norm,
     )
+    _dx = __import__("os").environ.get("LLAMA_XNORM_DUMP")
+    if _dx and layer_idx < 2:
+        np.save(f"{_dx}_layer{layer_idx:02d}.npy",
+                aie_buffers.prefill.x_norm.to_torch().float().numpy())
     x_norm = aie_buffers.prefill.x_norm.to_torch().unsqueeze(0)[:, :seq_len, :]
 
     # Step 5: Feed-forward network
     swiglu_ffn_forward_prefill(layer_idx)
 
     # Step 6: Residual
-    aie_ops.prefill.residual_add(
-        aie_buffers.prefill.x, aie_buffers.prefill.ffn_output, aie_buffers.prefill.x
-    )
+    if aie_ops.prefill.ffn_fused is None:
+        aie_ops.prefill.residual_add(
+            aie_buffers.prefill.x, aie_buffers.prefill.ffn_output, aie_buffers.prefill.x
+        )
+
+    _dxp = __import__("os").environ.get("LLAMA_XPOST_DUMP")
+    if _dxp and layer_idx in (0, 1, 5, 10, 12, 14, 15):
+        np.save(f"{_dxp}_layer{layer_idx:02d}.npy",
+                aie_buffers.prefill.x.to_torch().float().numpy())
 
     return attn_keys, attn_values
 
@@ -1143,6 +1267,11 @@ def llama_forward_pass_prefill(config, state):
         )
         aie_buffers.keys_cache[layer_idx].to("npu")
         aie_buffers.values_cache[layer_idx].to("npu")
+
+    # DEBUG: dump first-token logits (determinism/correctness check).
+    _dump = __import__("os").environ.get("LLAMA_LOGITS_DUMP")
+    if _dump:
+        np.save(_dump, logits[0, -1, :].float().numpy())
 
     return logits, state
 
@@ -1233,8 +1362,14 @@ def main():
 
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
-    aie_ops = AIELlamaOperators(config, max_seq_len)
-    aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
+    # Prefill ops run at the real prompt length, padded up to the GEMM tile
+    # constraints (bf16: M % (tile_m*4) == 0 and N % (tile_n*8) == 0 -> 512).
+    # Decode ops and the KV caches keep the full max_seq_len.
+    seq_len = state.token_ids.shape[1]
+    prefill_len = max(512, ((seq_len + 511) // 512) * 512)
+
+    aie_ops = AIELlamaOperators(config, max_seq_len, prefill_len=prefill_len)
+    aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops, prefill_len=prefill_len)
 
     print(prompt, end="", flush=True)
     harness.generate(

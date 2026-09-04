@@ -20,6 +20,10 @@ template <typename T_in, typename T_out> void eltwise_vmul(T_in *a, T_in *b, T_o
 {
 
     event0();
+    // Round-to-nearest-even for the bf16 result conversion (see add.cc:
+    // without this the kernel inherits floor from a prior kernel and biases
+    // large values systematically).
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
     for (int i = 0; i < size; i += 32) {
         auto A = aie::load_v<32>(a + i);
         auto B = aie::load_v<32>(b + i);

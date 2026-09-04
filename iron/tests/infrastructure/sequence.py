@@ -204,6 +204,66 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 
 
 # ---------------------------------------------------------------------------
+# 3b. In-place (aliased) buffers in a fused runlist must be bit-stable.
+#
+# Regression for the fused-dispatch in-place bug: a runlist name in BOTH
+# input_args and output_args (e.g. (add, "x", "y", "x")) is allocated in the
+# output consolidated arena, so writing it through get_buffer().torch_view()
+# marks the OUTPUT BO dirty. SequenceFullELFCallable._sync_inputs() must push
+# all three consolidated buffers (input/output/scratch) or the write never
+# reaches the device and repeated dispatches intermittently run against stale
+# x. A correct implementation must return bit-identical output every dispatch.
+# ---------------------------------------------------------------------------
+
+
+def _run_inplace_add(context, dispatch, name, a, b, n_dispatches=8):
+    """out = x + y into x (in-place), dispatched n times on identical inputs."""
+    add = ElementwiseAdd(
+        size=_ADD_RELU_SIZE,
+        tile_size=_ADD_RELU_TILE,
+        num_aie_columns=_ADD_RELU_COLS,
+        context=context,
+    )
+    seq = OperatorSequence(
+        name=name,
+        runlist=[(add, "x", "y", "x")],
+        input_args=["x", "y"],
+        output_args=["x"],
+        dispatch=dispatch,
+        context=context,
+    ).compile()
+    call = seq.get_callable()
+    # warm-up
+    call.get_buffer("x").torch_view()[:] = a
+    call.get_buffer("y").torch_view()[:] = b
+    call()
+    outputs = []
+    for _ in range(n_dispatches):
+        call.get_buffer("x").torch_view()[:] = a
+        call.get_buffer("y").torch_view()[:] = b
+        call()
+        outputs.append(call.get_buffer("x").to_torch().clone())
+    return outputs
+
+
+@pytest.mark.supported_devices("npu2")
+def test_fused_inplace_buffer_bit_stable(aie_context):
+    """Repeated fused dispatches with an in-place buffer must be identical."""
+    torch.manual_seed(0)
+    a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    expected = (a.float() + b.float()).to(torch.bfloat16)
+
+    outputs = _run_inplace_add(aie_context, "fused", "infra_inplace_stable", a, b)
+    assert all(torch.equal(o, outputs[0]) for o in outputs[1:]), (
+        "in-place fused dispatch is not bit-stable across repeated dispatches"
+    )
+    assert torch.equal(outputs[0], expected), (
+        "in-place fused dispatch output is wrong vs the reference"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. Compare mode flags (and by default raises on) a per-step reference/NPU
 #    mismatch on its own.
 #

@@ -5,6 +5,7 @@
 
 import torch
 import math
+import numpy as _np
 import llama_inference_harness as harness
 
 # Operators
@@ -39,11 +40,16 @@ def rope_forward(x, angles):
 
 
 def rms_norm_forward(x, weight, eps=1e-5):
-    """Root Mean Square Layer Normalization"""
-    # x: (batch, seq_len, dim)
-    variance = x.pow(2).mean(-1, keepdim=True)
-    x = x * torch.rsqrt(variance + eps)
-    return weight * x
+    """Root Mean Square Layer Normalization (computed in fp32).
+
+    The bf16 variant (x.pow(2) on a bf16 tensor) loses catastrophic
+    precision on the model's large-magnitude channels (e.g. |217| squares),
+    corrupting the logits by ~corr 0.3 vs a correct fp32 norm.
+    """
+    xf = x.float()
+    variance = xf.pow(2).mean(-1, keepdim=True)
+    xn = xf * torch.rsqrt(variance + eps)
+    return (weight.float() * xn).to(x.dtype)
 
 
 def grouped_query_attention_forward(
@@ -272,6 +278,21 @@ def llama_forward_pass(config, state):
                 attn_mask=attn_mask,
             )
         )
+        _p = __import__("os").environ.get("LLAMA_PERTURB")
+        if _p and x.shape[1] > 1:
+            scale, dims_str = _p.split(":")
+            scale = float(scale)
+            dims = [int(d) for d in dims_str.split(",")]
+            for dim in dims:
+                x[0, 0, dim] = x[0, 0, dim] * (1.0 + scale)
+            if layer_idx < 3:
+                print(f"[perturb] layer {layer_idx}: +{scale*100:.1f}% at dims {dims}", flush=True)
+        # DEBUG: post-FFN x dump (matches NPU LLAMA_XPOST_DUMP)
+        _cx = __import__("os").environ.get("LLAMA_XPOST_DUMP")
+        if _cx and layer_idx in (0, 1, 5, 10, 12, 14, 15) and x.shape[1] > 1:
+            _np.save(f"{_cx}_layer{layer_idx:02d}.npy", x[0, :, :].float().numpy())
+
+
 
     # Step 4: Final normalization
     final_norm_weight = config.weights["model.norm.weight"]
@@ -281,6 +302,12 @@ def llama_forward_pass(config, state):
     logits = torch.nn.functional.linear(
         x, config.weights["model.embed_tokens.weight"]
     )  # (batch, seq_len, vocab_size)
+
+    # DEBUG: dump first-token logits (prefill ONLY — decode calls this too
+    # and would otherwise overwrite the reference with decode logits).
+    _dump = __import__("os").environ.get("LLAMA_LOGITS_DUMP")
+    if _dump and logits.shape[1] > 1:
+        _np.save(_dump, logits[0, -1, :].float().numpy())
 
     return logits, state
 
@@ -293,6 +320,10 @@ def main():
     args = harness.parse_args()
     prompt = harness.get_prompt(args.prompt_len)
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
+    # DEBUG: cast weights to fp32 to measure bf16 fragility (LLAMA_FP32=1).
+    if __import__("os").environ.get("LLAMA_FP32"):
+        config.weights = {k: v.float() for k, v in config.weights.items()}
+        print("[cpu] weights cast to fp32", flush=True)
     print(prompt, end="", flush=True)
     harness.generate(config, state, llama_forward_pass, num_tokens=args.num_tokens)
 

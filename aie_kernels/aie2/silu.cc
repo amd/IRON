@@ -11,6 +11,7 @@ using namespace aie;
 
 void silu_tanh_approx_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict output_vector, const int32_t vector_size)
 {
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
     event0();
 
     auto it_in = aie::begin_restrict_vector<32>((bfloat16 *)input_vector);

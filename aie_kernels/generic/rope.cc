@@ -10,6 +10,7 @@
 template <typename T, int N>
 void rope_kernel_interleaved(const T *restrict input, const T *restrict lut, T *restrict output, int32_t dims)
 {
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
     event0();
 
     for (int v = 0; v < dims; v += N) {
@@ -41,6 +42,7 @@ void rope_kernel_interleaved(const T *restrict input, const T *restrict lut, T *
 template <typename T, int N>
 void rope_kernel_two_halves(const T *restrict input, const T *restrict lut, T *restrict output, int32_t dims)
 {
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
     event0();
 
     auto dims_half = dims / 2;

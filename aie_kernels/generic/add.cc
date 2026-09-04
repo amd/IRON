@@ -23,6 +23,12 @@ template <typename T_in, typename T_out> void eltwise_vadd(T_in *a, T_in *b, T_o
 
     constexpr int vec_factor = 32;
     event0();
+    // Round-to-nearest-even for the bf16 result conversion. Without this the
+    // kernel inherits the rounding mode left by the previous kernel (often
+    // floor), which biases every element toward -inf/~0: at |200| that is a
+    // ~0.7% systematic error per residual, amplified by the model's outlier
+    // channels over 32 layers (observed: llama logits corr 0.32 vs CPU).
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
     T_in *__restrict pA1 = a;
     T_in *__restrict pB1 = b;
     T_out *__restrict pC1 = c;

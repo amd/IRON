@@ -579,8 +579,24 @@ class SequenceFullELFCallable(SequenceCallable):
         self.sequence_name = sequence_name
 
         assert isinstance(op.artifacts[0], comp.FullElfArtifact)
-        xrt_elf = pyxrt.elf(str(op.artifacts[0].filename))
-        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
+        _rt = aie_utils.DefaultNPURuntime
+        # The driver can transiently reject a new hw_context (EINVAL) while
+        # several contexts are resident (observed flakily at 13-14 contexts on
+        # Strix Halo). Retry with a fresh pyxrt.elf per attempt and without
+        # eviction: cached contexts may be held by live callables, so evicting
+        # them corrupts later dispatches.
+        xrt_context = None
+        for _attempt in range(8):
+            try:
+                xrt_context = pyxrt.hw_context(
+                    _rt._device, pyxrt.elf(str(op.artifacts[0].filename))
+                )
+                break
+            except RuntimeError as _e:
+                if _attempt == 7:
+                    raise
+                time.sleep(0.5)
+        assert xrt_context is not None
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
@@ -649,7 +665,17 @@ class SequenceFullELFCallable(SequenceCallable):
         # Sub-views handed out by get_buffer() share the parent's coherence map, so
         # a write through one (e.g. torch_view()) marks its byte range host-dirty
         # there too, and `to("npu")` here syncs every dirty range in one pass.
+        #
+        # Push dirty ranges on ALL THREE consolidated buffers: an in-place
+        # buffer (a runlist name in both input_args and output_args, e.g.
+        # residual_add's "x") is allocated in the OUTPUT arena (the output
+        # allocation overwrites the layout entry), so its host write marks the
+        # output BO dirty and the input-only push would never reach the device.
+        # That left x stale/racy on the device -- the intermittent wrong
+        # results observed with in-place runlists.
         self.input_buffer.to("npu")
+        self.output_buffer.to("npu")
+        self.scratch_buffer.to("npu")
 
     def _sync_outputs(self):
         # _run just rewrote the output arena on the device, so the device holds the

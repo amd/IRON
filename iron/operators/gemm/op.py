@@ -20,7 +20,22 @@ import aie.utils as aie_utils
 
 @dataclass
 class GEMM(MLIROperator):
-    """AIE-accelerated General Matrix Multiplication (GEMM) layer"""
+    """AIE-accelerated General Matrix Multiplication (GEMM) layer.
+
+    Supported integer data types: ``dtype_in="i8"`` / ``"i16"`` with
+    ``dtype_out="i32"`` (the only bit-exact integer output — integer
+    microkernels accumulate in 32 bits, and narrower outputs truncate and
+    are rejected). ``dtype_in="bf16"`` with ``"bf16"`` or ``"f32"`` output
+    is the default floating-point path.
+
+    Known flake (XRT/amdxdna, not this operator): on NPU2 (Strix Halo) a
+    dispatch can rarely (~5% per process) return a wrong result after
+    several *distinct* xclbins have been compiled in one process — the
+    zero/accumulate write races the first submit on a freshly-registered
+    context. It self-heals on the next dispatch. The repo test harness
+    already warms up and verifies; production callers should do the same
+    (warm-up once, verify the first result, retry once on mismatch).
+    """
 
     M: int
     K: int
@@ -34,8 +49,9 @@ class GEMM(MLIROperator):
     emulate_bf16_mmul_with_bfp16: bool = field(default=True, repr=False)
     prio_accuracy: bool = field(default=False, repr=False)
     round_conv_even: bool = field(default=True, repr=False)
-    dtype_in: str = field(default="bf16", repr=False)
-    dtype_out: str = field(default="bf16", repr=False)
+    dtype_in: str = field(default="bf16")
+    dtype_out: str = field(default="bf16")
+    dtype_b: str = field(default="")
     use_scalar: bool = field(default=False, repr=False)
     separate_c_tiles: bool = field(default=False, repr=False)
     context: object = field(default=None, repr=False)
@@ -61,23 +77,74 @@ class GEMM(MLIROperator):
         if self.N % min_N != 0:
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
-        if self.emulate_bf16_mmul_with_bfp16:
-            min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
+        # r/s/t MAC shapes per dtype (see microkernel_mac_dim_map in design.py).
+        # The vectorized kernels static_assert m % (2*r) == 0, k % s == 0,
+        # n % (2*t) == 0, so the tile must be a multiple of (2r, s, 2t).
+        # Asymmetric INT4 weights (dtype_b="i4") use the AIE2P 4x16x16 shape:
+        # K and N per MAC are 16 (2x int8xint8's density), so tile_k and
+        # tile_n must be multiples of 16 and 32 respectively.
+        if self.dtype_in == "i8" and self.dtype_b == "i4":
+            r, s, t = 4, 16, 16
+        elif self.dtype_in == "i8":
+            r, s, t = 8, 8, 8
+        elif self.dtype_in == "i16":
+            r, s, t = 4, 4, 8
+        elif self.emulate_bf16_mmul_with_bfp16:
+            r, s, t = 8, 8, 8
         else:
-            min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        if self.tile_m < min_tile_m:
-            raise ValueError(f"tile_m ({self.tile_m}) must be >= {min_tile_m}")
-        if self.tile_k < min_tile_k:
-            raise ValueError(f"tile_k ({self.tile_k}) must be >= {min_tile_k}")
-        if self.tile_n < min_tile_n:
-            raise ValueError(f"tile_n ({self.tile_n}) must be >= {min_tile_n}")
+            r, s, t = 4, 8, 8
+        min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
+        if (self.tile_m % min_tile_m) != 0 or (self.tile_k % min_tile_k) != 0 or (self.tile_n % min_tile_n) != 0:
+            raise ValueError(
+                f"tile sizes ({self.tile_m},{self.tile_k},{self.tile_n}) must be multiples of "
+                f"({min_tile_m},{min_tile_k},{min_tile_n}) for dtype {self.dtype_in}"
+            )
+
+        # Integer microkernels accumulate in 32 bits (accauto resolves int8xint8
+        # and int16xint16 to a 32-bit accumulator). Narrowing that accumulator
+        # into a smaller output (i8->i8, i8->i16, i16->i16) silently truncates,
+        # so only the exact 32-bit integer output is supported.
+        if self.dtype_in in ("i8", "i16") and self.dtype_out != "i32":
+            raise ValueError(
+                f"dtype_out ({self.dtype_out}) for dtype_in={self.dtype_in} must be 'i32': "
+                f"integer microkernels accumulate in 32 bits; narrower outputs truncate"
+            )
 
         MLIROperator.__init__(self, context=self.context)
 
     @property
     def _kernel_flags_suffix(self):
         """Suffix encoding compile-time flags that affect the kernel binary."""
-        return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
+        return f"_{self.dtype_in}_{self.dtype_b or ''}_{self.dtype_out}_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
+
+    @property
+    def _kernel_dtype_flag(self) -> str:
+        """Compile-time -D flag selecting the dtype combo in aie_kernels/**/mm.cc.
+
+        The microkernel library instantiates extern-C entry points from a
+        ``combos(X)`` list; exactly one ``*_ONLY`` define narrows it to a
+        single (input, output) dtype pair so the object file exports only the
+        symbols this operator references.
+
+        With ``prio_accuracy`` the design accumulates in an internal f32 buffer
+        and resolves the kernels as ``matmul_{dtype_in}_f32`` / ``zero_f32``
+        (see design.py), so the kernel object must be built with the f32-output
+        combo even though the user-visible output dtype stays bf16.
+        """
+        if self.prio_accuracy:
+            if self.dtype_in != "bf16":
+                raise ValueError(
+                    f"prio_accuracy is only supported for dtype_in='bf16', got {self.dtype_in!r}"
+                )
+            return "bf16_f32_ONLY"
+        if self.dtype_in == "i8" and self.dtype_b == "i4":
+            return "i8_i4_ONLY"
+        return {
+            ("bf16", "bf16"): "bf16_bf16_ONLY",
+            ("bf16", "f32"): "bf16_f32_ONLY",
+            ("i8", "i32"): "i8_i32_ONLY",
+            ("i16", "i32"): "i16_i32_ONLY",
+        }[(self.dtype_in, self.dtype_out)]
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -97,6 +164,7 @@ class GEMM(MLIROperator):
                     "n_aie_cols": self.num_aie_columns,
                     "dtype_in_str": self.dtype_in,
                     "dtype_out_str": self.dtype_out,
+                    "dtype_b_str": self.dtype_b,
                     "b_col_maj": int(self.b_col_maj),
                     "c_col_maj": int(self.c_col_maj),
                     "use_scalar": self.use_scalar,
@@ -117,14 +185,11 @@ class GEMM(MLIROperator):
             f"-DDIM_K={self.tile_k}",
             f"-DDIM_N={self.tile_n}",
         ]
-        if self.prio_accuracy:
-            kernel_flags.append("-Dbf16_f32_ONLY")
-        else:
-            kernel_flags.append("-Dbf16_bf16_ONLY")
+        kernel_flags.append(f"-D{self._kernel_dtype_flag}")
+        if self.dtype_in == "bf16" and self.emulate_bf16_mmul_with_bfp16:
+            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
         if self.round_conv_even:
             kernel_flags.append("-DROUND_CONV_EVEN")
-        if self.emulate_bf16_mmul_with_bfp16:
-            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
         if self.b_col_maj:
             kernel_flags.append("-DB_COL_MAJ")
         if self.c_col_maj:
@@ -150,10 +215,13 @@ class GEMM(MLIROperator):
         ]
 
     def get_arg_spec(self):
+        # B (weights) is passed packed for asymmetric INT4: (K, N//2) int8
+        # storage, two nibbles per byte.
+        b_n = self.N // 2 if self.dtype_b == "i4" else self.N
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
             AIERuntimeArgSpec(
-                "in", (self.K, self.N) if not self.b_col_maj else (self.N, self.K)
+                "in", (self.K, b_n) if not self.b_col_maj else (b_n, self.K)
             ),  # input B (weights)
             AIERuntimeArgSpec(
                 "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
@@ -203,6 +271,37 @@ class GEMM(MLIROperator):
             B_padded[:K, :N] = B_np
         return B_padded
 
+    @staticmethod
+    def pack_i4(B_np):
+        """Pack an int8-valued (K, N) matrix into (K, N//2) int8 nibbles.
+
+        For ``dtype_b="i4"`` the caller stores 4-bit weights in an int8
+        array with values in [-8, 7]; this packs two nibbles per byte
+        (low nibble first: byte = (b_lo & 0xf) | (b_hi << 4)) matching the
+        kernel's int4 reinterpret. N must be even.
+
+        NOTE: the asymmetric INT4 GEMM (A=i8, B=i4, 4x16x16 mmul on AIE2P)
+        is bit-exact against a 32-bit reference for random and identity
+        inputs. The one subtlety lives in the microkernel, not here: the AIE
+        API's ``int4_t`` is an empty struct (``sizeof(int4) == 1``) although
+        each element is really 4 bits, so manual pointer arithmetic on
+        ``int4*`` (the j-block offset and the k-loop B advance) must halve
+        the element counts to land on the true packed byte offsets. ``mm.cc``
+        encodes this as ``B_ADV = size_B / 2`` for int4. With the corrected
+        strides the L2->L1 B stream is plain k-block-major (16 blocks of
+        16x16 int4) and the A stream is plain row-major, so no host-side
+        permutation is needed; pack plain, low-nibble-first.
+        """
+        B_np = np.asarray(B_np, dtype=np.int8)
+        K, N = B_np.shape
+        if N % 2 != 0:
+            raise ValueError(f"B N ({N}) must be even for INT4 packing")
+        packed = np.zeros((K, N // 2), dtype=np.int8)
+        packed[:, :] = (B_np[:, 0::2].astype(np.uint8) & 0x0F) | (
+            (B_np[:, 1::2].astype(np.uint8) & 0x0F) << 4
+        )
+        return packed
+
     def partition_B(self, B, partition_N):
         B_parts = [None] * partition_N
         if B is None:
@@ -215,4 +314,6 @@ class GEMM(MLIROperator):
                 B_parts[i] = self.pad_B(B[col_start:col_end, :])
             else:
                 B_parts[i] = self.pad_B(B[:, col_start:col_end])
+            if self.dtype_b == "i4":
+                B_parts[i] = self.pack_i4(B_parts[i])
         return B_parts
