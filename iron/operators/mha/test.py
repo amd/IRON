@@ -80,3 +80,40 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
     assert (
         len(errors["O"]) <= max_acceptable_errors
     ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
+
+
+@pytest.mark.parametrize(
+    "seq_len,dim,num_heads,num_pipelines,num_kv_heads",
+    [
+        # GQA: 8 query heads against 2 KV heads. K/V are a quarter of Q/O.
+        (16384, 64, 8, 8, 2),
+        # Standard MHA: num_kv_heads == 0 means num_kv_heads == num_heads.
+        (16384, 64, 1, 8, 0),
+    ],
+)
+def test_arg_spec_matches_design_shapes(
+    seq_len, dim, num_heads, num_pipelines, num_kv_heads
+):
+    """get_arg_spec sizes the runtime buffers; design.py declares the MLIR arg types.
+
+    Under GQA the two disagree on K and V by num_heads/num_KV_heads. Nothing catches
+    it today: run_test sizes input buffers from the supplied tensor rather than from
+    the spec, so only a fused OperatorSequence -- which asserts the MLIR arg count
+    equals the computed one -- would notice.
+    """
+    op = MHA(
+        num_heads=num_heads,
+        seq_len=seq_len,
+        d=dim,
+        num_KV_heads=num_kv_heads,
+        num_of_pipelines=num_pipelines,
+    )
+    q, k, v, o = (spec.shape[0] for spec in op.get_arg_spec())
+
+    # design.py: Q_ty is (heads, S_q_pad, d), KV_ty is (num_KV_heads, S_kv_pad * d).
+    pad = op._calculate_seq_padding(seq_len, num_pipelines)
+    kv_heads = num_kv_heads if num_kv_heads else num_heads
+    assert q == num_heads * pad * dim
+    assert o == num_heads * pad * dim
+    assert k == kv_heads * pad * dim
+    assert v == kv_heads * pad * dim
