@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import pytest
+import torch
 
 from iron.operators.strided_copy.op import StridedCopy
 from iron.operators.strided_copy.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.sequence import OperatorSequence
+from iron.common.test_utils import run_test, verify_buffer
 
 # Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim) and one
 # token's keys land in slot t of every group. SEQ is 128 rather than the real 2048 to
@@ -93,6 +96,60 @@ def test_strided_copy(kwargs, aie_context):
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_strided_copy_cache_offset_parameter(aie_context):
+    """llama_npu.py:319 is the operator's only production caller and drives
+    the KV-cache write's slot through output_offset_parameter
+    (ParameterScratchpad), with output_offset=0 as the base -- every arm
+    above bakes the offset in at compile time instead, so this path has no
+    coverage.
+
+    dispatch="fused" is the only mode with a ctrl scratchpad. Drives
+    cache_offset through one persistent run handle across three token
+    positions and checks the full cache buffer each time: a mis-scaled
+    addend (elements vs bytes) lands the write in the wrong slot, which a
+    target-slot-only check would miss.
+    """
+    base_kwargs = _kv_slot(SEQ, 0)
+    op = StridedCopy(
+        **base_kwargs, output_offset_parameter="cache_offset", context=aie_context
+    )
+    seq = OperatorSequence(
+        "strided_copy_cache_offset_cov",
+        [(op, "in", "out")],
+        input_args=["in"],
+        output_args=["out"],
+        dispatch="fused",
+        context=aie_context,
+    )
+    seq.compile()
+    run = seq.get_callable()
+    assert run.params is not None, "cache_offset did not produce a ctrl scratchpad"
+
+    out_buf = run.get_buffer("out")
+    expected = torch.zeros(base_kwargs["output_buffer_size"], dtype=torch.bfloat16)
+    out_buf.torch_view()[: expected.numel()] = expected
+    out_buf.to("npu")
+
+    for i, slot in enumerate((0, 5, SEQ - 1)):
+        golden = generate_golden_reference(
+            **base_kwargs, output_offset_addend=slot * HEAD_DIM, seed=i + 1
+        )
+        expected += golden["output"]
+
+        in_buf = run.get_buffer("in")
+        in_buf.torch_view()[: golden["input"].numel()] = golden["input"]
+        in_buf.to("npu")
+
+        run.params.write("cache_offset", np.int32(slot * HEAD_DIM))
+        run.params.sync()
+        run()
+
+        out = out_buf.torch_view()[: expected.numel()].clone()
+        errors = verify_buffer(out, "out", expected, rel_tol=0.0, abs_tol=0.0)
+        assert not errors, f"slot {slot}: {errors}"
 
 
 def test_transfer_size_not_dividing_per_channel_share_is_rejected(aie_context):
