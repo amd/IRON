@@ -215,8 +215,11 @@ def fused_mha(
     func_type = "" if vectorized else "_scalar"
     zero_kernel = Kernel(f"zero_{dtype_str}", "mha.o", [qk_ty])
 
+    # Pipelined entry point: 4*B_q/32 trips is 8 at the B_q=64 this operator is fixed
+    # to (op.py), safely >=6. Callers that lower B_q below 48 must switch back to
+    # passThroughLine.
     memcopy_kernel_scale = Kernel(
-        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+        f"passThroughLinePipelined", "mha_passThrough.o", [s_ty, s_ty, np.int32]
     )
 
     scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
