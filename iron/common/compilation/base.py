@@ -41,6 +41,7 @@ import os.path
 import shutil
 import zlib
 import logging
+import concurrent.futures
 import subprocess
 import importlib.util
 from dataclasses import dataclass, field
@@ -103,14 +104,46 @@ def plan(
     return [(rule, commands)] + plan(rules, graph, _seen_unavailable=unavailable)
 
 
+def _execute_rule(rule: CompilationRule, commands: list[CompilationCommand]) -> None:
+    """Run one rule's commands, concurrently when the rule says they are independent.
+
+    A rule that sets `commands_are_independent` emits one command per artifact in
+    its worklist, with no artifact depending on another's output -- kernel object
+    compiles are the case that matters, and they were costing the SUM of their
+    walls (7.9 s of a 17.1 s encoder-MHA build for two kernels).
+
+    Bounded by cores: each kernel compile is a single-threaded clang peaking near
+    205 MB of RSS. Set IRON_COMPILE_JOBS to override.
+    """
+    if not getattr(rule, "commands_are_independent", False) or len(commands) < 2:
+        for command in commands:
+            logging.debug(f"  Executing command: {command}")
+            if not command.run():
+                raise RuntimeError(f"Command failed: {command}")
+        return
+
+    try:
+        jobs = int(os.environ.get("IRON_COMPILE_JOBS", "0"))
+    except ValueError:
+        jobs = 0
+    if jobs <= 0:
+        jobs = os.cpu_count() or 1
+    jobs = min(jobs, len(commands))
+    logging.debug(f"  Executing {len(commands)} independent commands on {jobs} threads")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        results = list(pool.map(lambda c: (c, c.run()), commands))
+    # Report the first failure only after every sibling has finished, so a
+    # failing command cannot leave half-written outputs behind a raised error.
+    for command, success in results:
+        if not success:
+            raise RuntimeError(f"Command failed: {command}")
+
+
 def execute(plan_steps: list[tuple[CompilationRule, list[CompilationCommand]]]) -> None:
     for rule, commands in plan_steps:
         logging.debug(f"Applying rule: {rule.__class__.__name__}")
-        for command in commands:
-            logging.debug(f"  Executing command: {command}")
-            success = command.run()
-            if not success:
-                raise RuntimeError(f"Command failed: {command}")
+        _execute_rule(rule, commands)
 
 
 def compile(
@@ -474,6 +507,12 @@ class PythonCallbackCompilationCommand(CompilationCommand):
 class CompilationRule(ABC):
     """A compilation rule is applied to a artifact graph, producing compilation commands and a transformed artifact graph."""
 
+    #: Set by a rule whose `compile()` emits one command per worklist artifact,
+    #: none of them consuming another's output. `execute` may then run them
+    #: concurrently. Default off: a rule that batches dependent steps into one
+    #: application must keep its order, and only the rule knows which it is.
+    commands_are_independent: bool = False
+
     @abstractmethod
     def matches(self, artifact: CompilationArtifactGraph) -> bool:
         """Return true if this rule can be applied to any artifact in the artifact graph."""
@@ -758,6 +797,10 @@ def _find_working_tool(name, peano_dir, mlir_aie_dir):
 
 class KernelCompilationRule(CompilationRule):
     """Compile KernelObjectArtifacts using Peano (clang++) or xchesscc."""
+
+    # One command per KernelObjectArtifact, each reading its own source and
+    # writing its own object.
+    commands_are_independent = True
 
     def __init__(self, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs):
         self.peano_dir = peano_dir
