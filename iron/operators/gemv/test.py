@@ -4,8 +4,10 @@
 
 import pytest
 import aie.utils as aie_utils
+from ml_dtypes import bfloat16
 
 from iron.operators.gemv.op import GEMV
+from iron.operators.gemv.design import _shim_gran_elems, split_run
 from iron.operators.gemv.reference import (
     generate_golden_reference,
     generate_golden_reference_batched,
@@ -15,6 +17,30 @@ from iron.common.device_utils import get_kernel_dir
 import numpy as np
 import torch
 from iron.common.test_utils import run_test
+
+
+def test_shim_gran_elems_matches_dtype():
+    """GRAN_ELEMS used to be hard-coded to 2 (4-byte shim granule / 2-byte bf16), regardless
+    of what dtype was actually being transferred. Assert it now tracks the element width, and
+    that split_run's alignment is only correct when it does.
+    """
+    bf16_ty = np.dtype[bfloat16]
+    i8_ty = np.dtype[np.int8]
+    f32_ty = np.dtype[np.float32]
+
+    assert _shim_gran_elems(bf16_ty) == 2
+    assert _shim_gran_elems(i8_ty) == 4
+    assert _shim_gran_elems(f32_ty) == 1
+
+    # Concrete regression: at the old hard-coded gran=2, this run's best split has a lo
+    # (514) that is not a multiple of 4 -- illegal for a dtype whose real granule is 4
+    # (e.g. int8). Deriving gran from the dtype (as my_matvec's A_gran/C_gran now do)
+    # gives the aligned split instead.
+    run = 1028
+    wrong = split_run(run, gran=2)
+    right = split_run(run, gran=_shim_gran_elems(i8_ty))
+    assert wrong == (2, 514) and wrong[1] % 4 != 0
+    assert right == (257, 4) and right[1] % 4 == 0
 
 
 def get_params():

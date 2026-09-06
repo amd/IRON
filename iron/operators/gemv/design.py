@@ -24,6 +24,49 @@ Calls into the mv.cc kernel code. That kernel computes `m_input` output rows per
  - num_batches: number of iterations of this mat-vec to perform on contiguous matrices and vectors in memory (results concatenated)
 """
 
+# ShimNOC DMA BD field bounds. verifyStridesWraps (AIEXDialect.cpp) computes these per tile
+# type from the target model: ShimNOC wrap=10-bit/step=20-bit, MemTile wrap=10-bit/step=17-bit,
+# CoreTile wrap=8-bit/step=13-bit (getDmaBdWrapBits/getDmaBdStepBits). The batch-coalescing
+# below only ever emits shim BDs (the runtime sequence's fill/drain move L3<->L1 across the
+# shim), so SHIM_MAX_WRAP/SHIM_MAX_STRIDE are scoped to that tile type on purpose -- reusing
+# them for a MemTile or CoreTile transfer would silently under- or over-shoot the real limit.
+#
+# Neither accessor reaches Python today: getDmaBdWrapBits/getDmaBdStepBits have no CAPI or
+# nanobind binding, and getAddressGenGranularity has a CAPI entry
+# (aieGetTargetModelAddressGenGranularity) but isn't bound into aie.dialects.aie.AIETargetModel
+# either, so all three stay hard-coded here until one of those lands.
+SHIM_MAX_WRAP = 1023  # (1 << 10) - 1
+SHIM_MAX_STRIDE = (1 << 20) - 1
+# getAddressGenGranularity(); same on every AIE1/AIE2 target model today.
+SHIM_ADDR_GRAN_BITS = 32
+
+
+def _shim_gran_elems(dtype_generic) -> int:
+    """Elements per shim DMA address-generation granule for a `np.dtype[T]` generic (as
+    `dtype_in`/`dtype_out` are below).
+
+    Mirrors what verifyStridesWraps computes from getAddressGenGranularity() and the memref's
+    actual element type, so callers get the granule for THEIR dtype instead of the bf16-only
+    value (2) this used to hard-code regardless of what was actually being transferred.
+    """
+    elem_bits = np.dtype(dtype_generic.__args__[0]).itemsize * 8
+    assert SHIM_ADDR_GRAN_BITS % elem_bits == 0, (
+        f"{dtype_generic} is {elem_bits}-bit, which does not evenly divide the "
+        f"{SHIM_ADDR_GRAN_BITS}-bit shim address-generation granularity"
+    )
+    return SHIM_ADDR_GRAN_BITS // elem_bits
+
+
+def split_run(run, lim=SHIM_MAX_WRAP, gran=2):
+    """Factor a contiguous run into (hi, lo), both <= lim and lo a multiple of gran
+    (the address-granularity-aligned inner size), lo maximal. None if no such
+    split exists (caller then falls back to the per-batch path)."""
+    lo_start = (lim // gran) * gran
+    for lo in range(lo_start, 0, -gran):
+        if run % lo == 0 and (run // lo) <= lim:
+            return (run // lo, lo)
+    return None
+
 
 def my_matvec(
     dev,
@@ -190,36 +233,18 @@ def my_matvec(
     # gathers its own slice out of every batch with a gap in between.
     #
     # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
-    # the AIE shim's 10-bit (1023) wrap-size cap.
-    #
-    # FIXME: pull these shim BD bounds from the MLIR-AIE target model rather than
-    # hard-coding them; they live in verifyStridesWraps in
-    # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
-    MAX_WRAP = 1023
-    GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
-    # The 20-bit shim BD step field counts address granules, not elements, so the
-    # bound converts: an element-unit bound is 2x too strict for bf16.
-    MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
-
-    def split_run(run, lim=MAX_WRAP, gran=GRAN_ELEMS):
-        """Factor a contiguous run into (hi, lo), both <= lim and lo a multiple of gran
-        (the address-granularity-aligned inner size), lo maximal. None if no such
-        split exists (caller then falls back to the per-batch path)."""
-        lo_start = (lim // gran) * gran
-        for lo in range(lo_start, 0, -gran):
-            if run % lo == 0 and (run // lo) <= lim:
-                return (run // lo, lo)
-        return None
-
+    # the ShimNOC BD's 10-bit (1023) wrap-size cap -- see SHIM_MAX_WRAP/split_run() above.
+    A_gran, C_gran = _shim_gran_elems(dtype_in), _shim_gran_elems(dtype_out)
     A_run, A_bstride = (M // cols) * K, M * K
     C_run, C_bstride = (M // cols), M
-    A_split, C_split = split_run(A_run), split_run(C_run)
+    A_split = split_run(A_run, gran=A_gran)
+    C_split = split_run(C_run, gran=C_gran)
     coalesce = (
         num_batches > 1
-        and A_bstride <= MAX_STRIDE
-        and C_bstride <= MAX_STRIDE
-        and A_bstride % GRAN_ELEMS == 0
-        and C_bstride % GRAN_ELEMS == 0
+        and A_bstride <= SHIM_MAX_STRIDE
+        and C_bstride <= SHIM_MAX_STRIDE
+        and A_bstride % A_gran == 0
+        and C_bstride % C_gran == 0
         and A_split is not None
         and C_split is not None
     )
