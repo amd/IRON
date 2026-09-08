@@ -127,10 +127,21 @@ def flm_gemm(
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
     rem_blocks = (N % MIN_N) // N_TILE
-    # Per column: how many column-blocks it computes, and whether it has to sit
-    # out a trailing one while still draining the A broadcast for its row.
-    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(COLS)]
-    col_drain = [1 if (rem_blocks and c >= rem_blocks) else 0 for c in range(COLS)]
+    # Columns that participate at all. With no full sweep (N below the grid's
+    # COLS*N_TILE stride) only the first rem_blocks columns do, and the rest
+    # are not instantiated -- giving them fifos that nothing ever drains builds
+    # dead dataflow, which newer mlir-aie rejects outright with
+    # "objectfifo.pool op segment 0 has no drainer".
+    n_active_cols = COLS if n_full else rem_blocks
+    # Per column: how many column-blocks it computes, and whether it sits out a
+    # trailing one while still draining the A broadcast for its row. That drain
+    # only arises for a column that exists and skips the trailing block, which
+    # requires at least one full sweep.
+    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(n_active_cols)]
+    col_drain = [
+        1 if (rem_blocks and n_full and c >= rem_blocks) else 0
+        for c in range(n_active_cols)
+    ]
 
     # L1 (per compute tile)
     ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
@@ -204,7 +215,7 @@ def flm_gemm(
     # DDR as one contiguous (ROWS*M_TILE) x N_TILE block.
     c_l2l3_fifos = []
     c_prod = {}
-    for c in range(COLS):
+    for c in range(n_active_cols):
         of_c = ObjectFifo(mt_out_ty, name=f"C_L2L3_{c}", depth=C_DEPTH)
         c_l2l3_fifos.append(of_c)
         sub = of_c.prod().join(
@@ -233,14 +244,15 @@ def flm_gemm(
             name=f"A_L2L1_{r}",
             dims_to_stream=a_send_dims,
         )
-        # One cons() handle per column: every tile in the row sees this object.
-        for c in range(COLS):
+        # One cons() handle per active column; every tile in the row sees
+        # this object, so inactive columns must not be consumers at all.
+        for c in range(n_active_cols):
             a_cons[(r, c)] = of_a.cons()
 
     # B: shim -> memtile -> broadcast down the compute column.
     b_l3l2_fifos = []
     b_cons = {}
-    for c in range(COLS):
+    for c in range(n_active_cols):
         of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
         b_l3l2_fifos.append(of_b_in)
         of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
@@ -303,7 +315,7 @@ def flm_gemm(
 
     workers = []
     for r in range(ROWS):
-        for c in range(COLS):
+        for c in range(n_active_cols):
             tile = Tile(c, r + 2)
             acc = Buffer(tile=tile, type=ct_acc_ty, name=f"c_acc_{r}_{c}")
             workers.append(
