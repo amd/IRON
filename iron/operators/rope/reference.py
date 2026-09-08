@@ -122,8 +122,10 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     dim (length ``cols``).  Only ``method_type == 0`` (TWO_HALVES) is supported
     here; the golden-data generator uses :func:`apply_rope`, which additionally
     supports the interleaved method and works from the full-precision cos/sin
-    tables.  ``angles`` may have fewer rows than ``x``; in that case the angles
-    are tiled along the row dimension to match ``x``.
+    tables.  ``angles`` may have fewer rows than ``x``; in that case each angle
+    row is repeated for ``rows / angles.shape[0]`` *consecutive* rows of ``x``,
+    matching the device kernel (design.py's ``core_body`` acquires one angle
+    row and applies it to that many consecutive input rows before moving on).
     """
     if method_type != 0:
         raise NotImplementedError(
@@ -140,8 +142,11 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     if cos.shape[0] != rows:
         if rows % cos.shape[0] == 0:
             rep = rows // cos.shape[0]
-            cos = cos.repeat(rep, 1)
-            sin = sin.repeat(rep, 1)
+            # repeat_interleave, not repeat: the device applies one angle row
+            # to `rep` *consecutive* input rows, not to `rep` tiled copies of
+            # the whole angle block (see design.py's core_body).
+            cos = cos.repeat_interleave(rep, dim=0)
+            sin = sin.repeat_interleave(rep, dim=0)
         else:
             cos = cos[:rows]
             sin = sin[:rows]
