@@ -27,9 +27,13 @@ class SwiGLUPrefill(OperatorSequence):
         self.embedding_dim = embedding_dim
         self.prio_accuracy = prio_accuracy
 
-        # All operators (GEMM, SiLU, ElementwiseMul) apply their own padding
-        # to meet hardware alignment requirements. We store the padded dimensions
-        # from GEMM and size SiLU/ElementwiseMul to match.
+        # None of GEMM, SiLU, ElementwiseMul pad: each raises ValueError in
+        # __post_init__ if its shape doesn't already meet hardware alignment
+        # requirements (e.g. GEMM needs M % (tile_m * 4) == 0). So seq_len,
+        # embedding_dim and hidden_dim must already be aligned, or
+        # construction fails below. We read the dims back off gemm_1 (rather
+        # than reusing self.seq_len etc.) only to size SiLU/ElementwiseMul
+        # from the same source GEMM validated, not because they differ.
         accuracy_flags = {}
         if self.prio_accuracy:
             accuracy_flags = {
@@ -48,19 +52,19 @@ class SwiGLUPrefill(OperatorSequence):
             num_aie_columns=n_cols,
             **accuracy_flags,
         )
-        self.seq_len_padded = gemm_1.M
-        self.embedding_dim_padded = gemm_1.K
-        self.hidden_dim_padded = gemm_1.N
+        self.seq_len_aligned = gemm_1.M
+        self.embedding_dim_aligned = gemm_1.K
+        self.hidden_dim_aligned = gemm_1.N
 
         silu = SiLU(
-            size=self.seq_len_padded * self.hidden_dim_padded,
+            size=self.seq_len_aligned * self.hidden_dim_aligned,
             num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_padded // n_cols,
+            tile_size=self.hidden_dim_aligned // n_cols,
         )
         eltwise_mul = ElementwiseMul(
-            size=self.seq_len_padded * self.hidden_dim_padded,
+            size=self.seq_len_aligned * self.hidden_dim_aligned,
             num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_padded // n_cols,
+            tile_size=self.hidden_dim_aligned // n_cols,
         )
         gemm_2 = GEMM(
             M=self.seq_len,
