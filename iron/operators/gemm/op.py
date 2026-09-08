@@ -62,16 +62,33 @@ class GEMM(MLIROperator):
         if self.N % min_N != 0:
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
+        # r, s, t are the aie::mmul tile dims the bf16 kernel is built from
+        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul): it expands A
+        # and B 2x in m and n, so the static_asserts there require
+        # m % (2*r) == 0, k % s == 0, n % (2*t) == 0 -- a divisibility rule,
+        # not a lower bound. A tile_m/tile_n that merely meets the old ">="
+        # check (e.g. 8 or 12) passes here and then fails that static_assert
+        # at kernel compile time, in a file this class never names.
         if self.emulate_bf16_mmul_with_bfp16:
-            min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
+            r, s, t = 8, 8, 8
         else:
-            min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        if self.tile_m < min_tile_m:
-            raise ValueError(f"tile_m ({self.tile_m}) must be >= {min_tile_m}")
-        if self.tile_k < min_tile_k:
-            raise ValueError(f"tile_k ({self.tile_k}) must be >= {min_tile_k}")
-        if self.tile_n < min_tile_n:
-            raise ValueError(f"tile_n ({self.tile_n}) must be >= {min_tile_n}")
+            r, s, t = 4, 8, 8
+        min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
+        if self.tile_m % min_tile_m != 0:
+            raise ValueError(
+                f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
+                f"(aie_kernels/aie2p/mm.cc requires m % (2*r) == 0, r={r})"
+            )
+        if self.tile_k % min_tile_k != 0:
+            raise ValueError(
+                f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
+                f"(aie_kernels/aie2p/mm.cc requires k % s == 0, s={s})"
+            )
+        if self.tile_n % min_tile_n != 0:
+            raise ValueError(
+                f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
+                f"(aie_kernels/aie2p/mm.cc requires n % (2*t) == 0, t={t})"
+            )
 
         MLIROperator.__init__(self, context=self.context)
 
