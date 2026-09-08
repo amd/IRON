@@ -34,7 +34,7 @@ class GEMV(MLIROperator):
     epilogue: str = field(default="none", repr=False)
     # Optional norm applied to the shared vector once before the matvec, fusing a
     # RMSNorm/LayerNorm decode prologue into the same dispatch. Affine-free (gamma/beta
-    # fold into the weight matrix host-side, same convention the norm kernels already use).
+    # fold into the weight matrix host-side).
     prologue: str = field(default="none", repr=False)
     context: object = field(default=None, repr=False)
 
