@@ -108,8 +108,8 @@ class MHA(MLIROperator):
 
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
-        # design.py declares Q and O as (heads, S_q_pad, d) but K and V as
-        # (num_KV_heads, S_kv_pad * d), and treats num_KV_heads == 0 as plain MHA.
+        # design.py declares Q/O as (heads, S_q_pad, d) and K/V as
+        # (num_KV_heads, S_kv_pad * d); num_KV_heads == 0 means plain MHA.
         kv_heads = self.num_KV_heads if self.num_KV_heads else self.num_heads
         q_size = self.num_heads * self.d * seq_padding
         kv_size = kv_heads * self.d * seq_padding
