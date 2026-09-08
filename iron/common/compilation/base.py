@@ -382,15 +382,11 @@ class KernelObjectArtifact(CompilationArtifact):
         extra_flags: list[str] | None = None,
         rename_symbols: dict[str, str] | None = None,
         prefix_symbols: str | None = None,
-        inline_symbol: str | None = None,
     ) -> None:
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
-        # Required when filename is a .ll/.bc: the symbol to mark alwaysinline
-        # so aiecc inlines it after llvm-linking the module into the core.
-        self.inline_symbol = inline_symbol
 
 
 class KernelArchiveArtifact(CompilationArtifact):
@@ -794,23 +790,6 @@ class KernelCompilationRule(CompilationRule):
                     "-Wno-missing-template-arg-list-after-template-kw"
                 ] + compile_args
 
-            # A .ll/.bc output means the kernel is meant to be llvm-linked into
-            # the core and inlined (aie.iron's ExternalFunction(inline=True)
-            # declares it with link_with_mode = "merge") rather than left as a
-            # call. That is a Peano-only path; xchesscc has no equivalent.
-            inline = str(artifact.filename).endswith((".ll", ".bc"))
-            if inline and self.use_chess:
-                raise RuntimeError(
-                    f"Kernel artifact '{artifact.filename}' requests an inline "
-                    "(.ll/.bc) build, which requires the Peano compiler; this "
-                    "compilation is configured for chess."
-                )
-            if inline and not artifact.inline_symbol:
-                raise RuntimeError(
-                    f"Kernel artifact '{artifact.filename}' is an inline "
-                    "(.ll/.bc) build and must name the symbol to inline via "
-                    "KernelObjectArtifact(inline_symbol=...)."
-                )
             commands.append(
                 PythonCallbackCompilationCommand(
                     partial(
@@ -821,8 +800,6 @@ class KernelCompilationRule(CompilationRule):
                         include_dirs=[str(runtime_lib_include_path)],
                         compile_args=compile_args,
                         use_chess=self.use_chess,
-                        inline=inline,
-                        symbol_name=artifact.inline_symbol if inline else None,
                     )
                 )
             )

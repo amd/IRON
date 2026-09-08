@@ -24,15 +24,12 @@ below are the single source of truth: ``op.py`` passes them to the kernels as
 -D flags, so the C++ and the dataflow cannot drift apart.
 """
 
-from pathlib import Path
-
 import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
-    ExternalFunction,
     Kernel,
     ObjectFifo,
     Program,
@@ -92,9 +89,6 @@ def flm_gemm(
     epilogue="none",
     kernel_object="flm_gemm.o",
     epilogue_object="flm_gemm_epilogue.o",
-    epilogue_source=None,
-    epilogue_flags=None,
-    inline_epilogue=False,
     trace_size=0,
 ):
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
@@ -161,28 +155,11 @@ def flm_gemm(
     k_step = Kernel(
         "flm_gemm_k_step", kernel_object, [ct_a_obj_ty, ct_b_ty, ct_acc_ty]
     )
-    epilogue_arg_types = [ct_out_ty, ct_acc_ty, np.int32, np.int32]
-    if inline_epilogue:
-        # Compile the epilogue to alwaysinline LLVM IR so aiecc llvm-links it
-        # into the core instead of leaving a call. The epilogue is short and
-        # runs once per C object, so the call overhead the C ObjectFifo
-        # introduces is a real cost here -- whereas inlining the much larger
-        # mmul measures worse, which is why only this one is merged.
-        if epilogue_source is None:
-            raise ValueError("inline_epilogue requires epilogue_source")
-        epilogue_chunk = ExternalFunction(
-            EPILOGUE_SYMBOL,
-            object_file_name=str(Path(epilogue_object).with_suffix(".ll")),
-            source_file=str(epilogue_source),
-            inline=True,
-            arg_types=epilogue_arg_types,
-            include_dirs=[str(Path(epilogue_source).parent)],
-            compile_flags=list(epilogue_flags or []),
-        )
-    else:
-        epilogue_chunk = Kernel(
-            EPILOGUE_SYMBOL, epilogue_object, epilogue_arg_types
-        )
+    epilogue_chunk = Kernel(
+        EPILOGUE_SYMBOL,
+        epilogue_object,
+        [ct_out_ty, ct_acc_ty, np.int32, np.int32],
+    )
 
     # --- Data movement ----------------------------------------------------
     #

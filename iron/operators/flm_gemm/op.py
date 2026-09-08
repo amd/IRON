@@ -20,7 +20,6 @@ from iron.operators.flm_gemm.design import (
     C_DEPTH,
     CT_OUT_LEN,
     EPILOGUE_MODES,
-    EPILOGUE_SYMBOL,
     K_TILE,
     MIN_K,
     MIN_M,
@@ -48,9 +47,6 @@ class FLMGEMM(MLIROperator):
     epilogue: str = field(default="none", repr=False)
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = field(default=None, repr=False)
-    # Compile the epilogue to alwaysinline LLVM IR merged into the core,
-    # rather than leaving it as a call. See design.py.
-    inline_epilogue: bool = field(default=True, repr=False)
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {**MLIROperator._name_aliases}
@@ -89,13 +85,6 @@ class FLMGEMM(MLIROperator):
             base = f"{base}_epi{self.epilogue}"
         if self.clamp is not None:
             base = f"{base}_clamp{self._clamp_tag}"
-        if not self.inline_epilogue:
-            # Different core binary, so it must not share an artifact name with
-            # the inlined build -- otherwise a cached xclbin from one satisfies
-            # the other and an A/B of the two silently compares a binary with
-            # itself. (The GEMM operator has this hazard for its
-            # emulate_bf16_mmul_with_bfp16 / prio_accuracy flags.)
-            base = f"{base}_noinline"
         return base
 
     @property
@@ -108,8 +97,7 @@ class FLMGEMM(MLIROperator):
         obj = f"flm_gemm_epilogue_{self.epilogue}"
         if self.clamp is not None:
             obj = f"{obj}_clamp{self._clamp_tag}"
-        # .ll is llvm-linked into the core and inlined; .o is left as a call.
-        return f"{obj}.ll" if self.inline_epilogue else f"{obj}.o"
+        return f"{obj}.o"
 
     @property
     def _epilogue_source(self):
@@ -117,8 +105,7 @@ class FLMGEMM(MLIROperator):
 
     @property
     def _epilogue_flags(self) -> list[str]:
-        """Compile flags for the epilogue, shared by the inline and
-        separately-compiled paths so the two cannot drift apart."""
+        """Compile flags for the epilogue."""
         flags = [
             f"-DFLM_GEMM_OUT_CHUNK={CT_OUT_LEN}",
             f"-DFLM_GEMM_C_DEPTH={C_DEPTH}",
@@ -154,9 +141,6 @@ class FLMGEMM(MLIROperator):
                     "epilogue": self.epilogue,
                     "kernel_object": self._kernel_object,
                     "epilogue_object": self._epilogue_artifact,
-                    "epilogue_source": str(self._epilogue_source),
-                    "epilogue_flags": self._epilogue_flags,
-                    "inline_epilogue": self.inline_epilogue,
                     "trace_size": 0,
                 },
             ),
@@ -188,19 +172,11 @@ class FLMGEMM(MLIROperator):
                 ],
             ),
         ]
-        # Inlined, this is a .ll that aiecc llvm-links into the core; otherwise
-        # an ordinary .o it calls. Either way the build system produces it --
-        # design.py's ExternalFunction only supplies the merge-mode
-        # declaration in the MLIR, it does not compile anything under IRON's
-        # compilation flow.
         artifacts.append(
             KernelObjectArtifact(
                 self._epilogue_artifact,
                 dependencies=[SourceArtifact(self._epilogue_source)],
                 extra_flags=self._epilogue_flags,
-                inline_symbol=(
-                    EPILOGUE_SYMBOL if self.inline_epilogue else None
-                ),
             )
         )
         return artifacts
