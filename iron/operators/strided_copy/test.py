@@ -100,17 +100,10 @@ def test_strided_copy(kwargs, aie_context):
 
 @pytest.mark.supported_devices("npu2")
 def test_strided_copy_cache_offset_parameter(aie_context):
-    """llama_npu.py:319 is the operator's only production caller and drives
-    the KV-cache write's slot through output_offset_parameter
-    (ParameterScratchpad), with output_offset=0 as the base -- every arm
-    above bakes the offset in at compile time instead, so this path has no
-    coverage.
+    """dispatch="fused" is the only mode with a ctrl scratchpad.
 
-    dispatch="fused" is the only mode with a ctrl scratchpad. Drives
-    cache_offset through one persistent run handle across three token
-    positions and checks the full cache buffer each time: a mis-scaled
-    addend (elements vs bytes) lands the write in the wrong slot, which a
-    target-slot-only check would miss.
+    The whole cache is checked rather than the target slot: a mis-scaled addend
+    (elements vs bytes) lands the write in a different slot.
     """
     base_kwargs = _kv_slot(SEQ, 0)
     op = StridedCopy(
