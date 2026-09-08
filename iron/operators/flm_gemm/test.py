@@ -16,11 +16,18 @@ def get_params():
     if dev.cols < 8 or dev.resolve().name != "npu2":
         return []
 
+    # N values that are NOT a multiple of N_TILE*COLS=1024 exercise the
+    # trailing partial column-block, where some columns compute it and the
+    # rest only drain the A broadcast. Real transformer o/down projections
+    # have N = model dim, so they always land here: 1536 leaves 4 active
+    # columns, 2560 leaves 4, and 128 leaves just 1.
     # fmt: off
     #      M,    K,     N, epilogue,    clamp
     regular_params = [
-        (  256,  512,  1024, "none",     None),   # smallest legal shape: one grid sweep
+        (  256,  512,  1024, "none",     None),   # smallest full sweep
         (  512, 1024,  2048, "none",     None),
+        (  256,  512,  1536, "none",     None),   # remainder: 4 of 8 columns
+        (  256,  512,   128, "none",     None),   # remainder only: 1 column
         (  256,  512,  1024, "silu",     None),
         (  256,  512,  1024, "gelu",     None),
         (  256,  512,  1024, "none", (-2.0, 2.0)),
@@ -28,6 +35,8 @@ def get_params():
     extensive_params = [
         ( 1024, 2048,  2048, "none",     None),
         ( 2048, 2048,  2048, "none",     None),
+        ( 1024, 2560,  2560, "none",     None),   # E4B o-projection shape
+        (  512, 1536,  1536, "silu",     None),   # E2B down-projection shape
         (  256,  512,  1024, "sigmoid",  None),
         (  512, 1024,  2048, "silu", (-4.0, 4.0)),
     ]

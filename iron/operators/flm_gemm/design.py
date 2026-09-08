@@ -107,10 +107,13 @@ def flm_gemm(
         raise ValueError(
             f"epilogue must be one of {sorted(EPILOGUE_MODES)}, got {epilogue!r}"
         )
-    # The design has no partial-block path: a compute tile either does a full
-    # m x n block of work or none at all. The existing gemm operator constrains
-    # its shapes the same way.
-    for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, MIN_N)):
+    # A compute tile does a whole m x n block or nothing, so M and K must tile
+    # exactly. N need only be a multiple of N_TILE: a trailing group of fewer
+    # than COLS blocks is handled by giving the columns different trip counts
+    # (see col_work / col_drain below). That matters in practice -- for a
+    # transformer the o and down projections have N = model dim, which is
+    # essentially never a multiple of N_TILE*COLS.
+    for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, N_TILE)):
         if value % unit != 0:
             raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
 
@@ -118,9 +121,16 @@ def flm_gemm(
     f32 = np.dtype[np.float32]
 
     # How many times the whole grid sweeps, in each dimension.
-    n_col_blocks = N // MIN_N
     m_row_blocks = M // MIN_M
     k_iters = K // K_TILE
+    # Sweeps where all COLS columns have work, plus a trailing group of
+    # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
+    n_full = N // MIN_N
+    rem_blocks = (N % MIN_N) // N_TILE
+    # Per column: how many column-blocks it computes, and whether it has to sit
+    # out a trailing one while still draining the A broadcast for its row.
+    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(COLS)]
+    col_drain = [1 if (rem_blocks and c >= rem_blocks) else 0 for c in range(COLS)]
 
     # L1 (per compute tile)
     ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
@@ -244,30 +254,52 @@ def flm_gemm(
             b_cons[(r, c)] = of_b.cons()
 
     # --- Compute ----------------------------------------------------------
-    def core_fn(acc, o_h, b_h, a_h, init_k, kstep_k, epi_k):
-        # The loop nest lives here rather than inside the kernel so that every
-        # level has an ObjectFifo acquire point. With M/K/N known at compile
-        # time all the trip counts are constants.
-        for _ in range_(n_col_blocks):
-            for _ in range_(m_row_blocks):
-                init_k(acc)
-                for _ in range_(k_iters):
-                    # The l loop is unrolled by the B fifo depth so the
-                    # acquired buffer index stays a compile-time constant.
-                    for _ in range_(B_ITERS // B_DEPTH):
-                        for _ in range(B_DEPTH):
-                            b = b_h.acquire(1)
-                            a = a_h.acquire(1)
-                            kstep_k(a, b, acc)
-                            a_h.release(1)
-                            b_h.release(1)
-                # Drain the accumulator. Unrolled by C_DEPTH for the same
-                # reason; a full O_CHUNKS unroll overflows program memory.
-                for chunk in range_(O_CHUNKS // C_DEPTH):
-                    for half in range(C_DEPTH):
-                        o = o_h.acquire(1)
-                        epi_k(o, acc, chunk, half)
-                        o_h.release(1)
+    def make_core_fn(n_work, n_drain):
+        """Core body for a column that computes ``n_work`` column-blocks and
+        then drains A for ``n_drain`` more (0 or 1)."""
+
+        def core_fn(acc, o_h, b_h, a_h, init_k, kstep_k, epi_k):
+            # The loop nest lives here rather than inside the kernel so that
+            # every level has an ObjectFifo acquire point. With M/K/N known at
+            # compile time all the trip counts are constants.
+            if n_work:
+                for _ in range_(n_work):
+                    for _ in range_(m_row_blocks):
+                        init_k(acc)
+                        for _ in range_(k_iters):
+                            # The l loop is unrolled by the B fifo depth so the
+                            # acquired buffer index stays a compile-time
+                            # constant.
+                            for _ in range_(B_ITERS // B_DEPTH):
+                                for _ in range(B_DEPTH):
+                                    b = b_h.acquire(1)
+                                    a = a_h.acquire(1)
+                                    kstep_k(a, b, acc)
+                                    a_h.release(1)
+                                    b_h.release(1)
+                        # Drain the accumulator. Unrolled by C_DEPTH for the
+                        # same reason; a full O_CHUNKS unroll overflows program
+                        # memory.
+                        for chunk in range_(O_CHUNKS // C_DEPTH):
+                            for half in range(C_DEPTH):
+                                o = o_h.acquire(1)
+                                epi_k(o, acc, chunk, half)
+                                o_h.release(1)
+            if n_drain:
+                # The trailing partial column-block, for a column that sits it
+                # out. A is broadcast along the whole compute row, so this
+                # column must still consume its share or the columns that DO
+                # have work stall waiting for the fifo to advance. No B and no
+                # C here -- the runtime sequence issues neither for it.
+                for _ in range_(n_drain):
+                    for _ in range_(m_row_blocks):
+                        for _ in range_(k_iters):
+                            for _ in range_(B_ITERS // B_DEPTH):
+                                for _ in range(B_DEPTH):
+                                    a_h.acquire(1)
+                                    a_h.release(1)
+
+        return core_fn
 
     workers = []
     for r in range(ROWS):
@@ -276,7 +308,7 @@ def flm_gemm(
             acc = Buffer(tile=tile, type=ct_acc_ty, name=f"c_acc_{r}_{c}")
             workers.append(
                 Worker(
-                    core_fn,
+                    make_core_fn(col_work[c], col_drain[c]),
                     [
                         acc,
                         c_prod[(r, c)].prod(),
@@ -350,34 +382,104 @@ def flm_gemm(
     # one for the drain -- and exceeding the limit is a hard compile error, not
     # a slowdown. Retire the fills in batches sized to stay under it.
     SHIM_BD_LIMIT = 16
-    K_BATCH = max(1, (SHIM_BD_LIMIT - 2) // 2)  # leave room for the C drain
+    # Cost on the worst shim tile (an A source column, which carries an A fill,
+    # a B fill and a C drain): 2 BDs per k-block in a fill batch, 1 per drain.
+    # A sweep's fills must all go in ONE task group. Splitting them across
+    # groups -- which is what would make larger k_iters fit -- produces
+    # silently WRONG results, reproducible at M=1024 K=2560 N=2560
+    # (k_iters=5): one group passes, two groups fail on the same shape. Not
+    # yet diagnosed, so the split is not used and the limit is enforced
+    # instead of being silently mis-lowered.
+    K_BATCH = (SHIM_BD_LIMIT - 1) // 2  # 7
+    if k_iters > K_BATCH:
+        raise ValueError(
+            f"K ({K}) needs {k_iters} k-iterations, but at most {K_BATCH} fit "
+            f"in a shim tile's {SHIM_BD_LIMIT} buffer descriptors alongside "
+            f"the C drain. Split the GEMM along K, or fix the multi-group "
+            f"fill path."
+        )
 
     def sequence(A, B, C, a_prods, b_prods, c_conses):
-        for mega_col in range(n_col_blocks):
+        # Sweeps 0..n_full-1 use every column; the trailing one (when N is not
+        # a multiple of N_TILE*COLS) uses only the first rem_blocks. A is
+        # always issued for every row, because the columns sitting the trailing
+        # block out still have to drain their share of the broadcast.
+        sweeps = [(mc, COLS) for mc in range(n_full)]
+        if rem_blocks:
+            sweeps.append((n_full, rem_blocks))
+
+        # Retiring each sweep before issuing the next serialises the pipeline:
+        # the next sweep's fills cannot start until this sweep's C drain has
+        # come back, which waits on the cores. So issue sweep i+1 in full, and
+        # only THEN retire sweep i -- the depth-2 model, which is what the
+        # design this was ported from uses (its notes record that a depth-1
+        # "retire immediately" variant hung on hardware).
+        #
+        # NOT YET DONE -- this is the operator's main performance gap. Driving
+        # the original overlay directly measures 8750 GFLOP/s against this
+        # sequence's 1687 on the same shape and kernel, and the difference is
+        # here, not in the kernel or the tiling.
+        #
+        # Two attempts at overlapping both hung on hardware: an opportunistic
+        # "retire the oldest group only when BDs run short" scheduler, and a
+        # strict depth-2 "issue sweep i+1, then retire sweep i".
+        #
+        # The idiom itself is not the problem. The original design's sequence
+        # issues the next iteration's tasks and only THEN awaits and frees the
+        # previous one's -- and its notes are explicit that the retirement must
+        # be a real await, not a bare free (freeing early returns the BD slot
+        # while the transfer is still in flight: the first invocation comes back
+        # correct and later ones progressively corrupt). TaskGroup.finish()
+        # awaits then frees, so it already expresses this.
+        #
+        # So the hang here has a different, undiagnosed cause -- plausibly BD
+        # accounting, since the cost model above assumes one BD per transfer.
+        # Worth knowing before spending much on it: the original hit an
+        # undiagnosed hang on this path too, which survived even after the
+        # relevant compiler fix landed, and it still ships with its own IRON
+        # sequence disabled.
+        pipelined = False
+
+        prev = None
+        for mega_col, active_cols in sweeps:
             for mega_row in range(m_row_blocks):
                 # The drain is issued first and retired last: it is an S2MM
-                # that simply waits for the cores to produce, so having it
-                # outstanding across the whole sweep is what lets compute and
-                # write-back overlap. It must NOT share a task group with the
-                # fills -- finishing a group that contains it before the fills
-                # it depends on have been issued would deadlock.
+                # that waits for the cores to produce, so keeping it
+                # outstanding across the sweep overlaps compute with
+                # write-back. It must not share a task group with the fills it
+                # depends on -- finishing those together would deadlock.
                 tg_c = TaskGroup()
-                for c in range(COLS):
+                for c in range(active_cols):
                     c_conses[c].drain(
                         C, c_tap(mega_col, mega_row, c), group=tg_c, wait=True
                     )
 
                 # One A and one B object per k iteration, matching the core's
                 # k_iters x B_ITERS acquires on each leg.
+                fill_groups = []
                 for batch in range(0, k_iters, K_BATCH):
                     tg_f = TaskGroup()
                     for kb in range(batch, min(batch + K_BATCH, k_iters)):
                         for r in range(ROWS):
                             a_prods[r].fill(A, a_tap(mega_row, r, kb), group=tg_f)
-                        for c in range(COLS):
+                        for c in range(active_cols):
                             b_prods[c].fill(B, b_tap(mega_col, c, kb), group=tg_f)
-                    tg_f.finish()
-                tg_c.finish()
+                    if pipelined:
+                        fill_groups.append(tg_f)
+                    else:
+                        tg_f.finish()
+
+                if pipelined:
+                    if prev is not None:
+                        for tg in prev:
+                            tg.finish()
+                    prev = fill_groups + [tg_c]
+                else:
+                    tg_c.finish()
+
+        if prev is not None:
+            for tg in prev:
+                tg.finish()
 
     rt = Runtime(
         sequence,

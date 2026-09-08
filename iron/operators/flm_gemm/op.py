@@ -24,7 +24,6 @@ from iron.operators.flm_gemm.design import (
     K_TILE,
     MIN_K,
     MIN_M,
-    MIN_N,
     M_TILE,
     N_TILE,
 )
@@ -55,10 +54,13 @@ class FLMGEMM(MLIROperator):
     _name_aliases: ClassVar[Dict[str, str]] = {**MLIROperator._name_aliases}
 
     def __post_init__(self):
+        # N only needs to tile to N_TILE: a trailing group of fewer than
+        # COLS column-blocks is handled by giving the columns different trip
+        # counts. See design.py.
         for name, value, unit in (
             ("M", self.M, MIN_M),
             ("K", self.K, MIN_K),
-            ("N", self.N, MIN_N),
+            ("N", self.N, N_TILE),
         ):
             if value % unit != 0:
                 raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
