@@ -35,20 +35,15 @@ RESET_DEVICE = "reset_device"
 # ##########################################################################
 
 
-def trace_buffer_layout(mlir_text: str):
-    """Regions of the fused trace buffer, one per traced operator.
+def trace_buffer_size(mlir_text: str) -> int:
+    """Bytes of the fused trace buffer the dispatched sequence takes.
 
-    `-aie-fuse-trace-buffers` gives the dispatched sequence one trace buffer
-    covering every design it configures, and records the split on the sequence.
-    The host reads it for the buffer's size, the parser for which design wrote
-    which bytes.
-
-    Returns `(total_bytes, slices)`; `(0, [])` for an untraced build.
+    `-aie-fuse-trace-buffers` gives the sequence one buffer covering every design
+    it configures, and records the split on the sequence. Returns 0 for an
+    untraced build.
     """
     slices = get_trace_slices(mlir_text)
-    if not slices:
-        return 0, []
-    return max(s["offset"] + s["size"] for s in slices), slices
+    return max((s["offset"] + s["size"] for s in slices), default=0)
 
 
 class SequenceMLIRArtifact(MLIRArtifact):

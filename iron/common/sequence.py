@@ -67,7 +67,7 @@ class AutoDispatch(SequenceDispatch):
 
 def _trace_tag(seq):
     """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
-    untraced one's ELF. Empty when untraced, leaving those artifacts named as before."""
+    untraced one's ELF. Empty when untraced."""
     return f"_traced{seq.trace_size}" if seq.trace_size else ""
 
 
@@ -611,16 +611,12 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
-        # Trace lowering appends one buffer covering every configured design,
-        # after the consolidated three. trace_size is per design and says
-        # nothing about how many channels or sub-designs claim a share, so the
-        # size comes from the lowered module.
+        # Trace lowering appends one buffer covering every configured design, after
+        # the consolidated three. Its size depends on how many channels and
+        # sub-designs claim a share, so read it from the lowered module.
         self.trace_buffer = None
-        self.trace_slices = []
         if self.op.trace_size:
-            total, self.trace_slices = comp.trace_buffer_layout(
-                self.lowered_mlir_text()
-            )
+            total = comp.trace_buffer_size(self.lowered_mlir_text())
             if total:
                 self.trace_buffer = XRTTensor((total,), dtype=np.int8)
 

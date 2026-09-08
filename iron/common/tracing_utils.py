@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read a traced run's hardware trace buffer back and write Perfetto JSON.
+"""Write a traced run's hardware trace buffer as Perfetto JSON.
 
 Tracing is configured at build time (``IRON_TRACE_SIZE`` / ``IRON_TRACE_NTILES``,
-consumed by the operator's design) and the runtime already syncs the resulting
-buffer device->host after every dispatch. Nothing reads it, though, so a traced
-run leaves its data sitting in host memory. This module is that last step: one call
-after ``run()`` turns it into files.
+read by the operator's design), and the runtime syncs the buffer device->host after
+every dispatch. Call :func:`dump_traces` after ``run()`` to write it out:
 
     from iron.common.tracing_utils import dump_traces
 
@@ -15,22 +13,22 @@ after ``run()`` turns it into files.
     run()
     dump_traces(run, "my_operator")
 
-No-op on an untraced build, so the call can stay in a test unconditionally.
+On an untraced build the call returns an empty list, so a test can call it
+unconditionally.
 
-Two files land per traced design: the raw 32-bit words as hex text, and the
-parsed JSON for https://ui.perfetto.dev. The raw text is kept because reparsing is
-free and re-dispatching is not - see :func:`parse_trace_words` to reparse it with a
-different column shift without touching the device.
+A dump writes the raw 32-bit words as hex text, plus one JSON file per traced
+design for https://ui.perfetto.dev. Keep the text: :func:`parse_trace_buffer`
+reparses it with a different column shift for the price of no further dispatch.
 
-``dump_traces`` also prints a per-tile summary, since the Perfetto timeline of a
-few hundred short kernel calls is hard to read at a glance and the numbers a
-designer wants - how much of the run a core spent computing, and how much waiting -
+:func:`dump_traces` also prints a per-tile summary. A Perfetto timeline of a few
+hundred short kernel calls is hard to read at a glance, and the two numbers a
+designer wants, the cycles a core spent computing and the cycles it spent waiting,
 are a few sums away. :func:`print_trace_summary` does the same for a JSON file
 written earlier.
 
 Environment:
   * ``IRON_TRACE_DIR``      where to write (default ``outputs/traces``)
-  * ``IRON_TRACE_MLIR``     override the MLIR the parser reads (see below)
+  * ``IRON_TRACE_MLIR``     override the MLIR the parser reads
   * ``IRON_TRACE_COLSHIFT`` force the column shift; unset means auto-detect
 """
 
@@ -42,36 +40,33 @@ from pathlib import Path
 
 import numpy as np
 
-from aie.utils.trace.parse import parse_trace
+from aie.utils.trace.parse import parse_trace_slices
 
 from . import compilation as comp
 
 __all__ = [
     "dump_traces",
-    "parse_trace_words",
+    "parse_trace_buffer",
     "lowered_mlir",
-    "trace_words",
     "summarize_trace",
     "print_trace_summary",
 ]
 
 DEFAULT_TRACE_DIR = "outputs/traces"
 
-# The kernel brackets: aie_kernels sources wrap their body in event0()/event1(),
-# so one pair is one kernel invocation. Everything between two pairs is the core
-# waiting - on its input object FIFO, on a lock, on the next descriptor.
+# aie_kernels sources bracket their body with event0()/event1(), so one pair is one
+# kernel invocation, and the gap between two pairs is the core waiting.
 KERNEL_START, KERNEL_END = "INSTR_EVENT_0", "INSTR_EVENT_1"
 
 
 def lowered_mlir(run) -> tuple[Path, str]:
     """The post-lowering MLIR for a callable, as ``(path, text)``.
 
-    mlir-aie's trace parser reads ``aiex.npu.write32`` ops and matches the
-    trace-unit config addresses. ``aie-insert-trace-flows`` produces those writes
-    from the declarative ``aie.trace`` ops inside aiecc, so the module handed to
-    aiecc carries none of them. A traced build passes
-    ``--get-input-with-addresses``, which lands the lowered module in the work dir
-    beside the source (``<source>.mlir.d/``).
+    mlir-aie's trace parser matches ``aiex.npu.write32`` ops against the trace unit's
+    config addresses. ``aie-insert-trace-flows`` emits those writes inside aiecc, so
+    the parser needs aiecc's lowered module. A traced build requests it with
+    ``--get-input-with-addresses``, which lands it in the work dir beside the source
+    (``<source>.mlir.d/``).
     """
     override = os.environ.get("IRON_TRACE_MLIR")
     if override:
@@ -88,41 +83,22 @@ def lowered_mlir(run) -> tuple[Path, str]:
     return path, path.read_text()
 
 
-def trace_words(buf) -> np.ndarray:
-    """A trace buffer's contents as uint32 words, with the unfilled tail dropped.
+def parse_trace_buffer(words, mlir_text: str, colshift: int | None = None):
+    """A trace buffer's words as ``(slice_info, events)`` per traced design.
 
-    The buffer is allocated at the full trace size and only partly written, so the
-    trailing zeros are absence of events rather than events. Trimming them keeps the
-    JSON small and stops the parser inventing a long idle tail.
-    """
-    raw = buf.to_torch().numpy().astype(np.uint8)
-    raw = raw[: raw.size - raw.size % 4]
-    words = raw.view(np.uint32)  # little-endian on x86, matching the DMA layout
-    if not words.any():
-        return words[:0]
-    return words[: int(np.nonzero(words)[0][-1]) + 1]
-
-
-def parse_trace_words(
-    words, mlir_text: str, colshift: int | None = None, device: str | None = None
-):
-    """Trace words plus the lowered MLIR into Trace Event Format events.
+    The parser splits the buffer by the layout the compiler recorded on the
+    dispatched sequence, and decodes each region against the device that wrote it.
 
     ``colshift`` of None lets the parser align the columns itself, which is what you
     want by default: a design configured for one column may be loaded into another.
-    Override it only when the tiles in the output do not match the placement.
+    Override it when that alignment picks the wrong columns.
 
-    ``device`` names the ``aie.device`` that wrote these words. A fused sequence
-    holds one per sub-design, and two often share tile coordinates, so an unset
-    ``device`` merges their event assignments.
-
-    The parser calls ``sys.exit`` rather than raising on some malformed input, so
-    SystemExit is caught here - a visualisation failure should never take a test
-    down with it.
+    The parser calls ``sys.exit`` on some malformed input, so SystemExit becomes a
+    RuntimeError here: a visualisation failure must not fail a test.
     """
     try:
-        return parse_trace(
-            np.asarray(words, dtype=np.uint32), mlir_text, colshift, device
+        return parse_trace_slices(
+            np.asarray(words, dtype=np.uint32), mlir_text, colshift
         )
     except SystemExit as exc:
         raise RuntimeError(
@@ -138,11 +114,10 @@ def _slug(text: str) -> str:
 
 
 def _by_tile(events):
-    """Group Trace Event Format records by pid, resolving each pid's tile name.
+    """Group Trace Event Format records by pid, and resolve each pid's tile name.
 
-    The parser emits one process per traced tile (``process_name`` metadata), and
-    one thread per monitored event slot. Metadata records carry no timestamp, so
-    they are separated out here rather than filtered at every use.
+    The parser emits one process per traced tile (``process_name`` metadata) and one
+    thread per monitored event slot. Metadata records carry no timestamp.
     """
     names, records = {}, {}
     for index, event in enumerate(events):
@@ -161,10 +136,10 @@ def _by_tile(events):
 def _state_cycles(records):
     """Cycles each event name was asserted, summed over its begin/end intervals.
 
-    A level event (a stall, vector activity) is emitted as ``B``/``E`` pairs on its
-    own thread, re-asserted at every trace command, so one logical stall arrives as
-    many short intervals. Summing them gives the time in that state. These overlap
-    each other and the kernel brackets - a core stalls *during* a kernel call - so
+    A level event (a stall, vector activity) arrives as ``B``/``E`` pairs on its own
+    thread, re-asserted at every trace command, so one logical stall spans many short
+    intervals. Summing them gives the time in that state. These intervals overlap
+    each other and the kernel brackets, since a core stalls during a kernel call, so
     they are shares of the window, not a partition of it.
     """
     open_at, totals = {}, {}
@@ -180,8 +155,8 @@ def _state_cycles(records):
 def _invocations(records):
     """Kernel invocations as ``(start, end)`` cycle pairs.
 
-    Pairs each ``event0`` with the next ``event1``, ignoring repeats of either -
-    the same rule mlir-aie's own summary uses, so the call counts agree.
+    Pairs each ``event0`` with the next ``event1`` and ignores repeats of either,
+    matching mlir-aie's own summary, so the call counts agree.
     """
     spans, start = [], None
     for ts, _, event in records:
@@ -244,8 +219,8 @@ def _pct(part, whole):
 def print_trace_summary(source, title: str | None = None) -> dict:
     """Print :func:`summarize_trace` as a short per-tile report, and return it.
 
-    Reads as: how much of the traced window each core spent inside a kernel, how
-    much it spent between kernels, and what it was stalled on meanwhile.
+    Each tile reports how much of the traced window its core spent inside a kernel,
+    how much it spent between kernels, and what it stalled on meanwhile.
     """
     summary = summarize_trace(source)
     if title is None and isinstance(source, (str, Path)):
@@ -276,7 +251,7 @@ def print_trace_summary(source, title: str | None = None) -> dict:
                 f"min/mean/max {waiting['min']}/{waiting['mean']:.1f}/{waiting['max']}"
             )
 
-        # Stalls and vector activity overlap the above, so they are listed apart.
+        # Stalls and vector activity overlap the kernel time above.
         states = {
             name: cycles
             for name, cycles in data["states"].items()
@@ -301,13 +276,13 @@ def dump_traces(
 ) -> list[Path]:
     """Write a completed run's trace buffer as hex text and Perfetto JSON.
 
-    Call it after ``run()``: the callable syncs its trace buffer device->host as
-    part of the dispatch, so this only reads host memory. Returns the JSON paths
-    written, empty on an untraced build.
+    Call it after ``run()``: the callable syncs its trace buffer device->host as part
+    of the dispatch, so this only reads host memory. Returns the JSON paths written,
+    empty on an untraced build.
 
     ``tag`` distinguishes one dump from another - a test name or parameter id. The
     layout the compiler recorded on the dispatched sequence splits the buffer, so a
-    fused sequence yields one pair of files per configured design.
+    fused sequence yields one JSON file per configured design.
     """
     buffer = getattr(run, "trace_buffer", None)
     if buffer is None:
@@ -328,33 +303,30 @@ def dump_traces(
     mlir_path, mlir_text = lowered_mlir(run)
     print(f"[trace] parsing against {mlir_path}")
 
-    all_words = buffer.to_torch().numpy().astype(np.uint8).view(np.uint32)
+    words = buffer.to_torch().numpy().astype(np.uint8).view(np.uint32)
     tag = _slug(tag)
+    raw = (out_dir / tag).with_suffix(".txt")
+    raw.write_text("\n".join(f"{w:08x}" for w in words) + "\n")
+    if not words.any():
+        print("[trace] buffer is all zeros, no trace data captured")
+        return []
+
+    try:
+        parsed = parse_trace_buffer(words, mlir_text, colshift)
+    except Exception as exc:  # a visualisation failure must not fail a run
+        print(f"[trace] parse failed ({exc}); raw words kept at {raw}")
+        return []
+
     written = []
-    for index, entry in enumerate(run.trace_slices):
-        name = f"{index}_{entry['device']}"
-        start = entry["offset"] // 4
-        region = all_words[start : start + entry["size"] // 4]
-        words = region[: int(np.nonzero(region)[0][-1]) + 1] if region.any() else region
-        if not words.size:
-            print(f"[trace] {name}: buffer is all zeros, no trace data captured")
-            continue
-        if words.size == region.size:
+    for index, (entry, events) in enumerate(parsed):
+        name = f"{index}_{entry['device']}" if entry else "sequence"
+        if entry and words[(entry["offset"] + entry["size"]) // 4 - 1]:
             print(
                 f"[trace] {name}: slice full ({entry['size']} B), trace is likely "
                 "truncated - raise IRON_TRACE_SIZE"
             )
 
-        stem = out_dir / f"{tag}_{_slug(name)}"
-        stem.with_suffix(".txt").write_text("\n".join(f"{w:08x}" for w in words) + "\n")
-
-        try:
-            events = parse_trace_words(words, mlir_text, colshift, entry["device"])
-        except Exception as exc:  # never let a visualisation failure fail a run
-            print(f"[trace] {name}: parse failed ({exc}); raw words kept at {stem}.txt")
-            continue
-
-        target = stem.with_suffix(".json")
+        target = (out_dir / f"{tag}_{_slug(name)}").with_suffix(".json")
         target.write_text(json.dumps(events))
         print(f"[trace] {target} ({len(events)} events)")
         written.append(target)
@@ -362,6 +334,6 @@ def dump_traces(
         if summary:
             try:
                 print_trace_summary(events, title=target.name)
-            except Exception as exc:  # a summary is never worth failing a run over
+            except Exception as exc:  # a summary must not fail a run either
                 print(f"[trace] {name}: summary failed ({exc})")
     return written

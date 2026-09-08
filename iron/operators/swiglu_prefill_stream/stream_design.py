@@ -294,7 +294,7 @@ def trace_size():
 
 
 def trace_tiles():
-    """How many tiles to trace. Routing, not the packet id space, is the real limit."""
+    """How many tiles to trace. Routing capacity sets the practical limit."""
     return int(os.environ.get("IRON_TRACE_NTILES", "4"))
 
 
