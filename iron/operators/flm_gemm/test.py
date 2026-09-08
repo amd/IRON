@@ -22,23 +22,27 @@ def get_params():
     # have N = model dim, so they always land here: 1536 leaves 4 active
     # columns, 2560 leaves 4, and 128 leaves just 1.
     # fmt: off
-    #      M,    K,     N, epilogue,    clamp
+    #      M,    K,     N, epilogue,    clamp,     rounding
     regular_params = [
-        (  256,  512,  1024, "none",     None),   # smallest full sweep
-        (  512, 1024,  2048, "none",     None),
-        (  256,  512,  1536, "none",     None),   # remainder: 4 of 8 columns
-        (  256,  512,   128, "none",     None),   # remainder only: 1 column
-        (  256,  512,  1024, "silu",     None),
-        (  256,  512,  1024, "gelu",     None),
-        (  256,  512,  1024, "none", (-2.0, 2.0)),
+        (  256,  512,  1024, "none",     None,       "conv_even"),  # smallest full sweep
+        (  512, 1024,  2048, "none",     None,       "conv_even"),
+        (  256,  512,  1536, "none",     None,       "conv_even"),  # remainder: 4 of 8 cols
+        (  256,  512,   128, "none",     None,       "conv_even"),  # remainder only: 1 col
+        (  256,  512,  1024, "silu",     None,       "conv_even"),
+        (  256,  512,  1024, "gelu",     None,       "conv_even"),
+        (  256,  512,  1024, "none", (-2.0, 2.0),    "conv_even"),
+        # floor reproduces the shipped FastFlowLM overlay bit for bit; it is
+        # much less accurate, so it gets its own bound below.
+        (  256,  512,  1024, "none",     None,       "floor"),
     ]
     extensive_params = [
-        ( 1024, 2048,  2048, "none",     None),
-        ( 2048, 2048,  2048, "none",     None),
-        ( 1024, 2560,  2560, "none",     None),   # E4B o-projection shape
-        (  512, 1536,  1536, "silu",     None),   # E2B down-projection shape
-        (  256,  512,  1024, "sigmoid",  None),
-        (  512, 1024,  2048, "silu", (-4.0, 4.0)),
+        ( 1024, 2048,  2048, "none",     None,       "conv_even"),
+        ( 2048, 2048,  2048, "none",     None,       "conv_even"),
+        ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
+        (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
+        (  256,  512,  1024, "sigmoid",  None,       "conv_even"),
+        (  512, 1024,  2048, "silu", (-4.0, 4.0),    "conv_even"),
+        (  256,  512,  1024, "silu",     None,       "floor"),
     ]
     # fmt: on
 
@@ -55,8 +59,8 @@ def get_params():
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
-@pytest.mark.parametrize("M,K,N,epilogue,clamp", get_params())
-def test_flm_gemm(M, K, N, epilogue, clamp, aie_context):
+@pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
+def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     # Keep the activation tests in the range where the curve is not flat.
     scale = 4.0 if epilogue == "none" else 0.5
     golden_ref = generate_golden_reference(
@@ -69,6 +73,7 @@ def test_flm_gemm(M, K, N, epilogue, clamp, aie_context):
         N=N,
         epilogue=epilogue,
         clamp=clamp,
+        rounding=rounding,
         context=aie_context,
     )
 
@@ -98,12 +103,19 @@ def test_flm_gemm(M, K, N, epilogue, clamp, aie_context):
     mass = K * golden_ref["input"].abs().float().mean() * (
         golden_ref["input_b"].abs().float().mean()
     )
+    #
+    # floor rounding truncates rather than rounding to nearest, so its bias
+    # accumulates over the K reduction instead of cancelling: ~0.0099 of mass
+    # rather than ~0.00042, measured, and bit-identical to the shipped overlay.
+    # It gets a bound to match; holding it to the conv_even budget would just
+    # fail.
+    budget = 0.05 if rounding == "floor" else 0.004
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
         input_buffers,
         output_buffers,
         rel_tol=0.04,
-        abs_tol=float(0.004 * mass),
+        abs_tol=float(budget * mass),
     )
 
     gflops = (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9
