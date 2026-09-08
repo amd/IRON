@@ -403,18 +403,32 @@ def flm_gemm(
         # is an S2MM that simply waits for the cores, so keeping it outstanding
         # is what overlaps compute with write-back, and it must not share a
         # group with the fills it depends on.
+        # Depth-2: issue column-block i+1 before retiring i, so its transfers
+        # are already moving while i computes. Retiring a block before issuing
+        # the next serialises on the C await, which waits for the cores.
+        #
+        # This is affordable only because each leg is now a single task: a
+        # block costs 3 buffer descriptors on a shim column (A + B + C), so two
+        # in flight is 6 of 16. Per-object tasks needed 1 + 2*k_iters and could
+        # not be overlapped at all.
+        prev = None
         for mega_col, active_cols in blocks:
             tg_c = TaskGroup()
             for c in range(active_cols):
                 c_conses[c].drain(C, c_tap(mega_col, c), group=tg_c, wait=True)
-
             tg_f = TaskGroup()
             for r in range(ROWS):
                 a_prods[r].fill(A, a_tap(mega_col, r), group=tg_f)
             for c in range(active_cols):
                 b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
-            tg_f.finish()
-            tg_c.finish()
+
+            if prev is not None:
+                for tg in prev:
+                    tg.finish()
+            prev = [tg_f, tg_c]
+
+        for tg in prev or []:
+            tg.finish()
 
     rt = Runtime(
         sequence,
