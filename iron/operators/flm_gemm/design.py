@@ -339,159 +339,82 @@ def flm_gemm(
     #
     # Every wrap below stays under the shim's 10-bit (1023) size field: the
     # largest are K_TILE=512 and ROWS*M_TILE=256.
-    def a_tap(mega_row, r, kb):
-        # One M_TILE x K_TILE block of A, row-major -- which is exactly the
-        # order the memtile's dims_from_stream expects, so no reordering is
-        # needed here (unlike B).
-        #
-        # Issued one k-block at a time, like B. Packing all k_iters blocks into
-        # a single BD also describes the right bytes, but that one BD then has
-        # to stall part-way through whenever k_iters exceeds the fifo depth,
-        # while still holding its shim channel -- which deadlocks against the
-        # C drain sharing that channel. It survives k_iters <= A_DEPTH and
-        # hangs above it, so the failure only appears at larger K.
+    # One transfer per (column-block, leg) instead of one per object.
+    #
+    # A single fill/drain may span MANY fifo objects -- the descriptor just
+    # walks them in the order the cores consume -- so a whole column-block's
+    # worth of A, B and C each go out as one task. Issuing per object instead
+    # meant a host-side await for every sweep, and those awaits were the
+    # serialisation: the next sweep could not start until the previous sweep's
+    # C had come all the way back.
+    #
+    # Dimension order must match the core loop nest exactly: for each
+    # column-block it walks mega_row, then k. Every wrap stays under the shim's
+    # 10-bit size field (largest are K_TILE=512 and ROWS*M_TILE=256).
+    def a_tap(mega_col, r):
+        # Every (mega_row, k) block this compute row consumes for one
+        # column-block. A does not depend on mega_col; it is re-fetched per
+        # column-block because the cores re-consume it.
         return TensorAccessPattern(
             tensor_dims=(M * K,),
-            offset=(mega_row * ROWS + r) * M_TILE * K + kb * K_TILE,
-            sizes=[1, 1, M_TILE, K_TILE],
-            strides=[0, 0, K, 1],
+            offset=r * M_TILE * K,
+            sizes=[m_row_blocks, k_iters, M_TILE, K_TILE],
+            strides=[ROWS * M_TILE * K, K_TILE, K, 1],
         )
 
-    def b_tap(mega_col, c, kb):
-        # One K_TILE x N_TILE chunk of B, read as a single contiguous run.
+    def b_tap(mega_col, c):
+        # Every (mega_row, k) chunk this column consumes. B does not depend on
+        # mega_row, hence the 0 stride: the same k-blocks are replayed for each
+        # row-block, which is what the cores expect.
         #
-        # B must arrive PRE-PACKED in the memtile's expected order (see
-        # FLMGEMM.pack_B). Expressing that reorder in the descriptor instead --
-        # a 4D gather over a plain row-major (K, N) tensor -- is correct but
-        # ruinous: its innermost run is T=8 bf16, so a 128 KB transfer becomes
-        # 8192 scattered 16-byte bursts. Measured with the compute nulled out,
-        # that costs 5.4x (11122 us vs 2070 us at M=1024 K=1536 N=6144) and was
-        # the entire gap against the original overlay, which pre-packs its
-        # weights on the host for exactly this reason.
-        #
-        # Weights are packed once and reused across dispatches, so this belongs
-        # on the caller rather than in the inner loop.
+        # B must arrive PRE-PACKED (see FLMGEMM.pack_B) so each k-block is one
+        # contiguous run. Expressing that reorder in the descriptor instead
+        # gives an innermost run of T=8 bf16, turning each 128 KB transfer into
+        # 8192 scattered bursts -- measured 5.4x slower end to end.
         return TensorAccessPattern(
             tensor_dims=(K * N,),
-            offset=(mega_col * COLS + c) * N_TILE * K + kb * K_TILE * N_TILE,
-            sizes=[1, 1, 1, K_TILE * N_TILE],
-            strides=[0, 0, 0, 1],
+            offset=(mega_col * COLS + c) * N_TILE * K,
+            sizes=[m_row_blocks, k_iters, 1, K_TILE * N_TILE],
+            strides=[0, K_TILE * N_TILE, 0, 1],
         )
 
-    def c_tap(mega_col, mega_row, c):
-        # One joined block: ROWS*M_TILE rows of this column's N_TILE-wide slice.
+    def c_tap(mega_col, c):
+        # Every joined block this column produces for one column-block: one
+        # ROWS*M_TILE x N_TILE block per row-block.
         return TensorAccessPattern(
             tensor_dims=(M * N,),
-            offset=mega_row * ROWS * M_TILE * N + (mega_col * COLS + c) * N_TILE,
-            sizes=[1, 1, ROWS * M_TILE, N_TILE],
-            strides=[0, 0, N, 1],
-        )
-
-    # A shim tile supports only SHIM_BD_LIMIT simultaneously active buffer
-    # descriptors, and shim column 0 carries three legs at once: the A fills
-    # for compute row 0, the B fills for compute column 0, and the C drain for
-    # compute column 0. So each k iteration in flight costs 2 BDs there, plus
-    # one for the drain -- and exceeding the limit is a hard compile error, not
-    # a slowdown. Retire the fills in batches sized to stay under it.
-    SHIM_BD_LIMIT = 16
-    # Cost on the worst shim tile (an A source column, which carries an A fill,
-    # a B fill and a C drain): 2 BDs per k-block in a fill batch, 1 per drain.
-    # A sweep's fills must all go in ONE task group. Splitting them across
-    # groups -- which is what would make larger k_iters fit -- produces
-    # silently WRONG results, reproducible at M=1024 K=2560 N=2560
-    # (k_iters=5): one group passes, two groups fail on the same shape. Not
-    # yet diagnosed, so the split is not used and the limit is enforced
-    # instead of being silently mis-lowered.
-    K_BATCH = (SHIM_BD_LIMIT - 1) // 2  # 7
-    if k_iters > K_BATCH:
-        raise ValueError(
-            f"K ({K}) needs {k_iters} k-iterations, but at most {K_BATCH} fit "
-            f"in a shim tile's {SHIM_BD_LIMIT} buffer descriptors alongside "
-            f"the C drain. Split the GEMM along K, or fix the multi-group "
-            f"fill path."
+            offset=(mega_col * COLS + c) * N_TILE,
+            sizes=[1, m_row_blocks, ROWS * M_TILE, N_TILE],
+            strides=[0, ROWS * M_TILE * N, N, 1],
         )
 
     def sequence(A, B, C, a_prods, b_prods, c_conses):
-        # Sweeps 0..n_full-1 use every column; the trailing one (when N is not
-        # a multiple of N_TILE*COLS) uses only the first rem_blocks. A is
-        # always issued for every row, because the columns sitting the trailing
-        # block out still have to drain their share of the broadcast.
-        sweeps = [(mc, COLS) for mc in range(n_full)]
+        # Column-blocks 0..n_full-1 use every column; the trailing one (when N
+        # is not a multiple of N_TILE*COLS) uses only the first rem_blocks. A
+        # is always issued for every row, because the columns sitting the
+        # trailing block out still drain their share of the broadcast.
+        blocks = [(mc, COLS) for mc in range(n_full)]
         if rem_blocks:
-            sweeps.append((n_full, rem_blocks))
+            blocks.append((n_full, rem_blocks))
 
-        # Retiring each sweep before issuing the next serialises the pipeline:
-        # the next sweep's fills cannot start until this sweep's C drain has
-        # come back, which waits on the cores. So issue sweep i+1 in full, and
-        # only THEN retire sweep i -- the depth-2 model, which is what the
-        # design this was ported from uses (its notes record that a depth-1
-        # "retire immediately" variant hung on hardware).
-        #
-        # NOT YET DONE -- this is the operator's main performance gap. Driving
-        # the original overlay directly measures 8750 GFLOP/s against this
-        # sequence's 1687 on the same shape and kernel, and the difference is
-        # here, not in the kernel or the tiling.
-        #
-        # Two attempts at overlapping both hung on hardware: an opportunistic
-        # "retire the oldest group only when BDs run short" scheduler, and a
-        # strict depth-2 "issue sweep i+1, then retire sweep i".
-        #
-        # The idiom itself is not the problem. The original design's sequence
-        # issues the next iteration's tasks and only THEN awaits and frees the
-        # previous one's -- and its notes are explicit that the retirement must
-        # be a real await, not a bare free (freeing early returns the BD slot
-        # while the transfer is still in flight: the first invocation comes back
-        # correct and later ones progressively corrupt). TaskGroup.finish()
-        # awaits then frees, so it already expresses this.
-        #
-        # So the hang here has a different, undiagnosed cause -- plausibly BD
-        # accounting, since the cost model above assumes one BD per transfer.
-        # Worth knowing before spending much on it: the original hit an
-        # undiagnosed hang on this path too, which survived even after the
-        # relevant compiler fix landed, and it still ships with its own IRON
-        # sequence disabled.
-        pipelined = False
+        # One task per (column-block, leg): three per column instead of one per
+        # object, so a whole column-block retires on a single await rather than
+        # one per row-block. The C drain is issued first and retired last -- it
+        # is an S2MM that simply waits for the cores, so keeping it outstanding
+        # is what overlaps compute with write-back, and it must not share a
+        # group with the fills it depends on.
+        for mega_col, active_cols in blocks:
+            tg_c = TaskGroup()
+            for c in range(active_cols):
+                c_conses[c].drain(C, c_tap(mega_col, c), group=tg_c, wait=True)
 
-        prev = None
-        for mega_col, active_cols in sweeps:
-            for mega_row in range(m_row_blocks):
-                # The drain is issued first and retired last: it is an S2MM
-                # that waits for the cores to produce, so keeping it
-                # outstanding across the sweep overlaps compute with
-                # write-back. It must not share a task group with the fills it
-                # depends on -- finishing those together would deadlock.
-                tg_c = TaskGroup()
-                for c in range(active_cols):
-                    c_conses[c].drain(
-                        C, c_tap(mega_col, mega_row, c), group=tg_c, wait=True
-                    )
-
-                # One A and one B object per k iteration, matching the core's
-                # k_iters x B_ITERS acquires on each leg.
-                fill_groups = []
-                for batch in range(0, k_iters, K_BATCH):
-                    tg_f = TaskGroup()
-                    for kb in range(batch, min(batch + K_BATCH, k_iters)):
-                        for r in range(ROWS):
-                            a_prods[r].fill(A, a_tap(mega_row, r, kb), group=tg_f)
-                        for c in range(active_cols):
-                            b_prods[c].fill(B, b_tap(mega_col, c, kb), group=tg_f)
-                    if pipelined:
-                        fill_groups.append(tg_f)
-                    else:
-                        tg_f.finish()
-
-                if pipelined:
-                    if prev is not None:
-                        for tg in prev:
-                            tg.finish()
-                    prev = fill_groups + [tg_c]
-                else:
-                    tg_c.finish()
-
-        if prev is not None:
-            for tg in prev:
-                tg.finish()
+            tg_f = TaskGroup()
+            for r in range(ROWS):
+                a_prods[r].fill(A, a_tap(mega_col, r), group=tg_f)
+            for c in range(active_cols):
+                b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
+            tg_f.finish()
+            tg_c.finish()
 
     rt = Runtime(
         sequence,
