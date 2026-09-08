@@ -26,6 +26,8 @@ from iron.operators.flm_gemm.design import (
     MIN_M,
     M_TILE,
     N_TILE,
+    S,
+    T,
 )
 
 
@@ -203,9 +205,37 @@ class FLMGEMM(MLIROperator):
         )
         return artifacts
 
+    @staticmethod
+    def pack_B(B):
+        """Reorder a row-major ``(K, N)`` weight matrix into the layout the B
+        fill expects. Returns a flat tensor.
+
+        Each ``K_TILE x N_TILE`` tile is emitted in t-block-major order -- the
+        odometer ``(n//T, k%S, k//S, n%T)``, outermost first -- with tiles
+        ordered by column stripe and then by k-block, so each fill is one
+        contiguous read.
+
+        This is deliberately the caller's job. The same reorder is expressible
+        as a strided descriptor over an unpacked B, but its innermost run is
+        then T=8 bf16 = 16 bytes, turning each 128 KB transfer into 8192
+        scattered bursts -- measured 5.4x slower end to end, and the whole of
+        this operator's gap against the design it was ported from, which packs
+        its weights on the host for the same reason. Weights are packed once
+        and reused across dispatches, so the cost belongs here.
+        """
+        K, N = B.shape
+        if K % K_TILE or N % N_TILE:
+            raise ValueError(
+                f"B ({K}, {N}) must tile to ({K_TILE}, {N_TILE}) to be packed"
+            )
+        t = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
+        # (kb, kb8, s_in, cb, tb, t_in) -> (cb, kb, tb, s_in, kb8, t_in)
+        return t.permute(3, 0, 4, 2, 1, 5).reshape(-1).contiguous()
+
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # A
+            # B, pre-packed by pack_B -- same element count, different order.
             AIERuntimeArgSpec("in", (self.K, self.N)),  # B (weights)
             AIERuntimeArgSpec("out", (self.M, self.N)),  # C
         ]

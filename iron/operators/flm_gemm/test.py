@@ -74,7 +74,8 @@ def test_flm_gemm(M, K, N, epilogue, clamp, aie_context):
 
     input_buffers = {
         "A": golden_ref["input"].flatten(),
-        "B": golden_ref["input_b"].flatten(),
+        # B is consumed pre-packed; see FLMGEMM.pack_B.
+        "B": FLMGEMM.pack_B(golden_ref["input_b"]),
     }
     output_buffers = {"C": golden_ref["output"].flatten()}
 

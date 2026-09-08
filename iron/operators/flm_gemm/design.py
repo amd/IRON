@@ -358,24 +358,24 @@ def flm_gemm(
         )
 
     def b_tap(mega_col, c, kb):
-        # One K_TILE x N_TILE chunk of B's column stripe, reordered on the fly.
+        # One K_TILE x N_TILE chunk of B, read as a single contiguous run.
         #
-        # B is a plain row-major (K, N) tensor, but the memtile's
-        # dims_from_stream expects the elements in t-block-major order --
-        # (n//T, k%S, k//S, n%T), outermost first -- not row-major. Rather than
-        # make the caller pre-pack B (which is what the design this came from
-        # did on the host), the gather is expressed here, so B stays an ordinary
-        # dense tensor. Getting this order wrong yields silently wrong results,
-        # not a build error.
+        # B must arrive PRE-PACKED in the memtile's expected order (see
+        # FLMGEMM.pack_B). Expressing that reorder in the descriptor instead --
+        # a 4D gather over a plain row-major (K, N) tensor -- is correct but
+        # ruinous: its innermost run is T=8 bf16, so a 128 KB transfer becomes
+        # 8192 scattered 16-byte bursts. Measured with the compute nulled out,
+        # that costs 5.4x (11122 us vs 2070 us at M=1024 K=1536 N=6144) and was
+        # the entire gap against the original overlay, which pre-packs its
+        # weights on the host for exactly this reason.
         #
-        # Only one k-block fits in the 4 available dimensions, so the caller
-        # issues one of these per k iteration; each delivers exactly one
-        # memtile object.
+        # Weights are packed once and reused across dispatches, so this belongs
+        # on the caller rather than in the inner loop.
         return TensorAccessPattern(
             tensor_dims=(K * N,),
-            offset=(mega_col * COLS + c) * N_TILE + kb * K_TILE * N,
-            sizes=[N_TILE // T, S, K_TILE // S, T],
-            strides=[T, N, S * N, 1],
+            offset=(mega_col * COLS + c) * N_TILE * K + kb * K_TILE * N_TILE,
+            sizes=[1, 1, 1, K_TILE * N_TILE],
+            strides=[0, 0, 0, 1],
         )
 
     def c_tap(mega_col, mega_row, c):
