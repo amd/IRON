@@ -16,6 +16,15 @@ pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
+# stream-dse's codegen emits `!aie.objectfifosubview`, which mlir-aie removed in
+# Xilinx/mlir-aie#3553. Every wheel carrying the trace slice API this branch needs is
+# newer than that removal. Revert this commit once a stream-dse release targets a
+# post-#3553 mlir-aie.
+pytest.skip(
+    "stream-dse codegen does not parse against the pinned mlir-aie",
+    allow_module_level=True,
+)
+
 from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream
 
 # The operator's design is generated from this module; the values it is checked
