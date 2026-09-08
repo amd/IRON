@@ -24,7 +24,6 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
-from iron.common.utils import XRTSubBuffer
 from iron.common.sequence import OperatorSequence
 from iron.operators import (
     RMSNorm,
@@ -672,12 +671,10 @@ class AIEPrefillBuffers:
             (n_heads * prompt_len, head_dim), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_queries_per_head = [
-            XRTSubBuffer.from_parent(
-                self.attn_scores_queries_all,
+            self.attn_scores_queries_all.subview(
+                h * prompt_len * head_dim * np.dtype(ml_dtypes.bfloat16).itemsize,
                 (prompt_len, head_dim),
-                offset_elements=h * prompt_len * head_dim,
-                length_elements=prompt_len * head_dim,
-                dtype=ml_dtypes.bfloat16,
+                ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
@@ -686,12 +683,10 @@ class AIEPrefillBuffers:
             (n_kv_groups * head_dim, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_keys_per_kv_group = [
-            XRTSubBuffer.from_parent(
-                self.attn_scores_keys_all,
+            self.attn_scores_keys_all.subview(
+                g * head_dim * prompt_len * np.dtype(ml_dtypes.bfloat16).itemsize,
                 (head_dim, prompt_len),
-                offset_elements=g * head_dim * prompt_len,
-                length_elements=head_dim * prompt_len,
-                dtype=ml_dtypes.bfloat16,
+                ml_dtypes.bfloat16,
             )
             for g in range(n_kv_groups)
         ]
@@ -700,12 +695,10 @@ class AIEPrefillBuffers:
             (n_heads * prompt_len, prompt_len), dtype=ml_dtypes.bfloat16
         )
         self.attn_scores_per_head = [
-            XRTSubBuffer.from_parent(
-                self.attn_scores,
+            self.attn_scores.subview(
+                h * prompt_len * prompt_len * np.dtype(ml_dtypes.bfloat16).itemsize,
                 (prompt_len, prompt_len),
-                offset_elements=h * prompt_len * prompt_len,
-                length_elements=prompt_len * prompt_len,
-                dtype=ml_dtypes.bfloat16,
+                ml_dtypes.bfloat16,
             )
             for h in range(n_heads)
         ]
@@ -840,15 +833,13 @@ class AIELlamaBuffers:
             config.padded_vocab_size // config.vocab_partitions
         )
         self.prefill.logits_parts = [
-            XRTSubBuffer.from_parent(
-                self.prefill.logits,
+            self.prefill.logits.subview(
+                i * logits_part_len * np.dtype(ml_dtypes.bfloat16).itemsize,
                 (
                     prompt_len,
                     config.padded_vocab_size // config.vocab_partitions,
                 ),
-                offset_elements=i * logits_part_len,
-                length_elements=logits_part_len,
-                dtype=ml_dtypes.bfloat16,
+                ml_dtypes.bfloat16,
             )
             for i in range(config.vocab_partitions)
         ]

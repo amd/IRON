@@ -7,18 +7,49 @@ import time
 from pathlib import Path
 import numpy as np
 import ml_dtypes
-import pyxrt
-import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
-from .utils import XRTSubBuffer
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 
+try:
+    import pyxrt
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+except ImportError:
+    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The two
+    # on-device dispatch policies below are XRT-native (pyxrt.elf / hw_context / run,
+    # plus XRTTensor views), so they cannot run there; _require_xrt() makes that
+    # explicit at construction. The CPU policy and the whole compile path do not care,
+    # and must keep importing.
+    pyxrt = None
+    XRTTensor = None
+
 logger = logging.getLogger(__name__)
+
+
+def _torch():
+    """Import torch for CPU reference/compare paths. Compile and NPU dispatch do not."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "OperatorSequence CPU reference/compare modes need torch. "
+            "Compile and NPU dispatch do not."
+        ) from exc
+    return torch
+
+
+def _require_xrt() -> None:
+    """Fail with the reason, rather than an AttributeError on ``None.elf``."""
+    if pyxrt is None:
+        raise RuntimeError(
+            "this OperatorSequence dispatch policy needs the XRT host runtime (pyxrt), "
+            "which is not installed. Use SequenceCPUCallable, or run a single operator "
+            "(AIEOperatorBase), which dispatches through aie.utils.DefaultNPURuntime and "
+            "works on any backend."
+        )
 
 
 # ##########################################################################
@@ -85,6 +116,7 @@ class FusedDispatch(SequenceDispatch):
             f"{seq.name}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
+            extra_flags=seq.extra_flags,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -97,18 +129,19 @@ class FusedDispatch(SequenceDispatch):
         """
         operator_mlir_map = {}
         comp_runlist = []
-        op_names = {}  # id(op) -> op_name
+        designs, design_of = seq.unique_designs()
+        design_names = []
 
-        for idx, op in enumerate(seq.unique_operators()):
+        for idx, op in enumerate(designs):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
-            op_names[id(op)] = op_name
+            design_names.append(op_name)
             operator_mlir_map[op_name] = mlir_artifact
 
         for op, *bufs in seq.runlist:
-            comp_runlist.append((op_names[id(op)], *bufs))
+            comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
         return comp.SequenceMLIRArtifact(
             seq.name + "_fused.mlir",
@@ -122,7 +155,7 @@ class FusedDispatch(SequenceDispatch):
     def _collect_kernel_artifacts(self, seq):
         """Kernel artifacts from all child operators, prefixed per operator index."""
         kernel_artifacts = []
-        for idx, op in enumerate(seq.unique_operators()):
+        for idx, op in enumerate(seq.unique_designs()[0]):
             objs = op.get_kernel_artifacts()
             for obj in objs:
                 obj.filename = f"op{idx}_{obj.filename}"
@@ -262,6 +295,8 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         dispatch="auto",
+        extra_flags=None,
+        share_designs=False,
         *args,
         **kwargs,
     ):
@@ -276,12 +311,17 @@ class OperatorSequence(AIEOperatorBase):
             )
         super().__init__(*args, **kwargs)
         self.runlist = runlist
-        self.name = name
+        # Sharing changes which designs are built, so it belongs in the name that
+        # keys the build artifacts.
+        self.name = name + "_shared" if share_designs else name
         self.input_args = input_args
         self.output_args = output_args
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
+        # Extra aiecc flags forwarded to the full-ELF build.
+        self.extra_flags = extra_flags or []
+        self.share_designs = share_designs
         self._dispatch = dispatch
 
     @staticmethod
@@ -299,6 +339,32 @@ class OperatorSequence(AIEOperatorBase):
         for op, *_ in self.runlist:
             seen.setdefault(id(op), op)
         return list(seen.values())
+
+    def unique_designs(self):
+        """The designs to build, and which design each operator uses.
+
+        With ``share_designs`` set, operators reporting the same ``design_key``
+        collapse onto one design, so it is built, prefixed and configured once.
+        """
+        designs = []
+        design_of = {}
+        first_with_key = {}
+        for op in self.unique_operators():
+            key = op.design_key() if self.share_designs else None
+            if key is not None and key in first_with_key:
+                shared = designs[first_with_key[key]]
+                if op.get_arg_spec() != shared.get_arg_spec():
+                    raise ValueError(
+                        f"{op.name} and {shared.name} report the same design_key but "
+                        "different runtime arguments, so the design cannot be shared"
+                    )
+                design_of[id(op)] = first_with_key[key]
+                continue
+            if key is not None:
+                first_with_key[key] = len(designs)
+            design_of[id(op)] = len(designs)
+            designs.append(op)
+        return designs, design_of
 
     def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> args_spec
@@ -508,6 +574,7 @@ class SequenceFullELFCallable(SequenceCallable):
     """
 
     def __init__(self, op, device_name="main", sequence_name="sequence"):
+        _require_xrt()
         self.device_name = device_name
         self.sequence_name = sequence_name
 
@@ -534,16 +601,21 @@ class SequenceFullELFCallable(SequenceCallable):
     def params(self):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
-        The ``params.txt`` describing the runtime parameters is written by
-        ``aie-lower-parameters`` into the ``<mlir>.prj`` project directory next
-        to the fused MLIR source. Returns ``None`` if the sequence declared no
-        runtime parameters (in which case the file is not written).
+        The ``params.txt`` describing the runtime parameters is requested from
+        aiecc via ``--get-scratchpad-parameters``; it is a graph output, so it
+        lands in aiecc's ``--output-dir``, which compile_mlir_module() points at
+        the work dir (see ``_aiecc_work_dir``) for the fused MLIR source.
+        Returns ``None`` if the sequence declared no runtime parameters: the
+        file is still written, but holds a count of zero and there is no ctrl
+        scratchpad buffer object to bind to.
         """
         if self._params is not None:
             return self._params
         mlir_filename = self.op.artifacts[0].mlir_input.filename
-        params_path = Path(mlir_filename + ".prj") / "params.txt"
+        params_path = comp._aiecc_work_dir(mlir_filename) / "params.txt"
         if not params_path.exists():
+            return None
+        if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
@@ -569,23 +641,22 @@ class SequenceFullELFCallable(SequenceCallable):
             "output": self.output_buffer,
             "scratch": self.scratch_buffer,
         }[buf_type]
-        sub = XRTSubBuffer(
-            parent_bo=parent.buffer_object(),
-            offset_bytes=offset,
-            size_bytes=length,
-            shape=(length // BF16.itemsize,),
-            dtype=ml_dtypes.bfloat16,
-            parent=parent,
-        )
+        sub = parent.subview(offset, (length // BF16.itemsize,), ml_dtypes.bfloat16)
         self._buffer_cache[buffer_name] = sub
         return sub
 
     def _sync_inputs(self):
-        # Sub-views handed out by get_buffer() propagate their host-dirty state
-        # to this parent, so the parent syncs to the device here.
+        # Sub-views handed out by get_buffer() share the parent's coherence map, so
+        # a write through one (e.g. torch_view()) marks its byte range host-dirty
+        # there too, and `to("npu")` here syncs every dirty range in one pass.
         self.input_buffer.to("npu")
 
     def _sync_outputs(self):
+        # _run just rewrote the output arena on the device, so the device holds the
+        # authoritative copy. Force the device->host sync: assert device residency first
+        # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
+        # range "cpu" (otherwise a looped dispatch would read stale output).
+        self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
 
     def _run(self):
@@ -648,6 +719,7 @@ class SequenceXclbinCallable(_PerBufferCallable):
     """
 
     def __init__(self, op, dispatch):
+        _require_xrt()
         self._dispatch = dispatch
         super().__init__(op)
 
@@ -655,13 +727,8 @@ class SequenceXclbinCallable(_PerBufferCallable):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
 
     def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        return XRTSubBuffer(
-            parent_bo=parent.buffer_object(),
-            offset_bytes=offset_bytes,
-            size_bytes=size_bytes,
-            shape=(size_bytes // BF16.itemsize,),
-            dtype=ml_dtypes.bfloat16,
-            parent=parent,
+        return parent.subview(
+            offset_bytes, (size_bytes // BF16.itemsize,), ml_dtypes.bfloat16
         )
 
     def _allocate_buffers(self):
@@ -721,6 +788,7 @@ class SequenceReferenceCallable(_PerBufferCallable):
         return view
 
     def _run(self):
+        torch = _torch()
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
             inputs = [
                 _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
@@ -767,6 +835,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
         kernel(*args)
 
+        torch = _torch()
         npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
         ref_out = step_op.reference(*cpu_inputs)
 

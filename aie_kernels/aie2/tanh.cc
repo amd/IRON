@@ -13,20 +13,19 @@ void tanh_bf16_vectorized(bfloat16 *restrict input_vector, bfloat16 *restrict ou
 {
     event0();
 
-    auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
-    auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
+    auto it_in = aie::begin_restrict_vector<32>((bfloat16 *)input_vector);
+    auto it_out = aie::begin_restrict_vector<32>((bfloat16 *)output_vector);
 
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_MIN_ITERATION_COUNT(64)
-    for (int i = 0; i < vector_size; i += 16) {
-        // Load input vector
-        aie::vector<bfloat16, 16> input = *it_in++;
+    for (int i = 0; i < vector_size; i += 32) {
+        auto input = *it_in++;
 
-        // Compute tanh approximation
-        aie::vector<bfloat16, 16> tanh_x = getTanhBf16(input);
+        // LUT-based tanh: split to 16-wide halves
+        aie::vector<bfloat16, 16> tanh_lo = getTanhBf16(input.extract<16>(0));
+        aie::vector<bfloat16, 16> tanh_hi = getTanhBf16(input.extract<16>(1));
 
-        // Store output vector
-        *it_out++ = tanh_x;
+        *it_out++ = aie::concat(tanh_lo, tanh_hi);
     }
 
     event1();

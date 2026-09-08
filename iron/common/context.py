@@ -55,10 +55,6 @@ class AIEContext:
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.KernelCompilationRule(peano_dir, mlir_aie_dir, use_chess=use_chess),
             comp.ArchiveCompilationRule(peano_dir, mlir_aie_dir),
-            comp.AieccXclbinInstsCompilationRule(
-                self.build_dir, peano_dir, mlir_aie_dir, use_chess=use_chess
-            ),
-            comp.AieccFullElfCompilationRule(
-                self.build_dir, peano_dir, mlir_aie_dir, use_chess=use_chess
-            ),
+            comp.AieccXclbinInstsCompilationRule(use_chess=use_chess),
+            comp.AieccFullElfCompilationRule(use_chess=use_chess),
         ]

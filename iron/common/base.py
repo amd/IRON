@@ -115,6 +115,15 @@ class MLIROperator(AIEOperatorBase):
     def operator_dir(self) -> Path:
         return Path(inspect.getfile(type(self))).parent
 
+    def design_key(self) -> str | None:
+        """Identifies the design this operator compiles to, for sharing it.
+
+        Two operators returning the same key must produce byte-identical MLIR before
+        the fused build prefixes their kernel symbols, and must take the same runtime
+        argument shapes. ``None`` means the design is never shared.
+        """
+        return None
+
     @property
     def name(self) -> str:
         """Unique name for this operator instance, derived from its parameters.
@@ -147,23 +156,20 @@ class MLIROperator(AIEOperatorBase):
         pass
 
     def get_artifacts(
-        self, prefix: str = "", dynamic_obj_fifos: bool = False
+        self, prefix: str = ""
     ) -> tuple[XclbinArtifact, InstsBinArtifact]:
         operator_name = prefix + self.name
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps = self.get_kernel_artifacts()
-        extra_flags = ["--dynamic-objFifos"] if dynamic_obj_fifos else []
         xclbin_artifact = XclbinArtifact(
             f"{operator_name}.xclbin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_deps,
-            extra_flags=extra_flags,
         )
         insts_artifact = InstsBinArtifact(
             f"{operator_name}.bin",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact],
-            extra_flags=extra_flags,
         )
         return xclbin_artifact, insts_artifact
 

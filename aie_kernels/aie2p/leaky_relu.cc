@@ -41,9 +41,12 @@ void leaky_relu_vectorized_bf16(bfloat16 *restrict a,
 
 extern "C" {
 
-void leaky_relu_bf16(bfloat16 *restrict input, bfloat16 *restrict output, int input_size, bfloat16 alpha)
+void leaky_relu_bf16(bfloat16 *restrict input, bfloat16 *restrict output, int input_size, float alpha)
 {
-    leaky_relu_vectorized_bf16(input, output, input_size, alpha);
+    // chess LLVM cannot parse bfloat call-constants; pass the slope as f32
+    // (like the axpy kernel) and convert here.
+    leaky_relu_vectorized_bf16(input, output, input_size,
+                               (bfloat16)alpha);
 }
 
 } // extern "C"

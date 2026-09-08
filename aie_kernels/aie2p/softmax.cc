@@ -45,7 +45,7 @@ void softmax_simple_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict out
         input_bf16 = *it_log_in++;
         scaled_accum = aie::mul(input_bf16, log2e_vec);
         running_max = aie::reduce_max(scaled_accum.to_vector<bfloat16>());
-        if (running_max > max_val) {
+        if ((float)running_max > max_val) {
             max_val = running_max;
         }
     }
@@ -121,13 +121,13 @@ void partial_softmax_alias_bf16(bfloat16 *restrict input_vector,
         input_bf16 = *it_log_in++;
         scaled_accum = aie::mul(input_bf16, log2e_vec);
         running_max = aie::reduce_max(scaled_accum.to_vector<bfloat16>());
-        if (running_max > max_val) {
+        if ((float)running_max > max_val) {
             max_val = running_max;
         }
     }
 
     // Compute m_{i}
-    if (max_val > scale_buffer[row_idx]) {
+    if (max_val > (float)scale_buffer[row_idx]) {
         scale_buffer[num_rows + row_idx] = max_val;
     } else {
         scale_buffer[num_rows + row_idx] = scale_buffer[row_idx];
@@ -172,9 +172,10 @@ void partial_softmax_bf16(bfloat16 *restrict input,
                           const int32_t input_size,
                           const int32_t row_idx,
                           const int32_t num_rows,
-                          const bfloat16 scale)
+                          const float scale)
 {
-    partial_softmax_alias_bf16(input, output, scale_buffer, input_size, row_idx, num_rows, scale);
+    partial_softmax_alias_bf16(input, output, scale_buffer, input_size, row_idx, num_rows,
+                               (bfloat16)scale);
 }
 
 void mask_bf16(bfloat16 *inout, const int32 unmasked_size, const int32 total_size)

@@ -13,26 +13,28 @@ void silu_tanh_approx_bf16(bfloat16 *restrict input_vector, bfloat16 *restrict o
 {
     event0();
 
-    auto it_in = aie::begin_restrict_vector<16>((bfloat16 *)input_vector);
-    auto it_out = aie::begin_restrict_vector<16>((bfloat16 *)output_vector);
+    auto it_in = aie::begin_restrict_vector<32>((bfloat16 *)input_vector);
+    auto it_out = aie::begin_restrict_vector<32>((bfloat16 *)output_vector);
 
-    aie::vector<bfloat16, 16> register_0_5 = aie::broadcast<bfloat16, 16>(0.5f);
-    aie::vector<bfloat16, 16> register_1 = aie::broadcast<bfloat16, 16>(1.0f);
+    aie::vector<bfloat16, 32> register_0_5 = aie::broadcast<bfloat16, 32>(0.5f);
+    aie::vector<bfloat16, 32> register_1 = aie::broadcast<bfloat16, 32>(1.0f);
     AIE_PREPARE_FOR_PIPELINING
     AIE_LOOP_MIN_ITERATION_COUNT(64)
-    for (int i = 0; i < vector_size; i += 16) {
-        // Load input vector
-        aie::vector<bfloat16, 16> input = *it_in++;
+    for (int i = 0; i < vector_size; i += 32) {
+        auto input = *it_in++;
 
-        // Compute tanh approximation
-        aie::vector<bfloat16, 16> half_x = aie::mul(input, register_0_5);
-        aie::vector<bfloat16, 16> tanh_half_x = getTanhBf16(half_x);
-        auto tanh_half_x_approx = aie::add(tanh_half_x, register_1);
-        aie::vector<bfloat16, 16> sigmoid_approx = aie::mul(tanh_half_x_approx, register_0_5);
-        // Compute output: x * tanh_approx
+        // Compute half_x = x * 0.5
+        aie::vector<bfloat16, 32> half_x = aie::mul(input, register_0_5);
+
+        // LUT-based tanh: split to 16-wide halves
+        aie::vector<bfloat16, 16> tanh_lo = getTanhBf16(half_x.extract<16>(0));
+        aie::vector<bfloat16, 16> tanh_hi = getTanhBf16(half_x.extract<16>(1));
+        aie::vector<bfloat16, 32> tanh_half_x = aie::concat(tanh_lo, tanh_hi);
+
+        auto one_plus = aie::add(tanh_half_x, register_1);
+        aie::vector<bfloat16, 32> sigmoid_approx = aie::mul(one_plus, register_0_5);
         auto mul_output = aie::mul(input, sigmoid_approx);
 
-        // Store output vector
         *it_out++ = mul_output.to_vector<bfloat16>();
     }
 

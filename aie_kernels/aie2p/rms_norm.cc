@@ -7,10 +7,13 @@
 #include <stdlib.h>
 
 template <typename T, int N>
-void rms_norm_general(const T *restrict input, const T *restrict input2, T *restrict output, int32_t cols)
+void rms_norm_general(const T *restrict input,
+                      const T *restrict input2,
+                      T *restrict output,
+                      int32_t cols,
+                      float epsilon)
 {
     event0();
-    constexpr float epsilon = 1e-5f;
     ::aie::vector<float, N> add_res = ::aie::zeros<float, N>();
 
     int vector_chunks = cols / N;
@@ -33,19 +36,20 @@ void rms_norm_general(const T *restrict input, const T *restrict input2, T *rest
 
     float rms = sum_sq / cols + epsilon;
     float inv_rms = aie::invsqrt(rms);
-    ::aie::vector<T, N> inv_rms_v = ::aie::broadcast<T, N>(static_cast<T>(inv_rms));
+    // Normalize in f32 and round once. Mirrors layer_norm.cc's accfloat path.
+    ::aie::accum<accfloat, N> inv_rms_v;
+    inv_rms_v.from_vector(::aie::broadcast<float, N>(inv_rms), 0);
 
     for (int i = 0; i < vector_chunks; i++) {
-        ::aie::vector<T, N> reg_a = ::aie::load_v<N>(input + i * N);
-        ::aie::vector<T, N> norm_v = ::aie::mul(reg_a, inv_rms_v);
-        ::aie::vector<T, N> out_v;
+        ::aie::accum<accfloat, N> reg_a;
+        reg_a.from_vector(::aie::load_v<N>(input + i * N), 0);
+        reg_a = ::aie::mul(reg_a.template to_vector<float>(), inv_rms_v.template to_vector<float>());
         if (input2) {
-            ::aie::vector<T, N> reg_b = ::aie::load_v<N>(input2 + i * N);
-            out_v = ::aie::mul(norm_v, reg_b);
-        } else {
-            out_v = norm_v;
+            ::aie::accum<accfloat, N> reg_b;
+            reg_b.from_vector(::aie::load_v<N>(input2 + i * N), 0);
+            reg_a = ::aie::mul(reg_a.template to_vector<float>(), reg_b.template to_vector<float>());
         }
-        ::aie::store_v(output + i * N, out_v);
+        ::aie::store_v(output + i * N, reg_a.template to_vector<T>());
     }
 
     if (remaining > 0) {
@@ -65,13 +69,17 @@ void rms_norm_general(const T *restrict input, const T *restrict input2, T *rest
 }
 
 extern "C" {
-void rms_norm_bf16_vector(bfloat16 *input, bfloat16 *output, int32_t size)
+void rms_norm_bf16_vector(bfloat16 *input, bfloat16 *output, int32_t size, float epsilon)
 {
-    rms_norm_general<bfloat16, 16>(input, nullptr, output, size);
+    ::aie::set_rounding(aie::rounding_mode::conv_even); // round-to-nearest-even; do not inherit a floor rounding mode
+                                                        // from a prior kernel
+    rms_norm_general<bfloat16, 32>(input, nullptr, output, size, epsilon);
 }
 
-void weighted_rms_norm(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t size)
+void weighted_rms_norm(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t size, float epsilon)
 {
-    rms_norm_general<bfloat16, 16>(a_in, b_in, c_out, size);
+    ::aie::set_rounding(aie::rounding_mode::conv_even); // round-to-nearest-even; do not inherit a floor rounding mode
+                                                        // from a prior kernel
+    rms_norm_general<bfloat16, 32>(a_in, b_in, c_out, size, epsilon);
 }
 }

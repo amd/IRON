@@ -67,7 +67,10 @@ void softmax_bf16(bfloat16 *restrict input, bfloat16 *restrict output, const int
 void mask_bf16(bfloat16 *inout, const int32_t unmasked_size, const int32_t total_size)
 {
     for (int32_t i = unmasked_size; i < total_size; i++) {
-        inout[i] = (bfloat16)(-INFINITY);
+        // chess: the aie2 chess front-end headers do not define INFINITY;
+        // use the most-negative finite bf16 (exp2 of this underflows to 0,
+        // identical masking semantics).
+        inout[i] = (bfloat16)(-65504.0f);
     }
 }
 

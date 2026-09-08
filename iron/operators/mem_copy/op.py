@@ -71,9 +71,6 @@ class MemCopy(MLIROperator):
             )
         ]
 
-    def get_artifacts(self):
-        return super().get_artifacts(dynamic_obj_fifos=True)
-
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.size,)),

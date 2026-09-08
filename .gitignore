@@ -1,24 +1,2 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-/my_install*
-/ironenv*
-.vscode
-__pycache__
-.DS_Store
-*.bin
-build/*
-**/_build/**
-**/build/**
-**/build_elf/**
-*.exe
-*.csv
-secret_github_token
-id_ed25519
-id_ed25519.pub
-*.log
-*.safetensors
-*.model
-.cline_storage
-*.egg-info
-**/*.prj/**
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*

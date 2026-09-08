@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker
+from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -17,6 +17,7 @@ def my_weighted_rms_norm(
     num_channels,
     weight_length,
     trace_size,
+    epsilon=1e-5,
     func_prefix="",
 ):
     per_tile_elements = weight_length
@@ -63,7 +64,7 @@ def my_weighted_rms_norm(
     rms_norm_kernel = Kernel(
         f"{func_prefix}rms_norm_bf16_vector",
         f"{func_prefix}rms_norm.o",
-        [tile_ty, tile_ty, np.int32],
+        [tile_ty, tile_ty, np.int32, np.float32],
     )
     eltwise_mul_kernel = Kernel(
         f"{func_prefix}eltwise_mul_bf16_vector",
@@ -77,7 +78,7 @@ def my_weighted_rms_norm(
         for _ in range_(N_div_n):
             elem_in1 = of_in1.acquire(1)
             elem_out = of_out1.acquire(1)
-            rms_norm(elem_in1, elem_out, per_tile_elements)
+            rms_norm(elem_in1, elem_out, per_tile_elements, epsilon)
             of_in1.release(1)
             of_out1.release(1)
 
@@ -139,42 +140,48 @@ def my_weighted_rms_norm(
     ]
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(tensor_ty, weights_ty, tensor_ty) as (A, B, C):
-        rt.start(*my_workers)
+    def sequence(A, B, C, of_in1s_prods, of_in2s_prods, of_out2s_conss):
 
         # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = rt.task_group()
+        tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
                 idx = i * num_channels + j
-                rt.fill(
-                    of_in1s[idx].prod(),
+                of_in1s_prods[idx].fill(
                     A,
                     taps[idx],
-                    task_group=tg,
+                    group=tg,
                 )
         # Fill weights (one per channel)
         for j in range(num_channels):
-            rt.fill(
-                of_in2s[j].prod(),
+            of_in2s_prods[j].fill(
                 B,
-                task_group=tg,
+                group=tg,
             )
         # Drain the output objectFIFOs with data
         for i in range(num_columns):
             for j in range(num_channels):
                 idx = i * num_channels + j
-                rt.drain(
-                    of_out2s[idx].cons(),
+                of_out2s_conss[idx].drain(
                     C,
                     taps[idx],
                     wait=True,
-                    task_group=tg,
+                    group=tg,
                 )
-        rt.finish_task_group(tg)
+        tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            tensor_ty,
+            weights_ty,
+            tensor_ty,
+            [of.prod() for of in of_in1s],
+            [of.prod() for of in of_in2s],
+            [of.cons() for of in of_out2s],
+        ],
+    )
     # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt).resolve_program()
+    return Program(dev, rt, workers=my_workers).resolve_program()

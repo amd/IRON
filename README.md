@@ -1,237 +1,52 @@
 <!--
-SPDX-FileCopyrightText: Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# 🦾 - IRON: Unlocking the Full Potential of NPUs - 🦾
-
-<a href="https://discord.gg/cW99Ds85e8">
-    <img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord" /></a>
-<a href="https://github.com/amd/iron/releases/latest" title="Download the latest release">
-   <img src="https://img.shields.io/github/v/release/amd/iron?include_prereleases" alt="Latest Release" /></a>
-<a href="https://tooomm.github.io/github-release-stats/?username=amd&repository=iron">
-   <img src="https://img.shields.io/github/downloads/amd/iron/total.svg" alt="GitHub downloads" /></a>
-<a href="https://github.com/amd/iron/actions" title="Check out our tests">
-   <img src="https://github.com/amd/iron/actions/workflows/small.yml/badge.svg" alt="Iron Tests" /></a>
-<a href="https://github.com/amd/iron/blob/main/CONTRIBUTING.md" title="Contribution Guide">
-    <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
-<a href="https://github.com/amd/iron/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache-yellow.svg" alt="license: Apache" /></a>
-<a href="https://github.com/psf/black">
-    <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black" /></a>
-
-<p align="center">
-   <img src="./images/XDNA2.png" alt="IRON Logo" style="max-width: 100%; height: auto;">
-</p>
-
-IRON is an open-source & close-to-metal Python API enabling fast and efficient execution on [AMD Ryzen™ AI NPUs](https://www.amd.com/en/products/processors/consumer/ryzen-ai.html). It relies on language bindings around the [MLIR-AIE](https://github.com/Xilinx/mlir-aie) dialect.
-
-**Key Features:**
-
-- Close-to-metal NPU programming via MLIR-AIE Python bindings
-- Pre-built operator library (GEMM, MHA, RMSNorm, RoPE, activations, etc.)
-- Operator fusion for optimal performance
-- Extensible architecture for custom operators
-- End-to-end LLM inference (Llama 3.2 1B example included)
-
-The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
-
-> E. Hunhoff, J. Melber, K. Denolf, A. Bisca, S. Bayliss, S. Neuendorffer, J. Fifield, J. Lo, P. Vasireddy, P. James-Roxby, E. Keller. "[Efficiency, Expressivity, and Extensibility in a Close-to-Metal NPU Programming Interface](https://arxiv.org/abs/2504.18430)". In 33rd IEEE International Symposium On Field-Programmable Custom Computing Machines, May 2025.
-
-#### 🎯 Operator Dashboard
-
-| Section | Description | Datatype | AIE2 | AIE2P | Status | Design Example |
-|:--------|:------------|:---------|:-----|:------|:-------|:-------------|
-| [Element-wise Add](./aie_kernels/generic/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add/](./iron/operators/elementwise_add/) |
-| [Element-wise Mul](./aie_kernels/generic/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul/](./iron/operators/elementwise_mul/) |
-| [GEMM](./aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm/](./iron/operators/gemm/) |
-| [GEMV](./aie_kernels/generic/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv/](./iron/operators/gemv/) |
-| [GQA](./aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [MHA](./aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [RMSNorm](./aie_kernels/aie2/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
-| [RoPE](./aie_kernels/generic/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope/](./iron/operators/rope/) |
-| [SiLU](./aie_kernels/aie2/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu/](./iron/operators/silu/) |
-| [Softmax](./aie_kernels/aie2/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax/](./iron/operators/softmax/) |
-| [Weighted RMSNorm](./aie_kernels/aie2/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
-| [Copy](./aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/mem_copy/](./iron/operators/mem_copy/) |
-| [Transpose](./aie_kernels/generic/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose/](./iron/operators/transpose/) |
-| [AXPY](./aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy/](./iron/operators/axpy/) |
-| [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
-| [Dequant](./aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant/](./iron/operators/dequant/) |
-| [RELU](./aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu/](./iron/operators/relu/) |
-| [Leaky RELU](./aie_kernels/aie2/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
-| [GELU](./aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
-| [LayerNorm](./aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm/](./iron/operators/layer_norm/) |
-| [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
-| [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
-| [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
-| [Tanh](./aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh/](./iron/operators/tanh/) |
-| [Sigmoid](./aie_kernels/aie2/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/sigmoid/](./iron/operators/sigmoid/) |
-
-> Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
-
-#### 📌 Legend
-
-| Status | Meaning            |
-|--------|--------------------|
-| 🟢     | **Done**           |
-| 🟡     | **In Development** |
-| ⚪     | **Not Assigned**   |
-
-
-## Installation (Linux)
-
-These instructions will guide you through everything required for building and executing a program on the Ryzen™ AI NPU, starting from a fresh bare-bones **Ubuntu 24.04** or **Ubuntu 24.10** install.
-
-### Initial Setup
-
-  > **Important**: Ensure your system has the latest BIOS version that enables NPU support. Check your laptop/mini-PC manufacturer's support website for BIOS updates.
-
-If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+ by installing the Hardware Enablement (HWE) stack:
-
-  ```bash
-  sudo apt update
-  sudo apt install --install-recommends linux-generic-hwe-24.04
-  sudo reboot
-  ```
-
-1. Install XDNA™ Driver and XRT:
-
-    > [Instructions from mlir-aie repository](https://github.com/Xilinx/mlir-aie?tab=readme-ov-file#build-and-install-the-xdna-driver-and-xrt)
-
-1. Install the packages needed for IRON and MLIR-AIE:
-
-    ```bash
-    # Python versions 3.10, 3.12 and 3.13 are currently supported by our wheels
-    sudo apt install \
-    build-essential clang clang-14 lld lld-14 python3-venv python3-pip
-    ```
-
-1. Setup a virtual environment and activate it:
-   ```bash
-   python3 -m venv ironenv
-   source ironenv/bin/activate
-   python3 -m pip install --upgrade pip
-   ```
-
-1. Source XRT (installed in step 1):
-   ```bash
-   source /opt/xilinx/xrt/setup.sh
-   ```
-
-1. Install required Python packages (from requirements.txt):
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-1. To test your installation, you can try to build and run the example below:
-   ```bash
-   pytest ./iron/operators/axpy/
-   ```
-
-### Building/Using & Testing Operators
-
-All available operators can be found in `iron/operators`. These each contain:
-
-- `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
-- `design.py`: The implementation of the operator's NPU code. Often references a kernel in `aie_kernels` for the compute core code and describes the data movement using ObjectFIFOs.
-- `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
-- `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
-
-> NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
->       `source /opt/xilinx/xrt/setup.sh`
->       `source /path/to/ironenv/bin/activate`
-
-To build and test all the operators:
-
-``` bash
-pytest iron/operators/ -m "not extensive"
-```
-
-To run the extensive test suite:
-
-``` bash
-pytest iron/operators/
-```
-
-To run a specific operator's tests:
-
-``` bash
-pytest iron/operators/axpy/
-```
-
-### Git Hooks (Optional but Recommended)
-
-To ensure your code passes CI linting checks before pushing, install the pre-push hook:
-
-```bash
-cp scripts/hooks/pre-push .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
-```
-
-The hook will run the same linting checks as CI:
-
-- License checks (reuse)
-- Python formatting (black)
-- C++ formatting (clang-format)
-
-To bypass the hook if needed: `git push --no-verify`
-
-## Applications
-
-### Llama 3.2 1B Inference
-
-IRON includes a complete LLM inference example demonstrating NPU acceleration:
-
-- **Location**: `iron/applications/llama_3.2_1b/`
-- **Model**: Meta Llama 3.2 1B
-- **Features**: Multi-head attention, fused operators, bfloat16 quantization
-
-See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
-
-## Architecture
-
-IRON uses a three-layer architecture:
-
-1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator has: `op.py` (interface), `design.py` (MLIR-AIE implementation), `reference.py` (CPU reference), `test.py` (validation)
-
-2. **AIE Kernels** (`aie_kernels/`): Low-level C++ compute kernels
-   - Organized by architecture: `generic/`, `aie2/`, `aie2p/`
-   - Vectorized using AIE API for optimal performance
-
-3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
-   - MLIR-AIE compilation pipeline
-   - XRT runtime integration
-   - Operator fusion framework
-
-## Performance
-
-IRON operators are designed for maximum NPU utilization:
-
-- Parallel execution across multiple AIE columns
-- Optimized data movement via ObjectFIFOs
-- Fused operations to minimize host-NPU transfers
-- Vectorized kernels using AIE intrinsics
-
-Run benchmarks:
-
-```bash
-# Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ -m "not extensive" -v
-```
-
-## Community and Support
-
-- 💬 **Discord**: Join our [Discord server](https://discord.gg/cW99Ds85e8) for discussions and support
-- 🐛 **Issues**: Report bugs and request features via [GitHub Issues](https://github.com/amd/iron/issues)
-- 📖 **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development guidelines
-- 📚 **Documentation**: Operator examples in `iron/operators/`, kernel docs in `aie_kernels/README.md`
-
-## License
-
-IRON is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.
-
------
-
-<p align="center">Copyright&copy; 2025-2026 Advanced Micro Devices, Inc</p>
+# AIE Kernels
+
+These kernels are provided as example building blocks for larger designs, and also as illustrations of how to write single core programs for AIEs which can then be duplicated or mixed into multi-core designs using the structural IRON API.
+
+In some cases, the kernels are just generic C code, and will run on any family of AI Engines with varying performance.  Other kernels are then optimized for the AIE1 and AIE2 architectures.  Finally, some kernels use the AIE API, which is a C++ header-only library providing types and operations that get translated into efficient low-level intrinsics, and whose documentation can be found [here](https://www.xilinx.com/htmldocs/xilinx2023_2/aiengine_api/aie_api/doc/index.html), while others use the architecture specific low-level intrinsics directly
+
+> **NOTE:** this set of AIE kernels are meant for demonstration along with the programming examples. The goal is not to be 100% performant, there may be room for further improvement. The kernels are provided as-is with no guarantees of support of AMD or AMD Research and Advanced Development.
+
+## Generic
+| Class | Name | Coding style | Purpose | Datatypes |
+|-|-|-|-|-|
+| basic | [passThrough.cc](./generic/passThrough.cc) | AIE API | A simple memcpy operation | `uint8_t`, `int16_t`, `int32_t` |
+
+## AIE1
+| Name | Coding style | Purpose |
+|-|-|-|
+
+## AIE2
+| Class | Name | Coding style | Purpose | Datatypes |
+|-|-|-|-|-|
+| basic | [zero.cc](../../aie_kernels/aie2/zero.cc) | AIE API | Fill a tensor with zeroes | template |
+| basic | [add.cc](../../aie_kernels/aie2/add.cc) | AIE API | Pointwise addition of 2 tensors | `bfloat16` |
+| basic | [mul.cc](../../aie_kernels/aie2/mul.cc) | AIE API | Pointwise multiplication of 2 tensors | `bfloat16` |
+| basic | [scale.cc](../../aie_kernels/aie2/scale.cc) | AIE API | Scale all elements of a tensor with a scale factor | `int32_t` |
+| basic | [bitwiseOR.cc](../../aie_kernels/aie2/bitwiseOR.cc) | AIE API | Bitwise OR of fixed point tensors | `uint8_t`,`int16_t`,`int32_t`|
+| basic | [bitwiseAND.cc](../../aie_kernels/aie2/bitwiseAND.cc) | AIE API | Bitwise AND of fixed point tensors | `uint8_t`,`int16_t`,`int32_t` |
+| gemm  | [mm.cc](../../aie_kernels/aie2/mm.cc) | AIE API | Matrix/Matrix multiplication | `int16_t`,`bfloat16_t` |
+| gemm  | [mv.cc](../../aie_kernels/aie2/mv.cc) | AIE API | Matrix/Vector multiplication | `bfloat16_t` |
+| |
+| reduction | [reduce_add.cc](../../aie_kernels/aie2/reduce_add.cc) | Intrinsics | Find the sum of elements in a tensor | `int32 _t` |
+| reduction| [reduce_max.cc](../../aie_kernels/aie2/reduce_max.cc) | Intrinsics | Find max value across a tensor | `int32 _t` |
+| reduction | [reduce_min.cc](../../aie_kernels/aie2/reduce_min.cc) | Intrinsics | Find min value across a tensor | `int32 _t` |
+||
+| ml | [conv2dk1_i8.cc](../../aie_kernels/aie2/conv2dk1_i8.cc) | AIE API | 1x1 Conv2D | `int8_t` |
+| ml | [conv2dk1.cc](../../aie_kernels/aie2/conv2dk1.cc) | AIE API | 1x1 Conv2D with fused ReLU | `int8_t`, `uint8_t` |
+| ml | [conv2dk3.cc](../../aie_kernels/aie2/conv2dk3.cc) | AIE API | 3x3 Conv2D with fused ReLU | `int8_t`, `uint8_t` |
+| ml | [conv2dk1_skip.cc](../../aie_kernels/aie2/conv2dk1_skip.cc) | AIE API| 1x1 Conv2D with fused skip addition | `int8_t`, `uint8_t` |
+| ml | [conv2dk1_skip_init.cc](../../aie_kernels/aie2/conv2dk1_skip_init.cc) | AIE API | 1x1 Conv2D with fused 1x1 Conv2D skip addition | `int8_t`, `uint8_t` |
+| ml |[relu.cc](../../aie_kernels/aie2/relu.cc) | Intrinsics | ReLU activation function | `bfloat16_t` |
+| ml |  [bf16_exp.cc](../../aie_kernels/aie2/bf16_exp.cc) | AIE API | Raise all elements in a `bfloat` tensor to $e^x$ | `bfloat16_t` |
+| |
+| vision | [gray2rgba.cc](../../aie_kernels/aie2/gray2rgba.cc) | AIE API | Convert from grayscale to RGBA format | `uint8_t` |
+| vision |[rgba2gray.cc](../../aie_kernels/aie2/rgba2gray.cc) | AIE API | Convert from RGBA format to grayscale | `uint8_t` |
+| vision | [rgba2hue.cc](../../aie_kernels/aie2/rgba2hue.cc) | AIE API | Convert from RGBA to hue | `uint8_t` |
+| vision | [addWeighted.cc](../../aie_kernels/aie2/addWeighted.cc) | AIE API | Fixed point weighted sum of two tensors | `uint8_t` |
+| vision | [threshold.cc](../../aie_kernels/aie2/threshold.cc) | AIE API | Clipping | `uint8_t` |  
+| vision | [filter2d.cc](../../aie_kernels/aie2/filter2d.cc) | AIE API | Fixed point 2D image processing filter | `uint8_t` |

@@ -38,7 +38,7 @@ void saxpy_scalar(bfloat16 *x, bfloat16 *y, const bfloat16 a, bfloat16 *z, const
     event0();
     float a_f = a;
     for (int i = 0; i < vector_size; ++i) {
-        z[i] = a_f * x[i] + y[i];
+        z[i] = a_f * (float)x[i] + (float)y[i];
     }
     event1();
 }

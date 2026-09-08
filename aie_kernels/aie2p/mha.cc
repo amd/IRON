@@ -60,7 +60,7 @@ void partial_softmax_bf16(bfloat16 *input,
                           const int32_t input_size,
                           const int32_t row_idx,
                           const int32_t row_size,
-                          const bfloat16 scale);
+                          const float scale);
 void passThroughLine(int32_t *in, int32_t *out, int32_t lineWidth);
 
 void matmul_bf16_bf16_wrapper(bfloat16 *a_in, bfloat16 *b_in, bfloat16 *c_out, int32_t *idx_buffer)
@@ -164,7 +164,7 @@ void partial_softmax(bfloat16 *A,
                      bfloat16 *P,
                      bfloat16 *scale_buffer,
                      int32_t *idx_buffer,
-                     bfloat16 inv_scale,
+                     float inv_scale,
                      int32_t B_q,
                      int32_t B_kv,
                      int32_t S_q_eff,

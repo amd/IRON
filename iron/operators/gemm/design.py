@@ -14,6 +14,7 @@ from aie.iron import (
     Program,
     Buffer,
     Runtime,
+    TaskGroup,
     Worker,
     WorkerRuntimeBarrier,
     str_to_dtype,
@@ -21,6 +22,7 @@ from aie.iron import (
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._trace import maybe_enable_trace
 
 microkernel_mac_dim_map = {
     "npu1": {
@@ -550,27 +552,21 @@ def my_matmul(
         )
 
     # Runtime operations to move data to/from the AIE-array
-    rt = Runtime()
-    with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
-        rt.start(*workers)
-
+    def sequence(A, B, C, A_prods, B_prods, C_conses):
         # Set runtime parameters
-        def set_rtps(*args):
-            for row, rtps_row in enumerate(args):
-                for col, rtp_row_col in enumerate(rtps_row):
-                    rtp_row_col[0] = K_div_k
-                    rtp_row_col[1] = n_c_row_tiles_per_core * n_c_col_tiles_per_core
-
-        rt.inline_ops(set_rtps, rtps)
+        for rtps_row in rtps:
+            for rtp_row_col in rtps_row:
+                rtp_row_col[0] = K_div_k
+                rtp_row_col[1] = n_c_row_tiles_per_core * n_c_col_tiles_per_core
 
         # Set the barriers to 1 to allow the worker to read the
         # runtime parameters and start the computation
         for row in range(n_aie_rows):
             for col in range(n_aie_cols):
-                rt.set_barrier(workerBarriers[row][col], 1)
+                workerBarriers[row][col].set(1)
 
         # Task groups will be used to determine when to sync/await/free DMA runtime ops
-        tg = rt.task_group()
+        tg = TaskGroup()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
@@ -628,13 +624,11 @@ def my_matmul(
                         # This line does not change MLIR output at all - it's just for recording data movement
                         C_taps.append(C_tile)
 
-                        rt.drain(
-                            C_l2l3_fifos[col].cons(),
+                        C_conses[col].drain(
                             C,
                             tap=C_tile,
                             wait=True,
-                            task_group=tg,
-                            tile=Tile(col, 0),
+                            group=tg,
                         )
 
                     for tile_row in range(current_tb_n_rows):
@@ -683,13 +677,11 @@ def my_matmul(
                                 sizes=C_sizes,
                                 strides=C_strides,
                             )
-                            rt.drain(
-                                C_l2l3_fifos[col].cons(),
+                            C_conses[col].drain(
                                 C,
                                 tap=C_tile,
                                 wait=True,
-                                task_group=tg,
-                                tile=Tile(col, 0),
+                                group=tg,
                             )
                             # This line does not change MLIR output at all - it's just for recording data movement
                             C_taps.append(C_tile)
@@ -718,14 +710,10 @@ def my_matmul(
 
                         # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
                         if col < n_aie_rows:
-                            rt.fill(
-                                A_l3l2_fifos[col].prod(),
+                            A_prods[col].fill(
                                 A,
                                 tap=A_tiles[tile_offset],
-                                task_group=tg,
-                                tile=Tile(
-                                    2 * col if n_aie_cols == 8 else col, 0
-                                ),  # alternate columns in full 4x8 NPU2 case
+                                group=tg,
                             )
                         # Use the calculated sizes/strides/offsets to record the data movement
                         # caused by the above call to npu_dma_memcpy_nd.
@@ -749,21 +737,43 @@ def my_matmul(
                         #     |0011    0011    |
                         #     |0011    0011    |
                         #      ----------------
-                        rt.fill(
-                            B_l3l2_fifos[col].prod(),
+                        B_prods[col].fill(
                             B,
                             tap=B_tiles[col],
-                            task_group=tg,
-                            tile=Tile(col, 0),
+                            group=tg,
                         )
 
                         # These lines do not change MLIR output at all - they are just for recording data movement
                         A_taps.append(A_tiles[tile_offset])
                         B_taps.append(B_tiles[col])
                 if tb > 0 or (tb == 0 and pingpong > 0):
-                    rt.finish_task_group(tg)
-                    tg = rt.task_group()
-        rt.finish_task_group(tg)
+                    tg.finish()
+                    tg = TaskGroup()
+        tg.finish()
+
+    rt = Runtime(
+        sequence,
+        [
+            A_ty,
+            B_ty,
+            C_ty,
+            [
+                f.prod(tile=Tile(2 * c if n_aie_cols == 8 else c, 0))
+                for c, f in enumerate(A_l3l2_fifos)
+            ],
+            [f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)],
+            [f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)],
+        ],
+    )
+
+    # Create the program from the device type and runtime
+    my_program = Program(dev_ty, rt, workers=workers)
+    maybe_enable_trace(my_program, trace_size, workers)
+
+    # Place components (assign them resources on the device) and generate an MLIR module.
+    # This is what runs the sequence body, so it must happen before the taps it
+    # records are read.
+    module = my_program.resolve_program()
 
     if generate_taps:
         # If generate taps is true, return a representation of tensor access patterns
@@ -774,11 +784,6 @@ def my_matmul(
             TensorAccessSequence.from_taps(C_taps),
         )
 
-    # Create the program from the device type and runtime
-    my_program = Program(dev_ty, rt)
-
-    # Place components (assign them resources on the device) and generate an MLIR module
-    module = my_program.resolve_program()
     return module
 
 

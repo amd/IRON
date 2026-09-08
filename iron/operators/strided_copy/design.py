@@ -11,7 +11,14 @@ input[0, :, 0] -> output[:, 0, 0]
 import numpy as np
 
 from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import ObjectFifo, ScratchpadParameter, Program, Runtime
+from aie.iron import (
+    ObjectFifo,
+    Program,
+    Runtime,
+    ScratchpadParameter,
+    TaskGroup,
+    sync_parameters,
+)
 
 
 def strided_copy(
@@ -48,9 +55,23 @@ def strided_copy(
         output_sizes[output_highest_sz_idx] % num_aie_channels == 0
     ), "Highest dimension of output_sizes must be divisible by num_aie_channels"
 
+    # Each channel's BD carries 1/num_aie_channels of the tensor, so the ObjectFifo object
+    # is sized against the per-channel share. A BD shorter than the object starves the
+    # MemTile's S2MM -- it never completes an object, never releases the lock, and the
+    # drain's dma_await_task never returns (ERT_CMD_STATE_TIMEOUT). An integer multiple is
+    # fine; it just cycles the buffer.
+    assert int(np.prod(input_sizes)) == int(np.prod(output_sizes)), (
+        f"a copy moves the same element count both ways: input_sizes {input_sizes} "
+        f"has {int(np.prod(input_sizes))} elements, output_sizes {output_sizes} has "
+        f"{int(np.prod(output_sizes))}"
+    )
+    per_channel_size = int(np.prod(input_sizes)) // num_aie_channels
     if transfer_size is None:
-        transfer_size = int(np.prod(input_sizes))
-    assert np.prod(input_sizes) % transfer_size == 0
+        transfer_size = per_channel_size
+    assert per_channel_size % transfer_size == 0, (
+        f"transfer_size {transfer_size} must divide the per-channel transfer "
+        f"{per_channel_size} (= {int(np.prod(input_sizes))} / {num_aie_channels} channels)"
+    )
     transfer_ty = np.ndarray[
         (transfer_size,),
         np.dtype[dtype],
@@ -130,27 +151,33 @@ def strided_copy(
         for c in range(num_aie_channels)
     ]
 
-    rt = Runtime()
-    with rt.sequence(inp_ty, out_ty) as (inp, out):
+    def sequence(inp, out, fifos_in_prods, fifos_out_conss):
         if in_offset_param is not None or out_offset_param is not None:
-            rt.sync_parameters()
-        tg = rt.task_group()
+            sync_parameters()
+        tg = TaskGroup()
         for c in range(num_aie_channels):
-            rt.fill(
-                fifos_in[c].prod(),
+            fifos_in_prods[c].fill(
                 inp,
                 input_taps[c],
-                task_group=tg,
+                group=tg,
                 offset_parameter=in_offset_param,
             )
-            rt.drain(
-                fifos_out[c].cons(),
+            fifos_out_conss[c].drain(
                 out,
                 output_taps[c],
-                task_group=tg,
+                group=tg,
                 wait=True,
                 offset_parameter=out_offset_param,
             )
-        rt.finish_task_group(tg)
+        tg.finish()
 
+    rt = Runtime(
+        sequence,
+        [
+            inp_ty,
+            out_ty,
+            [of.prod() for of in fifos_in],
+            [of.cons() for of in fifos_out],
+        ],
+    )
     return Program(dev, rt).resolve_program()
