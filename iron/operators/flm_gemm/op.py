@@ -47,6 +47,12 @@ class FLMGEMM(MLIROperator):
     epilogue: str = field(default="none", repr=False)
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = field(default=None, repr=False)
+    # "conv_even" (round to nearest even) or "floor" (truncate). The core
+    # powers up in floor, and the design this was ported from never sets the
+    # mode, so "floor" reproduces its arithmetic exactly -- at ~40x the error,
+    # because truncation biases every conversion the same way and the bias
+    # accumulates over the K reduction instead of cancelling.
+    rounding: str = field(default="conv_even", repr=False)
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {**MLIROperator._name_aliases}
@@ -71,6 +77,10 @@ class FLMGEMM(MLIROperator):
             lo, hi = self.clamp
             if lo > hi:
                 raise ValueError(f"clamp min ({lo}) must be <= max ({hi})")
+        if self.rounding not in ("conv_even", "floor"):
+            raise ValueError(
+                f"rounding must be 'conv_even' or 'floor', got {self.rounding!r}"
+            )
 
         MLIROperator.__init__(self, context=self.context)
 
@@ -85,6 +95,8 @@ class FLMGEMM(MLIROperator):
             base = f"{base}_epi{self.epilogue}"
         if self.clamp is not None:
             base = f"{base}_clamp{self._clamp_tag}"
+        if self.rounding != "conv_even":
+            base = f"{base}_{self.rounding}"
         return base
 
     @property
@@ -97,7 +109,15 @@ class FLMGEMM(MLIROperator):
         obj = f"flm_gemm_epilogue_{self.epilogue}"
         if self.clamp is not None:
             obj = f"{obj}_clamp{self._clamp_tag}"
+        if self.rounding != "conv_even":
+            obj = f"{obj}_{self.rounding}"
         return f"{obj}.o"
+
+    @property
+    def _rounding_flags(self) -> list[str]:
+        """Applies to both kernels: the mmul and the epilogue's f32->bf16
+        store are both conversions and must agree."""
+        return ["-DFLM_GEMM_ROUND_FLOOR"] if self.rounding == "floor" else []
 
     @property
     def _epilogue_source(self):
@@ -120,11 +140,12 @@ class FLMGEMM(MLIROperator):
                 f"-DFLM_GEMM_CLAMP_MIN={float(lo)!r}f",
                 f"-DFLM_GEMM_CLAMP_MAX={float(hi)!r}f",
             ]
-        return flags
+        return flags + self._rounding_flags
 
     @property
     def _kernel_object(self) -> str:
-        return f"flm_gemm_{M_TILE}x{K_TILE}x{N_TILE}.o"
+        rnd = "" if self.rounding == "conv_even" else f"_{self.rounding}"
+        return f"flm_gemm_{M_TILE}x{K_TILE}x{N_TILE}{rnd}.o"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -169,7 +190,8 @@ class FLMGEMM(MLIROperator):
                     # bfp16-emulated path; without this the kernel will not
                     # compile.
                     "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-                ],
+                ]
+                + self._rounding_flags,
             ),
         ]
         artifacts.append(
