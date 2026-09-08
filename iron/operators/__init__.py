@@ -13,6 +13,7 @@ import importlib
 _OPERATOR_MODULES = {
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",
+    "FLMGEMM": "flm_gemm",
     "GEMM": "gemm",
     "GEMV": "gemv",
     "MHA": "mha",
