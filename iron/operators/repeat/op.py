@@ -56,8 +56,10 @@ class Repeat(MLIROperator):
 
     def get_arg_spec(self):
         return [
-            AIERuntimeArgSpec("in", (self.rows, self.cols)),
-            AIERuntimeArgSpec("out", (self.rows * self.repeat, self.cols)),
+            AIERuntimeArgSpec("in", (self.rows, self.cols), dtype=self.dtype),
+            AIERuntimeArgSpec(
+                "out", (self.rows * self.repeat, self.cols), dtype=self.dtype
+            ),
         ]
 
     def reference(self, x):
