@@ -95,6 +95,12 @@ void flm_gemm_k_step(bfloat16 *a_buf, bfp16ebs8 *b_buf, float *y_acc,
 void flm_gemm_k_step(bfloat16 *a_buf, bfloat16 *b_buf, float *y_acc,
 #endif
                      int32_t band) {
+#ifdef FLM_GEMM_NULL_MMUL
+  // ABLATION ONLY: skip the multiply, keep every acquire, release and DMA.
+  // Output is garbage; never correctness-gate a build with this.
+  (void)a_buf; (void)b_buf; (void)y_acc; (void)band;
+  return;
+#endif
   ::aie::set_rounding(round_mode);
   constexpr int NUM_ITER = K / CT_K;
   // The accumulator is [row-block][col-block][r*t], so band b starts at

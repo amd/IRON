@@ -123,6 +123,7 @@ def flm_gemm(
     epilogue="none",
     tile_n=N_TILE_DEFAULT,
     tile_ma=None,
+    overlap=None,
     kernel_object="flm_gemm.o",
     epilogue_object="flm_gemm_epilogue.o",
     trace_size=0,
@@ -150,6 +151,9 @@ def flm_gemm(
             f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
         )
     RHO = M_TILE // T_MA
+    import os as _os
+
+    OVERLAP = int(_os.environ.get("FLM_OVERLAP", "2")) if overlap is None else overlap
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
     CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
     CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
@@ -515,6 +519,17 @@ def flm_gemm(
     def c_tap(mega_col, c):
         # Every joined block this column produces for one column-block: one
         # ROWS*M_TILE x N_TILE block per row-block.
+        if _os.environ.get("FLM_C_LINEAR") == "1":
+            # ABLATION: same byte count, one contiguous run per column-block
+            # instead of ROWS*M_TILE runs of N_TILE. Writes C to the WRONG
+            # place -- only for measuring what the scattered write costs.
+            blk = m_row_blocks * ROWS * M_TILE * N_TILE
+            return TensorAccessPattern(
+                tensor_dims=(M * N,),
+                offset=(mega_col * COLS + c) * blk,
+                sizes=[1, 1, 1, blk],
+                strides=[0, 0, 0, 1],
+            )
         return TensorAccessPattern(
             tensor_dims=(M * N,),
             offset=(mega_col * COLS + c) * N_TILE,
@@ -545,7 +560,12 @@ def flm_gemm(
         # block costs 3 buffer descriptors on a shim column (A + B + C), so two
         # in flight is 6 of 16. Per-object tasks needed 1 + 2*k_iters and could
         # not be overlapped at all.
-        prev = None
+        # Keep OVERLAP column-blocks in flight. A block costs 3 shim buffer
+        # descriptors on a column (A + B + C) against 16 available, so the
+        # ceiling is 5; the operator is DDR-rate bound rather than byte bound
+        # (53 GB/s of a 63-70 GB/s roof), so how deeply the fills are pipelined
+        # is what decides the rate.
+        pending = []
         for mega_col, active_cols in blocks:
             tg_c = TaskGroup()
             for c in range(active_cols):
@@ -556,13 +576,14 @@ def flm_gemm(
             for c in range(active_cols):
                 b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
 
-            if prev is not None:
-                for tg in prev:
+            pending.append([tg_f, tg_c])
+            while len(pending) >= OVERLAP:
+                for tg in pending.pop(0):
                     tg.finish()
-            prev = [tg_f, tg_c]
 
-        for tg in prev or []:
-            tg.finish()
+        for group in pending:
+            for tg in group:
+                tg.finish()
 
     rt = Runtime(
         sequence,

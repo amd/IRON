@@ -225,6 +225,15 @@ class FLMGEMM(MLIROperator):
         return flags + self._rounding_flags
 
     @property
+    def _ablate_mmul(self) -> bool:
+        """ABLATION: FLM_NULL_MMUL=1 nulls the multiply, leaving all data
+        movement. Threaded into the object AND operator names because the
+        build cache is keyed on filename."""
+        import os
+
+        return os.environ.get("FLM_NULL_MMUL", "") == "1"
+
+    @property
     def _tile_ma(self) -> int:
         """Resolved A-tile height. design.py picks the default, and it MUST be
         the same value the kernel is compiled with -- the design sizes the A
@@ -240,7 +249,7 @@ class FLMGEMM(MLIROperator):
     @property
     def _kernel_object(self) -> str:
         rnd = "" if self.rounding == "conv_even" else f"_{self.rounding}"
-        ma = f"_ma{self._tile_ma}"
+        ma = f"_ma{self._tile_ma}" + ("_nomm" if self._ablate_mmul else "")
         return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}{rnd}{ma}.o"
 
     def get_mlir_artifact(self):
@@ -286,6 +295,7 @@ class FLMGEMM(MLIROperator):
                     f"-DFLM_GEMM_TILE_N={self.tile_n}",
                     f"-DFLM_GEMM_TILE_MA={self._tile_ma}",
                     "-DFLM_GEMM_BFP16_B",
+                    *(["-DFLM_GEMM_NULL_MMUL"] if self._ablate_mmul else []),
                     # The r=8 mmul shape this design uses only exists on the
                     # bfp16-emulated path; without this the kernel will not
                     # compile.
