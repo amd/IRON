@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+
+import numpy as np
+import torch
 from typing import ClassVar, Dict
 
 from iron.common import (
@@ -28,6 +31,39 @@ from iron.operators.flm_gemm.design import (
     S,
     T,
 )
+
+
+def _f32_to_bfp16ebs8(a):
+    """float32 -> bfp16ebs8, matching the hardware's to_v64bfp16ebs8.
+
+    Blocks of 8 share the max f32 exponent in the block; each mantissa is the
+    24-bit magnitude with the implicit bit made explicit, two's-complemented
+    when negative, truncated to 8 bits and then arithmetically right-shifted by
+    (maxExp - exp). AIE2P always TRUNCATES here, so this is independent of
+    ``rounding``. Verified byte-identical against mlir-aie's reference
+    implementation (``programming_examples/ml/block_datatypes/helper.h``).
+
+    Layout per block: one shared-exponent byte then the 8 mantissa bytes.
+    """
+    flat = np.ascontiguousarray(a, dtype=np.float32).reshape(-1, 8)
+    u = flat.view(np.uint32)
+    sign = (u & 0x80000000) != 0
+    exp = ((u >> 23) & 0xFF).astype(np.int32)
+    man = (u & 0x007FFFFF).astype(np.uint32)
+    man = np.where(exp != 0, man | 0x00800000, man).astype(np.uint32)
+    max_exp = exp.max(axis=1, keepdims=True)
+    mag = np.where(sign, ~man.astype(np.int64) + 1, man.astype(np.int64))
+    # The two shifts compose: 17 to keep 7 mantissa bits plus the sign, then
+    # (maxExp - exp) to bring the value onto the block's shared exponent.
+    # TRUNCATION, not rounding -- that is what AIE2P does, and round-to-nearest
+    # here measures 6.18e-03 against truncation's 2.69e-04.
+    shift = (max_exp - exp).astype(np.int64)
+    total = 17 + np.clip(shift, 0, 40)
+    v8 = np.where(shift >= 32, np.where(sign, -1, 0), mag >> np.clip(total, 0, 62))
+    out = np.empty((flat.shape[0], 9), dtype=np.uint8)
+    out[:, 0] = max_exp[:, 0].astype(np.uint8)
+    out[:, 1:] = v8.astype(np.int8).view(np.uint8)
+    return torch.from_numpy(out.reshape(-1))
 
 
 @dataclass
@@ -232,6 +268,7 @@ class FLMGEMM(MLIROperator):
                     f"-DFLM_GEMM_TILE_K={K_TILE}",
                     f"-DFLM_GEMM_TILE_N={self.tile_n}",
                     f"-DFLM_GEMM_TILE_MA={self._tile_ma}",
+                    "-DFLM_GEMM_BFP16_B",
                     # The r=8 mmul shape this design uses only exists on the
                     # bfp16-emulated path; without this the kernel will not
                     # compile.
@@ -250,8 +287,15 @@ class FLMGEMM(MLIROperator):
         return artifacts
 
     def pack_B(self, B):
-        """Reorder a row-major ``(K, N)`` weight matrix into the layout the B
-        fill expects. Returns a flat tensor.
+        """Reorder and quantize a row-major ``(K, N)`` weight matrix into the
+        layout the B fill expects. Returns a flat uint8 tensor of bfp16ebs8
+        blocks, NOT a bf16 tensor.
+
+        The quantization is not a loss this adds. The mmul only multiplies
+        bfp16, so the bf16 path converts B inside every mac call; doing it here
+        hoists a rounding that already happened and leaves the arithmetic
+        bit-identical. It also makes B 9 bytes per 8 values instead of 16,
+        which is the point -- this operator is data-movement bound.
 
         Each ``K_TILE x N_TILE`` tile is emitted in t-block-major order -- the
         odometer ``(n//T, k%S, k//S, n%T)``, outermost first -- with tiles
@@ -287,10 +331,22 @@ class FLMGEMM(MLIROperator):
             K // K_TILE, K_TILE // CT_K, col_a, S, N // N_TILE, N_TILE // T, T
         )
         # (kb, kslice, i, s_in, cb, tb, t_in)
-        #   -> (cb, kb, kslice, tb, i, s_in, t_in)
-        # The s x t block is s-major: the mmul is instantiated with
-        # is_b_s_t_in_row_major=true, so it loads the block straight from L1.
-        return t.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+        #   -> (cb, kb, kslice, tb, i, t_in, s_in)
+        # t-major within the block: the mixed mmul hands B straight to
+        # mac_8x8_8x8T without the transpose the bf16 form applies, so the
+        # transpose happens here instead. It also puts the 8 values that share
+        # a bfp16 exponent (8 consecutive k for one n) adjacent, which is what
+        # makes the block grouping below match the kernel's.
+        # Grouping the shared exponent over 8 consecutive k (for one n) is
+        # verified: grouping over n instead measures 1.95e-02 against this
+        # layout's 2.69e-04.
+        t = t.permute(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8).contiguous()
+        return _f32_to_bfp16ebs8(t.float().numpy())
+
+    @staticmethod
+    def unpack_B_size(K, N):
+        """Bytes ``pack_B`` returns for a ``(K, N)`` weight matrix."""
+        return K * N // 8 * 9
 
     def get_arg_spec(self):
         return [

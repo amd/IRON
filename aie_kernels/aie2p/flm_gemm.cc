@@ -89,14 +89,23 @@ void flm_gemm_acc_init(float *y_acc) {
 // The l loop lives in the core body so that each B chunk gets its own acquire
 // point. A is a single object spanning every z slice of the mmul, so this takes
 // no locks -- the A and B fifos own that handshake.
+#ifdef FLM_GEMM_BFP16_B
+void flm_gemm_k_step(bfloat16 *a_buf, bfp16ebs8 *b_buf, float *y_acc,
+#else
 void flm_gemm_k_step(bfloat16 *a_buf, bfloat16 *b_buf, float *y_acc,
+#endif
                      int32_t band) {
   ::aie::set_rounding(round_mode);
   constexpr int NUM_ITER = K / CT_K;
   // The accumulator is [row-block][col-block][r*t], so band b starts at
   // b * MA * N -- b*(MA/R) row-blocks in, each colB*(r*t) wide.
+#ifdef FLM_GEMM_BFP16_B
+  flm_gemm_mmul_2x2_bfpb<float, (MA / R), ((K / NUM_ITER) / S), (N / T), R, S,
+                         T>(a_buf, b_buf, y_acc + band * (MA * N));
+#else
   flm_gemm_mmul_2x2<bfloat16, float, (MA / R), ((K / NUM_ITER) / S), (N / T), R,
                     S, T, /*b_row_maj=*/false, /*is_b_s_t_in_row_major=*/true>(
       a_buf, b_buf, y_acc + band * (MA * N));
+#endif
 }
 }

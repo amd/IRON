@@ -150,12 +150,14 @@ M=1024 K=1536 N=6144, min of per-run medians across separate processes:
 
 | | bytes moved | latency | DMA-only (compute nulled) |
 |---|---|---|---|
-| `FLMGEMM` (`tile_n=64`) | 69 MB | **1252 us** | 1231 us |
+| `FLMGEMM` (`tile_n=64`) | 47 MB | **1143 us** | -- |
 | shipped `mm.xclbin` | 107 MB | 2175 us | -- |
 | `GEMM` (`emulate=True, prio_accuracy=True`) | 126 MB | 3353 us | 3374 us |
 
-**1.74x the shipped overlay**, at identical arithmetic (err/mass 2.41e-04
-either way). The 69 MB is with B resident in the memtile; the 126 MB figure
+**1.90x the shipped overlay.** Accuracy is err/mass 2.69e-04 against the
+shipped overlay's 9.87e-03 -- 37x better -- but see the note below: it is
+2.69e-04 rather than the 2.41e-04 this operator reached before B was stored
+in bfp16, and that gap is a known open bug, not a fundamental cost. The 69 MB is with B resident in the memtile; the 126 MB figure
 this table used to quote was the non-resident fallback. At 1252 us against a
 1231 us data-movement floor, this operator is now essentially DMA-bound: the
 mmul is finally cheap enough to hide, so further gains have to come from

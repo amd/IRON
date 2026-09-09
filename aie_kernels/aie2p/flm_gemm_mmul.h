@@ -120,4 +120,91 @@ flm_gemm_mmul_2x2(const T_in *__restrict pA, const T_in *__restrict pB,
   event1();
 }
 
+// The same 2x2 mmul, but B arrives ALREADY in bfp16ebs8 rather than bf16.
+//
+// The bf16 form converts B inside every mac -- transpose, widen, then
+// to_v64bfp16ebs8 -- purely to feed hardware that only multiplies bfp16. B is
+// static weights, so pack_B does that conversion once on the host instead.
+// The values are unchanged: this hoists a rounding that already happened, it
+// does not add one. It also makes B 9 bytes per 8 elements instead of 16,
+// which is why it is worth doing at all -- the operator is DMA-bound.
+//
+// B is streamed rather than pointer-indexed because a block_vector cannot be
+// aie::load_v'd, and because bfp16ebs8 pointer arithmetic counts BYTES, not
+// blocks (llvm-aie#1232). The stream sidesteps both.
+template <typename T_out, unsigned rowA, unsigned colA, unsigned colB,
+          unsigned r, unsigned s, unsigned t>
+__aie_inline void flm_gemm_mmul_2x2_bfpb(const bfloat16 *__restrict pA,
+                                         const bfp16ebs8 *__restrict pB,
+                                         T_out *__restrict pC) {
+  constexpr unsigned sizeA = r * s;
+  constexpr unsigned sizeB = s * t;
+  constexpr unsigned sizeC = r * t;
+  event0();
+  AIE_LOOP_MAX_ITERATION_COUNT(rowA / 2)
+  for (unsigned z = 0; z < rowA; z += 2) {
+    T_out *__restrict pC1 = pC + (z * colB) * sizeC;
+    T_out *__restrict pC2 = pC + ((z + 1) * colB) * sizeC;
+    const bfloat16 *__restrict pA_cur = pA + (z >> 1) * (2 * r * colA * s);
+
+    AIE_LOOP_MAX_ITERATION_COUNT(colB / 2)
+    for (unsigned j = 0; j < colB; j += 2) {
+      const bfloat16 *__restrict pA1 = pA_cur;
+      const bfloat16 *__restrict pA2 = pA_cur + colA * sizeA;
+
+      aie::block_vector_input_buffer_stream<bfp16ebs8, sizeB> pB1(pB);
+      aie::block_vector_input_buffer_stream<bfp16ebs8, sizeB> pB2(pB);
+      pB1.seek(j * colA);
+      pB2.seek((j + 1) * colA);
+
+      aie::accum<accfloat, sizeC> C00(aie::load_v<sizeC>(pC1));
+      aie::accum<accfloat, sizeC> C01(aie::load_v<sizeC>(pC1 + sizeC));
+      aie::accum<accfloat, sizeC> C10(aie::load_v<sizeC>(pC2));
+      aie::accum<accfloat, sizeC> C11(aie::load_v<sizeC>(pC2 + sizeC));
+
+      aie::vector<bfloat16, sizeA> A0;
+      aie::vector<bfloat16, sizeA> A1;
+      aie::accum<accfloat, sizeA> accA0;
+      aie::accum<accfloat, sizeA> accA1;
+
+      // Rolled for the same reason as the bf16 form: extra live state across
+      // this loop loses more than it gains (llvm-aie#1066).
+      AIE_LOOP_MAX_ITERATION_COUNT(colA)
+      for (unsigned i = 0; i < colA; i++) {
+        // One conversion per A operand per i, reused by both j accumulators,
+        // rather than one inside each of the four macs. Same values.
+        //
+        // The two operands are widened by DIFFERENT routes, exactly as
+        // mlir-aie's mm_bfp_mixed.cc does. Widening both by assignment makes
+        // Peano's AIE2P backend abort with "Use not jointly dominated by
+        // defs"; mul_elem_64 by one is the same arithmetic and codegens.
+        A0 = aie::load_v<sizeA>(pA1);
+        pA1 += sizeA;
+        A1 = aie::load_v<sizeA>(pA2);
+        pA2 += sizeA;
+        accA0 = A0;
+        accA1 = mul_elem_64(A1, concat(broadcast_one_to_v32bfloat16(),
+                                       broadcast_one_to_v32bfloat16()));
+
+        aie::block_vector<bfp16ebs8, sizeB> B0 = pB1.pop();
+        aie::block_vector<bfp16ebs8, sizeB> B1 = pB2.pop();
+
+        C00 = mac_8x8_8x8T(accA0.template to_vector<bfp16ebs8>(), B0, C00);
+        C01 = mac_8x8_8x8T(accA0.template to_vector<bfp16ebs8>(), B1, C01);
+        C10 = mac_8x8_8x8T(accA1.template to_vector<bfp16ebs8>(), B0, C10);
+        C11 = mac_8x8_8x8T(accA1.template to_vector<bfp16ebs8>(), B1, C11);
+      }
+      aie::store_v(pC1, C00.template to_vector<T_out>());
+      pC1 += sizeC;
+      aie::store_v(pC1, C01.template to_vector<T_out>());
+      pC1 += sizeC;
+      aie::store_v(pC2, C10.template to_vector<T_out>());
+      pC2 += sizeC;
+      aie::store_v(pC2, C11.template to_vector<T_out>());
+      pC2 += sizeC;
+    }
+  }
+  event1();
+}
+
 #endif // __FLM_GEMM_MMUL_H__

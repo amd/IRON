@@ -27,6 +27,8 @@ below are the single source of truth: ``op.py`` passes them to the kernels as
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.helpers.util import v8bfp16ebs8
+
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -81,6 +83,12 @@ MIN_M = M_TILE * ROWS  # 256
 MIN_K = K_TILE  # 512
 
 
+def _bfp16_bytes(elems):
+    """bfp16ebs8 packs 8 values as 8 mantissa bytes plus one shared exponent."""
+    assert elems % 8 == 0
+    return elems // 8 * 9
+
+
 def _default_tile_ma(n_tile, ct_max_k):
     """Largest A-tile height whose L1 working set fits.
 
@@ -90,9 +98,13 @@ def _default_tile_ma(n_tile, ct_max_k):
     (ct_max_k=128 at n=64), which measured 3.67 -> 2.64 cycles per 8x8x8 mac.
     """
     acc = M_TILE * n_tile * 4
-    b = ct_max_k * n_tile * 2 * B_DEPTH
+    b = _bfp16_bytes(ct_max_k * n_tile) * B_DEPTH
     cout = CT_OUT_LEN * 2 * C_DEPTH
-    for t_ma in (M_TILE, M_TILE // 2, M_TILE // 4, M_TILE // 8):
+    # Not below 32: at t_ma = 16 the mmul's z loop has a single trip and
+    # Peano's AIE2P backend aborts with "Use not jointly dominated by defs"
+    # on the bfp16 path. 32 also halves the A object count, which is fifo
+    # overhead the asymmetry would otherwise add.
+    for t_ma in (M_TILE, M_TILE // 2):
         if t_ma < 2 * R:
             break
         a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
@@ -188,17 +200,17 @@ def flm_gemm(
 
     # L1 (per compute tile)
     ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
-    ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE,), bf16_ty]
+    ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE // 8,), np.dtype[v8bfp16ebs8]]
     ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
     ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
     # L2 (per memtile)
     mt_a_ty = np.ndarray[(M_TILE * K_TILE,), bf16_ty]
-    mt_b_ty = np.ndarray[(K_TILE * N_TILE,), bf16_ty]
-    mt_b_bytes = K_TILE * N_TILE * 2
+    mt_b_ty = np.ndarray[(K_TILE * N_TILE // 8,), np.dtype[v8bfp16ebs8]]
+    mt_b_bytes = _bfp16_bytes(K_TILE * N_TILE)
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
     # L3 (DDR), flat -- the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
-    b_l3_ty = np.ndarray[(K * N,), bf16_ty]
+    b_l3_ty = np.ndarray[(K * N // 8,), np.dtype[v8bfp16ebs8]]
     c_l3_ty = np.ndarray[(M * N,), bf16_ty]
 
     acc_init = Kernel("flm_gemm_acc_init", kernel_object, [ct_acc_ty])
@@ -352,7 +364,7 @@ def flm_gemm(
         # dimension -- the objects simply come out in k order. (The previous
         # blocked layout had to widen one dim inbound and add an outermost k
         # dim outbound, which is what collided with CT_MAX_K=128.)
-        mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE,), bf16_ty]
+        mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE // 8,), np.dtype[v8bfp16ebs8]]
 
     b_l3l2_fifos = []
     b_cons = {}
@@ -488,14 +500,16 @@ def flm_gemm(
         # gives an innermost run of T=8 bf16, turning each 128 KB transfer into
         # 8192 scattered bursts -- measured 5.4x slower end to end.
         return TensorAccessPattern(
-            tensor_dims=(K * N,),
-            offset=(mega_col * COLS + c) * N_TILE * K,
+            tensor_dims=(K * N // 8,),
+            offset=(mega_col * COLS + c) * N_TILE * K // 8,
             sizes=(
-                [1, 1, 1, k_iters * K_TILE * N_TILE]
+                [1, 1, 1, k_iters * K_TILE * N_TILE // 8]
                 if b_resident
-                else [m_row_blocks, k_iters, 1, K_TILE * N_TILE]
+                else [m_row_blocks, k_iters, 1, K_TILE * N_TILE // 8]
             ),
-            strides=([0, 0, 0, 1] if b_resident else [0, K_TILE * N_TILE, 0, 1]),
+            strides=(
+                [0, 0, 0, 1] if b_resident else [0, K_TILE * N_TILE // 8, 0, 1]
+            ),
         )
 
     def c_tap(mega_col, c):
