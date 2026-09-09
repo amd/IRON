@@ -158,6 +158,7 @@ def flm_gemm(
     # L2 (per memtile)
     mt_a_ty = np.ndarray[(M_TILE * K_TILE,), bf16_ty]
     mt_b_ty = np.ndarray[(K_TILE * N_TILE,), bf16_ty]
+    mt_b_bytes = K_TILE * N_TILE * 2
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
     # L3 (DDR), flat -- the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
@@ -240,6 +241,55 @@ def flm_gemm(
             a_cons[(r, c)] = of_a.cons()
 
     # B: shim -> memtile -> broadcast down the compute column.
+    # Resident B: hold a whole column-block's B in the memtile as ONE object
+    # and re-walk it per row-block, so DDR sees it once instead of
+    # m_row_blocks times. B is the dominant DDR leg -- at M=1024 K=1536 N=6144
+    # it is 75 MB of the 126 MB moved -- so this is ~43% less total traffic.
+    #
+    # It saves power and time both, and the time is worth more the taller the
+    # problem is, because B's DDR re-reads scale with m_row_blocks. Measured at
+    # K=1024 N=4096 (full builds, min of interleaved rounds):
+    #
+    #   M=512  (2 row-blocks)  470.8 -> 468.5 us   0.5%
+    #   M=1024 (4 row-blocks)  860.4 -> 846.5 us   1.6%
+    #   M=2048 (8 row-blocks) 1760.1 -> 1622.8 us  7.8%
+    #
+    # The operator IS DDR-bandwidth bound: with the mmul nulled out, the
+    # non-resident floor at M=2048 is 1739 us for 118 MB, i.e. 68 GB/s, against
+    # a measured 63-70 GB/s roof. Residency drops that floor to 1135 us.
+    #
+    # Note the gap between that 604 us of floor and the 137 us actually
+    # captured: repeat_count restarts the memtile BD chain at every replay
+    # boundary, and ~77% of the win goes there. Closing it is the largest known
+    # remaining lever on this design. Do not measure it at small M -- at M=512
+    # the effect is inside the noise, which is how it was first mistaken for a
+    # power-only optimisation.
+    #
+    # One object, not k_iters of them: iterating a pool replays each object in
+    # turn (k0,k0,k1,k1,...) rather than the sequence. Fitting k into the
+    # descriptors within the 4-dimension limit takes both hops -- inbound the
+    # outermost dim already steps by (N_TILE//T)*(K_TILE*T), exactly
+    # K_TILE*N_TILE, so widening its COUNT walks into the next k-block;
+    # outbound k becomes a new outermost dim, which also keeps one emitted
+    # object per CT_MAX_K slice.
+    #
+    # Replay is repeat_count, on the forward() below. iter_count cannot do this
+    # job: it only bounds how many times an end cycles through all its buffers
+    # (objects = iter_count * elemNumber * repeat_count), so it is in units of
+    # depth-cycles rather than objects, and getting it wrong hangs rather than
+    # mis-computes.
+    #
+    # Gated on the buffer fitting DOUBLE-buffered, so the next column-block
+    # still prefetches; A takes 128 KB and C 64 KB of the 512 KB memtile.
+    # NOTE this admits only k_iters <= 2, i.e. K <= 1024 at tile_n=64. Larger K
+    # silently falls back to non-resident, so check this gate before believing
+    # any measurement that claims to be testing residency.
+    b_resident = (k_iters * mt_b_bytes * 2) <= (512 - 128 - 64) * 1024
+    if b_resident:
+        mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE,), bf16_ty]
+        b_recv_dims = [(k_iters * (N_TILE // T), K_TILE * T)] + b_recv_dims[1:]
+        b_send_dims = [(k_iters, K_TILE * N_TILE)] + b_send_dims
+
     b_l3l2_fifos = []
     b_cons = {}
     for c in range(n_active_cols):
@@ -251,6 +301,14 @@ def flm_gemm(
             depth=B_DEPTH,
             name=f"B_L2L1_{c}",
             dims_to_stream=b_send_dims,
+            # Replay the resident memtile object once per row-block. This is
+            # the mechanism that actually re-sends an object; iter_count only
+            # bounds how many chain iterations happen in total. Correct
+            # ordering depends on the memtile holding ONE object spanning every
+            # k-block: replicating a pool of k_iters smaller objects would
+            # emit k0,k0,k1,k1,... rather than the k0..kn sequence the cores
+            # accumulate in.
+            repeat_count=m_row_blocks if b_resident else None,
         )
         for r in range(ROWS):
             b_cons[(r, c)] = of_b.cons()
@@ -364,8 +422,12 @@ def flm_gemm(
         return TensorAccessPattern(
             tensor_dims=(K * N,),
             offset=(mega_col * COLS + c) * N_TILE * K,
-            sizes=[m_row_blocks, k_iters, 1, K_TILE * N_TILE],
-            strides=[0, K_TILE * N_TILE, 0, 1],
+            sizes=(
+                [1, 1, 1, k_iters * K_TILE * N_TILE]
+                if b_resident
+                else [m_row_blocks, k_iters, 1, K_TILE * N_TILE]
+            ),
+            strides=([0, 0, 0, 1] if b_resident else [0, K_TILE * N_TILE, 0, 1]),
         )
 
     def c_tap(mega_col, c):
