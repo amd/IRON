@@ -4,14 +4,6 @@
 
 """SwiGLUPrefill does not pad: it raises for a seq_len its inner GEMM cannot
 tile, and the *_aligned attributes just echo the input dims back.
-
-The __init__ docstring used to claim "All operators (GEMM, SiLU,
-ElementwiseMul) apply their own padding", but none of the three pad --
-each raises ValueError from __post_init__ if its shape doesn't already
-divide evenly (see iron/common/operator_bases.py and
-iron/operators/gemm/op.py). So SwiGLUPrefill(seq_len=...) simply forwards
-that raise for any seq_len that is not already a multiple of
-tile_m * 4 (256 with GEMM's defaults).
 """
 
 import aie.utils as aie_utils
