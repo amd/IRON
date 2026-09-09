@@ -140,22 +140,30 @@ hide the extra A traffic. Measured, minimum of 3 runs:
 
 ## Performance
 
-M=1024 K=1536 N=6144, 7 processes x 100 iterations, min of per-run medians
-(run-to-run spread is ~5%, so differences below that are not meaningful):
+M=1024 K=1536 N=6144, min of per-run medians across separate processes:
 
 | | bytes moved | latency | DMA-only (compute nulled) |
 |---|---|---|---|
-| `FLMGEMM` (`tile_n=64`) | 126 MB | **1741 us** | -- |
+| `FLMGEMM` (`tile_n=64`) | 126 MB | **1741 us** | 1692 us |
 | `FLMGEMM` (`tile_n=128`) | 107 MB | 2178 us | 1481 us |
 | shipped `mm.xclbin` | 107 MB | 2175 us | -- |
 | `GEMM` (`emulate=True, prio_accuracy=True`) | 126 MB | 3353 us | 3374 us |
 
+**Measure this carefully.** Dispatch latency on this part is *bimodal*, with
+modes about 6% apart, and both show up for every configuration. A batch that
+lands wholly in one mode turns min-of-medians into a mode selector rather than
+a measurement -- that is how a change later shown to do nothing at all first
+produced a convincing 5% "win". Compare configurations **interleaved**
+round-robin rather than one after the other, use at least 8 rounds each, and
+believe a difference only when the min and the median agree on it.
+
 Nulling the mmul out is what makes this legible. `GEMM` does not change at all
-without it (3374 vs 3353 us), so it is entirely data-movement bound; this
-operator drops to 1481 us, so it is compute bound with its transfers hidden.
-That is why the two respond to opposite fixes: `GEMM` would want cheaper
-transfers, this design wants a cheaper inner loop -- which is what `tile_n=64`
-buys.
+without it (3374 vs 3353 us), so it is entirely data-movement bound. At
+`tile_n=128` this operator drops to 1481 us, so *there* it is compute bound
+with its transfers hidden -- which is what `tile_n=64` fixes, buying a much
+cheaper inner loop at the price of more data movement. But note the default
+`tile_n=64` is then data-movement bound itself (1692 of 1741 us), so further
+gains there come from moving fewer bytes, not from a faster kernel.
 
 Its transfers are cheaper mostly because B arrives pre-packed: the contiguous
 run per transfer is 128 KB for B and 1 KB for A, against 128 bytes on every
@@ -169,3 +177,30 @@ await per row-block, and a C await waits on the cores. Collapsing those is
 also what makes overlapping column-blocks affordable — a block then costs 3
 buffer descriptors on a shim tile instead of `1 + 2*k_iters`, so two can be in
 flight without exhausting the 16 available.
+
+### Resident B
+
+Where a whole column-block's B fits in the memtile double-buffered
+(`k_iters <= 2`, i.e. K <= 1024 at `tile_n=64`) it is held there and replayed
+per row-block, so DDR reads it once instead of `m_row_blocks` times -- about
+43% less traffic. Larger K falls back to re-reading it, unchanged.
+
+This operator is DDR-bandwidth bound, so that is a latency win as well as a
+power one, and it grows with the height of the problem because B's re-reads
+scale with `m_row_blocks`. At K=1024 N=4096:
+
+| M | row-blocks | non-resident | resident | |
+|---|---|---|---|---|
+| 512 | 2 | 470.8 us | 468.5 us | 0.5% |
+| 1024 | 4 | 860.4 us | 846.5 us | 1.6% |
+| 2048 | 8 | 1760.1 us | **1622.8 us** | 7.8% |
+
+Do not evaluate this at small M: at M=512 the effect is inside the noise, which
+is how it was first mistaken for a power-only optimisation.
+
+Most of the available win is still on the table. With the mmul nulled, the
+non-resident floor at M=2048 is 1739 us -- 118 MB at 68 GB/s, against a
+memcpy-measured 63-70 GB/s roof for mixed read/write traffic -- and residency
+drops that floor to 1135 us. Only 137 us of those 604 us reaches the full
+build; the rest goes to `repeat_count` restarting the memtile BD chain at every
+replay boundary. Closing that is the largest known remaining lever here.
