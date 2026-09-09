@@ -751,6 +751,16 @@ class SequenceXclbinCallable(_PerBufferCallable):
         self._dispatch = dispatch
         super().__init__(op)
 
+    def _sync_outputs(self):
+        # _run rewrote these on the device, which the coherence map does not observe.
+        # Assert device residency first so the pull fires even when a prior read left
+        # the range marked "cpu"; otherwise a second dispatch reads the first's output.
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                buf = self._buffers[name]
+                buf.device = "npu"
+                buf.to("cpu")
+
     def _make_buffer(self, n_elements):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
 
