@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""bf16 GEMM over a fixed 4x8 compute-tile grid.
+"""bf16 GEMM over a 4-row compute-tile grid, as wide as the device.
 
 This is a different design from ``iron.operators.gemm``, not a retuning of it.
 The distinguishing choices, all of which the kernel's L1 layout depends on:
 
-  * **A is broadcast along each compute row.** Four shim tiles (columns 0/2/4/6)
-    each feed one row of the grid, and every one of the 8 tiles in that row
-    consumes the same A object. B is broadcast down each column. So an A tile is
-    fetched once per row rather than once per tile.
+  * **A is broadcast along each compute row.** Four shim tiles each feed one row
+    of the grid, and every tile in that row consumes the same A object. B is
+    broadcast down each column. So an A tile is fetched once per row rather than
+    once per tile.
   * **C is joined at the memtile.** Each of the 4 tiles in a column writes its
     own 64x128 slice into one memtile buffer, which drains to DDR as a single
     256x128 block, rather than each tile draining separately.
@@ -19,9 +19,17 @@ The distinguishing choices, all of which the kernel's L1 layout depends on:
     and an optional clamp all happen while the values are still in registers,
     on the way into the C object.
 
-Geometry is fixed (m/k/n = 64/512/128, r/s/t = 8/8/8, 4x8 grid). The constants
-below are the single source of truth: ``op.py`` passes them to the kernels as
--D flags, so the C++ and the dataflow cannot drift apart.
+Tiling is fixed (m/k/n = 64/512/128, r/s/t = 8/8/8); only the grid WIDTH varies
+with the device, 8 columns on NPU2 and 4 on NPU1. The constants below are the
+single source of truth: ``op.py`` passes them to the kernels as -D flags, so the
+C++ and the dataflow cannot drift apart.
+
+r/s/t stays 8/8/8 on both architectures. AIE2's native bf16 mac is 4x8x4, but
+``aie::mmul<8,8,8>`` decomposes onto it as exactly four native macs with no
+wasted lanes, so the whole blocked L1 layout -- ``pack_B``, the four stream
+dimension lists below, and ``gather_dims`` -- is shared verbatim. Only AIE2P has
+the bfp16-emulated path that does the same shape in two macs, which is why
+``op.py`` passes ``AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16`` there and not here.
 """
 
 import numpy as np
@@ -54,12 +62,28 @@ N_TILE_DEFAULT = 64
 # k-slice per n width; must match compute_CT_k_max_n<N> in flm_gemm_geometry.h
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 64, 128: 32, 256: 16}
 R, S, T = 8, 8, 8
-ROWS, COLS = 4, 8
+ROWS = 4
+# Widest grid this design supports, i.e. NPU2. The actual width comes from the
+# device (see grid_cols); this is only what op.py uses to name artifacts.
+MAX_COLS = 8
 
-# Which shim column sources the A broadcast for each compute row. Spreading
-# them over alternate columns keeps four independent MM2S paths; the existing
-# gemm operator pins A the same way in the 8-column case.
-A_SOURCE_COL = [0, 2, 4, 6]
+
+def grid_cols(dev):
+    """Grid width: 8 on NPU2 (Strix/Krackan), 4 on NPU1 (Phoenix)."""
+    return min(dev.cols, MAX_COLS)
+
+
+def a_source_cols(cols):
+    """Which shim column sources the A broadcast for each compute row.
+
+    On an 8-column grid the four A streams go to alternate columns, so each gets
+    its own shim MM2S path and never contends with a B fill; the existing gemm
+    operator pins A the same way. A 4-column grid has no such slack -- every
+    column must source one A row AND one B column AND drain C, which is 2 MM2S +
+    1 S2MM, exactly saturating a shim tile's channels.
+    """
+    return [2 * r for r in range(ROWS)] if cols >= 2 * ROWS else list(range(ROWS))
+
 
 CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
@@ -100,6 +124,11 @@ def flm_gemm(
         raise ValueError(
             f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {tile_n}"
         )
+    # Grid width, and the shim columns feeding the A broadcast, both follow the
+    # device. Everything below is written against these rather than a constant,
+    # so the same dataflow covers NPU2's 4x8 and NPU1's 4x4.
+    COLS = grid_cols(dev)
+    A_SOURCE_COL = a_source_cols(COLS)
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
@@ -166,9 +195,7 @@ def flm_gemm(
     c_l3_ty = np.ndarray[(M * N,), bf16_ty]
 
     acc_init = Kernel("flm_gemm_acc_init", kernel_object, [ct_acc_ty])
-    k_step = Kernel(
-        "flm_gemm_k_step", kernel_object, [ct_a_obj_ty, ct_b_ty, ct_acc_ty]
-    )
+    k_step = Kernel("flm_gemm_k_step", kernel_object, [ct_a_obj_ty, ct_b_ty, ct_acc_ty])
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,
         epilogue_object,
@@ -488,10 +515,7 @@ def flm_gemm(
             a_l3_ty,
             b_l3_ty,
             c_l3_ty,
-            [
-                f.prod(tile=Tile(A_SOURCE_COL[r], 0))
-                for r, f in enumerate(a_l3l2_fifos)
-            ],
+            [f.prod(tile=Tile(A_SOURCE_COL[r], 0)) for r, f in enumerate(a_l3l2_fifos)],
             [f.prod(tile=Tile(c, 0)) for c, f in enumerate(b_l3l2_fifos)],
             [f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)],
         ],

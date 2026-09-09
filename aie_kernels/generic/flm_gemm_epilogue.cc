@@ -19,7 +19,7 @@
 // its own flags and, if the per-call overhead ever shows up in a trace, be
 // switched to an inlined LLVM-IR kernel independently of the much larger mmul.
 #include "../aie_kernel_utils.h"
-#include "nonlut_based_ops.h"
+#include "flm_gemm_activations.h"
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
@@ -81,11 +81,11 @@ void flm_gemm_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer,
     // v16bfloat16, not an aie::vector.
     aie::vector<bfloat16, V> v = to_v16bfloat16(acc);
 #if FLM_GEMM_EPILOGUE_MODE == 1
-    v = getGeluBf16_nonLUT<V>(v);
+    v = flm_gemm_gelu_bf16<V>(v);
 #elif FLM_GEMM_EPILOGUE_MODE == 2
-    v = getSiluBf16_nonLUT<V>(v);
+    v = flm_gemm_silu_bf16<V>(v);
 #elif FLM_GEMM_EPILOGUE_MODE == 3
-    v = getSigmoidBf16_nonLUT<V>(v);
+    v = flm_gemm_sigmoid_bf16<V>(v);
 #endif
 #if FLM_GEMM_CLAMP
     v = aie::clamp(v, lo, hi);

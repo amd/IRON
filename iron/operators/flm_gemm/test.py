@@ -12,38 +12,69 @@ from iron.common.test_utils import run_test
 
 def get_params():
     dev = aie_utils.get_current_device()
-    # The design is a fixed 4x8 grid, so it needs all 8 columns.
-    if dev.cols < 8 or dev.resolve().name != "npu2":
+    if dev is None:
+        return []
+    dev_name = dev.resolve().name
+    if dev_name not in ("npu1", "npu2"):
         return []
 
-    # N values that are NOT a multiple of N_TILE*COLS=1024 exercise the
-    # trailing partial column-block, where some columns compute it and the
-    # rest only drain the A broadcast. Real transformer o/down projections
-    # have N = model dim, so they always land here: 1536 leaves 4 active
-    # columns, 2560 leaves 4, and 128 leaves just 1.
+    # The grid is 4 rows by as many columns as the device has, so the width of
+    # one full sweep -- N_TILE * COLS -- differs per device, and so do the N
+    # values that leave a trailing PARTIAL column-block. That trailing case is
+    # the interesting one: some columns compute the block while the rest only
+    # drain the A broadcast, and real transformer o/down projections always
+    # land there, since N = model dim is essentially never a multiple of the
+    # sweep width.
+    #
+    # At K = 512 there is a single k iteration, so tile_n defaults to 128 and a
+    # sweep is 1024 wide on NPU2 and 512 on NPU1; at K >= 1024 tile_n drops to
+    # 64, halving both.
     # fmt: off
-    #      M,    K,     N, epilogue,    clamp,     rounding
-    regular_params = [
-        (  256,  512,  1024, "none",     None,       "conv_even"),  # smallest full sweep
-        (  512, 1024,  2048, "none",     None,       "conv_even"),
-        (  256,  512,  1536, "none",     None,       "conv_even"),  # remainder: 4 of 8 cols
-        (  256,  512,   128, "none",     None,       "conv_even"),  # remainder only: 1 col
-        (  256,  512,  1024, "silu",     None,       "conv_even"),
-        (  256,  512,  1024, "gelu",     None,       "conv_even"),
-        (  256,  512,  1024, "none", (-2.0, 2.0),    "conv_even"),
-        # floor reproduces the shipped FastFlowLM overlay bit for bit; it is
-        # much less accurate, so it gets its own bound below.
-        (  256,  512,  1024, "none",     None,       "floor"),
-    ]
-    extensive_params = [
-        ( 1024, 2048,  2048, "none",     None,       "conv_even"),
-        ( 2048, 2048,  2048, "none",     None,       "conv_even"),
-        ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
-        (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
-        (  256,  512,  1024, "sigmoid",  None,       "conv_even"),
-        (  512, 1024,  2048, "silu", (-4.0, 4.0),    "conv_even"),
-        (  256,  512,  1024, "silu",     None,       "floor"),
-    ]
+    if dev_name == "npu2":
+        #      M,    K,     N, epilogue,    clamp,     rounding
+        regular_params = [
+            (  256,  512,  1024, "none",     None,       "conv_even"),  # smallest full sweep
+            (  512, 1024,  2048, "none",     None,       "conv_even"),
+            (  256,  512,  1536, "none",     None,       "conv_even"),  # remainder: 4 of 8 cols
+            (  256,  512,   128, "none",     None,       "conv_even"),  # remainder only: 1 col
+            (  256,  512,  1024, "silu",     None,       "conv_even"),
+            (  256,  512,  1024, "gelu",     None,       "conv_even"),
+            (  256,  512,  1024, "none", (-2.0, 2.0),    "conv_even"),
+            # floor reproduces the shipped FastFlowLM overlay bit for bit; it is
+            # much less accurate, so it gets its own bound below.
+            (  256,  512,  1024, "none",     None,       "floor"),
+        ]
+        extensive_params = [
+            ( 1024, 2048,  2048, "none",     None,       "conv_even"),
+            ( 2048, 2048,  2048, "none",     None,       "conv_even"),
+            ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
+            (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
+            (  256,  512,  1024, "sigmoid",  None,       "conv_even"),
+            (  512, 1024,  2048, "silu", (-4.0, 4.0),    "conv_even"),
+            (  256,  512,  1024, "silu",     None,       "floor"),
+        ]
+    else:  # npu1: 4 columns, so every sweep width above halves
+        #      M,    K,     N, epilogue,    clamp,     rounding
+        regular_params = [
+            (  256,  512,   512, "none",     None,       "conv_even"),  # smallest full sweep
+            (  512, 1024,  1024, "none",     None,       "conv_even"),
+            (  256,  512,   256, "none",     None,       "conv_even"),  # remainder: 2 of 4 cols
+            (  256,  512,   128, "none",     None,       "conv_even"),  # remainder only: 1 col
+            (  256,  512,   640, "none",     None,       "conv_even"),  # full sweep + 1 col
+            (  256,  512,   512, "silu",     None,       "conv_even"),
+            (  256,  512,   512, "gelu",     None,       "conv_even"),
+            (  256,  512,   512, "none", (-2.0, 2.0),    "conv_even"),
+            (  256,  512,   512, "none",     None,       "floor"),
+        ]
+        extensive_params = [
+            ( 1024, 2048,  1024, "none",     None,       "conv_even"),
+            ( 2048, 2048,  1024, "none",     None,       "conv_even"),
+            ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
+            (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
+            (  256,  512,   512, "sigmoid",  None,       "conv_even"),
+            (  512, 1024,  1024, "silu", (-4.0, 4.0),    "conv_even"),
+            (  256,  512,   512, "silu",     None,       "floor"),
+        ]
     # fmt: on
 
     params = []
@@ -67,7 +98,6 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
         M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, scale=scale
     )
 
-
     operator = FLMGEMM(
         M=M,
         K=K,
@@ -85,32 +115,42 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     }
     output_buffers = {"C": golden_ref["output"].flatten()}
 
-    # This design's r=8 mmul shape exists only on the bfp16-emulated path, so
-    # its error budget is that of an emulated GEMM, not of the exact one the
-    # GEMM operator's test asserts on (that test opts into r=4 via
-    # emulate_bf16_mmul_with_bfp16=False, which is not available here).
-    #
     # A pure relative tolerance cannot work: with signed A the K-term sum
     # cancels by ~sqrt(K), so |C| is ~20x smaller than the accumulated
     # magnitude while the error tracks that magnitude, leaving near-zero
     # outputs relatively uncheckable. So the error is bounded in ABSOLUTE terms
-    # against the accumulated mass, which is what bfp16 error actually scales
-    # with. Measured on this data: mean |err| is 0.00042 of the mass and the
-    # worst element 0.0025 -- both marginally better than the GEMM operator run
-    # in the same emulated mode (0.00044 / 0.0031), so the budget below is not
-    # papering over a regression in this port. The bound is tight enough to
-    # have caught a real bug: leaving the core in its default floor rounding
-    # mode pushes mean error to 0.0099 of mass, ~7x over.
-    mass = K * golden_ref["input"].abs().float().mean() * (
-        golden_ref["input_b"].abs().float().mean()
+    # against the accumulated mass, which is what the error actually scales
+    # with.
+    mass = (
+        K
+        * golden_ref["input"].abs().float().mean()
+        * (golden_ref["input_b"].abs().float().mean())
     )
     #
+    # The budget is per-architecture, because the two lower the same 8x8x8 mmul
+    # shape onto very different arithmetic:
+    #
+    #   NPU2 emulates it with bfp16, which drops mantissa bits. Measured mean
+    #     |err| is 0.00042 of mass (worst element 0.0025) -- marginally better
+    #     than the GEMM operator run in the same emulated mode (0.00044 /
+    #     0.0031), so this budget is not papering over a regression.
+    #   NPU1 has no bfp16 and lowers it onto four NATIVE bf16 macs accumulating
+    #     in f32, which is exact up to the f32->bf16 store. Measured mean |err|
+    #     is under 1e-6 of mass with conv_even and 0.00015 with floor -- 7x and
+    #     66x better than NPU2 respectively. Inheriting NPU2's budget here would
+    #     leave ~70x of slack and stop the test being able to catch anything.
+    #
     # floor rounding truncates rather than rounding to nearest, so its bias
-    # accumulates over the K reduction instead of cancelling: ~0.0099 of mass
-    # rather than ~0.00042, measured, and bit-identical to the shipped overlay.
-    # It gets a bound to match; holding it to the conv_even budget would just
-    # fail.
-    budget = 0.05 if rounding == "floor" else 0.004
+    # accumulates over the K reduction instead of cancelling rather than
+    # averaging out, hence the separate, looser bound on both.
+    #
+    # NOTE the "floor is bit-identical to the shipped FastFlowLM overlay" claim
+    # holds on NPU2 only. NPU1 sums the K reduction in a different order, so it
+    # reproduces the overlay's rounding MODE but not its exact results.
+    if aie_utils.get_current_device().resolve().name == "npu1":
+        budget = 0.002 if rounding == "floor" else 0.0002
+    else:
+        budget = 0.05 if rounding == "floor" else 0.004
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
         input_buffers,

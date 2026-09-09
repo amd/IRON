@@ -3,32 +3,61 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FLMGEMM — bf16 GEMM on a fixed 4x8 grid
+# FLMGEMM — bf16 GEMM on a 4-row grid
 
 A second GEMM design, ported from FastFlowLM's `mm` overlay. It is a different
 dataflow from [`GEMM`](../gemm), not a retuning of it:
 
 | | `GEMM` | `FLMGEMM` |
 |---|---|---|
-| geometry | parameterized tiles, 1–8 columns | fixed m=64 k=512, r/s/t 8/8/8, 4x8 grid; n selectable |
+| geometry | parameterized tiles, 1–8 columns | fixed m=64 k=512, r/s/t 8/8/8, 4 rows x all columns; n selectable |
 | A delivery | per column | broadcast along each compute row from 4 shim columns |
 | C staging | full m x n tile in L1 | streamed out in 512-element chunks |
 | C collection | per column | ObjectFifo `join` of 4 rows through the memtile |
 | epilogue | separate `convert_copy` | fused f32→bf16 + activation + clamp |
 | B layout | plain `(K, N)` | **pre-packed**, see below |
 
-On NPU2 (aie2p) only: the r=8 mmul shape exists solely on the bfp16-emulated
-path, and the grid needs all 8 columns.
+## Architectures
+
+Runs on both NPU2 (aie2p — Strix/Krackan) and NPU1 (aie2 — Phoenix/Hawk Point).
+The tiling and the whole blocked L1 layout are shared; only the grid width and
+two lowering details differ.
+
+| | NPU2 | NPU1 |
+|---|---|---|
+| grid | 4 x 8 | 4 x 4 |
+| A broadcast sources | shim columns 0/2/4/6 | shim columns 0/1/2/3 |
+| 8x8x8 mmul lowers to | 2 bfp16-emulated macs | 4 native 4x8x4 bf16 macs |
+| `tile_n` default | 128 at K=512, else 64 | always 64 |
+| epilogue `tanh` | native `aie::tanh` | `getTanhBf16` LUT |
+
+The mmul shape is **not** specific to the bfp16 path, despite needing
+`AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16` to get the fast lowering on NPU2:
+`aie::mmul<8,8,8>` decomposes onto AIE2's native 4x8x4 bf16 mac as exactly four
+macs with no wasted lanes, so `pack_B`, the stream-dimension lists and
+`gather_dims` are shared verbatim. On AIE2 that flag is silently ignored, so it
+is only passed where it changes codegen.
+
+Two consequences of the native-vs-emulated split are worth knowing:
+
+* **NPU1 is materially more accurate.** bfp16 emulation drops mantissa bits;
+  native bf16 macs accumulating in f32 do not. Measured mean |err| against the
+  accumulated mass is under 1e-6 on NPU1 with `conv_even` versus 0.00042 on
+  NPU2, and 0.00015 versus 0.0099 with `floor`. `test.py` sets the budget per
+  architecture — inheriting NPU2's would leave ~70x of slack.
+* **`rounding="floor"` reproduces the shipped FastFlowLM overlay bit-for-bit on
+  NPU2 only.** NPU1 sums the K reduction in a different order, so it matches the
+  rounding *mode* but not the exact results.
 
 ## Shape constraints
 
 `M % 256 == 0`, `K % 512 == 0`, `N % tile_n == 0` (so 64 by default).
 
-N only has to tile to `tile_n`, not to the grid's `tile_n * 8` stride: a
-trailing group of fewer than 8 column-blocks is handled by giving the columns
-different trip counts. That matters in practice — a transformer's `o` and
-`down` projections have N = model dim, which is essentially never a multiple
-of the full stride.
+N only has to tile to `tile_n`, not to the grid's `tile_n * cols` stride: a
+trailing group of fewer column-blocks than the grid is wide is handled by giving
+the columns different trip counts. That matters in practice — a transformer's
+`o` and `down` projections have N = model dim, which is essentially never a
+multiple of the full stride.
 
 ## B must be pre-packed
 
@@ -116,15 +145,16 @@ difference worth knowing about is `conv_even` versus the shipped overlay's
 
 ## Choosing `tile_n`
 
-`tile_n` defaults to `None`, which picks per shape: **128 when `K == 512`,
-otherwise 64**. Override only if you have measured a reason to.
+`tile_n` defaults to `None`, which picks per shape and per device: on NPU2,
+**128 when `K == 512`, otherwise 64**; on NPU1, **always 64**. Override only if
+you have measured a reason to.
 
 `n=64` gives the mmul `colA=8` rather than 4, halving accumulator traffic per
-mac. `n=128` instead halves A fetches, because the grid then covers 1024
-columns of N per pass rather than 512. Which wins depends on whether compute
-or data movement is the critical path, and that turns on how much K there is
+mac. `n=128` instead halves A fetches, because the grid then covers twice as
+many columns of N per pass. Which wins depends on whether compute or data
+movement is the critical path, and on NPU2 that turns on how much K there is
 to reduce over -- with a single k iteration there is not enough compute to
-hide the extra A traffic. Measured, minimum of 3 runs:
+hide the extra A traffic. Measured on NPU2, minimum of 3 runs:
 
 | M / K / N | k_iters | `tile_n=64` | `tile_n=128` |
 |---|---|---|---|
@@ -135,10 +165,27 @@ hide the extra A traffic. Measured, minimum of 3 runs:
 | 2048 / 2048 / 2048 | 4 | **1535 us** | 1924 us |
 | 256 / 4096 / 1024 | 8 | **254 us** | 316 us |
 
+NPU1 never reaches that crossover. It has half the columns *and* a quarter of
+the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
+`n=128`'s 32 KB f32 accumulator also overflows bank-aware L1 allocation (it
+falls back to sequential allocation rather than failing). Measured on Phoenix,
+min of 5 interleaved rounds of 20 dispatches:
+
+| M / K / N | k_iters | `tile_n=64` | `tile_n=128` |
+|---|---|---|---|
+| 256 / 512 / 512 | 1 | **237 us** | 288 us |
+| 512 / 512 / 1024 | 1 | **447 us** | 574 us |
+| 512 / 1024 / 1024 | 2 | **697 us** | 906 us |
+| 1024 / 1024 / 1024 | 2 | **1214 us** | 1626 us |
+| 1024 / 2048 / 1024 | 4 | **2158 us** | 2977 us |
+| 512 / 1536 / 1536 | 3 | **1297 us** | 1775 us |
+
 `pack_B` is bound to the operator because the packing layout depends on
 `tile_n`; call `op.pack_B(B)`, not `FLMGEMM.pack_B(B)`.
 
 ## Performance
+
+### NPU2
 
 M=1024 K=1536 N=6144, min of per-run medians across separate processes:
 
@@ -164,6 +211,28 @@ with its transfers hidden -- which is what `tile_n=64` fixes, buying a much
 cheaper inner loop at the price of more data movement. But note the default
 `tile_n=64` is then data-movement bound itself (1692 of 1741 us), so further
 gains there come from moving fewer bytes, not from a faster kernel.
+
+### NPU1
+
+Against `GEMM` at its own defaults (64/64/64 over all 4 columns), min of 5
+interleaved rounds of 20 dispatches each:
+
+| M / K / N | `FLMGEMM` | `GEMM` | speedup | `FLMGEMM` GFLOP/s |
+|---|---|---|---|---|
+| 256 / 512 / 512 | **242 us** | 246 us | 1.02x | 556 |
+| 512 / 512 / 1024 | **443 us** | 495 us | 1.12x | 1213 |
+| 512 / 1024 / 1024 | **702 us** | 819 us | 1.17x | 1530 |
+| 1024 / 1024 / 1024 | **1209 us** | 1463 us | 1.21x | 1776 |
+| 1024 / 2048 / 1024 | **2156 us** | 2747 us | 1.27x | 1992 |
+| 512 / 1536 / 1536 | **1300 us** | 1633 us | 1.26x | 1858 |
+| 1024 / 2560 / 2560 | **6313 us** | 8220 us | 1.30x | 2126 |
+
+The margin is smaller than NPU2's ~1.9x, and that is expected rather than a
+port problem: much of the NPU2 win comes from the bfp16 fast path (two macs per
+8x8x8 shape against four) and from spreading A across eight columns. On NPU1
+both operators lower to the same native 4x8x4 mac, so what remains is this
+design's data movement -- row-broadcast A, the memtile C join, and resident B --
+which is why the gap grows with the problem size rather than being flat.
 
 Its transfers are cheaper mostly because B arrives pre-packed: the contiguous
 run per transfer is 128 KB for B and 1 KB for A, against 128 bytes on every
