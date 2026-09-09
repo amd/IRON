@@ -209,9 +209,11 @@ def flm_gemm(
     ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
     # L2 (per memtile)
     mt_a_ty = np.ndarray[(M_TILE * K_TILE,), bf16_ty]
+    mt_a_bytes = M_TILE * K_TILE * 2
     mt_b_ty = np.ndarray[(K_TILE * N_TILE // 8,), np.dtype[v8bfp16ebs8]]
     mt_b_bytes = _bfp16_bytes(K_TILE * N_TILE)
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
+    mt_out_bytes = C_SLICE_LEN * ROWS * 2
     # L3 (DDR), flat -- the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
     b_l3_ty = np.ndarray[(K * N // 8,), np.dtype[v8bfp16ebs8]]
@@ -361,7 +363,13 @@ def flm_gemm(
     # immediately after the mmul loop was re-rolled. Larger K still falls back
     # to non-resident, so check this gate before believing any measurement that
     # claims to be testing residency.
-    b_resident = (k_iters * mt_b_bytes * 2) <= (512 - 64) * 1024
+    # Count what A and C actually occupy rather than assuming C's 64 KB is the
+    # only other tenant. The old form ignored A entirely and hardcoded C's size,
+    # which at tile_n=128 (where C doubles and resident B is 432 KB) admitted a
+    # configuration that then failed address assignment outright.
+    b_resident = (k_iters * mt_b_bytes * B_DEPTH) <= (
+        512 * 1024 - mt_a_bytes * A_DEPTH - mt_out_bytes * C_DEPTH
+    )
     if b_resident:
         # Just a bigger buffer. With B packed in consumption order the walk is
         # linear, so spanning every k-block needs no extra descriptor
