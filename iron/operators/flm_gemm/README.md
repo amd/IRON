@@ -102,9 +102,17 @@ signed A / non-negative B:
 
 | | mean err / mass |
 |---|---|
-| `FLMGEMM` (default) | 0.00024 |
-| `GEMM`, same emulated mode (`emulate=True, prio_accuracy=True`) | 0.00044 |
-| `GEMM`, exact r=4 path | 0.00007 |
+| `FLMGEMM` (default) | 0.000241 |
+| `GEMM`, same mode (`emulate=True, prio_accuracy=True`) | 0.000241 |
+| `GEMM`, bf16 accumulator (`prio_accuracy=False`) | 0.000445 |
+| `GEMM`, exact r=4 path (`emulate=False`) | 0.00007 |
+
+This operator and `GEMM` in the same mode are numerically **indistinguishable**
+-- identical mean error, signed bias and maximum, at both `tile_n` values.
+Same mmul shape, same bfp16 emulation, same f32 accumulation, same rounding,
+so there is no reason for them to differ and they do not. The only accuracy
+difference worth knowing about is `conv_even` versus the shipped overlay's
+`floor` (above).
 
 ## Choosing `tile_n`
 
