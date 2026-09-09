@@ -5,6 +5,7 @@
 import time
 import pytest
 
+from iron.operators.gemm.op import GEMM
 from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 
 # swiglu_prefill shares the same reference implementation as swiglu_decode:
@@ -15,7 +16,10 @@ from iron.common.test_utils import verify_buffer
 
 
 def get_params():
-    params_list = [(256, 2048, 2048, False)]
+    params_list = [
+        (256, 2048, 2048, False, False),
+        (256, 2048, 2048, False, True),
+    ]
 
     params = []
     for p in params_list:
@@ -27,8 +31,12 @@ def get_params():
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
 )
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
-def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy,b_col_maj", get_params()
+)
+def test_swiglu_prefill(
+    seq_len, embedding_dim, hidden_dim, prio_accuracy, b_col_maj, aie_context
+):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
     operator = SwiGLUPrefill(
@@ -36,16 +44,19 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,
         prio_accuracy=bool(prio_accuracy),
+        b_col_maj=bool(b_col_maj),
         context=aie_context,
     )
     operator.compile()
     fc = operator.get_callable()
 
-    # Upload the persistent weight buffers. GEMM takes its ``B`` operand in
-    # (K, N) layout, so the projection weights go in un-transposed.
-    fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].reshape(-1)
-    fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].reshape(-1)
-    fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].reshape(-1)
+    # GEMM takes its ``B`` operand in (K, N) layout, or (N, K) under b_col_maj.
+    def _as_stored(w):
+        return (w.t().contiguous() if b_col_maj else w).reshape(-1)
+
+    fc.get_buffer("w_gate").torch_view()[:] = _as_stored(golden_ref["w_gate"])
+    fc.get_buffer("w_up").torch_view()[:] = _as_stored(golden_ref["w_up"])
+    fc.get_buffer("w_down").torch_view()[:] = _as_stored(golden_ref["w_down"])
     # Push the persistent weight buffers to the device.
     for name in ("w_gate", "w_up", "w_down"):
         fc.get_buffer(name).to("npu")
@@ -102,3 +113,14 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         errors["output"] = errors_3
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+@pytest.mark.parametrize("b_col_maj", [False, True])
+def test_weight_layout_reaches_both_gemms(b_col_maj):
+    """Construction only: the layout must reach every GEMM and the design name."""
+    op = SwiGLUPrefill(
+        seq_len=256, embedding_dim=2048, hidden_dim=2048, b_col_maj=b_col_maj
+    )
+    gemms = [step[0] for step in op.runlist if isinstance(step[0], GEMM)]
+    assert gemms and all(g.b_col_maj == b_col_maj for g in gemms)
+    assert op.name.endswith("_bc") == b_col_maj
