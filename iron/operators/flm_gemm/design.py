@@ -551,6 +551,19 @@ def flm_gemm(
                 sizes=[1, 1, 1, blk],
                 strides=[0, 0, 0, 1],
             )
+        if _os.environ.get("FLM_C_RUN2") == "1":
+            # ABLATION: identical byte count and identical DDR footprint, but
+            # HALF as many runs each TWICE as long (N_TILE*2 = 256 B instead of
+            # 128 B), by walking every other row. Writes C to the WRONG place.
+            # This isolates exactly what the column-pair join would buy --
+            # FLM_C_LINEAR above removes ALL scatter, so it is the ceiling for
+            # perfect linearisation, not for the 128 B -> 256 B step.
+            return TensorAccessPattern(
+                tensor_dims=(M * N,),
+                offset=(mega_col * COLS + c) * N_TILE,
+                sizes=[1, m_row_blocks, ROWS * M_TILE // 2, N_TILE * 2],
+                strides=[0, ROWS * M_TILE * N, N * 2, 1],
+            )
         return TensorAccessPattern(
             tensor_dims=(M * N,),
             offset=(mega_col * COLS + c) * N_TILE,

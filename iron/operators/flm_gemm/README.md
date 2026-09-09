@@ -124,22 +124,27 @@ mac. `n=128` instead halves A fetches, because the grid then covers 1024
 columns of N per pass rather than 512. Which wins depends on whether compute
 or data movement is the critical path, and that turns on how much K there is
 to reduce over -- with a single k iteration there is not enough compute to
-hide the extra A traffic. Measured, minimum of 3 runs:
-
-> **Stale:** the sweep below predates the re-rolled mmul and the widened
-> residency gate, which together took 1024/1536/6144 from 1741 to 1434 us. The
-> `tile_n` choice it justifies is unlikely to have changed sign (residency does
-> not fit at `tile_n=128`, whose `mt_b` is 128 KB), but the absolute numbers
-> are no longer right and it wants re-measuring.
+hide the extra A traffic. Measured 2026-09-09 against the current design
+(rolled mmul, resident B, ATB, bfp16 B), min of per-run medians over 6 rounds
+with the two `tile_n` builds interleaved round-robin -- this box is bimodal
+~6%, so running all of one and then all of the other measures drift rather
+than design:
 
 | M / K / N | k_iters | `tile_n=64` | `tile_n=128` |
 |---|---|---|---|
-| 1024 / 512 / 4096 | 1 | 642 us | **589 us** |
-| 1024 / 1024 / 4096 | 2 | **850 us** | 1034 us |
-| 1024 / 1536 / 6144 | 3 | **1741 us** | 2178 us |
-| 1024 / 2560 / 4096 | 5 | **1891 us** | 2371 us |
-| 2048 / 2048 / 2048 | 4 | **1535 us** | 1924 us |
-| 256 / 4096 / 1024 | 8 | **254 us** | 316 us |
+| 1024 / 512 / 4096 | 1 | 514 us | **498 us** |
+| 1024 / 1024 / 4096 | 2 | **591 us** | 931 us |
+| 1024 / 1536 / 6144 | 3 | **1141 us** | 1960 us |
+| 1024 / 2560 / 4096 | 5 | **1239 us** | 1940 us |
+| 2048 / 2048 / 2048 | 4 | **915 us** | 1581 us |
+| 256 / 4096 / 1024 | 8 | **227 us** | 265 us |
+
+The default rule is unchanged in sign: `tile_n=128` still wins only at
+`k_iters=1`. But its margin there has narrowed to 3% (was 8%) and its penalty
+everywhere else has grown -- at `k_iters>=2` it is now 1.2-1.7x slower where
+it used to be 1.2-1.25x. Both follow from `tile_n=128` giving up resident B
+(its `mt_b` is 128 KB, so `k_iters` copies do not fit the memtile): the more k
+there is to reduce over, the more that costs.
 
 `pack_B` is bound to the operator because the packing layout depends on
 `tile_n`; call `op.pack_B(B)`, not `FLMGEMM.pack_B(B)`.
