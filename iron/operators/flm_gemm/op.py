@@ -370,8 +370,13 @@ class FLMGEMM(MLIROperator):
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # A
-            # B, pre-packed by pack_B -- same element count, different order.
-            AIERuntimeArgSpec("in", (self.K, self.N)),  # B (weights)
+            # B arrives pre-packed AND quantized by pack_B: bfp16ebs8, which is
+            # 9 bytes per 8 values rather than bf16's 16. Declared in bytes so
+            # the buffer is sized from what pack_B actually returns -- a
+            # (K, N) bf16 spec would over-allocate the largest buffer by 1.78x.
+            AIERuntimeArgSpec(
+                "in", (self.unpack_B_size(self.K, self.N),), dtype=np.uint8
+            ),  # B (weights)
             AIERuntimeArgSpec("out", (self.M, self.N)),  # C
         ]
 
