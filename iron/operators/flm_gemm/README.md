@@ -126,6 +126,12 @@ or data movement is the critical path, and that turns on how much K there is
 to reduce over -- with a single k iteration there is not enough compute to
 hide the extra A traffic. Measured, minimum of 3 runs:
 
+> **Stale:** the sweep below predates the re-rolled mmul and the widened
+> residency gate, which together took 1024/1536/6144 from 1741 to 1434 us. The
+> `tile_n` choice it justifies is unlikely to have changed sign (residency does
+> not fit at `tile_n=128`, whose `mt_b` is 128 KB), but the absolute numbers
+> are no longer right and it wants re-measuring.
+
 | M / K / N | k_iters | `tile_n=64` | `tile_n=128` |
 |---|---|---|---|
 | 1024 / 512 / 4096 | 1 | 642 us | **589 us** |
@@ -144,10 +150,13 @@ M=1024 K=1536 N=6144, min of per-run medians across separate processes:
 
 | | bytes moved | latency | DMA-only (compute nulled) |
 |---|---|---|---|
-| `FLMGEMM` (`tile_n=64`) | 126 MB | **1741 us** | 1692 us |
-| `FLMGEMM` (`tile_n=128`) | 107 MB | 2178 us | 1481 us |
+| `FLMGEMM` (`tile_n=64`) | 69 MB | **1434 us** | 1231 us |
 | shipped `mm.xclbin` | 107 MB | 2175 us | -- |
 | `GEMM` (`emulate=True, prio_accuracy=True`) | 126 MB | 3353 us | 3374 us |
+
+**1.52x the shipped overlay**, at identical arithmetic (err/mass 2.41e-04
+either way). The 69 MB is with B resident in the memtile; the 126 MB figure
+this table used to quote was the non-resident fallback.
 
 **Measure this carefully.** Dispatch latency on this part is *bimodal*, with
 modes about 6% apart, and both show up for every configuration. A batch that
@@ -158,12 +167,25 @@ round-robin rather than one after the other, use at least 8 rounds each, and
 believe a difference only when the min and the median agree on it.
 
 Nulling the mmul out is what makes this legible. `GEMM` does not change at all
-without it (3374 vs 3353 us), so it is entirely data-movement bound. At
-`tile_n=128` this operator drops to 1481 us, so *there* it is compute bound
-with its transfers hidden -- which is what `tile_n=64` fixes, buying a much
-cheaper inner loop at the price of more data movement. But note the default
-`tile_n=64` is then data-movement bound itself (1692 of 1741 us), so further
-gains there come from moving fewer bytes, not from a faster kernel.
+without it (3374 vs 3353 us), so it is entirely data-movement bound.
+
+This operator is **not**. An earlier revision of this section read the small
+gap between the nulled floor and the full time (1692 of 1741 us) as proof that
+`tile_n=64` was data-movement bound, and concluded that "further gains come
+from moving fewer bytes, not from a faster kernel". That was backwards. The
+floor sat just *above* the mmul, hiding it; the operator was compute bound the
+whole time, and every attempt to move fewer bytes duly measured as worth
+nothing. Re-rolling the mmul's inner loop cut it 23% (2446 -> 1875 cycles per
+call, HW trace) and only then did keeping B resident pay -- together 1741 ->
+1434 us.
+
+Two lessons worth keeping. When total latency is `max(compute, DMA)`, testing
+levers **one at a time scores both as zero**: residency alone gained nothing
+while the mmul was the wall, and the re-rolled mmul alone gained little while
+the non-resident floor was. And a nulled-mmul floor close to the full time does
+not by itself mean DMA-bound -- it equally means compute is hiding just
+underneath. Compare against the *nulled floor*, not the full time, when judging
+a data-movement change.
 
 Its transfers are cheaper mostly because B arrives pre-packed: the contiguous
 run per transfer is 128 KB for B and 1 KB for A, against 128 bytes on every

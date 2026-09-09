@@ -66,10 +66,15 @@ flm_gemm_mmul_2x2(const T_in *__restrict pA, const T_in *__restrict pB,
       MMUL C10(aie::load_v<MMUL::size_C>(pC2));
       MMUL C11(aie::load_v<MMUL::size_C>(pC2 + MMUL::size_C));
 
-      static_assert(colA % 2 == 0);
-      // Peano schedules the 2x-unrolled body better than it schedules the
-      // rolled one; chess does not need the hand-unroll.
-#if defined(__chess__)
+      // Rolled, deliberately. An earlier 2x hand-unroll for the Peano path
+      // is now a pessimization: with colA/2 = 4 trip counts there are too
+      // few iterations to amortize the software pipeline's fill/drain.
+      // Measured cycles per mmul call (HW trace, event0/event1): rolled
+      // 1875, hand-unrolled 2x 2446, compiler unroll 4/8 3291/3221. Any
+      // extra live state across this loop loses more than it gains --
+      // Peano's register allocator is pipelining-unaware and manufactures
+      // false loop-carried anti-deps (llvm-aie#1066), so keep the body
+      // minimal and let the pipeliner overlap the iterations.
       AIE_LOOP_MAX_ITERATION_COUNT(colA)
       for (unsigned i = 0; i < colA; i++) {
         A0 = aie::load_v<MMUL::size_A>(pA1);
@@ -101,70 +106,6 @@ flm_gemm_mmul_2x2(const T_in *__restrict pA, const T_in *__restrict pB,
         C10.mac(A1, B0);
         C11.mac(A1, B1);
       }
-#else
-      AIE_LOOP_MAX_ITERATION_COUNT(colA / 2)
-      for (unsigned i = 0; i < colA; i += 2) {
-        // First iteration
-        A0 = aie::load_v<MMUL::size_A>(pA1);
-        pA1 += MMUL::size_A;
-        A1 = aie::load_v<MMUL::size_A>(pA2);
-        pA2 += MMUL::size_A;
-
-        if constexpr (b_row_maj) {
-          B0 = aie::load_v<MMUL::size_B>(pB1);
-          pB1 += MMUL::size_B * colB;
-          B1 = aie::load_v<MMUL::size_B>(pB2);
-          pB2 += MMUL::size_B * colB;
-        } else {
-          if constexpr (is_b_s_t_in_row_major == false) {
-            B0 = aie::transpose(aie::load_v<MMUL::size_B>(pB1), t, s);
-            pB1 += MMUL::size_B;
-            B1 = aie::transpose(aie::load_v<MMUL::size_B>(pB2), t, s);
-            pB2 += MMUL::size_B;
-          } else {
-            B0 = aie::load_v<MMUL::size_B>(pB1);
-            pB1 += MMUL::size_B;
-            B1 = aie::load_v<MMUL::size_B>(pB2);
-            pB2 += MMUL::size_B;
-          }
-        }
-
-        C00.mac(A0, B0);
-        C01.mac(A0, B1);
-        C10.mac(A1, B0);
-        C11.mac(A1, B1);
-
-        // Second iteration
-        A0 = aie::load_v<MMUL::size_A>(pA1);
-        pA1 += MMUL::size_A;
-        A1 = aie::load_v<MMUL::size_A>(pA2);
-        pA2 += MMUL::size_A;
-
-        if constexpr (b_row_maj) {
-          B0 = aie::load_v<MMUL::size_B>(pB1);
-          pB1 += MMUL::size_B * colB;
-          B1 = aie::load_v<MMUL::size_B>(pB2);
-          pB2 += MMUL::size_B * colB;
-        } else {
-          if constexpr (is_b_s_t_in_row_major == false) {
-            B0 = aie::transpose(aie::load_v<MMUL::size_B>(pB1), t, s);
-            pB1 += MMUL::size_B;
-            B1 = aie::transpose(aie::load_v<MMUL::size_B>(pB2), t, s);
-            pB2 += MMUL::size_B;
-          } else {
-            B0 = aie::load_v<MMUL::size_B>(pB1);
-            pB1 += MMUL::size_B;
-            B1 = aie::load_v<MMUL::size_B>(pB2);
-            pB2 += MMUL::size_B;
-          }
-        }
-
-        C00.mac(A0, B0);
-        C01.mac(A0, B1);
-        C10.mac(A1, B0);
-        C11.mac(A1, B1);
-      }
-#endif
       aie::store_v(pC1, C00.template to_vector<T_out>());
       pC1 += MMUL::size_C;
       aie::store_v(pC1, C01.template to_vector<T_out>());

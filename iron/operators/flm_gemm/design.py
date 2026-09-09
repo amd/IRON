@@ -280,11 +280,28 @@ def flm_gemm(
     # mis-computes.
     #
     # Gated on the buffer fitting DOUBLE-buffered, so the next column-block
-    # still prefetches; A takes 128 KB and C 64 KB of the 512 KB memtile.
-    # NOTE this admits only k_iters <= 2, i.e. K <= 1024 at tile_n=64. Larger K
-    # silently falls back to non-resident, so check this gate before believing
-    # any measurement that claims to be testing residency.
-    b_resident = (k_iters * mt_b_bytes * 2) <= (512 - 128 - 64) * 1024
+    # still prefetches. B_DEPTH is load-bearing, not a safety margin:
+    # single-buffering would let the lowering use the DMA's native repeat field
+    # instead of a duplicated BD chain, but it also stops the next
+    # column-block's B prefetching behind this one's replay, and that costs
+    # more than it saves -- 1720 us against 1600 at M=2048 K=1024 N=4096,
+    # i.e. worse than not being resident at all.
+    #
+    # The budget counts only C's 64 KB, not A's 128 KB, so it admits k_iters
+    # <= 3 (K <= 1536 at tile_n=64) rather than 2. That deliberately overcommits
+    # the A-carrying memtiles by 64 KB and relies on aie-objectfifo-allocate
+    # spilling one buffer to the least-loaded adjacent memtile, which packs all
+    # eight to exactly 512 KB (C_L2L3_6 lands on mem_tile_7_1). There is ZERO
+    # slack: re-verify placement after any change to the A, B or C buffer
+    # sizes, or the build will fail address assignment rather than silently
+    # mis-run.
+    #
+    # Residency only pays once compute is off the critical path -- it was
+    # measured latency-neutral while the mmul was the wall, and worth 260 us
+    # immediately after the mmul loop was re-rolled. Larger K still falls back
+    # to non-resident, so check this gate before believing any measurement that
+    # claims to be testing residency.
+    b_resident = (k_iters * mt_b_bytes * 2) <= (512 - 64) * 1024
     if b_resident:
         mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE,), bf16_ty]
         b_recv_dims = [(k_iters * (N_TILE // T), K_TILE * T)] + b_recv_dims[1:]
