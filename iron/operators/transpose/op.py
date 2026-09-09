@@ -62,6 +62,21 @@ class Transpose(MLIROperator):
             raise ValueError(
                 "Transfer size must be divisible by m*n*num_columns*num_channels"
             )
+        # The product check is necessary but not sufficient: the design tiles each
+        # dimension separately, as [M // num_channels // m, N // num_columns // n, m, n],
+        # and either quotient floors to zero on shapes whose product still divides.
+        if self.N // self.num_aie_columns // self.n < 1:
+            raise ValueError(
+                f"num_aie_columns ({self.num_aie_columns}) exceeds N/n "
+                f"({self.N // self.n}): each column needs at least one n-wide tile of "
+                f"N={self.N}, so num_aie_columns must be <= {self.N // self.n}"
+            )
+        if self.M // self.num_channels // self.m < 1:
+            raise ValueError(
+                f"num_channels ({self.num_channels}) exceeds M/m "
+                f"({self.M // self.m}): each channel needs at least one m-tall tile of "
+                f"M={self.M}, so num_channels must be <= {self.M // self.m}"
+            )
         MLIROperator.__init__(self, context=self.context)
 
     def get_mlir_artifact(self):
