@@ -240,11 +240,11 @@ class FLMGEMM(MLIROperator):
         object from it while the kernel derives the mmul's rowA from it, so a
         mismatch reads past the buffer and produces garbage rather than a build
         error."""
-        from iron.operators.flm_gemm.design import CT_MAX_K_FOR_N, _default_tile_ma
+        from iron.operators.flm_gemm.design import CT_MAX_K_FOR_N, _default_l1
 
         if self.tile_ma is not None:
             return self.tile_ma
-        return _default_tile_ma(self.tile_n, CT_MAX_K_FOR_N[self.tile_n])
+        return _default_l1(self.tile_n, CT_MAX_K_FOR_N[self.tile_n])[0]
 
     @property
     def _kernel_object(self) -> str:

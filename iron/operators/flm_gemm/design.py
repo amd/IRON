@@ -89,30 +89,31 @@ def _bfp16_bytes(elems):
     return elems // 8 * 9
 
 
-def _default_tile_ma(n_tile, ct_max_k):
-    """Largest A-tile height whose L1 working set fits.
+def _default_l1(n_tile, ct_max_k):
+    """Pick (A-tile height, L1 B depth) -- the largest working set that fits.
 
-    A is dead as soon as it is consumed while the accumulator lives across the
-    whole K reduction, so they need not share a height. Shrinking A is what
-    pays for a k slice deep enough to halve the accumulator traffic per mac
-    (ct_max_k=128 at n=64), which measured 3.67 -> 2.64 cycles per 8x8x8 mac.
+    A dies as soon as it is consumed while the accumulator lives across the
+    whole K reduction, so they need not share a height; shrinking A is what
+    pays for a k slice deep enough to halve the accumulator traffic per mac.
+    B's depth is searched too because at n=128 the k=128 slice makes the B
+    object 18 KB, and a double-buffered pair simply does not fit -- giving that
+    up is what buys colA=16 there, and colA is worth far more than B's L1
+    prefetch (3.67 -> 2.28 cycles per mac, measured).
+
+    Deeper B first, then the tallest A that still fits, so the n=64 default is
+    unchanged at (32, 2).
     """
     acc = M_TILE * n_tile * 4
-    b = _bfp16_bytes(ct_max_k * n_tile) * B_DEPTH
     cout = CT_OUT_LEN * 2 * C_DEPTH
-    # Not below 32: at t_ma = 16 the mmul's z loop has a single trip and
-    # Peano's AIE2P backend aborts with "Use not jointly dominated by defs"
-    # on the bfp16 path. 32 also halves the A object count, which is fifo
-    # overhead the asymmetry would otherwise add.
-    for t_ma in (M_TILE, M_TILE // 2):
-        if t_ma < 2 * R:
-            break
-        a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
-        if acc + a + b + cout <= L1_BUDGET:
-            return t_ma
-    raise ValueError(
-        f"no A-tile height fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}"
-    )
+    for b_depth in (B_DEPTH, 1):
+        b = _bfp16_bytes(ct_max_k * n_tile) * b_depth
+        for t_ma in (M_TILE, M_TILE // 2, M_TILE // 4):
+            if t_ma < 2 * R:
+                continue
+            a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
+            if acc + a + b + cout <= L1_BUDGET:
+                return t_ma, b_depth
+    raise ValueError(f"nothing fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}")
 
 
 def flm_gemm(
@@ -145,7 +146,8 @@ def flm_gemm(
     # accumulator spans M_TILE, so the core folds RHO bands into one C tile.
     # A is dead the moment it is consumed while C lives across the whole K
     # reduction, so sizing both to M_TILE pays the peak L1 cost twice.
-    T_MA = _default_tile_ma(N_TILE, CT_MAX_K) if tile_ma is None else tile_ma
+    _t_ma_fit, L1_B_DEPTH = _default_l1(N_TILE, CT_MAX_K)
+    T_MA = _t_ma_fit if tile_ma is None else tile_ma
     if M_TILE % T_MA or T_MA % (2 * R):
         raise ValueError(
             f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
@@ -367,9 +369,18 @@ def flm_gemm(
     # only other tenant. The old form ignored A entirely and hardcoded C's size,
     # which at tile_n=128 (where C doubles and resident B is 432 KB) admitted a
     # configuration that then failed address assignment outright.
-    b_resident = (k_iters * mt_b_bytes * B_DEPTH) <= (
-        512 * 1024 - mt_a_bytes * A_DEPTH - mt_out_bytes * C_DEPTH
+    # Prefer a double-buffered resident B so the next column-block prefetches
+    # behind this one's replay. Single-buffering costs that prefetch and was
+    # measured WORSE than not being resident at all -- at tile_n=64, where B is
+    # small enough that depth 2 fits anyway. At tile_n=128 B is twice the size
+    # and depth 2 does not fit, but depth 1 does; and there residency is worth
+    # far more, because it is also what keeps B's DDR from quadrupling. So take
+    # the deepest that fits rather than giving up on residency.
+    mt_free = 512 * 1024 - mt_a_bytes * A_DEPTH - mt_out_bytes * C_DEPTH
+    MT_B_DEPTH = next(
+        (d for d in (B_DEPTH, 1) if k_iters * mt_b_bytes * d <= mt_free), 0
     )
+    b_resident = MT_B_DEPTH > 0
     if b_resident:
         # Just a bigger buffer. With B packed in consumption order the walk is
         # linear, so spanning every k-block needs no extra descriptor
@@ -381,12 +392,14 @@ def flm_gemm(
     b_l3l2_fifos = []
     b_cons = {}
     for c in range(n_active_cols):
-        of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
+        of_b_in = ObjectFifo(
+            mt_b_ty, name=f"B_L3L2_{c}", depth=MT_B_DEPTH if b_resident else B_DEPTH
+        )
         b_l3l2_fifos.append(of_b_in)
         of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
             tile=Tile(c, 1),
             obj_type=ct_b_ty,
-            depth=B_DEPTH,
+            depth=L1_B_DEPTH,
             name=f"B_L2L1_{c}",
             dims_to_stream=b_send_dims,
             # Replay the resident memtile object once per row-block. This is
