@@ -25,8 +25,7 @@ from iron.operators.flm_gemm.design import (
     MIN_K,
     MIN_M,
     M_TILE,
-    S,
-    T,
+    register_tiling,
 )
 
 
@@ -202,9 +201,19 @@ class FLMGEMM(MLIROperator):
         return flags + self._rounding_flags
 
     @property
+    def _rst(self) -> tuple[int, int, int]:
+        """The mmul's r/s/t for this device. ``pack_B`` and the design's stream
+        dimensions must agree on these or the result is silently wrong."""
+        return register_tiling(aie_utils.get_current_device().resolve().name)
+
+    @property
     def _kernel_object(self) -> str:
         rnd = "" if self.rounding == "conv_even" else f"_{self.rounding}"
-        return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}{rnd}.o"
+        r, _s, t = self._rst
+        # r/t are in the name even though build dirs are already arch-scoped:
+        # they change the emitted layout, so an artifact built for one shape
+        # must never satisfy a request for the other.
+        return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}_r{r}t{t}{rnd}.o"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -258,6 +267,9 @@ class FLMGEMM(MLIROperator):
                     f"-DFLM_GEMM_TILE_M={M_TILE}",
                     f"-DFLM_GEMM_TILE_K={K_TILE}",
                     f"-DFLM_GEMM_TILE_N={self.tile_n}",
+                    f"-DFLM_GEMM_R={self._rst[0]}",
+                    f"-DFLM_GEMM_S={self._rst[1]}",
+                    f"-DFLM_GEMM_T={self._rst[2]}",
                 ]
                 + arch_include
                 + emulate_flags
@@ -306,6 +318,11 @@ class FLMGEMM(MLIROperator):
             raise ValueError(
                 f"B ({K}, {N}) must tile to ({K_TILE}, {N_TILE}) to be packed"
             )
+        # s/t come from the device: the t-block width is the mmul's native t,
+        # 8 on NPU2 and 4 on NPU1. Packing with the wrong t produces a wrongly
+        # ordered buffer that still has the right SIZE, so it mis-computes
+        # silently rather than raising.
+        _r, S, T = self._rst
         t = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
         # (kb, kb8, s_in, cb, tb, t_in) -> (cb, kb, tb, s_in, kb8, t_in)
         return t.permute(3, 0, 4, 2, 1, 5).reshape(-1).contiguous()

@@ -61,7 +61,9 @@ M_TILE, K_TILE = 64, 512
 N_TILE_DEFAULT = 64
 # k-slice per n width; must match compute_CT_k_max_n<N> in flm_gemm_geometry.h
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 64, 128: 32, 256: 16}
-R, S, T = 8, 8, 8
+# Register tiling. s is 8 on both architectures; r and t follow the device --
+# see register_tiling.
+S = 8
 ROWS = 4
 # Widest grid this design supports, i.e. NPU2. The actual width comes from the
 # device (see grid_cols); this is only what op.py uses to name artifacts.
@@ -71,6 +73,35 @@ MAX_COLS = 8
 def grid_cols(dev):
     """Grid width: 8 on NPU2 (Strix/Krackan), 4 on NPU1 (Phoenix)."""
     return min(dev.cols, MAX_COLS)
+
+
+def register_tiling(dev_name):
+    """The mmul's r/s/t. 8/8/8 on both architectures.
+
+    Returns (r, s, t). These set the blocked L1 layout, so ``pack_B`` and the
+    four stream-dimension lists below all key off them; they are a knob rather
+    than a constant because r/t is the natural thing to retune per device, and
+    because getting it wrong is silent.
+
+    **NPU1 at 4/8/4 was measured and is 22-30% SLOWER. Do not retry it without
+    also changing the register blocking.** The reasoning that suggested it was
+    that AIE2's native mac is 4x8x4, so composing 8x8x8 costs lane
+    rearrangement -- measured at 2.5 ``vshuffle`` per ``vmac`` (64 vmac / 48
+    vshuffle in the kernel object) against zero at 4/8/4. Eliminating every one
+    of those shuffles made it slower, because the shuffles were never the
+    bottleneck: this kernel is LOAD-PORT bound. Per unit work 4/8/4 needs 1.62
+    loads per mac against 8/8/8's 1.06, since ``flm_gemm_mmul_2x2``'s 2x2
+    register block amortizes each A and B load over four macs either way --
+    4 x 2048 MACs at 8x8x8 but only 4 x 512 at 4x8x4. Measured min/median,
+    interleaved, agreeing to three decimals: 0.927x at M=256 K=512 N=512 down
+    to 0.766x at M=1024 K=2560 N=2560.
+
+    The untried variant that could still win is a WIDER register block on the
+    native shape -- 4x4 tiling of 4x8x4 would restore load amortization at the
+    same accumulator pressure as 8/8/8's 2x2 (16 x 16 f32 = 4 x 64 f32) while
+    keeping the shuffle count at zero. That needs a 4x4 mmul kernel written.
+    """
+    return (8, S, 8)
 
 
 def a_source_cols(cols):
@@ -129,6 +160,9 @@ def flm_gemm(
     # so the same dataflow covers NPU2's 4x8 and NPU1's 4x4.
     COLS = grid_cols(dev)
     A_SOURCE_COL = a_source_cols(COLS)
+    # r/t are the device's native mac shape; every blocked layout below is
+    # expressed in terms of them.
+    R, _S, T = register_tiling(dev.resolve().name)
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
@@ -214,7 +248,13 @@ def flm_gemm(
     gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
     # B: DDR row-major (k x n) -> s x t blocks (recv), then split into the
     # CT_MAX_K-deep chunks a single mmul call consumes (send).
-    b_recv_dims = [(N_TILE // T, K_TILE * T), (T, S), (K_TILE // S, S * T), (S, 1)]
+    #
+    # The middle two dimensions walk pack_B's emission order, which is
+    # (tb, s_in, kb8, t_in): s_in advances one COLUMN of an s x t block, hence
+    # stride T, and t_in is the contiguous innermost run of width T. Writing
+    # these as (T, S) and (S, 1) is indistinguishable while s == t, which it is
+    # on NPU2 -- it only diverges at NPU1's t=4.
+    b_recv_dims = [(N_TILE // T, K_TILE * T), (S, T), (K_TILE // S, S * T), (T, 1)]
     b_send_dims = [
         (K_DIV_CT_K_MAX, T * CT_MAX_K),
         (N_TILE // T, K_TILE * T),

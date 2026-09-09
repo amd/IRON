@@ -29,9 +29,21 @@ namespace {
 constexpr int M = FLM_GEMM_TILE_M;
 constexpr int K = FLM_GEMM_TILE_K;
 constexpr int N = FLM_GEMM_TILE_N;
-constexpr int R = 8; // register tiling r/s/t
-constexpr int S = 8;
-constexpr int T = 8;
+// Register tiling r/s/t, from design.py so the C++ and the blocked L1 layout
+// cannot drift. Defaulted for a standalone compile; the operator always passes
+// them explicitly.
+#ifndef FLM_GEMM_R
+#define FLM_GEMM_R 8
+#endif
+#ifndef FLM_GEMM_S
+#define FLM_GEMM_S 8
+#endif
+#ifndef FLM_GEMM_T
+#define FLM_GEMM_T 8
+#endif
+constexpr int R = FLM_GEMM_R;
+constexpr int S = FLM_GEMM_S;
+constexpr int T = FLM_GEMM_T;
 
 // How much of K one compute tile holds at a time, given the n width.
 constexpr int CT_K = compute_CT_k_max_n<N>();

@@ -231,8 +231,40 @@ The margin is smaller than NPU2's ~1.9x, and that is expected rather than a
 port problem: much of the NPU2 win comes from the bfp16 fast path (two macs per
 8x8x8 shape against four) and from spreading A across eight columns. On NPU1
 both operators lower to the same native 4x8x4 mac, so what remains is this
-design's data movement -- row-broadcast A, the memtile C join, and resident B --
-which is why the gap grows with the problem size rather than being flat.
+design's data movement -- row-broadcast A and the memtile C join -- which is
+why the gap grows with the problem size rather than being flat.
+
+Where the time goes, by nulling the mmul out (same ObjectFifo traffic, so the
+remainder is the data-movement floor):
+
+| M / K / N | wall | DMA floor | compute | ceiling if compute were free |
+|---|---|---|---|---|
+| 512 / 1024 / 1024 | 704 us | 455 us | 250 us | 1.55x |
+| 1024 / 2048 / 1024 | 2165 us | 1309 us | 855 us | 1.65x |
+| 1024 / 2560 / 2560 | 6308 us | 3790 us | 2518 us | 1.66x |
+
+**This is the opposite of NPU2's situation.** There, `tile_n=64` is 97%
+data-movement bound (1692 of 1741 us) and a faster kernel buys nothing. On NPU1
+compute is ~40% of wall time and is *not* hidden, so both a faster mmul and
+less traffic pay off.
+
+### Measured dead ends on NPU1
+
+Recorded so they are not retried. Both were plausible and both lost:
+
+* **Resident B does nothing here.** Measured off-versus-on at M=2048, the shape
+  where NPU2 gains 7.8%: 1259/1269 us against 1262/1268 (min/median) at K=512,
+  and 2238/2248 against 2221/2229 at K=1024 -- i.e. at best a no-op, marginally
+  negative at K=1024, against a 1.4-4.4% round spread. The `repeat_count`
+  BD-chain restart noted above eats ~77% of the win on NPU2; on NPU1 it appears
+  to eat all of it. Making B resident *single*-buffered to reach K=2560 is worse
+  still, 5-12%, because it gives up the next column-block's prefetch.
+* **The native 4x8x4 mmul shape is 22-30% slower.** See `register_tiling` in
+  `design.py`. Composing 8x8x8 out of native macs costs 2.5 `vshuffle` per
+  `vmac` and 4x8x4 costs zero, but removing every shuffle made it slower: the
+  kernel is load-port bound, not shuffle bound, and the narrower shape needs 53%
+  more loads per unit work because the 2x2 register block amortizes each load
+  over a quarter as much arithmetic.
 
 Its transfers are cheaper mostly because B arrives pre-packed: the contiguous
 run per transfer is 128 KB for B and 1 KB for A, against 128 bytes on every
