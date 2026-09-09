@@ -67,6 +67,7 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
         M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, scale=scale
     )
 
+
     operator = FLMGEMM(
         M=M,
         K=K,
@@ -80,7 +81,7 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     input_buffers = {
         "A": golden_ref["input"].flatten(),
         # B is consumed pre-packed; see FLMGEMM.pack_B.
-        "B": FLMGEMM.pack_B(golden_ref["input_b"]),
+        "B": operator.pack_B(golden_ref["input_b"]),
     }
     output_buffers = {"C": golden_ref["output"].flatten()}
 

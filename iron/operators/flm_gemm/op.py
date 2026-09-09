@@ -24,7 +24,7 @@ from iron.operators.flm_gemm.design import (
     MIN_K,
     MIN_M,
     M_TILE,
-    N_TILE,
+    N_TILE_DEFAULT,
     S,
     T,
 )
@@ -47,6 +47,10 @@ class FLMGEMM(MLIROperator):
     epilogue: str = field(default="none", repr=False)
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = field(default=None, repr=False)
+    # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
+    # halves A fetches instead and wins only when small K makes the operator
+    # DMA-bound. See README.md.
+    tile_n: int | None = field(default=None, repr=False)
     # "conv_even" (round to nearest even) or "floor" (truncate). The core
     # powers up in floor, and the design this was ported from never sets the
     # mode, so "floor" reproduces its arithmetic exactly -- at ~40x the error,
@@ -58,13 +62,15 @@ class FLMGEMM(MLIROperator):
     _name_aliases: ClassVar[Dict[str, str]] = {**MLIROperator._name_aliases}
 
     def __post_init__(self):
+        if self.tile_n is None:
+            self.tile_n = self._default_tile_n(self.K)
         # N only needs to tile to N_TILE: a trailing group of fewer than
         # COLS column-blocks is handled by giving the columns different trip
         # counts. See design.py.
         for name, value, unit in (
             ("M", self.M, MIN_M),
             ("K", self.K, MIN_K),
-            ("N", self.N, N_TILE),
+            ("N", self.N, self.tile_n),
         ):
             if value % unit != 0:
                 raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
@@ -84,6 +90,19 @@ class FLMGEMM(MLIROperator):
 
         MLIROperator.__init__(self, context=self.context)
 
+    @staticmethod
+    def _default_tile_n(K: int) -> int:
+        """Pick the n tile from the shape.
+
+        n=64 gives the mmul colA=8 instead of 4, halving accumulator traffic
+        per mac; n=128 halves A fetches instead. Which wins depends on whether
+        compute or data movement is the critical path, and that is set by how
+        much K there is to reduce over: with a single k iteration there is too
+        little compute to hide the extra A traffic. Measured ~20% for n=64 at
+        K >= 1024 and ~9% the other way at K = 512.
+        """
+        return 128 if K // K_TILE <= 1 else 64
+
     @property
     def name(self) -> str:
         # epilogue/clamp are repr=False so the plain path keeps a stable name,
@@ -97,6 +116,8 @@ class FLMGEMM(MLIROperator):
             base = f"{base}_clamp{self._clamp_tag}"
         if self.rounding != "conv_even":
             base = f"{base}_{self.rounding}"
+        if self.tile_n != self._default_tile_n(self.K):
+            base = f"{base}_tn{self.tile_n}"
         return base
 
     @property
@@ -145,7 +166,7 @@ class FLMGEMM(MLIROperator):
     @property
     def _kernel_object(self) -> str:
         rnd = "" if self.rounding == "conv_even" else f"_{self.rounding}"
-        return f"flm_gemm_{M_TILE}x{K_TILE}x{N_TILE}{rnd}.o"
+        return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}{rnd}.o"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -159,6 +180,7 @@ class FLMGEMM(MLIROperator):
                     "M": self.M,
                     "K": self.K,
                     "N": self.N,
+                    "tile_n": self.tile_n,
                     "epilogue": self.epilogue,
                     "kernel_object": self._kernel_object,
                     "epilogue_object": self._epilogue_artifact,
@@ -185,7 +207,7 @@ class FLMGEMM(MLIROperator):
                 extra_flags=[
                     f"-DFLM_GEMM_TILE_M={M_TILE}",
                     f"-DFLM_GEMM_TILE_K={K_TILE}",
-                    f"-DFLM_GEMM_TILE_N={N_TILE}",
+                    f"-DFLM_GEMM_TILE_N={self.tile_n}",
                     # The r=8 mmul shape this design uses only exists on the
                     # bfp16-emulated path; without this the kernel will not
                     # compile.
@@ -203,8 +225,7 @@ class FLMGEMM(MLIROperator):
         )
         return artifacts
 
-    @staticmethod
-    def pack_B(B):
+    def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into the layout the B
         fill expects. Returns a flat tensor.
 
@@ -222,6 +243,7 @@ class FLMGEMM(MLIROperator):
         and reused across dispatches, so the cost belongs here.
         """
         K, N = B.shape
+        N_TILE = self.tile_n
         if K % K_TILE or N % N_TILE:
             raise ValueError(
                 f"B ({K}, {N}) must tile to ({K_TILE}, {N_TILE}) to be packed"

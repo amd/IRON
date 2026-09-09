@@ -10,8 +10,9 @@ dataflow from [`GEMM`](../gemm), not a retuning of it:
 
 | | `GEMM` | `FLMGEMM` |
 |---|---|---|
-| geometry | parameterized tiles, 1–8 columns | fixed 64/512/128, r/s/t 8/8/8, 4x8 grid |
+| geometry | parameterized tiles, 1–8 columns | fixed m=64 k=512, r/s/t 8/8/8, 4x8 grid; n selectable |
 | A delivery | per column | broadcast along each compute row from 4 shim columns |
+| C staging | full m x n tile in L1 | streamed out in 512-element chunks |
 | C collection | per column | ObjectFifo `join` of 4 rows through the memtile |
 | epilogue | separate `convert_copy` | fused f32→bf16 + activation + clamp |
 | B layout | plain `(K, N)` | **pre-packed**, see below |
@@ -21,23 +22,23 @@ path, and the grid needs all 8 columns.
 
 ## Shape constraints
 
-`M % 256 == 0`, `K % 512 == 0`, `N % 128 == 0`.
+`M % 256 == 0`, `K % 512 == 0`, `N % tile_n == 0` (so 64 by default).
 
-N only has to tile to `N_TILE=128`, not to the grid's 1024-wide stride: a
+N only has to tile to `tile_n`, not to the grid's `tile_n * 8` stride: a
 trailing group of fewer than 8 column-blocks is handled by giving the columns
 different trip counts. That matters in practice — a transformer's `o` and
 `down` projections have N = model dim, which is essentially never a multiple
-of 1024.
+of the full stride.
 
 ## B must be pre-packed
 
 ```python
 op = FLMGEMM(M=M, K=K, N=N, context=ctx)
-C = op.compile().get_callable()(A, FLMGEMM.pack_B(B), C_out)
+op.compile().get_callable()(A, op.pack_B(B), C_out)
 ```
 
 `pack_B` reorders a row-major `(K, N)` matrix into the order the memtile
-expects — each `K_TILE x N_TILE` tile as the odometer `(n//T, k%S, k//S, n%T)`,
+expects — each `K_TILE x tile_n` tile as the odometer `(n//T, k%S, k//S, n%T)`,
 outermost first — so each fill is one contiguous read.
 
 This is deliberately the caller's job rather than something the fill
@@ -105,16 +106,52 @@ signed A / non-negative B:
 | `GEMM`, same emulated mode (`emulate=True, prio_accuracy=True`) | 0.00044 |
 | `GEMM`, exact r=4 path | 0.00007 |
 
+## Choosing `tile_n`
+
+`tile_n` defaults to `None`, which picks per shape: **128 when `K == 512`,
+otherwise 64**. Override only if you have measured a reason to.
+
+`n=64` gives the mmul `colA=8` rather than 4, halving accumulator traffic per
+mac. `n=128` instead halves A fetches, because the grid then covers 1024
+columns of N per pass rather than 512. Which wins depends on whether compute
+or data movement is the critical path, and that turns on how much K there is
+to reduce over -- with a single k iteration there is not enough compute to
+hide the extra A traffic. Measured, minimum of 3 runs:
+
+| M / K / N | k_iters | `tile_n=64` | `tile_n=128` |
+|---|---|---|---|
+| 1024 / 512 / 4096 | 1 | 642 us | **589 us** |
+| 1024 / 1024 / 4096 | 2 | **850 us** | 1034 us |
+| 1024 / 1536 / 6144 | 3 | **1741 us** | 2178 us |
+| 1024 / 2560 / 4096 | 5 | **1891 us** | 2371 us |
+| 2048 / 2048 / 2048 | 4 | **1535 us** | 1924 us |
+| 256 / 4096 / 1024 | 8 | **254 us** | 316 us |
+
+`pack_B` is bound to the operator because the packing layout depends on
+`tile_n`; call `op.pack_B(B)`, not `FLMGEMM.pack_B(B)`.
+
 ## Performance
 
 M=1024 K=1536 N=6144, 7 processes x 100 iterations, min of per-run medians
 (run-to-run spread is ~5%, so differences below that are not meaningful):
 
-| | latency |
-|---|---|
-| `FLMGEMM` | 2183 us |
-| shipped `mm.xclbin` | 2175 us |
-| `GEMM` (`emulate=True, prio_accuracy=True`) | 3353 us |
+| | bytes moved | latency | DMA-only (compute nulled) |
+|---|---|---|---|
+| `FLMGEMM` (`tile_n=64`) | 126 MB | **1741 us** | -- |
+| `FLMGEMM` (`tile_n=128`) | 107 MB | 2178 us | 1481 us |
+| shipped `mm.xclbin` | 107 MB | 2175 us | -- |
+| `GEMM` (`emulate=True, prio_accuracy=True`) | 126 MB | 3353 us | 3374 us |
+
+Nulling the mmul out is what makes this legible. `GEMM` does not change at all
+without it (3374 vs 3353 us), so it is entirely data-movement bound; this
+operator drops to 1481 us, so it is compute bound with its transfers hidden.
+That is why the two respond to opposite fixes: `GEMM` would want cheaper
+transfers, this design wants a cheaper inner loop -- which is what `tile_n=64`
+buys.
+
+Its transfers are cheaper mostly because B arrives pre-packed: the contiguous
+run per transfer is 128 KB for B and 1 KB for A, against 128 bytes on every
+leg for `GEMM`, which reorders in the descriptor instead.
 
 Two things dominate, and both are in the runtime sequence rather than the
 kernel: B must be pre-packed (above), and each of A, B and C must go out as

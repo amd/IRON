@@ -43,7 +43,16 @@ from iron.operators._trace import maybe_enable_trace
 
 # --- Fixed geometry -------------------------------------------------------
 # GEMM tiling per compute tile, and the register tiling inside it.
-M_TILE, K_TILE, N_TILE = 64, 512, 128
+M_TILE, K_TILE = 64, 512
+# Default n tile. 64 gives the mmul a colA of 8 rather than 4, halving the
+# accumulator traffic per mac, at the cost of doubling A fetches (the grid
+# then covers 512 columns of N per pass instead of 1024). That trade wins
+# whenever compute is the critical path, which is the usual case; see
+# README.md for the measured sweep, including the small-K shape where it
+# loses.
+N_TILE_DEFAULT = 64
+# k-slice per n width; must match compute_CT_k_max_n<N> in flm_gemm_geometry.h
+CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 64, 128: 32, 256: 16}
 R, S, T = 8, 8, 8
 ROWS, COLS = 4, 8
 
@@ -52,19 +61,8 @@ ROWS, COLS = 4, 8
 # gemm operator pins A the same way in the 8-column case.
 A_SOURCE_COL = [0, 2, 4, 6]
 
-# Must match compute_CT_k_max_n<N_TILE>() in flm_gemm_geometry.h: with n=128,
-# a compute tile holds 32 of K at a time.
-CT_MAX_K = 32
-K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
-
-# Buffer lengths, in elements.
-CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
-CT_A_OBJ = CT_A_LEN * (M_TILE // R // 2)  # A object: every z slice of one mmul
 CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
-C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
-O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects one accumulator drains as
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
-B_ITERS = K_TILE // CT_MAX_K  # B chunks the core consumes per k step
 B_DEPTH = 2  # B fifo depth; also the core-body unroll
 A_DEPTH = 2
 
@@ -75,10 +73,10 @@ EPILOGUE_MODES = {"none": 0, "gelu": 1, "silu": 2, "sigmoid": 3}
 # to mark the symbol alwaysinline when building the inline .ll variant).
 EPILOGUE_SYMBOL = "flm_gemm_epilogue_chunk"
 
-# Minimum problem size, i.e. one pass of the whole grid.
+# Minimum problem size, i.e. one pass of the whole grid. MIN_N depends on the
+# chosen n tile, so it is computed per call.
 MIN_M = M_TILE * ROWS  # 256
 MIN_K = K_TILE  # 512
-MIN_N = N_TILE * COLS  # 1024
 
 
 def flm_gemm(
@@ -87,6 +85,7 @@ def flm_gemm(
     K,
     N,
     epilogue="none",
+    tile_n=N_TILE_DEFAULT,
     kernel_object="flm_gemm.o",
     epilogue_object="flm_gemm_epilogue.o",
     trace_size=0,
@@ -97,6 +96,20 @@ def flm_gemm(
     bf16 and all plain dense tensors -- the block-major reordering B needs on
     the way in is done by the fill descriptor, not by the caller.
     """
+    if tile_n not in CT_MAX_K_FOR_N:
+        raise ValueError(
+            f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {tile_n}"
+        )
+    N_TILE = tile_n
+    CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
+    K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
+    CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
+    CT_A_OBJ = CT_A_LEN * (M_TILE // R // 2)  # every z slice of one mmul
+    C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
+    O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
+    B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
+    MIN_N = N_TILE * COLS
+
     if epilogue not in EPILOGUE_MODES:
         raise ValueError(
             f"epilogue must be one of {sorted(EPILOGUE_MODES)}, got {epilogue!r}"
