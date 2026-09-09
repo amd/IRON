@@ -15,7 +15,7 @@
 
 constexpr int CT_k_max_n_16 = 16;
 constexpr int CT_k_max_n_32 = 32;
-constexpr int CT_k_max_n_64 = 64;
+constexpr int CT_k_max_n_64 = 128;
 constexpr int CT_k_max_n_128 = 32;
 constexpr int CT_k_max_n_256 = 16;
 

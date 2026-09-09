@@ -27,6 +27,16 @@
 
 namespace {
 constexpr int M = FLM_GEMM_TILE_M;
+// Asymmetric tile buffering: the A tile spans MA rows while the accumulator
+// spans M, so the core folds RHO = M / MA A-bands into one C tile before
+// releasing it. A dies as soon as it is consumed and C must live across the
+// whole K reduction, so sizing both to M pays the peak cost twice. Defaults
+// to M, which is the symmetric design.
+#ifndef FLM_GEMM_TILE_MA
+#define FLM_GEMM_TILE_MA FLM_GEMM_TILE_M
+#endif
+constexpr int MA = FLM_GEMM_TILE_MA;
+static_assert(M % MA == 0, "tile_m must be a whole number of A bands");
 constexpr int K = FLM_GEMM_TILE_K;
 constexpr int N = FLM_GEMM_TILE_N;
 constexpr int R = 8; // register tiling r/s/t
@@ -34,10 +44,14 @@ constexpr int S = 8;
 constexpr int T = 8;
 
 // How much of K one compute tile holds at a time, given the n width.
+#ifdef FLM_GEMM_CT_K
+constexpr int CT_K = FLM_GEMM_CT_K;
+#else
 constexpr int CT_K = compute_CT_k_max_n<N>();
+#endif
 static_assert(CT_K > 0, "no K-blocking geometry for this tile_n");
 
-static_assert(M % (2 * R) == 0, "tile_m must be a multiple of 2*r (2x2 mmul)");
+static_assert(MA % (2 * R) == 0, "tile_ma must be a multiple of 2*r (2x2 mmul)");
 static_assert(N % (2 * T) == 0, "tile_n must be a multiple of 2*t (2x2 mmul)");
 static_assert(K % CT_K == 0, "tile_k must be a multiple of the k slice");
 static_assert(CT_K % S == 0, "k slice must be a multiple of s");
@@ -75,11 +89,14 @@ void flm_gemm_acc_init(float *y_acc) {
 // The l loop lives in the core body so that each B chunk gets its own acquire
 // point. A is a single object spanning every z slice of the mmul, so this takes
 // no locks -- the A and B fifos own that handshake.
-void flm_gemm_k_step(bfloat16 *a_buf, bfloat16 *b_buf, float *y_acc) {
+void flm_gemm_k_step(bfloat16 *a_buf, bfloat16 *b_buf, float *y_acc,
+                     int32_t band) {
   ::aie::set_rounding(round_mode);
   constexpr int NUM_ITER = K / CT_K;
-  flm_gemm_mmul_2x2<bfloat16, float, (M / R), ((K / NUM_ITER) / S), (N / T), R,
+  // The accumulator is [row-block][col-block][r*t], so band b starts at
+  // b * MA * N -- b*(MA/R) row-blocks in, each colB*(r*t) wide.
+  flm_gemm_mmul_2x2<bfloat16, float, (MA / R), ((K / NUM_ITER) / S), (N / T), R,
                     S, T, /*b_row_maj=*/false, /*is_b_s_t_in_row_major=*/true>(
-      a_buf, b_buf, y_acc);
+      a_buf, b_buf, y_acc + band * (MA * N));
 }
 }

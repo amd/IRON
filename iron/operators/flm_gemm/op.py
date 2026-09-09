@@ -51,6 +51,9 @@ class FLMGEMM(MLIROperator):
     # halves A fetches instead and wins only when small K makes the operator
     # DMA-bound. See README.md.
     tile_n: int | None = field(default=None, repr=False)
+    # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
+    # buffering). None means symmetric (T_MA == M_TILE).
+    tile_ma: int | None = field(default=None, repr=False)
     # "conv_even" (round to nearest even) or "floor" (truncate). The core
     # powers up in floor, and the design this was ported from never sets the
     # mode, so "floor" reproduces its arithmetic exactly -- at ~40x the error,
@@ -118,6 +121,11 @@ class FLMGEMM(MLIROperator):
             base = f"{base}_{self.rounding}"
         if self.tile_n != self._default_tile_n(self.K):
             base = f"{base}_tn{self.tile_n}"
+        # The RESOLVED height, not just an explicit override: it changes the
+        # emitted MLIR and the kernel object, so a build dir holding another
+        # value's artifacts must not satisfy this one.
+        if self._tile_ma != M_TILE:
+            base = f"{base}_ma{self._tile_ma}"
         return base
 
     @property
@@ -164,9 +172,23 @@ class FLMGEMM(MLIROperator):
         return flags + self._rounding_flags
 
     @property
+    def _tile_ma(self) -> int:
+        """Resolved A-tile height. design.py picks the default, and it MUST be
+        the same value the kernel is compiled with -- the design sizes the A
+        object from it while the kernel derives the mmul's rowA from it, so a
+        mismatch reads past the buffer and produces garbage rather than a build
+        error."""
+        from iron.operators.flm_gemm.design import CT_MAX_K_FOR_N, _default_tile_ma
+
+        if self.tile_ma is not None:
+            return self.tile_ma
+        return _default_tile_ma(self.tile_n, CT_MAX_K_FOR_N[self.tile_n])
+
+    @property
     def _kernel_object(self) -> str:
         rnd = "" if self.rounding == "conv_even" else f"_{self.rounding}"
-        return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}{rnd}.o"
+        ma = f"_ma{self._tile_ma}"
+        return f"flm_gemm_{M_TILE}x{K_TILE}x{self.tile_n}{rnd}{ma}.o"
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -181,6 +203,7 @@ class FLMGEMM(MLIROperator):
                     "K": self.K,
                     "N": self.N,
                     "tile_n": self.tile_n,
+                    "tile_ma": self._tile_ma,
                     "epilogue": self.epilogue,
                     "kernel_object": self._kernel_object,
                     "epilogue_object": self._epilogue_artifact,
@@ -208,6 +231,7 @@ class FLMGEMM(MLIROperator):
                     f"-DFLM_GEMM_TILE_M={M_TILE}",
                     f"-DFLM_GEMM_TILE_K={K_TILE}",
                     f"-DFLM_GEMM_TILE_N={self.tile_n}",
+                    f"-DFLM_GEMM_TILE_MA={self._tile_ma}",
                     # The r=8 mmul shape this design uses only exists on the
                     # bfp16-emulated path; without this the kernel will not
                     # compile.
@@ -248,9 +272,25 @@ class FLMGEMM(MLIROperator):
             raise ValueError(
                 f"B ({K}, {N}) must tile to ({K_TILE}, {N_TILE}) to be packed"
             )
-        t = B.reshape(K // K_TILE, K_TILE // S, S, N // N_TILE, N_TILE // T, T)
-        # (kb, kb8, s_in, cb, tb, t_in) -> (cb, kb, tb, s_in, kb8, t_in)
-        return t.permute(3, 0, 4, 2, 1, 5).reshape(-1).contiguous()
+        # Emit the FINAL consumption order, not an intermediate one. The old
+        # layout left a 4-dimension scatter for the memtile's dims_from_stream
+        # to finish, which put the n-block index outside the k-slice index and
+        # so cost two descriptor dimensions on the way back out. Packing all
+        # the way here makes both B hops linear, which is what leaves room for
+        # a k-slice deep enough to halve the accumulator traffic (CT_MAX_K=128)
+        # while B is also memtile-resident.
+        from iron.operators.flm_gemm.design import CT_MAX_K_FOR_N
+
+        CT_K = CT_MAX_K_FOR_N[N_TILE]
+        col_a = CT_K // S
+        t = B.reshape(
+            K // K_TILE, K_TILE // CT_K, col_a, S, N // N_TILE, N_TILE // T, T
+        )
+        # (kb, kslice, i, s_in, cb, tb, t_in)
+        #   -> (cb, kb, kslice, tb, i, s_in, t_in)
+        # The s x t block is s-major: the mmul is instantiated with
+        # is_b_s_t_in_row_major=true, so it loads the block straight from L1.
+        return t.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
 
     def get_arg_spec(self):
         return [

@@ -52,7 +52,7 @@ M_TILE, K_TILE = 64, 512
 # loses.
 N_TILE_DEFAULT = 64
 # k-slice per n width; must match compute_CT_k_max_n<N> in flm_gemm_geometry.h
-CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 64, 128: 32, 256: 16}
+CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32, 256: 16}
 R, S, T = 8, 8, 8
 ROWS, COLS = 4, 8
 
@@ -67,6 +67,8 @@ B_DEPTH = 2  # B fifo depth; also the core-body unroll
 A_DEPTH = 2
 
 STACK_SIZE = 4096
+# Usable L1 per compute tile: 64 KB less the stack and a little slack.
+L1_BUDGET = 60 * 1024
 
 EPILOGUE_MODES = {"none": 0, "gelu": 1, "silu": 2, "sigmoid": 3}
 # The epilogue entry point, shared by the design and op.py (which needs it
@@ -79,6 +81,28 @@ MIN_M = M_TILE * ROWS  # 256
 MIN_K = K_TILE  # 512
 
 
+def _default_tile_ma(n_tile, ct_max_k):
+    """Largest A-tile height whose L1 working set fits.
+
+    A is dead as soon as it is consumed while the accumulator lives across the
+    whole K reduction, so they need not share a height. Shrinking A is what
+    pays for a k slice deep enough to halve the accumulator traffic per mac
+    (ct_max_k=128 at n=64), which measured 3.67 -> 2.64 cycles per 8x8x8 mac.
+    """
+    acc = M_TILE * n_tile * 4
+    b = ct_max_k * n_tile * 2 * B_DEPTH
+    cout = CT_OUT_LEN * 2 * C_DEPTH
+    for t_ma in (M_TILE, M_TILE // 2, M_TILE // 4, M_TILE // 8):
+        if t_ma < 2 * R:
+            break
+        a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
+        if acc + a + b + cout <= L1_BUDGET:
+            return t_ma
+    raise ValueError(
+        f"no A-tile height fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}"
+    )
+
+
 def flm_gemm(
     dev,
     M,
@@ -86,6 +110,7 @@ def flm_gemm(
     N,
     epilogue="none",
     tile_n=N_TILE_DEFAULT,
+    tile_ma=None,
     kernel_object="flm_gemm.o",
     epilogue_object="flm_gemm_epilogue.o",
     trace_size=0,
@@ -93,8 +118,9 @@ def flm_gemm(
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
 
     A is (M, K) row-major, B is (K, N) row-major and C is (M, N) row-major, all
-    bf16 and all plain dense tensors -- the block-major reordering B needs on
-    the way in is done by the fill descriptor, not by the caller.
+    bf16 and all plain dense tensors, except that B must arrive pre-packed by
+    ``FLMGEMM.pack_B`` -- it emits B in the order the cores consume it, so both
+    B hops are plain linear descriptors.
     """
     if tile_n not in CT_MAX_K_FOR_N:
         raise ValueError(
@@ -102,9 +128,19 @@ def flm_gemm(
         )
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
+    # Asymmetric tile buffering: the A tile spans T_MA rows while the
+    # accumulator spans M_TILE, so the core folds RHO bands into one C tile.
+    # A is dead the moment it is consumed while C lives across the whole K
+    # reduction, so sizing both to M_TILE pays the peak L1 cost twice.
+    T_MA = _default_tile_ma(N_TILE, CT_MAX_K) if tile_ma is None else tile_ma
+    if M_TILE % T_MA or T_MA % (2 * R):
+        raise ValueError(
+            f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
+        )
+    RHO = M_TILE // T_MA
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
     CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
-    CT_A_OBJ = CT_A_LEN * (M_TILE // R // 2)  # every z slice of one mmul
+    CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
     C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
     O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
     B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
@@ -167,7 +203,9 @@ def flm_gemm(
 
     acc_init = Kernel("flm_gemm_acc_init", kernel_object, [ct_acc_ty])
     k_step = Kernel(
-        "flm_gemm_k_step", kernel_object, [ct_a_obj_ty, ct_b_ty, ct_acc_ty]
+        "flm_gemm_k_step",
+        kernel_object,
+        [ct_a_obj_ty, ct_b_ty, ct_acc_ty, np.int32],
     )
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,
@@ -182,24 +220,30 @@ def flm_gemm(
     # layout the mmul indexes, and they are tightly coupled to it. A mismatch
     # here produces silently wrong results, not a build error.
 
+    def _split_run(run):
+        # A BD wrap may not exceed 1023; the run is contiguous, so a longer one
+        # re-encodes as two dimensions at the cost of one of the four.
+        return [(run, 1)] if run <= 1023 else [(2, run // 2), (run // 2, 1)]
+
     # C: de-block each core's r x t tiled output back into row-major within its
     # 64x128 slice, on the way into the memtile.
     gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
     # B: DDR row-major (k x n) -> s x t blocks (recv), then split into the
     # CT_MAX_K-deep chunks a single mmul call consumes (send).
-    b_recv_dims = [(N_TILE // T, K_TILE * T), (T, S), (K_TILE // S, S * T), (S, 1)]
-    b_send_dims = [
-        (K_DIV_CT_K_MAX, T * CT_MAX_K),
-        (N_TILE // T, K_TILE * T),
-        (T * CT_MAX_K, 1),
-    ]
+    # B needs no reblocking on either hop: pack_B already emits it in the
+    # order the cores consume, so the memtile just streams it through. That
+    # frees every descriptor dimension B used to spend -- which is what lets
+    # CT_MAX_K reach 128 (the innermost run would otherwise overflow the BD's
+    # 10-bit size field and need a split dimension) at the same time as
+    # residency (which spends one on its outer k walk).
+    b_recv_dims = None
+    b_send_dims = None
     # A: same idea, r x s blocks.
     a_recv_dims = [(M_TILE // R, R * K_TILE), (R, S), (K_TILE // S, R * S), (S, 1)]
     a_send_dims = [
         (K_DIV_CT_K_MAX, R * CT_MAX_K),
         (M_TILE // R, R * K_TILE),
-        (R * CT_MAX_K, 1),
-    ]
+    ] + _split_run(R * CT_MAX_K)
 
     # C: one join per column. Each of the ROWS cores in the column drops its
     # slice at its own offset in a single memtile buffer, which then drains to
@@ -303,9 +347,12 @@ def flm_gemm(
     # claims to be testing residency.
     b_resident = (k_iters * mt_b_bytes * 2) <= (512 - 64) * 1024
     if b_resident:
+        # Just a bigger buffer. With B packed in consumption order the walk is
+        # linear, so spanning every k-block needs no extra descriptor
+        # dimension -- the objects simply come out in k order. (The previous
+        # blocked layout had to widen one dim inbound and add an outermost k
+        # dim outbound, which is what collided with CT_MAX_K=128.)
         mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE,), bf16_ty]
-        b_recv_dims = [(k_iters * (N_TILE // T), K_TILE * T)] + b_recv_dims[1:]
-        b_send_dims = [(k_iters, K_TILE * N_TILE)] + b_send_dims
 
     b_l3l2_fifos = []
     b_cons = {}
@@ -349,10 +396,13 @@ def flm_gemm(
                             # constant.
                             for _ in range_(B_ITERS // B_DEPTH):
                                 for _ in range(B_DEPTH):
+                                    # One B chunk feeds every A band, so B is
+                                    # acquired once around the band loop.
                                     b = b_h.acquire(1)
-                                    a = a_h.acquire(1)
-                                    kstep_k(a, b, acc)
-                                    a_h.release(1)
+                                    for band in range(RHO):
+                                        a = a_h.acquire(1)
+                                        kstep_k(a, b, acc, band)
+                                        a_h.release(1)
                                     b_h.release(1)
                         # Drain the accumulator. Unrolled by C_DEPTH for the
                         # same reason; a full O_CHUNKS unroll overflows program
@@ -373,8 +423,9 @@ def flm_gemm(
                         for _ in range_(k_iters):
                             for _ in range_(B_ITERS // B_DEPTH):
                                 for _ in range(B_DEPTH):
-                                    a_h.acquire(1)
-                                    a_h.release(1)
+                                    for _ in range(RHO):
+                                        a_h.acquire(1)
+                                        a_h.release(1)
 
         return core_fn
 

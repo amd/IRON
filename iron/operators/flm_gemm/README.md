@@ -150,13 +150,28 @@ M=1024 K=1536 N=6144, min of per-run medians across separate processes:
 
 | | bytes moved | latency | DMA-only (compute nulled) |
 |---|---|---|---|
-| `FLMGEMM` (`tile_n=64`) | 69 MB | **1434 us** | 1231 us |
+| `FLMGEMM` (`tile_n=64`) | 69 MB | **1252 us** | 1231 us |
 | shipped `mm.xclbin` | 107 MB | 2175 us | -- |
 | `GEMM` (`emulate=True, prio_accuracy=True`) | 126 MB | 3353 us | 3374 us |
 
-**1.52x the shipped overlay**, at identical arithmetic (err/mass 2.41e-04
+**1.74x the shipped overlay**, at identical arithmetic (err/mass 2.41e-04
 either way). The 69 MB is with B resident in the memtile; the 126 MB figure
-this table used to quote was the non-resident fallback.
+this table used to quote was the non-resident fallback. At 1252 us against a
+1231 us data-movement floor, this operator is now essentially DMA-bound: the
+mmul is finally cheap enough to hide, so further gains have to come from
+moving fewer bytes.
+
+Three changes compound to get there, and none of them works alone:
+
+* **The mmul's inner loop is rolled**, not hand-unrolled. 2446 -> 1875 cycles
+  per call.
+* **`pack_B` emits the final consumption order**, so both B hops are linear
+  descriptors instead of blocked ones. Worth nothing by itself -- it is what
+  frees the descriptor dimensions the other two need.
+* **Asymmetric tile buffering.** The A tile is 16 rows while the accumulator
+  is 64 (`rho = 4`), which pays for a 128-deep k slice. That halves the
+  accumulator traffic per mac and doubles the inner loop's trip count:
+  3.67 -> 2.64 cycles per 8x8x8 mac.
 
 **Measure this carefully.** Dispatch latency on this part is *bimodal*, with
 modes about 6% apart, and both show up for every configuration. A batch that
