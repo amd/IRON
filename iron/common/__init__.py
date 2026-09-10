@@ -16,6 +16,8 @@ from .compilation import (
     KernelArchiveArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
+    RemoteFileArtifact,
+    InstsBinArtifact,
     DesignGenerator,
 )
 from .layout import Stride, TiledStride, TiledStridedLayout, tiled_2d

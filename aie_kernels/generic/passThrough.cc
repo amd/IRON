@@ -10,6 +10,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Element width in bits, chosen by the caller with -DBIT_WIDTH. Only mha passes
+// it (16); every other user wants the 32-bit form and used to reach it by
+// leaving the macro undefined, which the preprocessor evaluates as 0 and so
+// falls through to the #else below. Peano now compiles with -Werror=undef, so
+// that default has to be written down rather than relied on.
+#ifndef BIT_WIDTH
+#define BIT_WIDTH 32
+#endif
+
 template <typename T, int N>
 __attribute__((noinline)) void
 passThrough_aie(T *restrict in, T *restrict out, const int32_t height, const int32_t width)

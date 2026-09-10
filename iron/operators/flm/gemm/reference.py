@@ -5,31 +5,27 @@ import torch
 from iron.common.test_utils import torch_dtype_map
 
 
-def _activation(x, epilogue):
-    if epilogue == "none":
-        return x
-    if epilogue == "gelu":
-        # Match the kernel, which uses the sigmoid approximation
-        # gelu(x) ~= x * sigmoid(1.702x) -- NOT torch's erf-exact gelu, and not
-        # the tanh approximation the standalone gelu operator uses.
-        return x * torch.sigmoid(1.702 * x)
-    if epilogue == "silu":
-        return x * torch.sigmoid(x)
-    if epilogue == "sigmoid":
-        return torch.sigmoid(x)
-    raise ValueError(f"unknown epilogue {epilogue!r}")
-
-
 def reference(input_a, input_b, epilogue="none", clamp=None):
     """CPU reference ``C = clamp(activation(A @ B))``.
 
     The matmul is accumulated in fp32 to mirror the kernel's f32 accumulator,
     then cast back to the input dtype at the end, which is where the kernel
     converts too.
+
+    ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, matching the
+    kernel -- NOT torch's erf-exact gelu, and not the tanh approximation the
+    standalone gelu operator uses.
     """
     out_dtype = input_a.dtype
     C = torch.matmul(input_a.float(), input_b.float())
-    C = _activation(C, epilogue)
+    if epilogue == "gelu":
+        C = C * torch.sigmoid(1.702 * C)
+    elif epilogue == "silu":
+        C = C * torch.sigmoid(C)
+    elif epilogue == "sigmoid":
+        C = torch.sigmoid(C)
+    elif epilogue != "none":
+        raise ValueError(f"unknown epilogue {epilogue!r}")
     if clamp is not None:
         C = torch.clamp(C, clamp[0], clamp[1])
     return C.to(out_dtype)
