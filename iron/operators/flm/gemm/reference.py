@@ -8,9 +8,14 @@ from iron.common.test_utils import torch_dtype_map
 def reference(input_a, input_b, epilogue="none", clamp=None):
     """CPU reference ``C = clamp(activation(A @ B))``.
 
-    The matmul is accumulated in fp32 to mirror the kernel's f32 accumulator,
-    then cast back to the input dtype at the end, which is where the kernel
-    converts too.
+    The matmul is accumulated in fp32 to mirror the kernel's f32 accumulator.
+    This is an idealized reference, not operation-for-operation matching: it
+    applies the activation and clamp in fp32 and casts to the input dtype only
+    at the end, whereas the kernel (``mm_fused_epilogue_chunk`` in
+    ``mm_fused_epilogue.cc``) converts the accumulator to bf16 first and then
+    applies the activation and clamp in bf16. The two are close enough that the
+    per-test tolerances absorb the difference, but do not expect a bit-exact
+    match.
 
     ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, matching the
     kernel -- NOT torch's erf-exact gelu, and not the tanh approximation the

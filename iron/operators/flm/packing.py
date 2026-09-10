@@ -110,10 +110,17 @@ def pack_b(
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            return blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
-        #   -> (cb, kb, kslice, tb, i, s_in, t_in)
-        # Row-major s x t within the block, which is what the plain mmul loads.
-        return blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+            out = blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
+        else:
+            #   -> (cb, kb, kslice, tb, i, s_in, t_in)
+            # Row-major s x t within the block, which is what the plain mmul
+            # loads.
+            out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+        # Callers may pass B in whatever dtype they have it in (e.g. a model's
+        # native f32 weight); the kernels and get_arg_spec() assume the result
+        # is bf16, so guarantee that here rather than silently returning
+        # whatever B.dtype was.
+        return out.to(torch.bfloat16)
     #   -> (cb, kb, kslice, tb, i, t_in, s_in)
     # t-major within the block: the mixed mmul hands B straight to
     # mac_8x8_8x8T without the transpose the bf16 form applies, so the transpose

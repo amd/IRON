@@ -68,7 +68,10 @@ N_TILE_DEFAULT = 64
 # L1 budget split two ways, so a wider n tile leaves less room for B's k slice
 # and the product stays roughly constant. op.py passes the chosen value to the
 # kernel as -DMM_FUSED_CT_K, making this table the only place it is decided.
-CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32, 256: 16}
+# n=256 is deliberately absent: at that width the f32 accumulator alone
+# (M_TILE * 256 * 4 = 65536 bytes) already exceeds L1_BUDGET, before A, B or C
+# are even counted, so no ct_max_k could ever make it fit.
+CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
 # Register tiling. 8/8/8 on both architectures today; register_tiling() is the
 # single source of truth and returns exactly these.
 R, S, T = 8, 8, 8
@@ -211,6 +214,27 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes):
     raise ValueError(f"nothing fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}")
 
 
+def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes):
+    """Deepest B fifo depth that fits L1 alongside an explicit A-tile height.
+
+    ``_default_l1`` picks L1_B_DEPTH together with the t_ma IT chooses; that
+    pairing need not fit a caller-overridden t_ma; a taller A tile leaves less
+    L1 for B, and can push a working set that fit at the default t_ma over
+    budget. Raise rather than silently reusing a depth that doesn't fit.
+    """
+    acc = M_TILE * n_tile * 4
+    cout = CT_OUT_LEN * 2 * C_DEPTH
+    a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
+    for b_depth in (B_DEPTH, 1):
+        b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
+        if acc + a + b + cout <= L1_BUDGET:
+            return b_depth
+    raise ValueError(
+        f"tile_ma={t_ma} does not fit L1 for tile_n={n_tile} "
+        f"(ct_max_k={ct_max_k}); even single-buffered B overflows the budget"
+    )
+
+
 def gemm(
     dev,
     M,
@@ -255,12 +279,15 @@ def gemm(
     # accumulator spans M_TILE, so the core folds RHO bands into one C tile.
     # A is dead the moment it is consumed while C lives across the whole K
     # reduction, so sizing both to M_TILE pays the peak L1 cost twice.
-    _t_ma_fit, L1_B_DEPTH = _default_l1(N_TILE, CT_MAX_K, b_elem_bytes)
-    T_MA = _t_ma_fit if tile_ma is None else tile_ma
-    if M_TILE % T_MA or T_MA % (2 * R):
-        raise ValueError(
-            f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
-        )
+    if tile_ma is None:
+        T_MA, L1_B_DEPTH = _default_l1(N_TILE, CT_MAX_K, b_elem_bytes)
+    else:
+        T_MA = tile_ma
+        if M_TILE % T_MA or T_MA % (2 * R):
+            raise ValueError(
+                f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
+            )
+        L1_B_DEPTH = _b_depth_for(T_MA, N_TILE, CT_MAX_K, b_elem_bytes)
     RHO = M_TILE // T_MA
     OVERLAP = OVERLAP_DEFAULT if overlap is None else overlap
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K

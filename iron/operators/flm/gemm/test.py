@@ -203,6 +203,47 @@ def test_gemm_split_leg_windowing(aie_context):
     GEMM(M=512, K=10240, N=10240, context=aie_context).compile()
 
 
+@pytest.mark.extensive
+def test_gemm_split_leg_windowing_runs(aie_context):
+    """Execute the two-sided split path, not just compile it.
+
+    test_gemm_split_leg_windowing above only compiles this shape: the failure
+    mode it guards against -- BD-id aliasing and shim task-queue overrun (see
+    that test's docstring) -- is a runtime device hang or silent corruption,
+    which compiling the MLIR can't exercise. This dispatches the same shape on
+    hardware and checks the result.
+    """
+    M, K, N = 512, 10240, 10240
+    golden_ref = generate_golden_reference(M=M, K=K, N=N)
+
+    operator = GEMM(M=M, K=K, N=N, context=aie_context)
+
+    input_buffers = {
+        "A": golden_ref["input"].flatten(),
+        "B": operator.pack_B(golden_ref["input_b"]),
+    }
+    output_buffers = {"C": golden_ref["output"].flatten()}
+
+    # Same mass-based bound as test_gemm, at the non-floor budget for whichever
+    # architecture this runs on.
+    mass = (
+        K
+        * golden_ref["input"].abs().float().mean()
+        * golden_ref["input_b"].abs().float().mean()
+    )
+    budget = (
+        0.0002 if aie_utils.get_current_device().resolve().name == "npu1" else 0.004
+    )
+    errors, _latency_us, _bandwidth_gbps = run_test(
+        operator,
+        input_buffers,
+        output_buffers,
+        rel_tol=0.04,
+        abs_tol=float(budget * mass),
+    )
+    assert not errors, "Test failed"
+
+
 @pytest.mark.parametrize("M,K,N", [(256, 512, 1024), (512, 1024, 2048)])
 def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
     """``flm.GEMM`` must never share an artifact stem with ``GEMM``.

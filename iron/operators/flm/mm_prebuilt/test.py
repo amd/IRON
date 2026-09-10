@@ -39,8 +39,10 @@ BUDGET_FLOOR = 2e-2
 @pytest.mark.parametrize(
     "M,K,N,epilogue,clamp",
     [
-        (256, 512, 1024, "none", None),
-        (512, 1024, 2048, "none", None),
+        (256, 512, 1024, "none", None),  # exactly one full 8-column sweep
+        (512, 1024, 2048, "none", None),  # two full sweeps
+        (256, 512, 640, "none", None),  # remainder only: 5 of 8 cols
+        (256, 512, 1280, "none", None),  # full sweep + remainder: 1 of 8 cols
         (256, 512, 1024, "silu", None),
         (256, 512, 1024, "gelu", None),
         (256, 512, 1024, "sigmoid", None),
@@ -66,16 +68,27 @@ def test_mm_prebuilt(M, K, N, epilogue, clamp, aie_context):
     # Same absolute-mass bound as flm.gemm/test.py, for the same reason: with
     # signed A the K-sum cancels by ~sqrt(K), leaving near-zero outputs
     # relatively uncheckable under a plain relative tolerance.
-    mass = (
-        K
-        * golden_ref["input"].abs().float().mean()
-        * golden_ref["input_b"].abs().float().mean()
-    )
+    #
+    # sigmoid and clamp are the exception: their output is bounded to a known,
+    # narrow range (sigmoid to (0, 1), this clamp to (-2, 2)), far smaller than
+    # the mass-based bound above -- which would then pass even an all-zero
+    # result. Scale the tolerance to the actual output domain for those instead.
+    if epilogue == "sigmoid":
+        abs_tol = BUDGET_FLOOR
+    elif clamp is not None:
+        abs_tol = BUDGET_FLOOR * (clamp[1] - clamp[0])
+    else:
+        mass = (
+            K
+            * golden_ref["input"].abs().float().mean()
+            * golden_ref["input_b"].abs().float().mean()
+        )
+        abs_tol = float(BUDGET_FLOOR * mass)
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
         input_buffers,
         output_buffers,
         rel_tol=0.04,
-        abs_tol=float(BUDGET_FLOOR * mass),
+        abs_tol=abs_tol,
     )
     assert not errors, "Test failed"
