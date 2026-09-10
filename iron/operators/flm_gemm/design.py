@@ -89,6 +89,21 @@ def _bfp16_bytes(elems):
     return elems // 8 * 9
 
 
+# Shim-tile DMA BD step field is 20 bits wide (AIE2p; see mlir-aie's
+# AIETargetModel::getDmaBdStepBits and AIEXDialect.cpp's "Stride N exceeds"
+# verifier). An IR-level bf16-element stride S is re-expressed in hardware
+# units as (S - 1) * 2 bytes / 4-byte address granularity before that check,
+# so S must satisfy hw_stride_bf16(S) <= (1 << 20) - 1.
+_SHIM_STEP_BITS = 20
+_BF16_BYTES = 2
+_ADDR_GRANULARITY_BYTES = 4
+
+
+def _hw_stride_ok(stride_elems):
+    hw_stride = (stride_elems - 1) * _BF16_BYTES // _ADDR_GRANULARITY_BYTES
+    return hw_stride <= (1 << _SHIM_STEP_BITS) - 1
+
+
 def _default_l1(n_tile, ct_max_k):
     """Pick (A-tile height, L1 B depth) -- the largest working set that fits.
 
@@ -184,6 +199,60 @@ def flm_gemm(
     # How many times the whole grid sweeps, in each dimension.
     m_row_blocks = M // MIN_M
     k_iters = K // K_TILE
+    # The mega_row dimension's stride (ROWS*M_TILE*{K,N}) overflows the shim's
+    # 20-bit step field once K or N crosses ~8191 elements -- E4B's FFN width
+    # (10240) does, E2B's max (6144) does not. Only relevant once M actually
+    # walks more than one mega_row (m_row_blocks>1); at M=256 the dimension is
+    # degenerate (size 1) and the taplib/MLIR toolchain strips it before this
+    # stride is ever encoded, so it never fails regardless of K/N.
+    #
+    # Attempted fix: split the single 4D descriptor into m_row_blocks separate
+    # 3D fill()/drain() calls, each carrying the mega_row jump in its OFFSET
+    # (unbounded) instead of a shared STRIDE (20-bit limited). Compiles cleanly
+    # either direction (A's L3->L2 broadcast feed, or C's L2->L3 drain), but
+    # the dispatch hangs on real hardware (XRT: ERT_CMD_STATE_TIMEOUT) for
+    # BOTH once tested at the actual target shape (K or N = 10240) rather
+    # than a small stand-in -- a small forced-split repro (e.g. N=4096)
+    # appeared to work for the C direction, which was a false signal: the
+    # same shape at the real N=10240 hangs reproducibly on fresh builds. Not
+    # a buffer-depth issue either (tried objectfifo depths 2/4/8/16 for A,
+    # all hang). A dedicated IR-forensics pass diffed every aiecc compiler
+    # stage between working and broken small-shape builds and found the
+    # generated MLIR/BDs/locks correct and consistent throughout -- not a
+    # compiler bug. The kernel driver's health-report interface (amdxdna's
+    # `aie2_dump_ctx`, see
+    # /usr/src/xrt-amdxdna-*/driver/amdxdna/aie2_ctx.c and
+    # aie2_msg_priv.h's `struct app_health_report`) shows, on an actual hang:
+    # `Fatal error type: 0x0` and every exception field zero (NOT a
+    # crash/fault), `dpu_pc`/`txn_op_id` at their documented "not captured
+    # for this op type" sentinel (0xffffffff), while `ctx_pc` holds a real
+    # captured address -- consistent with the on-chip firmware sitting in a
+    # wait loop for a completion signal the array's DMA engine never raises.
+    # The driver's TDR watchdog (aie2_tdr.c, 2s default) is what eventually
+    # force-resets it. This is a genuine, silent hardware/firmware
+    # synchronization hang, not something splitting the host-issued task
+    # count works around. Root cause not fully pinned down -- the firmware
+    # itself is closed, unsymbolized microcode
+    # (/lib/firmware/amdnpu/*/npu*.sbin); further work needs AMD-internal
+    # firmware source or a hardware debugger, neither available here.
+    #
+    # Until a real fix lands, K/N > ~8191 at M > 256 raises a clear
+    # compile-time error below rather than emitting a build that hangs on
+    # real hardware.
+    if m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * K):
+        raise ValueError(
+            f"K={K} at M={M} would need a shim DMA descriptor stride "
+            f"(ROWS*M_TILE*K={ROWS * M_TILE * K}) that exceeds the AIE2p "
+            "shim's 20-bit step field (see the comment above this check) "
+            "-- not yet fixed."
+        )
+    if m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N):
+        raise ValueError(
+            f"N={N} at M={M} would need a shim DMA descriptor stride "
+            f"(ROWS*M_TILE*N={ROWS * M_TILE * N}) that exceeds the AIE2p "
+            "shim's 20-bit step field (see the comment above this check) "
+            "-- not yet fixed."
+        )
     # Sweeps where all COLS columns have work, plus a trailing group of
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N

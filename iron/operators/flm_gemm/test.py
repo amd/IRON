@@ -125,3 +125,20 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     print(f"Throughput: {gflops:.6e} GFLOP/s\n")
 
     assert not errors, "Test failed"
+
+
+@pytest.mark.parametrize(
+    "M,K,N",
+    [
+        (1024, 10240, 2560),  # E4B down-proj: K overflows the shim's 20-bit stride
+        (1024, 2560, 10240),  # E4B gateup-proj: N overflows it instead
+    ],
+)
+def test_flm_gemm_stride_overflow_rejected(M, K, N, aie_context):
+    # K or N > ~8191 at M > 256 needs a shim DMA descriptor stride that
+    # exceeds the AIE2p shim's 20-bit step field. Splitting the transfer
+    # into multiple descriptors compiles but hangs real hardware (see
+    # design.py's comment above this check) -- so this must keep failing
+    # fast at construction, not silently emit a build that hangs.
+    with pytest.raises(ValueError, match="20-bit step field"):
+        FLMGEMM(M=M, K=K, N=N, context=aie_context).compile()
