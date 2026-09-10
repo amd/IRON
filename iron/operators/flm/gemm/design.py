@@ -227,6 +227,13 @@ def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes, budget):
     pairing need not fit a caller-overridden t_ma; a taller A tile leaves less
     L1 for B, and can push a working set that fit at the default t_ma over
     budget. Raise rather than silently reusing a depth that doesn't fit.
+
+    How much the depth is worth, measured on npu2 (turbo, 12 interleaved rounds
+    of 20 dispatches, min of per-round medians) by forcing depth 1 against the
+    default: 1.2% at M=1024 K=1536 N=6144, and within noise at K=1024 N=4096 and
+    K=512 N=1024. So the prefetch earns its L1 at the largest shapes and is
+    close to free elsewhere -- worth keeping, but not worth contorting the
+    search for.
     """
     acc = M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH

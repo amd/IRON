@@ -227,15 +227,20 @@ def test_gemm_split_leg_windowing(aie_context):
     GEMM(M=512, K=10240, N=10240, context=aie_context).compile()
 
 
-@pytest.mark.extensive
 def test_gemm_split_leg_windowing_runs(aie_context):
     """Execute the two-sided split path, not just compile it.
 
     test_gemm_split_leg_windowing above only compiles this shape: the failure
     mode it guards against -- BD-id aliasing and shim task-queue overrun (see
     that test's docstring) -- is a runtime device hang or silent corruption,
-    which compiling the MLIR can't exercise. This dispatches the same shape on
+    which compiling the MLIR cannot exercise. This dispatches the same shape on
     hardware and checks the result.
+
+    Regular rather than extensive despite being the largest shape here. What it
+    catches is a hang or silently wrong output, not a wrong number, and its
+    compile-only sibling is already regular, so leaving the executing half out
+    of the default run is the wrong side to err on. Costs ~8s against the
+    regular suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
     golden_ref = generate_golden_reference(M=M, K=K, N=N)
