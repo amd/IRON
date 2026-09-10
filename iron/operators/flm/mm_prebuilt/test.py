@@ -19,7 +19,10 @@ import aie.utils as aie_utils
 
 from iron.common.test_utils import run_test
 from iron.operators.flm.gemm.reference import generate_golden_reference
+from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
+
+NONE, GELU, SILU, SIGMOID = Epilogue
 
 pytestmark = pytest.mark.extensive
 
@@ -39,14 +42,14 @@ BUDGET_FLOOR = 2e-2
 @pytest.mark.parametrize(
     "M,K,N,epilogue,clamp",
     [
-        (256, 512, 1024, "none", None),  # exactly one full 8-column sweep
-        (512, 1024, 2048, "none", None),  # two full sweeps
-        (256, 512, 640, "none", None),  # remainder only: 5 of 8 cols
-        (256, 512, 1280, "none", None),  # full sweep + remainder: 1 of 8 cols
-        (256, 512, 1024, "silu", None),
-        (256, 512, 1024, "gelu", None),
-        (256, 512, 1024, "sigmoid", None),
-        (256, 512, 1024, "none", (-2.0, 2.0)),
+        (256, 512, 1024, NONE, None),  # exactly one full 8-column sweep
+        (512, 1024, 2048, NONE, None),  # two full sweeps
+        (256, 512, 640, NONE, None),  # remainder only: 5 of 8 cols
+        (256, 512, 1280, NONE, None),  # full sweep + remainder: 1 of 8 cols
+        (256, 512, 1024, SILU, None),
+        (256, 512, 1024, GELU, None),
+        (256, 512, 1024, SIGMOID, None),
+        (256, 512, 1024, NONE, (-2.0, 2.0)),
     ],
 )
 def test_mm_prebuilt(M, K, N, epilogue, clamp, aie_context):
@@ -73,7 +76,7 @@ def test_mm_prebuilt(M, K, N, epilogue, clamp, aie_context):
     # narrow range (sigmoid to (0, 1), this clamp to (-2, 2)), far smaller than
     # the mass-based bound above -- which would then pass even an all-zero
     # result. Scale the tolerance to the actual output domain for those instead.
-    if epilogue == "sigmoid":
+    if epilogue is SIGMOID:
         abs_tol = BUDGET_FLOOR
     elif clamp is not None:
         abs_tol = BUDGET_FLOOR * (clamp[1] - clamp[0])

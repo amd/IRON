@@ -3,9 +3,10 @@
 
 import torch
 from iron.common.test_utils import torch_dtype_map
+from iron.operators.flm.gemm.design import Epilogue
 
 
-def reference(input_a, input_b, epilogue="none", clamp=None):
+def reference(input_a, input_b, epilogue=Epilogue.NONE, clamp=None):
     """CPU reference ``C = clamp(activation(A @ B))``.
 
     The matmul is accumulated in fp32 to mirror the kernel's f32 accumulator.
@@ -23,14 +24,15 @@ def reference(input_a, input_b, epilogue="none", clamp=None):
     """
     out_dtype = input_a.dtype
     C = torch.matmul(input_a.float(), input_b.float())
-    if epilogue == "gelu":
-        C = C * torch.sigmoid(1.702 * C)
-    elif epilogue == "silu":
-        C = C * torch.sigmoid(C)
-    elif epilogue == "sigmoid":
-        C = torch.sigmoid(C)
-    elif epilogue != "none":
-        raise ValueError(f"unknown epilogue {epilogue!r}")
+    match Epilogue(epilogue):
+        case Epilogue.NONE:
+            pass
+        case Epilogue.GELU:
+            C = C * torch.sigmoid(1.702 * C)
+        case Epilogue.SILU:
+            C = C * torch.sigmoid(C)
+        case Epilogue.SIGMOID:
+            C = torch.sigmoid(C)
     if clamp is not None:
         C = torch.clamp(C, clamp[0], clamp[1])
     return C.to(out_dtype)
@@ -42,7 +44,7 @@ def generate_golden_reference(
     N: int,
     dtype="bf16",
     seed=42,
-    epilogue="none",
+    epilogue=Epilogue.NONE,
     clamp=None,
     scale=4.0,
 ):

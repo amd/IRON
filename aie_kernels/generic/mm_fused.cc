@@ -5,19 +5,21 @@
 // accumulates over K into an f32 accumulator that stays in L1 for the whole
 // reduction.
 //
-// Two entry points, each called once per iteration of a loop nest that lives in
-// the design (iron/operators/flm/gemm/design.py) rather than here:
+// Three entry points, each called once per iteration of a loop nest that lives
+// in the design (iron/operators/flm/gemm/design.py) rather than here:
 //
-//   mm_fused_acc_init   zero the accumulator, once per output tile
-//   mm_fused_k_step     multiply one A band by one B chunk into the accumulator
+//   mm_fused_acc_init        zero the accumulator, once per output tile
+//   mm_fused_k_step          multiply one A band by one B chunk into it
+//   mm_fused_epilogue_chunk  drain one chunk of it to a bf16 C object
 //
 // The nest lives in the design so that every level of it has an ObjectFifo
-// acquire point, a fifo consumer having to acquire once per object. The
-// matching output stage is mm_fused_epilogue.cc.
+// acquire point, a fifo consumer having to acquire once per object.
 //
 // Tile geometry arrives as -D flags from design.py, which is the single source
 // of truth for it: the same constants size the design's buffers and set its
 // unroll factors.
+#include "../aie_kernel_utils.h"
+#include "activations.h"
 #include "mm_fused_mmul.h"
 #include "zero.cc"
 
@@ -26,6 +28,24 @@
 
 #if !defined(MM_FUSED_TILE_M) || !defined(MM_FUSED_TILE_K) || !defined(MM_FUSED_TILE_N) || !defined(MM_FUSED_CT_K)
 #error "design.py must pass -DMM_FUSED_TILE_M / _TILE_K / _TILE_N / _CT_K"
+#endif
+#if !defined(MM_FUSED_OUT_CHUNK) || !defined(MM_FUSED_C_DEPTH)
+#error "design.py must pass -DMM_FUSED_OUT_CHUNK / -DMM_FUSED_C_DEPTH"
+#endif
+
+// Epilogue selection. 0 = none, 1 = gelu, 2 = silu, 3 = sigmoid, matching
+// Epilogue.mode in design.py.
+#ifndef MM_FUSED_EPILOGUE_MODE
+#define MM_FUSED_EPILOGUE_MODE 0
+#endif
+#ifndef MM_FUSED_CLAMP
+#define MM_FUSED_CLAMP 0
+#endif
+#ifndef MM_FUSED_CLAMP_MIN
+#define MM_FUSED_CLAMP_MIN 0.0f
+#endif
+#ifndef MM_FUSED_CLAMP_MAX
+#define MM_FUSED_CLAMP_MAX 0.0f
 #endif
 
 namespace
@@ -57,6 +77,12 @@ constexpr int S = MM_FUSED_S;
 constexpr int T = MM_FUSED_T;
 constexpr int CT_K = MM_FUSED_CT_K;
 
+// Output stage geometry.
+constexpr int CHUNK = MM_FUSED_OUT_CHUNK;
+constexpr int C_DEPTH = MM_FUSED_C_DEPTH;
+constexpr int V = 16; // one 512-bit bf16 vector
+static_assert(CHUNK % V == 0, "output chunk must be a whole number of vectors");
+
 // Same divisibility conditions mm.cc asserts for its own 2x2 mmul, plus the
 // two the k blocking adds.
 static_assert(M % MA == 0, "tile_m must be a whole number of A bands");
@@ -70,7 +96,7 @@ static_assert(CT_K % S == 0, "k slice must be a multiple of s");
 // the error accumulates over the K reduction instead of cancelling -- ~1% of
 // the result, against ~0.02% for round-to-nearest-even, which is far more than
 // the bfp16 emulation itself costs. Every entry point that converts sets it:
-// the mmul below, and the f32->bf16 store in mm_fused_epilogue.cc.
+// the mmul and the epilogue's f32->bf16 store, both below.
 //
 // Flag name and polarity follow mm.cc, so the two kernels are configured the
 // same way; the operator passes -DROUND_CONV_EVEN by default.
@@ -109,5 +135,51 @@ void mm_fused_k_step(bfloat16 *a_buf, mm_fused_b_elem_t *b_buf, float *y_acc, in
     // The accumulator is [row-block][col-block][r*t], so band b starts at
     // b * MA * N -- b*(MA/R) row-blocks in, each colB*(r*t) wide.
     mm_fused_mmul_2x2<(MA / R), (CT_K / S), (N / T), R, S, T>(a_buf, b_buf, y_acc + band * (MA * N));
+}
+
+// The output stage: convert chunk (outer * C_DEPTH + half) of the f32
+// accumulator into a bf16 C object the core body has already acquired from the
+// C ObjectFifo, optionally applying an activation and a clamp on the way out.
+//
+// Fusing the activation here is the point: the values are already in registers
+// after the f32 -> bf16 conversion, so gelu/silu/sigmoid costs one more vector
+// op per 16 elements instead of a separate pass over L1 (which is what chaining
+// a standalone activation operator after a GEMM would cost). The mode and clamp
+// are compile-time, so the inner loop below is branch-free.
+//
+// The chunk index is split in two because the core body unrolls the drain by
+// the C fifo depth to keep the acquired buffer index a compile-time constant;
+// passing both parts avoids doing that arithmetic up there.
+void mm_fused_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer, int32_t half)
+{
+    // The store below is a conversion, so it obeys the same rounding mode the
+    // mmul does and must agree with it.
+    ::aie::set_rounding(round_mode);
+    const float *__restrict src = y_acc + (outer * C_DEPTH + half) * CHUNK;
+
+#if MM_FUSED_CLAMP
+    const aie::vector<bfloat16, V> lo = aie::broadcast<bfloat16, V>(static_cast<bfloat16>(MM_FUSED_CLAMP_MIN));
+    const aie::vector<bfloat16, V> hi = aie::broadcast<bfloat16, V>(static_cast<bfloat16>(MM_FUSED_CLAMP_MAX));
+#endif
+
+    AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
+    for (int j = 0; j < CHUNK / V; j++) {
+        aie::accum<accfloat, V> acc;
+        acc.from_vector(aie::load_v<V>(src + j * V));
+        // The assignment is the conversion: to_v16bfloat16 yields a raw
+        // v16bfloat16, not an aie::vector.
+        aie::vector<bfloat16, V> v = to_v16bfloat16(acc);
+#if MM_FUSED_EPILOGUE_MODE == 1
+        v = gelu_vec<V>(v);
+#elif MM_FUSED_EPILOGUE_MODE == 2
+        v = silu_vec<V>(v);
+#elif MM_FUSED_EPILOGUE_MODE == 3
+        v = sigmoid_vec<V>(v);
+#endif
+#if MM_FUSED_CLAMP
+        v = aie::clamp(v, lo, hi);
+#endif
+        aie::store_v(y_out + j * V, v);
+    }
 }
 }

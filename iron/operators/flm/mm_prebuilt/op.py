@@ -17,7 +17,7 @@ from iron.common import (
 )
 
 from iron.operators.flm.packing import pack_b
-from iron.operators.flm.gemm.design import EPILOGUE_MODES, K_TILE, S, T
+from iron.operators.flm.gemm.design import Epilogue, K_TILE, S, T
 from iron.operators.flm.mm_prebuilt.design import MIN_K, MIN_M, N_TILE
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
@@ -59,9 +59,9 @@ class MMPrebuilt(MLIROperator):
     M: int
     K: int
     N: int
-    # "none" | "gelu" | "silu" | "sigmoid", selected through a runtime
-    # parameter rather than at compile time as in flm.GEMM.
-    epilogue: str = "none"
+    # Activation, selected through a runtime parameter rather than at compile
+    # time as in flm.GEMM.
+    epilogue: Epilogue = Epilogue.NONE
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = None
     context: object = field(default=None, repr=False)
@@ -79,11 +79,7 @@ class MMPrebuilt(MLIROperator):
         ):
             if value % unit != 0:
                 raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
-        if self.epilogue not in EPILOGUE_MODES:
-            raise ValueError(
-                f"epilogue must be one of {sorted(EPILOGUE_MODES)}, "
-                f"got {self.epilogue!r}"
-            )
+        self.epilogue = Epilogue(self.epilogue)
         if self.clamp is not None and self.clamp[0] > self.clamp[1]:
             raise ValueError(
                 f"clamp min ({self.clamp[0]}) must be <= max ({self.clamp[1]})"

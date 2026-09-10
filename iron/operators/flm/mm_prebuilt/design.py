@@ -35,19 +35,19 @@ from aie.extras.context import mlir_mod_ctx
 from aie.ir import BF16Type, MemRefType
 
 from iron.operators.flm.gemm.design import (
-    EPILOGUE_MODES,
+    Epilogue,
     K_TILE,
-    MAX_COLS,
     M_TILE,
-    ROWS,
     a_source_cols,
 )
 
-# The shipped overlay is built with n=128 on the full 8-column NPU2 grid; every
+# The shipped overlay is a fixed 4x8 NPU2 binary built with n=128, so unlike
+# flm.gemm these do NOT follow the device -- they describe the artifact. Every
 # other tiling knob matches flm.gemm, whose constants are imported above.
 N_TILE = 128
-COLS = MAX_COLS
-A_SOURCE_COL = a_source_cols(COLS)
+COLS = 8
+ROWS = 4
+A_SOURCE_COL = a_source_cols(COLS, ROWS)
 
 # Core data memory holding the runtime parameters, and the lock a core waits
 # on before it reads them. Both are baked into the overlay's core programs.
@@ -63,16 +63,13 @@ MIN_M = M_TILE * ROWS
 MIN_K = K_TILE
 
 
-def mm_prebuilt(dev, M, K, N, epilogue="none", clamp=None):
+def mm_prebuilt(dev, M, K, N, epilogue=Epilogue.NONE, clamp=None):
     """Emit the MLIR module whose runtime sequence drives the overlay.
 
     A is ``(M, K)`` row-major and C is ``(M, N)`` row-major, both bf16. B is
     ``(K, N)`` reordered by :meth:`MMPrebuilt.pack_B`.
     """
-    if epilogue not in EPILOGUE_MODES:
-        raise ValueError(
-            f"epilogue must be one of {sorted(EPILOGUE_MODES)}, got {epilogue!r}"
-        )
+    epilogue = Epilogue(epilogue)
     for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, N_TILE)):
         if value % unit != 0:
             raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
@@ -92,7 +89,7 @@ def mm_prebuilt(dev, M, K, N, epilogue="none", clamp=None):
         (RTP_ADDRESS + 4, M),
         (RTP_ADDRESS + 8, N),
         (RTP_ADDRESS + 12, 0),  # bias, which this operator does not expose
-        (RTP_ADDRESS + 16, EPILOGUE_MODES[epilogue]),
+        (RTP_ADDRESS + 16, epilogue.mode),
         (RTP_ADDRESS + 20, 1 if clamp is not None else 0),
         (RTP_ADDRESS + 24, int(np.float32(clamp_min).view(np.int32))),
         (RTP_ADDRESS + 28, int(np.float32(clamp_max).view(np.int32))),

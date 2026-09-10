@@ -34,10 +34,6 @@
 // The two paths therefore do NOT produce bit-identical results, and the AIE2
 // path carries the LUT's approximation error on top of bf16 rounding. test.py
 // sets the accuracy budget per architecture accordingly.
-//
-// This header was called nonlut_based_ops.h when mm_fused was AIE2P-only, which
-// stopped being an accurate name once AIE2 brought in the LUT; it is mm_fused's
-// only consumer, hence the rename rather than a second copy.
 #ifndef __ACTIVATIONS_H__
 #define __ACTIVATIONS_H__
 #include <aie_api/aie.hpp>

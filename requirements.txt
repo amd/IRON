@@ -13,9 +13,6 @@
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-# Keep these two in step: each mlir-aie wheel is built against one Peano
-# nightly, pinned in that revision's utils/peano-requirements.txt. The pair
-# below is the one dev85 declares.
 mlir_aie==1.4.3.dev85+gdf48abc
 llvm-aie==22.0.0.2026090701+3e93bf7b
 

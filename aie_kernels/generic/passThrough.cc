@@ -10,11 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Element width in bits, chosen by the caller with -DBIT_WIDTH. Only mha passes
-// it (16); every other user wants the 32-bit form and used to reach it by
-// leaving the macro undefined, which the preprocessor evaluates as 0 and so
-// falls through to the #else below. Peano now compiles with -Werror=undef, so
-// that default has to be written down rather than relied on.
+// Element width in bits, chosen by the caller with -DBIT_WIDTH; 32 if unset.
 #ifndef BIT_WIDTH
 #define BIT_WIDTH 32
 #endif

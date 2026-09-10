@@ -132,13 +132,7 @@ class Candidate:
         self.budget = budget
         self.round_medians = []
 
-        already_built = self._is_built(op, ctx)
-        t0 = time.perf_counter()
         op.compile()
-        # Only meaningful on a genuine miss; on a hit compile() returns in
-        # milliseconds and reporting that as a build time would be a lie.
-        self.compile_s = None if already_built else time.perf_counter() - t0
-
         self.xclbin = Path(op.xclbin_artifact.filename)
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
         run = op.get_callable()
@@ -152,12 +146,6 @@ class Candidate:
             self.c_bo,
         ]
         self.run = lambda: run(*args)
-
-    @staticmethod
-    def _is_built(op, ctx):
-        if not op.artifacts:
-            op.set_up_artifacts()
-        return Path(op.xclbin_artifact.filename).is_file()
 
     def verify(self, M, N, expected, mass):
         self.run()
@@ -202,8 +190,6 @@ class Candidate:
     FLMJitterPct=r"flm jitter \(%\): (?P<value>[\d\.]+)",
     FLMXclbinKB=r"flm xclbin \(KB\): (?P<value>[\d\.]+)",
     GEMMXclbinKB=r"gemm xclbin \(KB\): (?P<value>[\d\.]+)",
-    FLMCompileTime=r"flm compile \(s\): (?P<value>[\d\.]+)",
-    GEMMCompileTime=r"gemm compile \(s\): (?P<value>[\d\.]+)",
 )
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
 def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
@@ -269,8 +255,6 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
         print(f"{c.name} xclbin (KB): {c.xclbin.stat().st_size / 1024:.1f}")
-        if c.compile_s is not None:
-            print(f"{c.name} compile (s): {c.compile_s:.1f}")
     print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
     print(f"speedup vs gemm: {by_name['gemm'].us / flm.us:.3f}")
     print(f"flm throughput: {2.0 * M * K * N / (flm.us * 1e-6) / 1e9:.6e} GFLOP/s")

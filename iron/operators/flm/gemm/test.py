@@ -6,9 +6,14 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators import GEMM as GenericGEMM
+from iron.operators.flm.gemm.design import Epilogue, Rounding
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
+
+# Unpacked so the parameter tables below stay column-aligned.
+NONE, GELU, SILU, SIGMOID = Epilogue
+CONV_EVEN, FLOOR = Rounding
 
 # Activation tests run at a smaller scale so the result lands where the curve
 # is not flat. generate_golden_reference grows the result like sqrt(K)*scale**2,
@@ -41,60 +46,60 @@ def get_params():
     if dev_name == "npu2":
         #      M,    K,     N, epilogue,    clamp,     rounding
         regular_params = [
-            (  256,  512,  1024, "none",     None,       "conv_even"),  # smallest full sweep
-            (  512, 1024,  2048, "none",     None,       "conv_even"),
-            (  256,  512,  1536, "none",     None,       "conv_even"),  # remainder: 4 of 8 cols
-            (  256,  512,   128, "none",     None,       "conv_even"),  # remainder only: 1 col
-            (  256,  512,  1024, "silu",     None,       "conv_even"),
-            (  256,  512,  1024, "gelu",     None,       "conv_even"),
-            (  256,  512,  1024, "none", (-2.0, 2.0),    "conv_even"),
+            (  256,  512,  1024, NONE,     None,       CONV_EVEN),  # smallest full sweep
+            (  512, 1024,  2048, NONE,     None,       CONV_EVEN),
+            (  256,  512,  1536, NONE,     None,       CONV_EVEN),  # remainder: 4 of 8 cols
+            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
+            (  256,  512,  1024, SILU,     None,       CONV_EVEN),
+            (  256,  512,  1024, GELU,     None,       CONV_EVEN),
+            (  256,  512,  1024, NONE, (-2.0, 2.0),    CONV_EVEN),
             # floor reproduces the shipped FastFlowLM overlay's rounding mode
             # (bit for bit on NPU2; NPU1 sums the K reduction in a different
             # order). It is much less accurate, so it gets its own bound below.
-            (  256,  512,  1024, "none",     None,       "floor"),
+            (  256,  512,  1024, NONE,     None,       FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  2048, "none",     None,       "conv_even"),
-            ( 2048, 2048,  2048, "none",     None,       "conv_even"),
-            ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
-            (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
-            (  256,  512,  1024, "sigmoid",  None,       "conv_even"),
-            (  512, 1024,  2048, "silu", (-4.0, 4.0),    "conv_even"),
-            (  256,  512,  1024, "silu",     None,       "floor"),
+            ( 1024, 2048,  2048, NONE,     None,       CONV_EVEN),
+            ( 2048, 2048,  2048, NONE,     None,       CONV_EVEN),
+            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
+            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
+            (  256,  512,  1024, SIGMOID,  None,       CONV_EVEN),
+            (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
+            (  256,  512,  1024, SILU,     None,       FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
             # mega_row iteration step, so that leg is issued as one transfer
             # per mega_row, retired in windows. These are the real E4B FFN
             # projections and were unsupported until that landed; they are
             # the regression cover for it. M=2048 needs two windows, which is
             # what exercises the windowing.
-            ( 1024, 10240,  2560, "none",     None,       "conv_even"),  # E4B down
-            ( 1024,  2560, 10240, "none",     None,       "conv_even"),  # E4B gateup
-            ( 2048, 10240,  2560, "none",     None,       "conv_even"),  # A, 2 windows
-            ( 2048,  2560, 10240, "none",     None,       "conv_even"),  # C, 2 windows
+            ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
+            ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
+            ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # A, 2 windows
+            ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # C, 2 windows
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
         # NPU2-shaped sweep would give.
         #      M,    K,     N, epilogue,    clamp,     rounding
         regular_params = [
-            (  256,  512,   256, "none",     None,       "conv_even"),  # smallest full sweep
-            (  512, 1024,   512, "none",     None,       "conv_even"),
-            (  256,  512,   128, "none",     None,       "conv_even"),  # remainder: 2 of 4 cols
-            (  256,  512,    64, "none",     None,       "conv_even"),  # remainder only: 1 col
-            (  256,  512,   320, "none",     None,       "conv_even"),  # full sweep + 1 col
-            (  256,  512,   512, "silu",     None,       "conv_even"),
-            (  256,  512,   512, "gelu",     None,       "conv_even"),
-            (  256,  512,   512, "none", (-2.0, 2.0),    "conv_even"),
-            (  256,  512,   512, "none",     None,       "floor"),
+            (  256,  512,   256, NONE,     None,       CONV_EVEN),  # smallest full sweep
+            (  512, 1024,   512, NONE,     None,       CONV_EVEN),
+            (  256,  512,   128, NONE,     None,       CONV_EVEN),  # remainder: 2 of 4 cols
+            (  256,  512,    64, NONE,     None,       CONV_EVEN),  # remainder only: 1 col
+            (  256,  512,   320, NONE,     None,       CONV_EVEN),  # full sweep + 1 col
+            (  256,  512,   512, SILU,     None,       CONV_EVEN),
+            (  256,  512,   512, GELU,     None,       CONV_EVEN),
+            (  256,  512,   512, NONE, (-2.0, 2.0),    CONV_EVEN),
+            (  256,  512,   512, NONE,     None,       FLOOR),
         ]
         extensive_params = [
-            ( 1024, 2048,  1024, "none",     None,       "conv_even"),
-            ( 2048, 2048,  1024, "none",     None,       "conv_even"),
-            ( 1024, 2560,  2560, "none",     None,       "conv_even"),  # E4B o-proj
-            (  512, 1536,  1536, "silu",     None,       "conv_even"),  # E2B down-proj
-            (  256,  512,   512, "sigmoid",  None,       "conv_even"),
-            (  512, 1024,  1024, "silu", (-4.0, 4.0),    "conv_even"),
-            (  256,  512,   512, "silu",     None,       "floor"),
+            ( 1024, 2048,  1024, NONE,     None,       CONV_EVEN),
+            ( 2048, 2048,  1024, NONE,     None,       CONV_EVEN),
+            ( 1024, 2560,  2560, NONE,     None,       CONV_EVEN),  # E4B o-proj
+            (  512, 1536,  1536, SILU,     None,       CONV_EVEN),  # E2B down-proj
+            (  256,  512,   512, SIGMOID,  None,       CONV_EVEN),
+            (  512, 1024,  1024, SILU, (-4.0, 4.0),    CONV_EVEN),
+            (  256,  512,   512, SILU,     None,       FLOOR),
         ]
     # fmt: on
 
@@ -113,7 +118,7 @@ def get_params():
 )
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
 def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
-    scale = INPUT_SCALE if epilogue == "none" else ACTIVATION_INPUT_SCALE
+    scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
     golden_ref = generate_golden_reference(
         M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, scale=scale
     )
@@ -156,9 +161,9 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     # accumulates over the K reduction instead of cancelling, hence the
     # separate, looser bound on both.
     if aie_utils.get_current_device().resolve().name == "npu1":
-        budget = 0.002 if rounding == "floor" else 0.0002
+        budget = 0.002 if rounding is FLOOR else 0.0002
     else:
-        budget = 0.05 if rounding == "floor" else 0.004
+        budget = 0.05 if rounding is FLOOR else 0.004
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
         input_buffers,
@@ -189,11 +194,12 @@ def test_gemm_split_leg_windowing(aie_context):
     channel. Assert that arithmetic here, since the numbers come from the
     hardware and a future retune of SHIM_TASK_QUEUE could break it silently.
     """
-    from iron.operators.flm.gemm.design import SHIM_BDS, SHIM_TASK_QUEUE
+    from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE, shim_bds
 
+    available = shim_bds(aie_utils.get_current_device())
     worst = 1 + 2 * SHIM_TASK_QUEUE
-    assert worst <= SHIM_BDS, (
-        f"a fully split block needs {worst} shim BDs of {SHIM_BDS}; "
+    assert worst <= available, (
+        f"a fully split block needs {worst} shim BDs of {available}; "
         "windowing no longer fits and the split shapes will hang"
     )
 
