@@ -13,8 +13,8 @@
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==1.4.3.dev60+gc80b88c
-llvm-aie==22.0.0.2026090201+a36c62b9
+mlir_aie==1.4.3.dev85+gdf48abc
+llvm-aie==22.0.0.2026090701+3e93bf7b
 
 black
 reuse
