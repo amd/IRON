@@ -96,18 +96,6 @@ def compute_rows(dev):
     return tm.rows() - 1 - tm.get_num_mem_tile_rows()
 
 
-def a_source_cols(cols, rows):
-    """Which shim column sources the A broadcast for each compute row.
-
-    On an 8-column grid the four A streams go to alternate columns, so each gets
-    its own shim MM2S path and never contends with a B fill; the existing gemm
-    operator pins A the same way. A 4-column grid has no such slack -- every
-    column must source one A row AND one B column AND drain C, which is 2 MM2S +
-    1 S2MM, exactly saturating a shim tile's channels.
-    """
-    return [2 * r for r in range(rows)] if cols >= 2 * rows else list(range(rows))
-
-
 CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
 B_DEPTH = 2  # B fifo depth; also the core-body unroll
@@ -280,7 +268,6 @@ def gemm(
     # constant, so the same dataflow covers NPU2's 4x8 and NPU1's 4x4.
     tm = get_target_model(dev.resolve())
     COLS, ROWS = dev.cols, compute_rows(dev)
-    A_SOURCE_COL = a_source_cols(COLS, ROWS)
     MIN_M = M_TILE * ROWS
     SHIM_BDS = tm.get_num_bds(0, 0)
     N_TILE = tile_n
@@ -488,7 +475,6 @@ def gemm(
             obj_types=[ct_out_ty] * ROWS,
             names=[f"C_L1L2_{c}_{r}" for r in range(ROWS)],
             dims_from_stream=[gather_dims] * ROWS,
-            tile=Tile(c, 1),
         )
         for r in range(ROWS):
             c_prod[(r, c)] = sub[r]
@@ -499,11 +485,9 @@ def gemm(
     a_l3l2_fifos = []
     a_cons = {}
     for r in range(ROWS):
-        src = A_SOURCE_COL[r]
         of_a_in = ObjectFifo(mt_a_ty, name=f"A_L3L2_{r}", depth=A_DEPTH)
         a_l3l2_fifos.append(of_a_in)
         of_a = of_a_in.cons(dims_from_stream=a_recv_dims).forward(
-            tile=Tile(src, 1),
             obj_type=ct_a_obj_ty,
             depth=A_DEPTH,
             name=f"A_L2L1_{r}",
@@ -563,6 +547,17 @@ def gemm(
         )
         b_l3l2_fifos.append(of_b_in)
         of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
+            # The one placement pin this design keeps. Everything else -- the
+            # workers, the accumulator buffers, the C join, the A forward and
+            # the shim ends -- is left to the placer, and measures the same.
+            #
+            # Without it, aie-place-tiles merges the 20 logical memtiles (4 A
+            # relays + 8 B relays + 8 C joins) onto the 8 physical ones in a way
+            # that aie-objectFifo-stateful-transform then rejects with "number
+            # of input DMA channel exceeded". Spreading B one-per-column is
+            # enough to steer it to a legal assignment; see the mlir-aie issue
+            # referenced in README.md. Reproduces at M=1024 K=2048 N=2048, which
+            # test.py covers.
             tile=Tile(c, 1),
             obj_type=ct_b_ty,
             depth=L1_B_DEPTH,
@@ -635,8 +630,7 @@ def gemm(
     workers = []
     for r in range(ROWS):
         for c in range(n_active_cols):
-            tile = Tile(c, r + 2)
-            acc = Buffer(tile=tile, type=ct_acc_ty, name=f"c_acc_{r}_{c}")
+            acc = Buffer(type=ct_acc_ty, name=f"c_acc_{r}_{c}")
             workers.append(
                 Worker(
                     partial(core_fn, col_work[c], col_drain[c]),
@@ -649,7 +643,6 @@ def gemm(
                         k_step,
                         epilogue_chunk,
                     ],
-                    tile=tile,
                 )
             )
 
@@ -855,9 +848,9 @@ def gemm(
             a_l3_ty,
             b_l3_ty,
             c_l3_ty,
-            [f.prod(tile=Tile(A_SOURCE_COL[r], 0)) for r, f in enumerate(a_l3l2_fifos)],
-            [f.prod(tile=Tile(c, 0)) for c, f in enumerate(b_l3l2_fifos)],
-            [f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)],
+            [f.prod() for f in a_l3l2_fifos],
+            [f.prod() for f in b_l3l2_fifos],
+            [f.cons() for f in c_l2l3_fifos],
         ],
     )
 

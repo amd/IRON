@@ -38,7 +38,6 @@ from iron.operators.flm.gemm.design import (
     Epilogue,
     K_TILE,
     M_TILE,
-    a_source_cols,
 )
 
 # The shipped overlay is a fixed 4x8 NPU2 binary built with n=128, so unlike
@@ -47,7 +46,11 @@ from iron.operators.flm.gemm.design import (
 N_TILE = 128
 COLS = 8
 ROWS = 4
-A_SOURCE_COL = a_source_cols(COLS, ROWS)
+# Which shim column sources the A broadcast for each compute row. Unlike
+# flm.gemm -- which lets the placer choose -- this must match the placement
+# baked into the downloaded xclbin: the four A streams go to alternate columns
+# so each gets its own shim MM2S path and never contends with a B fill.
+A_SOURCE_COL = [2 * r for r in range(ROWS)]
 
 # Core data memory holding the runtime parameters, and the lock a core waits
 # on before it reads them. Both are baked into the overlay's core programs.
