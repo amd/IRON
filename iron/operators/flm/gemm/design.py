@@ -769,19 +769,34 @@ def gemm(
         # dma_free_task note on a_split above.
         all_mb = list(range(m_row_blocks))
 
+        # One emitter per leg, so the two paths below differ only in HOW they
+        # group and retire, not in how a leg is issued.
+        def issue_a(mega_col, mbs, group, wait=False):
+            for r in range(ROWS):
+                for tap in a_taps(mega_col, r, mbs):
+                    a_prods[r].fill(A, tap, group=group, wait=wait)
+
+        def issue_b(mega_col, active_cols, group):
+            for c in range(active_cols):
+                b_prods[c].fill(B, b_tap(mega_col, c), group=group)
+
+        def issue_c(mega_col, active_cols, mbs, group):
+            for c in range(active_cols):
+                for tap in c_taps(mega_col, c, mbs):
+                    c_conses[c].drain(C, tap, group=group, wait=True)
+
         def emit_unsplit():
             pending = []
             for mega_col, active_cols in blocks:
+                # C in its own group, issued first and retired last: it is an
+                # S2MM that waits on the cores, so keeping it outstanding is
+                # what overlaps compute with write-back, and it must not share
+                # a group with the fills it depends on.
                 tg_c = TaskGroup()
-                for c in range(active_cols):
-                    for tap in c_taps(mega_col, c, all_mb):
-                        c_conses[c].drain(C, tap, group=tg_c, wait=True)
+                issue_c(mega_col, active_cols, all_mb, tg_c)
                 tg_f = TaskGroup()
-                for r in range(ROWS):
-                    for tap in a_taps(mega_col, r, all_mb):
-                        a_prods[r].fill(A, tap, group=tg_f)
-                for c in range(active_cols):
-                    b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
+                issue_a(mega_col, all_mb, tg_f)
+                issue_b(mega_col, active_cols, tg_f)
 
                 pending.append([tg_f, tg_c])
                 while len(pending) >= OVERLAP:
@@ -805,8 +820,7 @@ def gemm(
             # window's C has been awaited, which is what guarantees it drained.
             for mega_col, active_cols in blocks:
                 tg_b = TaskGroup()
-                for c in range(active_cols):
-                    b_prods[c].fill(B, b_tap(mega_col, c), group=tg_b)
+                issue_b(mega_col, active_cols, tg_b)
 
                 # The leg that did NOT split is still one task for the whole
                 # block -- its single descriptor already spans every mega_row,
@@ -814,27 +828,19 @@ def gemm(
                 # It stays live alongside the windows and retires with them.
                 tg_whole = TaskGroup()
                 if not c_split:
-                    for c in range(active_cols):
-                        for tap in c_taps(mega_col, c, all_mb):
-                            c_conses[c].drain(C, tap, group=tg_whole, wait=True)
+                    issue_c(mega_col, active_cols, all_mb, tg_whole)
                 if not a_split:
-                    for r in range(ROWS):
-                        for tap in a_taps(mega_col, r, all_mb):
-                            a_prods[r].fill(A, tap, group=tg_whole)
+                    issue_a(mega_col, all_mb, tg_whole)
 
                 for w in range(0, m_row_blocks, MB_WINDOW):
                     mbs = all_mb[w : w + MB_WINDOW]
                     tg_w = TaskGroup()
                     if c_split:
-                        for c in range(active_cols):
-                            for tap in c_taps(mega_col, c, mbs):
-                                c_conses[c].drain(C, tap, group=tg_w, wait=True)
+                        issue_c(mega_col, active_cols, mbs, tg_w)
                     if a_split:
-                        for r in range(ROWS):
-                            for tap in a_taps(mega_col, r, mbs):
-                                # wait=True: the await is what makes this
-                                # window's descriptors reusable by the next.
-                                a_prods[r].fill(A, tap, group=tg_w, wait=True)
+                        # wait=True: the await is what makes this window's
+                        # descriptors reusable by the next.
+                        issue_a(mega_col, mbs, tg_w, wait=True)
                     tg_w.finish()
 
                 tg_whole.finish()
