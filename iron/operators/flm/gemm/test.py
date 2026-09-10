@@ -194,9 +194,11 @@ def test_gemm_split_leg_windowing(aie_context):
     channel. Assert that arithmetic here, since the numbers come from the
     hardware and a future retune of SHIM_TASK_QUEUE could break it silently.
     """
-    from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE, shim_bds
+    from aie.dialects.aie import get_target_model
+    from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE
 
-    available = shim_bds(aie_utils.get_current_device())
+    dev = aie_utils.get_current_device()
+    available = get_target_model(dev.resolve()).get_num_bds(0, 0)
     worst = 1 + 2 * SHIM_TASK_QUEUE
     assert worst <= available, (
         f"a fully split block needs {worst} shim BDs of {available}; "

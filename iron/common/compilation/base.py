@@ -41,7 +41,6 @@ import hashlib
 import os.path
 import shutil
 import urllib.request
-import zlib
 import logging
 import subprocess
 import importlib.util

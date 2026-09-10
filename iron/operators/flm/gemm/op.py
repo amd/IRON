@@ -15,6 +15,8 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from aie.dialects.aie import get_target_model
+from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
 from iron.common.operator_bases import lut_based_ops_artifacts
 from iron.common.utils import float_to_name
@@ -26,6 +28,7 @@ from iron.operators.flm.gemm.design import (
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
     C_DEPTH,
+    compute_rows,
     CT_OUT_LEN,
     Epilogue,
     K_TILE,
@@ -36,9 +39,6 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
     _default_l1,
-    bfp16_b_for,
-    l1_budget,
-    min_m,
 )
 
 
@@ -110,7 +110,7 @@ class GEMM(MLIROperator):
             # everywhere there by 1.21-1.38x, including at K=512 where NPU2's
             # rule would pick 128.
             single_k_iter = self.K // K_TILE <= 1
-            self.tile_n = 128 if (bfp16_b_for(dev) and single_k_iter) else 64
+            self.tile_n = 128 if (dev.arch == AIEArch.AIE2p and single_k_iter) else 64
         elif self.tile_n not in CT_MAX_K_FOR_N:
             raise ValueError(
                 f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
@@ -120,13 +120,13 @@ class GEMM(MLIROperator):
                 self.tile_n,
                 CT_MAX_K_FOR_N[self.tile_n],
                 self._b_elem_bytes,
-                l1_budget(dev),
+                get_target_model(dev.resolve()).get_local_memory_size(),
             )[0]
         # N only needs to tile to N_TILE: a trailing group of fewer than
         # COLS column-blocks is handled by giving the columns different trip
         # counts. See design.py.
         for name, value, unit in (
-            ("M", self.M, min_m(dev)),
+            ("M", self.M, M_TILE * compute_rows(dev)),
             ("K", self.K, MIN_K),
             ("N", self.N, self.tile_n),
         ):
@@ -161,9 +161,9 @@ class GEMM(MLIROperator):
         AIE2P only, and the reason both mmul templates in the kernel header are
         live rather than one being dead code: on AIE2 the scalar BFP types do
         not exist, so B stays bf16 and the mmul lowers onto four native 4x8x4
-        macs. See ``bfp16_b_for`` in design.py.
+        macs.
         """
-        return bfp16_b_for(aie_utils.get_current_device())
+        return aie_utils.get_current_device().arch == AIEArch.AIE2p
 
     @property
     def _b_elem_bytes(self) -> float:

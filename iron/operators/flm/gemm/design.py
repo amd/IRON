@@ -34,6 +34,7 @@ the bfp16-emulated path that does the same shape in two macs, which is why
 
 import argparse
 from enum import StrEnum
+from functools import partial
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -54,6 +55,7 @@ from aie.iron.controlflow import range_
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import NPU1, NPU2, Tile
+from iron.common.utils import split_run
 from iron.operators._trace import maybe_enable_trace
 
 # --- Fixed geometry -------------------------------------------------------
@@ -115,27 +117,12 @@ A_DEPTH = 2
 # ceiling is 5; 2 is enough to keep the fills ahead of the cores.
 OVERLAP_DEFAULT = 2
 
-STACK_SIZE = 4096
-
-
-def l1_budget(dev):
-    """Usable L1 per compute tile: the core's data memory, less the stack.
-
-    No further headroom is subtracted. The buffer arithmetic in ``_default_l1``
-    counts only the four objects the design allocates, so this is an upper
-    bound rather than an exact model -- the placement it feeds is verified by
-    building, not by this sum.
-    """
-    return get_target_model(dev.resolve()).get_local_memory_size() - STACK_SIZE
-
 
 class Epilogue(StrEnum):
     """Activation folded into the C drain.
 
-    Declaration order IS the wire format: the kernel selects on
-    ``-DMM_FUSED_EPILOGUE_MODE=<index>``, and the 0/1/2/3 mapping is also the
-    shipped FastFlowLM overlay's ``output_mode``, which ``flm.MMPrebuilt``
-    writes as a runtime parameter. Do not reorder.
+    Declaration order is the wire format -- it is both the kernel's
+    ``-DMM_FUSED_EPILOGUE_MODE`` and the shipped overlay's ``output_mode``.
     """
 
     NONE = "none"
@@ -150,13 +137,11 @@ class Epilogue(StrEnum):
 
 
 class Rounding(StrEnum):
-    """Rounding mode for every f32->bf16 conversion in the operator.
+    """Rounding for every f32->bf16 conversion.
 
-    The core powers up in ``floor``; ``CONV_EVEN`` is the default here because
-    truncation biases every conversion the same direction, so the error
-    accumulates over the K reduction instead of cancelling. ``FLOOR``
-    reproduces the shipped overlay's arithmetic, which never calls
-    ``set_rounding``.
+    The core powers up in floor; conv_even is the default because truncation
+    biases every conversion the same way and the error then accumulates over
+    the K reduction. floor reproduces the shipped overlay.
     """
 
     CONV_EVEN = "conv_even"
@@ -167,33 +152,15 @@ class Rounding(StrEnum):
 # to mark the symbol alwaysinline when building the inline .ll variant).
 EPILOGUE_SYMBOL = "mm_fused_epilogue_chunk"
 
-# Minimum problem size in K, i.e. one pass of the whole grid. MIN_M depends on
-# the grid height and MIN_N on the chosen n tile, so both are computed per call.
+# Minimum problem size in K. The minimum in M is M_TILE * compute_rows(dev) and
+# in N is the chosen n tile, both of which depend on the device or the config.
 MIN_K = K_TILE  # 512
 
 
-def min_m(dev):
-    """Smallest M this design can run: one pass down the compute grid."""
-    return M_TILE * compute_rows(dev)
-
-
-# B is bfp16ebs8 on AIE2P and bf16 on AIE2 -- the scalar BFP types exist only
-# on AIE2P (see GEMM._bfp16_b). BFP16_GROUP is how many B values one element of
-# the MLIR type holds: v8bfp16ebs8 holds 8, bf16 holds 1. The name says the
-# group size, and mlir-aie exposes no width query on the type to read it from.
-BFP16_GROUP = 8
-# Bytes per bfp16ebs8 group: 8 mantissa bytes plus one shared exponent.
-BFP16_GROUP_BYTES = 9
-
-
-def bfp16_b_for(dev):
-    """Whether B is stored as bfp16ebs8 for this device.
-
-    AIE2P only: the scalar BFP types are gated on ``__AIE_API_SCALAR_BFP_TYPES__``,
-    which only ``aie_api/detail/aie2p/config.hpp`` defines. On AIE2, B stays bf16
-    and the mmul lowers onto four native 4x8x4 macs instead.
-    """
-    return dev.arch == AIEArch.AIE2p
+# B values per element of the MLIR type, and the bytes they occupy: v8bfp16ebs8
+# packs 8 values into 8 mantissa bytes plus one shared exponent. mlir-aie
+# exposes no width query on the type, hence the literals.
+BFP16_GROUP, BFP16_GROUP_BYTES = 8, 9
 
 
 def _b_bytes(elems, bfp16_b):
@@ -207,36 +174,21 @@ def _b_bytes(elems, bfp16_b):
 
 # --- Shim DMA limits ------------------------------------------------------
 #
-# The three constants below are hardware facts that the Python bindings do not
-# expose. AIETargetModel is bound (see shim_bds() and l1_budget() above, which
-# do read it), but only a subset of its queries are: neither getDmaBdStepBits
-# nor getDmaBdWrapSizeBits is among them, and nothing in mlir-aie models the
-# channel task queue at all. Hardcoding them here matches what the other
-# operators in this repo do with the same fields -- see gemv/design.py's
-# MAX_WRAP and repeat/design.py.
+# Hardware facts the Python bindings do not expose: gemm() reads AIETargetModel
+# directly for the L1 ceiling, BD count and grid, but neither getDmaBdStepBits
+# nor getDmaBdWrapSizeBits is bound, and nothing models the channel task queue.
+# gemv/design.py and repeat/design.py hardcode the same fields.
 #
-# Width of the shim BD's step field. An IR-level bf16-element stride S is
-# re-expressed in hardware units as (S - 1) * 2 bytes / 4-byte address
-# granularity before AIEXDialect.cpp's "Stride N exceeds" verifier checks it.
+# Step field width. An IR-level bf16-element stride S is re-expressed as
+# (S - 1) * 2 bytes / 4-byte granularity before AIEXDialect.cpp checks it.
 _SHIM_STEP_BITS = 20
 _BF16_BYTES = 2
 _ADDR_GRANULARITY_BYTES = 4
-# Width of the shim BD's wrap/size field, i.e. a maximum wrap of 1023.
-_SHIM_WRAP_MAX = (1 << 10) - 1
 # Entries in a shim DMA channel's task queue. AIEDmaToNpu's NpuPushQueueOp
 # pushes unconditionally, so overrunning this is a silent device hang rather
 # than a diagnostic. Measured at K=10240 M=1024: 4 outstanding tasks on one
 # channel run, 8 hang.
 SHIM_TASK_QUEUE = 4
-
-
-def shim_bds(dev):
-    """Buffer descriptors on one shim tile.
-
-    A per-TILE resource shared by every channel and both directions, so the A,
-    B and C legs on one column all draw from the same pool.
-    """
-    return get_target_model(dev.resolve()).get_num_bds(0, 0)
 
 
 def _hw_stride_ok(stride_elems):
@@ -248,8 +200,13 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget):
     """Pick (A-tile height, L1 B depth) -- the largest working set that fits.
 
     ``b_elem_bytes`` is 9/8 where B is bfp16ebs8 and 2 where it is bf16, and
-    ``budget`` is the device's usable L1 (see l1_budget), so the search below
-    reflects what B actually costs on this device.
+    ``budget`` is the core's data memory, so the search below reflects what B
+    actually costs on this device.
+
+    No stack is reserved out of ``budget``: the cores leave ``stack_size``
+    unset and aiecc measures each core's requirement and fails the build if it
+    does not fit, so the stack is the toolchain's to enforce. This kernel
+    measures 192 bytes against the >=6 KB the search leaves unused anyway.
 
     A dies as soon as it is consumed while the accumulator lives across the
     whole K reduction, so they need not share a height; shrinking A is what
@@ -328,26 +285,32 @@ def gemm(
     SHIM_BDS = tm.get_num_bds(0, 0)
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
-    # B's storage format follows the device, and with it every B type and every
-    # B extent below. B_GROUP is the number of B values per element of the MLIR
-    # type, so a length in values becomes a length in elements by dividing.
-    BFP16_B = bfp16_b_for(dev)
+    # B is bfp16ebs8 on AIE2P and bf16 on AIE2: the scalar BFP types are gated
+    # on __AIE_API_SCALAR_BFP_TYPES__, which only aie_api/detail/aie2p/config.hpp
+    # defines, so on AIE2 B stays bf16 and the mmul lowers onto four native
+    # 4x8x4 macs. That choice drives every B type and extent below. B_GROUP is
+    # the number of B values per element of the MLIR type, so a length in values
+    # becomes a length in elements by dividing.
+    BFP16_B = dev.arch == AIEArch.AIE2p
     B_GROUP = BFP16_GROUP if BFP16_B else 1
     b_elem_bytes = BFP16_GROUP_BYTES / BFP16_GROUP if BFP16_B else 2
     # Asymmetric tile buffering: the A tile spans T_MA rows while the
     # accumulator spans M_TILE, so the core folds RHO bands into one C tile.
     # A is dead the moment it is consumed while C lives across the whole K
     # reduction, so sizing both to M_TILE pays the peak L1 cost twice.
-    budget = l1_budget(dev)
     if tile_ma is None:
-        T_MA, L1_B_DEPTH = _default_l1(N_TILE, CT_MAX_K, b_elem_bytes, budget)
+        T_MA, L1_B_DEPTH = _default_l1(
+            N_TILE, CT_MAX_K, b_elem_bytes, tm.get_local_memory_size()
+        )
     else:
         T_MA = tile_ma
         if M_TILE % T_MA or T_MA % (2 * R):
             raise ValueError(
                 f"tile_ma ({T_MA}) must divide {M_TILE} and be a multiple of {2 * R}"
             )
-        L1_B_DEPTH = _b_depth_for(T_MA, N_TILE, CT_MAX_K, b_elem_bytes, budget)
+        L1_B_DEPTH = _b_depth_for(
+            T_MA, N_TILE, CT_MAX_K, b_elem_bytes, tm.get_local_memory_size()
+        )
     RHO = M_TILE // T_MA
     OVERLAP = OVERLAP_DEFAULT if overlap is None else overlap
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
@@ -492,11 +455,6 @@ def gemm(
     # layout the mmul indexes, and they are tightly coupled to it. A mismatch
     # here produces silently wrong results, not a build error.
 
-    def _split_run(run):
-        # A BD wrap may not exceed _SHIM_WRAP_MAX; the run is contiguous, so a
-        # longer one re-encodes as two dimensions at the cost of one of the four.
-        return [(run, 1)] if run <= _SHIM_WRAP_MAX else [(2, run // 2), (run // 2, 1)]
-
     # C: de-block each core's r x t tiled output back into row-major within its
     # 64x128 slice, on the way into the memtile.
     gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
@@ -515,7 +473,7 @@ def gemm(
     a_send_dims = [
         (K_DIV_CT_K_MAX, R * CT_MAX_K),
         (M_TILE // R, R * K_TILE),
-    ] + _split_run(R * CT_MAX_K)
+    ] + split_run(R * CT_MAX_K)
 
     # C: one join per column. Each of the ROWS cores in the column drops its
     # slice at its own offset in a single memtile buffer, which then drains to
@@ -623,56 +581,56 @@ def gemm(
             b_cons[(r, c)] = of_b.cons()
 
     # --- Compute ----------------------------------------------------------
-    def make_core_fn(n_work, n_drain):
+    def core_fn(n_work, n_drain, acc, o_h, b_h, a_h, init_k, kstep_k, epi_k):
         """Core body for a column that computes ``n_work`` column-blocks and
-        then drains A for ``n_drain`` more (0 or 1)."""
+        then drains A for ``n_drain`` more (0 or 1).
 
-        def core_fn(acc, o_h, b_h, a_h, init_k, kstep_k, epi_k):
-            # The loop nest lives here rather than inside the kernel so that
-            # every level has an ObjectFifo acquire point. With M/K/N known at
-            # compile time all the trip counts are constants.
-            if n_work:
-                for _ in range_(n_work):
-                    for _ in range_(m_row_blocks):
-                        init_k(acc)
-                        for _ in range_(k_iters):
-                            # The l loop is unrolled by the B fifo depth so the
-                            # acquired buffer index stays a compile-time
-                            # constant.
-                            for _ in range_(B_ITERS // B_DEPTH):
-                                for _ in range(B_DEPTH):
-                                    # One B chunk feeds every A band, so B is
-                                    # acquired once around the band loop.
-                                    b = b_h.acquire(1)
-                                    for band in range(RHO):
-                                        a = a_h.acquire(1)
-                                        kstep_k(a, b, acc, band)
-                                        a_h.release(1)
-                                    b_h.release(1)
-                        # Drain the accumulator. Unrolled by C_DEPTH for the
-                        # same reason; a full O_CHUNKS unroll overflows program
-                        # memory.
-                        for chunk in range_(O_CHUNKS // C_DEPTH):
-                            for half in range(C_DEPTH):
-                                o = o_h.acquire(1)
-                                epi_k(o, acc, chunk, half)
-                                o_h.release(1)
-            if n_drain:
-                # The trailing partial column-block, for a column that sits it
-                # out. A is broadcast along the whole compute row, so this
-                # column must still consume its share or the columns that DO
-                # have work stall waiting for the fifo to advance. No B and no
-                # C here -- the runtime sequence issues neither for it.
-                for _ in range_(n_drain):
-                    for _ in range_(m_row_blocks):
-                        for _ in range_(k_iters):
-                            for _ in range_(B_ITERS // B_DEPTH):
-                                for _ in range(B_DEPTH):
-                                    for _ in range(RHO):
-                                        a_h.acquire(1)
-                                        a_h.release(1)
-
-        return core_fn
+        n_work/n_drain are bound per column via functools.partial below; they
+        are compile-time constants, so the trip counts below fold away.
+        """
+        # The loop nest lives here rather than inside the kernel so that
+        # every level has an ObjectFifo acquire point. With M/K/N known at
+        # compile time all the trip counts are constants.
+        if n_work:
+            for _ in range_(n_work):
+                for _ in range_(m_row_blocks):
+                    init_k(acc)
+                    for _ in range_(k_iters):
+                        # The l loop is unrolled by the B fifo depth so the
+                        # acquired buffer index stays a compile-time
+                        # constant.
+                        for _ in range_(B_ITERS // B_DEPTH):
+                            for _ in range(B_DEPTH):
+                                # One B chunk feeds every A band, so B is
+                                # acquired once around the band loop.
+                                b = b_h.acquire(1)
+                                for band in range(RHO):
+                                    a = a_h.acquire(1)
+                                    kstep_k(a, b, acc, band)
+                                    a_h.release(1)
+                                b_h.release(1)
+                    # Drain the accumulator. Unrolled by C_DEPTH for the
+                    # same reason; a full O_CHUNKS unroll overflows program
+                    # memory.
+                    for chunk in range_(O_CHUNKS // C_DEPTH):
+                        for half in range(C_DEPTH):
+                            o = o_h.acquire(1)
+                            epi_k(o, acc, chunk, half)
+                            o_h.release(1)
+        if n_drain:
+            # The trailing partial column-block, for a column that sits it
+            # out. A is broadcast along the whole compute row, so this
+            # column must still consume its share or the columns that DO
+            # have work stall waiting for the fifo to advance. No B and no
+            # C here -- the runtime sequence issues neither for it.
+            for _ in range_(n_drain):
+                for _ in range_(m_row_blocks):
+                    for _ in range_(k_iters):
+                        for _ in range_(B_ITERS // B_DEPTH):
+                            for _ in range(B_DEPTH):
+                                for _ in range(RHO):
+                                    a_h.acquire(1)
+                                    a_h.release(1)
 
     workers = []
     for r in range(ROWS):
@@ -681,7 +639,7 @@ def gemm(
             acc = Buffer(tile=tile, type=ct_acc_ty, name=f"c_acc_{r}_{c}")
             workers.append(
                 Worker(
-                    make_core_fn(col_work[c], col_drain[c]),
+                    partial(core_fn, col_work[c], col_drain[c]),
                     [
                         acc,
                         c_prod[(r, c)].prod(),
@@ -692,13 +650,12 @@ def gemm(
                         epilogue_chunk,
                     ],
                     tile=tile,
-                    stack_size=STACK_SIZE,
                 )
             )
 
     # --- Runtime ----------------------------------------------------------
     #
-    # Every wrap below stays under the shim's wrap/size field (_SHIM_WRAP_MAX): the
+    # Every wrap below stays under the shim's wrap/size field (DMA_BD_MAX_WRAP): the
     # largest are K_TILE=512 and ROWS*M_TILE=256.
     # One transfer per (column-block, leg) instead of one per object.
     #
