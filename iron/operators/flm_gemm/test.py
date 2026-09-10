@@ -43,6 +43,15 @@ def get_params():
         (  256,  512,  1024, "sigmoid",  None,       "conv_even"),
         (  512, 1024,  2048, "silu", (-4.0, 4.0),    "conv_even"),
         (  256,  512,  1024, "silu",     None,       "floor"),
+        # K or N = 10240 at M > 256 overflows the shim BD's 20-bit mega_row
+        # iteration step, so that leg is issued as one transfer per mega_row,
+        # retired in windows. These are the real E4B FFN projections and were
+        # unsupported until that landed; they are the regression cover for it.
+        # M=2048 needs two windows, which is what exercises the windowing.
+        ( 1024, 10240, 2560, "none",     None,       "conv_even"),  # E4B down
+        ( 1024,  2560, 10240, "none",    None,       "conv_even"),  # E4B gateup
+        ( 2048, 10240, 2560, "none",     None,       "conv_even"),  # A, 2 windows
+        ( 2048,  2560, 10240, "none",    None,       "conv_even"),  # C, 2 windows
     ]
     # fmt: on
 
@@ -127,18 +136,28 @@ def test_flm_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     assert not errors, "Test failed"
 
 
-@pytest.mark.parametrize(
-    "M,K,N",
-    [
-        (1024, 10240, 2560),  # E4B down-proj: K overflows the shim's 20-bit stride
-        (1024, 2560, 10240),  # E4B gateup-proj: N overflows it instead
-    ],
-)
-def test_flm_gemm_stride_overflow_rejected(M, K, N, aie_context):
-    # K or N > ~8191 at M > 256 needs a shim DMA descriptor stride that
-    # exceeds the AIE2p shim's 20-bit step field. Splitting the transfer
-    # into multiple descriptors compiles but hangs real hardware (see
-    # design.py's comment above this check) -- so this must keep failing
-    # fast at construction, not silently emit a build that hangs.
-    with pytest.raises(ValueError, match="20-bit step field"):
-        FLMGEMM(M=M, K=K, N=N, context=aie_context).compile()
+def test_flm_gemm_split_leg_windowing(aie_context):
+    # K or N > ~8191 at M > 256 makes the mega_row stride overflow the shim
+    # BD's 20-bit iteration step, so that leg is issued as one transfer per
+    # mega_row, retired in windows of at most SHIM_TASK_QUEUE. Two shim
+    # resources bound it and NEITHER is modelled by the toolchain -- the BD
+    # ids (16/tile, freed without a completion check) and the channel task
+    # queue (4 deep, pushed unconditionally) -- so overrunning either is a
+    # silent device hang rather than a diagnostic.
+    #
+    # Windowing keeps both inside their limits for every shape: at most
+    # 1 B + 4 A + 4 C = 9 of 16 descriptors, and at most 4 outstanding per
+    # channel. Assert that arithmetic here, since the numbers come from the
+    # hardware and a future retune of SHIM_TASK_QUEUE could break it silently.
+    from iron.operators.flm_gemm.design import SHIM_BDS, SHIM_TASK_QUEUE
+
+    worst = 1 + 2 * SHIM_TASK_QUEUE
+    assert worst <= SHIM_BDS, (
+        f"a fully split block needs {worst} shim BDs of {SHIM_BDS}; "
+        "windowing no longer fits and the split shapes will hang"
+    )
+
+    # The square case splits BOTH legs, which the real Gemma shapes never do
+    # (E4B's down-proj overflows on K and its gate/up on N, never both), so it
+    # is the only cover for the two-sided path.
+    FLMGEMM(M=512, K=10240, N=10240, context=aie_context).compile()

@@ -125,13 +125,10 @@ E4B_PROJ = [
 ]
 PREFILL_LENGTHS = [256, 1024, 2048]
 
-# The two E4B projections with a 10240-wide dimension need a shim DMA
-# descriptor stride past the AIE2p shim's 20-bit step field once M walks more
-# than one mega_row. design.py rejects them at construction; see its comment
-# and test.py's test_flm_gemm_stride_overflow_rejected. They are skipped here
-# rather than left to raise, so the sweep reports 26 results and 4 known
-# blocks instead of 4 errors.
-BLOCKED = "K/N=10240 at M>256 overflows the shim's 20-bit DMA stride field"
+# All 30 shapes run. The four E4B projections with a 10240-wide dimension used
+# to be skipped here: at M>256 their mega_row stride overflows the shim BD's
+# 20-bit iteration step. design.py now issues that leg as one transfer per
+# mega_row, retired in windows -- see its a_split comment.
 
 
 def get_params():
@@ -139,12 +136,8 @@ def get_params():
     for model, projections in (("E2B", E2B_PROJ), ("E4B", E4B_PROJ)):
         for M in PREFILL_LENGTHS:
             for proj, K, N in projections:
-                blocked = M > 256 and max(K, N) > 8191
-                marks = [pytest.mark.skip(reason=BLOCKED)] if blocked else []
                 params.append(
-                    pytest.param(
-                        model, proj, M, K, N, marks=marks, id=f"{model}-{proj}-M{M}"
-                    )
+                    pytest.param(model, proj, M, K, N, id=f"{model}-{proj}-M{M}")
                 )
     return params
 

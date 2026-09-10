@@ -97,6 +97,15 @@ def _bfp16_bytes(elems):
 _SHIM_STEP_BITS = 20
 _BF16_BYTES = 2
 _ADDR_GRANULARITY_BYTES = 4
+# Buffer descriptors per shim tile (AIETargetModel::getNumBDs, ShimNOCTile).
+# A per-TILE resource shared by every channel and both directions, so the A, B
+# and C legs on one column all draw from the same 16.
+SHIM_BDS = 16
+# Entries in a shim DMA channel's task queue. Nothing in mlir-aie models this
+# -- AIEDmaToNpu's NpuPushQueueOp pushes unconditionally -- so overrunning it
+# is a silent device hang, not a diagnostic. Measured here at K=10240 M=1024:
+# 4 outstanding tasks on one channel run, 8 hang.
+SHIM_TASK_QUEUE = 4
 
 
 def _hw_stride_ok(stride_elems):
@@ -199,60 +208,61 @@ def flm_gemm(
     # How many times the whole grid sweeps, in each dimension.
     m_row_blocks = M // MIN_M
     k_iters = K // K_TILE
-    # The mega_row dimension's stride (ROWS*M_TILE*{K,N}) overflows the shim's
-    # 20-bit step field once K or N crosses ~8191 elements -- E4B's FFN width
-    # (10240) does, E2B's max (6144) does not. Only relevant once M actually
-    # walks more than one mega_row (m_row_blocks>1); at M=256 the dimension is
-    # degenerate (size 1) and the taplib/MLIR toolchain strips it before this
-    # stride is ever encoded, so it never fails regardless of K/N.
+    # A mega_row dimension with stride ROWS*M_TILE*{K,N} lands in the shim
+    # BD's ITERATION field, whose step is 20 bits, so it overflows once K or N
+    # crosses ~8191 elements -- E4B's FFN width (10240) does, E2B's max (6144)
+    # does not. Only relevant once M walks more than one mega_row; at M=256 the
+    # dimension is degenerate (size 1) and is stripped before the stride is
+    # ever encoded, so it never fails there regardless of K/N.
     #
-    # Attempted fix: split the single 4D descriptor into m_row_blocks separate
-    # 3D fill()/drain() calls, each carrying the mega_row jump in its OFFSET
-    # (unbounded) instead of a shared STRIDE (20-bit limited). Compiles cleanly
-    # either direction (A's L3->L2 broadcast feed, or C's L2->L3 drain), but
-    # the dispatch hangs on real hardware (XRT: ERT_CMD_STATE_TIMEOUT) for
-    # BOTH once tested at the actual target shape (K or N = 10240) rather
-    # than a small stand-in -- a small forced-split repro (e.g. N=4096)
-    # appeared to work for the C direction, which was a false signal: the
-    # same shape at the real N=10240 hangs reproducibly on fresh builds. Not
-    # a buffer-depth issue either (tried objectfifo depths 2/4/8/16 for A,
-    # all hang). A dedicated IR-forensics pass diffed every aiecc compiler
-    # stage between working and broken small-shape builds and found the
-    # generated MLIR/BDs/locks correct and consistent throughout -- not a
-    # compiler bug. The kernel driver's health-report interface (amdxdna's
-    # `aie2_dump_ctx`, see
-    # /usr/src/xrt-amdxdna-*/driver/amdxdna/aie2_ctx.c and
-    # aie2_msg_priv.h's `struct app_health_report`) shows, on an actual hang:
-    # `Fatal error type: 0x0` and every exception field zero (NOT a
-    # crash/fault), `dpu_pc`/`txn_op_id` at their documented "not captured
-    # for this op type" sentinel (0xffffffff), while `ctx_pc` holds a real
-    # captured address -- consistent with the on-chip firmware sitting in a
-    # wait loop for a completion signal the array's DMA engine never raises.
-    # The driver's TDR watchdog (aie2_tdr.c, 2s default) is what eventually
-    # force-resets it. This is a genuine, silent hardware/firmware
-    # synchronization hang, not something splitting the host-issued task
-    # count works around. Root cause not fully pinned down -- the firmware
-    # itself is closed, unsymbolized microcode
-    # (/lib/firmware/amdnpu/*/npu*.sbin); further work needs AMD-internal
-    # firmware source or a hardware debugger, neither available here.
+    # Fix: issue that leg as m_row_blocks separate transfers, each carrying the
+    # mega_row jump in its OFFSET (unbounded) instead of a shared STRIDE. The
+    # two legs are independent -- E4B's down-proj overflows on K (A only) and
+    # its gate/up on N (C only) -- so neither shape pays for both.
     #
-    # Until a real fix lands, K/N > ~8191 at M > 256 raises a clear
-    # compile-time error below rather than emitting a build that hangs on
-    # real hardware.
-    if m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * K):
+    # This was long recorded as an unfixable firmware hang. It was not. The
+    # earlier attempt retired each mega_row's TaskGroup immediately, and
+    # TaskGroup.finish() emits dma_free_task, which hands the buffer descriptor
+    # id back to a COMPILE-TIME allocator that never checks the transfer
+    # finished (mlir-aie AIEAssignRuntimeSequenceBDIDs::recycle, isAwait=false).
+    # Ids are per shim TILE, shared across channels and directions, so every
+    # task on a column collapsed onto bd_id 0 and reprogrammed it mid-flight --
+    # including B, whose descriptor streams across every mega_row. Verify with
+    # aie-opt --aie-substitute-shim-dma-allocations
+    # --aie-assign-runtime-sequence-bd-ids: the ids on a shim tile must be
+    # distinct, and were all 0.
+    a_split = m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * K)
+    c_split = m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N)
+    # A split leg issues one transfer per mega_row back to back on ONE channel,
+    # so they must also fit that channel's task queue -- a limit nothing in the
+    # toolchain models, and overrunning it hangs rather than diagnoses.
+    # Measured at K=10240 M=1024: 4 outstanding run, 8 hang.
+    #
+    # So a split block is emitted in WINDOWS of at most SHIM_TASK_QUEUE
+    # mega_rows, each window awaited before the next is issued (see sequence()).
+    # Awaiting is what makes the window's descriptors safe to reuse, and it
+    # bounds both resources at once. M<=1024 is a single window, so the shapes
+    # that already worked are unaffected.
+    MB_WINDOW = min(m_row_blocks, SHIM_TASK_QUEUE) if (a_split or c_split) else 1
+    bds_per_block = 1 + (MB_WINDOW if a_split else 1) + (MB_WINDOW if c_split else 1)
+    # Unreachable while SHIM_TASK_QUEUE is 4 (the worst case is 1 + 4 + 4 = 9
+    # of 16), so this guards a future retune of the window rather than any
+    # shape reachable today. test_flm_gemm_split_leg_windowing asserts the same
+    # arithmetic from the outside.
+    if bds_per_block > SHIM_BDS:
         raise ValueError(
-            f"K={K} at M={M} would need a shim DMA descriptor stride "
-            f"(ROWS*M_TILE*K={ROWS * M_TILE * K}) that exceeds the AIE2p "
-            "shim's 20-bit step field (see the comment above this check) "
-            "-- not yet fixed."
+            f"M={M} K={K} N={N} needs {bds_per_block} shim buffer descriptors "
+            f"per window (1 B + {MB_WINDOW if a_split else 1} A + "
+            f"{MB_WINDOW if c_split else 1} C) but a shim tile has only "
+            f"{SHIM_BDS}."
         )
-    if m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N):
-        raise ValueError(
-            f"N={N} at M={M} would need a shim DMA descriptor stride "
-            f"(ROWS*M_TILE*N={ROWS * M_TILE * N}) that exceeds the AIE2p "
-            "shim's 20-bit step field (see the comment above this check) "
-            "-- not yet fixed."
-        )
+    # Cross-block overlap only applies to the unsplit path; a split block
+    # already awaits inside itself, so keeping a second one in flight would
+    # refill the very queue the windowing just drained.
+    if a_split or c_split:
+        OVERLAP = 1
+    else:
+        OVERLAP = max(1, min(OVERLAP, SHIM_BDS // bds_per_block))
     # Sweeps where all COLS columns have work, plus a trailing group of
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
@@ -573,16 +583,33 @@ def flm_gemm(
     # Dimension order must match the core loop nest exactly: for each
     # column-block it walks mega_row, then k. Every wrap stays under the shim's
     # 10-bit size field (largest are K_TILE=512 and ROWS*M_TILE=256).
-    def a_tap(mega_col, r):
+    def a_taps(mega_col, r, mbs):
         # Every (mega_row, k) block this compute row consumes for one
         # column-block. A does not depend on mega_col; it is re-fetched per
         # column-block because the cores re-consume it.
-        return TensorAccessPattern(
-            tensor_dims=(M * K,),
-            offset=r * M_TILE * K,
-            sizes=[m_row_blocks, k_iters, M_TILE, K_TILE],
-            strides=[ROWS * M_TILE * K, K_TILE, K, 1],
-        )
+        #
+        # Returns a LIST: one 4D descriptor normally, or one 3D descriptor per
+        # mega_row when the mega_row stride would overflow the shim BD's 20-bit
+        # iteration step (see a_split above). The split form carries the
+        # mega_row jump in the offset, which has no such limit.
+        if not a_split:
+            return [
+                TensorAccessPattern(
+                    tensor_dims=(M * K,),
+                    offset=r * M_TILE * K,
+                    sizes=[m_row_blocks, k_iters, M_TILE, K_TILE],
+                    strides=[ROWS * M_TILE * K, K_TILE, K, 1],
+                )
+            ]
+        return [
+            TensorAccessPattern(
+                tensor_dims=(M * K,),
+                offset=mb * ROWS * M_TILE * K + r * M_TILE * K,
+                sizes=[1, k_iters, M_TILE, K_TILE],
+                strides=[0, K_TILE, K, 1],
+            )
+            for mb in mbs
+        ]
 
     def b_tap(mega_col, c):
         # Every (mega_row, k) chunk this column consumes. B does not depend on
@@ -606,9 +633,26 @@ def flm_gemm(
             ),
         )
 
-    def c_tap(mega_col, c):
+    def c_taps(mega_col, c, mbs):
         # Every joined block this column produces for one column-block: one
-        # ROWS*M_TILE x N_TILE block per row-block.
+        # ROWS*M_TILE x N_TILE block per row-block. Returns a LIST, for the
+        # same reason a_taps does -- one descriptor per mega_row when N makes
+        # the mega_row stride overflow the shim BD's iteration step. The
+        # ablation knobs below are unsplit-only; they write C to the wrong
+        # place by construction and exist purely for timing.
+        if c_split:
+            return [
+                TensorAccessPattern(
+                    tensor_dims=(M * N,),
+                    offset=(mega_col * COLS + c) * N_TILE + mb * ROWS * M_TILE * N,
+                    sizes=[1, 1, ROWS * M_TILE, N_TILE],
+                    strides=[0, 0, N, 1],
+                )
+                for mb in mbs
+            ]
+        return [_c_tap_unsplit(mega_col, c)]
+
+    def _c_tap_unsplit(mega_col, c):
         if _os.environ.get("FLM_C_LINEAR") == "1":
             # ABLATION: same byte count, one contiguous run per column-block
             # instead of ROWS*M_TILE runs of N_TILE. Writes C to the WRONG
@@ -659,34 +703,94 @@ def flm_gemm(
         # are already moving while i computes. Retiring a block before issuing
         # the next serialises on the C await, which waits for the cores.
         #
-        # This is affordable only because each leg is now a single task: a
-        # block costs 3 buffer descriptors on a shim column (A + B + C), so two
-        # in flight is 6 of 16. Per-object tasks needed 1 + 2*k_iters and could
-        # not be overlapped at all.
-        # Keep OVERLAP column-blocks in flight. A block costs 3 shim buffer
-        # descriptors on a column (A + B + C) against 16 available, so the
-        # ceiling is 5; the operator is DDR-rate bound rather than byte bound
-        # (53 GB/s of a 63-70 GB/s roof), so how deeply the fills are pipelined
-        # is what decides the rate.
-        pending = []
-        for mega_col, active_cols in blocks:
-            tg_c = TaskGroup()
-            for c in range(active_cols):
-                c_conses[c].drain(C, c_tap(mega_col, c), group=tg_c, wait=True)
-            tg_f = TaskGroup()
-            for r in range(ROWS):
-                a_prods[r].fill(A, a_tap(mega_col, r), group=tg_f)
-            for c in range(active_cols):
-                b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
+        # This is affordable only because each leg is a single task per
+        # column-block. Per-object tasks needed 1 + 2*k_iters and could not be
+        # overlapped at all.
+        # Keep OVERLAP column-blocks in flight, against 16 shim buffer
+        # descriptors per column; the operator is DDR-rate bound rather than
+        # byte bound (53 GB/s of a 63-70 GB/s roof), so how deeply the fills
+        # are pipelined is what decides the rate.
+        #
+        # Every task of a block stays LIVE in its TaskGroup until the block is
+        # retired here. That is load-bearing, not tidiness: finish() emits
+        # dma_free_task, which returns the buffer descriptor id to a
+        # compile-time allocator that does not check the transfer completed, so
+        # retiring a leg early lets the next task reprogram a live descriptor.
+        # See the a_split comment above for what that cost.
+        all_mb = list(range(m_row_blocks))
 
-            pending.append([tg_f, tg_c])
-            while len(pending) >= OVERLAP:
-                for tg in pending.pop(0):
+        def emit_unsplit():
+            pending = []
+            for mega_col, active_cols in blocks:
+                tg_c = TaskGroup()
+                for c in range(active_cols):
+                    for tap in c_taps(mega_col, c, all_mb):
+                        c_conses[c].drain(C, tap, group=tg_c, wait=True)
+                tg_f = TaskGroup()
+                for r in range(ROWS):
+                    for tap in a_taps(mega_col, r, all_mb):
+                        a_prods[r].fill(A, tap, group=tg_f)
+                for c in range(active_cols):
+                    b_prods[c].fill(B, b_tap(mega_col, c), group=tg_f)
+
+                pending.append([tg_f, tg_c])
+                while len(pending) >= OVERLAP:
+                    for tg in pending.pop(0):
+                        tg.finish()
+
+            for group in pending:
+                for tg in group:
                     tg.finish()
 
-        for group in pending:
-            for tg in group:
-                tg.finish()
+        def emit_split():
+            # A split leg is one transfer per mega_row, so a whole block at
+            # once would overrun the shim channel's task queue. Emit MB_WINDOW
+            # mega_rows at a time and retire each window before the next, which
+            # both drains the queue and -- because the window's transfers are
+            # awaited, not merely freed -- makes its descriptors safe to reuse.
+            #
+            # B stays live across the whole block: its descriptor replays over
+            # every mega_row, so freeing it per window would hand its
+            # descriptor away mid-flight. It is retired last, after every
+            # window's C has been awaited, which is what guarantees it drained.
+            for mega_col, active_cols in blocks:
+                tg_b = TaskGroup()
+                for c in range(active_cols):
+                    b_prods[c].fill(B, b_tap(mega_col, c), group=tg_b)
+
+                # The leg that did NOT split is still one task for the whole
+                # block -- its single descriptor already spans every mega_row,
+                # so re-issuing it per window would transfer the block twice.
+                # It stays live alongside the windows and retires with them.
+                tg_whole = TaskGroup()
+                if not c_split:
+                    for c in range(active_cols):
+                        for tap in c_taps(mega_col, c, all_mb):
+                            c_conses[c].drain(C, tap, group=tg_whole, wait=True)
+                if not a_split:
+                    for r in range(ROWS):
+                        for tap in a_taps(mega_col, r, all_mb):
+                            a_prods[r].fill(A, tap, group=tg_whole)
+
+                for w in range(0, m_row_blocks, MB_WINDOW):
+                    mbs = all_mb[w : w + MB_WINDOW]
+                    tg_w = TaskGroup()
+                    if c_split:
+                        for c in range(active_cols):
+                            for tap in c_taps(mega_col, c, mbs):
+                                c_conses[c].drain(C, tap, group=tg_w, wait=True)
+                    if a_split:
+                        for r in range(ROWS):
+                            for tap in a_taps(mega_col, r, mbs):
+                                # wait=True: the await is what makes this
+                                # window's descriptors reusable by the next.
+                                a_prods[r].fill(A, tap, group=tg_w, wait=True)
+                    tg_w.finish()
+
+                tg_whole.finish()
+                tg_b.finish()
+
+        emit_split() if (a_split or c_split) else emit_unsplit()
 
     rt = Runtime(
         sequence,
