@@ -49,6 +49,12 @@ def get_params():
         (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
         (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
         (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0, 1),
+        # C's row stride (mem_tile_m_C * N) overflows the shim BD's 20-bit
+        # iteration step at these widths, so the drain is issued as one
+        # descriptor per row-block instead. Both failed to build at all before
+        # that: aiecc "Stride 3 exceeds the [1:1048576] range".
+        (1024,  2560, 10240,               8,     False,     False,  64,  64,  64,          0, 1),
+        (2048,  2560, 10240,               8,     False,     False,  64,  64,  64,          0, 1),
     ]
     # fmt: on
 

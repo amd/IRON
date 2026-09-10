@@ -172,6 +172,17 @@ def my_matmul(
     mem_tile_m_C = m * n_aie_rows
     mem_tile_n = n * n_aie_cols
 
+    # A shim BD's outermost descriptor dimension lands in the ITERATION field,
+    # whose step is 20 bits wide (AIETargetModel::getDmaBdStepBits for
+    # ShimNOCTile). An element stride S is re-expressed as (S - 1) * itemsize
+    # / 4-byte address granularity before the check, so a wide N pushes C's row
+    # stride past it: M=1024 K=2560 N=10240 needs mem_tile_m_C * N = 2621440
+    # and aiecc rejects the build with "Stride 3 exceeds the [1:1048576]
+    # range". See the C drain below for how that is split, and flm_gemm's
+    # design.py for the same fix worked through in more detail.
+    def _hw_stride_ok(stride_elems, itemsize):
+        return (stride_elems - 1) * itemsize // 4 <= (1 << 20) - 1
+
     if prio_accuracy:
         assert (
             dtype_out_str == "bf16"
@@ -597,39 +608,72 @@ def my_matmul(
                         #     |                |
                         #     |                |
                         #      ----------------
+                        # Normally one descriptor walks all current_tb_n_rows
+                        # row-blocks. When that outermost stride overflows the
+                        # shim's 20-bit iteration step (see _hw_stride_ok
+                        # above), issue one descriptor per row-block instead,
+                        # carrying the row jump in the OFFSET -- which has no
+                        # such limit -- and leaving the outer dimension
+                        # degenerate. Same bytes, same order, same number of
+                        # objects; only the descriptor is reshaped.
+                        #
+                        # These extra tasks are safe against the two shim
+                        # limits neither the toolchain nor the verifier models.
+                        # BD ids: all of a (tb, pingpong) iteration's tasks stay
+                        # live until tg.finish() below, so they stay distinct --
+                        # 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
+                        # task queue: the C channel goes from 2 outstanding to
+                        # current_tb_n_rows x 2 = 4, which is where A and B
+                        # already sit.
+                        C_rows = [(row_base, current_tb_n_rows)]
                         if not c_col_maj:
-                            C_row_offset = row_base * mem_tile_m_C * N
-                            C_col_offset = col * n
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [
-                                current_tb_n_rows,
-                                N // mem_tile_n,
-                                mem_tile_m_C,
-                                n,
-                            ]
-                            C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
-                        else:
-                            C_row_offset = row_base * mem_tile_m_C
-                            C_col_offset = col * n * M
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                            C_strides = [M * mem_tile_n, m, M, 1]
-                        C_tile = TensorAccessPattern(
-                            (N, M) if c_col_maj else (M, N),
-                            offset=C_offset,
-                            sizes=C_sizes,
-                            strides=C_strides,
-                        )
+                            row_stride = mem_tile_m_C * N
+                            if current_tb_n_rows > 1 and not _hw_stride_ok(
+                                row_stride, np.dtype(dtype_out).itemsize
+                            ):
+                                C_rows = [
+                                    (row_base + r, 1) for r in range(current_tb_n_rows)
+                                ]
 
-                        # This line does not change MLIR output at all - it's just for recording data movement
-                        C_taps.append(C_tile)
+                        for c_row_base, c_n_rows in C_rows:
+                            if not c_col_maj:
+                                C_row_offset = c_row_base * mem_tile_m_C * N
+                                C_col_offset = col * n
+                                C_offset = C_col_offset + C_row_offset
+                                C_sizes = [
+                                    c_n_rows,
+                                    N // mem_tile_n,
+                                    mem_tile_m_C,
+                                    n,
+                                ]
+                                C_strides = [
+                                    mem_tile_m_C * N if c_n_rows > 1 else 0,
+                                    mem_tile_n,
+                                    N,
+                                    1,
+                                ]
+                            else:
+                                C_row_offset = c_row_base * mem_tile_m_C
+                                C_col_offset = col * n * M
+                                C_offset = C_col_offset + C_row_offset
+                                C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
+                                C_strides = [M * mem_tile_n, m, M, 1]
+                            C_tile = TensorAccessPattern(
+                                (N, M) if c_col_maj else (M, N),
+                                offset=C_offset,
+                                sizes=C_sizes,
+                                strides=C_strides,
+                            )
 
-                        C_conses[col].drain(
-                            C,
-                            tap=C_tile,
-                            wait=True,
-                            group=tg,
-                        )
+                            # This line does not change MLIR output at all - it's just for recording data movement
+                            C_taps.append(C_tile)
+
+                            C_conses[col].drain(
+                                C,
+                                tap=C_tile,
+                                wait=True,
+                                group=tg,
+                            )
 
                     for tile_row in range(current_tb_n_rows):
                         if separate_c_tiles:
