@@ -4,14 +4,16 @@
 
 """Compare ``flm.GEMM`` against the overlay it was ported from and IRON's GEMM.
 
-Three implementations run per shape, on identical inputs:
+Up to three implementations run per shape, on identical inputs:
 
   flm      :class:`iron.operators.flm.GEMM`, the port
-  prebuilt :class:`iron.operators.flm.MMPrebuilt`, FastFlowLM's shipped
-           ``mm.xclbin``, downloaded and pinned by digest
   gemm     :class:`iron.operators.GEMM`, left at its defaults, which are the
            same emulated-bfp16 mmul and conv_even rounding -- a like-for-like
            comparison rather than one against a more accurate, slower build
+  prebuilt :class:`iron.operators.flm.MMPrebuilt`, FastFlowLM's shipped
+           ``mm.xclbin``, downloaded and pinned by digest. NPU2 only, because
+           that binary is a fixed 8-column NPU2 overlay -- on any other device
+           it is dropped and the flm-vs-gemm comparison still runs.
 
 Nothing here needs an external install or a host-specific path: the overlay is
 a ``RemoteFileArtifact``, so it is fetched into the (gitignored) build dir like
@@ -27,7 +29,14 @@ correctness gate. The correctness half now lives in
 ``iron/operators/flm/mm_prebuilt/test.py``, which IS a collected ``test.py``
 and so IS reached by the extensive job.
 
-NPU2 only, because the shipped overlay is an 8-column NPU2 binary.
+Timing is the runtime's own ``npu_time`` (device-side), the same source
+``iron.common.test_utils.run_test`` reports, rather than a host wall clock: it
+excludes host dispatch and so compares the designs rather than the driver.
+
+The shapes below are the ones this operator exists to serve, so they overlap
+with ``test.py``'s by construction. They are not redundant with it: ``test.py``
+asserts correctness on one implementation, this compares latency across three
+frozen binaries, and neither can stand in for the other.
 
 Usage::
 
@@ -36,7 +45,6 @@ Usage::
 """
 
 import statistics
-import time
 from pathlib import Path
 
 import numpy as np
@@ -55,12 +63,10 @@ from iron.operators.flm import MMPrebuilt
 pytestmark = pytest.mark.extensive
 
 _dev = aie_utils.get_current_device()
-if _dev.resolve().name != "npu2" or _dev.cols < 8:
-    pytest.skip(
-        "the prebuilt FastFlowLM overlay is an 8-column NPU2 binary; "
-        f"this device is {_dev.resolve().name!r} with {_dev.cols} columns",
-        allow_module_level=True,
-    )
+# The shipped overlay is a fixed 8-column NPU2 binary. Where that does not
+# match the device, drop that ONE candidate rather than skipping the module:
+# flm vs iron.operators.GEMM is measurable on every supported device.
+HAVE_PREBUILT = _dev is not None and _dev.resolve().name == "npu2" and _dev.cols >= 8
 
 # Every projection of both Gemma4 variants FastFlowLM ships, at three prefill
 # lengths. E2B is dim 1536 / ffn 6144; E4B is dim 2560 / ffn 10240.
@@ -154,11 +160,8 @@ class Candidate:
         return self.err < self.budget
 
     def time_round(self):
-        ts = []
-        for _ in range(ITERS):
-            t0 = time.perf_counter()
-            self.run()
-            ts.append((time.perf_counter() - t0) * 1e6)
+        # npu_time is the device-side execution time the runtime reports, in ns.
+        ts = [self.run().npu_time / 1e3 for _ in range(ITERS)]
         self.round_medians.append(statistics.median(ts))
 
     @property
@@ -209,16 +212,6 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
             aie_context,
         ),
         Candidate(
-            "prebuilt",
-            MMPrebuilt(M=M, K=K, N=N, context=aie_context),
-            A,
-            B,
-            M,
-            N,
-            BUDGET_FLOOR,
-            aie_context,
-        ),
-        Candidate(
             "gemm",
             IronGEMM(M=M, K=K, N=N, context=aie_context),
             A,
@@ -229,6 +222,19 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
             aie_context,
         ),
     ]
+    if HAVE_PREBUILT:
+        candidates.append(
+            Candidate(
+                "prebuilt",
+                MMPrebuilt(M=M, K=K, N=N, context=aie_context),
+                A,
+                B,
+                M,
+                N,
+                BUDGET_FLOOR,
+                aie_context,
+            )
+        )
 
     bad = [c for c in candidates if not c.verify(M, N, expected, mass)]
     assert not bad, "; ".join(
@@ -255,7 +261,8 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
         print(f"{c.name} xclbin (KB): {c.xclbin.stat().st_size / 1024:.1f}")
-    print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
+    if "prebuilt" in by_name:
+        print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
     print(f"speedup vs gemm: {by_name['gemm'].us / flm.us:.3f}")
     print(f"flm throughput: {2.0 * M * K * N / (flm.us * 1e-6) / 1e9:.6e} GFLOP/s")
     print(f"flm jitter (%): {flm.jitter_pct:.2f}")
