@@ -17,6 +17,10 @@ shape:
   flm  : FastFlowLM's shipped ``mm.xclbin`` + its dumped TXN insts (order C, A, B)
   gemm : IRON's generic ``GEMM`` operator, same emulated-bfp16 numerics
 
+``gemm`` drops out of the E4B gate/up shapes at M>256: its C descriptor needs a
+mega_row stride past the shim's 20-bit step field there, which aiecc rejects.
+Those shapes report iron against flm only.
+
 The box is bimodal by ~6% (see the npu-bimodal-timing note), so the three are
 interleaved round-robin over several rounds and each is scored by the MINIMUM
 of its per-round medians. Running all of one competitor and then all of another
@@ -316,6 +320,13 @@ def _artifacts_exist(op, ctx):
     GEMMLatency=r"gemm latency \(us\): (?P<value>[\d\.]+)",
     SpeedupVsFLM=r"speedup vs flm: (?P<value>[\d\.]+)",
     SpeedupVsGEMM=r"speedup vs gemm: (?P<value>[\d\.]+)",
+    # Accuracy is asserted against a budget below, but that budget is loose
+    # enough that a toolchain or kernel change could move the error a long way
+    # inside it unnoticed. Record the numbers too, so a dependency bump can be
+    # diffed on accuracy and not only on speed.
+    IronErr=r"iron err/mass: (?P<value>[\d\.e\+-]+)",
+    FLMErr=r"flm err/mass: (?P<value>[\d\.e\+-]+)",
+    GEMMErr=r"gemm err/mass: (?P<value>[\d\.e\+-]+)",
     IronThroughput=r"iron throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
     IronJitterPct=r"iron jitter \(%\): (?P<value>[\d\.]+)",
     IronXclbinKB=r"iron xclbin \(KB\): (?P<value>[\d\.]+)",
@@ -330,8 +341,20 @@ def test_flm_gemm_vs_flm(model, proj, M, K, N, aie_context):
     competitors = [
         setup_iron(M, K, N, A, B, aie_context),
         setup_flm(M, K, N, A, B, aie_context),
-        setup_gemm(M, K, N, A, B, aie_context),
     ]
+    # IRON's generic GEMM still has the 20-bit mega_row stride limitation that
+    # flm_gemm fixed: at M>256 with a 10240-wide N its C descriptor wants a
+    # stride of 2621440 elements and aiecc rejects the build outright. That is
+    # a property of that operator, not of the shape, and it is caught at
+    # compile time rather than hanging -- so report the shape with the
+    # competitors that do build instead of losing flm_gemm's own numbers for
+    # it. Only that specific rejection is tolerated; anything else still fails.
+    try:
+        competitors.append(setup_gemm(M, K, N, A, B, aie_context))
+    except RuntimeError as e:
+        if "aie.dma_bd" not in str(e) or "exceeds the" not in str(e):
+            raise
+        print("gemm unavailable: descriptor stride exceeds the shim's 20-bit step")
 
     bad = [c for c in competitors if not c.verify(M, N, expected, mass)]
     assert not bad, "; ".join(
@@ -354,7 +377,8 @@ def test_flm_gemm_vs_flm(model, proj, M, K, N, aie_context):
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
     print(f"speedup vs flm: {by_name['flm'].us / iron.us:.3f}")
-    print(f"speedup vs gemm: {by_name['gemm'].us / iron.us:.3f}")
+    if "gemm" in by_name:
+        print(f"speedup vs gemm: {by_name['gemm'].us / iron.us:.3f}")
     print(f"iron throughput: {2.0 * M * K * N / (iron.us * 1e-6) / 1e9:.6e} GFLOP/s")
     print(f"iron jitter (%): {iron.jitter_pct:.2f}")
     print(f"iron xclbin (KB): {iron.xclbin.stat().st_size / 1024:.1f}")
