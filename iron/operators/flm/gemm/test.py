@@ -5,8 +5,21 @@
 import pytest
 import aie.utils as aie_utils
 
+from aie.dialects.aie import get_target_model
+from aie.dialects._aie_enum_gen import AIEArch
+
 from iron.operators import GEMM as GenericGEMM
-from iron.operators.flm.gemm.design import Epilogue, Rounding
+from iron.operators.flm.gemm.design import (
+    BFP16_GROUP,
+    BFP16_GROUP_BYTES,
+    CT_MAX_K_FOR_N,
+    Epilogue,
+    M_TILE,
+    R,
+    Rounding,
+    _b_depth_for,
+    _default_l1,
+)
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.reference import generate_golden_reference
 from iron.common.test_utils import run_test
@@ -111,6 +124,44 @@ def get_params():
     return params
 
 
+def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
+    """Run ``operator`` against its golden reference and return run_test's result.
+
+    Bounds the error in ABSOLUTE terms as a fraction of the accumulated mass,
+    i.e. the expected size of the K reduction before cancellation,
+    K * mean|a| * mean|b|. A plain relative tolerance cannot work: with signed A
+    the K-sum cancels by ~sqrt(K), so |C| ends up far smaller than the mass
+    while the error tracks the mass, leaving near-zero outputs uncheckable.
+
+    The fraction is per-architecture, because the two lower the same 8x8x8 mmul
+    onto very different arithmetic: NPU2 emulates it with bfp16, which drops
+    mantissa bits, while NPU1 has no bfp16 and lowers onto four native bf16 macs
+    accumulating in f32 -- exact up to the f32->bf16 store, so ~20x tighter.
+    floor truncates rather than rounding to nearest, so its bias accumulates
+    over the K reduction instead of cancelling and gets a looser bound on both.
+    """
+    mass = (
+        K
+        * golden_ref["input"].abs().float().mean()
+        * golden_ref["input_b"].abs().float().mean()
+    )
+    if aie_utils.get_current_device().resolve().name == "npu1":
+        budget = 0.002 if rounding is FLOOR else 0.0002
+    else:
+        budget = 0.05 if rounding is FLOOR else 0.004
+    return run_test(
+        operator,
+        {
+            "A": golden_ref["input"].flatten(),
+            # B is consumed pre-packed; see GEMM.pack_B.
+            "B": operator.pack_B(golden_ref["input_b"]),
+        },
+        {"C": golden_ref["output"].flatten()},
+        rel_tol=0.04,
+        abs_tol=float(budget * mass),
+    )
+
+
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
@@ -133,43 +184,8 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
         context=aie_context,
     )
 
-    input_buffers = {
-        "A": golden_ref["input"].flatten(),
-        # B is consumed pre-packed; see GEMM.pack_B.
-        "B": operator.pack_B(golden_ref["input_b"]),
-    }
-    output_buffers = {"C": golden_ref["output"].flatten()}
-
-    # The rule: bound the error in ABSOLUTE terms as a fraction of the
-    # accumulated mass, i.e. the expected size of the K reduction before
-    # cancellation, K * mean|a| * mean|b|. A plain relative tolerance cannot
-    # work, because with signed A the K-sum cancels by ~sqrt(K), so |C| is far
-    # smaller than the mass while the error tracks the mass -- which leaves
-    # near-zero outputs relatively uncheckable.
-    mass = (
-        K
-        * golden_ref["input"].abs().float().mean()
-        * (golden_ref["input_b"].abs().float().mean())
-    )
-    # The fraction is per-architecture, because the two lower the same 8x8x8
-    # mmul shape onto very different arithmetic: NPU2 emulates it with bfp16,
-    # which drops mantissa bits, while NPU1 has no bfp16 and lowers it onto
-    # four native bf16 macs accumulating in f32, which is exact up to the
-    # f32->bf16 store and so gets a ~20x tighter budget.
-    #
-    # floor rounding truncates rather than rounding to nearest, so its bias
-    # accumulates over the K reduction instead of cancelling, hence the
-    # separate, looser bound on both.
-    if aie_utils.get_current_device().resolve().name == "npu1":
-        budget = 0.002 if rounding is FLOOR else 0.0002
-    else:
-        budget = 0.05 if rounding is FLOOR else 0.004
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        input_buffers,
-        output_buffers,
-        rel_tol=0.04,
-        abs_tol=float(budget * mass),
+    errors, latency_us, bandwidth_gbps = check_on_device(
+        operator, golden_ref, K, rounding
     )
 
     gflops = (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9
@@ -226,29 +242,64 @@ def test_gemm_split_leg_windowing_runs(aie_context):
 
     operator = GEMM(M=M, K=K, N=N, context=aie_context)
 
-    input_buffers = {
-        "A": golden_ref["input"].flatten(),
-        "B": operator.pack_B(golden_ref["input_b"]),
-    }
-    output_buffers = {"C": golden_ref["output"].flatten()}
+    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
+    assert not errors, "Test failed"
 
-    # Same mass-based bound as test_gemm, at the non-floor budget for whichever
-    # architecture this runs on.
-    mass = (
-        K
-        * golden_ref["input"].abs().float().mean()
-        * golden_ref["input_b"].abs().float().mean()
-    )
-    budget = (
-        0.0002 if aie_utils.get_current_device().resolve().name == "npu1" else 0.004
-    )
-    errors, _latency_us, _bandwidth_gbps = run_test(
-        operator,
-        input_buffers,
-        output_buffers,
-        rel_tol=0.04,
-        abs_tol=float(budget * mass),
-    )
+
+def tile_option_params():
+    """Every (tile_n, tile_ma) the design accepts on this device.
+
+    The shape parameters above exercise only the DEFAULT tile geometry, because
+    __post_init__ resolves both knobs from the shape and the device. These cover
+    the knobs themselves, which change the blocked L1 layout: tile_n selects
+    CT_MAX_K and the B object width, tile_ma sets the mmul's rowA and the A
+    object height, and pack_B, the four stream-dimension lists and gather_dims
+    all key off them. A mismatch is silently wrong output rather than a build
+    error, so each combination has to actually run on hardware.
+
+    The default tile_ma per tile_n stays in the regular suite; the overrides are
+    extensive, since each is its own kernel object and xclbin.
+    """
+    dev = aie_utils.get_current_device()
+    if dev is None or dev.resolve().name not in ("npu1", "npu2"):
+        return []
+    l1 = get_target_model(dev.resolve()).get_local_memory_size()
+    b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
+
+    params = []
+    for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
+        default_ma = _default_l1(tile_n, ct_k, b_elem, l1)[0]
+        # One full sweep of the grid at this tile_n, so every column has work.
+        M, K, N = 256, 512, tile_n * dev.cols
+        for tile_ma in (16, 32, 64):
+            if M_TILE % tile_ma or tile_ma % (2 * R):
+                continue
+            try:
+                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1)
+            except ValueError:
+                continue  # this A height leaves no room for B at this width
+            marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
+            params.append(
+                pytest.param(
+                    M,
+                    K,
+                    N,
+                    tile_n,
+                    tile_ma,
+                    marks=marks,
+                    id=f"tn{tile_n}-ma{tile_ma}" + ("-default" if not marks else ""),
+                )
+            )
+    return params
+
+
+@pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
+def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
+    """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
+    golden_ref = generate_golden_reference(M=M, K=K, N=N, scale=INPUT_SCALE)
+    operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, context=aie_context)
+    assert operator.tile_n == tile_n and operator.tile_ma == tile_ma
+    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
     assert not errors, "Test failed"
 
 
