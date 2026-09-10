@@ -70,6 +70,16 @@ HAVE_PREBUILT = _dev is not None and _dev.resolve().name == "npu2" and _dev.cols
 
 # Every projection of both Gemma4 variants FastFlowLM ships, at three prefill
 # lengths. E2B is dim 1536 / ffn 6144; E4B is dim 2560 / ffn 10240.
+#
+# These two are the right coverage for the shipped mm.xclbin. Checked against
+# FastFlowLM f81eba71: Gemma4-E2B-IT-NPU2, Gemma4-E4B-IT-NPU2 and Gemma3-4B-NPU2
+# all ship the SAME mm.xclbin blob (git 4727df98, 512220 bytes) -- one overlay
+# serving several models -- so E2B and E4B between them already exercise it.
+#
+# Gemma4-12B-IT-NPU2 does not ship an mm.xclbin at all. Its overlays are a
+# different set (attn_global, attn_sliding, audio_image_mm, dequant_mm, layer,
+# lm_head), so its projections go through a quantized matmul rather than this
+# bf16 one and cannot be compared against MMPrebuilt.
 #             proj,      K,      N
 E2B_PROJ = [
     ("q", 1536, 4096),
