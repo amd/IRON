@@ -279,21 +279,19 @@ per row-block, so DDR reads it once instead of `m_row_blocks` times -- about
 43% less traffic. Larger K falls back to re-reading it, unchanged.
 
 On NPU2 this is a latency win as well as a power one, because there the
-operator is close to DDR-bandwidth bound; it grows with the height of the
-problem, since B's re-reads scale with `m_row_blocks`. On NPU1 it is neither —
-see [the dead ends above](#measured-dead-ends-on-npu1). At K=1024 N=4096 on
-NPU2:
+operator is close to DDR-bandwidth bound, and it grows with the height of the
+problem since B's re-reads scale with `m_row_blocks`. At K=1024 N=4096, min of
+per-round medians over 10 interleaved rounds of 20 dispatches, `npu_time`,
+power mode `turbo`:
 
 | M | row-blocks | non-resident | resident | |
 |---|---|---|---|---|
-| 512 | 2 | 470.8 us | 468.5 us | 0.5% |
-| 1024 | 4 | 860.4 us | 846.5 us | 1.6% |
-| 2048 | 8 | 1760.1 us | **1622.8 us** | 7.8% |
-
-Do not evaluate this at small M: at M=512 the effect is inside the noise.
+| 512 | 2 | 527.0 us | **461.2 us** | 12.5% |
+| 1024 | 4 | 1025.8 us | **857.3 us** | 16.4% |
+| 2048 | 8 | 1958.0 us | **1579.5 us** | 19.3% |
 
 Most of the available win is still on the table: `repeat_count` restarts the
-memtile BD chain at every replay boundary, which costs most of the traffic
+memtile BD chain at every replay boundary, which costs part of the traffic
 saving back. Closing that is the largest known remaining lever here.
 
 On NPU1 residency is neither a latency nor a power win — measured off-versus-on
