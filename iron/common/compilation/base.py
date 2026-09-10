@@ -37,8 +37,10 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+import hashlib
 import os.path
 import shutil
+import urllib.request
 import zlib
 import logging
 import subprocess
@@ -408,6 +410,33 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
 
 
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class RemoteFileArtifact(CompilationArtifact):
+    """A file downloaded from a URL and pinned by its SHA-256 digest.
+
+    The digest pins the content, so ``url`` must name an immutable revision of
+    the file -- a commit SHA rather than a branch.
+    """
+
+    def __init__(self, filename: str, url: str, sha256: str) -> None:
+        super().__init__(filename)
+        self.url = url
+        self.sha256 = sha256
+
+    def is_available_in_filesystem(self) -> bool:
+        # A stale file with a matching mtime is still the wrong file, so
+        # compare content rather than timestamps.
+        path = Path(self.filename)
+        return path.exists() and _sha256_of(path) == self.sha256
+
+
 # Compilation Command
 # ##########################################################################
 
@@ -483,6 +512,40 @@ class CompilationRule(ABC):
     def compile(self, artifacts: CompilationArtifactGraph) -> list[CompilationCommand]:
         """Apply this rule to the artifact graph, returning compilation commands. This should modify the artifact graph in-place to reflect the newly generated artifacts."""
         pass
+
+
+class DownloadCompilationRule(CompilationRule):
+    """Fetch RemoteFileArtifacts over HTTPS and check their digest."""
+
+    def matches(self, graph):
+        return any(graph.get_worklist(RemoteFileArtifact))
+
+    def compile(self, graph):
+        commands = []
+        for artifact in graph.get_worklist(RemoteFileArtifact):
+            commands.append(
+                PythonCallbackCompilationCommand(partial(self.download, artifact))
+            )
+            artifact.available = True
+        return commands
+
+    @staticmethod
+    def download(artifact):
+        if not artifact.url.startswith("https://"):
+            raise ValueError(f"refusing to download over {artifact.url!r}")
+        # Download beside the target and rename, so an interrupted fetch cannot
+        # leave a truncated file that a later run reports as a digest mismatch.
+        target = Path(artifact.filename)
+        partial_path = target.with_suffix(target.suffix + ".part")
+        with urllib.request.urlopen(artifact.url, timeout=60) as response:
+            partial_path.write_bytes(response.read())
+        digest = _sha256_of(partial_path)
+        if digest != artifact.sha256:
+            partial_path.unlink()
+            raise RuntimeError(
+                f"{artifact.url} has SHA-256 {digest}, expected {artifact.sha256}"
+            )
+        partial_path.replace(target)
 
 
 class GenerateMLIRFromPythonCompilationRule(CompilationRule):
