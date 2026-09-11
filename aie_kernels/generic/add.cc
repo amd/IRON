@@ -38,6 +38,15 @@ template <typename T_in, typename T_out> void eltwise_vadd(T_in *a, T_in *b, T_o
         aie::store_v(pC1, cout);
         pC1 += vec_factor;
     }
+    // `size` is a caller-chosen tile and need not divide vec_factor, so the vector body is
+    // bounded on the last FULL vector and the remainder is handled scalar-wise here. load_v and
+    // store_v are full-width regardless of how many elements remain, so a short final vector
+    // iteration would read and write past the buffer; in L1 that is another objectFIFO buffer or
+    // the stack.
+    const int tail = size - F * vec_factor; // pA1/pB1/pC1 point past the vector body
+    for (int i = 0; i < tail; i++) {
+        pC1[i] = pA1[i] + pB1[i];
+    }
     event1();
 }
 
