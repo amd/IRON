@@ -86,12 +86,9 @@ def strided_copy(
         np.dtype[dtype],
     ]
 
-    # input_offset_parameter (and output_offset_parameter) is the name of an
-    # aiex.scratchpad_parameter used to patch the DMA BD base address at runtime. The
-    # statically-computed offset is used as the base; the parameter's value is
-    # additively combined onto it inside the BD address registers via UPDATE_REG.
-    # The host writes the byte offset into the ctrl scratchpad before each
-    # dispatch via ParameterScratchpad.
+    # Patches the DMA BD base address at runtime: the static offset is the base,
+    # and UPDATE_REG adds the parameter onto it. The host writes an element count,
+    # which the firmware scales by elemBytes.
     in_offset_param = (
         ScratchpadParameter(input_offset_parameter, np.int32)
         if input_offset_parameter is not None
