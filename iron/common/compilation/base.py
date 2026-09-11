@@ -108,12 +108,8 @@ def _execute_rule(rule: CompilationRule, commands: list[CompilationCommand]) -> 
     """Run one rule's commands, concurrently when the rule says they are independent.
 
     A rule that sets `commands_are_independent` emits one command per artifact in
-    its worklist, with no artifact depending on another's output -- kernel object
-    compiles are the case that matters, and they were costing the SUM of their
-    walls (7.9 s of a 17.1 s encoder-MHA build for two kernels).
-
-    Bounded by cores: each kernel compile is a single-threaded clang peaking near
-    205 MB of RSS. Set IRON_COMPILE_JOBS to override.
+    its worklist, none of them consuming another's output, so they run in
+    parallel. Bounded by cores. Set IRON_COMPILE_JOBS to override.
     """
     if not getattr(rule, "commands_are_independent", False) or len(commands) < 2:
         for command in commands:
