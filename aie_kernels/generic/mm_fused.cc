@@ -158,27 +158,32 @@ void mm_fused_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer, int32
     const float *__restrict src = y_acc + (outer * C_DEPTH + half) * CHUNK;
 
 #if MM_FUSED_CLAMP
-    const aie::vector<bfloat16, V> lo = aie::broadcast<bfloat16, V>(static_cast<bfloat16>(MM_FUSED_CLAMP_MIN));
-    const aie::vector<bfloat16, V> hi = aie::broadcast<bfloat16, V>(static_cast<bfloat16>(MM_FUSED_CLAMP_MAX));
+    const aie::vector<float, V> lo = aie::broadcast<float, V>(MM_FUSED_CLAMP_MIN);
+    const aie::vector<float, V> hi = aie::broadcast<float, V>(MM_FUSED_CLAMP_MAX);
 #endif
 
     AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
     for (int j = 0; j < CHUNK / V; j++) {
-        aie::accum<accfloat, V> acc;
-        acc.from_vector(aie::load_v<V>(src + j * V));
-        // The assignment is the conversion: to_v16bfloat16 yields a raw
-        // v16bfloat16, not an aie::vector.
-        aie::vector<bfloat16, V> v = to_v16bfloat16(acc);
+        // The accumulator stays f32 through the activation and the clamp, and
+        // is converted to bf16 exactly once, on the store. Converting first
+        // would round twice and let the activation's slope amplify the first
+        // rounding -- see activations.h.
+        aie::vector<float, V> f = aie::load_v<V>(src + j * V);
 #if MM_FUSED_EPILOGUE_MODE == 1
-        v = gelu_vec<V>(v);
+        f = gelu_vec<V>(f);
 #elif MM_FUSED_EPILOGUE_MODE == 2
-        v = silu_vec<V>(v);
+        f = silu_vec<V>(f);
 #elif MM_FUSED_EPILOGUE_MODE == 3
-        v = sigmoid_vec<V>(v);
+        f = sigmoid_vec<V>(f);
 #endif
 #if MM_FUSED_CLAMP
-        v = aie::clamp(v, lo, hi);
+        f = aie::max(aie::min(f, hi), lo);
 #endif
+        aie::accum<accfloat, V> out;
+        out.from_vector(f);
+        // The assignment is the conversion: to_v16bfloat16 yields a raw
+        // v16bfloat16, not an aie::vector.
+        aie::vector<bfloat16, V> v = to_v16bfloat16(out);
         aie::store_v(y_out + j * V, v);
     }
 }

@@ -118,9 +118,20 @@ GEMM(M=M, K=K, N=N, context=ctx)                           # conv_even, default
 
 Verified against the shipped overlay on identical inputs, driven through
 [`flm.MMPrebuilt`](../mm_prebuilt), which runs that xclbin unmodified: with
-`floor`, output is **bit-identical across all 6291456 elements**, and all four
-epilogues match too (1048576/1048576 each). With the `conv_even` default it
-differs everywhere, and is far more accurate — see [Accuracy](#accuracy).
+`floor` and no activation, output is **bit-identical across all 6291456
+elements**. With the `conv_even` default it differs everywhere, and is far more
+accurate — see [Accuracy](#accuracy).
+
+**The activations deliberately do not match bit for bit**, even under `floor`.
+The overlay rounds its accumulator to bf16 and then applies the activation to
+that; this operator applies the activation to the f32 accumulator and rounds
+once, on the store. Rounding before a nonlinearity rounds twice and lets the
+activation's slope amplify the first rounding, so the overlay's order is the
+less accurate one and is not worth reproducing. The cost of diverging is
+visible — at M=256 K=512 N=1024, 117582/262144 silu elements differ from the
+overlay — and so is the benefit: against an exact f64 evaluation, mean |err|
+improves and gelu's worst case drops 5.5%. Measured perf-neutral (0.993-1.006x,
+inside the run-to-run spread).
 
 The shipped kernel selects its activation from a runtime parameter, one overlay
 serving every projection; this operator bakes it in at compile time instead,
