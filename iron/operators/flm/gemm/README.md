@@ -40,6 +40,17 @@ The shipped overlay itself is available as
 [`iron.operators.flm.MMPrebuilt`](../mm_prebuilt) for comparison; `benchmark.py`
 measures the two against each other and against `iron.operators.GEMM`.
 
+**Not yet a drop-in replacement for the shipped overlay in FastFlowLM itself.**
+FLM's runtime selects matrix shape and activation per call via runtime
+parameters (RTPs) on one compiled xclbin. `M`/`K`/`N`/`epilogue`/`rounding` here
+are `GEMM(...)` constructor arguments instead -- baked into the MLIR and the
+kernel's `-D` flags at compile time (see
+[Matching the shipped overlay](#matching-the-shipped-fastflowlm-overlay)) -- so
+each shape+epilogue combination is its own compiled kernel object, not one
+kernel switchable at runtime. Using this operator inside FLM today means
+precompiling and swapping between kernels per combination; making shape and
+epilogue RTP-selectable is follow-up work.
+
 ## Architectures
 
 Runs on both NPU2 (aie2p — Strix/Krackan) and NPU1 (aie2 — Phoenix/Hawk Point).
@@ -133,9 +144,11 @@ overlay — and so is the benefit: against an exact f64 evaluation, mean |err|
 improves and gelu's worst case drops 5.5%. Measured perf-neutral (0.993-1.006x,
 inside the run-to-run spread).
 
-The shipped kernel selects its activation from a runtime parameter, one overlay
-serving every projection; this operator bakes it in at compile time instead,
-with the same 0/1/2/3 mapping, which is what lets its inner loop be branch-free.
+The shipped kernel selects its activation -- and its shape -- from runtime
+parameters, one overlay serving every projection; this operator bakes both in
+at compile time instead (activation keeps the shipped 0/1/2/3 mapping), which
+is what lets its inner loop be branch-free. See the FLM-compatibility note near
+the top of this file for what that means for using this operator inside FLM.
 
 `clamp` has no counterpart in the shipped overlay to compare against — its
 `generate_seq` never writes the clamp RTP words, so clamping is always off

@@ -37,10 +37,18 @@ def float_to_name(v: float) -> str:
     return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
 
 
-# Widest wrap a DMA buffer descriptor's size field can encode. Not exposed by
-# the Python bindings (AIETargetModel::getDmaBdWrapSizeBits is unbound), so it
-# is written down here rather than in each design; gemv, repeat and mha all
-# hardcoded the same 1023 independently.
+# Widest wrap a shim or mem tile DMA buffer descriptor's size field can encode.
+# Not exposed by the Python bindings (AIETargetModel::getDmaBdWrapBits is
+# unbound), so it is written down here rather than in each design; gemv,
+# repeat and mha all hardcoded the same 1023 independently.
+#
+# This is the same 10 bits on every target model this repo builds for --
+# BaseNPU1TargetModel and BaseNPU2TargetModel both inherit it unmodified from
+# AIE2TargetModel::getDmaBdWrapBits, which does not override it per device --
+# so callers do not need to look it up per-device. It is NOT the same for
+# every tile type, though: core tiles get an 8-bit wrap (max 255), not 10-bit.
+# This constant is only valid for shim/mem tile descriptors, which is what
+# every current caller (gemv, repeat, mha, flm.GEMM) uses it for.
 DMA_BD_MAX_WRAP = (1 << 10) - 1
 
 

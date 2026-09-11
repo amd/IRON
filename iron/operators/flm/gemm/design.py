@@ -9,17 +9,38 @@ shape as that operator's -- A broadcast along each compute row, B down each
 column, C joined through the memtile -- so those are NOT what distinguishes it.
 What does:
 
-  * **Fixed tiling.** m/k/n = 64/512/128 and r/s/t = 8/8/8, rather than
-    parameterised tiles. Only the grid WIDTH varies with the device: 8 columns
+  * **B is quantized to bfp16ebs8 on NPU2** by ``GEMM.pack_B``, not bf16.
+    ``iron.operators.GEMM`` only ever moves bf16. This is not primarily a DMA
+    saving: it is what makes NPU2's fast mmul lowering available at all --
+    ``aie::mmul<8,8,8>`` needs bfp16 operands to decompose into two emulated
+    macs instead of four, which is most of the NPU2 speedup (see NPU1 in
+    README.md's Performance section, where B stays bf16 and the margin over
+    ``iron.operators.GEMM`` is correspondingly smaller). Quantizing is
+    numerically free -- the mmul only multiplies bfp16 regardless, so this
+    hoists a rounding that already happened on every mac -- provided it
+    reproduces the core's rounding mode; see ``packing.py``.
+  * **The tile shape is fixed, not parameterised** -- but fixedness alone is
+    not the advantage: ``iron.operators.GEMM`` is equally fixed once compiled
+    with a choice of tile args. What differs is *which* shape is fixed. r/s/t
+    stays 8/8/8 on both architectures for the reason below. m/k = 64/512 (n
+    defaults to 64) is chosen for the L1-budget tradeoff documented next to
+    ``CT_MAX_K_FOR_N`` below: n=64 gives the mmul a colA of 8 rather than 4,
+    which wins whenever compute is the critical path, at the cost of A being
+    re-read more often. Only the grid WIDTH varies with the device: 8 columns
     on NPU2, 4 on NPU1.
   * **A fused epilogue.** The f32->bf16 conversion, an optional activation and
     an optional clamp all happen while the values are still in registers, on the
     way into the C object, instead of a separate pass over L1.
   * **B arrives pre-packed** by ``GEMM.pack_B``, in the order the cores consume
-    it, so both B hops are plain linear descriptors. On NPU2 it is also
-    quantized to bfp16ebs8.
-  * **Asymmetric tile buffering**, so the A tile and the accumulator need not
-    share a height.
+    it, so both B hops are plain linear descriptors instead of the 128-byte
+    scattered bursts ``iron.operators.GEMM`` reorders in the descriptor.
+  * **Asymmetric tile buffering (ATB)**, so the A tile and the accumulator need
+    not share a height -- this is what buys the deep k slice (K_TILE=512)
+    within the L1 budget; see README.md's ATB reference.
+
+None of these four helps alone -- see README.md's Performance section for the
+measured, per-choice breakdown of the gap against both the shipped FastFlowLM
+overlay and ``iron.operators.GEMM``.
 
 The constants below are the single source of truth: ``op.py`` passes them to the
 kernels as -D flags, so the C++ and the dataflow cannot drift apart.
