@@ -38,7 +38,7 @@ What does:
     not share a height -- this is what buys the deep k slice (K_TILE=512)
     within the L1 budget; see README.md's ATB reference.
 
-None of these four helps alone -- see README.md's Performance section for the
+None of these helps alone -- see README.md's Performance section for the
 measured, per-choice breakdown of the gap against both the shipped FastFlowLM
 overlay and ``iron.operators.GEMM``.
 
