@@ -15,6 +15,7 @@ from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
+    M_CHUNK_FOR_N,
     Epilogue,
     M_TILE,
     R,
@@ -275,14 +276,17 @@ def tile_option_params():
 
     params = []
     for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
-        default_ma = _default_l1(tile_n, ct_k, b_elem, l1)[0]
+        # m_chunk matters: the core holds a B chunk across that many
+        # accumulators, so it is what decides which A heights still fit.
+        m_chunk = M_CHUNK_FOR_N[tile_n]
+        default_ma = _default_l1(tile_n, ct_k, b_elem, l1, m_chunk)[0]
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
         for tile_ma in (16, 32, 64):
             if M_TILE % tile_ma or tile_ma % (2 * R):
                 continue
             try:
-                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1)
+                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1, m_chunk)
             except ValueError:
                 continue  # this A height leaves no room for B at this width
             marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
@@ -336,12 +340,16 @@ def test_one_xclbin_serves_every_shape(aie_context):
     They disagree on every parameter -- M, K, N, whether a column sits a block
     out, and the activation -- and none of them may rebuild the xclbin.
     """
+    # Every shape here must resolve to the same m_chunk, because m_chunk
+    # shapes the core program and so the xclbin (see GEMM._config_tag). It
+    # buckets M by whether m_row_blocks is a multiple of it -- these are all
+    # even -- and excludes the K that would overflow the A descriptor's step.
     shapes = [
-        (256, 1536, 2048, "none"),
-        (256, 1536, 256, "none"),  # only 4 of 8 columns compute
-        (512, 2048, 1536, "none"),
-        (256, 1536, 6144, "gelu"),
-        (256, 1536, 2048, "none"),  # back to the first, after the rest
+        (512, 1536, 2048, "none"),
+        (512, 1536, 256, "none"),  # only 4 of 8 columns compute
+        (1024, 2048, 1536, "none"),
+        (512, 1536, 6144, "gelu"),
+        (512, 1536, 2048, "none"),  # back to the first, after the rest
     ]
     xclbin = None
     for M, K, N, epilogue in shapes:

@@ -27,6 +27,7 @@ from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
+    M_CHUNK_FOR_N,
     C_DEPTH,
     compute_rows,
     CT_OUT_LEN,
@@ -39,6 +40,7 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
     _default_l1,
+    _hw_stride_ok,
 )
 
 
@@ -79,6 +81,9 @@ class GEMM(MLIROperator):
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). __post_init__ resolves None to whatever L1 affords.
     tile_ma: int | None = None
+    # Row-blocks folded into one B fetch. __post_init__ resolves None from
+    # tile_n, falling back to 1 when it would not divide m_row_blocks.
+    m_chunk: int | None = None
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding = Rounding.CONV_EVEN
     context: object = field(default=None, repr=False)
@@ -88,6 +93,7 @@ class GEMM(MLIROperator):
         "epilogue": "epi",
         "tile_n": "tn",
         "tile_ma": "ma",
+        "m_chunk": "mc",
         "rounding": "rnd",
     }
 
@@ -120,12 +126,34 @@ class GEMM(MLIROperator):
             raise ValueError(
                 f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
             )
+        # m_chunk: row-blocks a core folds into one B fetch (design.py's
+        # M_CHUNK_FOR_N). It MUST divide m_row_blocks -- a partial group is
+        # inexpressible, see the raise in design.py -- so fall back to 1 when
+        # it does not. That puts M's divisibility in the configuration, but
+        # only as a 2-bucket split rather than per-shape.
+        if self.m_chunk is None:
+            want = M_CHUNK_FOR_N[self.tile_n]
+            rows = M_TILE * compute_rows(dev)
+            m_row_blocks = self.M // rows if self.M % rows == 0 else 0
+            # Two conditions, both of which force the fallback to 1:
+            #   * m_chunk must DIVIDE m_row_blocks -- a partial group is
+            #     inexpressible, see the raise in design.py.
+            #   * the group's row-blocks sit ROWS*M_TILE*K apart INSIDE the A
+            #     descriptor, so that stride must fit the shim BD's 20-bit
+            #     step. a_split used to lift this dimension out of the
+            #     descriptor entirely; m_chunk puts it back, so big K (10240)
+            #     overflows where m_chunk=1 would not.
+            fits = m_row_blocks and m_row_blocks % want == 0
+            if fits and not _hw_stride_ok(compute_rows(dev) * M_TILE * self.K):
+                fits = False
+            self.m_chunk = want if fits else 1
         if self.tile_ma is None:
             self.tile_ma = _default_l1(
                 self.tile_n,
                 CT_MAX_K_FOR_N[self.tile_n],
                 self._b_elem_bytes,
                 get_target_model(dev.resolve()).get_local_memory_size(),
+                self.m_chunk,
             )[0]
         # N only needs to tile to N_TILE: a trailing group of fewer than
         # COLS column-blocks is handled by giving the columns different trip
@@ -177,8 +205,9 @@ class GEMM(MLIROperator):
         """
         dev = aie_utils.get_current_device().resolve().name
         return (
-            f"tn{self.tile_n}_ma{self.tile_ma}_em{self._epilogue_mask:x}"
-            f"_{self.rounding}_cl{self._clamp_capable}_{dev}"
+            f"tn{self.tile_n}_ma{self.tile_ma}_mc{self.m_chunk}"
+            f"_em{self._epilogue_mask:x}_{self.rounding}"
+            f"_cl{self._clamp_capable}_{dev}"
         )
 
     @property
@@ -264,7 +293,13 @@ class GEMM(MLIROperator):
         would still be reaching the configuration.
         """
         dev = aie_utils.get_current_device()
-        return M_TILE * compute_rows(dev), MIN_K, self.tile_n * dev.cols
+        # M must be at least m_chunk row-blocks: a partial group is
+        # inexpressible (see design.py), and this module must build.
+        return (
+            M_TILE * compute_rows(dev) * self.m_chunk,
+            MIN_K,
+            self.tile_n * dev.cols,
+        )
 
     def _mlir_artifact(self, filename, M, K, N, epilogue, clamp):
         return PythonGeneratedMLIRArtifact(
@@ -280,6 +315,7 @@ class GEMM(MLIROperator):
                     "N": N,
                     "tile_n": self.tile_n,
                     "tile_ma": self.tile_ma,
+                    "m_chunk": self.m_chunk,
                     "epilogue": epilogue,
                     "clamp": clamp,
                     "kernel_object": self._link_file,
