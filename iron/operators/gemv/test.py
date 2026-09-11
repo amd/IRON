@@ -198,11 +198,15 @@ def test_gemv_gelu(
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output,prologue,norm_ref",
     [
+        # K is bounded here in a way the prologue-free gemv tests are not: the
+        # norm reads and writes separate pointers, so a prologue adds a second
+        # K-element L1 buffer on top of the B fifo's. K=8192 with m_input=1
+        # overflows one core's data memory on that extra buffer alone.
         pytest.param(128, 128, 1, 32, 128, "rms", rms_norm_ref),
-        pytest.param(2048, 8192, 1, 1, 2048, "rms", rms_norm_ref),
+        pytest.param(2048, 4096, 1, 1, 2048, "rms", rms_norm_ref),
         pytest.param(8192, 2048, 1, 4, 1024, "rms", rms_norm_ref),
         pytest.param(128, 128, 1, 32, 128, "ln", layer_norm_ref),
-        pytest.param(2048, 8192, 1, 1, 2048, "ln", layer_norm_ref),
+        pytest.param(2048, 4096, 1, 1, 2048, "ln", layer_norm_ref),
         pytest.param(8192, 2048, 1, 4, 1024, "ln", layer_norm_ref),
     ],
 )

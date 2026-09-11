@@ -111,7 +111,7 @@ def my_matvec(
     b_norm_bufs = [None] * cols
     PROLOGUE_EPSILON = 1e-5  # matches layer_norm.cc's hardcoded epsilon
     if prologue != "none":
-        norm_fn = "rms_norm_bf16_vector" if prologue == "rms" else "layer_norm"
+        norm_fn = "rms_norm_bf16_vector" if prologue == "rms" else "layer_norm_f32"
         norm_args = (
             [L1_B_ty, L1_B_ty, np.int32, np.float32]
             if prologue == "rms"
