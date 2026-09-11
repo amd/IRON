@@ -175,10 +175,19 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
+    marked_items = [
+        (item, item.get_closest_marker("supported_devices")) for item in items
+    ]
+    marked_items = [(item, marker) for item, marker in marked_items if marker]
+    if not marked_items:
+        # Nothing collected needs the NPU. Resolving one here would open the
+        # single-tenant device at collection time, contending with whatever
+        # else holds it and erroring out when none is attached.
+        return
+
     device = aie_utils.DefaultNPURuntime.device().resolve().name
-    for item in items:
-        marker = item.get_closest_marker("supported_devices")
-        if marker and device not in marker.args:
+    for item, marker in marked_items:
+        if device not in marker.args:
             item.add_marker(
                 pytest.mark.skip(
                     reason=f"Not supported on {device} (supported: {', '.join(marker.args)})"
