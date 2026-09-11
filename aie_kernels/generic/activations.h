@@ -88,8 +88,7 @@ __attribute__((always_inline)) aie::vector<float, vec_size> sigmoid_vec(aie::vec
 {
     const aie::vector<float, vec_size> v_half = aie::broadcast<float, vec_size>(0.5f);
     const aie::vector<float, vec_size> v_one = aie::broadcast<float, vec_size>(1.0f);
-    aie::vector<float, vec_size> t =
-        tanh_vec<vec_size>(aie::mul(x, v_half).template to_vector<float>());
+    aie::vector<float, vec_size> t = tanh_vec<vec_size>(aie::mul(x, v_half).template to_vector<float>());
     return aie::mul(aie::add(t, v_one), v_half).template to_vector<float>();
 }
 
