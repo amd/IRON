@@ -3,7 +3,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse, csv, os
+import argparse
+import csv
+import os
 from datetime import datetime
 
 

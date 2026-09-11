@@ -18,7 +18,6 @@ Another interpretation of the input tensor is (rows / num_heads, num_heads, cols
 import numpy as np
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16
@@ -45,14 +44,20 @@ def rope(
         + ".o"
     )
 
-    assert cols % (16 * 2) == 0 and cols >= (
-        16 * 2
-    ), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
-    assert rows % num_aie_columns == 0, "rows must be divisible by num_aie_columns"
-    assert angle_rows <= rows and rows % angle_rows == 0, "angle_rows must divide rows"
-    assert (
-        angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0
-    ), "angle_rows must be divisible by num_aie_columns"
+    if cols % (16 * 2) != 0 or cols < (16 * 2):
+        raise ValueError(
+            f"cols ({cols}) must be a multiple of 32 and >= 32 (rope.cc kernel "
+            "processes two 16-element vectors at a time)"
+        )
+    if rows % num_aie_columns != 0:
+        raise ValueError(f"rows ({rows}) must be divisible by num_aie_columns ({num_aie_columns})")
+    if angle_rows > rows or rows % angle_rows != 0:
+        raise ValueError(f"angle_rows ({angle_rows}) must divide rows ({rows})")
+    if angle_rows < num_aie_columns or angle_rows % num_aie_columns != 0:
+        raise ValueError(
+            f"angle_rows ({angle_rows}) must be divisible by num_aie_columns "
+            f"({num_aie_columns})"
+        )
 
     tensor_rows_per_aie_column = rows // num_aie_columns
     angle_rows_per_aie_column = angle_rows // num_aie_columns

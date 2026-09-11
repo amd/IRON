@@ -148,9 +148,8 @@ def fused_mha(
     if num_KV_heads == 0:
         num_KV_heads = heads
 
-    assert (
-        emulate_bf16_mmul_with_bfp16
-    ), "Only emulate_bf16_mmul_with_bfp16=True is supported"
+    if not emulate_bf16_mmul_with_bfp16:
+        raise ValueError("Only emulate_bf16_mmul_with_bfp16=True is supported")
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
     mac_dims = microkernel_mac_dim_map["npu2"][dtype_str]
@@ -166,21 +165,31 @@ def fused_mha(
         print(f"Vectorized: {vectorized}")
         print(f"Enable tracing: {enable_tracing}")
 
-    assert num_KV_heads > 0, "Number of KV heads must be greater than 0"
-    assert heads > 0, "Number of heads must be greater than 0"
-    assert (
-        num_KV_heads <= heads
-    ), "Number of KV heads must be less than or equal to number of heads"
-    assert (
-        heads % num_KV_heads == 0
-    ), f"Number of heads ({heads}) must be divisible by number of KV heads ({num_KV_heads})"
+    if num_KV_heads <= 0:
+        raise ValueError("Number of KV heads must be greater than 0")
+    if heads <= 0:
+        raise ValueError("Number of heads must be greater than 0")
+    if num_KV_heads > heads:
+        raise ValueError(
+            "Number of KV heads must be less than or equal to number of heads"
+        )
+    if heads % num_KV_heads != 0:
+        raise ValueError(
+            f"Number of heads ({heads}) must be divisible by number of KV heads "
+            f"({num_KV_heads})"
+        )
 
-    assert B_q % r == 0, f"B_q must be divisible by r ({B_q} % {r} != 0)"
-    assert B_kv % t == 0, f"B_kv must be divisible by t ({B_kv} % {t} != 0)"
-    assert d % s == 0, f"d must be divisible by s ({d} % {s} != 0)"
+    if B_q % r != 0:
+        raise ValueError(f"B_q ({B_q}) must be divisible by r ({r})")
+    if B_kv % t != 0:
+        raise ValueError(f"B_kv ({B_kv}) must be divisible by t ({t})")
+    if d % s != 0:
+        raise ValueError(f"d ({d}) must be divisible by s ({s})")
 
-    assert S_q_pad % B_q == 0, "Padded S_q must be divisible by B_q"
-    assert S_kv_pad % B_kv == 0, "Padded S_kv must be divisible by B_kv"
+    if S_q_pad % B_q != 0:
+        raise ValueError("Padded S_q must be divisible by B_q")
+    if S_kv_pad % B_kv != 0:
+        raise ValueError("Padded S_kv must be divisible by B_kv")
 
     dtype = dtype_map[dtype_str]
 
@@ -216,7 +225,7 @@ def fused_mha(
     zero_kernel = Kernel(f"zero_{dtype_str}", "mha.o", [qk_ty])
 
     memcopy_kernel_scale = Kernel(
-        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+        "passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
     )
 
     scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
@@ -750,8 +759,9 @@ def fused_mha(
         # Check that the transfer is continuous
         for idx, stride in enumerate(tap._strides[:-1]):
             if stride != 0 and stride != tap._sizes[idx + 1]:
-                raise ValueError(f"Cannot legalize DMA non-contiguous DMA transfer")
-        assert tap._strides[-1] == 1, f"Cannot legalize DMA non-contiguous DMA transfer"
+                raise ValueError("Cannot legalize DMA non-contiguous DMA transfer")
+        if tap._strides[-1] != 1:
+            raise ValueError("Cannot legalize DMA non-contiguous DMA transfer")
 
         tap._sizes = [1, 1, 1, math.prod(sizes)]
         tap._strides = [0, 0, 0, 1]
@@ -769,7 +779,7 @@ def fused_mha(
     legalize_tas(V_tiles)
 
     if verbose:
-        print(f"DMA Transfer Configuration: DRAM <-> Mem tile")
+        print("DMA Transfer Configuration: DRAM <-> Mem tile")
         # print_tap_seq_info(Q_tiles, "Q")
         print_tap_seq_info(K_tiles, "K")
         print_tap_seq_info(V_tiles, "V")

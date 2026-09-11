@@ -19,7 +19,8 @@ import time
 import argparse
 
 import safetensors.torch
-import tiktoken, tiktoken.load
+import tiktoken
+import tiktoken.load
 
 # Configuration
 # ##########################################################################

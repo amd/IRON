@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import numpy as np
-from ml_dtypes import bfloat16
 
 
 def generate_golden_reference(M=1, K=2048, N=8192, seed=42):

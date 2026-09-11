@@ -48,13 +48,22 @@ def my_matvec(
         print(f"Columns: {cols}")
 
     # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
-    assert (
-        m_output % m_input == 0 and m_output >= m_input
-    ), "m_output must be a multiple of m_input"
-    assert m_output <= M // cols, "m_output must be less than or equal to M/cols"
-    assert (M // cols) % m_output == 0, "m_output must evenly divide M/cols"
-    assert m_input <= M // cols, "m_input must be less than or equal to M/cols"
-    assert (M // cols) % m_input == 0, "m_input must evenly divide M/cols"
+    if not (m_output % m_input == 0 and m_output >= m_input):
+        raise ValueError(
+            f"m_output ({m_output}) must be a multiple of m_input ({m_input})"
+        )
+    if m_output > M // cols:
+        raise ValueError(
+            f"m_output ({m_output}) must be less than or equal to M/cols ({(M // cols)})"
+        )
+    if (M // cols) % m_output != 0:
+        raise ValueError(f"(M // cols) ({M // cols}) must evenly divide m_output ({m_output})")
+    if m_input > M // cols:
+        raise ValueError(
+            f"m_input ({m_input}) must be less than or equal to M/cols ({(M // cols)})"
+        )
+    if (M // cols) % m_input != 0:
+        raise ValueError(f"(M // cols) ({M // cols}) must evenly divide m_input ({m_input})")
 
     vectorized = True
     dtype_in = np.dtype[bfloat16]
@@ -62,7 +71,8 @@ def my_matvec(
     dtype_out = np.dtype[bfloat16]
     dtype_out_str = "bf16"
 
-    assert M % cols == 0
+    if M % cols != 0:
+        raise ValueError(f"M ({M}) must be a multiple of cols ({cols})")
 
     L1_A_ty = np.ndarray[
         (
@@ -89,12 +99,16 @@ def my_matvec(
     # Optional fused activation over the full m_output C-tile, applied once per tile in core_body
     # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose m_input
     # tile can be smaller than the 16-wide activation vector.
-    assert epilogue in ("none", "gelu")
+    if epilogue not in ("none", "gelu"):
+        raise ValueError(
+            f"unknown epilogue {epilogue!r} (expected 'none' or 'gelu')"
+        )
     gelu_kernel = None
     if epilogue == "gelu":
-        assert (
-            m_output % 16 == 0
-        ), f"gelu epilogue needs m_output % 16 == 0 (got {m_output})"
+        if m_output % 16 != 0:
+            raise ValueError(
+                f"gelu epilogue needs m_output % 16 == 0 (got {m_output})"
+            )
         gelu_kernel = Kernel(
             f"{func_prefix}gelu_tile_bf16",
             f"{func_prefix}{kernel_object}",
@@ -238,9 +252,12 @@ def my_matvec(
         # overrun). depth>=2 only buys OVERLAP of fill with compute, so it is a
         # performance guard here, not a correctness requirement (depth==1 is correct but
         # fully serial).
-        assert all(f.depth >= 2 for f in A_L3L1_fifos) and all(
+        if not (all(f.depth >= 2 for f in A_L3L1_fifos) and all(
             f.depth >= 2 for f in C_L1L3_fifos
-        ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
+        )):
+            raise ValueError(
+                "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
+            )
         A_taps_coalesced = [
             coalesced_tap(L3_A_ty, col * (M // cols) * K, A_split, A_bstride)
             for col in range(cols)

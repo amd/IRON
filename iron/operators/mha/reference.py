@@ -5,7 +5,6 @@ import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import numpy as np
-from ml_dtypes import bfloat16
 
 
 def pad_to_multiple_of_64(tensor, seq_dim, num_pipeline=1):

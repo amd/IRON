@@ -10,7 +10,6 @@ from __future__ import annotations
 import numpy as np
 import importlib.util
 from functools import partial
-from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
