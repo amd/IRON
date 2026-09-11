@@ -63,12 +63,7 @@ class GEMM(MLIROperator):
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
         # r, s, t are the aie::mmul tile dims the bf16 kernel is built from
-        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul): it expands A
-        # and B 2x in m and n, so the static_asserts there require
-        # m % (2*r) == 0, k % s == 0, n % (2*t) == 0 -- a divisibility rule,
-        # not a lower bound. A tile_m/tile_n that merely meets the old ">="
-        # check (e.g. 8 or 12) passes here and then fails that static_assert
-        # at kernel compile time, in a file this class never names.
+        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul)
         if self.emulate_bf16_mmul_with_bfp16:
             r, s, t = 8, 8, 8
         else:
