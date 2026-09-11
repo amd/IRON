@@ -20,7 +20,7 @@ from aie.iron import (
     str_to_dtype,
 )
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
-from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
+from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
 
@@ -78,12 +78,6 @@ def main():
     )
     argparser.add_argument("--trace_size", type=int, default=0)
     argparser.add_argument(
-        "--generate-taps",
-        action="store_true",
-        help="Generate TensorAccessPatterns, a Python object to represent each data transfer"
-        "of the input/output matrices. These objects can be used for visualization.",
-    )
-    argparser.add_argument(
         "--output-file-path",
         "-o",
         type=str,
@@ -91,7 +85,7 @@ def main():
     )
 
     args = argparser.parse_args()
-    maybe_module = my_matmul(
+    module = my_matmul(
         args.dev,
         args.M,
         args.K,
@@ -111,16 +105,11 @@ def main():
         args.trace_size,
         args.archive,
         "",
-        args.generate_taps,
     )
 
-    if args.generate_taps:
-        return maybe_module
-    else:
-        output_file_path = Path(args.output_file_path)
-
-        with open(output_file_path, "w") as f:
-            f.write(str(maybe_module))
+    output_file_path = Path(args.output_file_path)
+    with open(output_file_path, "w") as f:
+        f.write(str(module))
 
 
 def ceildiv(a, b):
@@ -147,7 +136,6 @@ def my_matmul(
     trace_size,
     kernel_object=None,
     func_prefix="",
-    generate_taps=False,
 ):
     n_aie_rows = 4
 
@@ -171,6 +159,17 @@ def my_matmul(
     mem_tile_m_A = m * n_A_tiles_per_shim
     mem_tile_m_C = m * n_aie_rows
     mem_tile_n = n * n_aie_cols
+
+    # A shim BD's outermost descriptor dimension lands in the ITERATION field,
+    # whose step is 20 bits wide (AIETargetModel::getDmaBdStepBits for
+    # ShimNOCTile). An element stride S is re-expressed as (S - 1) * itemsize
+    # / 4-byte address granularity before the check, so a wide N pushes C's row
+    # stride past it: M=1024 K=2560 N=10240 needs mem_tile_m_C * N = 2621440
+    # and aiecc rejects the build with "Stride 3 exceeds the [1:1048576]
+    # range". See the C drain below for how that is split, and flm_gemm's
+    # design.py for the same fix worked through in more detail.
+    def _hw_stride_ok(stride_elems, itemsize):
+        return (stride_elems - 1) * itemsize // 4 <= (1 << 20) - 1
 
     if prio_accuracy:
         assert (
@@ -261,12 +260,6 @@ def my_matmul(
             dev_ty = NPU1()
     else:
         dev_ty = NPU2()
-
-    # These will hold TensorAccessPattern objects that represent the runtime
-    # npu_dma_memcpy_nd operations of this design. They are only used if generate_taps is true
-    A_taps = []
-    B_taps = []
-    C_taps = []
 
     # Define tensor types
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
@@ -597,39 +590,69 @@ def my_matmul(
                         #     |                |
                         #     |                |
                         #      ----------------
+                        # Normally one descriptor walks all current_tb_n_rows
+                        # row-blocks. When that outermost stride overflows the
+                        # shim's 20-bit iteration step (see _hw_stride_ok
+                        # above), issue one descriptor per row-block instead,
+                        # carrying the row jump in the OFFSET -- which has no
+                        # such limit -- and leaving the outer dimension
+                        # degenerate. Same bytes, same order, same number of
+                        # objects; only the descriptor is reshaped.
+                        #
+                        # These extra tasks are safe against the two shim
+                        # limits neither the toolchain nor the verifier models.
+                        # BD ids: all of a (tb, pingpong) iteration's tasks stay
+                        # live until tg.finish() below, so they stay distinct --
+                        # 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
+                        # task queue: the C channel goes from 2 outstanding to
+                        # current_tb_n_rows x 2 = 4, which is where A and B
+                        # already sit.
+                        C_rows = [(row_base, current_tb_n_rows)]
                         if not c_col_maj:
-                            C_row_offset = row_base * mem_tile_m_C * N
-                            C_col_offset = col * n
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [
-                                current_tb_n_rows,
-                                N // mem_tile_n,
-                                mem_tile_m_C,
-                                n,
-                            ]
-                            C_strides = [mem_tile_m_C * N, mem_tile_n, N, 1]
-                        else:
-                            C_row_offset = row_base * mem_tile_m_C
-                            C_col_offset = col * n * M
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                            C_strides = [M * mem_tile_n, m, M, 1]
-                        C_tile = TensorAccessPattern(
-                            (N, M) if c_col_maj else (M, N),
-                            offset=C_offset,
-                            sizes=C_sizes,
-                            strides=C_strides,
-                        )
+                            row_stride = mem_tile_m_C * N
+                            if current_tb_n_rows > 1 and not _hw_stride_ok(
+                                row_stride, np.dtype(dtype_out).itemsize
+                            ):
+                                C_rows = [
+                                    (row_base + r, 1) for r in range(current_tb_n_rows)
+                                ]
 
-                        # This line does not change MLIR output at all - it's just for recording data movement
-                        C_taps.append(C_tile)
+                        for c_row_base, c_n_rows in C_rows:
+                            if not c_col_maj:
+                                C_row_offset = c_row_base * mem_tile_m_C * N
+                                C_col_offset = col * n
+                                C_offset = C_col_offset + C_row_offset
+                                C_sizes = [
+                                    c_n_rows,
+                                    N // mem_tile_n,
+                                    mem_tile_m_C,
+                                    n,
+                                ]
+                                C_strides = [
+                                    mem_tile_m_C * N if c_n_rows > 1 else 0,
+                                    mem_tile_n,
+                                    N,
+                                    1,
+                                ]
+                            else:
+                                C_row_offset = c_row_base * mem_tile_m_C
+                                C_col_offset = col * n * M
+                                C_offset = C_col_offset + C_row_offset
+                                C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
+                                C_strides = [M * mem_tile_n, m, M, 1]
+                            C_tile = TensorAccessPattern(
+                                (N, M) if c_col_maj else (M, N),
+                                offset=C_offset,
+                                sizes=C_sizes,
+                                strides=C_strides,
+                            )
 
-                        C_conses[col].drain(
-                            C,
-                            tap=C_tile,
-                            wait=True,
-                            group=tg,
-                        )
+                            C_conses[col].drain(
+                                C,
+                                tap=C_tile,
+                                wait=True,
+                                group=tg,
+                            )
 
                     for tile_row in range(current_tb_n_rows):
                         if separate_c_tiles:
@@ -683,9 +706,6 @@ def my_matmul(
                                 wait=True,
                                 group=tg,
                             )
-                            # This line does not change MLIR output at all - it's just for recording data movement
-                            C_taps.append(C_tile)
-
                         # A input transfer:
                         #
                         # The smallest transfer unit is a (m*n_A_tiles_per_shim)-sized sub-tile of the input matrix.
@@ -742,10 +762,6 @@ def my_matmul(
                             tap=B_tiles[col],
                             group=tg,
                         )
-
-                        # These lines do not change MLIR output at all - they are just for recording data movement
-                        A_taps.append(A_tiles[tile_offset])
-                        B_taps.append(B_tiles[col])
                 if tb > 0 or (tb == 0 and pingpong > 0):
                     tg.finish()
                     tg = TaskGroup()
@@ -771,20 +787,7 @@ def my_matmul(
     maybe_enable_trace(my_program, trace_size, workers)
 
     # Place components (assign them resources on the device) and generate an MLIR module.
-    # This is what runs the sequence body, so it must happen before the taps it
-    # records are read.
-    module = my_program.resolve_program()
-
-    if generate_taps:
-        # If generate taps is true, return a representation of tensor access patterns
-        # representing all the npu_dma_memcpy_nd runtime sequence operations per input/ouput tensor.
-        return (
-            TensorAccessSequence.from_taps(A_taps),
-            TensorAccessSequence.from_taps(B_taps),
-            TensorAccessSequence.from_taps(C_taps),
-        )
-
-    return module
+    return my_program.resolve_program()
 
 
 if __name__ == "__main__":

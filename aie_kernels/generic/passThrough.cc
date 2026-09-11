@@ -10,6 +10,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Element width in bits, chosen by the caller with -DBIT_WIDTH; 32 if unset.
+#ifndef BIT_WIDTH
+#define BIT_WIDTH 32
+#endif
+
 template <typename T, int N>
 __attribute__((noinline)) void
 passThrough_aie(T *restrict in, T *restrict out, const int32_t height, const int32_t width)

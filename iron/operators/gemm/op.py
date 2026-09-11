@@ -105,7 +105,6 @@ class GEMM(MLIROperator):
                     "prio_accuracy": self.prio_accuracy,
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
-                    "generate_taps": False,
                     "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 },
             ),
