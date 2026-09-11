@@ -3,18 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The root conftest.py's pytest_collection_modifyitems must not resolve a
-device unless some collected test actually restricts itself to specific
-devices via @pytest.mark.supported_devices.
+device unless some collected test restricts itself to specific devices via
+@pytest.mark.supported_devices. Resolving one unconditionally opens the
+single-tenant NPU on every plain `pytest` in this tree, whatever was selected.
 
-Before this fix it called aie_utils.DefaultNPURuntime.device() unconditionally
-at collection time, so a plain `pytest` in this tree opened the NPU
-regardless of which test was selected -- contending with anything else
-using the (single-tenant) device, and failing outright with no NPU present.
-
-Loads the real root conftest.py by path (rather than depending on pytest's
-own conftest-loading, which would defeat the point of testing it in
-isolation) and calls its hook directly with fake items and a stubbed
-aie_utils.DefaultNPURuntime that raises if .device() is ever called.
+pytest loads the root conftest.py for these tests too, so the hook under test
+is imported by path instead and called directly, against fake items and a
+stubbed aie_utils.DefaultNPURuntime that raises if .device() is reached.
 """
 
 import importlib.util
@@ -28,7 +23,9 @@ _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 
 
 def _load_root_conftest():
-    spec = importlib.util.spec_from_file_location("_root_conftest_under_test", _ROOT_CONFTEST)
+    spec = importlib.util.spec_from_file_location(
+        "_root_conftest_under_test", _ROOT_CONFTEST
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -74,12 +71,13 @@ def test_no_device_probe_when_nothing_is_device_restricted(monkeypatch):
     _stub_runtime_that_forbids_device_calls(root_conftest, monkeypatch)
 
     items = [_FakeItem(), _FakeItem(), _FakeItem()]
-    # Must not raise _DeviceCalledError.
     root_conftest.pytest_collection_modifyitems(config=None, items=items)
     assert all(item.markers_added == [] for item in items)
 
 
-def test_device_probed_and_marker_logic_preserved_when_a_test_is_restricted(monkeypatch):
+def test_device_probed_and_unsupported_items_skipped_when_a_test_is_restricted(
+    monkeypatch,
+):
     root_conftest = _load_root_conftest()
 
     class _FakeDevice:

@@ -180,10 +180,9 @@ def pytest_collection_modifyitems(config, items):
     ]
     marked_items = [(item, marker) for item, marker in marked_items if marker]
     if not marked_items:
-        # No collected test restricts itself to specific devices, so nothing
-        # here needs the NPU. Resolving it anyway made a plain `pytest`
-        # collection open the device unconditionally, contending with
-        # whatever else is using it and failing outright with no NPU at all.
+        # Nothing collected needs the NPU. Resolving one here would open the
+        # single-tenant device at collection time, contending with whatever
+        # else holds it and erroring out when none is attached.
         return
 
     device = aie_utils.DefaultNPURuntime.device().resolve().name
