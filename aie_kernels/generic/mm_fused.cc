@@ -38,14 +38,13 @@
 #ifndef MM_FUSED_EPILOGUE_MODE_MASK
 #define MM_FUSED_EPILOGUE_MODE_MASK 0xF
 #endif
+// Whether a clamp is compiled in at all. Like the mode mask above this is a
+// CAPABILITY, not a selection: compiling the clamped path costs program
+// memory, so a build that never clamps should not carry it. The BOUNDS are
+// runtime parameters (see mm_fused_epilogue_chunk), so every pair of bounds
+// shares one build.
 #ifndef MM_FUSED_CLAMP
 #define MM_FUSED_CLAMP 0
-#endif
-#ifndef MM_FUSED_CLAMP_MIN
-#define MM_FUSED_CLAMP_MIN 0.0f
-#endif
-#ifndef MM_FUSED_CLAMP_MAX
-#define MM_FUSED_CLAMP_MAX 0.0f
 #endif
 
 namespace
@@ -107,12 +106,15 @@ constexpr aie::rounding_mode round_mode = aie::rounding_mode::floor;
 #endif
 // One activation's inner loop. Templated so each mode compiles branch-free;
 // mm_fused_epilogue_chunk selects between them once per chunk.
-template <int MODE> static inline void epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src)
+template <int MODE, bool CLAMP>
+static inline void
+epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src, float clamp_min, float clamp_max)
 {
-#if MM_FUSED_CLAMP
-    const aie::vector<float, V> lo = aie::broadcast<float, V>(MM_FUSED_CLAMP_MIN);
-    const aie::vector<float, V> hi = aie::broadcast<float, V>(MM_FUSED_CLAMP_MAX);
-#endif
+    aie::vector<float, V> lo, hi;
+    if constexpr (CLAMP) {
+        lo = aie::broadcast<float, V>(clamp_min);
+        hi = aie::broadcast<float, V>(clamp_max);
+    }
 
     AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
     for (int j = 0; j < CHUNK / V; j++) {
@@ -127,9 +129,8 @@ template <int MODE> static inline void epilogue_body(bfloat16 *__restrict y_out,
             f = silu_vec<V>(f);
         else if constexpr (MODE == 3)
             f = sigmoid_vec<V>(f);
-#if MM_FUSED_CLAMP
-        f = aie::max(aie::min(f, hi), lo);
-#endif
+        if constexpr (CLAMP)
+            f = aie::max(aie::min(f, hi), lo);
         aie::accum<accfloat, V> out;
         out.from_vector(f);
         // The assignment is the conversion: to_v16bfloat16 yields a raw
@@ -137,6 +138,25 @@ template <int MODE> static inline void epilogue_body(bfloat16 *__restrict y_out,
         aie::vector<bfloat16, V> v = to_v16bfloat16(out);
         aie::store_v(y_out + j * V, v);
     }
+}
+
+// Pick the clamped or unclamped instantiation for a mode. Only one of the two
+// exists unless MM_FUSED_CLAMP compiled the clamp in, so a build that never
+// clamps pays nothing for this.
+template <int MODE>
+static inline void epilogue_dispatch(bfloat16 *__restrict y_out,
+                                     const float *__restrict src,
+                                     int32_t clamp_enabled,
+                                     float clamp_min,
+                                     float clamp_max)
+{
+#if MM_FUSED_CLAMP
+    if (clamp_enabled) {
+        epilogue_body<MODE, true>(y_out, src, clamp_min, clamp_max);
+        return;
+    }
+#endif
+    epilogue_body<MODE, false>(y_out, src, clamp_min, clamp_max);
 }
 } // namespace
 
@@ -182,39 +202,58 @@ void mm_fused_k_step(bfloat16 *a_buf, mm_fused_b_elem_t *b_buf, float *y_acc, in
 // The mode is a runtime argument, because one xclbin serves every activation.
 // It is tested once per chunk, outside the vector loop, so each mode still runs
 // a branch-free inner loop; the cost is program memory, since every mode in
-// MM_FUSED_EPILOGUE_MODE_MASK is compiled in. The clamp stays compile-time.
+// MM_FUSED_EPILOGUE_MODE_MASK is compiled in.
+//
+// The clamp follows the same split: whether a clamped path exists at all is
+// compile-time (MM_FUSED_CLAMP, since it costs program memory), while
+// clamp_enabled and the BOUNDS are runtime, so every pair of bounds shares one
+// build. The bounds arrive as raw int32 bit patterns because the RTP mechanism
+// (aie.dialects.aie.npu_write_rtp) only writes i32 words; design.py bit-casts
+// them on the host side.
 //
 // The chunk index is split in two because the core body unrolls the drain by
 // the C fifo depth to keep the acquired buffer index a compile-time constant;
 // passing both parts avoids doing that arithmetic up there.
-void mm_fused_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer, int32_t half, int32_t mode)
+void mm_fused_epilogue_chunk(bfloat16 *y_out,
+                             float *y_acc,
+                             int32_t outer,
+                             int32_t half,
+                             int32_t mode,
+                             int32_t clamp_enabled,
+                             int32_t clamp_min_bits,
+                             int32_t clamp_max_bits)
 {
     // The store below is a conversion, so it obeys the same rounding mode the
     // mmul does and must agree with it.
     ::aie::set_rounding(round_mode);
     const float *__restrict src = y_acc + (outer * C_DEPTH + half) * CHUNK;
+    // __builtin_bit_cast, not memcpy: memcpy leaves an unresolved external
+    // call in the compiled object here rather than folding to a register move,
+    // and this runs once per chunk drain.
+    const float clamp_min = __builtin_bit_cast(float, clamp_min_bits);
+    const float clamp_max = __builtin_bit_cast(float, clamp_max_bits);
 
     switch (mode) {
 #if MM_FUSED_EPILOGUE_MODE_MASK & 2
     case 1:
-        epilogue_body<1>(y_out, src);
+        epilogue_dispatch<1>(y_out, src, clamp_enabled, clamp_min, clamp_max);
         return;
 #endif
 #if MM_FUSED_EPILOGUE_MODE_MASK & 4
     case 2:
-        epilogue_body<2>(y_out, src);
+        epilogue_dispatch<2>(y_out, src, clamp_enabled, clamp_min, clamp_max);
         return;
 #endif
 #if MM_FUSED_EPILOGUE_MODE_MASK & 8
     case 3:
-        epilogue_body<3>(y_out, src);
+        epilogue_dispatch<3>(y_out, src, clamp_enabled, clamp_min, clamp_max);
         return;
 #endif
     // Mode 0 is always compiled: it is the fallback for a mode the mask leaves
     // out, so an unselectable mode yields an unactivated result rather than an
     // unwritten buffer.
     default:
-        epilogue_body<0>(y_out, src);
+        epilogue_dispatch<0>(y_out, src, clamp_enabled, clamp_min, clamp_max);
         return;
     }
 }

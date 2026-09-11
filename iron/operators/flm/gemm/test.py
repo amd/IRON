@@ -373,3 +373,41 @@ def test_one_xclbin_serves_every_shape(aie_context):
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
+
+
+def test_one_xclbin_serves_every_clamp_bound(aie_context):
+    """Different clamp bounds back to back on one loaded xclbin.
+
+    The bounds are runtime parameters, so they must not rebuild anything;
+    only clamped-versus-unclamped is a build choice, because the clamped
+    instantiation costs program memory. See GEMM._clamp_capable.
+
+    Deliberately separate from test_one_xclbin_serves_every_shape: that one
+    never clamps, so it cannot catch bounds leaking back into the
+    configuration, which is exactly what this asserts.
+    """
+    M, K, N = 256, 512, 1024
+    bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
+    xclbin = None
+    for clamp in bounds:
+        operator = GEMM(M=M, K=K, N=N, clamp=clamp, context=aie_context)
+        golden_ref = generate_golden_reference(
+            M=M, K=K, N=N, clamp=clamp, scale=INPUT_SCALE
+        )
+        errors, _, _ = check_on_device(operator, golden_ref, K)
+        assert not errors, f"clamp={clamp} produced wrong output"
+
+        stamp = (
+            operator.xclbin_artifact.filename,
+            os.path.getmtime(operator.xclbin_artifact.filename),
+        )
+        if xclbin is None:
+            xclbin = stamp
+        assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
+
+    # ...but an unclamped build is a different configuration, and must be:
+    # the clamped instantiation is compiled out entirely there. config_name
+    # rather than xclbin_artifact, which only exists once compile() has run.
+    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
+    unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
+    assert unclamped.config_name != clamped.config_name

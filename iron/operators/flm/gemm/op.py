@@ -20,7 +20,6 @@ from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 from iron.common.operator_bases import lut_based_ops_artifacts
-from iron.common.utils import float_to_name
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -156,19 +155,30 @@ class GEMM(MLIROperator):
         return 1 | sum(1 << Epilogue(m).mode for m in self.epilogue_modes)
 
     @property
+    def _clamp_capable(self) -> int:
+        """Whether a clamped path is compiled in at all.
+
+        Like ``epilogue_modes`` this is a capability, not a selection: the
+        clamped instantiation costs program memory, so a build that never
+        clamps should not carry it. The BOUNDS are runtime parameters, so
+        ``clamp=(-2, 2)`` and ``clamp=(-4, 4)`` share one xclbin -- only
+        clamped-versus-not forks the build.
+        """
+        return 1 if self.clamp is not None else 0
+
+    @property
     def _config_tag(self) -> str:
         """Everything that shapes the device configuration, and so the xclbin.
 
-        M, K, N and the activation are absent: they are runtime parameters, so
-        they change only the instruction stream.
+        M, K, N, the activation and the clamp BOUNDS are absent: they are
+        runtime parameters, so they change only the instruction stream.
+        Whether a clamp exists at all does shape the build; see
+        ``_clamp_capable``.
         """
-        clamp = ""
-        if self.clamp is not None:
-            clamp = "_clamp" + "_".join(float_to_name(float(v)) for v in self.clamp)
         dev = aie_utils.get_current_device().resolve().name
         return (
             f"tn{self.tile_n}_ma{self.tile_ma}_em{self._epilogue_mask:x}"
-            f"_{self.rounding}{clamp}_{dev}"
+            f"_{self.rounding}_cl{self._clamp_capable}_{dev}"
         )
 
     @property
@@ -216,13 +226,10 @@ class GEMM(MLIROperator):
         which set the blocked layout, and the epilogue flags, which since the
         epilogue was folded into this translation unit shape the same object.
         """
-        clamp = ""
-        if self.clamp is not None:
-            clamp = "_clamp" + "_".join(float_to_name(float(v)) for v in self.clamp)
         return (
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_em{self._epilogue_mask:x}{clamp}.o"
+            f"_em{self._epilogue_mask:x}_cl{self._clamp_capable}.o"
         )
 
     @property
@@ -259,7 +266,7 @@ class GEMM(MLIROperator):
         dev = aie_utils.get_current_device()
         return M_TILE * compute_rows(dev), MIN_K, self.tile_n * dev.cols
 
-    def _mlir_artifact(self, filename, M, K, N, epilogue):
+    def _mlir_artifact(self, filename, M, K, N, epilogue, clamp):
         return PythonGeneratedMLIRArtifact(
             filename,
             DesignGenerator(
@@ -274,6 +281,7 @@ class GEMM(MLIROperator):
                     "tile_n": self.tile_n,
                     "tile_ma": self.tile_ma,
                     "epilogue": epilogue,
+                    "clamp": clamp,
                     "kernel_object": self._link_file,
                     "trace_size": 0,
                 },
@@ -282,7 +290,7 @@ class GEMM(MLIROperator):
 
     def get_mlir_artifact(self):
         return self._mlir_artifact(
-            f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue
+            f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue, self.clamp
         )
 
     def set_up_artifacts(self) -> None:
@@ -291,8 +299,16 @@ class GEMM(MLIROperator):
         # The xclbin comes from a module emitted at a reference shape and a
         # reference activation, so every shape sharing this configuration
         # reuses it rather than rebuilding an identical one.
+        # Canonical bounds, not this instance's: the clamp BOUNDS only reach
+        # the runtime sequence, which this module has discarded, so passing
+        # the real ones would make a filename-cached artifact's content depend
+        # on something that never reaches the xclbin. Only the capability
+        # matters here, and that is already in config_name.
         config_mlir = self._mlir_artifact(
-            f"{self.config_name}.mlir", *self._reference_shape, Epilogue.NONE
+            f"{self.config_name}.mlir",
+            *self._reference_shape,
+            Epilogue.NONE,
+            (0.0, 0.0) if self._clamp_capable else None,
         )
         self.xclbin_artifact = XclbinArtifact(
             f"{self.config_name}.xclbin",
@@ -345,20 +361,13 @@ class GEMM(MLIROperator):
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
             f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
+            # Capability only -- the bounds are runtime. See _clamp_capable.
+            f"-DMM_FUSED_CLAMP={self._clamp_capable}",
         ] + arch_include
         if self._bfp16_b:
             flags += [
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
                 "-DMM_FUSED_BFP16_B",
-            ]
-        if self.clamp is not None:
-            lo, hi = self.clamp
-            # repr() rather than :g -- the latter renders -4.0 as "-4", and
-            # "-4f" is not a valid C float literal.
-            flags += [
-                "-DMM_FUSED_CLAMP=1",
-                f"-DMM_FUSED_CLAMP_MIN={float(lo)!r}f",
-                f"-DMM_FUSED_CLAMP_MAX={float(hi)!r}f",
             ]
         if self.rounding is Rounding.CONV_EVEN:
             # ROUND_CONV_EVEN is mm.cc's flag, reused rather than inventing a

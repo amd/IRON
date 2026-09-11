@@ -78,7 +78,7 @@ Two consequences of the native-vs-emulated split are worth knowing:
 
 ## Runtime parameters
 
-Five words in an L1 buffer per core, written by the runtime sequence and read
+Eight words in an L1 buffer per core, written by the runtime sequence and read
 by the core once its barrier opens:
 
 | word | value |
@@ -88,19 +88,29 @@ by the core once its barrier opens:
 | `m_row_blocks` | `M / 256` |
 | `k_iters` | `K / 512` |
 | epilogue | the `Epilogue` mode |
+| `clamp_enabled` | whether to apply the clamp |
+| `clamp_min` / `clamp_max` | the bounds, as raw `int32` bit patterns |
+
+The clamp bounds are floats, but `npu_write_rtp` writes `i32` words only, so
+they travel bit-cast and the kernel casts them back with
+`__builtin_bit_cast` -- `memcpy` leaves an unresolved external call in the
+compiled object rather than folding to a register move.
 
 All columns are always built. One with no work for a shape gets `n_work = 0`
 and still drains its share of the A broadcast, because the memtile will not
 release an A object until every consumer has taken it.
 
 The two artifacts therefore carry different stems: the xclbin's `config_name`
-covers tile_n, tile_ma, the compiled activation set, clamp, rounding and the
-device, while `name` adds M, K, N and the activation. The xclbin is built from
-a module emitted at a reference shape, whose runtime sequence is discarded.
+covers tile_n, tile_ma, the compiled activation set, whether a clamp exists,
+rounding and the device, while `name` adds M, K, N and the activation. The
+xclbin is built from a module emitted at a reference shape, whose runtime
+sequence is discarded.
 
-Which activations the epilogue can *select between* stays a build-time choice,
-since each one compiled in costs program memory; `epilogue_modes` sets it and
-lands in the xclbin's name.
+Two things stay build-time, for the same reason -- each costs program memory:
+which activations the epilogue can *select between* (`epilogue_modes`), and
+whether a clamped path exists at all. Both land in the xclbin's name. Note the
+asymmetry for clamp: *whether* to clamp is a build choice, but the *bounds*
+are runtime, so `clamp=(-2, 2)` and `clamp=(-4, 4)` share one xclbin.
 
 The core releases its barrier straight after reading the parameters.
 `wait_for_value` emits `LockAction.Acquire`, which does not leave the lock

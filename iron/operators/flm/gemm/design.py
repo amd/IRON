@@ -147,8 +147,24 @@ class Epilogue(StrEnum):
 
 
 # The runtime parameter buffer each core reads once its barrier opens.
-RTP_N_WORK, RTP_N_DRAIN, RTP_M_ROW_BLOCKS, RTP_K_ITERS, RTP_EPILOGUE = range(5)
-RTP_WORDS = 5
+#
+# The clamp bounds are the one non-obvious entry: they are floats, but
+# npu_write_rtp only writes i32 words, so they travel as raw bit patterns and
+# the kernel bit-casts them back. Whether a clamped path exists at all stays
+# compile-time (op.py's -DMM_FUSED_CLAMP), because it costs program memory;
+# only the enable and the bounds are runtime, so every pair of bounds shares
+# one build.
+(
+    RTP_N_WORK,
+    RTP_N_DRAIN,
+    RTP_M_ROW_BLOCKS,
+    RTP_K_ITERS,
+    RTP_EPILOGUE,
+    RTP_CLAMP_ENABLED,
+    RTP_CLAMP_MIN_BITS,
+    RTP_CLAMP_MAX_BITS,
+) = range(8)
+RTP_WORDS = 8
 
 
 class Rounding(StrEnum):
@@ -281,6 +297,7 @@ def gemm(
     K,
     N,
     epilogue=Epilogue.NONE,
+    clamp=None,
     tile_n=N_TILE_DEFAULT,
     tile_ma=None,
     overlap=None,
@@ -343,6 +360,15 @@ def gemm(
     MIN_N = N_TILE * COLS
 
     epilogue = Epilogue(epilogue)
+    # Clamp bounds ride the RTP buffer as raw int32 bit patterns: npu_write_rtp
+    # writes i32 words only, so the kernel bit-casts them back. Bounds being
+    # runtime is what lets every pair share one build; whether a clamped path
+    # exists at all is still op.py's -DMM_FUSED_CLAMP, because it costs
+    # program memory.
+    clamp_enabled = 1 if clamp is not None else 0
+    clamp_lo, clamp_hi = clamp if clamp is not None else (0.0, 0.0)
+    clamp_min_bits = int(np.float32(clamp_lo).view(np.int32))
+    clamp_max_bits = int(np.float32(clamp_hi).view(np.int32))
     # A compute tile does a whole m x n block or nothing, so M and K must tile
     # exactly. N need only be a multiple of N_TILE: a trailing group of fewer
     # than COLS blocks is handled by giving the columns different trip counts
@@ -463,7 +489,8 @@ def gemm(
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,
         kernel_object,
-        [ct_out_ty, ct_acc_ty, np.int32, np.int32, np.int32],
+        # outer, half, mode, clamp_enabled, clamp_min_bits, clamp_max_bits
+        [ct_out_ty, ct_acc_ty] + [np.int32] * 6,
     )
 
     # --- Data movement ----------------------------------------------------
@@ -618,6 +645,9 @@ def gemm(
         n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
         n_k_iters = my_rtp[RTP_K_ITERS]
         epi_mode = my_rtp[RTP_EPILOGUE]
+        clamp_enabled = my_rtp[RTP_CLAMP_ENABLED]
+        clamp_min_bits = my_rtp[RTP_CLAMP_MIN_BITS]
+        clamp_max_bits = my_rtp[RTP_CLAMP_MAX_BITS]
         # Acquire does not consume the barrier, so take it back to zero or the
         # next dispatch reads these parameters again instead of waiting. Safe
         # before the work: the sequence cannot set the barrier again until it
@@ -645,7 +675,16 @@ def gemm(
                 for chunk in range_(O_CHUNKS // C_DEPTH):
                     for half in range(C_DEPTH):
                         o = o_h.acquire(1)
-                        epi_k(o, acc, chunk, half, epi_mode)
+                        epi_k(
+                            o,
+                            acc,
+                            chunk,
+                            half,
+                            epi_mode,
+                            clamp_enabled,
+                            clamp_min_bits,
+                            clamp_max_bits,
+                        )
                         o_h.release(1)
 
         # Column-blocks this column sits out. A is broadcast along the whole
@@ -784,6 +823,9 @@ def gemm(
                 rtps[r][c][RTP_M_ROW_BLOCKS] = m_row_blocks
                 rtps[r][c][RTP_K_ITERS] = k_iters
                 rtps[r][c][RTP_EPILOGUE] = epilogue.mode
+                rtps[r][c][RTP_CLAMP_ENABLED] = clamp_enabled
+                rtps[r][c][RTP_CLAMP_MIN_BITS] = clamp_min_bits
+                rtps[r][c][RTP_CLAMP_MAX_BITS] = clamp_max_bits
         for r in range(ROWS):
             for c in range(n_active_cols):
                 barriers[r][c].set(1)
