@@ -27,8 +27,8 @@ class SwiGLUPrefill(OperatorSequence):
         self.embedding_dim = embedding_dim
         self.prio_accuracy = prio_accuracy
 
-        # GEMM, SiLU, ElementwiseMul require input shapes that meet hardware 
-        # alignment requirements (e.g. GEMM needs M % (tile_m * 4) == 0). We 
+        # GEMM, SiLU, ElementwiseMul require input shapes that meet hardware
+        # alignment requirements (e.g. GEMM needs M % (tile_m * 4) == 0). We
         # read the dims back off gemm_1 only to size SiLU/ElementwiseMul
         # from the same source GEMM validated, not because they differ.
         accuracy_flags = {}
