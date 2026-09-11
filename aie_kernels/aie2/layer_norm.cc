@@ -106,4 +106,13 @@ void layer_norm(bfloat16 *input, bfloat16 *output, int32_t cols)
     ::aie::set_rounding(aie::rounding_mode::conv_even);
     layer_norm<bfloat16, 16>(input, output, cols);
 }
+
+// layer_norm accumulates the sum in bfloat16, so the mean it subtracts loses
+// accuracy as cols grows. This entry point trades bandwidth for the f32
+// accumulation instead.
+void layer_norm_f32(bfloat16 *input, bfloat16 *output, int32_t cols)
+{
+    ::aie::set_rounding(aie::rounding_mode::conv_even);
+    layer_norm_bf16_f32_calculation(input, output, cols);
+}
 }
