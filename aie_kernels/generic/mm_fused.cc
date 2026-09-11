@@ -35,8 +35,8 @@
 
 // Epilogue selection. 0 = none, 1 = gelu, 2 = silu, 3 = sigmoid, matching
 // Epilogue.mode in design.py.
-#ifndef MM_FUSED_EPILOGUE_MODE
-#define MM_FUSED_EPILOGUE_MODE 0
+#ifndef MM_FUSED_EPILOGUE_MODE_MASK
+#define MM_FUSED_EPILOGUE_MODE_MASK 0xF
 #endif
 #ifndef MM_FUSED_CLAMP
 #define MM_FUSED_CLAMP 0
@@ -105,6 +105,39 @@ constexpr aie::rounding_mode round_mode = aie::rounding_mode::conv_even;
 #else
 constexpr aie::rounding_mode round_mode = aie::rounding_mode::floor;
 #endif
+// One activation's inner loop. Templated so each mode compiles branch-free;
+// mm_fused_epilogue_chunk selects between them once per chunk.
+template <int MODE> static inline void epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src)
+{
+#if MM_FUSED_CLAMP
+    const aie::vector<float, V> lo = aie::broadcast<float, V>(MM_FUSED_CLAMP_MIN);
+    const aie::vector<float, V> hi = aie::broadcast<float, V>(MM_FUSED_CLAMP_MAX);
+#endif
+
+    AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
+    for (int j = 0; j < CHUNK / V; j++) {
+        // The accumulator stays f32 through the activation and the clamp, and
+        // is converted to bf16 exactly once, on the store. Converting first
+        // would round twice and let the activation's slope amplify the first
+        // rounding -- see activations.h.
+        aie::vector<float, V> f = aie::load_v<V>(src + j * V);
+        if constexpr (MODE == 1)
+            f = gelu_vec<V>(f);
+        else if constexpr (MODE == 2)
+            f = silu_vec<V>(f);
+        else if constexpr (MODE == 3)
+            f = sigmoid_vec<V>(f);
+#if MM_FUSED_CLAMP
+        f = aie::max(aie::min(f, hi), lo);
+#endif
+        aie::accum<accfloat, V> out;
+        out.from_vector(f);
+        // The assignment is the conversion: to_v16bfloat16 yields a raw
+        // v16bfloat16, not an aie::vector.
+        aie::vector<bfloat16, V> v = to_v16bfloat16(out);
+        aie::store_v(y_out + j * V, v);
+    }
+}
 } // namespace
 
 extern "C" {
@@ -144,47 +177,45 @@ void mm_fused_k_step(bfloat16 *a_buf, mm_fused_b_elem_t *b_buf, float *y_acc, in
 // Fusing the activation here is the point: the values are already in registers
 // after the f32 -> bf16 conversion, so gelu/silu/sigmoid costs one more vector
 // op per 16 elements instead of a separate pass over L1 (which is what chaining
-// a standalone activation operator after a GEMM would cost). The mode and clamp
-// are compile-time, so the inner loop below is branch-free.
+// a standalone activation operator after a GEMM would cost).
+//
+// The mode is a runtime argument, because one xclbin serves every activation.
+// It is tested once per chunk, outside the vector loop, so each mode still runs
+// a branch-free inner loop; the cost is program memory, since every mode in
+// MM_FUSED_EPILOGUE_MODE_MASK is compiled in. The clamp stays compile-time.
 //
 // The chunk index is split in two because the core body unrolls the drain by
 // the C fifo depth to keep the acquired buffer index a compile-time constant;
 // passing both parts avoids doing that arithmetic up there.
-void mm_fused_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer, int32_t half)
+void mm_fused_epilogue_chunk(bfloat16 *y_out, float *y_acc, int32_t outer, int32_t half, int32_t mode)
 {
     // The store below is a conversion, so it obeys the same rounding mode the
     // mmul does and must agree with it.
     ::aie::set_rounding(round_mode);
     const float *__restrict src = y_acc + (outer * C_DEPTH + half) * CHUNK;
 
-#if MM_FUSED_CLAMP
-    const aie::vector<float, V> lo = aie::broadcast<float, V>(MM_FUSED_CLAMP_MIN);
-    const aie::vector<float, V> hi = aie::broadcast<float, V>(MM_FUSED_CLAMP_MAX);
+    switch (mode) {
+#if MM_FUSED_EPILOGUE_MODE_MASK & 2
+    case 1:
+        epilogue_body<1>(y_out, src);
+        return;
 #endif
-
-    AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
-    for (int j = 0; j < CHUNK / V; j++) {
-        // The accumulator stays f32 through the activation and the clamp, and
-        // is converted to bf16 exactly once, on the store. Converting first
-        // would round twice and let the activation's slope amplify the first
-        // rounding -- see activations.h.
-        aie::vector<float, V> f = aie::load_v<V>(src + j * V);
-#if MM_FUSED_EPILOGUE_MODE == 1
-        f = gelu_vec<V>(f);
-#elif MM_FUSED_EPILOGUE_MODE == 2
-        f = silu_vec<V>(f);
-#elif MM_FUSED_EPILOGUE_MODE == 3
-        f = sigmoid_vec<V>(f);
+#if MM_FUSED_EPILOGUE_MODE_MASK & 4
+    case 2:
+        epilogue_body<2>(y_out, src);
+        return;
 #endif
-#if MM_FUSED_CLAMP
-        f = aie::max(aie::min(f, hi), lo);
+#if MM_FUSED_EPILOGUE_MODE_MASK & 8
+    case 3:
+        epilogue_body<3>(y_out, src);
+        return;
 #endif
-        aie::accum<accfloat, V> out;
-        out.from_vector(f);
-        // The assignment is the conversion: to_v16bfloat16 yields a raw
-        // v16bfloat16, not an aie::vector.
-        aie::vector<bfloat16, V> v = to_v16bfloat16(out);
-        aie::store_v(y_out + j * V, v);
+    // Mode 0 is always compiled: it is the fallback for a mode the mask leaves
+    // out, so an unselectable mode yields an unactivated result rather than an
+    // unwritten buffer.
+    default:
+        epilogue_body<0>(y_out, src);
+        return;
     }
 }
 }

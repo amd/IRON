@@ -18,6 +18,7 @@ from iron.common import (
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
+from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 from iron.common.operator_bases import lut_based_ops_artifacts
 from iron.common.utils import float_to_name
 import aie.utils as aie_utils
@@ -65,6 +66,11 @@ class GEMM(MLIROperator):
     N: int
     # Activation fused into the C drain.
     epilogue: Epilogue = Epilogue.NONE
+    # The activations the epilogue can select between at run time. Each one
+    # compiled in costs program memory, so a deployment that dispatches two
+    # should compile two. Unlike `epilogue`, this is part of the
+    # configuration.
+    epilogue_modes: tuple[Epilogue, ...] = tuple(Epilogue)
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = None
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
@@ -144,15 +150,44 @@ class GEMM(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
-    def name(self) -> str:
-        """Artifact stem, prefixed to disambiguate from ``iron.operators.GEMM``.
+    def _epilogue_mask(self) -> int:
+        """Bitmask of the modes compiled into the epilogue. Mode 0 is always
+        present -- the kernel falls back to it."""
+        return 1 | sum(1 << Epilogue(m).mode for m in self.epilogue_modes)
 
-        ``MLIROperator.name`` derives the stem from ``type(self).__name__``,
-        which is ``GEMM`` for both operators. This repo's build cache keys on
-        filename and mtime rather than on source or flags, so two operators
-        sharing a stem in one build dir would silently satisfy each other.
+    @property
+    def _config_tag(self) -> str:
+        """Everything that shapes the device configuration, and so the xclbin.
+
+        M, K, N and the activation are absent: they are runtime parameters, so
+        they change only the instruction stream.
         """
-        return f"FLM_{super().name}"
+        clamp = ""
+        if self.clamp is not None:
+            clamp = "_clamp" + "_".join(float_to_name(float(v)) for v in self.clamp)
+        dev = aie_utils.get_current_device().resolve().name
+        return (
+            f"tn{self.tile_n}_ma{self.tile_ma}_em{self._epilogue_mask:x}"
+            f"_{self.rounding}{clamp}_{dev}"
+        )
+
+    @property
+    def config_name(self) -> str:
+        """Stem of the artifacts that do not depend on the shape."""
+        return f"FLM_GEMM_{self._config_tag}"
+
+    @property
+    def name(self) -> str:
+        """Artifact stem for the instruction stream, which does depend on it.
+
+        Prefixed to disambiguate from ``iron.operators.GEMM``: this repo's
+        build cache keys on filename and mtime rather than on source or flags,
+        so two operators sharing a stem would silently satisfy each other.
+        """
+        base = f"FLM_GEMM_M{self.M}_K{self.K}_N{self.N}_{self._config_tag}"
+        if self.epilogue != Epilogue.NONE:
+            base = f"{base}_epi{self.epilogue}"
+        return base
 
     @property
     def _bfp16_b(self) -> bool:
@@ -187,7 +222,7 @@ class GEMM(MLIROperator):
         return (
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_epi{self.epilogue}{clamp}.o"
+            f"_em{self._epilogue_mask:x}{clamp}.o"
         )
 
     @property
@@ -201,30 +236,78 @@ class GEMM(MLIROperator):
         LINK error for tanh_lut_ab/tanh_lut_cd rather than a compile error, so
         it surfaces late.
         """
-        if self.epilogue is not Epilogue.NONE and get_kernel_dir() == "aie2":
-            return f"{self.name}_kernels.a"
+        if (
+            any(Epilogue(m) is not Epilogue.NONE for m in self.epilogue_modes)
+            and get_kernel_dir() == "aie2"
+        ):
+            # config_name, not name: this string reaches the design's
+            # link_with, so a shape in it would put the shape in the device
+            # configuration.
+            return f"{self.config_name}_kernels.a"
         return self._kernel_object
 
-    def get_mlir_artifact(self):
+    @property
+    def _reference_shape(self) -> tuple[int, int, int]:
+        """The shape the configuration-only module is emitted at.
+
+        Its runtime sequence is discarded; only its device body reaches the
+        xclbin. Taking the smallest valid shape keeps that module cheap to
+        build and makes the shape-independence explicit -- if a real shape's
+        instruction stream did not run against this xclbin, some dimension
+        would still be reaching the configuration.
+        """
+        dev = aie_utils.get_current_device()
+        return M_TILE * compute_rows(dev), MIN_K, self.tile_n * dev.cols
+
+    def _mlir_artifact(self, filename, M, K, N, epilogue):
         return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
+            filename,
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "gemm",
                 (),
                 {
                     "dev": aie_utils.get_current_device(),
-                    "M": self.M,
-                    "K": self.K,
-                    "N": self.N,
+                    "M": M,
+                    "K": K,
+                    "N": N,
                     "tile_n": self.tile_n,
                     "tile_ma": self.tile_ma,
-                    "epilogue": self.epilogue,
+                    "epilogue": epilogue,
                     "kernel_object": self._link_file,
                     "trace_size": 0,
                 },
             ),
         )
+
+    def get_mlir_artifact(self):
+        return self._mlir_artifact(
+            f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue
+        )
+
+    def set_up_artifacts(self) -> None:
+        kernels = self.get_kernel_artifacts()
+
+        # The xclbin comes from a module emitted at a reference shape and a
+        # reference activation, so every shape sharing this configuration
+        # reuses it rather than rebuilding an identical one.
+        config_mlir = self._mlir_artifact(
+            f"{self.config_name}.mlir", *self._reference_shape, Epilogue.NONE
+        )
+        self.xclbin_artifact = XclbinArtifact(
+            f"{self.config_name}.xclbin",
+            mlir_input=config_mlir,
+            dependencies=[config_mlir] + kernels,
+        )
+        shape_mlir = self.get_mlir_artifact()
+        self.insts_artifact = InstsBinArtifact(
+            f"{self.name}.bin",
+            mlir_input=shape_mlir,
+            # aiecc compiles the cores on the way to an instruction stream, so
+            # this needs the kernel objects too.
+            dependencies=[shape_mlir] + kernels,
+        )
+        self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
     def get_kernel_artifacts(self):
         kernel_dir = get_kernel_dir()
@@ -261,7 +344,7 @@ class GEMM(MLIROperator):
             # Output stage.
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
-            f"-DMM_FUSED_EPILOGUE_MODE={self.epilogue.mode}",
+            f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
         ] + arch_include
         if self._bfp16_b:
             flags += [

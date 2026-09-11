@@ -71,6 +71,7 @@ from aie.iron import (
     Runtime,
     TaskGroup,
     Worker,
+    WorkerRuntimeBarrier,
 )
 from aie.iron.controlflow import range_
 from aie.dialects.aie import get_target_model
@@ -143,6 +144,11 @@ class Epilogue(StrEnum):
     def mode(self) -> int:
         """The integer the kernel and the shipped overlay both select on."""
         return list(Epilogue).index(self)
+
+
+# The runtime parameter buffer each core reads once its barrier opens.
+RTP_N_WORK, RTP_N_DRAIN, RTP_M_ROW_BLOCKS, RTP_K_ITERS, RTP_EPILOGUE = range(5)
+RTP_WORDS = 5
 
 
 class Rounding(StrEnum):
@@ -410,21 +416,18 @@ def gemm(
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
     rem_blocks = (N % MIN_N) // N_TILE
-    # Columns that participate at all. With no full sweep (N below the grid's
-    # COLS*N_TILE stride) only the first rem_blocks columns do, and the rest
-    # are not instantiated -- giving them fifos that nothing ever drains builds
-    # dead dataflow, which newer mlir-aie rejects outright with
-    # "objectfifo.pool op segment 0 has no drainer".
-    n_active_cols = COLS if n_full else rem_blocks
-    # Per column: how many column-blocks it computes, and whether it sits out a
-    # trailing one while still draining the A broadcast for its row. That drain
-    # only arises for a column that exists and skips the trailing block, which
-    # requires at least one full sweep.
-    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(n_active_cols)]
-    col_drain = [
-        1 if (rem_blocks and n_full and c >= rem_blocks) else 0
-        for c in range(n_active_cols)
-    ]
+    # Every column is instantiated for every shape, because which columns
+    # exist is configuration and this design has one configuration. A column
+    # with no work for this shape gets n_work = 0 and drains instead.
+    n_active_cols = COLS
+    # Per column: how many column-blocks it computes, and how many it sits out
+    # while still draining the A broadcast for its row. Every block issues A
+    # for every compute row, so a column that does not compute a block must
+    # still take that block's A or the row stalls -- the memtile will not
+    # release an A object until all COLS consumers have taken it.
+    total_blocks = n_full + (1 if rem_blocks else 0)
+    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(COLS)]
+    col_drain = [total_blocks - w for w in col_work]
 
     # B's element type: one v8bfp16ebs8 per 8 values on AIE2P, one bf16 per
     # value on AIE2. Every B extent below is therefore in values // B_GROUP.
@@ -460,7 +463,7 @@ def gemm(
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,
         kernel_object,
-        [ct_out_ty, ct_acc_ty, np.int32, np.int32],
+        [ct_out_ty, ct_acc_ty, np.int32, np.int32, np.int32],
     )
 
     # --- Data movement ----------------------------------------------------
@@ -554,25 +557,16 @@ def gemm(
     # has zero slack -- the eight memtiles pack to exactly 512 KB, relying on
     # aie-objectfifo-allocate spilling one buffer to an adjacent tile -- so
     # re-verify it after any change to the A, B or C buffer sizes.
-    mt_free = tm.get_mem_tile_size() - mt_a_bytes * A_DEPTH - mt_out_bytes * C_DEPTH
-    MT_B_DEPTH = next(
-        (d for d in (B_DEPTH, 1) if k_iters * mt_b_bytes * d <= mt_free), 0
-    )
-    b_resident = MT_B_DEPTH > 0
-    if b_resident:
-        # Just a bigger buffer. With B packed in consumption order the walk is
-        # linear, so spanning every k-block needs no extra descriptor
-        # dimension -- the objects simply come out in k order. (The previous
-        # blocked layout had to widen one dim inbound and add an outermost k
-        # dim outbound, which is what collided with CT_MAX_K=128.)
-        mt_b_ty = np.ndarray[(k_iters * K_TILE * N_TILE // B_GROUP,), b_elem_ty]
+    # B residency is gone: it sizes the memtile buffer from k_iters and
+    # replays it m_row_blocks times through the forward()'s repeat_count, so
+    # it carries both K and M into the configuration, which is what the
+    # runtime parameters exist to remove. See README.md for what that cost.
+    b_resident = False
 
     b_l3l2_fifos = []
     b_cons = {}
     for c in range(n_active_cols):
-        of_b_in = ObjectFifo(
-            mt_b_ty, name=f"B_L3L2_{c}", depth=MT_B_DEPTH if b_resident else B_DEPTH
-        )
+        of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
         b_l3l2_fifos.append(of_b_in)
         of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
             # The one placement pin this design keeps. Everything else -- the
@@ -591,69 +585,81 @@ def gemm(
             depth=L1_B_DEPTH,
             name=f"B_L2L1_{c}",
             dims_to_stream=b_send_dims,
-            # Replay the resident memtile object once per row-block. This is
-            # the mechanism that actually re-sends an object; iter_count only
-            # bounds how many chain iterations happen in total. Correct
-            # ordering depends on the memtile holding ONE object spanning every
-            # k-block: replicating a pool of k_iters smaller objects would
-            # emit k0,k0,k1,k1,... rather than the k0..kn sequence the cores
-            # accumulate in.
-            repeat_count=m_row_blocks if b_resident else None,
         )
         for r in range(ROWS):
             b_cons[(r, c)] = of_b.cons()
 
-    # --- Compute ----------------------------------------------------------
-    def core_fn(n_work, n_drain, acc, o_h, b_h, a_h, init_k, kstep_k, epi_k):
-        """Core body for a column that computes ``n_work`` column-blocks and
-        then drains A for ``n_drain`` more (0 or 1).
+    # --- Runtime parameters -----------------------------------------------
+    rtps = [
+        [
+            Buffer(
+                np.ndarray[(RTP_WORDS,), np.dtype[np.int32]],
+                name=f"rtp_{r}_{c}",
+                initial_value=np.zeros(RTP_WORDS, dtype=np.int32),
+                use_write_rtp=True,
+            )
+            for c in range(n_active_cols)
+        ]
+        for r in range(ROWS)
+    ]
+    barriers = [
+        [WorkerRuntimeBarrier() for _ in range(n_active_cols)] for _ in range(ROWS)
+    ]
 
-        n_work/n_drain are bound per column via functools.partial below; they
-        are compile-time constants, so the trip counts below fold away.
-        """
+    # --- Compute ----------------------------------------------------------
+    def core_fn(acc, o_h, b_h, a_h, init_k, kstep_k, epi_k, my_rtp, barrier):
+        """Core body. Every trip count and the activation come from the
+        runtime parameter buffer, so one core program serves every shape."""
         # The loop nest lives here rather than inside the kernel so that
-        # every level has an ObjectFifo acquire point. With M/K/N known at
-        # compile time all the trip counts are constants.
-        if n_work:
-            for _ in range_(n_work):
-                for _ in range_(m_row_blocks):
-                    init_k(acc)
-                    for _ in range_(k_iters):
-                        # The l loop is unrolled by the B fifo depth so the
-                        # acquired buffer index stays a compile-time
-                        # constant.
-                        for _ in range_(B_ITERS // B_DEPTH):
-                            for _ in range(B_DEPTH):
-                                # One B chunk feeds every A band, so B is
-                                # acquired once around the band loop.
-                                b = b_h.acquire(1)
-                                for band in range(RHO):
-                                    a = a_h.acquire(1)
-                                    kstep_k(a, b, acc, band)
-                                    a_h.release(1)
-                                b_h.release(1)
-                    # Drain the accumulator. Unrolled by C_DEPTH for the
-                    # same reason; a full O_CHUNKS unroll overflows program
-                    # memory.
-                    for chunk in range_(O_CHUNKS // C_DEPTH):
-                        for half in range(C_DEPTH):
-                            o = o_h.acquire(1)
-                            epi_k(o, acc, chunk, half)
-                            o_h.release(1)
-        if n_drain:
-            # The trailing partial column-block, for a column that sits it
-            # out. A is broadcast along the whole compute row, so this
-            # column must still consume its share or the columns that DO
-            # have work stall waiting for the fifo to advance. No B and no
-            # C here -- the runtime sequence issues neither for it.
-            for _ in range_(n_drain):
-                for _ in range_(m_row_blocks):
-                    for _ in range_(k_iters):
-                        for _ in range_(B_ITERS // B_DEPTH):
-                            for _ in range(B_DEPTH):
-                                for _ in range(RHO):
-                                    a_h.acquire(1)
-                                    a_h.release(1)
+        # every level has an ObjectFifo acquire point.
+        barrier.wait_for_value(1)
+        n_work = my_rtp[RTP_N_WORK]
+        n_drain = my_rtp[RTP_N_DRAIN]
+        n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
+        n_k_iters = my_rtp[RTP_K_ITERS]
+        epi_mode = my_rtp[RTP_EPILOGUE]
+        # Acquire does not consume the barrier, so take it back to zero or the
+        # next dispatch reads these parameters again instead of waiting. Safe
+        # before the work: the sequence cannot set the barrier again until it
+        # has drained this dispatch's C.
+        barrier.release_with_value(1)
+
+        for _ in range_(n_work):
+            for _ in range_(n_row_blocks):
+                init_k(acc)
+                for _ in range_(n_k_iters):
+                    # The l loop is unrolled by the B fifo depth so the
+                    # acquired buffer index stays a compile-time constant.
+                    for _ in range_(B_ITERS // B_DEPTH):
+                        for _ in range(B_DEPTH):
+                            # One B chunk feeds every A band, so B is
+                            # acquired once around the band loop.
+                            b = b_h.acquire(1)
+                            for band in range(RHO):
+                                a = a_h.acquire(1)
+                                kstep_k(a, b, acc, band)
+                                a_h.release(1)
+                            b_h.release(1)
+                # Drain the accumulator. Unrolled by C_DEPTH for the same
+                # reason; a full O_CHUNKS unroll overflows program memory.
+                for chunk in range_(O_CHUNKS // C_DEPTH):
+                    for half in range(C_DEPTH):
+                        o = o_h.acquire(1)
+                        epi_k(o, acc, chunk, half, epi_mode)
+                        o_h.release(1)
+
+        # Column-blocks this column sits out. A is broadcast along the whole
+        # compute row, so it must still consume its share or the columns that
+        # DO have work stall waiting for the fifo to advance. No B and no C
+        # here -- the runtime sequence issues neither for it.
+        for _ in range_(n_drain):
+            for _ in range_(n_row_blocks):
+                for _ in range_(n_k_iters):
+                    for _ in range_(B_ITERS // B_DEPTH):
+                        for _ in range(B_DEPTH):
+                            for _ in range(RHO):
+                                a_h.acquire(1)
+                                a_h.release(1)
 
     workers = []
     for r in range(ROWS):
@@ -661,7 +667,7 @@ def gemm(
             acc = Buffer(type=ct_acc_ty, name=f"c_acc_{r}_{c}")
             workers.append(
                 Worker(
-                    partial(core_fn, col_work[c], col_drain[c]),
+                    core_fn,
                     [
                         acc,
                         c_prod[(r, c)].prod(),
@@ -670,6 +676,8 @@ def gemm(
                         acc_init,
                         k_step,
                         epilogue_chunk,
+                        rtps[r][c],
+                        barriers[r][c],
                     ],
                 )
             )
@@ -766,6 +774,20 @@ def gemm(
         )
 
     def sequence(A, B, C, a_prods, b_prods, c_conses):
+        # Write every core's parameters, then open every barrier. Both loops
+        # run to completion before the first fill is issued, so no core can
+        # read a half-written buffer.
+        for r in range(ROWS):
+            for c in range(n_active_cols):
+                rtps[r][c][RTP_N_WORK] = col_work[c]
+                rtps[r][c][RTP_N_DRAIN] = col_drain[c]
+                rtps[r][c][RTP_M_ROW_BLOCKS] = m_row_blocks
+                rtps[r][c][RTP_K_ITERS] = k_iters
+                rtps[r][c][RTP_EPILOGUE] = epilogue.mode
+        for r in range(ROWS):
+            for c in range(n_active_cols):
+                barriers[r][c].set(1)
+
         # Column-blocks 0..n_full-1 use every column; the trailing one (when N
         # is not a multiple of N_TILE*COLS) uses only the first rem_blocks. A
         # is always issued for every row, because the columns sitting the

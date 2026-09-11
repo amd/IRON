@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 import aie.utils as aie_utils
 
@@ -321,3 +323,53 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
         GEMM(M=M, K=K, N=N, context=aie_context).name
         != GenericGEMM(M=M, K=K, N=N, context=aie_context).name
     )
+
+
+def test_one_xclbin_serves_every_shape(aie_context):
+    """Several shapes back to back on one loaded xclbin.
+
+    This is what the runtime parameters are for, and the parametrised tests
+    above cannot cover it: each gets a fresh context, so the array is
+    reconfigured between cases and any state a dispatch leaves behind is
+    wiped. Here the shapes share one.
+
+    They disagree on every parameter -- M, K, N, whether a column sits a block
+    out, and the activation -- and none of them may rebuild the xclbin.
+    """
+    shapes = [
+        (256, 1536, 2048, "none"),
+        (256, 1536, 256, "none"),  # only 4 of 8 columns compute
+        (512, 2048, 1536, "none"),
+        (256, 1536, 6144, "gelu"),
+        (256, 1536, 2048, "none"),  # back to the first, after the rest
+    ]
+    xclbin = None
+    for M, K, N, epilogue in shapes:
+        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue, context=aie_context)
+        golden_ref = generate_golden_reference(
+            M=M, K=K, N=N, epilogue=epilogue, scale=4.0 if epilogue == "none" else 0.5
+        )
+        mass = (
+            K
+            * golden_ref["input"].abs().float().mean()
+            * golden_ref["input_b"].abs().float().mean()
+        )
+        errors, _, _ = run_test(
+            operator,
+            {
+                "A": golden_ref["input"].flatten(),
+                "B": operator.pack_B(golden_ref["input_b"]),
+            },
+            {"C": golden_ref["output"].flatten()},
+            rel_tol=0.04,
+            abs_tol=float(0.004 * mass),
+        )
+        assert not errors, f"{M}x{K}x{N} {epilogue} failed"
+
+        stamp = (
+            operator.xclbin_artifact.filename,
+            os.path.getmtime(operator.xclbin_artifact.filename),
+        )
+        if xclbin is None:
+            xclbin = stamp
+        assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
