@@ -77,7 +77,8 @@ __attribute__((always_inline)) aie::vector<float, vec_size> tanh_vec(aie::vector
                   "epilogue width; widening V needs an explicit split here");
     aie::accum<accfloat, vec_size> narrowed;
     narrowed.from_vector(x);
-    widened.from_vector(getTanhBf16(narrowed.template to_vector<bfloat16>()));
+    aie::vector<bfloat16, vec_size> tanh_bf16 = getTanhBf16(narrowed.template to_vector<bfloat16>());
+    widened.from_vector(tanh_bf16);
 #endif
     return widened.template to_vector<float>();
 }
