@@ -20,7 +20,7 @@ from aie.iron import (
     str_to_dtype,
 )
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
-from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D, TensorAccessPattern
+from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
 
@@ -78,12 +78,6 @@ def main():
     )
     argparser.add_argument("--trace_size", type=int, default=0)
     argparser.add_argument(
-        "--generate-taps",
-        action="store_true",
-        help="Generate TensorAccessPatterns, a Python object to represent each data transfer"
-        "of the input/output matrices. These objects can be used for visualization.",
-    )
-    argparser.add_argument(
         "--output-file-path",
         "-o",
         type=str,
@@ -91,7 +85,7 @@ def main():
     )
 
     args = argparser.parse_args()
-    maybe_module = my_matmul(
+    module = my_matmul(
         args.dev,
         args.M,
         args.K,
@@ -111,16 +105,11 @@ def main():
         args.trace_size,
         args.archive,
         "",
-        args.generate_taps,
     )
 
-    if args.generate_taps:
-        return maybe_module
-    else:
-        output_file_path = Path(args.output_file_path)
-
-        with open(output_file_path, "w") as f:
-            f.write(str(maybe_module))
+    output_file_path = Path(args.output_file_path)
+    with open(output_file_path, "w") as f:
+        f.write(str(module))
 
 
 def ceildiv(a, b):
@@ -147,7 +136,6 @@ def my_matmul(
     trace_size,
     kernel_object=None,
     func_prefix="",
-    generate_taps=False,
 ):
     n_aie_rows = 4
 
@@ -272,12 +260,6 @@ def my_matmul(
             dev_ty = NPU1()
     else:
         dev_ty = NPU2()
-
-    # These will hold TensorAccessPattern objects that represent the runtime
-    # npu_dma_memcpy_nd operations of this design. They are only used if generate_taps is true
-    A_taps = []
-    B_taps = []
-    C_taps = []
 
     # Define tensor types
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
@@ -665,9 +647,6 @@ def my_matmul(
                                 strides=C_strides,
                             )
 
-                            # This line does not change MLIR output at all - it's just for recording data movement
-                            C_taps.append(C_tile)
-
                             C_conses[col].drain(
                                 C,
                                 tap=C_tile,
@@ -727,9 +706,6 @@ def my_matmul(
                                 wait=True,
                                 group=tg,
                             )
-                            # This line does not change MLIR output at all - it's just for recording data movement
-                            C_taps.append(C_tile)
-
                         # A input transfer:
                         #
                         # The smallest transfer unit is a (m*n_A_tiles_per_shim)-sized sub-tile of the input matrix.
@@ -786,10 +762,6 @@ def my_matmul(
                             tap=B_tiles[col],
                             group=tg,
                         )
-
-                        # These lines do not change MLIR output at all - they are just for recording data movement
-                        A_taps.append(A_tiles[tile_offset])
-                        B_taps.append(B_tiles[col])
                 if tb > 0 or (tb == 0 and pingpong > 0):
                     tg.finish()
                     tg = TaskGroup()
@@ -815,20 +787,7 @@ def my_matmul(
     maybe_enable_trace(my_program, trace_size, workers)
 
     # Place components (assign them resources on the device) and generate an MLIR module.
-    # This is what runs the sequence body, so it must happen before the taps it
-    # records are read.
-    module = my_program.resolve_program()
-
-    if generate_taps:
-        # If generate taps is true, return a representation of tensor access patterns
-        # representing all the npu_dma_memcpy_nd runtime sequence operations per input/ouput tensor.
-        return (
-            TensorAccessSequence.from_taps(A_taps),
-            TensorAccessSequence.from_taps(B_taps),
-            TensorAccessSequence.from_taps(C_taps),
-        )
-
-    return module
+    return my_program.resolve_program()
 
 
 if __name__ == "__main__":
