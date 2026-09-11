@@ -16,7 +16,6 @@ from aie.iron import (
     WorkerRuntimeBarrier,
     sync_parameters,
 )
-from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16

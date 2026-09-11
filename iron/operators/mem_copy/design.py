@@ -16,7 +16,7 @@ from aie.iron import (
     Runtime,
     Worker,
 )
-from aie.iron.device import Tile, NPU1, NPU2
+from aie.iron.device import Tile
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from aie.iron.runtime.endpoint import RuntimeEndpoint

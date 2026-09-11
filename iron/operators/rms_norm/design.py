@@ -5,7 +5,6 @@ from ml_dtypes import bfloat16
 import numpy as np
 
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 

@@ -37,9 +37,10 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+import hashlib
+import json
 import os.path
 import shutil
-import zlib
 import logging
 import subprocess
 import importlib.util
@@ -50,6 +51,117 @@ import sys
 
 from iron.common.device_utils import get_kernel_dir
 from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_module
+
+# Global Functions
+# ##########################################################################
+
+# Data flow tier enumeration
+# ##########################################################################
+
+class DataFlowTier(Enum):
+    """Data flow tier representing precision tier for NPU execution."""
+    BFLOAT16 = "bfloat16"
+    FLOAT32 = "f32"
+
+    @property
+    def dtype(self):
+        """Return the numpy dtype for this tier."""
+        if self == DataFlowTier.BFLOAT16:
+            from ml_dtypes import bfloat16
+            return bfloat16
+        else:
+            import numpy as np
+            return np.float32
+
+    @property
+    def itemsize(self):
+        """Return the itemsize in bytes for this tier."""
+        if self == DataFlowTier.BFLOAT16:
+            return 2
+        else:
+            return 4
+
+# Toolchain version fingerprint
+# ##########################################################################
+
+_SUFFIX = ".meta"
+
+
+def _toolchain_version() -> str:
+    """A short hash of the toolchain's identifying metadata.
+
+    This is deliberately coarse-grained: it hashes the installed mlir-aie
+    Python package version plus the sizes/mtimes of the main LLVM toolchain
+    binaries. The goal is to invalidate caches when the toolchain is upgraded,
+    not to fingerprint individual binaries precisely. Cheap to compute, stable
+    while nothing changes.
+    """
+    digest = hashlib.sha256()
+    try:
+        import aie
+
+        digest.update(
+            ("mlir_aie " + (getattr(aie, "__version__", "") or "")).encode()
+        )
+    except Exception:
+        pass
+
+    # Find the tools the same way _find_tool does (peano, then mlir-aie, then PATH),
+    # but without importing config eagerly here: this helper is called inside an
+    # artifact availability check, which must not drag in the whole toolchain.
+    def _locate(name: str) -> Path | None:
+        for key, sub in (("PEANO_INSTALL_DIR", "bin"), ("root_path", "bin")):
+            try:
+                import importlib
+
+                cfg = importlib.import_module("aie.utils.config").config
+                base = getattr(cfg, key, None) if key.isupper() else getattr(cfg, key, None)
+                if isinstance(base, str) and base:
+                    p = Path(base) / sub / name
+                    if p.is_file():
+                        return p
+            except Exception:
+                continue
+        found = shutil.which(name)
+        return Path(found) if found else None
+
+    for tool in ("aie-opt", "aie-translate", "clang++", "llvm-ar"):
+        p = _locate(tool)
+        if p is None:
+            continue
+        digest.update(tool.encode())
+        try:
+            # Sizes are cheap and change almost every toolchain bump.
+            st = p.stat()
+            digest.update(str(st.st_size).encode())
+            digest.update(str(st.st_mtime_ns).encode())
+        except OSError:
+            continue
+    return digest.hexdigest()[:16]
+
+
+def _write_fingerprint_meta(
+    filename: Path, payload: Any, deps: list[tuple[str, str]]
+) -> None:
+    """Write the fingerprint sidecar for ``filename`` (atomic-ish write).
+
+    ``deps`` is a list of ``(dep_filename, dep_fingerprint)`` pairs. The
+    fingerprint must be JSON-serializable.
+    """
+    meta = {"payload": payload, "deps": [list(d) for d in deps]}
+    target = filename.with_suffix(filename.suffix + _SUFFIX)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(meta, sort_keys=True))
+    tmp.replace(target)
+
+
+def _read_fingerprint_meta(filename: Path) -> dict | None:
+    """Read the fingerprint sidecar for ``filename``, or None if unreadable."""
+    try:
+        return json.loads(filename.with_suffix(filename.suffix + _SUFFIX).read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
 
 # Global Functions
 # ##########################################################################
@@ -249,6 +361,14 @@ class CompilationArtifact(ABC):
     Each artifact corresponds to exactly one file on disk.  Subclasses
     represent specific kinds of build products (source files, MLIR modules,
     kernel objects, xclbin packages, etc.).
+
+    Every artifact can produce a :meth:`fingerprint` - a stable hash of the
+    *properties of the build* that determine its output (own flags, toolchain,
+    and dependency fingerprints). Products written to disk record their
+    fingerprint in a ``.meta`` sidecar, and :meth:`is_available_in_filesystem`
+    requires it to still match, so a cached artifact is *not* reused when a
+    compile flag, a dependency, or the toolchain changes - regardless of file
+    mtimes.
     """
 
     def __init__(
@@ -273,6 +393,95 @@ class CompilationArtifact(ABC):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.filename})"
 
+    def _fingerprint_payload(self) -> Any:
+        """JSON-serializable blob identifying this artifact's *own* build inputs.
+
+        Subclasses override this to include the flags/settings that change its
+        output (``extra_flags``, ``kernel_name``, ``rename_symbols``, ...). The
+        base returns the class name and filename only. The hash recursively
+        folds in ``deps`` and the toolchain fingerprint, so this does not need
+        to be exhaustive - missing a property here only weakens (never
+        breaks) cache invalidation.
+        """
+        return {
+            "class": type(self).__name__,
+            "filename": self.filename,
+        }
+
+    def record_fingerprint(self) -> None:
+        """Write this product's ``.meta`` sidecar after it is produced.
+
+        Called by the compilation rules once the underlying file exists. The
+        sidecar stores the full recursive fingerprint (own payload + dep
+        fingerprints, each source's live content hash included), which
+        :meth:`is_available_in_filesystem` re-computes and compares. A stale
+        sidecar (flag/dependency/toolchain change) forces a rebuild.
+        """
+        deps = [
+            (dep.filename, dep.fingerprint())
+            for dep in self.dependencies
+            if isinstance(dep, CompilationArtifact)
+        ]
+        _write_fingerprint_meta(
+            Path(self.filename),
+            {
+                "fingerprint": self.fingerprint(),
+                "payload": self._fingerprint_payload(),
+                "deps": [list(d) for d in deps],
+            },
+        )
+
+    @property
+    def _uses_toolchain(self) -> bool:
+        """True for products whose content depends on the compiler toolchain.
+
+        Sources and generated-MLIR artifacts do not (the MLIR generator is
+        pure Python over the design args). Kernel objects, archives, xclbins,
+        insts.bins and ELFs all link/compile through Peano + mlir-aie, so a
+        toolchain bump must invalidate them.
+        """
+        return isinstance(
+            self,
+            (KernelObjectArtifact, KernelArchiveArtifact, XclbinArtifact, InstsBinArtifact, FullElfArtifact),
+        )
+
+    def fingerprint(self, _depth: int = 0) -> str:
+        """A stable hash of this artifact's build inputs.
+
+        Everything that determines the artifact's output is folded into one
+        string: own payload (flags, settings), dependency fingerprints
+        (recursively — source leaves contribute their *live content hash*), and
+        — for products compiled through Peano/mlir-aie — the toolchain
+        fingerprint. Editing a source or swapping the toolchain thus changes
+        this value and invalidates every downstream cached product.
+        """
+        if _depth > 64:
+            raise RecursionError(f"artifact dependency cycle at {self.filename}")
+
+        if isinstance(self, SourceArtifact):
+            # A source's content *is* its fingerprint, hashed live so edits are
+            # seen even without a rules pass.
+            digest = hashlib.sha256()
+            digest.update(type(self).__name__.encode())
+            file_hash = self._file_fingerprint()
+            digest.update(str(file_hash).encode())
+            return digest.hexdigest()
+
+        payload = self._fingerprint_payload()
+        dep_fprints = [
+            (dep.filename, dep.fingerprint(_depth + 1))
+            for dep in self.dependencies
+            if isinstance(dep, CompilationArtifact)
+        ]
+        if self._uses_toolchain:
+            payload = {"payload": payload, "toolchain": _toolchain_version()}
+        digest = hashlib.sha256()
+        digest.update(json.dumps(payload, sort_keys=True, default=str).encode())
+        for name, fprint in dep_fprints:
+            digest.update(hashlib.sha256(name.encode()).hexdigest().encode())
+            digest.update(fprint.encode())
+        return digest.hexdigest()
+
     def is_available(self) -> bool:
         """'Conceptual' availability: during a dry-run or in the planning stage, available may be True even if the underlying file does not exist yet."""
         # If any of our dependencies' dependencies are outdated, this artifact is also outdated
@@ -282,18 +491,58 @@ class CompilationArtifact(ABC):
         """Return True if all direct dependencies are available."""
         return all(d.is_available() for d in self.dependencies)
 
+    def _file_fingerprint(self) -> str | None:
+        """Hash of the on-disk file, or None if it does not exist.
+
+        Used for source artifacts, whose "fingerprint" is their content.
+        """
+        path = Path(self.filename)
+        if not path.exists() or not path.is_file():
+            return None
+        h = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        return h.hexdigest()
+
     def is_available_in_filesystem(self) -> bool:
-        """'Real' availability: checks if the underlying file exists and is up-to-date with respect to dependencies."""
-        if not Path(self.filename).exists():
+        """'Real' availability: the file exists and is up-to-date for this build.
+
+        Uptodate-ness is decided by fingerprint equality, not mtimes:
+
+        * a *source* artifact's "fingerprint" is its file content, hashed live;
+        * a *product*'s recorded ``.meta`` fingerprint must equal the one this
+          build would produce now, which recursively folds in every source's
+          content hash, own flags, and the toolchain fingerprint.
+
+        So editing a ``.cc``/``design.py``/``op.py`` source or bumping the
+        toolchain invalidates every downstream product - regardless of whether
+        a file's mtime happens to be newer. A missing sidecar (a fresh build,
+        or a cache from before this scheme) counts as stale.
+        """
+        path = Path(self.filename)
+        if not path.exists() or not path.is_file():
             return False
-        file_mtime = os.path.getmtime(self.filename)
-        for dependency in self.dependencies:
-            if (
-                not dependency.is_available_in_filesystem()
-                or os.path.getmtime(dependency.filename) > file_mtime
-            ):
-                return False
-        return True
+
+        if isinstance(self, SourceArtifact):
+            # A source is up-to-date iff its content still is what downstream
+            # fingerprints folded in. There is nothing recorded about it to
+            # compare, so it is available as long as the file exists (products
+            # that depend on it re-hash it live via fingerprint()).
+            return True
+
+        # Product: recompute the current build fingerprint and compare against
+        # the recorded one on disk.
+        recorded = _read_fingerprint_meta(path)
+        if recorded is None:
+            return False
+        try:
+            return recorded["fingerprint"] == self.fingerprint()
+        except (KeyError, OSError):
+            return False
 
 
 class SourceArtifact(CompilationArtifact):
@@ -344,6 +593,15 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         # Bytes of trace buffer per runlist step, 0 for an untraced build.
         self.trace_size = trace_size
 
+    def _fingerprint_payload(self) -> Any:
+        return {
+            "class": type(self).__name__,
+            "filename": self.filename,
+            "extra_flags": list(self.extra_flags),
+            "trace_size": self.trace_size,
+            "use_chess": getattr(self, "_use_chess", False),
+        }
+
 
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
     def __init__(
@@ -362,6 +620,18 @@ class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.xclbin_input = xclbin_input
 
+    def _fingerprint_payload(self) -> Any:
+        payload = {
+            "class": type(self).__name__,
+            "filename": self.filename,
+            "kernel_name": self.kernel_name,
+            "extra_flags": list(self.extra_flags),
+            "use_chess": getattr(self, "_use_chess", False),
+        }
+        if self.xclbin_input is not None:
+            payload["xclbin_input"] = self.xclbin_input.filename
+        return payload
+
 
 class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
     def __init__(
@@ -375,6 +645,14 @@ class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
+
+    def _fingerprint_payload(self) -> Any:
+        return {
+            "class": type(self).__name__,
+            "filename": self.filename,
+            "extra_flags": list(self.extra_flags),
+            "use_chess": getattr(self, "_use_chess", False),
+        }
 
 
 class KernelObjectArtifact(CompilationArtifact):
@@ -391,6 +669,16 @@ class KernelObjectArtifact(CompilationArtifact):
         self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
 
+    def _fingerprint_payload(self) -> Any:
+        return {
+            "class": type(self).__name__,
+            "filename": self.filename,
+            "extra_flags": list(self.extra_flags),
+            "rename_symbols": dict(self.rename_symbols),
+            "prefix_symbols": self.prefix_symbols,
+            "use_chess": getattr(self, "_use_chess", False),
+        }
+
 
 class KernelArchiveArtifact(CompilationArtifact):
     """A static archive (.a) bundling one or more KernelObjectArtifacts."""
@@ -406,6 +694,22 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
     ) -> None:
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
+
+    def _fingerprint_payload(self) -> Any:
+        """The Python design generator: its source file and its call arguments.
+
+        ``args``/``kwargs`` may hold non-JSON objects (a ``Device``, numpy
+        types), so they are serialised with ``default=str``; two generators
+        whose arguments convert the same are treated as equivalent, which is
+        the best we can do without deep-compare of live Python objects.
+        """
+        return {
+            "class": type(self).__name__,
+            "filename": self.filename,
+            "fn_name": self.generator.fn_name,
+            "args": list(self.generator.args),
+            "kwargs": dict(self.generator.kwargs),
+        }
 
 
 # Compilation Command
@@ -602,6 +906,7 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                     use_chess=self.use_chess,
                     verbose=True,
                 )
+                artifact.record_fingerprint()
 
             commands.append(PythonCallbackCompilationCommand(_compile))
             artifact.available = True
@@ -663,6 +968,7 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 insts_path=insts_path,
                 options=options,
                 work_dir=work_dir,
+                worklist=worklist,
             ):
                 work_dir.mkdir(parents=True, exist_ok=True)
                 _link_build_outputs_into(work_dir, Path(mlir_source.filename).parent)
@@ -675,6 +981,10 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                     use_chess=self.use_chess,
                     verbose=True,
                 )
+                # Record fingerprints for every artifact this invocation produced.
+                for artifact in worklist:
+                    if artifact.mlir_input is mlir_source:
+                        artifact.record_fingerprint()
 
             commands.append(PythonCallbackCompilationCommand(_compile))
 
@@ -814,6 +1124,12 @@ class KernelCompilationRule(CompilationRule):
                 commands.extend(self._rename_symbols(artifact))
             if artifact.prefix_symbols:
                 commands.extend(self._prefix_symbols(artifact, artifact.prefix_symbols))
+
+            # Record the fingerprint only AFTER any symbol renaming/prefixing has
+            # rewritten the object, since those change its bytes.
+            commands.append(
+                PythonCallbackCompilationCommand(artifact.record_fingerprint)
+            )
             artifact.available = True
 
         return commands
@@ -880,6 +1196,10 @@ with open({repr(symbol_map_file)}, 'w') as f:
         ]
 
         return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
+
+    def _record(self, artifact) -> None:
+        if hasattr(artifact, "record_fingerprint"):
+            artifact.record_fingerprint()
 
 
 class ArchiveCompilationRule(CompilationRule):

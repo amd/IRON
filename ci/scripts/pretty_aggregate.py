@@ -9,7 +9,7 @@ import argparse
 import csv
 import os
 
-from pretty_common import display_name, parse_checks, split_test_path, status_emoji
+from pretty_common import display_name, parse_checks, split_test_path
 
 parser = argparse.ArgumentParser(
     description="Aggregate CI results from all architecture subdirectories into a top-level readme.md"

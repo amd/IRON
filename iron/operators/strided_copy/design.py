@@ -37,8 +37,16 @@ def strided_copy(
     input_offset_parameter=None,
     output_offset_parameter=None,
 ):
-    assert len(input_sizes) == len(input_strides)
-    assert len(output_sizes) == len(output_strides)
+    if len(input_sizes) != len(input_strides):
+        raise ValueError(
+            f"input_sizes and input_strides must have the same length "
+            f"({len(input_sizes)} vs {len(input_strides)})"
+        )
+    if len(output_sizes) != len(output_strides):
+        raise ValueError(
+            f"output_sizes and output_strides must have the same length "
+            f"({len(output_sizes)} vs {len(output_strides)})"
+        )
 
     # Pad out dimensions to 4D; dropping leading dimensions leads to compiler not initializing these registers, causing hard-to-debug errors
     input_sizes = [1] * (4 - len(input_sizes)) + list(input_sizes)
@@ -48,30 +56,34 @@ def strided_copy(
 
     input_highest_sz_idx = max(idx for idx, sz in enumerate(input_sizes) if sz >= 1)
     output_highest_sz_idx = max(idx for idx, sz in enumerate(output_sizes) if sz >= 1)
-    assert (
-        input_sizes[input_highest_sz_idx] % num_aie_channels == 0
-    ), "Highest dimension of input_sizes must be divisible by num_aie_channels"
-    assert (
-        output_sizes[output_highest_sz_idx] % num_aie_channels == 0
-    ), "Highest dimension of output_sizes must be divisible by num_aie_channels"
+    if input_sizes[input_highest_sz_idx] % num_aie_channels != 0:
+        raise ValueError(
+            "Highest dimension of input_sizes must be divisible by num_aie_channels"
+        )
+    if output_sizes[output_highest_sz_idx] % num_aie_channels != 0:
+        raise ValueError(
+            "Highest dimension of output_sizes must be divisible by num_aie_channels"
+        )
 
     # Each channel's BD carries 1/num_aie_channels of the tensor, so the ObjectFifo object
     # is sized against the per-channel share. A BD shorter than the object starves the
     # MemTile's S2MM -- it never completes an object, never releases the lock, and the
     # drain's dma_await_task never returns (ERT_CMD_STATE_TIMEOUT). An integer multiple is
     # fine; it just cycles the buffer.
-    assert int(np.prod(input_sizes)) == int(np.prod(output_sizes)), (
-        f"a copy moves the same element count both ways: input_sizes {input_sizes} "
-        f"has {int(np.prod(input_sizes))} elements, output_sizes {output_sizes} has "
-        f"{int(np.prod(output_sizes))}"
-    )
+    if int(np.prod(input_sizes)) != int(np.prod(output_sizes)):
+        raise ValueError(
+            f"a copy moves the same element count both ways: input_sizes {input_sizes} "
+            f"has {int(np.prod(input_sizes))} elements, output_sizes {output_sizes} has "
+            f"{int(np.prod(output_sizes))}"
+        )
     per_channel_size = int(np.prod(input_sizes)) // num_aie_channels
     if transfer_size is None:
         transfer_size = per_channel_size
-    assert per_channel_size % transfer_size == 0, (
-        f"transfer_size {transfer_size} must divide the per-channel transfer "
-        f"{per_channel_size} (= {int(np.prod(input_sizes))} / {num_aie_channels} channels)"
-    )
+    if per_channel_size % transfer_size != 0:
+        raise ValueError(
+            f"transfer_size {transfer_size} must divide the per-channel transfer "
+            f"{per_channel_size} (= {int(np.prod(input_sizes))} / {num_aie_channels} channels)"
+        )
     transfer_ty = np.ndarray[
         (transfer_size,),
         np.dtype[dtype],

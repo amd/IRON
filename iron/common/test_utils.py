@@ -6,7 +6,6 @@ from __future__ import annotations
 import numpy as np
 import torch
 import aie.utils as aie_utils
-from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 
 torch_dtype_map = {

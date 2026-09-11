@@ -4,7 +4,6 @@
 import argparse
 from pathlib import Path
 
-from ml_dtypes import bfloat16
 
 import numpy as np
 
@@ -173,28 +172,37 @@ def my_matmul(
     mem_tile_n = n * n_aie_cols
 
     if prio_accuracy:
-        assert (
-            dtype_out_str == "bf16"
-        ), f"prio_accuracy flag is a feature only for bfloat16 output data types"
+        if dtype_out_str != "bf16":
+            raise ValueError(
+                "prio_accuracy flag is a feature only for bfloat16 output data types "
+                f"(got {dtype_out_str!r})"
+            )
         use_larger_internal_buffer = True
         # If prio_accuracy flag is enabled, gemm for bfloat16 will accumulate in place with a f32 buffer,
         # which will be converted to bf16 after the reduction loop finishes for output transfer to L2
         dtype_out_internal = str_to_dtype("f32")
-        assert np.issubdtype(dtype_in, np.integer) == np.issubdtype(
+        if np.issubdtype(dtype_in, np.integer) != np.issubdtype(
             dtype_out_internal, np.integer
-        ), f"Input dtype ({dtype_in}) and output dtype ({dtype_out_internal}) must either both be integral or both be float"
-        assert (
-            np.dtype(dtype_out_internal).itemsize >= np.dtype(dtype_in).itemsize
-        ), f"Output dtype ({dtype_out_internal}) must be equal or larger to input dtype ({dtype_in})"
+        ):
+            raise ValueError(
+                f"Input dtype ({dtype_in}) and output dtype ({dtype_out_internal}) "
+                "must either both be integral or both be float"
+            )
+        if np.dtype(dtype_out_internal).itemsize < np.dtype(dtype_in).itemsize:
+            raise ValueError(
+                f"Output dtype ({dtype_out_internal}) must be equal or larger to input dtype ({dtype_in})"
+            )
     else:
         use_larger_internal_buffer = False
 
-    assert np.issubdtype(dtype_in, np.integer) == np.issubdtype(
-        dtype_out, np.integer
-    ), f"Input dtype ({dtype_in}) and output dtype ({dtype_out}) must either both be integral or both be float"
-    assert (
-        np.dtype(dtype_out).itemsize >= np.dtype(dtype_in).itemsize
-    ), f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
+    if np.issubdtype(dtype_in, np.integer) != np.issubdtype(dtype_out, np.integer):
+        raise ValueError(
+            f"Input dtype ({dtype_in}) and output dtype ({dtype_out}) must either both be integral or both be float"
+        )
+    if np.dtype(dtype_out).itemsize < np.dtype(dtype_in).itemsize:
+        raise ValueError(
+            f"Output dtype ({dtype_out}) must be equal or larger to input dtype ({dtype_in})"
+        )
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
     mac_dims = microkernel_mac_dim_map[dev_name][dtype_in_str]
@@ -205,10 +213,10 @@ def my_matmul(
 
     # npu1 is a 4 row x 4 col array
     if dev_name == "npu1" and n_aie_cols > 4:
-        raise AssertionError("Invalid configuration: NPU (Phoenix/Hawk) has 4 columns")
+        raise ValueError("Invalid configuration: NPU (Phoenix/Hawk) has 4 columns")
     # npu2 is a 4 row x 8 col array
     if dev_name == "npu2" and n_aie_cols > 8:
-        raise AssertionError(
+        raise ValueError(
             "Invalid configuration: NPU2 (Strix/Strix Halo/Krackan) has 8 columns"
         )
 
@@ -217,34 +225,44 @@ def my_matmul(
     # blocks are _broadcast_ across AIE core columns, then _distributed_ across
     # rows, s.t. each of the n_rows compute cores in a column receives a
     # contiguous (m, k)-sized block of A.
-    assert (
-        M % mem_tile_m_A == 0
-    ), """A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"""
+    if M % mem_tile_m_A != 0:
+        raise ValueError(
+            f"M ({M}) must be tileable into (m * n_A_tiles_per_shim, k)-sized "
+            f"blocks: M % ({mem_tile_m_A}) == {M % mem_tile_m_A}"
+        )
 
     # Both A and B are tiled in the K dimension into size k.
-    assert K % k == 0
+    if K % k != 0:
+        raise ValueError(f"K ({K}) must be a multiple of k ({k})")
 
     # Input matrix B:
     # Conceptually, we do the same as with A, but instead of broadcasting
     # across columns we broadcast across rows and distribute across columns.
-    assert (
-        N % mem_tile_n == 0
-    ), """B must be tileable into (k, n * n_aie_cols)-sized blocks"""
+    if N % mem_tile_n != 0:
+        raise ValueError(
+            f"N ({N}) must be tileable into (k, n * n_aie_cols)-sized blocks: "
+            f"N % ({mem_tile_n}) == {N % mem_tile_n}"
+        )
 
     # Output matrix C:
     # Conceptually, we divide output C into (m * n_rows, n)-sized blocks. These
     # blocks are _distributed_ across AIE core columns, and _joined_ across
     # rows, s.t. each of the n_rows compute cores in a column send a
     # contiguous (m, n)-sized block of C.
-    assert (
-        M % mem_tile_m_C == 0
-    ), """C must be tileable into (m * n_aie_rows, n)-sized blocks"""
+    if M % mem_tile_m_C != 0:
+        raise ValueError(
+            f"M ({M}) must be tileable into (m * n_aie_rows, n)-sized blocks: "
+            f"M % ({mem_tile_m_C}) == {M % mem_tile_m_C}"
+        )
 
     # r, s, t are the dimensions required by the microkernel MAC instructions.
     if not use_scalar:
-        assert m % r == 0
-        assert k % s == 0
-        assert n % t == 0
+        if m % r != 0:
+            raise ValueError(f"tile_m ({m}) must be a multiple of r ({r})")
+        if k % s != 0:
+            raise ValueError(f"tile_k ({k}) must be a multiple of s ({s})")
+        if n % t != 0:
+            raise ValueError(f"tile_n ({n}) must be a multiple of t ({t})")
 
     # If you get errors during CDO generation due to running out of program
     # memory, it may be because too much code is generated due to ObjectFIFO

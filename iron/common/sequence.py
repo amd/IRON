@@ -4,7 +4,6 @@
 import hashlib
 import logging
 import time
-from pathlib import Path
 import numpy as np
 import ml_dtypes
 from . import compilation as comp
@@ -514,12 +513,23 @@ class OperatorSequence(AIEOperatorBase):
 # Module helpers
 # ##########################################################################
 
+from iron.common.compilation.base import DataFlowTier
+
 
 BF16 = np.dtype(ml_dtypes.bfloat16)
+F32 = np.dtype(np.float32)
 
 
-def _n_elements(nbytes):
-    return max(nbytes, BF16.itemsize) // BF16.itemsize
+def _n_elements(nbytes, tier: DataFlowTier = DataFlowTier.BFLOAT16):
+    return max(nbytes, tier.itemsize) // tier.itemsize
+
+
+def _buffer_dtype_for_tier(tier: DataFlowTier):
+    """Return numpy dtype for given data flow tier."""
+    if tier == DataFlowTier.BFLOAT16:
+        return BF16
+    else:
+        return F32
 
 
 # ##########################################################################

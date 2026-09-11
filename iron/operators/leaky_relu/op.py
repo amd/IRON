@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from typing import ClassVar, Dict
 
-import aie.utils as aie_utils
 from iron.common import (
     ChanneledUnaryOperator,
     PythonGeneratedMLIRArtifact,
