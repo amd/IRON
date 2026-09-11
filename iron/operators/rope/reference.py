@@ -142,9 +142,6 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     if cos.shape[0] != rows:
         if rows % cos.shape[0] == 0:
             rep = rows // cos.shape[0]
-            # repeat_interleave, not repeat: the device applies one angle row
-            # to `rep` *consecutive* input rows, not to `rep` tiled copies of
-            # the whole angle block (see design.py's core_body).
             cos = cos.repeat_interleave(rep, dim=0)
             sin = sin.repeat_interleave(rep, dim=0)
         else:

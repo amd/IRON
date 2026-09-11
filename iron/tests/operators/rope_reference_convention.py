@@ -2,20 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""reference() must apply an angle row to `rows / angle_rows` CONSECUTIVE
-input rows, matching the device kernel -- not to `rows / angle_rows` tiled
-copies of the whole angle block.
+"""reference() must match the device's angle convention: design.py's core_body
+acquires one angle row and applies it to `rows // angle_rows` consecutive input
+rows before moving to the next, so row r uses angle row
+`r // (rows // angle_rows)`.
 
-design.py's core_body acquires one angle row and applies it to
-`tensor_rows_per_angle_row` consecutive input rows before moving to the
-next angle row: row r uses angle row `r // (rows // angle_rows)`. A prior
-version of reference() used `cos.repeat(rep, 1)`, which tiles the whole
-angle block `rep` times (row r uses angle row `r % angle_rows`) --  the
-interleaved convention. The two conventions agree only when angle_rows is
-1 or rows, so this is invisible unless something exercises
-1 < angle_rows < rows -- exactly the shape llama_npu.py's prefill RoPE uses
-(rows=prompt_len*n_heads, angle_rows=prompt_len), though nothing there
-currently calls reference() with it.
+That convention and the interleaved one (`r % angle_rows`) agree whenever
+angle_rows is 1 or rows, so only 1 < angle_rows < rows tells them apart --
+the regime llama_npu.py's prefill RoPE shape sits in
+(rows=prompt_len*n_heads, angle_rows=prompt_len).
 """
 
 import torch
@@ -24,8 +19,8 @@ from iron.operators.rope.reference import reference
 
 
 def _block_major_expected(x, angles, rows, angle_rows):
-    """Ground truth built directly from the device convention: row r uses
-    angle row r // (rows // angle_rows)."""
+    """Device convention spelled out row by row: row r uses angle row
+    r // (rows // angle_rows)."""
     cols = x.shape[-1]
     half = cols // 2
     tensor_rows_per_angle_row = rows // angle_rows
@@ -51,8 +46,7 @@ def _make_inputs(rows, angle_rows, cols=4, seed=0):
 
 
 def test_reference_matches_device_convention_for_batched_angle_rows():
-    """Decisive case: 1 < angle_rows < rows. Before the fix, 4 of these 6
-    rows disagreed with the device convention."""
+    """1 < angle_rows < rows, the only regime that separates the two conventions."""
     rows, angle_rows = 6, 3
     x, angles = _make_inputs(rows, angle_rows)
     expected = _block_major_expected(x, angles, rows, angle_rows)
@@ -65,4 +59,6 @@ def test_reference_matches_device_convention_across_shapes():
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)
         got = reference(x, angles, rows=rows, cols=x.shape[-1])
-        assert torch.equal(expected, got), f"mismatch at rows={rows} angle_rows={angle_rows}"
+        assert torch.equal(
+            expected, got
+        ), f"mismatch at rows={rows} angle_rows={angle_rows}"
