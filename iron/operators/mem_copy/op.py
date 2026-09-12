@@ -60,6 +60,7 @@ class MemCopy(MLIROperator):
         return [
             KernelObjectArtifact(
                 "mem_copy.o",
+                extra_flags=["-DBIT_WIDTH=16"],
                 dependencies=[
                     SourceArtifact(
                         self.context.base_dir
