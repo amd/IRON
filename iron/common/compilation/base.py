@@ -38,6 +38,7 @@ from collections import deque
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 import hashlib
+import json
 import os.path
 import shutil
 import urllib.request
@@ -49,8 +50,13 @@ from functools import partial
 from typing import Any, Callable
 import sys
 
+from iron.common.cache import ContentStore, content_key, parse_depfile
 from iron.common.device_utils import get_kernel_dir
-from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_module
+from aie.utils.compile.utils import (
+    _tool_identity,
+    compile_cxx_core_function,
+    compile_mlir_module,
+)
 
 # Global Functions
 # ##########################################################################
@@ -378,6 +384,32 @@ class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
         self.extra_flags = extra_flags if extra_flags is not None else []
 
 
+def _kernel_object_store() -> ContentStore:
+    from aie.utils.compile import NPU_CACHE_HOME
+
+    return ContentStore(NPU_CACHE_HOME / "iron-compilation-artifacts")
+
+
+def _peano_toolchain_fingerprint() -> str:
+    """Identify Peano by what it IS, not where it sits or when it was installed.
+
+    Reuses _tool_identity rather than re-deriving its own version of the same lesson:
+    mlir-aie#3427 keyed aiecc by mtime and made two installs of the same commit
+    disagree, and a naive `--version` capture here would repeat that by keeping the
+    `InstalledDir:` line _tool_identity already knows to drop.
+    """
+    try:
+        import aie.utils.config as config
+
+        return _tool_identity(config.peano_cxx_path()) or "<peano:empty-version>"
+    except (ImportError, OSError) as exc:
+        return f"<peano:unresolved:{type(exc).__name__}>"
+
+
+def _kernel_manifest_path(filename: str) -> Path:
+    return Path(f"{filename}.contentkey.json")
+
+
 class KernelObjectArtifact(CompilationArtifact):
     def __init__(
         self,
@@ -386,11 +418,56 @@ class KernelObjectArtifact(CompilationArtifact):
         extra_flags: list[str] | None = None,
         rename_symbols: dict[str, str] | None = None,
         prefix_symbols: str | None = None,
+        use_chess: bool = False,
     ) -> None:
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
+        self.use_chess = use_chess
+
+    def _content_flags(self) -> dict:
+        return {
+            "extra_flags": sorted(self.extra_flags),
+            "rename_symbols": sorted(self.rename_symbols.items()),
+            "prefix_symbols": self.prefix_symbols,
+            "use_chess": self.use_chess,
+        }
+
+    def is_available_in_filesystem(self) -> bool:
+        """Content-addressed, not mtime-compared.
+
+        Two builds differing only in extra_flags/rename_symbols/prefix_symbols (a
+        row-batch count, a -D define, a symbol prefix) produce different compiled
+        bytes at the SAME filename, and mtime cannot tell them apart -- see
+        iron/common/cache.py's module docstring for the failure class this closes,
+        and 2026-09-12-compilationartifact-is-a-third-mtime-only-cache-instance for
+        the live bug it was found from (a shared build cache silently linked the
+        wrong SCORES_ROWBATCH arm's object).
+
+        Trusts a sidecar manifest written by KernelCompilationRule at the last
+        successful compile of THIS filename, not a bare ContentStore hit: a store
+        hit only proves this identity was built somewhere, not that these bytes,
+        right here, are it. The manifest names the key that produced what is
+        currently on disk; if the depfile it points at no longer hashes to that
+        key (a header changed) or the caller's current flags/toolchain differ from
+        what it recorded, this is correctly NOT available, regardless of mtime.
+        """
+        if not Path(self.filename).exists():
+            return False
+        try:
+            manifest = json.loads(_kernel_manifest_path(self.filename).read_text())
+        except (OSError, ValueError):
+            return False
+        flags = self._content_flags()
+        toolchain = _peano_toolchain_fingerprint()
+        if manifest.get("flags") != flags or manifest.get("toolchain") != toolchain:
+            return False
+        inputs = manifest.get("inputs")
+        if not inputs:
+            return False
+        recomputed = content_key(inputs, flags, toolchain)
+        return recomputed == manifest.get("key")
 
 
 class KernelArchiveArtifact(CompilationArtifact):
@@ -882,9 +959,50 @@ class KernelCompilationRule(CompilationRule):
                 commands.extend(self._rename_symbols(artifact))
             if artifact.prefix_symbols:
                 commands.extend(self._prefix_symbols(artifact, artifact.prefix_symbols))
+            # Last, after any rename/prefix post-processing: the manifest must
+            # describe the file's FINAL bytes, and content_key's own `flags`
+            # component already accounts for rename_symbols/prefix_symbols, so
+            # recording it before they run would claim an identity the file does
+            # not have yet.
+            commands.append(
+                PythonCallbackCompilationCommand(partial(self._record_cache_entry, artifact))
+            )
             artifact.available = True
 
         return commands
+
+    @staticmethod
+    def _record_cache_entry(artifact) -> bool:
+        """Write the sidecar manifest KernelObjectArtifact.is_available_in_filesystem()
+        trusts, and put a copy in the shared ContentStore for future reuse at a
+        DIFFERENT filename (a second arm whose flags happen to produce the same
+        object). Runs after a successful compile (and any rename/prefix), so a
+        failure here must not be read as a compile failure -- it only means this
+        object will not be recognized as available or reused next time, not that
+        anything already built is wrong."""
+        depfile = f"{artifact.filename}.d"
+        inputs = parse_depfile(depfile)
+        if not inputs:
+            logging.debug(
+                "KernelCompilationRule: no depfile at %s; %s will not cache",
+                depfile,
+                artifact.filename,
+            )
+            return True
+        flags = artifact._content_flags()
+        toolchain = _peano_toolchain_fingerprint()
+        key = content_key(inputs, flags, toolchain)
+        try:
+            _kernel_object_store().put(key, artifact.filename)
+            _kernel_manifest_path(artifact.filename).write_text(
+                json.dumps(
+                    {"key": key, "inputs": inputs, "flags": flags, "toolchain": toolchain},
+                    sort_keys=True,
+                )
+            )
+        except OSError as exc:
+            logging.debug("KernelCompilationRule: could not record cache entry: %s", exc)
+        return True
 
     def _find_tool(self, name):
         return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
