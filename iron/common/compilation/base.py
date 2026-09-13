@@ -335,7 +335,44 @@ class _MLIRInputMixin:
         return result
 
 
-class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
+def _aiecc_output_manifest_path(filename: str) -> Path:
+    return Path(f"{filename}.contentkey.json")
+
+
+class _AieccOutputArtifact(_MLIRInputMixin, CompilationArtifact):
+    """Content-addressed availability, shared by the three aiecc-produced artifact classes.
+
+    Peano only: none of this tree's FullElfArtifact/XclbinArtifact/InstsBinArtifact call sites
+    pass a `use_chess` choice through to the artifact, so there is no toolchain fingerprint to
+    check a Chess build's manifest against here. Recording is skipped for a Chess compile
+    (AieccFullElfCompilationRule/AieccXclbinInstsCompilationRule below), so such an artifact is
+    correctly, conservatively mtime-only -- compile_mlir_module's own cache still makes a
+    repeat Chess compile fast, just not skipped at this outer layer.
+    """
+
+    def _content_flags(self) -> dict:
+        raise NotImplementedError
+
+    def is_available_in_filesystem(self) -> bool:
+        if not Path(self.filename).exists():
+            return False
+        try:
+            manifest = json.loads(
+                _aiecc_output_manifest_path(self.filename).read_text()
+            )
+        except (OSError, ValueError):
+            return False
+        flags = self._content_flags()
+        toolchain = _peano_toolchain_fingerprint()
+        if manifest.get("flags") != flags or manifest.get("toolchain") != toolchain:
+            return False
+        inputs = manifest.get("inputs")
+        if not inputs:
+            return False
+        return content_key(inputs, flags, toolchain) == manifest.get("key")
+
+
+class FullElfArtifact(_AieccOutputArtifact):
     def __init__(
         self,
         filename: str,
@@ -351,8 +388,11 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         # Bytes of trace buffer per runlist step, 0 for an untraced build.
         self.trace_size = trace_size
 
+    def _content_flags(self) -> dict:
+        return {"extra_flags": sorted(self.extra_flags), "trace_size": self.trace_size}
 
-class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
+
+class XclbinArtifact(_AieccOutputArtifact):
     def __init__(
         self,
         filename: str,
@@ -369,8 +409,15 @@ class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.xclbin_input = xclbin_input
 
+    def _content_flags(self) -> dict:
+        return {
+            "extra_flags": sorted(self.extra_flags),
+            "kernel_name": self.kernel_name,
+            "xclbin_input": self.xclbin_input.filename if self.xclbin_input else None,
+        }
 
-class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
+
+class InstsBinArtifact(_AieccOutputArtifact):
     def __init__(
         self,
         filename: str,
@@ -382,6 +429,9 @@ class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
+
+    def _content_flags(self) -> dict:
+        return {"extra_flags": sorted(self.extra_flags)}
 
 
 def _kernel_object_store() -> ContentStore:
@@ -476,6 +526,36 @@ class KernelArchiveArtifact(CompilationArtifact):
     pass
 
 
+def _generator_manifest_path(filename: str) -> Path:
+    return Path(f"{filename}.contentkey.json")
+
+
+def _json_scalar_safe(value) -> bool:
+    """True if `value` is built only from types whose `repr()` is a function of content,
+    not identity (a plain object's default `repr()` embeds its memory address)."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_json_scalar_safe(v) for v in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _json_scalar_safe(v) for k, v in value.items()
+        )
+    return False
+
+
+def _generator_content_flags(generator: DesignGenerator) -> dict | None:
+    """`content_key()` flags for a DesignGenerator's call shape, or None if `args`/`kwargs`
+    hold a value this cannot key on safely (see `_json_scalar_safe`)."""
+    if not _json_scalar_safe(generator.args) or not _json_scalar_safe(generator.kwargs):
+        return None
+    return {
+        "fn_name": generator.fn_name,
+        "args": list(generator.args),
+        "kwargs": dict(sorted(generator.kwargs.items())),
+    }
+
+
 class PythonGeneratedMLIRArtifact(MLIRArtifact):
     def __init__(
         self,
@@ -484,6 +564,31 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
     ) -> None:
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
+
+    def is_available_in_filesystem(self) -> bool:
+        """Content-addressed over the generator's source file AND its call shape.
+
+        A DesignGenerator's real identity is (source_path, fn_name, args, kwargs); the
+        mtime-only base class only ever compared source_path, so two calls differing only in
+        a kwarg (e.g. gen_llm_decode.py's scores_rowbatch) shared one cached "available" MLIR
+        file -- the same defect class KernelObjectArtifact was migrated for. Does not see
+        transitive imports the generator's own module makes: a plain Python callable has no
+        compiler-depfile equivalent to enumerate them.
+        """
+        flags = _generator_content_flags(self.generator)
+        if flags is None or not Path(self.filename).exists():
+            return False
+        try:
+            manifest = json.loads(_generator_manifest_path(self.filename).read_text())
+        except (OSError, ValueError):
+            return False
+        toolchain = sys.version
+        if manifest.get("flags") != flags or manifest.get("toolchain") != toolchain:
+            return False
+        inputs = manifest.get("inputs")
+        if not inputs:
+            return False
+        return content_key(inputs, flags, toolchain) == manifest.get("key")
 
 
 def _sha256_of(path: Path) -> str:
@@ -632,6 +737,11 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         for artifact in worklist:
             callback = partial(self.generate_mlir, artifact, artifact.generator)
             commands.append(PythonCallbackCompilationCommand(callback))
+            commands.append(
+                PythonCallbackCompilationCommand(
+                    partial(self._record_cache_entry, artifact)
+                )
+            )
             artifact.available = True
         return commands
 
@@ -640,6 +750,33 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         mlir_code = generator()
         with open(output_artifact.filename, "w") as f:
             f.write(mlir_code)
+
+    @staticmethod
+    def _record_cache_entry(artifact) -> bool:
+        flags = _generator_content_flags(artifact.generator)
+        if flags is None:
+            return True
+        inputs = [str(artifact.generator.source_path)]
+        toolchain = sys.version
+        key = content_key(inputs, flags, toolchain)
+        try:
+            _generator_manifest_path(artifact.filename).write_text(
+                json.dumps(
+                    {
+                        "key": key,
+                        "inputs": inputs,
+                        "flags": flags,
+                        "toolchain": toolchain,
+                    },
+                    sort_keys=True,
+                )
+            )
+        except OSError as exc:
+            logging.debug(
+                "GenerateMLIRFromPythonCompilationRule: could not record cache entry: %s",
+                exc,
+            )
+        return True
 
 
 def _aiecc_work_dir(mlir_filename: str) -> Path:
@@ -749,9 +886,36 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
                 )
 
             commands.append(PythonCallbackCompilationCommand(_compile))
+            if not self.use_chess:
+                commands.append(
+                    PythonCallbackCompilationCommand(
+                        partial(_record_aiecc_output_cache_entry, artifact)
+                    )
+                )
             artifact.available = True
 
         return commands
+
+
+def _record_aiecc_output_cache_entry(artifact) -> bool:
+    inputs = [d.filename for d in artifact.dependencies]
+    flags = artifact._content_flags()
+    toolchain = _peano_toolchain_fingerprint()
+    key = content_key(inputs, flags, toolchain)
+    try:
+        _aiecc_output_manifest_path(artifact.filename).write_text(
+            json.dumps(
+                {"key": key, "inputs": inputs, "flags": flags, "toolchain": toolchain},
+                sort_keys=True,
+            )
+        )
+    except OSError as exc:
+        logging.debug(
+            "_record_aiecc_output_cache_entry: could not record %s: %s",
+            artifact.filename,
+            exc,
+        )
+    return True
 
 
 class AieccXclbinInstsCompilationRule(AieccCompilationRule):
@@ -822,6 +986,17 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 )
 
             commands.append(PythonCallbackCompilationCommand(_compile))
+            if not self.use_chess:
+                for compiled in (
+                    first_xclbin if do_compile_xclbin else None,
+                    first_insts_bin if do_compile_insts_bin else None,
+                ):
+                    if compiled is not None:
+                        commands.append(
+                            PythonCallbackCompilationCommand(
+                                partial(_record_aiecc_output_cache_entry, compiled)
+                            )
+                        )
 
             # There may be multiple targets that require an xclbin/insts.bin from the same MLIR with different names; copy them
             for sources_to in [mlir_sources_to_xclbins, mlir_sources_to_insts]:
@@ -965,7 +1140,9 @@ class KernelCompilationRule(CompilationRule):
             # recording it before they run would claim an identity the file does
             # not have yet.
             commands.append(
-                PythonCallbackCompilationCommand(partial(self._record_cache_entry, artifact))
+                PythonCallbackCompilationCommand(
+                    partial(self._record_cache_entry, artifact)
+                )
             )
             artifact.available = True
 
@@ -996,12 +1173,19 @@ class KernelCompilationRule(CompilationRule):
             _kernel_object_store().put(key, artifact.filename)
             _kernel_manifest_path(artifact.filename).write_text(
                 json.dumps(
-                    {"key": key, "inputs": inputs, "flags": flags, "toolchain": toolchain},
+                    {
+                        "key": key,
+                        "inputs": inputs,
+                        "flags": flags,
+                        "toolchain": toolchain,
+                    },
                     sort_keys=True,
                 )
             )
         except OSError as exc:
-            logging.debug("KernelCompilationRule: could not record cache entry: %s", exc)
+            logging.debug(
+                "KernelCompilationRule: could not record cache entry: %s", exc
+            )
         return True
 
     def _find_tool(self, name):

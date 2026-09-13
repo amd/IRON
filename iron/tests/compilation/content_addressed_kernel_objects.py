@@ -156,20 +156,24 @@ def test_row_4_self_test_extra_flags_change_misses_and_is_not_served_stale(tmp_p
         tmp_path, extra_flags=["-DSCORES_ROWBATCH=1"]
     )
     with _with_fixed_toolchain(toolchain):
-        assert artifact.is_available_in_filesystem()  # sanity: the fixture is self-consistent
+        assert (
+            artifact.is_available_in_filesystem()
+        )  # sanity: the fixture is self-consistent
 
         # (1) mutate an input that changes what THIS object should contain, the same
         # shape as SCORES_ROWBATCH going from 1 to 4 at one unchanged filename.
         artifact.extra_flags = ["-DSCORES_ROWBATCH=4"]
         new_flags = artifact._content_flags()
-        new_key = content_key(parse_depfile(f"{artifact.filename}.d"), new_flags, toolchain)
+        new_key = content_key(
+            parse_depfile(f"{artifact.filename}.d"), new_flags, toolchain
+        )
         assert new_key != old_key, "content key did not change after the flag mutation"
 
         # (2) the artifact -- whose on-disk manifest still names the OLD key -- must
         # now report unavailable, because its recorded identity no longer matches.
-        assert not artifact.is_available_in_filesystem(), (
-            "a flag-only mutation was silently served the pre-mutation object"
-        )
+        assert (
+            not artifact.is_available_in_filesystem()
+        ), "a flag-only mutation was silently served the pre-mutation object"
 
         # (3) the stale object's own bytes were never touched by this check --
         # confirms rejection is a pure predicate, not an accidental in-place mutation
@@ -187,9 +191,9 @@ def test_a_changed_header_the_depfile_names_also_misses(tmp_path):
     with _with_fixed_toolchain(toolchain):
         assert artifact.is_available_in_filesystem()
         header.write_text("// shared, but different now\n")
-        assert not artifact.is_available_in_filesystem(), (
-            "an edit to a header the depfile named was not detected"
-        )
+        assert (
+            not artifact.is_available_in_filesystem()
+        ), "an edit to a header the depfile named was not detected"
 
 
 def test_a_missing_manifest_is_not_available(tmp_path):
@@ -213,7 +217,9 @@ def test_a_toolchain_change_misses_even_with_unchanged_inputs_and_flags(tmp_path
 # --- The real recording path, not just a hand-authored fixture --------------------
 
 
-def test_record_cache_entry_writes_a_manifest_that_is_then_recognized_available(tmp_path):
+def test_record_cache_entry_writes_a_manifest_that_is_then_recognized_available(
+    tmp_path,
+):
     """Exercises KernelCompilationRule._record_cache_entry itself (the code that
     runs after a real compile), rather than a hand-authored manifest, to prove the
     fixture above matches what the real migration actually writes."""
@@ -227,12 +233,15 @@ def test_record_cache_entry_writes_a_manifest_that_is_then_recognized_available(
         filename=str(obj), dependencies=[SourceArtifact(str(source))]
     )
     test_store = ContentStore(tmp_path / "npu-cache")
-    with _with_fixed_toolchain("toolchain-v1"), mock.patch(
-        "iron.common.compilation.base._kernel_object_store", return_value=test_store
+    with (
+        _with_fixed_toolchain("toolchain-v1"),
+        mock.patch(
+            "iron.common.compilation.base._kernel_object_store", return_value=test_store
+        ),
     ):
-        assert not artifact.is_available_in_filesystem(), (
-            "no manifest exists yet; a fresh compile must not already look available"
-        )
+        assert (
+            not artifact.is_available_in_filesystem()
+        ), "no manifest exists yet; a fresh compile must not already look available"
         assert KernelCompilationRule._record_cache_entry(artifact) is True
         assert artifact.is_available_in_filesystem(), (
             "_record_cache_entry's own manifest was not recognized by "
