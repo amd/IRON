@@ -18,8 +18,8 @@ from iron.common import (
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
+from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 from iron.common.operator_bases import lut_based_ops_artifacts
-from iron.common.utils import float_to_name
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -27,6 +27,7 @@ from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
+    M_CHUNK_FOR_N,
     C_DEPTH,
     compute_rows,
     CT_OUT_LEN,
@@ -39,6 +40,7 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
     _default_l1,
+    _hw_stride_ok,
 )
 
 
@@ -65,6 +67,11 @@ class GEMM(MLIROperator):
     N: int
     # Activation fused into the C drain.
     epilogue: Epilogue = Epilogue.NONE
+    # The activations the epilogue can select between at run time. Each one
+    # compiled in costs program memory, so a deployment that dispatches two
+    # should compile two. Unlike `epilogue`, this is part of the
+    # configuration.
+    epilogue_modes: tuple[Epilogue, ...] = tuple(Epilogue)
     # Optional (min, max) applied after the activation.
     clamp: tuple[float, float] | None = None
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
@@ -74,6 +81,9 @@ class GEMM(MLIROperator):
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). __post_init__ resolves None to whatever L1 affords.
     tile_ma: int | None = None
+    # Row-blocks folded into one B fetch. __post_init__ resolves None from
+    # tile_n, falling back to 1 when it would not divide m_row_blocks.
+    m_chunk: int | None = None
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding = Rounding.CONV_EVEN
     context: object = field(default=None, repr=False)
@@ -83,6 +93,7 @@ class GEMM(MLIROperator):
         "epilogue": "epi",
         "tile_n": "tn",
         "tile_ma": "ma",
+        "m_chunk": "mc",
         "rounding": "rnd",
     }
 
@@ -115,12 +126,34 @@ class GEMM(MLIROperator):
             raise ValueError(
                 f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
             )
+        # m_chunk: row-blocks a core folds into one B fetch (design.py's
+        # M_CHUNK_FOR_N). It MUST divide m_row_blocks -- a partial group is
+        # inexpressible, see the raise in design.py -- so fall back to 1 when
+        # it does not. That puts M's divisibility in the configuration, but
+        # only as a 2-bucket split rather than per-shape.
+        if self.m_chunk is None:
+            want = M_CHUNK_FOR_N[self.tile_n]
+            rows = M_TILE * compute_rows(dev)
+            m_row_blocks = self.M // rows if self.M % rows == 0 else 0
+            # Two conditions, both of which force the fallback to 1:
+            #   * m_chunk must DIVIDE m_row_blocks -- a partial group is
+            #     inexpressible, see the raise in design.py.
+            #   * the group's row-blocks sit ROWS*M_TILE*K apart INSIDE the A
+            #     descriptor, so that stride must fit the shim BD's 20-bit
+            #     step. a_split used to lift this dimension out of the
+            #     descriptor entirely; m_chunk puts it back, so big K (10240)
+            #     overflows where m_chunk=1 would not.
+            fits = m_row_blocks and m_row_blocks % want == 0
+            if fits and not _hw_stride_ok(compute_rows(dev) * M_TILE * self.K):
+                fits = False
+            self.m_chunk = want if fits else 1
         if self.tile_ma is None:
             self.tile_ma = _default_l1(
                 self.tile_n,
                 CT_MAX_K_FOR_N[self.tile_n],
                 self._b_elem_bytes,
                 get_target_model(dev.resolve()).get_local_memory_size(),
+                self.m_chunk,
             )[0]
         # N only needs to tile to N_TILE: a trailing group of fewer than
         # COLS column-blocks is handled by giving the columns different trip
@@ -144,15 +177,56 @@ class GEMM(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
-    def name(self) -> str:
-        """Artifact stem, prefixed to disambiguate from ``iron.operators.GEMM``.
+    def _epilogue_mask(self) -> int:
+        """Bitmask of the modes compiled into the epilogue. Mode 0 is always
+        present -- the kernel falls back to it."""
+        return 1 | sum(1 << Epilogue(m).mode for m in self.epilogue_modes)
 
-        ``MLIROperator.name`` derives the stem from ``type(self).__name__``,
-        which is ``GEMM`` for both operators. This repo's build cache keys on
-        filename and mtime rather than on source or flags, so two operators
-        sharing a stem in one build dir would silently satisfy each other.
+    @property
+    def _clamp_capable(self) -> int:
+        """Whether a clamped path is compiled in at all.
+
+        Like ``epilogue_modes`` this is a capability, not a selection: the
+        clamped instantiation costs program memory, so a build that never
+        clamps should not carry it. The BOUNDS are runtime parameters, so
+        ``clamp=(-2, 2)`` and ``clamp=(-4, 4)`` share one xclbin -- only
+        clamped-versus-not forks the build.
         """
-        return f"FLM_{super().name}"
+        return 1 if self.clamp is not None else 0
+
+    @property
+    def _config_tag(self) -> str:
+        """Everything that shapes the device configuration, and so the xclbin.
+
+        M, K, N, the activation and the clamp BOUNDS are absent: they are
+        runtime parameters, so they change only the instruction stream.
+        Whether a clamp exists at all does shape the build; see
+        ``_clamp_capable``.
+        """
+        dev = aie_utils.get_current_device().resolve().name
+        return (
+            f"tn{self.tile_n}_ma{self.tile_ma}_mc{self.m_chunk}"
+            f"_em{self._epilogue_mask:x}_{self.rounding}"
+            f"_cl{self._clamp_capable}_{dev}"
+        )
+
+    @property
+    def config_name(self) -> str:
+        """Stem of the artifacts that do not depend on the shape."""
+        return f"FLM_GEMM_{self._config_tag}"
+
+    @property
+    def name(self) -> str:
+        """Artifact stem for the instruction stream, which does depend on it.
+
+        Prefixed to disambiguate from ``iron.operators.GEMM``: this repo's
+        build cache keys on filename and mtime rather than on source or flags,
+        so two operators sharing a stem would silently satisfy each other.
+        """
+        base = f"FLM_GEMM_M{self.M}_K{self.K}_N{self.N}_{self._config_tag}"
+        if self.epilogue != Epilogue.NONE:
+            base = f"{base}_epi{self.epilogue}"
+        return base
 
     @property
     def _bfp16_b(self) -> bool:
@@ -181,13 +255,10 @@ class GEMM(MLIROperator):
         which set the blocked layout, and the epilogue flags, which since the
         epilogue was folded into this translation unit shape the same object.
         """
-        clamp = ""
-        if self.clamp is not None:
-            clamp = "_clamp" + "_".join(float_to_name(float(v)) for v in self.clamp)
         return (
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_epi{self.epilogue}{clamp}.o"
+            f"_em{self._epilogue_mask:x}_cl{self._clamp_capable}.o"
         )
 
     @property
@@ -201,30 +272,94 @@ class GEMM(MLIROperator):
         LINK error for tanh_lut_ab/tanh_lut_cd rather than a compile error, so
         it surfaces late.
         """
-        if self.epilogue is not Epilogue.NONE and get_kernel_dir() == "aie2":
-            return f"{self.name}_kernels.a"
+        if (
+            any(Epilogue(m) is not Epilogue.NONE for m in self.epilogue_modes)
+            and get_kernel_dir() == "aie2"
+        ):
+            # config_name, not name: this string reaches the design's
+            # link_with, so a shape in it would put the shape in the device
+            # configuration.
+            return f"{self.config_name}_kernels.a"
         return self._kernel_object
 
-    def get_mlir_artifact(self):
+    @property
+    def _reference_shape(self) -> tuple[int, int, int]:
+        """The shape the configuration-only module is emitted at.
+
+        Its runtime sequence is discarded; only its device body reaches the
+        xclbin. Taking the smallest valid shape keeps that module cheap to
+        build and makes the shape-independence explicit -- if a real shape's
+        instruction stream did not run against this xclbin, some dimension
+        would still be reaching the configuration.
+        """
+        dev = aie_utils.get_current_device()
+        # M must be at least m_chunk row-blocks: a partial group is
+        # inexpressible (see design.py), and this module must build.
+        return (
+            M_TILE * compute_rows(dev) * self.m_chunk,
+            MIN_K,
+            self.tile_n * dev.cols,
+        )
+
+    def _mlir_artifact(self, filename, M, K, N, epilogue, clamp):
         return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
+            filename,
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "gemm",
                 (),
                 {
                     "dev": aie_utils.get_current_device(),
-                    "M": self.M,
-                    "K": self.K,
-                    "N": self.N,
+                    "M": M,
+                    "K": K,
+                    "N": N,
                     "tile_n": self.tile_n,
                     "tile_ma": self.tile_ma,
-                    "epilogue": self.epilogue,
+                    "m_chunk": self.m_chunk,
+                    "epilogue": epilogue,
+                    "clamp": clamp,
                     "kernel_object": self._link_file,
                     "trace_size": 0,
                 },
             ),
         )
+
+    def get_mlir_artifact(self):
+        return self._mlir_artifact(
+            f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue, self.clamp
+        )
+
+    def set_up_artifacts(self) -> None:
+        kernels = self.get_kernel_artifacts()
+
+        # The xclbin comes from a module emitted at a reference shape and a
+        # reference activation, so every shape sharing this configuration
+        # reuses it rather than rebuilding an identical one.
+        # Canonical bounds, not this instance's: the clamp BOUNDS only reach
+        # the runtime sequence, which this module has discarded, so passing
+        # the real ones would make a filename-cached artifact's content depend
+        # on something that never reaches the xclbin. Only the capability
+        # matters here, and that is already in config_name.
+        config_mlir = self._mlir_artifact(
+            f"{self.config_name}.mlir",
+            *self._reference_shape,
+            Epilogue.NONE,
+            (0.0, 0.0) if self._clamp_capable else None,
+        )
+        self.xclbin_artifact = XclbinArtifact(
+            f"{self.config_name}.xclbin",
+            mlir_input=config_mlir,
+            dependencies=[config_mlir] + kernels,
+        )
+        shape_mlir = self.get_mlir_artifact()
+        self.insts_artifact = InstsBinArtifact(
+            f"{self.name}.bin",
+            mlir_input=shape_mlir,
+            # aiecc compiles the cores on the way to an instruction stream, so
+            # this needs the kernel objects too.
+            dependencies=[shape_mlir] + kernels,
+        )
+        self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
     def get_kernel_artifacts(self):
         kernel_dir = get_kernel_dir()
@@ -261,21 +396,14 @@ class GEMM(MLIROperator):
             # Output stage.
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
-            f"-DMM_FUSED_EPILOGUE_MODE={self.epilogue.mode}",
+            f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
+            # Capability only -- the bounds are runtime. See _clamp_capable.
+            f"-DMM_FUSED_CLAMP={self._clamp_capable}",
         ] + arch_include
         if self._bfp16_b:
             flags += [
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
                 "-DMM_FUSED_BFP16_B",
-            ]
-        if self.clamp is not None:
-            lo, hi = self.clamp
-            # repr() rather than :g -- the latter renders -4.0 as "-4", and
-            # "-4f" is not a valid C float literal.
-            flags += [
-                "-DMM_FUSED_CLAMP=1",
-                f"-DMM_FUSED_CLAMP_MIN={float(lo)!r}f",
-                f"-DMM_FUSED_CLAMP_MAX={float(hi)!r}f",
             ]
         if self.rounding is Rounding.CONV_EVEN:
             # ROUND_CONV_EVEN is mm.cc's flag, reused rather than inventing a

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 import aie.utils as aie_utils
 
@@ -13,6 +15,7 @@ from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
+    M_CHUNK_FOR_N,
     Epilogue,
     M_TILE,
     R,
@@ -273,14 +276,17 @@ def tile_option_params():
 
     params = []
     for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
-        default_ma = _default_l1(tile_n, ct_k, b_elem, l1)[0]
+        # m_chunk matters: the core holds a B chunk across that many
+        # accumulators, so it is what decides which A heights still fit.
+        m_chunk = M_CHUNK_FOR_N[tile_n]
+        default_ma = _default_l1(tile_n, ct_k, b_elem, l1, m_chunk)[0]
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
         for tile_ma in (16, 32, 64):
             if M_TILE % tile_ma or tile_ma % (2 * R):
                 continue
             try:
-                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1)
+                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1, m_chunk)
             except ValueError:
                 continue  # this A height leaves no room for B at this width
             marks = [] if tile_ma == default_ma else [pytest.mark.extensive]
@@ -321,3 +327,95 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
         GEMM(M=M, K=K, N=N, context=aie_context).name
         != GenericGEMM(M=M, K=K, N=N, context=aie_context).name
     )
+
+
+def test_one_xclbin_serves_every_shape(aie_context):
+    """Several shapes back to back on one loaded xclbin.
+
+    This is what the runtime parameters are for, and the parametrised tests
+    above cannot cover it: each gets a fresh context, so the array is
+    reconfigured between cases and any state a dispatch leaves behind is
+    wiped. Here the shapes share one.
+
+    They disagree on every parameter -- M, K, N, whether a column sits a block
+    out, and the activation -- and none of them may rebuild the xclbin.
+    """
+    # Every shape here must resolve to the same m_chunk, because m_chunk
+    # shapes the core program and so the xclbin (see GEMM._config_tag). It
+    # buckets M by whether m_row_blocks is a multiple of it -- these are all
+    # even -- and excludes the K that would overflow the A descriptor's step.
+    shapes = [
+        (512, 1536, 2048, "none"),
+        (512, 1536, 256, "none"),  # only 4 of 8 columns compute
+        (1024, 2048, 1536, "none"),
+        (512, 1536, 6144, "gelu"),
+        (512, 1536, 2048, "none"),  # back to the first, after the rest
+    ]
+    xclbin = None
+    for M, K, N, epilogue in shapes:
+        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue, context=aie_context)
+        golden_ref = generate_golden_reference(
+            M=M, K=K, N=N, epilogue=epilogue, scale=4.0 if epilogue == "none" else 0.5
+        )
+        mass = (
+            K
+            * golden_ref["input"].abs().float().mean()
+            * golden_ref["input_b"].abs().float().mean()
+        )
+        errors, _, _ = run_test(
+            operator,
+            {
+                "A": golden_ref["input"].flatten(),
+                "B": operator.pack_B(golden_ref["input_b"]),
+            },
+            {"C": golden_ref["output"].flatten()},
+            rel_tol=0.04,
+            abs_tol=float(0.004 * mass),
+        )
+        assert not errors, f"{M}x{K}x{N} {epilogue} failed"
+
+        stamp = (
+            operator.xclbin_artifact.filename,
+            os.path.getmtime(operator.xclbin_artifact.filename),
+        )
+        if xclbin is None:
+            xclbin = stamp
+        assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
+
+
+def test_one_xclbin_serves_every_clamp_bound(aie_context):
+    """Different clamp bounds back to back on one loaded xclbin.
+
+    The bounds are runtime parameters, so they must not rebuild anything;
+    only clamped-versus-unclamped is a build choice, because the clamped
+    instantiation costs program memory. See GEMM._clamp_capable.
+
+    Deliberately separate from test_one_xclbin_serves_every_shape: that one
+    never clamps, so it cannot catch bounds leaking back into the
+    configuration, which is exactly what this asserts.
+    """
+    M, K, N = 256, 512, 1024
+    bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
+    xclbin = None
+    for clamp in bounds:
+        operator = GEMM(M=M, K=K, N=N, clamp=clamp, context=aie_context)
+        golden_ref = generate_golden_reference(
+            M=M, K=K, N=N, clamp=clamp, scale=INPUT_SCALE
+        )
+        errors, _, _ = check_on_device(operator, golden_ref, K)
+        assert not errors, f"clamp={clamp} produced wrong output"
+
+        stamp = (
+            operator.xclbin_artifact.filename,
+            os.path.getmtime(operator.xclbin_artifact.filename),
+        )
+        if xclbin is None:
+            xclbin = stamp
+        assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
+
+    # ...but an unclamped build is a different configuration, and must be:
+    # the clamped instantiation is compiled out entirely there. config_name
+    # rather than xclbin_artifact, which only exists once compile() has run.
+    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
+    unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
+    assert unclamped.config_name != clamped.config_name
