@@ -38,10 +38,17 @@ with ``test.py``'s by construction. They are not redundant with it: ``test.py``
 asserts correctness on one implementation, this compares latency across three
 frozen binaries, and neither can stand in for the other.
 
+Pass ``--iterations 1``. Each test already averages ``ITERS`` dispatches over
+``ROUNDS`` interleaved rounds, so conftest's default of 5 repeats the whole
+matrix five times for nothing.
+
 Usage::
 
-    pytest iron/operators/flm/gemm/benchmark.py --no-short
-    pytest iron/operators/flm/gemm/benchmark.py --no-short -k E2B --csv-output flm.csv
+    pytest iron/operators/flm/gemm/benchmark.py --iterations 1
+    pytest iron/operators/flm/gemm/benchmark.py --iterations 1 -k E2B --csv-output flm.csv
+
+Do not pass ``-s`` when you want the CSV: conftest's reporter parses the
+captured stdout, so disabling capture yields a CSV with no metric columns.
 """
 
 import statistics
