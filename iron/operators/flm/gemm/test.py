@@ -47,17 +47,11 @@ def get_params():
     if dev_name not in ("npu1", "npu2"):
         return []
 
-    # The grid is 4 rows by as many columns as the device has, so the width of
-    # one full sweep -- N_TILE * COLS -- differs per device, and so do the N
-    # values that leave a trailing PARTIAL column-block. That trailing case is
-    # the interesting one: some columns compute the block while the rest only
-    # drain the A broadcast, and real transformer o/down projections always
-    # land there, since N = model dim is essentially never a multiple of the
-    # sweep width.
-    #
-    # At K = 512 there is a single k iteration, so tile_n defaults to 128 and a
-    # sweep is 1024 wide on NPU2 and 512 on NPU1; at K >= 1024 tile_n drops to
-    # 64, halving both.
+    # One full sweep is N_TILE * COLS wide, so both it and the N values that
+    # leave a trailing partial column-block differ per device. The trailing
+    # case is the interesting one: some columns compute the block while the
+    # rest only drain the A broadcast, and real o/down projections always land
+    # there. At K = 512 tile_n defaults to 128, halving at K >= 1024.
     # fmt: off
     if dev_name == "npu2":
         #      M,    K,     N, epilogue,    clamp,     rounding
@@ -83,15 +77,14 @@ def get_params():
             (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
             (  256,  512,  1024, SILU,     None,       FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
-            # mega_row iteration step, so that leg is issued as one transfer
-            # per mega_row, retired in windows. These are the real E4B FFN
-            # projections and were unsupported until that landed; they are
-            # the regression cover for it. M=2048 needs two windows, which is
-            # what exercises the windowing.
+            # mega_row iteration step, so that leg goes out as one transfer
+            # per mega_row against a bounded outstanding count. These are the
+            # real E4B FFN projections, unsupported until that landed, and
+            # M=2048 is what pushes past the bound.
             ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
             ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
-            ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # A, 2 windows
-            ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # C, 2 windows
+            ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down, 2x
+            ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup, 2x
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
@@ -130,18 +123,14 @@ def get_params():
 def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
     """Run ``operator`` against its golden reference and return run_test's result.
 
-    Bounds the error in ABSOLUTE terms as a fraction of the accumulated mass,
-    i.e. the expected size of the K reduction before cancellation,
-    K * mean|a| * mean|b|. A plain relative tolerance cannot work: with signed A
-    the K-sum cancels by ~sqrt(K), so |C| ends up far smaller than the mass
-    while the error tracks the mass, leaving near-zero outputs uncheckable.
+    Bounds the error absolutely, as a fraction of the accumulated mass
+    K * mean|a| * mean|b|. A relative tolerance cannot work: with signed A the
+    K-sum cancels by ~sqrt(K), so |C| ends up far smaller than the mass the
+    error tracks, leaving near-zero outputs uncheckable.
 
-    The fraction is per-architecture, because the two lower the same 8x8x8 mmul
-    onto very different arithmetic: NPU2 emulates it with bfp16, which drops
-    mantissa bits, while NPU1 has no bfp16 and lowers onto four native bf16 macs
-    accumulating in f32 -- exact up to the f32->bf16 store, so ~20x tighter.
-    floor truncates rather than rounding to nearest, so its bias accumulates
-    over the K reduction instead of cancelling and gets a looser bound on both.
+    The fraction is per-architecture, since NPU2 emulates the mmul with bfp16
+    while NPU1 accumulates four native bf16 macs in f32 (~20x tighter). floor
+    truncates, so its bias accumulates and gets a looser bound on both.
     """
     mass = (
         K
@@ -199,21 +188,12 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     assert not errors, "Test failed"
 
 
-def test_gemm_split_leg_windowing(aie_context):
-    """K or N = 10240 at M > 256 overflows the shim BD's 20-bit mega_row
-    iteration step, so that leg is issued as one transfer per mega_row, with at
-    most SHIM_TASK_QUEUE of them outstanding. Two shim resources bound it and
-    NEITHER is modelled by the toolchain -- the BD ids (16/tile, freed without
-    a completion check) and the channel task queue (4 deep, pushed
-    unconditionally) -- so overrunning either is a silent device hang rather
-    than a diagnostic.
-
-    The sequence retires the OLDEST transfer as it issues the next rather than
-    draining a whole window, so the live set is SHIM_TASK_QUEUE transfers plus
-    B and the unsplit leg for each of the two column-blocks a boundary spans:
-    4 + 2 + 2 = 8 of 16 descriptors, and at most 4 outstanding per channel.
-    Assert that arithmetic here, since the numbers come from the hardware and a
-    future retune of SHIM_TASK_QUEUE could break it silently.
+def test_gemm_split_leg_bounds(aie_context):
+    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so that leg
+    goes out one transfer per mega_row. Two unmodelled shim resources bound how
+    many may be live -- BD ids and the channel task queue -- and overrunning
+    either hangs silently. The live set is 4 + 2 + 2 = 8 of 16 descriptors;
+    assert that here, since retuning SHIM_TASK_QUEUE could break it silently.
     """
     from aie.dialects.aie import get_target_model
     from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE
@@ -226,26 +206,18 @@ def test_gemm_split_leg_windowing(aie_context):
         "the split shapes will hang"
     )
 
-    # The square case splits BOTH legs, which the real Gemma shapes never do
-    # (E4B's down-proj overflows on K and its gate/up on N, never both), so it
-    # is the only cover for the two-sided path.
+    # The square case splits both legs, which the real Gemma shapes never do
+    # (E4B's down overflows on K and its gate/up on N, never both), so it is
+    # the only cover for the two-sided path.
     GEMM(M=512, K=10240, N=10240, context=aie_context).compile()
 
 
-def test_gemm_split_leg_windowing_runs(aie_context):
+def test_gemm_split_leg_bounds_runs(aie_context):
     """Execute the two-sided split path, not just compile it.
 
-    test_gemm_split_leg_windowing above only compiles this shape: the failure
-    mode it guards against -- BD-id aliasing and shim task-queue overrun (see
-    that test's docstring) -- is a runtime device hang or silent corruption,
-    which compiling the MLIR cannot exercise. This dispatches the same shape on
-    hardware and checks the result.
-
-    Regular rather than extensive despite being the largest shape here. What it
-    catches is a hang or silently wrong output, not a wrong number, and its
-    compile-only sibling is already regular, so leaving the executing half out
-    of the default run is the wrong side to err on. Costs ~8s against the
-    regular suite's ~13s.
+    The failure the sibling test guards against is a runtime hang or silent
+    corruption, which compiling cannot exercise. Regular rather than extensive
+    despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
     golden_ref = generate_golden_reference(M=M, K=K, N=N)
@@ -259,16 +231,12 @@ def test_gemm_split_leg_windowing_runs(aie_context):
 def tile_option_params():
     """Every (tile_n, tile_ma) the design accepts on this device.
 
-    The shape parameters above exercise only the DEFAULT tile geometry, because
-    __post_init__ resolves both knobs from the shape and the device. These cover
-    the knobs themselves, which change the blocked L1 layout: tile_n selects
-    CT_MAX_K and the B object width, tile_ma sets the mmul's rowA and the A
-    object height, and pack_B, the four stream-dimension lists and gather_dims
-    all key off them. A mismatch is silently wrong output rather than a build
-    error, so each combination has to actually run on hardware.
-
-    The default tile_ma per tile_n stays in the regular suite; the overrides are
-    extensive, since each is its own kernel object and xclbin.
+    The shape parameters above only exercise the default geometry, since
+    __post_init__ resolves both knobs. These cover the knobs themselves, which
+    change the blocked L1 layout, and a mismatch is silently wrong output
+    rather than a build error, so each has to run on hardware. The defaults
+    stay in the regular suite; the overrides are extensive, since each is its
+    own kernel object and xclbin.
     """
     dev = aie_utils.get_current_device()
     if dev is None or dev.resolve().name not in ("npu1", "npu2"):
@@ -320,10 +288,9 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
 def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
     """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
 
-    Both classes are named ``GEMM``, and MLIROperator.name derives the stem
-    from the class name, while this repo's build cache keys on filename and
-    mtime rather than on source or flags -- so a shared stem would let the two
-    operators silently satisfy each other's builds in one build dir.
+    Both classes are named ``GEMM`` and MLIROperator.name derives the stem from
+    the class name, so with the cache keyed on filename the two operators would
+    silently satisfy each other's builds in one build dir.
     """
     assert (
         GEMM(M=M, K=K, N=N, context=aie_context).name
@@ -334,18 +301,13 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
 def test_one_xclbin_serves_every_shape(aie_context):
     """Several shapes back to back on one loaded xclbin.
 
-    This is what the runtime parameters are for, and the parametrised tests
-    above cannot cover it: each gets a fresh context, so the array is
-    reconfigured between cases and any state a dispatch leaves behind is
-    wiped. Here the shapes share one.
-
-    They disagree on every parameter -- M, K, N, whether a column sits a block
-    out, and the activation -- and none of them may rebuild the xclbin.
+    The parametrised tests cannot cover this: each gets a fresh context, so
+    the array is reconfigured between cases. Here the shapes share one, they
+    disagree on every parameter, and none may rebuild the xclbin.
     """
-    # Every shape here must resolve to the same m_chunk, because m_chunk
-    # shapes the core program and so the xclbin (see GEMM._config_tag). It
-    # buckets M by whether m_row_blocks is a multiple of it -- these are all
-    # even -- and excludes the K that would overflow the A descriptor's step.
+    # Every shape must resolve to the same m_chunk, which shapes the core
+    # program and so the xclbin. These are all even in m_row_blocks and exclude
+    # the K that would overflow the A descriptor's step.
     shapes = [
         (512, 1536, 2048, "none"),
         (512, 1536, 256, "none"),  # only 4 of 8 columns compute
@@ -388,13 +350,9 @@ def test_one_xclbin_serves_every_shape(aie_context):
 def test_one_xclbin_serves_every_clamp_bound(aie_context):
     """Different clamp bounds back to back on one loaded xclbin.
 
-    The bounds are runtime parameters, so they must not rebuild anything;
-    only clamped-versus-unclamped is a build choice, because the clamped
-    instantiation costs program memory. See GEMM._clamp_capable.
-
-    Deliberately separate from test_one_xclbin_serves_every_shape: that one
-    never clamps, so it cannot catch bounds leaking back into the
-    configuration, which is exactly what this asserts.
+    The bounds are runtime parameters, so they must not rebuild anything.
+    Separate from test_one_xclbin_serves_every_shape, which never clamps and so
+    cannot catch bounds leaking back into the configuration.
     """
     M, K, N = 256, 512, 1024
     bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]

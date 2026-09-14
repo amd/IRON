@@ -48,20 +48,15 @@ from iron.operators.flm.gemm.design import (
 class GEMM(MLIROperator):
     """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
 
-    A row-broadcast / C memtile-join design with fixed 64/512/128 tiling. See
-    ``design.py`` for how it differs from the more general ``GEMM`` operator.
-    Unlike ``GEMM`` this exposes no tiling knobs, but folds an activation and an
-    optional clamp into the output stage.
-
-    The grid is as wide as the device: 8 columns on NPU2, 4 on NPU1 (Phoenix).
-    Only the width varies -- the tiling and the blocked L1 layout are shared.
+    Fixed 64/512/128 tiling, no tiling knobs, and an activation plus optional
+    clamp folded into the output stage. The grid is as wide as the device: 8
+    columns on NPU2, 4 on NPU1. See ``design.py``.
     """
 
     # Every field below is repr=True, so MLIROperator.name derives the artifact
-    # stem from all of them. That is not cosmetic: each one changes the emitted
-    # MLIR or the kernel object, and this repo's build cache keys on filename,
-    # so a variant that shared a stem would be silently satisfied by another
-    # variant's cached build.
+    # stem from all of them. The build cache keys on filename, not on source or
+    # flags, so any field that changes the emitted MLIR or the kernel object
+    # must reach the stem or a stale build silently satisfies the request.
     M: int
     K: int
     N: int
@@ -98,51 +93,32 @@ class GEMM(MLIROperator):
     }
 
     def __post_init__(self):
-        # Resolve both tile knobs to concrete values here, so the dataclass
-        # fields hold what the build actually uses. The resolved tile_ma in
-        # particular must reach the artifact name: the design sizes the A object
-        # from it while the kernel derives the mmul's rowA from it, so an
-        # artifact built for one value must never satisfy a request for another.
+        # Resolve both tile knobs here, so the fields hold what the build
+        # actually uses. tile_ma especially must reach the artifact name: the
+        # design sizes the A object from it and the kernel derives the mmul's
+        # rowA from it.
         dev = aie_utils.get_current_device()
         if self.tile_n is None:
-            # n=64 gives the mmul colA=8 instead of 4, halving accumulator
-            # traffic per mac; n=128 halves A fetches instead. Which wins
-            # depends on whether compute or data movement is the critical path.
-            #
-            # On NPU2 that flips with K: with a single k iteration there is too
-            # little compute to hide the extra A traffic, so n=128 wins there
-            # (~9%), while n=64 wins by ~20% at K >= 1024.
-            #
-            # NPU1 never reaches that crossover. It has half the columns AND a
-            # quarter of the per-tile bf16 mac throughput (four native 4x8x4
-            # macs per 8x8x8 shape, against NPU2's two bfp16-emulated ones), so
-            # it stays compute-bound at every K, and n=128's 32 KB f32
-            # accumulator also overflows bank-aware L1 allocation. n=64 wins
-            # everywhere there by 1.21-1.38x, including at K=512 where NPU2's
-            # rule would pick 128.
+            # The trade flips with K on NPU2: one k iteration has too little
+            # compute to hide n=64's extra A traffic, so n=128 wins there by
+            # ~9% and n=64 by ~20% at K >= 1024. NPU1 has half the columns and
+            # a quarter of the per-tile bf16 throughput, so it stays
+            # compute-bound and n=64 wins at every K by 1.21-1.38x.
             single_k_iter = self.K // K_TILE <= 1
             self.tile_n = 128 if (dev.arch == AIEArch.AIE2p and single_k_iter) else 64
         elif self.tile_n not in CT_MAX_K_FOR_N:
             raise ValueError(
                 f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
             )
-        # m_chunk: row-blocks a core folds into one B fetch (design.py's
-        # M_CHUNK_FOR_N). It MUST divide m_row_blocks -- a partial group is
-        # inexpressible, see the raise in design.py -- so fall back to 1 when
-        # it does not. That puts M's divisibility in the configuration, but
-        # only as a 2-bucket split rather than per-shape.
+        # m_chunk falls back to 1 unless both hold: it divides m_row_blocks (a
+        # partial group is inexpressible, see design.py), and the group's
+        # row-blocks sit ROWS*M_TILE*K apart inside the A descriptor, a stride
+        # that must fit the shim BD's 20-bit step. K=10240 overflows it where
+        # m_chunk=1 would not.
         if self.m_chunk is None:
             want = M_CHUNK_FOR_N[self.tile_n]
             rows = M_TILE * compute_rows(dev)
             m_row_blocks = self.M // rows if self.M % rows == 0 else 0
-            # Two conditions, both of which force the fallback to 1:
-            #   * m_chunk must DIVIDE m_row_blocks -- a partial group is
-            #     inexpressible, see the raise in design.py.
-            #   * the group's row-blocks sit ROWS*M_TILE*K apart INSIDE the A
-            #     descriptor, so that stride must fit the shim BD's 20-bit
-            #     step. a_split used to lift this dimension out of the
-            #     descriptor entirely; m_chunk puts it back, so big K (10240)
-            #     overflows where m_chunk=1 would not.
             fits = m_row_blocks and m_row_blocks % want == 0
             if fits and not _hw_stride_ok(compute_rows(dev) * M_TILE * self.K):
                 fits = False
@@ -186,11 +162,9 @@ class GEMM(MLIROperator):
     def _clamp_capable(self) -> int:
         """Whether a clamped path is compiled in at all.
 
-        Like ``epilogue_modes`` this is a capability, not a selection: the
-        clamped instantiation costs program memory, so a build that never
-        clamps should not carry it. The BOUNDS are runtime parameters, so
-        ``clamp=(-2, 2)`` and ``clamp=(-4, 4)`` share one xclbin -- only
-        clamped-versus-not forks the build.
+        A capability, not a selection: the clamped instantiation costs
+        program memory. The bounds are runtime, so only clamped-versus-not
+        forks the build.
         """
         return 1 if self.clamp is not None else 0
 
@@ -198,19 +172,12 @@ class GEMM(MLIROperator):
     def _config_tag(self) -> str:
         """Everything that shapes the device configuration, and so the xclbin.
 
-        M, K, N, the activation and the clamp BOUNDS are absent: they are
-        runtime parameters, so they change only the instruction stream.
-        Whether a clamp exists at all does shape the build; see
-        ``_clamp_capable``.
+        M, K, N, the activation and the clamp bounds are absent: they are
+        runtime parameters. Whether a clamp exists at all does shape the build.
 
-        ``ck`` is here for the same reason it is in ``_kernel_object``, and it
-        is NOT redundant with ``tn``: CT_MAX_K_FOR_N is a tuning table, and
-        retuning one entry changes the design (B's object width, the k slice,
-        a_send_dims) while tn is unmoved. ``ma`` does not cover it either --
-        it usually moves with ck, but ``tile_ma`` is caller-overridable, so
-        tn128/ma16 is reachable at two different ck values. Omitting it here
-        silently served an xclbin built at one ck to a request for another,
-        which is how test_gemm_tile_options[tn128-ma16] started returning NaN.
+        ``ck`` needs naming separately because retuning CT_MAX_K_FOR_N moves it
+        while tn is unmoved, and tile_ma is caller-overridable. Omitting it
+        once served an xclbin built at one ck to a request for another.
         """
         dev = aie_utils.get_current_device().resolve().name
         return (
@@ -229,9 +196,8 @@ class GEMM(MLIROperator):
     def name(self) -> str:
         """Artifact stem for the instruction stream, which does depend on it.
 
-        Prefixed to disambiguate from ``iron.operators.GEMM``: this repo's
-        build cache keys on filename and mtime rather than on source or flags,
-        so two operators sharing a stem would silently satisfy each other.
+        Prefixed to disambiguate from ``iron.operators.GEMM``, which would
+        otherwise share a stem and satisfy this operator's cache lookups.
         """
         base = f"FLM_GEMM_M{self.M}_K{self.K}_N{self.N}_{self._config_tag}"
         if self.epilogue != Epilogue.NONE:
@@ -242,10 +208,9 @@ class GEMM(MLIROperator):
     def _bfp16_b(self) -> bool:
         """Whether B is stored as bfp16ebs8 rather than bf16.
 
-        AIE2P only, and the reason both mmul templates in the kernel header are
-        live rather than one being dead code: on AIE2 the scalar BFP types do
-        not exist, so B stays bf16 and the mmul lowers onto four native 4x8x4
-        macs.
+        AIE2P only, which is why both mmul templates in the kernel header are
+        live: on AIE2 the scalar BFP types do not exist, so B stays bf16 and
+        the mmul lowers onto four native 4x8x4 macs.
         """
         return aie_utils.get_current_device().arch == AIEArch.AIE2p
 
@@ -258,18 +223,10 @@ class GEMM(MLIROperator):
     def _kernel_object(self) -> str:
         """Object name over every flag that changes the emitted code.
 
-        Everything the -D flags in ``get_kernel_artifacts`` carry has to appear
-        here: this repo's build cache keys on filename and mtime rather than on
-        source or flags, so an object built for one configuration would
-        otherwise silently satisfy a request for another. That includes r/t,
-        which set the blocked layout, and the epilogue flags, which since the
-        epilogue was folded into this translation unit shape the same object.
-
-        ``ck`` is CT_MAX_K_FOR_N[tile_n], carried as -DMM_FUSED_CT_K. It is
-        derived from tile_n today, so it looks redundant -- but it is a TUNING
-        TABLE, and retuning one entry while leaving the object name alone is
-        exactly the silent-stale-binary case above. Naming it means the table
-        can be edited without also remembering to wipe the build dir.
+        Every -D flag from ``get_kernel_artifacts`` has to appear, for the
+        cache reason above. ``ck`` looks derivable from tile_n, but that is a
+        tuning table: naming it means retuning an entry does not also require
+        wiping the build dir.
         """
         return (
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
@@ -283,11 +240,9 @@ class GEMM(MLIROperator):
         """What the design names as its kernel: the bare object, or the archive
         bundling it with the tanh LUT tables.
 
-        Only AIE2 evaluates the activations through a LUT (AIE2P has a native
-        vector tanh), and only an activation references tanh at all -- the plain
-        epilogue just converts and stores. When this is wrong the failure is a
-        LINK error for tanh_lut_ab/tanh_lut_cd rather than a compile error, so
-        it surfaces late.
+        Only AIE2 evaluates activations through a LUT, and only an activation
+        references tanh. Getting this wrong is a link error, so it surfaces
+        late.
         """
         if (
             any(Epilogue(m) is not Epilogue.NONE for m in self.epilogue_modes)
@@ -303,11 +258,9 @@ class GEMM(MLIROperator):
     def _reference_shape(self) -> tuple[int, int, int]:
         """The shape the configuration-only module is emitted at.
 
-        Its runtime sequence is discarded; only its device body reaches the
-        xclbin. Taking the smallest valid shape keeps that module cheap to
-        build and makes the shape-independence explicit -- if a real shape's
-        instruction stream did not run against this xclbin, some dimension
-        would still be reaching the configuration.
+        Its runtime sequence is discarded; only the device body reaches the
+        xclbin. The smallest valid shape keeps it cheap and makes the
+        shape-independence explicit.
         """
         dev = aie_utils.get_current_device()
         # M must be at least m_chunk row-blocks: a partial group is
@@ -349,14 +302,9 @@ class GEMM(MLIROperator):
     def set_up_artifacts(self) -> None:
         kernels = self.get_kernel_artifacts()
 
-        # The xclbin comes from a module emitted at a reference shape and a
-        # reference activation, so every shape sharing this configuration
-        # reuses it rather than rebuilding an identical one.
-        # Canonical bounds, not this instance's: the clamp BOUNDS only reach
-        # the runtime sequence, which this module has discarded, so passing
-        # the real ones would make a filename-cached artifact's content depend
-        # on something that never reaches the xclbin. Only the capability
-        # matters here, and that is already in config_name.
+        # Emitted at a reference shape and activation, so every shape sharing
+        # this configuration reuses it. Canonical bounds, not this instance's:
+        # the real ones reach only the discarded runtime sequence.
         config_mlir = self._mlir_artifact(
             f"{self.config_name}.mlir",
             *self._reference_shape,
@@ -383,21 +331,15 @@ class GEMM(MLIROperator):
         base_dir = self.context.base_dir
         generic = base_dir / "aie_kernels" / "generic"
 
-        # mm_fused.cc includes zero.cc, which is genuinely per-architecture
-        # (AIE2 stores 256 bits at a time, AIE2P 512). A quoted include searches
-        # the including file's own directory first -- now generic/ -- so the
-        # arch directory has to be on the include path for it to resolve there.
+        # mm_fused.cc includes zero.cc, which is per-architecture. A quoted
+        # include searches generic/ first, so the arch directory must be on the
+        # include path for it to resolve there.
         arch_include = [f"-I{base_dir / 'aie_kernels' / kernel_dir}"]
 
-        # The 8x8x8 mmul shape this design uses exists on both architectures,
-        # but by different routes: AIE2P lowers it onto two bfp16-emulated macs,
-        # which is what this flag selects, while AIE2 lowers it onto four native
-        # 4x8x4 bf16 macs and ignores the flag entirely (it has no bfp16
-        # hardware). Passing it on AIE2 would be harmless but misleading, so it
-        # is scoped to the architecture where it actually changes codegen.
-        #
-        # MM_FUSED_BFP16_B rides along with it: storing B as bfp16ebs8 needs the
-        # scalar BFP types, which only AIE2P has. See _bfp16_b.
+        # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
+        # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
+        # MM_FUSED_BFP16_B rides along, since bfp16ebs8 storage needs the
+        # scalar BFP types.
         flags = [
             # Tile geometry and register tiling, for the mmul.
             f"-DMM_FUSED_TILE_M={M_TILE}",
@@ -423,11 +365,9 @@ class GEMM(MLIROperator):
                 "-DMM_FUSED_BFP16_B",
             ]
         if self.rounding is Rounding.CONV_EVEN:
-            # ROUND_CONV_EVEN is mm.cc's flag, reused rather than inventing a
-            # second spelling, and its polarity is mm.cc's too: absent means the
-            # core's power-up floor mode, even though this operator defaults the
-            # other way. It covers both conversions in the kernel -- the mmul
-            # and the epilogue's f32->bf16 store -- which must agree.
+            # mm.cc's flag and polarity, reused: absent means the core's
+            # power-up floor mode, though this operator defaults the other way.
+            # Covers both conversions in the kernel, which must agree.
             flags.append("-DROUND_CONV_EVEN")
 
         kernel_obj = KernelObjectArtifact(
@@ -443,9 +383,8 @@ class GEMM(MLIROperator):
         )
         if self._link_file == self._kernel_object:
             return [kernel_obj]
-        # The tanh LUT's coefficient tables live in their own translation unit
-        # in mlir-aie's runtime lib, so on AIE2 the kernel object alone leaves
-        # tanh_lut_ab/tanh_lut_cd undefined at link time. See _link_file.
+        # The tanh LUT tables live in their own translation unit, so on AIE2
+        # the kernel object alone leaves them undefined at link time.
         return [
             KernelArchiveArtifact(
                 self._link_file,
@@ -456,16 +395,11 @@ class GEMM(MLIROperator):
     def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
 
-        Returns a flat uint8 tensor of bfp16ebs8 blocks on NPU2, where B is also
-        quantized, and a flat bf16 tensor on NPU1. Bound to the operator rather
-        than a static method because the layout depends on the resolved
-        ``tile_n`` and on the device; call ``op.pack_B(B)``.
-
-        Packing all the way to consumption order is what makes both B hops
-        linear descriptors (design.py's b_recv_dims and b_send_dims are both
-        None), which in turn leaves the descriptor dimensions for a k slice
-        deep enough to halve the accumulator traffic.
-        See :mod:`iron.operators.flm.packing` for the layout itself.
+        Flat uint8 bfp16ebs8 blocks on NPU2, flat bf16 on NPU1. Bound to the
+        operator because the layout depends on the resolved ``tile_n`` and the
+        device. Packing to consumption order is what makes both B hops linear
+        descriptors, freeing the dimensions a deep k slice needs. See
+        :mod:`iron.operators.flm.packing`.
         """
         return pack_b(
             B,
@@ -485,12 +419,9 @@ class GEMM(MLIROperator):
     def get_arg_spec(self):
         return [
             AIERuntimeArgSpec("in", (self.M, self.K)),  # A
-            # B arrives pre-packed by pack_B. On AIE2P it is also quantized to
-            # bfp16ebs8 -- 9 bytes per 8 values rather than bf16's 16 -- so it
-            # is declared in BYTES there, sizing the buffer from what pack_B
-            # actually returns; a (K, N) bf16 spec would over-allocate the
-            # largest buffer by 1.78x. On AIE2 B stays bf16 and the spec is the
-            # plain element count.
+            # On AIE2P B is quantized to bfp16ebs8, so it is declared in
+            # bytes and sized from what pack_B returns; a (K, N) bf16 spec
+            # would over-allocate by 1.78x. On AIE2 it is an element count.
             (
                 AIERuntimeArgSpec(
                     "in", (self.packed_B_size(self.K, self.N),), dtype=np.uint8

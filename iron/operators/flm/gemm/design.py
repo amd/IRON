@@ -4,57 +4,20 @@
 """bf16 GEMM over a 4-row compute-tile grid, as wide as the device.
 
 A second GEMM design alongside ``iron.operators.gemm``, specialised for
-transformer projection shapes. The overall dataflow is the same whole-array
-shape as that operator's -- A broadcast along each compute row, B down each
-column, C joined through the memtile -- so those are NOT what distinguishes it.
-What does:
+transformer projection shapes. Same dataflow -- A broadcast along each compute
+row, B down each column, C joined through the memtile -- but with a fixed tile
+shape, B quantized to bfp16ebs8 and pre-packed into consumption order, an
+activation and clamp fused into the C drain, and asymmetric tile buffering so
+the A tile and the accumulator need not share a height.
 
-  * **B is quantized to bfp16ebs8 on NPU2** by ``GEMM.pack_B``, not bf16.
-    ``iron.operators.GEMM`` only ever moves bf16. This is not primarily a DMA
-    saving: it is what makes NPU2's fast mmul lowering available at all --
-    ``aie::mmul<8,8,8>`` needs bfp16 operands to decompose into two emulated
-    macs instead of four, which is most of the NPU2 speedup (see NPU1 in
-    README.md's Performance section, where B stays bf16 and the margin over
-    ``iron.operators.GEMM`` is correspondingly smaller). Quantizing is
-    numerically free -- the mmul only multiplies bfp16 regardless, so this
-    hoists a rounding that already happened on every mac -- provided it
-    reproduces the core's rounding mode; see ``packing.py``.
-  * **The tile shape is fixed, not parameterised** -- but fixedness alone is
-    not the advantage: ``iron.operators.GEMM`` is equally fixed once compiled
-    with a choice of tile args. What differs is *which* shape is fixed. r/s/t
-    stays 8/8/8 on both architectures for the reason below. m/k = 64/512 (n
-    defaults to 64) is chosen for the L1-budget tradeoff documented next to
-    ``CT_MAX_K_FOR_N`` below: n=64 gives the mmul a colA of 8 rather than 4,
-    which wins whenever compute is the critical path, at the cost of A being
-    re-read more often. Only the grid WIDTH varies with the device: 8 columns
-    on NPU2, 4 on NPU1.
-  * **A fused epilogue.** The f32->bf16 conversion, an optional activation and
-    an optional clamp all happen while the values are still in registers, on the
-    way into the C object, instead of a separate pass over L1.
-  * **B arrives pre-packed** by ``GEMM.pack_B``, in the order the cores consume
-    it, so both B hops are plain linear descriptors instead of the 128-byte
-    scattered bursts ``iron.operators.GEMM`` reorders in the descriptor.
-  * **Asymmetric tile buffering (ATB)**, so the A tile and the accumulator need
-    not share a height -- this is what buys the deep k slice (K_TILE=512)
-    within the L1 budget; see README.md's ATB reference.
-
-None of these helps alone -- see README.md's Performance section for the
-measured, per-choice breakdown of the gap against both the shipped FastFlowLM
+README.md has the per-choice breakdown against both the shipped FastFlowLM
 overlay and ``iron.operators.GEMM``.
 
-The constants below are the single source of truth: ``op.py`` passes them to the
-kernels as -D flags, so the C++ and the dataflow cannot drift apart.
-
-r/s/t stays 8/8/8 on both architectures. AIE2's native bf16 mac is 4x8x4, but
-``aie::mmul<8,8,8>`` decomposes onto it as exactly four native macs with no
-wasted lanes, so the whole blocked L1 layout -- ``pack_B``, the four stream
-dimension lists below, and ``gather_dims`` -- is shared verbatim. Only AIE2P has
-the bfp16-emulated path that does the same shape in two macs, which is why
-``op.py`` passes ``AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16`` there and not here.
+The constants below are the single source of truth: ``op.py`` passes them to
+the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
 """
 
 import argparse
-import os
 from enum import StrEnum
 from functools import partial
 
@@ -84,49 +47,21 @@ from iron.operators._trace import maybe_enable_trace
 # --- Fixed geometry -------------------------------------------------------
 # GEMM tiling per compute tile, and the register tiling inside it.
 M_TILE, K_TILE = 64, 512
-# Default n tile. 64 gives the mmul a colA of 8 rather than 4, halving the
-# accumulator traffic per mac, at the cost of doubling A fetches (the grid
-# then covers 512 columns of N per pass instead of 1024). That trade wins
-# whenever compute is the critical path, which is the usual case; see
-# README.md for the measured sweep, including the small-K shape where it
-# loses.
+# Default n tile. 64 doubles A fetches but gives the mmul colA=8 instead of 4,
+# which wins when compute is the critical path. op.py picks per shape.
 N_TILE_DEFAULT = 64
-# How much of K one compute tile holds at a time, per n width. This is a fixed
-# L1 budget split two ways, so a wider n tile leaves less room for B's k slice
-# and the product stays roughly constant. op.py passes the chosen value to the
-# kernel as -DMM_FUSED_CT_K, making this table the only place it is decided.
-# n=256 is deliberately absent: at that width the f32 accumulator alone
-# (M_TILE * 256 * 4 = 65536 bytes) already fills the whole of L1, before A, B
-# or C are even counted, so no ct_max_k could ever make it fit.
+# How much of K one compute tile holds at a time, per n width. It is a fixed
+# L1 budget split two ways, passed to the kernel as -DMM_FUSED_CT_K. n=256 is
+# absent because its f32 accumulator alone (M_TILE*256*4) fills all of L1.
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
-# (tile_n, ct_max_k) pairs KNOWN TO COMPUTE CORRECTLY on hardware. The table
-# above reads like a tuning knob -- op.py calls it "the only place it is
-# decided" -- but it is not freely tunable, and a wrong value fails SILENTLY.
-# Measured on npu2 2026-09-11:
-#
-#     tile_n=64  ct_k=128   err/mass 2.42e-04   (shipped)
-#     tile_n=64  ct_k= 64   err/mass 3.45e-02   ~140x worse, outside any budget
-#     tile_n=128 ct_k= 32   err/mass 1.43e-04   (shipped)
-#     tile_n=128 ct_k= 64   NaN
-#     tile_n=128 ct_k=128   NaN
-#
-# Root cause not found, but pack_b is RULED OUT BY TEST: inverting its
-# permutation round-trips exactly at ct_k 128, 64 and 32, so its blocking is
-# generic. The disagreement is most likely the ORDER the design's stream dims
-# and the kernel's mmul nest walk one ct-chunk. Until that is found, refuse
-# rather than miscompute.
+# (tile_n, ct_max_k) pairs verified on hardware. The table above looks tunable
+# but is not, and a wrong value fails SILENTLY: ct_k=64 at tile_n=64 gives
+# err/mass 3.45e-02 against 2.42e-04, and tile_n=128 NaNs. Cause unknown, so
+# refuse rather than miscompute.
 _VERIFIED_CT_K = {(16, 16), (32, 32), (64, 128), (128, 32)}
-# Register tiling, shared by both architectures. These set the blocked L1
-# layout, so ``pack_B``, the four stream-dimension lists below and
-# ``gather_dims`` all key off them; changing one without the others is silently
-# wrong rather than a build error.
-#
-# Matching AIE2's native 4x8x4 mac shape instead is a measured dead end, at
-# 22-30% slower: the kernel is load-port bound rather than shuffle bound, and
-# 4/8/4 needs 1.62 loads per mac against 8/8/8's 1.06, because the 2x2 register
-# block amortizes each load over four macs either way but over far less work.
-# Retrying it needs a wider register block on the native shape, i.e. a 4x4 mmul
-# kernel, not just a different r/s/t here.
+# Register tiling, shared by both architectures. pack_B, the stream-dimension
+# lists and gather_dims all key off these; changing one alone is silently
+# wrong. AIE2's native 4x8x4 shape measured 22-30% slower (load-port bound).
 R, S, T = 8, 8, 8
 
 
@@ -140,59 +75,22 @@ CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
 B_DEPTH = 2  # B fifo depth; also the core-body unroll
 A_DEPTH = 2
-# Row-blocks a core folds into one B fetch: it HOLDS a B chunk across M_CHUNK
-# accumulators instead of releasing it after one, so DDR reads B
-# m_row_blocks/M_CHUNK times instead of m_row_blocks. This is what replaces the
-# B residency the runtime parameters cost us -- residency sized the memtile
-# buffer from k_iters and replayed it m_row_blocks times, putting both K and M
-# in the device configuration, whereas M_CHUNK is a configuration constant and
-# leaves both runtime.
-#
-# Two things it costs:
-#   * L1: M_CHUNK accumulators instead of one. At tile_n=64 the k slice is
-#     unaffected (ct_k stays 128, colA 16) and only tile_ma drops 32 -> 16;
-#     at tile_n=128 nothing fits, so M_CHUNK is resolved per tile_n below.
-#   * A is issued once per chunk-group rather than once per column-block.
-#     Holding B means streaming A k-major -- A[mc0][k0], A[mc1][k0],
-#     A[mc0][k1], ... -- which wants five dimensions, and a shim BD carries
-#     four: the outermost lands in the ITERATION field and the inner three are
-#     its ND dims (getBDMaxDims is 3 off a memtile). So the chunk-group
-#     dimension comes out of the descriptor and becomes separate transfers
-#     carrying the jump in the OFFSET, which has no such limit -- exactly the
-#     trick a_split already uses for the mega_row dimension, and it reuses the
-#     same windowing. What is left per transfer is
-#     [k_iters, M_CHUNK, M_TILE, K_TILE], which fits.
-# DEFAULT 1 EVERYWHERE -- i.e. off, and for a contractual reason rather than a
-# performance one. m_chunk must DIVIDE m_row_blocks, so it needs M to be a
-# multiple of 512, while the overlay this operator replaces accepts any
-# multiple of 256 (mm_prebuilt/design.py:65, MIN_M = M_TILE*ROWS). A shape that
-# cannot use m_chunk falls back to 1 and so FORKS _config_tag, and serving
-# M=256 and M=2048 from ONE xclbin is a hard requirement here.
-#
-# The leftover cannot be padded away either: a partial group is inexpressible
-# (see the raise below), and duplicating the row-block to fill the group is
-# expressible and bit-exact but doubles A and C for that dispatch, which at
-# m_row_blocks=1 costs more than anything m_chunk could win back.
-#
-# Note m_chunk does NOT change A's byte count (A is M*K*2*n_col_blocks either
-# way). Its only structural effect is forcing a_split on, so if M % 512 == 0
-# ever becomes guaranteed it is worth re-measuring.
-#
-# `n_chunk` is the lever with the same effect and no such constraint: it groups
-# COLUMN-blocks, which the core already walks with an RTP-derived trip count,
-# so a partial group is a runtime bound rather than a descriptor shape and one
-# xclbin still serves every M.
+# Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
+# at the cost of that many L1 accumulators and forcing a_split. Off everywhere
+# for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
+# the overlay this replaces takes any multiple of 256, so a shape that cannot
+# use it forks _config_tag. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 # How many column-blocks the runtime sequence keeps in flight. A block costs 3
-# shim buffer descriptors on a column (A + B + C) against 16 available, so the
-# ceiling is 5; 2 is enough to keep the fills ahead of the cores.
+# shim buffer descriptors on a column (A + B + C) of the 16 available, so the
+# ceiling is 5. 2 is enough to keep the fills ahead of the cores.
 OVERLAP_DEFAULT = 2
 
 
 class Epilogue(StrEnum):
     """Activation folded into the C drain.
 
-    Declaration order is the wire format -- it is both the kernel's
+    Declaration order is the wire format: it is both the kernel's
     ``-DMM_FUSED_EPILOGUE_MODE`` and the shipped overlay's ``output_mode``.
     """
 
@@ -207,17 +105,9 @@ class Epilogue(StrEnum):
         return list(Epilogue).index(self)
 
 
-# The runtime parameter buffer each core reads once its barrier opens.
-#
-# The clamp bounds are the one non-obvious entry: they are floats, but
-# npu_write_rtp only writes i32 words, so they travel as raw bit patterns and
-# the kernel bit-casts them back. Whether a clamped path exists at all stays
-# compile-time (op.py's -DMM_FUSED_CLAMP), because it costs program memory;
-# only the enable and the bounds are runtime, so every pair of bounds shares
-# one build.
-# The five that EVERY configuration needs. Anything conditional lives after
-# them, at an offset rtp_layout() computes, so a word a build cannot use is
-# never allocated rather than written and ignored.
+# The parameter buffer each core reads once its barrier opens. These four are
+# always present; conditional words follow at offsets rtp_layout() computes,
+# so a word a build cannot use is never allocated.
 (
     RTP_N_VAL,
     RTP_M_ROW_BLOCKS,
@@ -229,22 +119,9 @@ class Epilogue(StrEnum):
 def rtp_layout(clamp_capable, m_chunk):
     """Slot index for each optional parameter, and the total word count.
 
-    **A word is not free.** Each one costs ~66 ns per core and the sequence
-    writes ROWS*COLS = 32 of them, so **every RTP word is ~2.06 us of dispatch
-    latency** -- measured by padding the buffer at a fixed core count (12 words
-    108.6 us, 24 words 135.2, 48 words 182.7). Against a ~107 us floor that is
-    not a rounding error, and at M=256 the floor is most of the dispatch.
-
-    So both groups here are omitted, not defaulted:
-
-    * the clamp trio, when the build has no clamped path at all. op.py compiles
-      the clamped instantiation out entirely at ``_clamp_capable == 0`` (the
-      default, and every real projection shape), so those three words were
-      written on every dispatch and never read -- ~6 us for nothing.
-    * ``n_chunks`` / ``n_units``, when M_CHUNK == 1. They are
-      ``m_row_blocks // M_CHUNK`` and each other, so at the shipped M_CHUNK
-      they are simply m_row_blocks, and the core reads that word instead --
-      no on-core arithmetic, just one fewer thing to send. ~4 us.
+    A word is not free: the sequence writes one per core, costing ~2 us of
+    dispatch latency against a ~107 us floor. So optional groups are omitted
+    rather than defaulted.
     """
     slots = {}
     n = 4
@@ -263,9 +140,8 @@ def rtp_layout(clamp_capable, m_chunk):
 class Rounding(StrEnum):
     """Rounding for every f32->bf16 conversion.
 
-    The core powers up in floor; conv_even is the default because truncation
-    biases every conversion the same way and the error then accumulates over
-    the K reduction. floor reproduces the shipped overlay.
+    conv_even by default: truncation biases every conversion the same way, so
+    the error accumulates over the K reduction. floor matches the overlay.
     """
 
     CONV_EVEN = "conv_even"
@@ -298,20 +174,16 @@ def _b_bytes(elems, bfp16_b):
 
 # --- Shim DMA limits ------------------------------------------------------
 #
-# Hardware facts the Python bindings do not expose: gemm() reads AIETargetModel
-# directly for the L1 ceiling, BD count and grid, but neither getDmaBdStepBits
-# nor getDmaBdWrapSizeBits is bound, and nothing models the channel task queue.
-# gemv/design.py and repeat/design.py hardcode the same fields.
-#
-# Step field width. An IR-level bf16-element stride S is re-expressed as
-# (S - 1) * 2 bytes / 4-byte granularity before AIEXDialect.cpp checks it.
+# Hardware facts the Python bindings do not expose: getDmaBdStepBits and
+# getDmaBdWrapSizeBits are unbound, and nothing models the channel task queue.
+# gemv/design.py and repeat/design.py hardcode the same fields. An IR-level
+# bf16 stride S is re-expressed as (S-1)*2 bytes / 4-byte granularity before
+# AIEXDialect.cpp checks it.
 _SHIM_STEP_BITS = 20
 _BF16_BYTES = 2
 _ADDR_GRANULARITY_BYTES = 4
-# Entries in a shim DMA channel's task queue. AIEDmaToNpu's NpuPushQueueOp
-# pushes unconditionally, so overrunning this is a silent device hang rather
-# than a diagnostic. Measured at K=10240 M=1024: 4 outstanding tasks on one
-# channel run, 8 hang.
+# Entries in a shim DMA channel's task queue. NpuPushQueueOp pushes
+# unconditionally, so overrunning this hangs silently. Measured: 4 run, 8 hang.
 SHIM_TASK_QUEUE = 4
 
 
@@ -321,32 +193,14 @@ def _hw_stride_ok(stride_elems):
 
 
 def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
-    """Pick (A-tile height, L1 B depth) -- the largest working set that fits.
+    """Pick the largest working set that fits: (A-tile height, L1 B depth).
 
-    ``b_elem_bytes`` is 9/8 where B is bfp16ebs8 and 2 where it is bf16, and
-    ``budget`` is the core's data memory, so the search below reflects what B
-    actually costs on this device.
-
-    No stack is reserved out of ``budget``: the cores leave ``stack_size``
-    unset and aiecc measures each core's requirement and fails the build if it
-    does not fit, so the stack is the toolchain's to enforce. This kernel
-    measures 192 bytes against the >=6 KB the search leaves unused anyway.
-
-    A dies as soon as it is consumed while the accumulator lives across the
-    whole K reduction, so they need not share a height; shrinking A is what
-    pays for a k slice deep enough to halve the accumulator traffic per mac.
-    B's depth is searched too because at n=128 the k=128 slice makes the B
-    object 18 KB, and a double-buffered pair simply does not fit -- giving that
-    up is what buys colA=16 there, and colA is worth far more than B's L1
-    prefetch (3.67 -> 2.28 cycles per mac, measured).
-
-    Deeper B first, then the tallest A that still fits, so the n=64 default is
-    unchanged at (32, 2).
+    Deeper B first, then the tallest A that still fits, since colA is worth
+    far more than B's L1 prefetch. No stack is reserved out of ``budget``;
+    aiecc fails the build if a core's measured requirement does not fit.
     """
-    # m_chunk accumulators, because the core holds a B chunk across that
-    # many row-blocks; see M_CHUNK_FOR_N. This is the ONLY term that
-    # scales with it -- A is acquired and released one band at a time
-    # inside the group loop, and C drains the accumulators in turn.
+    # m_chunk accumulators, since the core holds a B chunk across that many
+    # row-blocks. The only term that scales with it.
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
     for b_depth in (B_DEPTH, 1):
@@ -363,22 +217,10 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
 def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     """Deepest B fifo depth that fits L1 alongside an explicit A-tile height.
 
-    ``_default_l1`` picks L1_B_DEPTH together with the t_ma IT chooses; that
-    pairing need not fit a caller-overridden t_ma; a taller A tile leaves less
-    L1 for B, and can push a working set that fit at the default t_ma over
-    budget. Raise rather than silently reusing a depth that doesn't fit.
-
-    How much the depth is worth, measured on npu2 (turbo, 12 interleaved rounds
-    of 20 dispatches, min of per-round medians) by forcing depth 1 against the
-    default: 1.2% at M=1024 K=1536 N=6144, and within noise at K=1024 N=4096 and
-    K=512 N=1024. So the prefetch earns its L1 at the largest shapes and is
-    close to free elsewhere -- worth keeping, but not worth contorting the
-    search for.
+    ``_default_l1``'s depth is chosen with its own t_ma, which need not fit a
+    caller-overridden one. Raise rather than reuse a depth that does not fit.
     """
-    # m_chunk accumulators, because the core holds a B chunk across that
-    # many row-blocks; see M_CHUNK_FOR_N. This is the ONLY term that
-    # scales with it -- A is acquired and released one band at a time
-    # inside the group loop, and C drains the accumulators in turn.
+    # Same terms as _default_l1; acc is the only one that scales with m_chunk.
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
     a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
@@ -407,17 +249,14 @@ def gemm(
 ):
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
 
-    A is (M, K) row-major, B is (K, N) row-major and C is (M, N) row-major, all
-    bf16 and all plain dense tensors, except that B must arrive pre-packed by
-    ``GEMM.pack_B`` -- it emits B in the order the cores consume it, so both
-    B hops are plain linear descriptors.
+    A, B and C are row-major bf16 dense tensors, except that B must arrive
+    pre-packed by ``GEMM.pack_B`` in the order the cores consume it.
     """
     if tile_n not in CT_MAX_K_FOR_N:
         raise ValueError(
             f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {tile_n}"
         )
-    # Everything shape-related below comes from the device rather than a
-    # constant, so the same dataflow covers NPU2's 4x8 and NPU1's 4x4.
+    # From the device, not constants, so one dataflow covers 4x8 and 4x4.
     tm = get_target_model(dev.resolve())
     COLS, ROWS = dev.cols, compute_rows(dev)
     MIN_M = M_TILE * ROWS
@@ -433,19 +272,14 @@ def gemm(
             f"pair here once a hardware test passes."
         )
     M_CHUNK = M_CHUNK_FOR_N[N_TILE] if m_chunk is None else m_chunk
-    # B is bfp16ebs8 on AIE2P and bf16 on AIE2: the scalar BFP types are gated
-    # on __AIE_API_SCALAR_BFP_TYPES__, which only aie_api/detail/aie2p/config.hpp
-    # defines, so on AIE2 B stays bf16 and the mmul lowers onto four native
-    # 4x8x4 macs. That choice drives every B type and extent below. B_GROUP is
-    # the number of B values per element of the MLIR type, so a length in values
-    # becomes a length in elements by dividing.
+    # B is bfp16ebs8 on AIE2P and bf16 on AIE2. B_GROUP is the B values per
+    # element of the MLIR type, so a length in values divides to elements.
     BFP16_B = dev.arch == AIEArch.AIE2p
     B_GROUP = BFP16_GROUP if BFP16_B else 1
     b_elem_bytes = BFP16_GROUP_BYTES / BFP16_GROUP if BFP16_B else 2
-    # Asymmetric tile buffering: the A tile spans T_MA rows while the
-    # accumulator spans M_TILE, so the core folds RHO bands into one C tile.
-    # A is dead the moment it is consumed while C lives across the whole K
-    # reduction, so sizing both to M_TILE pays the peak L1 cost twice.
+    # Asymmetric tile buffering: A spans T_MA rows and the accumulator M_TILE,
+    # so the core folds RHO bands into one C tile. A dies on consumption while
+    # C lives across the K reduction, so sizing both to M_TILE pays twice.
     if tile_ma is None:
         T_MA, L1_B_DEPTH = _default_l1(
             N_TILE, CT_MAX_K, b_elem_bytes, tm.get_local_memory_size(), M_CHUNK
@@ -475,22 +309,18 @@ def gemm(
     MIN_N = N_TILE * COLS
 
     epilogue = Epilogue(epilogue)
-    # Clamp bounds ride the RTP buffer as raw int32 bit patterns: npu_write_rtp
-    # writes i32 words only, so the kernel bit-casts them back. Bounds being
-    # runtime is what lets every pair share one build; whether a clamped path
-    # exists at all is still op.py's -DMM_FUSED_CLAMP, because it costs
-    # program memory.
+    # Clamp bounds ride the RTP buffer as raw int32 bit patterns, since
+    # npu_write_rtp writes i32 only. Whether a clamped path exists is still
+    # compile-time (op.py's -DMM_FUSED_CLAMP).
     clamp_enabled = 1 if clamp is not None else 0
     rtp_slots, rtp_words = rtp_layout(clamp is not None, M_CHUNK)
     clamp_lo, clamp_hi = clamp if clamp is not None else (0.0, 0.0)
     clamp_min_bits = int(np.float32(clamp_lo).view(np.int32))
     clamp_max_bits = int(np.float32(clamp_hi).view(np.int32))
-    # A compute tile does a whole m x n block or nothing, so M and K must tile
-    # exactly. N need only be a multiple of N_TILE: a trailing group of fewer
-    # than COLS blocks is handled by giving the columns different trip counts,
-    # which each core derives for itself (see core_fn). That matters in
-    # practice -- for a transformer the o and down projections have N = model
-    # dim, which is essentially never a multiple of N_TILE*COLS.
+    # A tile does a whole m x n block or nothing, so M and K must tile
+    # exactly. N need only be a multiple of N_TILE: a short trailing group is
+    # handled by per-column trip counts, which matters because o and down
+    # have N = model dim.
     for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, N_TILE)):
         if value % unit != 0:
             raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
@@ -498,26 +328,15 @@ def gemm(
     bf16_ty = np.dtype[bfloat16]
     f32 = np.dtype[np.float32]
 
-    # How many times the whole grid sweeps, in each dimension.
     m_row_blocks = M // MIN_M
     k_iters = K // K_TILE
-    # Row-blocks grouped M_CHUNK at a time, so one B fetch feeds M_CHUNK of
-    # them (see M_CHUNK_FOR_N). A "unit" below is one such group, or one of the
-    # n_rem leftovers when M_CHUNK does not divide m_row_blocks. Every leg is
-    # issued per unit, so A, B and C stay aligned with each other and with the
-    # core's loop nest.
+    # A "unit" is one group of M_CHUNK row-blocks. Every leg is issued per
+    # unit, so A, B and C stay aligned with each other and the core's nest.
     n_chunks, n_rem = divmod(m_row_blocks, M_CHUNK)
     if n_rem:
-        # op.py resolves m_chunk so this cannot fire. A partial group is
-        # genuinely inexpressible: its object is M_CHUNK tiles wide and the
-        # forward always drains that much, so the rest would have to be filled
-        # by repeating the row-block -- and every way of saying that is
-        # rejected or mis-lowered. Stride 0 in an inner dimension is refused
-        # ("Stride 2 must be a positive integer"); stride 0 in the outermost
-        # slot IS the BD repeat count, which releases one object per
-        # repetition rather than one object in total; and several sub-object
-        # fills do not coalesce into one object either. All three were tried
-        # on hardware. Hence op.py falls back to m_chunk=1 instead.
+        # op.py resolves m_chunk, so this cannot fire. A partial group is
+        # inexpressible: the object is M_CHUNK tiles wide and the forward
+        # always drains that much, and no way of padding it lowers correctly.
         raise ValueError(
             f"m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
             f"({M_CHUNK}); op.py should have resolved m_chunk to 1 here"
@@ -525,62 +344,26 @@ def gemm(
     n_units = n_chunks
 
     def unit_rows(u):
-        """(first row-block, how many) for unit ``u`` -- always a full group."""
+        """(first row-block, how many) for unit ``u``; always a full group."""
         return u * M_CHUNK, M_CHUNK
 
-    # A mega_row dimension with stride ROWS*M_TILE*{K,N} lands in the shim
-    # BD's ITERATION field, whose step is 20 bits, so it overflows once K or N
-    # crosses ~8191 elements -- E4B's FFN width (10240) does, E2B's max (6144)
-    # does not. Only relevant once M walks more than one mega_row; at M=256 the
-    # dimension is degenerate (size 1) and is stripped before the stride is
-    # ever encoded, so it never fails there regardless of K/N.
+    # A mega_row stride lands in the shim BD's 20-bit iteration step, so it
+    # overflows once K or N passes ~8191 elements; only E4B's 10240 does. Such
+    # a leg goes out as one transfer per mega_row, carrying the jump in its
+    # unbounded offset. M_CHUNK > 1 forces the same path for A.
     #
-    # Such a leg is instead issued as m_row_blocks separate transfers, each
-    # carrying the mega_row jump in its OFFSET (unbounded) rather than a shared
-    # STRIDE. The two legs are independent -- E4B's down-proj overflows on K
-    # (A only) and its gate/up on N (C only) -- so neither shape pays for both.
-    #
-    # Those transfers must stay live in their TaskGroup until awaited.
-    # TaskGroup.finish() emits dma_free_task, which returns the buffer
-    # descriptor id to a COMPILE-TIME allocator that does not check the
-    # transfer finished (mlir-aie AIEAssignRuntimeSequenceBDIDs::recycle,
-    # isAwait=false); ids are per shim TILE, shared across channels and
-    # directions, so retiring one early lets the next task reprogram a live
-    # descriptor. Verify with aie-opt --aie-substitute-shim-dma-allocations
-    # --aie-assign-runtime-sequence-bd-ids: the ids on a shim tile must be
-    # distinct.
-    # M_CHUNK > 1 forces the split path for A: holding B makes the core's A
-    # order k-major within a group, which wants a fifth dimension, so the unit
-    # dimension comes out of the descriptor and becomes one transfer each.
-    # At n_units == 1 there is nothing to split -- a single transfer already
-    # covers the block -- so the cheaper unsplit path still applies.
+    # Those transfers must stay live in their TaskGroup until awaited: the
+    # BD-id allocator is compile-time and does not check that a transfer
+    # finished, so freeing one early lets the next task reprogram a live
+    # descriptor and corrupt silently.
     a_split = n_units > 1 and (M_CHUNK > 1 or not _hw_stride_ok(ROWS * M_TILE * K))
     c_split = m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N)
-    # A split leg issues one transfer per mega_row back to back on ONE channel,
-    # so they must also fit that channel's task queue -- a limit nothing in the
-    # toolchain models, and overrunning it hangs rather than diagnoses.
-    # Measured at K=10240 M=1024: 4 outstanding run, 8 hang.
-    #
-    # So a split leg keeps at most SHIM_TASK_QUEUE transfers outstanding, and
-    # emit_split() enforces that directly -- retiring the OLDEST transfer as it
-    # issues the next, so the channel stays full.
-    #
-    # It used to do this by windowing: issue SHIM_TASK_QUEUE transfers, await
-    # the whole window, then issue the next. That bounds the queue too, but it
-    # drains the channel to EMPTY at every window boundary and again at every
-    # column-block boundary, and on a DDR-rate-bound design those bubbles are
-    # the entire cost of the split path. Rolling instead of windowing measured,
-    # bit-exact, 8 rounds x 30 iters interleaved:
-    #
-    #     E4B/gateup M1024  4119.4 -> 3617.7   -12.2%
-    #     E4B/gateup M2048  7664.8 -> 7182.4    -6.3%
-    #     E4B/down   M1024  3649.2 -> 3553.4    -2.6%
-    #     E4B/down   M2048  7196.6 -> 6978.7    -3.0%
-    #
-    # The bound is counted in TRANSFERS, not units: under c_split a unit drains
-    # one C descriptor per row-block (M_CHUNK of them, see c_taps) and they all
-    # ride one channel, so counting units would overrun by exactly M_CHUNK --
-    # at m_chunk=2 that is 8 outstanding, the measured hang threshold.
+    # Split legs share one channel, whose task queue is 4 deep and modelled
+    # nowhere; overrunning it hangs (4 outstanding run, 8 hang). emit_split()
+    # bounds it by retiring the oldest as it issues the next, which also keeps
+    # the channel full -- do not simplify that to awaiting a whole batch, which
+    # drains the channel at every boundary and costs up to 12.4%. The bound
+    # counts transfers, not units: under c_split a unit drains M_CHUNK of them.
     _per_unit = M_CHUNK if c_split else 1
     # Live descriptors on a shim tile: SHIM_TASK_QUEUE from the rolling window,
     # plus B and the unsplit leg for each of the two blocks a boundary spans.
@@ -598,9 +381,9 @@ def gemm(
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
     rem_blocks = (N % MIN_N) // N_TILE
-    # Every column is instantiated for every shape, because which columns
-    # exist is configuration and this design has one configuration. A column
-    # with no work for this shape gets n_work = 0 and drains instead.
+    # Every column is instantiated for every shape. Which columns exist is
+    # configuration, and this design has only one. A column with no work for
+    # the current shape gets n_work = 0 and drains instead.
     n_active_cols = COLS
     # B's element type: one v8bfp16ebs8 per 8 values on AIE2P, one bf16 per
     # value on AIE2. Every B extent below is therefore in values // B_GROUP.
@@ -610,13 +393,12 @@ def gemm(
     ct_b_ty = np.ndarray[(CT_MAX_K * N_TILE // B_GROUP,), b_elem_ty]
     ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
     ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
-    # L2 (per memtile)
-    # M_CHUNK stacked row-block tiles, so the forward below can interleave
-    # them on the way out -- see a_send_dims.
+    # L2 (per memtile). M_CHUNK stacked row-block tiles, so the forward below
+    # can interleave them on the way out; see a_send_dims.
     mt_a_ty = np.ndarray[(M_CHUNK * M_TILE * K_TILE,), bf16_ty]
     mt_b_ty = np.ndarray[(K_TILE * N_TILE // B_GROUP,), b_elem_ty]
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
-    # L3 (DDR), flat -- the taps below index them linearly.
+    # L3 (DDR), flat; the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
     b_l3_ty = np.ndarray[(K * N // B_GROUP,), b_elem_ty]
     c_l3_ty = np.ndarray[(M * N,), bf16_ty]
@@ -641,40 +423,27 @@ def gemm(
 
     # --- Data movement ----------------------------------------------------
     #
-    # These stream-dimension lists are the load-bearing part of the design:
-    # they are what turns a row-major DDR tile into the r x s / s x t blocked
-    # layout the mmul indexes, and they are tightly coupled to it. A mismatch
-    # here produces silently wrong results, not a build error.
+    # These turn a row-major DDR tile into the blocked layout the mmul
+    # indexes. A mismatch is silently wrong, not a build error.
 
     # C: de-block each core's r x t tiled output back into row-major within its
     # 64x128 slice, on the way into the memtile.
     gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
-    # B: DDR row-major (k x n) -> s x t blocks (recv), then split into the
-    # CT_MAX_K-deep chunks a single mmul call consumes (send).
-    # B needs no reblocking on either hop: pack_B already emits it in the
-    # order the cores consume, so the memtile just streams it through. That
-    # frees every descriptor dimension B used to spend -- which is what lets
-    # CT_MAX_K reach 128 (the innermost run would otherwise overflow the BD's
-    # 10-bit size field and need a split dimension) at the same time as
-    # residency (which spends one on its outer k walk).
+    # B needs no reblocking on either hop: pack_B emits it in consume order.
+    # That frees the descriptor dimensions that let CT_MAX_K reach 128.
     b_recv_dims = None
     b_send_dims = None
-    # A: same idea, r x s blocks.
-    # The outermost row-group dimension spans M_CHUNK tiles rather than one.
-    # That is the whole trick: mc's stride is M_TILE*K_TILE, which is exactly
-    # this dimension's size*stride, so the two are contiguous and merge -- the
-    # walk stays within the memtile BD's four dimensions while gaining an
-    # interleave it could not otherwise express.
+    # A: same idea, r x s blocks. The outermost row-group dimension spans
+    # M_CHUNK tiles. mc's stride is exactly this dimension's size*stride, so
+    # the two merge and the walk stays within the memtile BD's four dims.
     a_recv_dims = [
         (M_CHUNK * M_TILE // R, R * K_TILE),
         (R, S),
         (K_TILE // S, R * S),
         (S, 1),
     ]
-    # Emits (b_iter, mc, band) -- b_iter outermost, then all M_CHUNK tiles'
-    # row-groups. That is the order the core acquires A in when it holds a B
-    # chunk across the group, and it is why ONE fifo suffices: a second would
-    # need a third core input DMA channel, and a tile has two.
+    # Emits (b_iter, mc, band): the order the core acquires A in while holding
+    # a B chunk across the group.
     a_send_dims = [
         (K_DIV_CT_K_MAX, R * CT_MAX_K),
         (M_CHUNK * M_TILE // R, R * K_TILE),
@@ -697,13 +466,9 @@ def gemm(
         for r in range(ROWS):
             c_prod[(r, c)] = sub[r]
 
-    # A: shim -> memtile -> broadcast along the compute row. The reblocking
-    # rides the forward(): inbound on cons(dims_from_stream=), outbound on
-    # forward(dims_to_stream=), sharing one memtile buffer.
-    # ONE fifo per row, even at M_CHUNK > 1. The interleave the core needs
-    # lives in a_send_dims above, not in extra fifos: a second A fifo would
-    # make the core want 3 input DMA channels and a compute tile has 2 (the
-    # design already spends both, on A and B).
+    # A: shim -> memtile -> broadcast along the compute row, reblocking on
+    # the forward(). One fifo per row even at M_CHUNK > 1: a second would
+    # want a third core input DMA channel, and a tile has two.
     a_l3l2_fifos = []
     a_cons = {}
     for r in range(ROWS):
@@ -715,42 +480,26 @@ def gemm(
             name=f"A_L2L1_{r}",
             dims_to_stream=a_send_dims,
         )
-        # One cons() handle per active column; every tile in the row sees
-        # this object, so inactive columns must not be consumers at all.
+        # Every tile in the row sees this object, so inactive columns must
+        # not be consumers at all.
         for c in range(n_active_cols):
             a_cons[(r, c)] = of_a.cons()
 
-    # B: shim -> memtile -> broadcast down the compute column.
-    #
-    # Placement has zero slack -- the eight memtiles pack to exactly 512 KB,
-    # relying on aie-objectfifo-allocate spilling one buffer to an adjacent
-    # tile -- so re-verify it after any change to the A, B or C buffer sizes.
-    #
-    # One k-block per object, re-fetched from DDR for every row-block. Holding
-    # a whole column-block here instead would size the buffer from k_iters and
-    # replay it m_row_blocks times, putting both K and M into the device
-    # configuration -- which is what the runtime parameters exist to keep out
-    # of it. The M half is tractable now (aiex.dma_channel_reset_for re-arms a
-    # resident fifo from the RUNTIME SEQUENCE, and push_queue's repeat is an
-    # SSA operand); the k_iters-sized buffer is the part still in the way.
-    # See README.md.
+    # B: shim -> memtile -> broadcast down the compute column, one k-block per
+    # object and re-fetched per row-block. Holding a whole column-block would
+    # put both K and M in the device configuration (README.md). Placement has
+    # zero slack -- the memtiles pack to exactly 512 KB, one buffer spilled to
+    # a neighbour -- so re-verify after any A/B/C size change.
     b_l3l2_fifos = []
     b_cons = {}
     for c in range(n_active_cols):
         of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
         b_l3l2_fifos.append(of_b_in)
         of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
-            # The one placement pin this design keeps. Everything else -- the
-            # workers, the accumulator buffers, the C join, the A forward and
-            # the shim ends -- is left to the placer, and measures the same.
-            #
-            # Without it, aie-place-tiles merges the 20 logical memtiles (4 A
-            # relays + 8 B relays + 8 C joins) onto the 8 physical ones in a way
-            # that aie-objectFifo-stateful-transform then rejects with "number
-            # of input DMA channel exceeded". Spreading B one-per-column is
-            # enough to steer it to a legal assignment; see the mlir-aie issue
-            # referenced in README.md. Reproduces at M=1024 K=2048 N=2048, which
-            # test.py covers.
+            # The one placement pin; everything else is left to the placer.
+            # Without it the 20 logical memtiles merge onto the 8 physical
+            # ones in a way rejected with "number of input DMA channel
+            # exceeded". Reproduces at M=1024 K=2048 N=2048.
             tile=Tile(c, 1),
             obj_type=ct_b_ty,
             depth=L1_B_DEPTH,
@@ -760,12 +509,9 @@ def gemm(
         for r in range(ROWS):
             b_cons[(r, c)] = of_b.cons()
 
-    # Each tile's own column, as an initialized buffer rather than a constant
-    # folded into the program. That is deliberate: the 32 core programs differ
-    # today only in symbol NAMES, and baking the column in as an immediate
-    # would make them differ in CODE, permanently foreclosing the one-program
-    # xclbin. Data may vary per tile; the program must not. Written once at
-    # configuration time, so unlike an RTP word it costs nothing per dispatch.
+    # Data, not an immediate folded into the program: the core programs differ
+    # only in symbol names, and baking this in as code would foreclose a
+    # one-program xclbin. Written once, so it costs nothing per dispatch.
     my_cols = [
         [
             Buffer(
@@ -799,31 +545,21 @@ def gemm(
     def core_fn(accs, o_h, b_h, a_h, init_k, kstep_k, epi_k, my_rtp, my_col, barrier):
         """Core body. Every trip count and the activation come from the
         runtime parameter buffer, so one core program serves every shape."""
-        # The loop nest lives here rather than inside the kernel so that
-        # every level has an ObjectFifo acquire point.
+        # The nest is here, not in the kernel, so every level has an acquire.
         barrier.wait_for_value(1)
-        # n_work / n_drain are DERIVED here rather than sent, which costs one
-        # RTP word instead of two. Branch-free, so no select is needed:
-        #
-        #   column c has work in column-block j iff (j*COLS + c)*N_TILE < N
-        #     => n_work = ceil((N/N_TILE - c) / COLS)
-        #
-        # and every divisor is a power of two (N_TILE=64, COLS=8), so this is
-        # shifts and adds -- no __divsi3. Verified against host-side trip
-        # counts for every shape in the suite.
-        # // rather than >>: the DSL's ScalarValue overloads add/sub/mul/
-        # floordiv/mod but NOT the shift operators. Both divisors are
-        # compile-time powers of two (N_TILE=64, COLS=8), so this strength-
-        # reduces and must not leave a __divsi3 call -- verified in the .o.
+        # Derived rather than sent, saving an RTP word: column c has work in
+        # block j iff (j*COLS + c)*N_TILE < N. Both divisors are powers of two,
+        # so this must leave no __divsi3 -- check the .o, not the .ll. Use //
+        # rather than >>; ScalarValue has no shift operators.
         n_tiles = my_rtp[RTP_N_VAL] // N_TILE
         n_work = (n_tiles - my_col[0] + COLS - 1) // COLS
         n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
         n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
         n_k_iters = my_rtp[RTP_K_ITERS]
         epi_mode = my_rtp[RTP_EPILOGUE]
-        # Absent slots become compile-time constants rather than loads: the
+        # Absent slots become compile-time constants rather than loads. The
         # kernel's clamped path is compiled out when it is not capable, and at
-        # M_CHUNK == 1 both chunk counts ARE n_row_blocks.
+        # M_CHUNK == 1 both chunk counts are just n_row_blocks.
         if "clamp_enabled" in rtp_slots:
             clamp_enabled = my_rtp[rtp_slots["clamp_enabled"]]
             clamp_min_bits = my_rtp[rtp_slots["clamp_min"]]
@@ -837,34 +573,21 @@ def gemm(
             n_chunks = n_row_blocks
             n_units_rt = n_row_blocks
         # Acquire does not consume the barrier, so take it back to zero or the
-        # next dispatch reads these parameters again instead of waiting. Safe
-        # before the work: the sequence cannot set the barrier again until it
-        # has drained this dispatch's C.
+        # next dispatch re-reads these instead of waiting. Safe before the
+        # work: the sequence cannot re-set it until this dispatch's C drains.
         barrier.release_with_value(1)
 
         def sweep(group):
             """One k reduction feeding ``group`` accumulators off a shared B.
 
-            ``group`` is a Python list, so its length is compile-time: the mc
-            loops below unroll. Calling this with every accumulator is the
-            wide pass; calling it with one is the leftover pass.
-
-            Holding B across the group is the whole point -- b_h is acquired
-            once outside the mc loop and released after all of them, so DDR
-            reads B once per len(group) row-blocks instead of once each.
+            ``group`` is a Python list, so the mc loops unroll. b_h is acquired
+            outside them, so DDR reads B once per len(group) row-blocks.
             """
             for a_acc in group:
                 init_k(a_acc)
             for _ in range_(n_k_iters):
-                # The l loop is unrolled by the B fifo depth so the
-                # acquired buffer index stays a compile-time constant.
                 for _ in range_(B_ITERS // B_DEPTH):
                     for _ in range(B_DEPTH):
-                        # One B chunk feeds every A band of every accumulator
-                        # in the group, so B is acquired once around both.
-                        # Each accumulator draws A from its OWN fifo, which is
-                        # what makes this interleave legal -- see the a_cons
-                        # construction above.
                         b = b_h.acquire(1)
                         for a_acc in group:
                             for band in range(RHO):
@@ -872,8 +595,8 @@ def gemm(
                                 kstep_k(a, b, a_acc, band)
                                 a_h.release(1)
                         b_h.release(1)
-            # Drain the accumulators. Unrolled by C_DEPTH for the same
-            # reason; a full O_CHUNKS unroll overflows program memory.
+            # Unrolled by C_DEPTH; a full O_CHUNKS unroll overflows program
+            # memory.
             for a_acc in group:
                 for chunk in range_(O_CHUNKS // C_DEPTH):
                     for half in range(C_DEPTH):
@@ -894,10 +617,9 @@ def gemm(
             for _ in range_(n_chunks):
                 sweep(accs)
 
-        # Column-blocks this column sits out. A is broadcast along the whole
-        # compute row, so it must still consume its share or the columns that
-        # DO have work stall waiting for the fifo to advance. No B and no C
-        # here -- the runtime sequence issues neither for it.
+        # Column-blocks this column sits out. A is broadcast along the row, so
+        # it must still consume its share or the columns that do have work will
+        # stall on the fifo. No B and no C; the sequence issues neither.
         for _ in range_(n_drain):
             # Every unit delivers a full M_CHUNK tiles of A, leftover or not,
             # so an idle column drains that much per unit.
@@ -912,9 +634,8 @@ def gemm(
     workers = []
     for r in range(ROWS):
         for c in range(n_active_cols):
-            # One accumulator per row-block in a chunk group. Worker flattens
-            # nested fn_args, so the list arrives in core_fn as a list and its
-            # length stays compile-time.
+            # Worker flattens nested fn_args, so the length stays
+            # compile-time in core_fn.
             accs = [
                 Buffer(type=ct_acc_ty, name=f"c_acc_{r}_{c}_{mc}")
                 for mc in range(M_CHUNK)
@@ -939,34 +660,13 @@ def gemm(
 
     # --- Runtime ----------------------------------------------------------
     #
-    # Every wrap below stays under the shim's wrap/size field (DMA_BD_MAX_WRAP): the
-    # largest are K_TILE=512 and ROWS*M_TILE=256.
-    # One transfer per (column-block, leg) instead of one per object.
-    #
-    # A single fill/drain may span MANY fifo objects -- the descriptor just
-    # walks them in the order the cores consume -- so a whole column-block's
-    # worth of A, B and C each go out as one task. Issuing per object instead
-    # meant a host-side await for every sweep, and those awaits were the
-    # serialisation: the next sweep could not start until the previous sweep's
-    # C had come all the way back.
-    #
-    # Dimension order must match the core loop nest exactly: for each
-    # column-block it walks mega_row, then k. Every wrap stays under the shim's
-    # wrap/size field (largest are K_TILE=512 and ROWS*M_TILE=256).
+    # One transfer per (column-block, leg), not one per object: a descriptor
+    # walks many fifo objects in consume order, and per-object issue meant a
+    # host await per sweep. Dimension order must match the core's nest.
     def a_taps(mega_col, r, units):
-        # Every (row-block, k) block this compute row consumes for one
-        # column-block. A does not depend on mega_col; it is re-fetched per
-        # column-block because the cores re-consume it.
-        #
-        # k OUTERMOST, then the group's M_CHUNK row-blocks: one memtile object
-        # per k holding M_CHUNK stacked tiles, which a_send_dims then emits
-        # interleaved as (b_iter, mc, band) -- the order the core acquires in
-        # while holding a B chunk across the group.
-        #
-        # A leftover unit is one row-block wide but fills the same object, so
-        # its mc dimension has stride 0: the row-block is repeated, and the
-        # core drains the duplicate (see sweep). It costs one extra read of
-        # that row-block, on at most one unit per column-block.
+        # Every (row-block, k) block this row consumes for one column-block,
+        # k outermost. A does not depend on mega_col; it is re-fetched because
+        # the cores re-consume it.
         if M_CHUNK == 1 and not a_split:
             return [
                 TensorAccessPattern(
@@ -991,47 +691,27 @@ def gemm(
 
     def b_tap(mega_col, c):
         # Every (mega_row, k) chunk this column consumes. B does not depend on
-        # mega_row, hence the 0 stride: the same k-blocks are replayed for each
-        # row-block, which is what the cores expect.
-        #
-        # B must arrive PRE-PACKED (see GEMM.pack_B) so each k-block is one
-        # contiguous run. Expressing that reorder in the descriptor instead
-        # gives an innermost run of T=8 bf16, turning each 128 KB transfer into
-        # 8192 scattered bursts -- measured 5.4x slower end to end.
+        # mega_row, hence the 0 stride. It must arrive pre-packed so each
+        # k-block is one contiguous run; reordering in the descriptor instead
+        # gives an innermost run of T=8 bf16 and measured 5.4x slower.
         return TensorAccessPattern(
             tensor_dims=(K * N // B_GROUP,),
             offset=(mega_col * COLS + c) * N_TILE * K // B_GROUP,
-            # One k sweep per UNIT, not per row-block: the cores hold each B
-            # chunk across the M_CHUNK row-blocks of a group, so DDR reads B
-            # n_units times instead of m_row_blocks. That is the whole win --
-            # see M_CHUNK_FOR_N. The unit dimension keeps stride 0, replaying
-            # the same k-blocks, exactly as the row-block dimension used to.
+            # One k sweep per unit, not per row-block: the cores hold each B
+            # chunk across a group. The unit dimension keeps stride 0.
             sizes=[n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP],
             strides=[0, K_TILE * N_TILE // B_GROUP, 0, 1],
         )
 
     def c_taps(mega_col, c, units):
-        # Every joined block this column produces for one column-block: one
-        # ROWS*M_TILE x N_TILE block per row-block. Returns a LIST, for the
-        # same reason a_taps does -- one descriptor per unit when N makes the
-        # row-block stride overflow the shim BD's iteration step.
-        #
-        # C drains in plain row-block order even under M_CHUNK, because the
-        # core drains a group's accumulators one after another, so no
-        # reordering is needed here; a unit just covers `count` consecutive
-        # row-blocks.
+        # Every joined block this column produces: one ROWS*M_TILE x N_TILE
+        # per row-block, in plain row-block order even under M_CHUNK.
         if c_split:
             taps = []
             for u in units:
                 first, count = unit_rows(u)
-                # One descriptor PER ROW-BLOCK, not one per unit. Grouping a
-                # unit's row-blocks into a count dimension would put a
-                # ROWS*M_TILE*N stride back inside the descriptor, which is
-                # exactly what c_split exists to avoid -- it overflows the
-                # shim BD's 20-bit step at N=10240. C drains in plain
-                # row-block order even under M_CHUNK (the core drains a
-                # group's accumulators one after another), so splitting them
-                # costs nothing but the extra descriptors.
+                # One descriptor per row-block: grouping them would put the
+                # ROWS*M_TILE*N stride back in, which c_split exists to avoid.
                 for i in range(count):
                     taps.append(
                         TensorAccessPattern(
@@ -1075,52 +755,26 @@ def gemm(
             for c in range(n_active_cols):
                 barriers[r][c].set(1)
 
-        # Column-blocks 0..n_full-1 use every column; the trailing one (when N
-        # is not a multiple of N_TILE*COLS) uses only the first rem_blocks. A
-        # is always issued for every row, because the columns sitting the
-        # trailing block out still drain their share of the broadcast.
+        # A trailing block uses only the first rem_blocks columns. A is still
+        # issued for every row, since the sitting-out columns drain it.
         blocks = [(mc, COLS) for mc in range(n_full)]
         if rem_blocks:
             blocks.append((n_full, rem_blocks))
 
-        # One task per (column-block, leg): three per column instead of one per
-        # object, so a whole column-block retires on a single await rather than
-        # one per row-block. The C drain is issued first and retired last -- it
-        # is an S2MM that simply waits for the cores, so keeping it outstanding
-        # is what overlaps compute with write-back, and it must not share a
-        # group with the fills it depends on.
-        # Depth-2: issue column-block i+1 before retiring i, so its transfers
-        # are already moving while i computes. Retiring a block before issuing
-        # the next serialises on the C await, which waits for the cores.
-        #
-        # This is affordable only because each leg is a single task per
-        # column-block. Per-object tasks need 1 + 2*k_iters and cannot be
-        # overlapped at all.
-        # Keep OVERLAP column-blocks in flight, against SHIM_BDS buffer
-        # descriptors per column; the operator is DDR-rate bound rather than
-        # byte bound, so how deeply the fills are pipelined is what decides the
-        # rate.
-        #
-        # Every task of a block stays LIVE in its TaskGroup until the block is
-        # retired here. That is load-bearing, not tidiness -- see the
-        # dma_free_task note on a_split above.
-        # Units, not row-blocks: every leg is issued per unit so A, B and C
-        # stay aligned with each other and with the core's nest. At
-        # M_CHUNK == 1 a unit IS a row-block and this is the old list.
+        # C is issued first and retired last: keeping that S2MM outstanding
+        # overlaps compute with write-back, and it must not share a group with
+        # the fills it depends on. Tasks stay live until retired here.
         all_mb = list(range(n_units))
 
-        # One emitter per leg, so the two paths below differ only in HOW they
-        # group and retire, not in how a leg is issued.
+        # One emitter per leg, so the paths below differ only in how they
+        # group and retire.
         def issue_a(mega_col, mbs, group, wait=False):
             for r in range(ROWS):
                 taps = a_taps(mega_col, r, mbs)
                 for i, tap in enumerate(taps):
-                    # A leftover unit emits k_iters*M_CHUNK fills back to back
-                    # on ONE channel (see a_taps), and that channel's task
-                    # queue is SHIM_TASK_QUEUE deep -- overrunning it HANGS
-                    # rather than diagnoses, the same limit a_split windows
-                    # for. Await every SHIM_TASK_QUEUE-th fill so no more than
-                    # that many are ever outstanding.
+                    # A leftover unit emits many fills back to back on one
+                    # channel, so await every SHIM_TASK_QUEUE-th to stay inside
+                    # the queue depth.
                     bounded = (
                         len(taps) > SHIM_TASK_QUEUE and (i + 1) % SHIM_TASK_QUEUE == 0
                     )
@@ -1138,10 +792,8 @@ def gemm(
         def emit_unsplit():
             pending = []
             for mega_col, active_cols in blocks:
-                # C in its own group, issued first and retired last: it is an
-                # S2MM that waits on the cores, so keeping it outstanding is
-                # what overlaps compute with write-back, and it must not share
-                # a group with the fills it depends on.
+                # C in its own group so it does not share one with the fills
+                # it depends on; see above.
                 tg_c = TaskGroup()
                 issue_c(mega_col, active_cols, all_mb, tg_c)
                 tg_f = TaskGroup()
@@ -1160,24 +812,14 @@ def gemm(
         def emit_split():
             """Issue split legs one unit at a time, retiring the oldest.
 
-            One TaskGroup covers one unit (one task per channel), and the
-            oldest is retired only when a new one would exceed SHIM_TASK_QUEUE
-            outstanding -- so the channel stays full across both unit and
-            column-block boundaries. See the SHIM_TASK_QUEUE comment above for
-            why retiring in batches instead costs real time.
-
-            ``pending`` is retired strictly in append order, which is what
-            keeps a block's B and unsplit-leg descriptors alive until every one
-            of that block's units has been AWAITED: they are appended after the
-            units they cover.
+            One TaskGroup per unit, retired only when a new one would exceed
+            SHIM_TASK_QUEUE outstanding. ``pending`` is retired in append
+            order, which keeps a block's B and unsplit-leg descriptors alive
+            until its units have been awaited.
             """
-            # What one unit costs on the BUSIEST single channel, which is what
-            # SHIM_TASK_QUEUE bounds. Under c_split a unit drains one C
-            # descriptor per row-block (M_CHUNK of them, see c_taps) and they
-            # all ride the same column's channel, so a unit is worth _per_unit
-            # there; the a_split leg is one descriptor per row-fifo, so one.
-            # Counting units instead would overrun by exactly M_CHUNK -- at
-            # m_chunk=2 that is 8 outstanding, the measured hang threshold.
+            # What a unit costs on the busiest channel. Under c_split it
+            # drains M_CHUNK C descriptors onto one, so counting units instead
+            # would overrun the queue by that factor.
             unit_cost = _per_unit if c_split else 1
             pending = []  # (group, queue cost), oldest first
 
@@ -1204,10 +846,8 @@ def gemm(
                     pending.append((tg_u, unit_cost))
                     retire(SHIM_TASK_QUEUE)
 
-                # Not queue-counted: B rides one channel per column and the
-                # unsplit leg one per row, neither of which is the channel the
-                # units contend for. They still retire in order, after the
-                # units of their own block.
+                # Not queue-counted: B and the unsplit leg ride channels the
+                # units do not contend for. Still retired in order.
                 pending.append((tg_whole, 0))
                 pending.append((tg_b, 0))
 
