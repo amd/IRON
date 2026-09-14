@@ -201,27 +201,29 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
 
 def test_gemm_split_leg_windowing(aie_context):
     """K or N = 10240 at M > 256 overflows the shim BD's 20-bit mega_row
-    iteration step, so that leg is issued as one transfer per mega_row,
-    retired in windows of at most SHIM_TASK_QUEUE. Two shim resources bound it
-    and NEITHER is modelled by the toolchain -- the BD ids (16/tile, freed
-    without a completion check) and the channel task queue (4 deep, pushed
+    iteration step, so that leg is issued as one transfer per mega_row, with at
+    most SHIM_TASK_QUEUE of them outstanding. Two shim resources bound it and
+    NEITHER is modelled by the toolchain -- the BD ids (16/tile, freed without
+    a completion check) and the channel task queue (4 deep, pushed
     unconditionally) -- so overrunning either is a silent device hang rather
     than a diagnostic.
 
-    Windowing keeps both inside their limits for every shape: at most
-    1 B + 4 A + 4 C = 9 of 16 descriptors, and at most 4 outstanding per
-    channel. Assert that arithmetic here, since the numbers come from the
-    hardware and a future retune of SHIM_TASK_QUEUE could break it silently.
+    The sequence retires the OLDEST transfer as it issues the next rather than
+    draining a whole window, so the live set is SHIM_TASK_QUEUE transfers plus
+    B and the unsplit leg for each of the two column-blocks a boundary spans:
+    4 + 2 + 2 = 8 of 16 descriptors, and at most 4 outstanding per channel.
+    Assert that arithmetic here, since the numbers come from the hardware and a
+    future retune of SHIM_TASK_QUEUE could break it silently.
     """
     from aie.dialects.aie import get_target_model
     from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE
 
     dev = aie_utils.get_current_device()
     available = get_target_model(dev.resolve()).get_num_bds(0, 0)
-    worst = 1 + 2 * SHIM_TASK_QUEUE
+    worst = SHIM_TASK_QUEUE + 2 + 2
     assert worst <= available, (
         f"a fully split block needs {worst} shim BDs of {available}; "
-        "windowing no longer fits and the split shapes will hang"
+        "the split shapes will hang"
     )
 
     # The square case splits BOTH legs, which the real Gemma shapes never do

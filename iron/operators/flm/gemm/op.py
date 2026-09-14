@@ -463,8 +463,8 @@ class GEMM(MLIROperator):
 
         Packing all the way to consumption order is what makes both B hops
         linear descriptors (design.py's b_recv_dims and b_send_dims are both
-        None), which in turn leaves the descriptor dimensions for a k slice deep
-        enough to halve the accumulator traffic while B is also memtile-resident.
+        None), which in turn leaves the descriptor dimensions for a k slice
+        deep enough to halve the accumulator traffic.
         See :mod:`iron.operators.flm.packing` for the layout itself.
         """
         return pack_b(

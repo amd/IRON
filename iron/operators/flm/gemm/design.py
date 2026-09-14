@@ -54,6 +54,7 @@ the bfp16-emulated path that does the same shape in two macs, which is why
 """
 
 import argparse
+import os
 from enum import StrEnum
 from functools import partial
 
@@ -161,23 +162,26 @@ A_DEPTH = 2
 #     trick a_split already uses for the mega_row dimension, and it reuses the
 #     same windowing. What is left per transfer is
 #     [k_iters, M_CHUNK, M_TILE, K_TILE], which fits.
-# DEFAULT 1 EVERYWHERE -- i.e. off. The mechanism is correct and tested, but
-# interleaved A/B at K=1024 N=4096 (10 rounds, round-robin in one process)
-# does not show a consistent win:
+# DEFAULT 1 EVERYWHERE -- i.e. off, and for a contractual reason rather than a
+# performance one. m_chunk must DIVIDE m_row_blocks, so it needs M to be a
+# multiple of 512, while the overlay this operator replaces accepts any
+# multiple of 256 (mm_prebuilt/design.py:65, MIN_M = M_TILE*ROWS). A shape that
+# cannot use m_chunk falls back to 1 and so FORKS _config_tag, and serving
+# M=256 and M=2048 from ONE xclbin is a hard requirement here.
 #
-#     M      m_chunk=1 min/med    m_chunk=2 min/med     min      med
-#      512    525.4 /  622.7       502.1 /  566.3      -4.4%    -9.1%
-#     1024    959.0 / 1081.6      1092.4 / 1162.9     +13.9%    +7.5%
-#     2048   1902.8 / 1986.0      1837.1 / 1940.0      -3.5%    -2.3%
+# The leftover cannot be padded away either: a partial group is inexpressible
+# (see the raise below), and duplicating the row-block to fill the group is
+# expressible and bit-exact but doubles A and C for that dispatch, which at
+# m_row_blocks=1 costs more than anything m_chunk could win back.
 #
-# B's DDR traffic really does fall by m_chunk, but something else eats it --
-# most likely the per-unit A descriptors, since m_chunk forces the split path
-# for A (see a_split). The M=1024 regression is not monotonic in n_units and
-# is not explained; do not turn this on by default without understanding it.
+# Note m_chunk does NOT change A's byte count (A is M*K*2*n_col_blocks either
+# way). Its only structural effect is forcing a_split on, so if M % 512 == 0
+# ever becomes guaranteed it is worth re-measuring.
 #
-# An earlier NON-interleaved measurement showed -11%/-15% and was wrong; see
-# the bimodal-timing discipline in README.md. Interleave before believing any
-# number here.
+# `n_chunk` is the lever with the same effect and no such constraint: it groups
+# COLUMN-blocks, which the core already walks with an RTP-derived trip count,
+# so a partial group is a runtime bound rather than a descriptor shape and one
+# xclbin still serves every M.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 # How many column-blocks the runtime sequence keeps in flight. A block costs 3
 # shim buffer descriptors on a column (A + B + C) against 16 available, so the
@@ -398,7 +402,6 @@ def gemm(
     tile_n=N_TILE_DEFAULT,
     m_chunk=None,
     tile_ma=None,
-    overlap=None,
     kernel_object="mm_fused.o",
     trace_size=0,
 ):
@@ -462,7 +465,7 @@ def gemm(
             M_CHUNK,
         )
     RHO = M_TILE // T_MA
-    OVERLAP = OVERLAP_DEFAULT if overlap is None else overlap
+    OVERLAP = OVERLAP_DEFAULT
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
     CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
     CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
@@ -484,10 +487,10 @@ def gemm(
     clamp_max_bits = int(np.float32(clamp_hi).view(np.int32))
     # A compute tile does a whole m x n block or nothing, so M and K must tile
     # exactly. N need only be a multiple of N_TILE: a trailing group of fewer
-    # than COLS blocks is handled by giving the columns different trip counts
-    # (see col_work / col_drain below). That matters in practice -- for a
-    # transformer the o and down projections have N = model dim, which is
-    # essentially never a multiple of N_TILE*COLS.
+    # than COLS blocks is handled by giving the columns different trip counts,
+    # which each core derives for itself (see core_fn). That matters in
+    # practice -- for a transformer the o and down projections have N = model
+    # dim, which is essentially never a multiple of N_TILE*COLS.
     for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, N_TILE)):
         if value % unit != 0:
             raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
@@ -558,49 +561,39 @@ def gemm(
     # toolchain models, and overrunning it hangs rather than diagnoses.
     # Measured at K=10240 M=1024: 4 outstanding run, 8 hang.
     #
-    # So a split block is emitted in WINDOWS of at most SHIM_TASK_QUEUE
-    # mega_rows, each window awaited before the next is issued (see sequence()).
-    # Awaiting is what makes the window's descriptors safe to reuse, and it
-    # bounds both resources at once. M<=1024 is a single window, so the shapes
-    # that already worked are unaffected.
-    # A window is counted in TRANSFERS, not units: under c_split a unit emits
-    # one C descriptor per row-block (M_CHUNK of them, see c_taps), so a
-    # window of SHIM_TASK_QUEUE units would push M_CHUNK times that many onto
-    # one channel and hang.
+    # So a split leg keeps at most SHIM_TASK_QUEUE transfers outstanding, and
+    # emit_split() enforces that directly -- retiring the OLDEST transfer as it
+    # issues the next, so the channel stays full.
+    #
+    # It used to do this by windowing: issue SHIM_TASK_QUEUE transfers, await
+    # the whole window, then issue the next. That bounds the queue too, but it
+    # drains the channel to EMPTY at every window boundary and again at every
+    # column-block boundary, and on a DDR-rate-bound design those bubbles are
+    # the entire cost of the split path. Rolling instead of windowing measured,
+    # bit-exact, 8 rounds x 30 iters interleaved:
+    #
+    #     E4B/gateup M1024  4119.4 -> 3617.7   -12.2%
+    #     E4B/gateup M2048  7664.8 -> 7182.4    -6.3%
+    #     E4B/down   M1024  3649.2 -> 3553.4    -2.6%
+    #     E4B/down   M2048  7196.6 -> 6978.7    -3.0%
+    #
+    # The bound is counted in TRANSFERS, not units: under c_split a unit drains
+    # one C descriptor per row-block (M_CHUNK of them, see c_taps) and they all
+    # ride one channel, so counting units would overrun by exactly M_CHUNK --
+    # at m_chunk=2 that is 8 outstanding, the measured hang threshold.
     _per_unit = M_CHUNK if c_split else 1
-    MB_WINDOW = (
-        min(n_units, max(1, SHIM_TASK_QUEUE // _per_unit))
-        if (a_split or c_split)
-        else 1
-    )
-    bds_per_block = (
-        1 + (MB_WINDOW if a_split else 1) + (MB_WINDOW * _per_unit if c_split else 1)
-    )
-    # Unreachable while SHIM_TASK_QUEUE is 4 (the worst case is 1 + 4 + 4 = 9
-    # of 16), so this guards a future retune of the window rather than any
-    # shape reachable today. test_flm_gemm_split_leg_windowing asserts the same
-    # arithmetic from the outside.
-    if bds_per_block > SHIM_BDS:
+    # Live descriptors on a shim tile: SHIM_TASK_QUEUE from the rolling window,
+    # plus B and the unsplit leg for each of the two blocks a boundary spans.
+    bds_per_block = SHIM_TASK_QUEUE + 2 + 2
+    if (a_split or c_split) and bds_per_block > SHIM_BDS:
         raise ValueError(
             f"M={M} K={K} N={N} needs {bds_per_block} shim buffer descriptors "
-            f"per window (1 B + {MB_WINDOW if a_split else 1} A + "
-            f"{MB_WINDOW if c_split else 1} C) but a shim tile has only "
-            f"{SHIM_BDS}."
+            f"for the split path but a shim tile has only {SHIM_BDS}."
         )
-    # Cross-block overlap only applies to the unsplit path; a split block
-    # already awaits inside itself, so keeping a second one in flight would
-    # refill the very queue the windowing just drained.
-    # Only a block that spans MORE THAN ONE window awaits inside itself; that
-    # is what makes a second block in flight refill the queue the windowing
-    # just drained. A single-window block has no intra-block await, so it can
-    # still overlap -- and it must, because m_chunk forces a_split on for the
-    # descriptor's sake even when nothing needs windowing, and losing the
-    # pipelining costs far more than the B traffic m_chunk saves (measured
-    # +13% at M=1024 before this).
-    if (a_split or c_split) and n_units > MB_WINDOW:
-        OVERLAP = 1
-    else:
-        OVERLAP = max(1, min(OVERLAP, SHIM_BDS // bds_per_block))
+    # The unsplit path pipelines whole column-blocks instead, at 3 descriptors
+    # each (A + B + C). The split path does its own bounding above and ignores
+    # this.
+    OVERLAP = max(1, min(OVERLAP, SHIM_BDS // 3))
     # Sweeps where all COLS columns have work, plus a trailing group of
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
@@ -609,15 +602,6 @@ def gemm(
     # exist is configuration and this design has one configuration. A column
     # with no work for this shape gets n_work = 0 and drains instead.
     n_active_cols = COLS
-    # Per column: how many column-blocks it computes, and how many it sits out
-    # while still draining the A broadcast for its row. Every block issues A
-    # for every compute row, so a column that does not compute a block must
-    # still take that block's A or the row stalls -- the memtile will not
-    # release an A object until all COLS consumers have taken it.
-    total_blocks = n_full + (1 if rem_blocks else 0)
-    col_work = [n_full + (1 if c < rem_blocks else 0) for c in range(COLS)]
-    col_drain = [total_blocks - w for w in col_work]
-
     # B's element type: one v8bfp16ebs8 per 8 values on AIE2P, one bf16 per
     # value on AIE2. Every B extent below is therefore in values // B_GROUP.
     b_elem_ty = np.dtype[v8bfp16ebs8] if BFP16_B else bf16_ty
@@ -630,11 +614,8 @@ def gemm(
     # M_CHUNK stacked row-block tiles, so the forward below can interleave
     # them on the way out -- see a_send_dims.
     mt_a_ty = np.ndarray[(M_CHUNK * M_TILE * K_TILE,), bf16_ty]
-    mt_a_bytes = M_CHUNK * M_TILE * K_TILE * 2
     mt_b_ty = np.ndarray[(K_TILE * N_TILE // B_GROUP,), b_elem_ty]
-    mt_b_bytes = _b_bytes(K_TILE * N_TILE, BFP16_B)
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
-    mt_out_bytes = C_SLICE_LEN * ROWS * 2
     # L3 (DDR), flat -- the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
     b_l3_ty = np.ndarray[(K * N // B_GROUP,), b_elem_ty]
@@ -741,38 +722,18 @@ def gemm(
 
     # B: shim -> memtile -> broadcast down the compute column.
     #
-    # Where it fits, a whole column-block's B is held in the memtile as ONE
-    # object and re-walked per row-block, so DDR reads it once instead of
-    # m_row_blocks times. B is the dominant DDR leg, so that is roughly 43% less
-    # total traffic; the latency it buys grows with M, because B's re-reads
-    # scale with m_row_blocks. Larger K does not fit and falls back to
-    # re-reading. See README.md for the measured effect.
+    # Placement has zero slack -- the eight memtiles pack to exactly 512 KB,
+    # relying on aie-objectfifo-allocate spilling one buffer to an adjacent
+    # tile -- so re-verify it after any change to the A, B or C buffer sizes.
     #
-    # Three things here are load-bearing rather than tuning:
-    #
-    #   * ONE object spanning every k-block, not a pool of k_iters objects.
-    #     Iterating a pool replays each object in turn (k0,k0,k1,k1,...) rather
-    #     than the k0..kn sequence the cores accumulate in.
-    #   * repeat_count on the forward() below is what re-sends an object.
-    #     iter_count only bounds how many times an end cycles through all its
-    #     buffers, so it is in units of depth-cycles; getting it wrong hangs
-    #     rather than mis-computing.
-    #   * The depth search takes the deepest that fits, not depth 1. Single
-    #     buffering stops the next column-block prefetching behind this one's
-    #     replay, which measures worse than not being resident at all.
-    #
-    # The budget must count what A and C actually occupy: at tile_n=128 C
-    # doubles and a resident B is 432 KB, and a budget that assumed C's size
-    # admitted a configuration that then failed address assignment. Placement
-    # has zero slack -- the eight memtiles pack to exactly 512 KB, relying on
-    # aie-objectfifo-allocate spilling one buffer to an adjacent tile -- so
-    # re-verify it after any change to the A, B or C buffer sizes.
-    # B residency is gone: it sizes the memtile buffer from k_iters and
-    # replays it m_row_blocks times through the forward()'s repeat_count, so
-    # it carries both K and M into the configuration, which is what the
-    # runtime parameters exist to remove. See README.md for what that cost.
-    b_resident = False
-
+    # One k-block per object, re-fetched from DDR for every row-block. Holding
+    # a whole column-block here instead would size the buffer from k_iters and
+    # replay it m_row_blocks times, putting both K and M into the device
+    # configuration -- which is what the runtime parameters exist to keep out
+    # of it. The M half is tractable now (aiex.dma_channel_reset_for re-arms a
+    # resident fifo from the RUNTIME SEQUENCE, and push_queue's repeat is an
+    # SSA operand); the k_iters-sized buffer is the part still in the way.
+    # See README.md.
     b_l3l2_fifos = []
     b_cons = {}
     for c in range(n_active_cols):
@@ -848,8 +809,8 @@ def gemm(
         #     => n_work = ceil((N/N_TILE - c) / COLS)
         #
         # and every divisor is a power of two (N_TILE=64, COLS=8), so this is
-        # shifts and adds -- no __divsi3. Verified against the host-side
-        # col_work/col_drain for every shape in the suite.
+        # shifts and adds -- no __divsi3. Verified against host-side trip
+        # counts for every shape in the suite.
         # // rather than >>: the DSL's ScalarValue overloads add/sub/mul/
         # floordiv/mod but NOT the shift operators. Both divisors are
         # compile-time powers of two (N_TILE=64, COLS=8), so this strength-
@@ -1045,14 +1006,8 @@ def gemm(
             # n_units times instead of m_row_blocks. That is the whole win --
             # see M_CHUNK_FOR_N. The unit dimension keeps stride 0, replaying
             # the same k-blocks, exactly as the row-block dimension used to.
-            sizes=(
-                [1, 1, 1, k_iters * K_TILE * N_TILE // B_GROUP]
-                if b_resident
-                else [n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP]
-            ),
-            strides=(
-                [0, 0, 0, 1] if b_resident else [0, K_TILE * N_TILE // B_GROUP, 0, 1]
-            ),
+            sizes=[n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP],
+            strides=[0, K_TILE * N_TILE // B_GROUP, 0, 1],
         )
 
     def c_taps(mega_col, c, units):
@@ -1203,43 +1158,64 @@ def gemm(
                     tg.finish()
 
         def emit_split():
-            # A split leg is one transfer per mega_row, so a whole block at
-            # once would overrun the shim channel's task queue. Emit MB_WINDOW
-            # mega_rows at a time and retire each window before the next, which
-            # both drains the queue and -- because the window's transfers are
-            # awaited, not merely freed -- makes its descriptors safe to reuse.
-            #
-            # B stays live across the whole block: its descriptor replays over
-            # every mega_row, so freeing it per window would hand its
-            # descriptor away mid-flight. It is retired last, after every
-            # window's C has been awaited, which is what guarantees it drained.
+            """Issue split legs one unit at a time, retiring the oldest.
+
+            One TaskGroup covers one unit (one task per channel), and the
+            oldest is retired only when a new one would exceed SHIM_TASK_QUEUE
+            outstanding -- so the channel stays full across both unit and
+            column-block boundaries. See the SHIM_TASK_QUEUE comment above for
+            why retiring in batches instead costs real time.
+
+            ``pending`` is retired strictly in append order, which is what
+            keeps a block's B and unsplit-leg descriptors alive until every one
+            of that block's units has been AWAITED: they are appended after the
+            units they cover.
+            """
+            # What one unit costs on the BUSIEST single channel, which is what
+            # SHIM_TASK_QUEUE bounds. Under c_split a unit drains one C
+            # descriptor per row-block (M_CHUNK of them, see c_taps) and they
+            # all ride the same column's channel, so a unit is worth _per_unit
+            # there; the a_split leg is one descriptor per row-fifo, so one.
+            # Counting units instead would overrun by exactly M_CHUNK -- at
+            # m_chunk=2 that is 8 outstanding, the measured hang threshold.
+            unit_cost = _per_unit if c_split else 1
+            pending = []  # (group, queue cost), oldest first
+
+            def retire(limit):
+                while sum(q for _, q in pending) > limit:
+                    pending.pop(0)[0].finish()
+
             for mega_col, active_cols in blocks:
                 tg_b = TaskGroup()
                 issue_b(mega_col, active_cols, tg_b)
 
-                # The leg that did NOT split is still one task for the whole
-                # block -- its single descriptor already spans every mega_row,
-                # so re-issuing it per window would transfer the block twice.
-                # It stays live alongside the windows and retires with them.
                 tg_whole = TaskGroup()
                 if not c_split:
                     issue_c(mega_col, active_cols, all_mb, tg_whole)
                 if not a_split:
                     issue_a(mega_col, all_mb, tg_whole)
 
-                for w in range(0, n_units, MB_WINDOW):
-                    mbs = all_mb[w : w + MB_WINDOW]
-                    tg_w = TaskGroup()
+                for u in all_mb:
+                    tg_u = TaskGroup()
                     if c_split:
-                        issue_c(mega_col, active_cols, mbs, tg_w)
+                        issue_c(mega_col, active_cols, [u], tg_u)
                     if a_split:
-                        # wait=True: the await is what makes this window's
-                        # descriptors reusable by the next.
-                        issue_a(mega_col, mbs, tg_w, wait=True)
-                    tg_w.finish()
+                        issue_a(mega_col, [u], tg_u, wait=True)
+                    pending.append((tg_u, unit_cost))
+                    retire(SHIM_TASK_QUEUE)
 
-                tg_whole.finish()
-                tg_b.finish()
+                # Not queue-counted: B rides one channel per column and the
+                # unsplit leg one per row, neither of which is the channel the
+                # units contend for. They still retire in order, after the
+                # units of their own block.
+                pending.append((tg_whole, 0))
+                pending.append((tg_b, 0))
+
+            # Drain everything, not retire(0): the tail groups are weighted 0,
+            # so a count-driven loop stops with them still open and the build
+            # fails with "Failed to close task groups".
+            for tg, _ in pending:
+                tg.finish()
 
         emit_split() if (a_split or c_split) else emit_unsplit()
 

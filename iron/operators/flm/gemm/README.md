@@ -273,9 +273,8 @@ to reduce over -- with a single k iteration there is not enough compute to
 hide the extra A traffic.
 
 On NPU2, `tile_n=128` wins only at `k_iters=1`, and by ~3%; at `k_iters>=2` it
-is 1.2-1.7x slower. Both followed from `tile_n=128` giving up resident B — its
-`mt_b` is 128 KB, so `k_iters` copies do not fit the memtile — and the more k
-there is to reduce over, the more that costs.
+is 1.2-1.7x slower, because its `CT_MAX_K` falls to 32 and the compute cost of
+the shorter k slice swamps the A traffic it saves.
 
 NPU1 never reaches that crossover. It has half the columns *and* a quarter of
 the per-tile bf16 mac throughput, so it stays compute-bound at every K, and
@@ -351,7 +350,6 @@ which is why the gap grows with the problem size rather than being flat.
 
 Unlike NPU2, compute here is **not** hidden behind the transfers, so on NPU1
 both a faster mmul and less traffic pay off, where on NPU2 only the latter does.
-Resident B was also a no-op on NPU1 — see [Resident B, removed](#resident-b-removed).
 
 ### Why the transfers are cheap
 
@@ -367,27 +365,47 @@ Two things, both in the runtime sequence rather than the kernel:
   block then costs 3 shim buffer descriptors instead of `1 + 2*k_iters`, so two
   can be in flight without exhausting the 16 available.
 
-### Resident B, removed
+### B is re-fetched per row-block
 
-B used to be held in the memtile across row-blocks where a whole column-block
-fit double-buffered, so DDR read it once instead of `m_row_blocks` times --
-about 43% less traffic. On NPU2 that was worth 12.5% at M=512, 16.4% at
-M=1024 and 19.3% at M=2048 (K=1024 N=4096). On NPU1 it was neither a latency
-nor a power win.
+DDR reads B `m_row_blocks` times rather than once. Holding a whole column-block
+in the memtile and replaying it would size that buffer from `k_iters` and set
+the replay from `m_row_blocks`, putting **both K and M into the device
+configuration** — and the configuration is what one xclbin has to share across
+every shape. That is the standing cost of M, K and N being runtime parameters,
+and it is why B is the dominant DDR leg here.
 
-**It is gone, and that is the price of the runtime parameters.** Residency
-sizes the memtile buffer from `k_iters` and replays it `m_row_blocks` times
-through a buffer descriptor's repeat count, so it puts both K and M in the
-device configuration — and the configuration is what one xclbin has to share
-across every shape.
+**M is the tractable half.** `aiex.npu.push_queue` takes both `bd_id` and
+`repeat_count` as SSA operands, and `aiex.dma_channel_reset_for(@fifo)` expands
+into the whole re-arm trio a resident fifo needs — channel reset, `aiex.set_lock`
+per bound lock, START_QUEUE re-push — inside the **runtime sequence**, which this
+operator regenerates per shape. So a per-shape replay count does not have to
+reach the xclbin. All of it is reachable from Python and has an npu2 device test
+(1000 dispatches on one hardware context).
 
-Removing it does lift a hard cap: the repeat count expands into the memtile's
-BD chain at 2 blocks per replay, and at `m_row_blocks = 16` that chain
-exceeded its 48-block limit, so no shape with K <= 2048 would build at M=4096.
-Every shape builds there now.
+**K is the part still in the way.** Correct ordering needs one memtile object
+spanning every k-block, so the buffer is sized from `k_iters` and that sizing is
+device configuration. Selecting among several pre-programmed BD chains via
+`push_queue`'s runtime `bd_id` is the obvious line of attack and has not been
+tried.
 
-Restoring it needs a replay mechanism that carries neither K nor M into the
-configuration. That is the largest known lever left here, and it is worth more
-than the figures above suggest, because `repeat_count` restarting the memtile
-BD chain at every replay boundary was already giving part of the traffic
-saving back.
+### Split legs retire rolling, not in windows
+
+Where K or N is 10240, the row-block stride overflows the shim BD's 20-bit
+iteration step and that leg is issued as one transfer per row-block. Two shim
+resources bound how many may be outstanding, and neither is modelled by the
+toolchain: BD ids (16/tile, freed without a completion check) and the channel
+task queue (4 deep, pushed unconditionally).
+
+The sequence retires the **oldest** transfer as it issues the next, which
+bounds both resources directly while keeping the channel full.
+
+**Do not "simplify" this into windowing** — issue four, await the whole window,
+issue the next four. That bounds the same two resources and reads more simply,
+but it drains the channel to *empty* at every window boundary and again at every
+column-block boundary, and on a DDR-rate-bound design those bubbles are the
+entire cost of the split path. Measured at up to **-12.4%** on the shapes that
+take this path (E4B/gateup M1024), for no change in what is in flight.
+
+`m_chunk` takes this path too, since its only structural effect is to force the
+split on for A. It is off by default regardless — see `M_CHUNK_FOR_N` in
+design.py, which would fork the xclbin.
