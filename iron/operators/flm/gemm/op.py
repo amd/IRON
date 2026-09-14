@@ -202,10 +202,20 @@ class GEMM(MLIROperator):
         runtime parameters, so they change only the instruction stream.
         Whether a clamp exists at all does shape the build; see
         ``_clamp_capable``.
+
+        ``ck`` is here for the same reason it is in ``_kernel_object``, and it
+        is NOT redundant with ``tn``: CT_MAX_K_FOR_N is a tuning table, and
+        retuning one entry changes the design (B's object width, the k slice,
+        a_send_dims) while tn is unmoved. ``ma`` does not cover it either --
+        it usually moves with ck, but ``tile_ma`` is caller-overridable, so
+        tn128/ma16 is reachable at two different ck values. Omitting it here
+        silently served an xclbin built at one ck to a request for another,
+        which is how test_gemm_tile_options[tn128-ma16] started returning NaN.
         """
         dev = aie_utils.get_current_device().resolve().name
         return (
-            f"tn{self.tile_n}_ma{self.tile_ma}_mc{self.m_chunk}"
+            f"tn{self.tile_n}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
+            f"_ma{self.tile_ma}_mc{self.m_chunk}"
             f"_em{self._epilogue_mask:x}_{self.rounding}"
             f"_cl{self._clamp_capable}_{dev}"
         )
@@ -254,9 +264,16 @@ class GEMM(MLIROperator):
         otherwise silently satisfy a request for another. That includes r/t,
         which set the blocked layout, and the epilogue flags, which since the
         epilogue was folded into this translation unit shape the same object.
+
+        ``ck`` is CT_MAX_K_FOR_N[tile_n], carried as -DMM_FUSED_CT_K. It is
+        derived from tile_n today, so it looks redundant -- but it is a TUNING
+        TABLE, and retuning one entry while leaving the object name alone is
+        exactly the silent-stale-binary case above. Naming it means the table
+        can be edited without also remembering to wipe the build dir.
         """
         return (
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
+            f"_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
             f"_em{self._epilogue_mask:x}_cl{self._clamp_capable}.o"
         )
