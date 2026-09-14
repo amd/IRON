@@ -98,6 +98,23 @@ N_TILE_DEFAULT = 64
 # (M_TILE * 256 * 4 = 65536 bytes) already fills the whole of L1, before A, B
 # or C are even counted, so no ct_max_k could ever make it fit.
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
+# (tile_n, ct_max_k) pairs KNOWN TO COMPUTE CORRECTLY on hardware. The table
+# above reads like a tuning knob -- op.py calls it "the only place it is
+# decided" -- but it is not freely tunable, and a wrong value fails SILENTLY.
+# Measured on npu2 2026-09-11:
+#
+#     tile_n=64  ct_k=128   err/mass 2.42e-04   (shipped)
+#     tile_n=64  ct_k= 64   err/mass 3.45e-02   ~140x worse, outside any budget
+#     tile_n=128 ct_k= 32   err/mass 1.43e-04   (shipped)
+#     tile_n=128 ct_k= 64   NaN
+#     tile_n=128 ct_k=128   NaN
+#
+# Root cause not found, but pack_b is RULED OUT BY TEST: inverting its
+# permutation round-trips exactly at ct_k 128, 64 and 32, so its blocking is
+# generic. The disagreement is most likely the ORDER the design's stream dims
+# and the kernel's mmul nest walk one ct-chunk. Until that is found, refuse
+# rather than miscompute.
+_VERIFIED_CT_K = {(16, 16), (32, 32), (64, 128), (128, 32)}
 # Register tiling, shared by both architectures. These set the blocked L1
 # layout, so ``pack_B``, the four stream-dimension lists below and
 # ``gather_dims`` all key off them; changing one without the others is silently
@@ -194,23 +211,49 @@ class Epilogue(StrEnum):
 # compile-time (op.py's -DMM_FUSED_CLAMP), because it costs program memory;
 # only the enable and the bounds are runtime, so every pair of bounds shares
 # one build.
+# The five that EVERY configuration needs. Anything conditional lives after
+# them, at an offset rtp_layout() computes, so a word a build cannot use is
+# never allocated rather than written and ignored.
 (
-    RTP_N_WORK,
-    RTP_N_DRAIN,
+    RTP_N_VAL,
     RTP_M_ROW_BLOCKS,
     RTP_K_ITERS,
     RTP_EPILOGUE,
-    RTP_CLAMP_ENABLED,
-    RTP_CLAMP_MIN_BITS,
-    RTP_CLAMP_MAX_BITS,
-    # Row-blocks split into M_CHUNK-wide groups plus a leftover: m_row_blocks
-    # need not divide by M_CHUNK (M=256 is one row-block, M=768 is three), so
-    # the core runs a wide pass n_chunks times and a single-wide pass n_rem
-    # times. Both counts are runtime, so any M still rides one xclbin.
-    RTP_N_CHUNKS,
-    RTP_N_UNITS,
-) = range(10)
-RTP_WORDS = 10
+) = range(4)
+
+
+def rtp_layout(clamp_capable, m_chunk):
+    """Slot index for each optional parameter, and the total word count.
+
+    **A word is not free.** Each one costs ~66 ns per core and the sequence
+    writes ROWS*COLS = 32 of them, so **every RTP word is ~2.06 us of dispatch
+    latency** -- measured by padding the buffer at a fixed core count (12 words
+    108.6 us, 24 words 135.2, 48 words 182.7). Against a ~107 us floor that is
+    not a rounding error, and at M=256 the floor is most of the dispatch.
+
+    So both groups here are omitted, not defaulted:
+
+    * the clamp trio, when the build has no clamped path at all. op.py compiles
+      the clamped instantiation out entirely at ``_clamp_capable == 0`` (the
+      default, and every real projection shape), so those three words were
+      written on every dispatch and never read -- ~6 us for nothing.
+    * ``n_chunks`` / ``n_units``, when M_CHUNK == 1. They are
+      ``m_row_blocks // M_CHUNK`` and each other, so at the shipped M_CHUNK
+      they are simply m_row_blocks, and the core reads that word instead --
+      no on-core arithmetic, just one fewer thing to send. ~4 us.
+    """
+    slots = {}
+    n = 4
+    if clamp_capable:
+        slots["clamp_enabled"] = n
+        slots["clamp_min"] = n + 1
+        slots["clamp_max"] = n + 2
+        n += 3
+    if m_chunk > 1:
+        slots["n_chunks"] = n
+        slots["n_units"] = n + 1
+        n += 2
+    return slots, n
 
 
 class Rounding(StrEnum):
@@ -378,6 +421,14 @@ def gemm(
     SHIM_BDS = tm.get_num_bds(0, 0)
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
+    if (N_TILE, CT_MAX_K) not in _VERIFIED_CT_K:
+        raise ValueError(
+            f"tile_n={N_TILE} with ct_max_k={CT_MAX_K} is not a verified "
+            f"combination (verified: {sorted(_VERIFIED_CT_K)}). It would build, "
+            f"run, and compute the WRONG ANSWER -- see _VERIFIED_CT_K. If you "
+            f"are retuning CT_MAX_K_FOR_N, fix that coupling first and add the "
+            f"pair here once a hardware test passes."
+        )
     M_CHUNK = M_CHUNK_FOR_N[N_TILE] if m_chunk is None else m_chunk
     # B is bfp16ebs8 on AIE2P and bf16 on AIE2: the scalar BFP types are gated
     # on __AIE_API_SCALAR_BFP_TYPES__, which only aie_api/detail/aie2p/config.hpp
@@ -427,6 +478,7 @@ def gemm(
     # exists at all is still op.py's -DMM_FUSED_CLAMP, because it costs
     # program memory.
     clamp_enabled = 1 if clamp is not None else 0
+    rtp_slots, rtp_words = rtp_layout(clamp is not None, M_CHUNK)
     clamp_lo, clamp_hi = clamp if clamp is not None else (0.0, 0.0)
     clamp_min_bits = int(np.float32(clamp_lo).view(np.int32))
     clamp_max_bits = int(np.float32(clamp_hi).view(np.int32))
@@ -747,13 +799,31 @@ def gemm(
         for r in range(ROWS):
             b_cons[(r, c)] = of_b.cons()
 
+    # Each tile's own column, as an initialized buffer rather than a constant
+    # folded into the program. That is deliberate: the 32 core programs differ
+    # today only in symbol NAMES, and baking the column in as an immediate
+    # would make them differ in CODE, permanently foreclosing the one-program
+    # xclbin. Data may vary per tile; the program must not. Written once at
+    # configuration time, so unlike an RTP word it costs nothing per dispatch.
+    my_cols = [
+        [
+            Buffer(
+                np.ndarray[(1,), np.dtype[np.int32]],
+                name=f"my_col_{r}_{c}",
+                initial_value=np.array([c], dtype=np.int32),
+            )
+            for c in range(n_active_cols)
+        ]
+        for r in range(ROWS)
+    ]
+
     # --- Runtime parameters -----------------------------------------------
     rtps = [
         [
             Buffer(
-                np.ndarray[(RTP_WORDS,), np.dtype[np.int32]],
+                np.ndarray[(rtp_words,), np.dtype[np.int32]],
                 name=f"rtp_{r}_{c}",
-                initial_value=np.zeros(RTP_WORDS, dtype=np.int32),
+                initial_value=np.zeros(rtp_words, dtype=np.int32),
                 use_write_rtp=True,
             )
             for c in range(n_active_cols)
@@ -765,22 +835,46 @@ def gemm(
     ]
 
     # --- Compute ----------------------------------------------------------
-    def core_fn(accs, o_h, b_h, a_h, init_k, kstep_k, epi_k, my_rtp, barrier):
+    def core_fn(accs, o_h, b_h, a_h, init_k, kstep_k, epi_k, my_rtp, my_col, barrier):
         """Core body. Every trip count and the activation come from the
         runtime parameter buffer, so one core program serves every shape."""
         # The loop nest lives here rather than inside the kernel so that
         # every level has an ObjectFifo acquire point.
         barrier.wait_for_value(1)
-        n_work = my_rtp[RTP_N_WORK]
-        n_drain = my_rtp[RTP_N_DRAIN]
+        # n_work / n_drain are DERIVED here rather than sent, which costs one
+        # RTP word instead of two. Branch-free, so no select is needed:
+        #
+        #   column c has work in column-block j iff (j*COLS + c)*N_TILE < N
+        #     => n_work = ceil((N/N_TILE - c) / COLS)
+        #
+        # and every divisor is a power of two (N_TILE=64, COLS=8), so this is
+        # shifts and adds -- no __divsi3. Verified against the host-side
+        # col_work/col_drain for every shape in the suite.
+        # // rather than >>: the DSL's ScalarValue overloads add/sub/mul/
+        # floordiv/mod but NOT the shift operators. Both divisors are
+        # compile-time powers of two (N_TILE=64, COLS=8), so this strength-
+        # reduces and must not leave a __divsi3 call -- verified in the .o.
+        n_tiles = my_rtp[RTP_N_VAL] // N_TILE
+        n_work = (n_tiles - my_col[0] + COLS - 1) // COLS
+        n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
         n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
         n_k_iters = my_rtp[RTP_K_ITERS]
         epi_mode = my_rtp[RTP_EPILOGUE]
-        clamp_enabled = my_rtp[RTP_CLAMP_ENABLED]
-        clamp_min_bits = my_rtp[RTP_CLAMP_MIN_BITS]
-        clamp_max_bits = my_rtp[RTP_CLAMP_MAX_BITS]
-        n_chunks = my_rtp[RTP_N_CHUNKS]
-        n_units_rt = my_rtp[RTP_N_UNITS]
+        # Absent slots become compile-time constants rather than loads: the
+        # kernel's clamped path is compiled out when it is not capable, and at
+        # M_CHUNK == 1 both chunk counts ARE n_row_blocks.
+        if "clamp_enabled" in rtp_slots:
+            clamp_enabled = my_rtp[rtp_slots["clamp_enabled"]]
+            clamp_min_bits = my_rtp[rtp_slots["clamp_min"]]
+            clamp_max_bits = my_rtp[rtp_slots["clamp_max"]]
+        else:
+            clamp_enabled, clamp_min_bits, clamp_max_bits = 0, 0, 0
+        if "n_chunks" in rtp_slots:
+            n_chunks = my_rtp[rtp_slots["n_chunks"]]
+            n_units_rt = my_rtp[rtp_slots["n_units"]]
+        else:
+            n_chunks = n_row_blocks
+            n_units_rt = n_row_blocks
         # Acquire does not consume the barrier, so take it back to zero or the
         # next dispatch reads these parameters again instead of waiting. Safe
         # before the work: the sequence cannot set the barrier again until it
@@ -876,6 +970,7 @@ def gemm(
                         k_step,
                         epilogue_chunk,
                         rtps[r][c],
+                        my_cols[r][c],
                         barriers[r][c],
                     ],
                 )
@@ -1009,16 +1104,18 @@ def gemm(
         # read a half-written buffer.
         for r in range(ROWS):
             for c in range(n_active_cols):
-                rtps[r][c][RTP_N_WORK] = col_work[c]
-                rtps[r][c][RTP_N_DRAIN] = col_drain[c]
+                rtps[r][c][RTP_N_VAL] = N
                 rtps[r][c][RTP_M_ROW_BLOCKS] = m_row_blocks
                 rtps[r][c][RTP_K_ITERS] = k_iters
                 rtps[r][c][RTP_EPILOGUE] = epilogue.mode
-                rtps[r][c][RTP_CLAMP_ENABLED] = clamp_enabled
-                rtps[r][c][RTP_CLAMP_MIN_BITS] = clamp_min_bits
-                rtps[r][c][RTP_CLAMP_MAX_BITS] = clamp_max_bits
-                rtps[r][c][RTP_N_CHUNKS] = n_chunks
-                rtps[r][c][RTP_N_UNITS] = n_units
+                # Only what this configuration actually reads; see rtp_layout.
+                if "clamp_enabled" in rtp_slots:
+                    rtps[r][c][rtp_slots["clamp_enabled"]] = clamp_enabled
+                    rtps[r][c][rtp_slots["clamp_min"]] = clamp_min_bits
+                    rtps[r][c][rtp_slots["clamp_max"]] = clamp_max_bits
+                if "n_chunks" in rtp_slots:
+                    rtps[r][c][rtp_slots["n_chunks"]] = n_chunks
+                    rtps[r][c][rtp_slots["n_units"]] = n_units
         for r in range(ROWS):
             for c in range(n_active_cols):
                 barriers[r][c].set(1)

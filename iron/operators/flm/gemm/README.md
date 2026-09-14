@@ -78,30 +78,56 @@ Two consequences of the native-vs-emulated split are worth knowing:
 
 ## Runtime parameters
 
-Eight words in an L1 buffer per core, written by the runtime sequence and read
-by the core once its barrier opens:
+**Four words** in an L1 buffer per core, written by the runtime sequence and
+read by the core once its barrier opens:
 
 | word | value |
 |---|---|
-| `n_work` | column-blocks this column computes |
-| `n_drain` | column-blocks it sits out while still draining A |
+| `N` | the raw N; the core derives its own `n_work` / `n_drain` from it |
 | `m_row_blocks` | `M / 256` |
 | `k_iters` | `K / 512` |
 | epilogue | the `Epilogue` mode |
-| `clamp_enabled` | whether to apply the clamp |
-| `clamp_min` / `clamp_max` | the bounds, as raw `int32` bit patterns |
 
-The clamp bounds are floats, but `npu_write_rtp` writes `i32` words only, so
-they travel bit-cast and the kernel casts them back with
-`__builtin_bit_cast` -- `memcpy` leaves an unresolved external call in the
-compiled object rather than folding to a register move.
+A word is not free: each costs ~66 ns per core and the sequence writes
+`ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
+(measured by padding the buffer at a fixed core count). Against a ~107 us
+floor that is most of a short-prefill dispatch, so `rtp_layout()` in design.py
+sizes the buffer per configuration rather than sending words a build cannot
+use. Three groups are therefore conditional or gone:
+
+* `clamp_enabled` / `clamp_min` / `clamp_max` are sent **only by a
+  clamp-capable build**. Where no clamped path is compiled in -- the default,
+  and every real projection -- they were written every dispatch and never
+  read. They stay raw `int32` bit patterns, because `npu_write_rtp` writes
+  i32 only; the kernel casts back with `__builtin_bit_cast`, since `memcpy`
+  leaves an unresolved external call rather than folding to a register move.
+* `n_chunks` / `n_units` are sent **only when `m_chunk > 1`**. They are
+  `m_row_blocks // M_CHUNK` and each other, so at the shipped `M_CHUNK = 1`
+  the core just reads `m_row_blocks`.
+* `n_work` / `n_drain` are **not sent at all**. The core derives them from `N`
+  and its own column, which it reads from a per-tile buffer initialised at
+  build time. Branch-free, and both divisors are powers of two, so it costs
+  shifts rather than a `__divsi3` call:
+
+      n_tiles = N // N_TILE
+      n_work  = (n_tiles - my_col + COLS - 1) // COLS
+      n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
+
+  The column index is per-tile **static data**, deliberately not a constant
+  folded into the program: the 32 core programs today differ only in symbol
+  names, and baking it into code would make them differ in instructions,
+  foreclosing a future one-program xclbin.
+
+Measured on the 30-shape suite: **-3.5% median at M=256** (best -11.3%,
+E2B/kv), and within noise at M >= 1024 -- the saving is a constant ~12 us, so
+it is a short-prefill and decode lever, not a prefill one.
 
 All columns are always built. One with no work for a shape gets `n_work = 0`
 and still drains its share of the A broadcast, because the memtile will not
 release an A object until every consumer has taken it.
 
 The two artifacts therefore carry different stems: the xclbin's `config_name`
-covers tile_n, tile_ma, the compiled activation set, whether a clamp exists,
+covers tile_n, ct_max_k, tile_ma, the compiled activation set, whether a clamp exists,
 rounding and the device, while `name` adds M, K, N and the activation. The
 xclbin is built from a module emitted at a reference shape, whose runtime
 sequence is discarded.
