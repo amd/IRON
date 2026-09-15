@@ -75,6 +75,12 @@ CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
 B_DEPTH = 2  # B fifo depth; also the core-body unroll
 A_DEPTH = 2
+# L1 bytes reserved for the core's stack, which the buffer budget below must
+# not hand out. The device default is 1024 and aiecc measures what a build
+# actually needs: 1088 on NPU1, which is the activation LUT path plus the
+# epilogue's clamp vectors, so the default fails the build outright. 2048
+# leaves headroom; aiecc names the exact requirement if a change outgrows it.
+STACK_SIZE = 2048
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
 # at the cost of that many L1 accumulators and forcing a_split. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
@@ -196,9 +202,10 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     """Pick the largest working set that fits: (A-tile height, L1 B depth).
 
     Deeper B first, then the tallest A that still fits, since colA is worth
-    far more than B's L1 prefetch. No stack is reserved out of ``budget``;
-    aiecc fails the build if a core's measured requirement does not fit.
+    far more than B's L1 prefetch. ``budget`` is the whole local memory; the
+    stack comes off it here so callers can keep passing the raw size.
     """
+    budget -= STACK_SIZE
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.
     acc = m_chunk * M_TILE * n_tile * 4
@@ -220,6 +227,7 @@ def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     ``_default_l1``'s depth is chosen with its own t_ma, which need not fit a
     caller-overridden one. Raise rather than reuse a depth that does not fit.
     """
+    budget -= STACK_SIZE
     # Same terms as _default_l1; acc is the only one that scales with m_chunk.
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
@@ -655,6 +663,7 @@ def gemm(
                         my_cols[r][c],
                         barriers[r][c],
                     ],
+                    stack_size=STACK_SIZE,
                 )
             )
 
