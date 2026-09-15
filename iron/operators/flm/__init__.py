@@ -13,6 +13,8 @@ import importlib
 _OPERATOR_MODULES = {
     # The port, built from source for the current device.
     "GEMM": "gemm",
+    # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
+    "DequantBFP": "dequant",
     # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
     # exists so the port can be measured against what it was ported from.
     "MMPrebuilt": "mm_prebuilt",
