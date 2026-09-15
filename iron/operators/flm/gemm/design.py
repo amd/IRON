@@ -85,7 +85,7 @@ STACK_SIZE = 2048
 # at the cost of that many L1 accumulators and forcing a_split. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
 # the overlay this replaces takes any multiple of 256, so a shape that cannot
-# use it forks _config_tag. See README.md.
+# use it forks config_name. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 # How many column-blocks the runtime sequence keeps in flight. A block costs 3
 # shim buffer descriptors on a column (A + B + C) of the 16 available, so the
@@ -111,18 +111,25 @@ class Epilogue(StrEnum):
         return list(Epilogue).index(self)
 
 
-# The parameter buffer each core reads once its barrier opens. These four are
+# The parameter buffer each core reads once its barrier opens. These six are
 # always present; conditional words follow at offsets rtp_layout() computes,
 # so a word a build cannot use is never allocated.
+#
+# The clamp bounds are unconditional even though most callers do not clamp,
+# because the alternative is a second xclbin: the kernel's clamp is not
+# compiled out, it is neutralised by sending (-inf, +inf). Two words is the
+# price of that, and a clamping caller now pays one word less than it did.
 (
     RTP_N_VAL,
     RTP_M_ROW_BLOCKS,
     RTP_K_ITERS,
     RTP_EPILOGUE,
-) = range(4)
+    RTP_CLAMP_MIN,
+    RTP_CLAMP_MAX,
+) = range(6)
 
 
-def rtp_layout(clamp_capable, m_chunk):
+def rtp_layout(m_chunk):
     """Slot index for each optional parameter, and the total word count.
 
     A word is not free: the sequence writes one per core, costing ~2 us of
@@ -130,12 +137,7 @@ def rtp_layout(clamp_capable, m_chunk):
     rather than defaulted.
     """
     slots = {}
-    n = 4
-    if clamp_capable:
-        slots["clamp_enabled"] = n
-        slots["clamp_min"] = n + 1
-        slots["clamp_max"] = n + 2
-        n += 3
+    n = 6
     if m_chunk > 1:
         slots["n_chunks"] = n
         slots["n_units"] = n + 1
@@ -318,11 +320,11 @@ def gemm(
 
     epilogue = Epilogue(epilogue)
     # Clamp bounds ride the RTP buffer as raw int32 bit patterns, since
-    # npu_write_rtp writes i32 only. Whether a clamped path exists is still
-    # compile-time (op.py's -DMM_FUSED_CLAMP).
-    clamp_enabled = 1 if clamp is not None else 0
-    rtp_slots, rtp_words = rtp_layout(clamp is not None, M_CHUNK)
-    clamp_lo, clamp_hi = clamp if clamp is not None else (0.0, 0.0)
+    # npu_write_rtp writes i32 only. No clamp means the identity bounds rather
+    # than a different build: min(x, +inf) and max(x, -inf) leave every finite
+    # value bit-identical, so an unclamped dispatch is numerically unchanged.
+    rtp_slots, rtp_words = rtp_layout(M_CHUNK)
+    clamp_lo, clamp_hi = clamp if clamp is not None else (-np.inf, np.inf)
     clamp_min_bits = int(np.float32(clamp_lo).view(np.int32))
     clamp_max_bits = int(np.float32(clamp_hi).view(np.int32))
     # A tile does a whole m x n block or nothing, so M and K must tile
@@ -425,8 +427,8 @@ def gemm(
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,
         kernel_object,
-        # outer, half, mode, clamp_enabled, clamp_min_bits, clamp_max_bits
-        [ct_out_ty, ct_acc_ty] + [np.int32] * 6,
+        # outer, half, mode, clamp_min_bits, clamp_max_bits
+        [ct_out_ty, ct_acc_ty] + [np.int32] * 5,
     )
 
     # --- Data movement ----------------------------------------------------
@@ -565,15 +567,10 @@ def gemm(
         n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
         n_k_iters = my_rtp[RTP_K_ITERS]
         epi_mode = my_rtp[RTP_EPILOGUE]
-        # Absent slots become compile-time constants rather than loads. The
-        # kernel's clamped path is compiled out when it is not capable, and at
+        clamp_min_bits = my_rtp[RTP_CLAMP_MIN]
+        clamp_max_bits = my_rtp[RTP_CLAMP_MAX]
+        # An absent slot becomes a compile-time constant rather than a load: at
         # M_CHUNK == 1 both chunk counts are just n_row_blocks.
-        if "clamp_enabled" in rtp_slots:
-            clamp_enabled = my_rtp[rtp_slots["clamp_enabled"]]
-            clamp_min_bits = my_rtp[rtp_slots["clamp_min"]]
-            clamp_max_bits = my_rtp[rtp_slots["clamp_max"]]
-        else:
-            clamp_enabled, clamp_min_bits, clamp_max_bits = 0, 0, 0
         if "n_chunks" in rtp_slots:
             n_chunks = my_rtp[rtp_slots["n_chunks"]]
             n_units_rt = my_rtp[rtp_slots["n_units"]]
@@ -615,7 +612,6 @@ def gemm(
                             chunk,
                             half,
                             epi_mode,
-                            clamp_enabled,
                             clamp_min_bits,
                             clamp_max_bits,
                         )
@@ -752,11 +748,9 @@ def gemm(
                 rtps[r][c][RTP_M_ROW_BLOCKS] = m_row_blocks
                 rtps[r][c][RTP_K_ITERS] = k_iters
                 rtps[r][c][RTP_EPILOGUE] = epilogue.mode
+                rtps[r][c][RTP_CLAMP_MIN] = clamp_min_bits
+                rtps[r][c][RTP_CLAMP_MAX] = clamp_max_bits
                 # Only what this configuration actually reads; see rtp_layout.
-                if "clamp_enabled" in rtp_slots:
-                    rtps[r][c][rtp_slots["clamp_enabled"]] = clamp_enabled
-                    rtps[r][c][rtp_slots["clamp_min"]] = clamp_min_bits
-                    rtps[r][c][rtp_slots["clamp_max"]] = clamp_max_bits
                 if "n_chunks" in rtp_slots:
                     rtps[r][c][rtp_slots["n_chunks"]] = n_chunks
                     rtps[r][c][rtp_slots["n_units"]] = n_units

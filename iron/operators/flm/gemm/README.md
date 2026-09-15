@@ -78,7 +78,7 @@ Two consequences of the native-vs-emulated split are worth knowing:
 
 ## Runtime parameters
 
-**Four words** in an L1 buffer per core, written by the runtime sequence and
+**Six words** in an L1 buffer per core, written by the runtime sequence and
 read by the core once its barrier opens:
 
 | word | value |
@@ -87,20 +87,15 @@ read by the core once its barrier opens:
 | `m_row_blocks` | `M / 256` |
 | `k_iters` | `K / 512` |
 | epilogue | the `Epilogue` mode |
+| `clamp_min` / `clamp_max` | the bounds, as raw `int32` bit patterns |
 
 A word is not free: each costs ~66 ns per core and the sequence writes
 `ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
 (measured by padding the buffer at a fixed core count). Against a ~107 us
 floor that is most of a short-prefill dispatch, so `rtp_layout()` in design.py
 sizes the buffer per configuration rather than sending words a build cannot
-use. Three groups are therefore conditional or gone:
+use. Two groups are therefore conditional or gone:
 
-* `clamp_enabled` / `clamp_min` / `clamp_max` are sent **only by a
-  clamp-capable build**. Where no clamped path is compiled in -- the default,
-  and every real projection -- they were written every dispatch and never
-  read. They stay raw `int32` bit patterns, because `npu_write_rtp` writes
-  i32 only; the kernel casts back with `__builtin_bit_cast`, since `memcpy`
-  leaves an unresolved external call rather than folding to a register move.
 * `n_chunks` / `n_units` are sent **only when `m_chunk > 1`**. They are
   `m_row_blocks // M_CHUNK` and each other, so at the shipped `M_CHUNK = 1`
   the core just reads `m_row_blocks`.
@@ -113,30 +108,44 @@ use. Three groups are therefore conditional or gone:
       n_work  = (n_tiles - my_col + COLS - 1) // COLS
       n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
 
+The clamp bounds are the one group that is unconditional despite most callers
+not clamping. The kernel has no unclamped instantiation to compile out: an
+unclamped dispatch sends `(-inf, +inf)`, which leaves every finite value
+bit-identical. Two always-sent words buy one xclbin for clamped and unclamped
+callers alike, which is the whole point of the runtime parameters, and a
+clamping caller now sends one word fewer than the old `clamp_enabled` trio did.
+The bounds stay raw `int32` because `npu_write_rtp` writes i32 only; the kernel
+casts back with `__builtin_bit_cast`, since `memcpy` leaves an unresolved
+external call rather than folding to a register move.
+
   The column index is per-tile **static data**, deliberately not a constant
   folded into the program: the 32 core programs today differ only in symbol
   names, and baking it into code would make them differ in instructions,
   foreclosing a future one-program xclbin.
 
-Measured on the 30-shape suite: **-3.5% median at M=256** (best -11.3%,
-E2B/kv), and within noise at M >= 1024 -- the saving is a constant ~12 us, so
-it is a short-prefill and decode lever, not a prefill one.
+Measured on the 30-shape suite at **four** words: **-3.5% median at M=256**
+(best -11.3%, E2B/kv), and within noise at M >= 1024 -- the saving is a
+constant ~12 us, so it is a short-prefill and decode lever, not a prefill one.
+Making the clamp bounds unconditional put two words back, which the ~2 us per
+word above prices at **~4 us of that ~12**; the shape of the result is
+unchanged but the median has not been re-measured since.
 
 All columns are always built. One with no work for a shape gets `n_work = 0`
 and still drains its share of the A broadcast, because the memtile will not
 release an A object until every consumer has taken it.
 
 The two artifacts therefore carry different stems: the xclbin's `config_name`
-covers tile_n, ct_max_k, tile_ma, the compiled activation set, whether a clamp exists,
-rounding and the device, while `name` adds M, K, N and the activation. The
-xclbin is built from a module emitted at a reference shape, whose runtime
-sequence is discarded.
+covers tile_n, ct_max_k, tile_ma, the compiled activation set, rounding and the
+device, while `name` adds every runtime parameter -- M, K, N, the activation
+and the clamp bounds. It has to: the sequence writes those as immediates and
+the build cache keys on filename and mtime, so a stem that omits one serves the
+first caller's instruction stream to the second. The xclbin is built from a
+module emitted at a reference shape, whose runtime sequence is discarded.
 
-Two things stay build-time, for the same reason -- each costs program memory:
-which activations the epilogue can *select between* (`epilogue_modes`), and
-whether a clamped path exists at all. Both land in the xclbin's name. Note the
-asymmetry for clamp: *whether* to clamp is a build choice, but the *bounds*
-are runtime, so `clamp=(-2, 2)` and `clamp=(-4, 4)` share one xclbin.
+One thing stays build-time, because it costs program memory: which activations
+the epilogue can *select between* (`epilogue_modes`). It lands in the xclbin's
+name. The clamp does not -- every build compiles it, so `clamp=(-2, 2)`,
+`clamp=(-4, 4)` and no clamp at all share one xclbin.
 
 The core releases its barrier straight after reading the parameters.
 `wait_for_value` emits `LockAction.Acquire`, which does not leave the lock

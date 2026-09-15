@@ -67,7 +67,9 @@ class GEMM(MLIROperator):
     # should compile two. Unlike `epilogue`, this is part of the
     # configuration.
     epilogue_modes: tuple[Epilogue, ...] = tuple(Epilogue)
-    # Optional (min, max) applied after the activation.
+    # Optional (min, max) applied after the activation. The bounds are runtime
+    # parameters and the kernel always clamps, so this changes the instruction
+    # stream only -- clamped and unclamped callers share one xclbin.
     clamp: tuple[float, float] | None = None
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
     # halves A fetches instead. __post_init__ resolves None per device and
@@ -145,6 +147,23 @@ class GEMM(MLIROperator):
         # the resolved fields still serialize into artifact names unchanged.
         self.epilogue = Epilogue(self.epilogue)
         self.rounding = Rounding(self.rounding)
+        # Deduplicated, since the mask ORs one bit per mode and a repeat would
+        # otherwise have to be tolerated by every consumer of the tuple.
+        self.epilogue_modes = tuple(
+            dict.fromkeys(Epilogue(m) for m in self.epilogue_modes)
+        )
+        # A mode the mask leaves out reaches the kernel's default arm, which is
+        # NONE -- an unactivated result rather than a build or dispatch error.
+        # Refuse instead: this is the caller contradicting itself.
+        if (
+            self.epilogue is not Epilogue.NONE
+            and self.epilogue not in self.epilogue_modes
+        ):
+            raise ValueError(
+                f"epilogue {self.epilogue} is not in epilogue_modes "
+                f"{tuple(str(m) for m in self.epilogue_modes)}, so it would not "
+                "be compiled in and the kernel would silently apply none"
+            )
         if self.clamp is not None:
             lo, hi = self.clamp
             if lo > hi:
@@ -155,25 +174,25 @@ class GEMM(MLIROperator):
     @property
     def _epilogue_mask(self) -> int:
         """Bitmask of the modes compiled into the epilogue. Mode 0 is always
-        present -- the kernel falls back to it."""
-        return 1 | sum(1 << Epilogue(m).mode for m in self.epilogue_modes)
+        present -- the kernel falls back to it.
 
-    @property
-    def _clamp_capable(self) -> int:
-        """Whether a clamped path is compiled in at all.
-
-        A capability, not a selection: the clamped instantiation costs
-        program memory. The bounds are runtime, so only clamped-versus-not
-        forks the build.
+        OR rather than sum: ``__post_init__`` deduplicates, but a sum would
+        make that a correctness requirement rather than tidiness, since two
+        copies of a mode carry into the neighbouring mode's bit.
         """
-        return 1 if self.clamp is not None else 0
+        mask = 1
+        for m in self.epilogue_modes:
+            mask |= 1 << Epilogue(m).mode
+        return mask
 
     @property
-    def _config_tag(self) -> str:
-        """Everything that shapes the device configuration, and so the xclbin.
+    def config_name(self) -> str:
+        """Stem of the artifacts that do not depend on the shape.
 
-        M, K, N, the activation and the clamp bounds are absent: they are
-        runtime parameters. Whether a clamp exists at all does shape the build.
+        Everything here shapes the device configuration, and so the xclbin. M,
+        K, N, the activation and the clamp bounds are absent: they are runtime
+        parameters, so they reach the instruction stream instead -- see
+        ``name``.
 
         ``ck`` needs naming separately because retuning CT_MAX_K_FOR_N moves it
         while tn is unmoved, and tile_ma is caller-overridable. Omitting it
@@ -181,27 +200,35 @@ class GEMM(MLIROperator):
         """
         dev = aie_utils.get_current_device().resolve().name
         return (
-            f"tn{self.tile_n}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
+            f"FLM_GEMM_tn{self.tile_n}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_ma{self.tile_ma}_mc{self.m_chunk}"
-            f"_em{self._epilogue_mask:x}_{self.rounding}"
-            f"_cl{self._clamp_capable}_{dev}"
+            f"_em{self._epilogue_mask:x}_{self.rounding}_{dev}"
         )
-
-    @property
-    def config_name(self) -> str:
-        """Stem of the artifacts that do not depend on the shape."""
-        return f"FLM_GEMM_{self._config_tag}"
 
     @property
     def name(self) -> str:
         """Artifact stem for the instruction stream, which does depend on it.
 
-        Prefixed to disambiguate from ``iron.operators.GEMM``, which would
-        otherwise share a stem and satisfy this operator's cache lookups.
+        The configuration it runs on, then the runtime parameters on top. That
+        also inherits ``config_name``'s prefix, which disambiguates from
+        ``iron.operators.GEMM`` -- that class would otherwise share a stem and
+        satisfy this operator's cache lookups.
+
+        Every runtime parameter has to appear, because the sequence writes them
+        as immediates and the build cache keys on filename and mtime: a stem
+        that omits one serves the first caller's instruction stream to the
+        second and silently applies the first caller's values. The clamp bounds
+        go in as raw bit patterns, so bounds that differ only below the printed
+        precision still get their own stem.
         """
-        base = f"FLM_GEMM_M{self.M}_K{self.K}_N{self.N}_{self._config_tag}"
+        base = f"{self.config_name}_M{self.M}_K{self.K}_N{self.N}"
         if self.epilogue != Epilogue.NONE:
             base = f"{base}_epi{self.epilogue}"
+        if self.clamp is not None:
+            lo, hi = (
+                int(np.float32(v).view(np.int32)) & 0xFFFFFFFF for v in self.clamp
+            )
+            base = f"{base}_cl{lo:08x}{hi:08x}"
         return base
 
     @property
@@ -232,7 +259,7 @@ class GEMM(MLIROperator):
             f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
             f"_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_em{self._epilogue_mask:x}_cl{self._clamp_capable}.o"
+            f"_em{self._epilogue_mask:x}.o"
         )
 
     @property
@@ -303,13 +330,13 @@ class GEMM(MLIROperator):
         kernels = self.get_kernel_artifacts()
 
         # Emitted at a reference shape and activation, so every shape sharing
-        # this configuration reuses it. Canonical bounds, not this instance's:
-        # the real ones reach only the discarded runtime sequence.
+        # this configuration reuses it. No clamp, not this instance's bounds:
+        # they reach only the discarded runtime sequence.
         config_mlir = self._mlir_artifact(
             f"{self.config_name}.mlir",
             *self._reference_shape,
             Epilogue.NONE,
-            (0.0, 0.0) if self._clamp_capable else None,
+            None,
         )
         self.xclbin_artifact = XclbinArtifact(
             f"{self.config_name}.xclbin",
@@ -356,8 +383,6 @@ class GEMM(MLIROperator):
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
             f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
-            # Capability only -- the bounds are runtime. See _clamp_capable.
-            f"-DMM_FUSED_CLAMP={self._clamp_capable}",
         ] + arch_include
         if self._bfp16_b:
             flags += [

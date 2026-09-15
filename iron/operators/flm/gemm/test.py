@@ -20,6 +20,7 @@ from iron.operators.flm.gemm.design import (
     M_TILE,
     R,
     Rounding,
+    SHIM_TASK_QUEUE,
     _b_depth_for,
     _default_l1,
 )
@@ -195,9 +196,6 @@ def test_gemm_split_leg_bounds(aie_context):
     either hangs silently. The live set is 4 + 2 + 2 = 8 of 16 descriptors;
     assert that here, since retuning SHIM_TASK_QUEUE could break it silently.
     """
-    from aie.dialects.aie import get_target_model
-    from iron.operators.flm.gemm.design import SHIM_TASK_QUEUE
-
     dev = aie_utils.get_current_device()
     available = get_target_model(dev.resolve()).get_num_bds(0, 0)
     worst = SHIM_TASK_QUEUE + 2 + 2
@@ -373,9 +371,16 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
             xclbin = stamp
         assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
 
-    # ...but an unclamped build is a different configuration, and must be:
-    # the clamped instantiation is compiled out entirely there. config_name
-    # rather than xclbin_artifact, which only exists once compile() has run.
+    # ...and neither does dropping the clamp: the kernel always clamps, and an
+    # unclamped caller neutralises it with (-inf, +inf) rather than compiling
+    # a second build. config_name rather than xclbin_artifact, which only
+    # exists once compile() has run.
     clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
     unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
-    assert unclamped.config_name != clamped.config_name
+    assert unclamped.config_name == clamped.config_name
+    # The bounds do reach the instruction stream, though, so they must reach
+    # its stem or the build cache serves one caller's stream to another.
+    assert unclamped.name != clamped.name
+    assert (
+        clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1], context=aie_context).name
+    )

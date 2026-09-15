@@ -30,11 +30,6 @@
 #ifndef MM_FUSED_EPILOGUE_MODE_MASK
 #define MM_FUSED_EPILOGUE_MODE_MASK 0xF
 #endif
-// Whether a clamp is compiled in at all: a capability, not a selection, since
-// the clamped path costs program memory. The bounds are runtime.
-#ifndef MM_FUSED_CLAMP
-#define MM_FUSED_CLAMP 0
-#endif
 
 namespace
 {
@@ -84,15 +79,16 @@ constexpr aie::rounding_mode round_mode = aie::rounding_mode::floor;
 #endif
 // One activation's inner loop. Templated so each mode compiles branch-free;
 // mm_fused_epilogue_chunk selects between them once per chunk.
-template <int MODE, bool CLAMP>
+//
+// The clamp is unconditional. An unclamped caller sends (-inf, +inf), which
+// leaves every finite value bit-identical, so there is no unclamped
+// instantiation to compile and no clamped-versus-not fork in the build.
+template <int MODE>
 static inline void
 epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src, float clamp_min, float clamp_max)
 {
-    aie::vector<float, V> lo, hi;
-    if constexpr (CLAMP) {
-        lo = aie::broadcast<float, V>(clamp_min);
-        hi = aie::broadcast<float, V>(clamp_max);
-    }
+    const aie::vector<float, V> lo = aie::broadcast<float, V>(clamp_min);
+    const aie::vector<float, V> hi = aie::broadcast<float, V>(clamp_max);
 
     AIE_LOOP_MAX_ITERATION_COUNT(CHUNK / V)
     for (int j = 0; j < CHUNK / V; j++) {
@@ -106,8 +102,7 @@ epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src, float cla
             f = silu_vec<V>(f);
         else if constexpr (MODE == 3)
             f = sigmoid_vec<V>(f);
-        if constexpr (CLAMP)
-            f = aie::max(aie::min(f, hi), lo);
+        f = aie::max(aie::min(f, hi), lo);
         aie::accum<accfloat, V> out;
         out.from_vector(f);
         // The assignment is the conversion: to_v16bfloat16 yields a raw
@@ -115,24 +110,6 @@ epilogue_body(bfloat16 *__restrict y_out, const float *__restrict src, float cla
         aie::vector<bfloat16, V> v = to_v16bfloat16(out);
         aie::store_v(y_out + j * V, v);
     }
-}
-
-// Pick the clamped or unclamped instantiation. Only one exists unless
-// MM_FUSED_CLAMP compiled the clamp in.
-template <int MODE>
-static inline void epilogue_dispatch(bfloat16 *__restrict y_out,
-                                     const float *__restrict src,
-                                     int32_t clamp_enabled,
-                                     float clamp_min,
-                                     float clamp_max)
-{
-#if MM_FUSED_CLAMP
-    if (clamp_enabled) {
-        epilogue_body<MODE, true>(y_out, src, clamp_min, clamp_max);
-        return;
-    }
-#endif
-    epilogue_body<MODE, false>(y_out, src, clamp_min, clamp_max);
 }
 } // namespace
 
@@ -162,21 +139,19 @@ void mm_fused_k_step(bfloat16 *a_buf, mm_fused_b_elem_t *b_buf, float *y_acc, in
 
 // Convert chunk (outer * C_DEPTH + half) of the f32 accumulator into a bf16 C
 // object the core body already acquired, applying an activation and clamp on
-// the way out.
+// the way out. Fusing them costs one more vector op per 16 elements instead of
+// a separate pass over L1.
 //
-// Fusing the activation is the point: the values are already in registers, so
-// gelu/silu/sigmoid costs one more vector op per 16 elements rather than a
-// separate pass over L1. The mode is runtime, tested once per chunk so the
-// inner loop stays branch-free; the cost is program memory, since every mode
-// in the mask is compiled in. The clamp splits the same way, its bounds
-// arriving as raw int32 because npu_write_rtp only writes i32 words. The chunk
-// index comes in two parts because the core body unrolls the drain.
+// The mode is runtime, tested once per chunk so the inner loops stay
+// branch-free; the cost is program memory, since every mode in the mask is
+// compiled in. The bounds arrive as raw int32 because npu_write_rtp only
+// writes i32 words, and the chunk index comes in two parts because the core
+// body unrolls the drain.
 void mm_fused_epilogue_chunk(bfloat16 *y_out,
                              float *y_acc,
                              int32_t outer,
                              int32_t half,
                              int32_t mode,
-                             int32_t clamp_enabled,
                              int32_t clamp_min_bits,
                              int32_t clamp_max_bits)
 {
@@ -192,23 +167,24 @@ void mm_fused_epilogue_chunk(bfloat16 *y_out,
     switch (mode) {
 #if MM_FUSED_EPILOGUE_MODE_MASK & 2
     case 1:
-        epilogue_dispatch<1>(y_out, src, clamp_enabled, clamp_min, clamp_max);
+        epilogue_body<1>(y_out, src, clamp_min, clamp_max);
         return;
 #endif
 #if MM_FUSED_EPILOGUE_MODE_MASK & 4
     case 2:
-        epilogue_dispatch<2>(y_out, src, clamp_enabled, clamp_min, clamp_max);
+        epilogue_body<2>(y_out, src, clamp_min, clamp_max);
         return;
 #endif
 #if MM_FUSED_EPILOGUE_MODE_MASK & 8
     case 3:
-        epilogue_dispatch<3>(y_out, src, clamp_enabled, clamp_min, clamp_max);
+        epilogue_body<3>(y_out, src, clamp_min, clamp_max);
         return;
 #endif
     // Mode 0 is always compiled, so a mode the mask leaves out yields an
-    // unactivated result rather than an unwritten buffer.
+    // unactivated result rather than an unwritten buffer. op.py rejects that
+    // combination up front; this is the backstop.
     default:
-        epilogue_dispatch<0>(y_out, src, clamp_enabled, clamp_min, clamp_max);
+        epilogue_body<0>(y_out, src, clamp_min, clamp_max);
         return;
     }
 }
