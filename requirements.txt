@@ -14,10 +14,6 @@
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-# Tagged release wheels live under their own tag's asset page, not under
-# latest-wheels-4 (which carries only the .dev builds), hence the extra
-# find-links above. llvm-aie is not tagged in step with mlir-aie; this pin is
-# the one mlir-aie v1.4.3 itself names in utils/peano-requirements.txt.
 mlir_aie==1.4.3
 llvm-aie==22.0.0.2026090701+3e93bf7b
 
