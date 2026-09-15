@@ -847,13 +847,17 @@ def gemm(
                     issue_a(mega_col, all_mb, tg_whole)
 
                 for u in all_mb:
+                    # Before issuing, not after: fill/drain pushes the task
+                    # immediately while TaskGroup.finish() emits the await, so
+                    # retiring afterwards would leave the queue transiently one
+                    # over. Await down to where this unit's transfers fit.
+                    retire(SHIM_TASK_QUEUE - unit_cost)
                     tg_u = TaskGroup()
                     if c_split:
                         issue_c(mega_col, active_cols, [u], tg_u)
                     if a_split:
                         issue_a(mega_col, [u], tg_u, wait=True)
                     pending.append((tg_u, unit_cost))
-                    retire(SHIM_TASK_QUEUE)
 
                 # Not queue-counted: B and the unsplit leg ride channels the
                 # units do not contend for. Still retired in order.
