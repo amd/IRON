@@ -139,6 +139,33 @@ def test_gate_up_interleaved_blob(aie_context):
 
 
 @requires_aie2p
+@pytest.mark.parametrize(
+    "K, N",
+    [
+        (4096, 1536),  # o, global layers
+        (6144, 1536),  # down
+        pytest.param(12288, 1536, marks=pytest.mark.extensive),  # down, skip layers
+    ],
+)
+def test_large_k_shapes(K, N, aie_context):
+    """E2B's tall projections, which need more k-tiles than a shim tile has BDs.
+
+    A column block costs BDS_PER_K_TILE descriptors per k-tile, so queueing a
+    whole one at K = 4096 asks for 25 of a shim tile's 16. The sequence windows
+    them instead. K = 12288 is 24 k-tiles, the deepest E2B reaches.
+    """
+    qw = random_q4nx(K, N, seed=21)
+    errors, _, _ = run_test(
+        DequantBFP(K=K, N=N, qw_layout=QwLayout.ENGINE, context=aie_context),
+        {"in": torch.from_numpy(to_engine_order(qw, K, N))},
+        {"out": torch.from_numpy(reference(qw, K, N))},
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
+    assert not errors, f"K={K} N={N} byte mismatch: {errors}"
+
+
+@requires_aie2p
 def test_layout_flag_survives_a_plain_string(aie_context):
     """The design must accept the layout as a bare str, not only as the enum.
 

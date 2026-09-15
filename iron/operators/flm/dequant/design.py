@@ -37,6 +37,7 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.dialects.aie import get_target_model
 
 from iron.common.device_utils import get_kernel_dir
 
@@ -101,6 +102,17 @@ DRAIN_DIMS = [
 # the four q4nx blocks in and the order DRAIN_DIMS unpicks.
 CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
+
+# Transfers a shim channel can have outstanding. Nothing in the toolchain
+# models this and overrunning it HANGS rather than diagnoses; flm.GEMM measured
+# the boundary at K=10240 M=1024, where 4 outstanding run and 8 hang. The
+# window below keeps every channel inside it.
+SHIM_TASK_QUEUE = 4
+
+# Drain windows kept in flight. A window is retired only once the next has been
+# issued, so the runtime sequence never blocks on an await with the shim idle:
+# the window being awaited overlaps the one already running.
+LIVE_WINDOWS = 2
 
 
 def _run_geometry(run_out_features, run_period_out_features, n_blocks):
@@ -194,6 +206,30 @@ def dequant_bfp(
     # the grid leaves some columns without work for that round, which costs
     # nothing: the cores loop forever and park on an empty input fifo.
     rounds = -(-n_blocks // COLS)
+
+    # A shim tile's buffer descriptor ids are shared across its channels and
+    # directions, and TaskGroup.finish() returns them to a COMPILE-TIME
+    # allocator that does not check the transfer finished. So a window's worth
+    # of transfers has to fit the tile, and the window has to be awaited before
+    # the next one reprograms those ids.
+    #
+    # One TaskGroup per column block would queue BDS_PER_K_TILE * k_tiles of
+    # them, which overflows a 16-BD tile at k_tiles >= 6 and the channel queue
+    # well before that. E2B reaches k_tiles = 24 at K = 12288.
+    # Two windows are live at once -- the previous one is retired only after
+    # the next is issued -- so both budgets count 2 * k_window. The fill is one
+    # descriptor per column block and outlives them all.
+    shim_bds = get_target_model(dev.resolve()).get_num_bds(0, 0)
+    k_window = min(
+        k_tiles,
+        SHIM_TASK_QUEUE // LIVE_WINDOWS,
+        (shim_bds - 1) // (LIVE_WINDOWS * HALVES),
+    )
+    if k_window < 1:
+        raise ValueError(
+            f"a shim tile with {shim_bds} descriptors and a queue of "
+            f"{SHIM_TASK_QUEUE} cannot hold one drain window"
+        )
 
     # One column block is N_TILE out-features over all of K, and its q4nx
     # blocks are contiguous in both layouts.
@@ -295,6 +331,10 @@ def dequant_bfp(
     # In engine order those blocks are already adjacent, so the gather
     # degenerates to a linear read of the whole column block. At K = 12288 the
     # outer count is 960, inside the same field.
+    #
+    # One fill carries a whole column block. In engine order that is a single
+    # linear burst of every k-tile at once, which is why the fill costs one
+    # descriptor no matter how tall K is -- only the drains scale with k_tiles.
     if qw_layout is QwLayout.ENGINE:
         qw_sizes = [blocks_per_row, 2, BLOCK_BYTES // 512, 512]
         qw_strides = [2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1]
@@ -318,18 +358,36 @@ def dequant_bfp(
 
     def sequence(QW, OUT, qw_prod_hs, out_cons_hs):
         for r in range(rounds):
-            tg = TaskGroup()
+            # The fill has to outlive every drain window that consumes it, so
+            # it gets its own group. Its descriptor is freed once the round's
+            # last drain has been awaited.
+            tg_fill = TaskGroup()
             for c in range(COLS):
                 cb = r * COLS + c
-                if cb >= n_blocks:
-                    continue
-                qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg)
-                for kb in range(k_tiles):
-                    for h in range(HALVES):
-                        out_cons_hs[c][h].drain(
-                            OUT, out_tap(cb, kb, h), wait=True, group=tg
-                        )
-            tg.finish()
+                if cb < n_blocks:
+                    qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg_fill)
+
+            prev = None
+            for kb0 in range(0, k_tiles, k_window):
+                tg = TaskGroup()
+                for c in range(COLS):
+                    cb = r * COLS + c
+                    if cb >= n_blocks:
+                        continue
+                    for kb in range(kb0, min(kb0 + k_window, k_tiles)):
+                        for h in range(HALVES):
+                            out_cons_hs[c][h].drain(
+                                OUT, out_tap(cb, kb, h), wait=True, group=tg
+                            )
+                # Retire the PREVIOUS window, now that this one is issued and
+                # running. finish() awaits, so doing it here overlaps the wait
+                # with live transfers instead of draining the shim first.
+                if prev is not None:
+                    prev.finish()
+                prev = tg
+            if prev is not None:
+                prev.finish()
+            tg_fill.finish()
 
     rt = Runtime(sequence, [qw_l3_ty, out_l3_ty, qw_prods, out_conses])
     prog = Program(dev, rt, workers=workers)
