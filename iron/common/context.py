@@ -30,6 +30,19 @@ class AIEContext:
     mlir_verbose: bool = False
     compiler: str = "peano"
 
+    @property
+    def kernels_dir(self) -> Path:
+        """C++ kernel sources bundled with the installed mlir-aie package.
+
+        IRON_AIE_KERNELS_DIR overrides this to point at a local mlir-aie
+        checkout for kernel development.
+        """
+        # Lazy: root_path() needs the package importable at call time.
+        override = os.environ.get("IRON_AIE_KERNELS_DIR")
+        if override:
+            return Path(override)
+        return Path(aie.utils.config.root_path()) / "include" / "aie_kernels"
+
     def __post_init__(self) -> None:
         """Normalize build_dir to a Path object."""
         self.build_dir = Path(self.build_dir)

@@ -63,7 +63,7 @@ def my_dequant_kernel(
 
     # AIE Core Function declaration
     dequant_kernel = Kernel(
-        "expand_int4_to_bfloat16",
+        "expand_uint4_to_bfloat16",
         f"expand_{get_kernel_dir(dev)}_{tile_size}.o",
         [in_tile_ty, out_tile_ty],
     )

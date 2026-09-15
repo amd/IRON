@@ -108,7 +108,7 @@ python scripts/clang-format-wrapper.py --diff
 python scripts/clang-format-wrapper.py --fix
 
 # Format specific directory
-python scripts/clang-format-wrapper.py --fix --path aie_kernels/
+python scripts/clang-format-wrapper.py --fix --path iron/
 ```
 
 ### License Compliance (REUSE)
@@ -129,8 +129,9 @@ reuse lint
      - `reference.py`: CPU reference implementation for validation
      - `test.py`: End-to-end test (build, run, verify against reference)
 
-2. **AIE Kernels** (`aie_kernels/`)
-   - Architecture-specific C++ compute kernels:
+2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
+   - Architecture-specific C++ compute kernels, sourced from the installed
+     mlir-aie package (`AIEContext.kernels_dir`), not from this repo:
      - `generic/`: Works on both AIE2 and AIE2P
      - `aie2/`: AIE2-specific (NPU1)
      - `aie2p/`: AIE2P-specific (NPU2)
@@ -250,7 +251,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - Define function that builds MLIR-AIE design
    - Use `range_()` for loops (not Python `range`)
    - Handle device-specific logic (NPU1 vs NPU2) if needed
-4. Implement C++ kernel in `aie_kernels/<arch>/` if needed
+4. If a new C++ compute kernel is needed, add it to the
+   [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
+   and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
@@ -450,7 +453,8 @@ logging.basicConfig(level=logging.DEBUG)
 
 **"Kernel not found" or "Symbol not defined"**
 
-- Verify kernel `.cc` file is in correct `aie_kernels/<arch>/` directory
+- Verify the kernel `.cc` exists under the installed mlir-aie package's
+  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
 - Check `get_kernel_artifacts()` in `op.py` references correct kernel path
 - Ensure kernel function signature matches `Kernel()` declaration in `design.py`
 
@@ -499,7 +503,7 @@ Full LLM inference example at `iron/applications/llama_3.2_1b/`:
 
 ### AIE Kernel Reference
 
-See `aie_kernels/README.md` for catalog of available kernels:
+See the [mlir-aie kernel library README](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/README.md) for the catalog of available kernels:
 
 - Element-wise ops (add, mul, scale)
 - Matrix operations (mm, mv)

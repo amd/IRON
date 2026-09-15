@@ -29,9 +29,7 @@ class AXPY(BinaryElementwiseOperator):
             KernelObjectArtifact(
                 "axpy.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "axpy.cc"
-                    )
+                    SourceArtifact(self.context.kernels_dir / "generic" / "axpy.cc")
                 ],
             )
         ]

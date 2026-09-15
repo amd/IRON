@@ -73,12 +73,12 @@ class _SwiGLUStreamGroup(MLIROperator):
             design.MUL: (ELTWISE_MUL, None),
         }
         layers = design.GROUP_LAYERS[self.k][self.group_index]
-        base_dir, kernel_dir = self.context.base_dir, get_kernel_dir()
+        kernels_dir, kernel_dir = self.context.kernels_dir, get_kernel_dir()
         return [
             artifact
             for kernel, tiles in dict.fromkeys(per_layer[layer] for layer in layers)
             for artifact in kernel.kernel_artifacts(
-                base_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
+                kernels_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
             )
         ]
 

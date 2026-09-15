@@ -148,14 +148,14 @@ class GEMM(MLIROperator):
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
                 dependencies=[
-                    SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
+                    SourceArtifact(self.context.kernels_dir / kernel_dir / "mm.cc")
                 ],
             ),
             KernelObjectArtifact(
-                "convert_copy.o",
+                "cast_f32_bf16.o",
                 [
                     SourceArtifact(
-                        base_dir / "aie_kernels" / "generic" / "convert_copy.cc"
+                        self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
                     )
                 ],
             ),

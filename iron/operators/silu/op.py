@@ -14,7 +14,7 @@ class SiLU(ChanneledUnaryOperator):
     num_channels: int = field(default=1, init=False, repr=False)
 
     kernel_name: ClassVar[str] = "silu"
-    kernel_fn_name: ClassVar[str] = "silu_bf16"
+    kernel_fn_name: ClassVar[str] = "silu_bf16_size"
     callback_fn: ClassVar[str] = "my_silu"
     needs_lut_ops: ClassVar[bool] = True
 

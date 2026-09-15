@@ -67,9 +67,7 @@ class Dequant(MLIROperator):
             KernelObjectArtifact(
                 f"expand_{get_kernel_dir()}_{self.tile_size}.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "expand.cc"
-                    )
+                    SourceArtifact(self.context.kernels_dir / "generic" / "expand.cc")
                 ],
                 extra_flags=[
                     f"-DTILE_SIZE={self.tile_size}",

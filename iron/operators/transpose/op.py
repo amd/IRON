@@ -90,10 +90,7 @@ class Transpose(MLIROperator):
                 f"transpose_{self.m}x{self.n}.o",
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / "generic"
-                        / "transpose.cc"
+                        self.context.kernels_dir / "generic" / "transpose.cc"
                     )
                 ],
                 extra_flags=[

@@ -114,9 +114,7 @@ class GEMV(MLIROperator):
         matvec_obj = KernelObjectArtifact(
             f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
             dependencies=[
-                SourceArtifact(
-                    self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
-                )
+                SourceArtifact(self.context.kernels_dir / "generic" / "mv.cc")
             ],
             extra_flags=[
                 f"-DDIM_K={self.K}",
@@ -133,9 +131,7 @@ class GEMV(MLIROperator):
             gelu_obj = KernelObjectArtifact(
                 "gelu.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
-                    )
+                    SourceArtifact(self.context.kernels_dir / "aie2p" / "gelu.cc")
                 ],
             )
             return [

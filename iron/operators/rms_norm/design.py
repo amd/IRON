@@ -50,7 +50,7 @@ def my_rms_norm(
 
     # AIE Core Function declaration
     rms_norm_kernel = Kernel(
-        "rms_norm_bf16_vector", "rms_norm.o", [tile_ty, tile_ty, np.int32, np.float32]
+        "rms_norm_eps", "rms_norm.o", [tile_ty, tile_ty, np.int32, np.float32]
     )
 
     # Define a task that will run on a compute tile

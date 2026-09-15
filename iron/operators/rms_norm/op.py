@@ -99,9 +99,7 @@ class RMSNorm(MLIROperator):
             KernelObjectArtifact(
                 "rms_norm.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / arch_dir / "rms_norm.cc"
-                    )
+                    SourceArtifact(self.context.kernels_dir / arch_dir / "rms_norm.cc")
                 ],
             ),
         ]
@@ -110,9 +108,7 @@ class RMSNorm(MLIROperator):
                 KernelObjectArtifact(
                     "mul.o",
                     dependencies=[
-                        SourceArtifact(
-                            self.context.base_dir / "aie_kernels" / "generic" / "mul.cc"
-                        )
+                        SourceArtifact(self.context.kernels_dir / arch_dir / "mul.cc")
                     ],
                 )
             )

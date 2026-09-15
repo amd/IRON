@@ -78,9 +78,7 @@ class Softmax(MLIROperator):
         softmax_obj = KernelObjectArtifact(
             "softmax.o",
             dependencies=[
-                SourceArtifact(
-                    self.context.base_dir / "aie_kernels" / kernel_dir / "softmax.cc"
-                )
+                SourceArtifact(self.context.kernels_dir / kernel_dir / "softmax.cc")
             ],
         )
         lut_objs = lut_based_ops_artifacts(kernel_dir)

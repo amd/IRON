@@ -355,13 +355,20 @@ class GEMM(MLIROperator):
 
     def get_kernel_artifacts(self):
         kernel_dir = get_kernel_dir()
-        base_dir = self.context.base_dir
-        generic = base_dir / "aie_kernels" / "generic"
+        kernels_dir = self.context.kernels_dir
+        generic = kernels_dir / "generic"
 
-        # mm_fused.cc includes zero.cc, which is per-architecture. A quoted
-        # include searches generic/ first, so the arch directory must be on the
-        # include path for it to resolve there.
-        arch_include = [f"-I{base_dir / 'aie_kernels' / kernel_dir}"]
+        # The last kernel IRON keeps in-tree, pending upstreaming to mlir-aie:
+        # its runtime epilogue (#200) is newer than the package copy. Its
+        # #included companions are unchanged, so they come from kernels_dir; the
+        # include path needs generic/ (activations.h, mm_fused_mmul.h,
+        # ../aie_kernel_utils.h) and the arch dir (zero.cc), since neither sits
+        # beside the in-tree source.
+        in_tree_generic = self.context.base_dir / "aie_kernels" / "generic"
+        arch_include = [
+            f"-I{generic}",
+            f"-I{kernels_dir / kernel_dir}",
+        ]
 
         # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
         # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
@@ -398,11 +405,11 @@ class GEMM(MLIROperator):
         kernel_obj = KernelObjectArtifact(
             self._kernel_object,
             dependencies=[
-                SourceArtifact(generic / "mm_fused.cc"),
+                SourceArtifact(in_tree_generic / "mm_fused.cc"),
                 SourceArtifact(generic / "mm_fused_mmul.h"),
                 SourceArtifact(generic / "activations.h"),
-                SourceArtifact(base_dir / "aie_kernels" / "aie_kernel_utils.h"),
-                SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "zero.cc"),
+                SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
+                SourceArtifact(kernels_dir / kernel_dir / "zero.cc"),
             ],
             extra_flags=flags,
         )

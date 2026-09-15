@@ -63,10 +63,7 @@ class MemCopy(MLIROperator):
                 extra_flags=["-DBIT_WIDTH=16"],
                 dependencies=[
                     SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / "generic"
-                        / "passThrough.cc"
+                        self.context.kernels_dir / "generic" / "passThrough.cc"
                     )
                 ],
             )

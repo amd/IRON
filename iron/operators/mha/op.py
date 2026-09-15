@@ -67,13 +67,11 @@ class MHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
-        softmax_source = str(
-            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
-        )
-        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
+        mm_source = str(self.context.kernels_dir / "aie2p" / "mm.cc")
+        softmax_source = str(self.context.kernels_dir / "aie2p" / "softmax.cc")
+        mha_source = str(self.context.kernels_dir / "aie2p" / "mha.cc")
         passthrough_source = str(
-            self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+            self.context.kernels_dir / "generic" / "passThrough.cc"
         )
 
         mm_defines_rowmaj = [
