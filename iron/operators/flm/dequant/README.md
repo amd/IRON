@@ -95,6 +95,38 @@ So a column joins its four cores into **two** memtile objects, one per k-half of
 the tile. The half rides in the offset, which pays for the split. See
 `DRAIN_DIMS`.
 
+## Input layout
+
+`qw_layout` selects how the q4nx blocks are ordered in the buffer:
+
+| | order | descriptor |
+|---|---|---|
+| `QwLayout.FILE` | the weights file: blocks row-major | 4-D gather |
+| `QwLayout.ENGINE` | what FastFlowLM writes to DRAM, pairs of block-rows interleaved | linear read |
+
+Both deliver the same blocks to the same cores in the same sequence, verified as
+index arithmetic by `test_engine_order_matches_file_order`. So this changes the
+shim descriptor and nothing else — not the cores, not the join, not
+`DRAIN_DIMS`, and not the xclbin.
+
+## Interleaved projections
+
+FastFlowLM packs gate and up into one blob, 512 out-features of each in a 1024
+period, so a projection's column blocks come in runs with a gap:
+
+```python
+DequantBFP(K=1536, N=6144, qw_layout="engine",
+           run_out_features=512, run_period_out_features=1024, ...)
+```
+
+The offset is computed per column block in Python and baked into the
+instruction stream, so the gap costs no descriptor dimension. `quantized_size()`
+spans the gaps, because the operator strides over them.
+
+These parameters describe the stride pattern only, never a base offset. Point
+the operator at the projection's own start — with a `Tensor.subview` on a
+`proj_weights` buffer, for instance.
+
 ## Shape constraints
 
 `K % 512 == 0` and `N % 64 == 0`. AIE2P only — `bfp16ebs8` does not exist on

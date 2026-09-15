@@ -23,6 +23,7 @@ from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
     COLS,
     CT_K,
+    QwLayout,
     GROUP,
     K_TILE,
     K_TILE_B,
@@ -30,6 +31,7 @@ from iron.operators.flm.dequant.design import (
     N_TILE,
     S,
     T,
+    qw_bytes_for,
 )
 
 BFP16_GROUP_BYTES = 9
@@ -52,6 +54,9 @@ class DequantBFP(MLIROperator):
     K: int
     N: int
     tile_n: int = None
+    qw_layout: QwLayout = QwLayout.FILE
+    run_out_features: int = None
+    run_period_out_features: int = None
     context: object = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -77,6 +82,13 @@ class DequantBFP(MLIROperator):
 
     @property
     def _config_tag(self) -> str:
+        """Everything that reaches the device configuration, and nothing else.
+
+        qw_layout and the interleave parameters are deliberately absent: they
+        only move offsets and strides inside the runtime sequence, so one
+        xclbin covers every combination of them. Adding one here would key the
+        xclbin on it and cost a hardware context per variant.
+        """
         dev = aie_utils.get_current_device().resolve().name
         return f"tn{self.tile_n}_{dev}"
 
@@ -99,7 +111,10 @@ class DequantBFP(MLIROperator):
         shape. Prefixed for the same reason ``flm.GEMM``'s is: the build cache
         keys on filename, and ``iron.operators.Dequant`` would otherwise share
         this stem."""
-        return f"FLM_DequantBFP_K{self.K}_N{self.N}_{self._config_tag}"
+        base = f"FLM_DequantBFP_K{self.K}_N{self.N}_{self.qw_layout}"
+        if self.run_out_features is not None:
+            base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
+        return f"{base}_{self._config_tag}"
 
     @property
     def _reference_shape(self) -> tuple[int, int]:
@@ -119,7 +134,15 @@ class DequantBFP(MLIROperator):
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "dequant_bfp",
-                (aie_utils.get_current_device(), K, N, self.tile_n),
+                (
+                    aie_utils.get_current_device(),
+                    K,
+                    N,
+                    self.tile_n,
+                    self.qw_layout,
+                    self.run_out_features,
+                    self.run_period_out_features,
+                ),
             ),
         )
 
@@ -148,8 +171,15 @@ class DequantBFP(MLIROperator):
         return self.K * self.N // BFP16_GROUP * BFP16_GROUP_BYTES
 
     def quantized_size(self) -> int:
-        """Bytes of q4nx input: 5 bits per weight, counting the scale and min."""
-        return self.K * self.N * 5 // 8
+        """Bytes of q4nx input the operator reads.
+
+        5 bits per weight, counting the scale and the min. Where the matrix is
+        interleaved with another one this spans the gaps too, because the
+        operator strides over them.
+        """
+        return qw_bytes_for(
+            self.K, self.N, self.run_out_features, self.run_period_out_features
+        )
 
     def get_mlir_artifact(self):
         return self._mlir_artifact(f"{self.name}.mlir", self.K, self.N)

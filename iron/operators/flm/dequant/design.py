@@ -28,6 +28,7 @@ wrong stride: a mis-ordered buffer has the right size and fails silently.
 """
 
 import sys
+from enum import StrEnum
 
 import numpy as np
 
@@ -102,8 +103,78 @@ CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
 
 
-def dequant_bfp(dev, K, N, tile_n=N_TILE, trace_size=0):
-    """K in-features, N out-features. B reaches the GEMM as (K, N)."""
+def _run_geometry(run_out_features, run_period_out_features, n_blocks):
+    """Interleave pattern in column blocks. Defaults to one run, no gap."""
+    if run_out_features is None and run_period_out_features is None:
+        return n_blocks, n_blocks
+    if run_out_features is None or run_period_out_features is None:
+        raise ValueError("run_out_features and run_period_out_features go together")
+    for name, v in (
+        ("run_out_features", run_out_features),
+        ("run_period_out_features", run_period_out_features),
+    ):
+        if v % N_TILE:
+            raise ValueError(f"{name} ({v}) must be a multiple of {N_TILE}")
+    if run_period_out_features < run_out_features:
+        raise ValueError("run_period_out_features must be at least run_out_features")
+    return run_out_features // N_TILE, run_period_out_features // N_TILE
+
+
+def qw_bytes_for(K, N, run_out_features=None, run_period_out_features=None):
+    """Bytes the operator reads, counting any gap it has to stride over."""
+    n_blocks = N // N_TILE
+    run_blocks, period_blocks = _run_geometry(
+        run_out_features, run_period_out_features, n_blocks
+    )
+    cb_bytes = N_TILE * K * 5 // 8
+    last = n_blocks - 1
+    return (((last // run_blocks) * period_blocks + last % run_blocks) + 1) * cb_bytes
+
+
+class QwLayout(StrEnum):
+    """How the q4nx blocks are ordered in the buffer handed to the operator.
+
+    Both orders deliver the four blocks of an output tile to the same cores in
+    the same sequence, so this changes the shim descriptor and nothing else --
+    not the cores, not the join, not DRAIN_DIMS. Verified as index arithmetic
+    by ``test_engine_order_matches_file_order``.
+    """
+
+    #: The weights file: blocks row-major, ``block_row * blocks_per_row + col``.
+    FILE = "file"
+    #: What FastFlowLM's engine writes to DRAM, which interleaves pairs of
+    #: block-rows. That is exactly the order this design already gathers, so
+    #: the descriptor degenerates to a linear read.
+    ENGINE = "engine"
+
+
+def dequant_bfp(
+    dev,
+    K,
+    N,
+    tile_n=N_TILE,
+    qw_layout=QwLayout.FILE,
+    run_out_features=None,
+    run_period_out_features=None,
+    trace_size=0,
+):
+    """K in-features, N out-features. B reaches the GEMM as (K, N).
+
+    ``run_out_features`` and ``run_period_out_features`` describe a matrix that
+    is interleaved with another one in the same buffer: this matrix occupies
+    ``run_out_features`` consecutive out-features, then the next run of it
+    starts ``run_period_out_features`` later. FastFlowLM packs gate and up that
+    way, 512 out-features each in a 1024 period. Leave both ``None`` for a
+    matrix that is contiguous over all of N.
+
+    The caller points the operator at the matrix's own start, so these describe
+    the stride pattern only, never a base offset.
+    """
+    # Coerce rather than compare by identity. The design generator round-trips
+    # its arguments, and a StrEnum comes back as a plain str -- an `is` test
+    # against it is silently false, which would take the file-order branch and
+    # emit a wrongly ordered buffer of the right size.
+    qw_layout = QwLayout(qw_layout)
     if dev.arch != AIEArch.AIE2p:
         raise NotImplementedError("bfp16ebs8 exists only on AIE2P")
     if tile_n != N_TILE:
@@ -124,7 +195,20 @@ def dequant_bfp(dev, K, N, tile_n=N_TILE, trace_size=0):
     # nothing: the cores loop forever and park on an empty input fifo.
     rounds = -(-n_blocks // COLS)
 
-    qw_bytes = N * K * 5 // 8
+    # One column block is N_TILE out-features over all of K, and its q4nx
+    # blocks are contiguous in both layouts.
+    cb_bytes = N_TILE * K * 5 // 8
+    run_blocks, period_blocks = _run_geometry(
+        run_out_features, run_period_out_features, n_blocks
+    )
+
+    def qw_offset(cb):
+        """Byte offset of column block cb, from the start of this matrix."""
+        return ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
+
+    # The buffer has to span the gaps, so it is the reach of the last column
+    # block rather than the matrix's own size.
+    qw_bytes = qw_offset(n_blocks - 1) + cb_bytes
     out_blocks = K * N // BFP16_GROUP
 
     qw_l3_ty = np.ndarray[(qw_bytes,), np.dtype[np.uint8]]
@@ -199,18 +283,27 @@ def dequant_bfp(dev, K, N, tile_n=N_TILE, trace_size=0):
             for r in range(ROWS)
         ]
 
-    # The fill walks (block-column, n-half, block bytes). The k-half and the
-    # k-tile index both step whole blocks along a row, so they collapse into
-    # one dimension of blocks_per_row -- which is what leaves a dimension free
-    # to split the 5120-byte block into 10 x 512, keeping the innermost size
-    # inside the BD's 10-bit field.
+    # Both layouts hand the cores the same blocks in the same sequence; only
+    # the descriptor that produces that sequence differs.
+    #
+    # In file order the fill walks (block-column, n-half, block bytes). The
+    # k-half and the k-tile index both step whole blocks along a row, so they
+    # collapse into one dimension of blocks_per_row -- which leaves a dimension
+    # free to split the 5120-byte block into 10 x 512, keeping the innermost
+    # size inside the BD's 10-bit field.
+    #
+    # In engine order those blocks are already adjacent, so the gather
+    # degenerates to a linear read of the whole column block. At K = 12288 the
+    # outer count is 960, inside the same field.
+    if qw_layout is QwLayout.ENGINE:
+        qw_sizes = [blocks_per_row, 2, BLOCK_BYTES // 512, 512]
+        qw_strides = [2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1]
+    else:
+        qw_sizes = [blocks_per_row, 2, BLOCK_BYTES // 512, 512]
+        qw_strides = [BLOCK_BYTES, blocks_per_row * BLOCK_BYTES, 512, 1]
+
     def qw_tap(cb):
-        return TensorAccessPattern(
-            (1, qw_bytes),
-            2 * cb * blocks_per_row * BLOCK_BYTES,
-            [blocks_per_row, 2, BLOCK_BYTES // 512, 512],
-            [BLOCK_BYTES, blocks_per_row * BLOCK_BYTES, 512, 1],
-        )
+        return TensorAccessPattern((1, qw_bytes), qw_offset(cb), qw_sizes, qw_strides)
 
     # One drain per k-half of each output tile. DRAIN_DIMS spends every
     # dimension on the half, so the tile index and the half both ride in the

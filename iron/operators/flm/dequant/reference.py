@@ -104,6 +104,51 @@ def reference(qw, K, N):
     ).numpy()
 
 
+def to_engine_order(qw, K, N):
+    """Permute a file-order blob into the order FastFlowLM's engine writes.
+
+    The engine interleaves pairs of block-rows as it reads from disk, so block
+    ``(br, bc)`` lands at ``(br // 2) * 2 * blocks_per_row + bc * 2 + br % 2``
+    instead of ``br * blocks_per_row + bc``.
+    """
+    bpr = K // K_TILE
+    blocks = np.asarray(qw, dtype=np.uint8).reshape(-1, BLOCK_BYTES)
+    out = np.empty_like(blocks)
+    for br in range(blocks.shape[0] // bpr):
+        for bc in range(bpr):
+            out[(br // 2) * 2 * bpr + bc * 2 + br % 2] = blocks[br * bpr + bc]
+    return out.ravel()
+
+
+def column_block_bytes(K):
+    """Bytes one N_TILE-wide column block occupies. Contiguous in both layouts."""
+    return N_TILE * K * 5 // 8
+
+
+def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
+    """Place a matrix's column blocks at their offsets in an interleaved buffer.
+
+    FastFlowLM packs gate and up into one blob, so a projection's column blocks
+    come in runs with a gap between them. The gap is filled with noise here, to
+    catch an operator that reads it.
+    """
+    from iron.operators.flm.dequant.design import qw_bytes_for
+
+    cb_bytes = column_block_bytes(K)
+    run_blocks = run_out_features // N_TILE
+    period_blocks = run_period_out_features // N_TILE
+
+    total = qw_bytes_for(K, N, run_out_features, run_period_out_features)
+    rng = np.random.default_rng(seed + 1)
+    out = rng.integers(0, 256, total, dtype=np.uint8)
+
+    src = np.asarray(qw, dtype=np.uint8).reshape(-1, cb_bytes)
+    for cb in range(N // N_TILE):
+        at = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
+        out[at : at + cb_bytes] = src[cb]
+    return out
+
+
 def random_q4nx(K, N, seed=0):
     """A random q4nx blob, for tests. Scales and mins are bf16 in the file, so
     they are generated there and widened, not rounded afterwards."""

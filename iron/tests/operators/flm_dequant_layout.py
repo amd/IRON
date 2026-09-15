@@ -192,6 +192,67 @@ def test_e2b_shapes_are_servable(K, N):
     assert N // N_TILE >= 8, f"N={N} leaves columns without work"
 
 
+@pytest.mark.parametrize("K", [512, 1024, 1536, 3072, 12288])
+def test_engine_order_matches_file_order(K):
+    """A linear read of engine order must deliver exactly what the gather does.
+
+    This is what lets QwLayout be a descriptor switch rather than a redesign.
+    If the two sequences differed, each core would get a different q4nx block
+    and the output would be a permutation of itself -- right size, real values,
+    wrong order.
+    """
+    bpr = K // K_TILE
+    block_bytes = M_TILE * K_TILE * 5 // 8
+
+    for cb in range(3):
+        # file order, through the 4-D gather the design emits
+        base = 2 * cb * bpr * block_bytes
+        gathered = [
+            (base + bc * block_bytes + br_off * bpr * block_bytes) // block_bytes
+            for bc in range(bpr)
+            for br_off in range(2)
+        ]
+        # engine order, read linearly from the same offset
+        engine_of = {}
+        for br in range(2 * (cb + 1)):
+            for bc in range(bpr):
+                engine_of[(br // 2) * 2 * bpr + bc * 2 + br % 2] = br * bpr + bc
+        linear = [engine_of[2 * cb * bpr + i] for i in range(2 * bpr)]
+
+        assert gathered == linear, f"K={K} cb={cb}"
+
+
+@pytest.mark.parametrize("K", [1024, 12288])
+def test_engine_descriptor_fits_the_bd_fields(K):
+    """The linear read spends its whole length on two dimensions."""
+    bpr = K // K_TILE
+    block_bytes = M_TILE * K_TILE * 5 // 8
+    outer = 2 * bpr * block_bytes // 512
+    assert outer <= 1023, outer
+    assert (512 // 4) <= 1023
+
+
+def test_gate_up_runs_reach_every_column_block():
+    """gate and up share a blob, so a projection's blocks come in runs.
+
+    E2B interleaves them 512 out-features at a time in a 1024 period, which is
+    8 column blocks of 64 in a period of 16.
+    """
+    N, run, period = 6144, 512, 1024
+    n_blocks, run_blocks, period_blocks = N // N_TILE, run // N_TILE, period // N_TILE
+    assert (run_blocks, period_blocks) == (8, 16)
+
+    offsets = [
+        (cb // run_blocks) * period_blocks + cb % run_blocks for cb in range(n_blocks)
+    ]
+    assert len(set(offsets)) == n_blocks  # no two blocks share a slot
+    assert offsets[:9] == [0, 1, 2, 3, 4, 5, 6, 7, 16]  # the gap after a run
+    # The other matrix's slots are exactly the ones this one skips.
+    assert sorted(set(range(max(offsets) + 1)) - set(offsets)) == [
+        p + i for p in range(8, max(offsets), period_blocks) for i in range(8)
+    ]
+
+
 def test_q4nx_block_is_a_whole_number_of_bfp16_blocks():
     """A scale group must not straddle two bfp16 blocks.
 

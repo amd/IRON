@@ -12,8 +12,14 @@ import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 
 from iron.common.test_utils import run_test
+from iron.operators.flm.dequant.design import QwLayout
 from iron.operators.flm.dequant.op import DequantBFP
-from iron.operators.flm.dequant.reference import random_q4nx, reference
+from iron.operators.flm.dequant.reference import (
+    random_q4nx,
+    reference,
+    scatter_runs,
+    to_engine_order,
+)
 
 # K must be a multiple of 512 and N of 64. K = 512 is excluded on purpose:
 # flm.GEMM picks tile_n = 128 there, which this operator refuses, and
@@ -85,6 +91,75 @@ def test_output_feeds_gemm_unchanged(aie_context):
 
 
 @requires_aie2p
+@pytest.mark.parametrize("K, N", [(1024, 512), (1536, 640)])
+def test_engine_order_input(K, N, aie_context):
+    """The engine reorders blocks as it reads from disk, so the operator has to
+    read that order. Same bytes out as from file order, by construction."""
+    qw = random_q4nx(K, N, seed=11)
+    errors, _, _ = run_test(
+        DequantBFP(K=K, N=N, qw_layout=QwLayout.ENGINE, context=aie_context),
+        {"in": torch.from_numpy(to_engine_order(qw, K, N))},
+        {"out": torch.from_numpy(reference(qw, K, N))},
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
+    assert not errors, f"K={K} N={N} byte mismatch: {errors}"
+
+
+@requires_aie2p
+def test_gate_up_interleaved_blob(aie_context):
+    """gate and up share one blob at 512 out-features in a 1024 period.
+
+    The gaps hold the other matrix, filled with noise here: an operator that
+    strides wrongly reads it and fails the byte check rather than producing
+    something plausible.
+    """
+    K, N, run, period = 1024, 1024, 512, 1024
+    qw = random_q4nx(K, N, seed=12)
+    blob = scatter_runs(to_engine_order(qw, K, N), K, N, run, period, seed=12)
+
+    op = DequantBFP(
+        K=K,
+        N=N,
+        qw_layout=QwLayout.ENGINE,
+        run_out_features=run,
+        run_period_out_features=period,
+        context=aie_context,
+    )
+    assert op.quantized_size() == blob.size
+
+    errors, _, _ = run_test(
+        op,
+        {"in": torch.from_numpy(blob)},
+        {"out": torch.from_numpy(reference(qw, K, N))},
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
+    assert not errors, f"byte mismatch: {errors}"
+
+
+@requires_aie2p
+def test_layout_flag_survives_a_plain_string(aie_context):
+    """The design must accept the layout as a bare str, not only as the enum.
+
+    QwLayout is a StrEnum and the design generator round-trips its arguments,
+    so the design sees ``"engine"`` rather than ``QwLayout.ENGINE``. An ``is``
+    comparison against the enum is silently false there and falls through to
+    file order, which emits a right-sized buffer in the wrong order -- the one
+    failure mode nothing but a byte check catches.
+    """
+    from iron.operators.flm.dequant.design import dequant_bfp
+
+    dev = aie_utils.get_current_device()
+    as_enum = str(dequant_bfp(dev, 1024, 512, qw_layout=QwLayout.ENGINE))
+    as_str = str(dequant_bfp(dev, 1024, 512, qw_layout="engine"))
+    as_file = str(dequant_bfp(dev, 1024, 512, qw_layout=QwLayout.FILE))
+
+    assert as_enum == as_str, "a bare string took a different path than the enum"
+    assert as_enum != as_file, "the layout flag changed nothing"
+
+
+@requires_aie2p
 def test_one_xclbin_serves_every_shape(aie_context):
     """Several shapes back to back on one loaded xclbin.
 
@@ -98,19 +173,43 @@ def test_one_xclbin_serves_every_shape(aie_context):
     that a compile-time trip count could not express -- a core that never
     acquires fails lowering outright.
     """
-    shapes = [(1536, 2048), (1024, 320), (2048, 1536), (1536, 2560), (1536, 2048)]
+    # The last two vary qw_layout and the interleave, which must not reach the
+    # xclbin either: they only move offsets and strides in the sequence.
+    cases = [
+        dict(K=1536, N=2048),
+        dict(K=1024, N=320),
+        dict(K=2048, N=1536),
+        dict(K=1536, N=2560),
+        dict(K=1024, N=512, qw_layout=QwLayout.ENGINE),
+        dict(
+            K=1024,
+            N=1024,
+            qw_layout=QwLayout.ENGINE,
+            run_out_features=512,
+            run_period_out_features=1024,
+        ),
+        dict(K=1536, N=2048),
+    ]
     xclbin = None
-    for K, N in shapes:
-        op = DequantBFP(K=K, N=N, context=aie_context)
+    for case in cases:
+        K, N = case["K"], case["N"]
+        op = DequantBFP(context=aie_context, **case)
         qw = random_q4nx(K, N, seed=7)
+        blob = qw
+        if case.get("qw_layout") is QwLayout.ENGINE:
+            blob = to_engine_order(qw, K, N)
+        if case.get("run_out_features"):
+            blob = scatter_runs(
+                blob, K, N, case["run_out_features"], case["run_period_out_features"], 7
+            )
         errors, _, _ = run_test(
             op,
-            {"in": torch.from_numpy(qw)},
+            {"in": torch.from_numpy(blob)},
             {"out": torch.from_numpy(reference(qw, K, N))},
             rel_tol=0.0,
             abs_tol=0.0,
         )
-        assert not errors, f"K={K} N={N} byte mismatch: {errors}"
+        assert not errors, f"{case} byte mismatch: {errors}"
 
         stamp = (
             op.xclbin_artifact.filename,
