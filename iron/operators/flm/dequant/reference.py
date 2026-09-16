@@ -1,21 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.operators.flm.DequantBFP`.
-
-Bit-exact against the device, not approximate, which is what lets the test
-compare bytes. Two details make that possible and both are load-bearing:
-
-* The cores round f32 to bf16 toward negative infinity. That is the AIE's
-  power-up mode, and nothing in the kernel calls ``set_rounding``. Truncating
-  the bit pattern instead rounds toward zero and differs on every inexact
-  negative -- about 11% of a normal weight tensor.
-* The bf16 result is converted to bfp16ebs8 under the same mode, so ``pack_b``
-  is called with ``round_conv_even=False``.
-
-This matches the q4nx reader in FastFlowLM_IRON's sidecar generator, which was
-validated byte for byte against the shipped dequant xclbin.
-"""
+"""CPU reference for :class:`iron.operators.flm.DequantBFP`, bit-exact against
+the device. See the operator's README.md for the layout and the rounding."""
 
 import numpy as np
 import torch
@@ -29,12 +16,12 @@ from iron.operators.flm.dequant.design import (
     N_TILE,
     S,
     T,
+    qw_bytes_for,
 )
 from iron.operators.flm.packing import pack_b
 
 BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
-# A byte holds two out-features at one in-feature. PARALLEL is the row span the
-# file interleaves them over.
+# Out-features one run of code bytes spans.
 PARALLEL = 16
 
 
@@ -76,8 +63,6 @@ def dequantize(qw, K, N):
     grp = np.arange(K_TILE) // GROUP
     s = scales[:, grp, :].transpose(0, 2, 1)
     m = mins[:, grp, :].transpose(0, 2, 1)
-    # The min is added, not subtracted: it is an offset, despite the zero-point
-    # name the shipped kernel gives its buffer.
     vals = m + s * q
 
     out = np.empty((N, K), dtype=np.float32)
@@ -105,12 +90,8 @@ def reference(qw, K, N):
 
 
 def to_engine_order(qw, K, N):
-    """Permute a file-order blob into the order FastFlowLM's engine writes.
-
-    The engine interleaves pairs of block-rows as it reads from disk, so block
-    ``(br, bc)`` lands at ``(br // 2) * 2 * blocks_per_row + bc * 2 + br % 2``
-    instead of ``br * blocks_per_row + bc``.
-    """
+    """Permute a file-order blob into the order FastFlowLM's runtime writes,
+    which interleaves pairs of block-rows."""
     bpr = K // K_TILE
     blocks = np.asarray(qw, dtype=np.uint8).reshape(-1, BLOCK_BYTES)
     out = np.empty_like(blocks)
@@ -120,28 +101,15 @@ def to_engine_order(qw, K, N):
     return out.ravel()
 
 
-def column_block_bytes(K):
-    """Bytes one N_TILE-wide column block occupies. Contiguous in both layouts."""
-    return N_TILE * K * 5 // 8
-
-
 def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
-    """Place a matrix's column blocks at their offsets in an interleaved buffer.
-
-    FastFlowLM packs gate and up into one blob, so a projection's column blocks
-    come in runs with a gap between them. The gap is filled with noise here, to
-    catch an operator that reads it.
-    """
-    from iron.operators.flm.dequant.design import qw_bytes_for
-
-    cb_bytes = column_block_bytes(K)
+    """Place a matrix's column blocks at their offsets in an interleaved
+    buffer. The gaps hold noise, so an operator that reads them fails."""
+    cb_bytes = N_TILE * K * 5 // 8
     run_blocks = run_out_features // N_TILE
     period_blocks = run_period_out_features // N_TILE
 
     total = qw_bytes_for(K, N, run_out_features, run_period_out_features)
-    rng = np.random.default_rng(seed + 1)
-    out = rng.integers(0, 256, total, dtype=np.uint8)
-
+    out = np.random.default_rng(seed + 1).integers(0, 256, total, dtype=np.uint8)
     src = np.asarray(qw, dtype=np.uint8).reshape(-1, cb_bytes)
     for cb in range(N // N_TILE):
         at = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
@@ -150,12 +118,11 @@ def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
 
 
 def random_q4nx(K, N, seed=0):
-    """A random q4nx blob, for tests. Scales and mins are bf16 in the file, so
-    they are generated there and widened, not rounded afterwards."""
+    """A random q4nx blob. Scales and mins are bf16 in the file, so they are
+    generated there and widened."""
     rng = np.random.default_rng(seed)
     n_blocks = (K // K_TILE) * (N // M_TILE)
-    n_groups = K_TILE // GROUP
-    sm = n_groups * M_TILE
+    sm = (K_TILE // GROUP) * M_TILE
 
     scales = f32_to_bf16_floor(
         rng.uniform(0.002, 0.05, (n_blocks, sm)).astype(np.float32)

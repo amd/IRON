@@ -3,7 +3,10 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `iron.operators.flm.DequantBFP` — q4nx weights to `flm.GEMM`'s packed B
+# `iron.operators.flm.DequantBFP`
+
+Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.GEMM`](../gemm) reads
+as B, on the device.
 
 ```python
 from iron.operators.flm import DequantBFP
@@ -13,179 +16,114 @@ op.compile()
 op.get_callable()(q4nx_blob, packed_b)
 ```
 
-Dequantizes 4-bit weights straight into the bfp16ebs8 layout
-[`flm.GEMM`](../gemm) reads, so the runtime neither dequantizes to bf16 first
-nor packs B on the host.
-
-The output is **byte-identical to `GEMM.pack_B`** under `Rounding.FLOOR`, which
-is the mode the cores run in. `test.py` asserts that against `pack_B` itself,
-not against a private reference.
-
-## What it replaces
-
-FastFlowLM's shipped pipeline runs `dequant.xclbin` to produce bf16 in the order
-its `mm` overlay wants, then multiplies. Swapping in `flm.GEMM` needs B in a
-different format *and* a different blocking:
-
-| | shipped `dequant` + `mm` | this operator + `flm.GEMM` |
-|---|---|---|
-| B element | bf16, 2 bytes | bfp16ebs8, 9 bytes per 8 values |
-| `n` tile | 128 | 64 |
-| k slice per compute tile | 512 | 128 |
-| within an 8x8 tile | `n` contiguous | **`k` contiguous** |
-
-The last row is the one that costs work. The 8 values sharing a bfp16 exponent
-must be 8 consecutive `k` for one `n`, and the file stores the opposite — one
-byte holds two `n` at the same `k`.
-
-## One xclbin for every shape
-
-Nothing in the device configuration depends on K or N. Every buffer descriptor
-comes from the q4nx block geometry and the GEMM tiling constants, and the cores
-loop forever over identical per-block work:
-
-```python
-for _ in range_(sys.maxsize):
-    qw = qw_in.acquire(1)
-    out = out_of.acquire(1)
-    k(qw, out)
-```
-
-The shim sequence bounds the real work. A core parks on an empty input fifo
-once that sequence has delivered its last block, so a column with no work in a
-dispatch simply idles.
-
-This is what makes the operator usable in a model. A shape-keyed xclbin would
-take one hardware context per weight shape — ten for Gemma4 E2B, against a
-budget of 16 — and pay a reconfiguration per projection. Instead `config_name`
-keys the xclbin on `tile_n` and the device while `name` keys the instruction
-stream on the shape. A clean build of the test suite produces **one xclbin and
-seven instruction streams**.
-
-A compile-time trip count would have put K and N in the core program. Making it
-a runtime parameter would have fixed that, but needs a barrier and a re-read per
-dispatch; a core that does the same thing every iteration needs neither.
-`test_one_xclbin_serves_every_shape` pins this, and includes a shape that leaves
-three of eight columns idle — the case a compile-time trip count cannot express
-at all, since a core that never acquires fails lowering.
-
-## Where each reorder happens, and why it has to
-
-A DMA addresses memory in 4-byte units. A bfp16 block is 9 bytes, and 9 is
-coprime with 4, so a single block is not addressable at all; the smallest unit a
-descriptor can move is a whole 8x8 tile, at 72 bytes. That splits the work:
-
-* **The core** does everything inside a tile: the nibble unpack, `min + scale *
-  quant`, the 8x8 transpose, and the conversion. The transpose has to precede
-  the conversion, because the conversion fuses 8 values under one exponent and
-  no permutation of them survives it.
-* **The drain** does everything coarser. Every stride above a tile is a multiple
-  of 72 bytes, so one buffer descriptor covers it.
-
-Two hardware limits shape that descriptor, and each rules out the other's
-workaround:
-
-* A shim BD carries three access dimensions plus a hardware repeat. Unpicking a
-  whole 64x512 output tile needs four before anything else.
-* The BD's size field counts **4-byte granules, not elements**, and stops at
-  1023. The core's natural run is 512 blocks = 4608 bytes = 1152 granules, so it
-  has to be split, which costs a dimension.
-
-So a column joins its four cores into **two** memtile objects, one per k-half of
-the tile. The half rides in the offset, which pays for the split. See
-`DRAIN_DIMS`.
+`K` is the in-feature count and `N` the out-feature count, so the result is B
+for a `(M, K) x (K, N)` GEMM. The output equals `GEMM.pack_B` byte for byte
+under `Rounding.FLOOR`, the mode the cores run in.
 
 ## Input layout
 
-`qw_layout` selects how the q4nx blocks are ordered in the buffer:
+Each layer holds a whole number of the layer below it.
 
-| | order | descriptor |
-|---|---|---|
-| `QwLayout.FILE` | the weights file: blocks row-major | 4-D gather |
-| `QwLayout.ENGINE` | what FastFlowLM writes to DRAM, pairs of block-rows interleaved | linear read |
+| Layer | Unit | Holds | Values | Bytes |
+|---|---|---|---|---|
+| 1 | byte | 2 codes: one `k`, two adjacent `n` | 2 | 1 |
+| 2 | slice | 8 bytes, stepping `n` by 2 | 16 | 8 |
+| 3 | half | 256 slices, stepping `k` by 1 | 4096 | 2048 |
+| 4 | codes | 2 halves, stepping `n` by 16 | 8192 | 4096 |
+| 5 | block | 512 B scales, 512 B mins, then layer 4 | 8192 | 5120 |
+| 6 | matrix | (N/32) x (K/256) blocks, row-major | N·K | 5·N·K/8 |
 
-Both deliver the same blocks to the same cores in the same sequence, verified as
-index arithmetic by `test_engine_order_matches_file_order`. So this changes the
-shim descriptor and nothing else — not the cores, not the join, not
-`DRAIN_DIMS`, and not the xclbin.
+A scale and a min cover 32 consecutive `k` for one `n`, so a block carries 8
+groups over its 32 `n`. The reader computes `min + scale * code`: the min is an
+offset, not a subtracted zero point.
 
-## Interleaved projections
+## Output layout
 
-FastFlowLM packs gate and up into one blob, 512 out-features of each in a 1024
-period, so a projection's column blocks come in runs with a gap:
+| Layer | Unit | Holds | Values | Bytes |
+|---|---|---|---|---|
+| 1 | bfp16 block | 1 exponent byte, 8 mantissa bytes: 8 `k`, one `n` | 8 | 9 |
+| 2 | tile | 8 blocks, stepping `n` by 1 | 64 | 72 |
+| 3 | | 16 tiles, stepping `k` by 8 | 1024 | 1152 |
+| 4 | | 4 of layer 3, stepping `n` by 8 | 4096 | 4608 |
+| 5 | slab | 8 of layer 4: outer `k` step 128 (x4), inner `n` step 32 (x2) | 32768 | 36864 |
+| 6 | column block | K/512 slabs, stepping `k` by 512 | 64·K | 72·K |
+| 7 | matrix | N/64 column blocks, stepping `n` by 64 | N·K | 9·N·K/8 |
+
+The two formats order the innermost pair in opposite directions: the input puts
+`n` next to `n`, the output puts `k` next to `k`.
+
+8 divides 32, so every bfp16 block lies inside one scale group and the kernel
+reads one scale and one min per block.
+
+## Where the work happens
+
+A DMA addresses memory in 4-byte units and a bfp16 block is 9 bytes, so no
+descriptor reaches inside layer 2. The core produces layers 1 and 2. It unpacks the
+nibbles, applies `min + scale * code`, transposes the 8x8 tile, and converts.
+The transpose precedes the conversion because the conversion fuses 8 values
+under one exponent.
+
+Layers 3 and up are multiples of 72 bytes, so one buffer descriptor covers
+them. A shim BD carries three access dimensions plus a repeat, and its size
+field counts 4-byte granules with a ceiling of 1023. Layer 4 is 1152 granules,
+so it splits in two and spends a dimension. A column therefore drains two
+memtile objects per slab, one per k-half, and the half rides in the offset.
+
+## One xclbin per configuration
+
+The device configuration holds no K or N: every descriptor comes from the
+layout above, and the cores loop over identical per-block work. `config_name`
+keys the xclbin on `tile_n` and the device; `name` keys the instruction stream
+on the shape. A clean build of the test suite emits one xclbin and ten
+instruction streams.
+
+## Parameters
+
+`qw_layout` selects the block order in the buffer:
+
+| | order |
+|---|---|
+| `QwLayout.FILE` | layer 6 above: blocks row-major |
+| `QwLayout.ENGINE` | pairs of block-rows interleaved, which FastFlowLM's runtime writes |
+
+Both deliver the same blocks to the same cores in the same sequence, so only
+the shim descriptor differs.
+
+`run_out_features` and `run_period_out_features` describe a matrix interleaved
+with another in one buffer. FastFlowLM packs gate and up at 512 out-features
+each in a 1024 period:
 
 ```python
 DequantBFP(K=1536, N=6144, qw_layout="engine",
            run_out_features=512, run_period_out_features=1024, ...)
 ```
 
-The offset is computed per column block in Python and baked into the
-instruction stream, so the gap costs no descriptor dimension. `quantized_size()`
-spans the gaps, because the operator strides over them.
+They describe the stride pattern, never a base offset. Point the operator at
+the matrix's own start, with `Tensor.subview` on the containing buffer.
+`quantized_size()` spans the gaps.
 
-These parameters describe the stride pattern only, never a base offset. Point
-the operator at the projection's own start — with a `Tensor.subview` on a
-`proj_weights` buffer, for instance.
+## Constraints
 
-## Shape constraints
+`K % 512 == 0`, `N % 64 == 0`, AIE2P only.
 
-`K % 512 == 0` and `N % 64 == 0`. AIE2P only — `bfp16ebs8` does not exist on
-AIE2.
-
-**`K == 512` is rejected.** `flm.GEMM` picks `tile_n = 128` when K has a single
-k iteration, and at that tile an output tile spans 128 out-features, so it takes
-eight q4nx blocks where a column has four cores. Emitting the `tile_n = 64`
-order anyway would produce a buffer of the right size that the GEMM reads
-wrongly, with nothing raising, so `__post_init__` refuses instead.
-
-`N` does not have to fill the grid. A column block count below `N_TILE * COLS`
-narrows the grid rather than idling part of it, because an objectfifo whose
-consumer never acquires fails lowering.
-
-## Input format
-
-The q4nx blob, as the weights file stores it. Blocks of 32 out-features by 256
-in-features, row-major, 5120 bytes each:
-
-| Run | Bytes | Contents |
-|---|---|---|
-| scales | 512 | 8 groups x 32 out-features, bf16 |
-| mins | 512 | same shape |
-| codes | 4096 | 8192 4-bit codes |
-
-A scale group spans 32 consecutive in-features for **one** out-feature. The min
-is **added**, not subtracted — it is an offset, despite the zero-point name the
-shipped kernel gives its buffer.
-
-The grouping nests cleanly: 8 divides 32, so every bfp16 block lies inside one
-scale group and the kernel reads exactly one scale and one min per block.
+`K == 512` raises. `flm.GEMM` picks `tile_n = 128` at a single k iteration,
+which packs B in a different order, and a mismatch there yields a buffer of the
+right size that the GEMM reads wrongly.
 
 ## Rounding
 
-Two conversions, both in the AIE's power-up `floor` mode, because nothing in the
-kernel calls `set_rounding`:
-
-1. f32 accumulator to bf16, rounding toward negative infinity.
-2. bf16 to bfp16ebs8, truncating onto the block's shared exponent.
-
-`reference.py` reproduces both exactly, which is what lets the tests compare
-bytes. Rounding toward zero instead of negative infinity differs on every
-inexact negative — about 11% of a real weight tensor — so a tolerance-based test
-would pass while the bytes diverged.
+The cores never call `set_rounding`, so both conversions run in the power-up
+`floor` mode: f32 to bf16 rounds toward negative infinity, and bf16 to
+bfp16ebs8 truncates onto the shared exponent. `reference.py` reproduces both,
+which is what lets the tests compare bytes.
 
 ## Validation
 
 | Check | Where |
 |---|---|
-| descriptors reproduce `pack_b`'s ordering, in index arithmetic | [`iron/tests/operators/flm_dequant_layout.py`](../../../tests/operators/flm_dequant_layout.py) |
-| device output equals the CPU reference, byte for byte | `test.py::test_matches_reference` |
-| device output equals `GEMM.pack_B`, byte for byte | `test.py::test_output_feeds_gemm_unchanged` |
+| descriptors reproduce `pack_b`'s order | `iron/tests/operators/flm_dequant_layout.py` |
+| device output equals the CPU reference | `test.py::test_matches_reference` |
+| device output equals `GEMM.pack_B` | `test.py::test_output_feeds_gemm_unchanged` |
 
-The layout tests exist because a wrong stride is otherwise silent: it produces a
-buffer of the right size, full of real weight values, in the wrong order.
-
-`reference.py` was also checked against FastFlowLM_IRON's sidecar generator
-(`tools/replace-gemm/sidecar.py`), which had itself been validated byte for byte
-against the shipped `dequant.xclbin`. They agree exactly at K/N of
-1024x128, 2048x256, 1536x640 and 2048x2048. That check cannot live here, since
-it needs the other repository.
+A wrong stride yields a buffer of the right size holding real weight values in
+the wrong order. The layout tests therefore compare index arithmetic.

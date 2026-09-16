@@ -16,19 +16,19 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     SourceArtifact,
 )
-from iron.common.device_utils import get_kernel_dir
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
+from iron.common.device_utils import get_kernel_dir
 
 from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
     COLS,
     CT_K,
-    QwLayout,
     GROUP,
     K_TILE,
     K_TILE_B,
     M_TILE,
     N_TILE,
+    QwLayout,
     S,
     T,
     qw_bytes_for,
@@ -41,14 +41,7 @@ BFP16_GROUP_BYTES = 9
 class DequantBFP(MLIROperator):
     """q4nx weights to bfp16, packed the way ``flm.GEMM`` reads B.
 
-    ``K`` is the in-feature count and ``N`` the out-feature count, so the result
-    is B for a ``(M, K) x (K, N)`` GEMM. The input is the q4nx blob as the
-    weights file stores it: 32 out-features by 256 in-features per block, each
-    block a scale table, a min table, then 4-bit codes.
-
-    The output is byte-identical to ``GEMM.pack_B`` under ``Rounding.FLOOR``,
-    which is what the cores use -- they never call ``set_rounding``, and the
-    power-up mode is floor.
+    See README.md for the layout, the parameters and the constraints.
     """
 
     K: int
@@ -64,10 +57,8 @@ class DequantBFP(MLIROperator):
             raise ValueError(f"K ({self.K}) must be a multiple of {K_TILE_B}")
         if self.N % N_TILE:
             raise ValueError(f"N ({self.N}) must be a multiple of {N_TILE}")
-        # Resolve tile_n by flm.GEMM's own rule, so a shape this operator
-        # cannot serve fails here rather than at the GEMM that reads the
-        # result. gemm/op.py picks 128 on AIE2P when K has a single k
-        # iteration, and the packed order differs between the two.
+        # Resolve tile_n by flm.GEMM's rule, so an unservable shape fails at
+        # construction.
         if self.tile_n is None:
             dev = aie_utils.get_current_device()
             single_k_iter = self.K // K_TILE_B <= 1
@@ -84,33 +75,24 @@ class DequantBFP(MLIROperator):
     def _config_tag(self) -> str:
         """Everything that reaches the device configuration, and nothing else.
 
-        qw_layout and the interleave parameters are deliberately absent: they
-        only move offsets and strides inside the runtime sequence, so one
-        xclbin covers every combination of them. Adding one here would key the
-        xclbin on it and cost a hardware context per variant.
+        qw_layout and the interleave move offsets and strides inside the
+        runtime sequence, so one xclbin covers every combination of them.
         """
         dev = aie_utils.get_current_device().resolve().name
         return f"tn{self.tile_n}_{dev}"
 
     @property
     def config_name(self) -> str:
-        """Stem of the artifacts that do not depend on the shape.
-
-        Everything in the device configuration is shape-independent: the cores
-        loop forever over identical per-block work, and every DMA descriptor is
-        built from the q4nx block geometry and the GEMM tiling constants. So
-        one xclbin covers every shape sharing this tag, and only the
-        instruction stream is rebuilt -- which matters because a model dispatches
-        ten weight shapes against a budget of 16 hardware contexts.
-        """
+        """Stem of the artifacts that do not depend on the shape."""
         return f"FLM_DequantBFP_{self._config_tag}"
 
     @property
     def name(self) -> str:
-        """Artifact stem for the instruction stream, which does depend on the
-        shape. Prefixed for the same reason ``flm.GEMM``'s is: the build cache
-        keys on filename, and ``iron.operators.Dequant`` would otherwise share
-        this stem."""
+        """Stem of the instruction stream, which does depend on the shape.
+
+        The build cache keys on filename, and ``iron.operators.Dequant`` would
+        otherwise share this stem.
+        """
         base = f"FLM_DequantBFP_K{self.K}_N{self.N}_{self.qw_layout}"
         if self.run_out_features is not None:
             base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
@@ -118,15 +100,19 @@ class DequantBFP(MLIROperator):
 
     @property
     def _reference_shape(self) -> tuple[int, int]:
-        """The shape the configuration-only module is emitted at.
-
-        Its runtime sequence is discarded; only its device body reaches the
-        xclbin. Taking the smallest valid shape keeps that module cheap and
-        makes the shape-independence explicit: if a real shape's instruction
-        stream did not run against this xclbin, some dimension would still be
-        reaching the configuration.
-        """
+        """The shape the configuration-only module is emitted at. Its runtime
+        sequence is discarded; only its device body reaches the xclbin."""
         return 2 * K_TILE_B, N_TILE * COLS
+
+    def packed_size(self) -> int:
+        """Bytes the operator writes: 9 per 8 values."""
+        return self.K * self.N // BFP16_GROUP * BFP16_GROUP_BYTES
+
+    def quantized_size(self) -> int:
+        """Bytes of q4nx input, counting any interleave gap it strides over."""
+        return qw_bytes_for(
+            self.K, self.N, self.run_out_features, self.run_period_out_features
+        )
 
     def _mlir_artifact(self, filename, K, N):
         return PythonGeneratedMLIRArtifact(
@@ -146,6 +132,9 @@ class DequantBFP(MLIROperator):
             ),
         )
 
+    def get_mlir_artifact(self):
+        return self._mlir_artifact(f"{self.name}.mlir", self.K, self.N)
+
     def set_up_artifacts(self) -> None:
         kernels = self.get_kernel_artifacts()
         config_mlir = self._mlir_artifact(
@@ -160,29 +149,10 @@ class DequantBFP(MLIROperator):
         self.insts_artifact = InstsBinArtifact(
             f"{self.name}.bin",
             mlir_input=shape_mlir,
-            # aiecc compiles the cores on the way to an instruction stream, so
-            # this needs the kernel objects too.
+            # aiecc compiles the cores on the way to an instruction stream.
             dependencies=[shape_mlir] + kernels,
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
-
-    def packed_size(self) -> int:
-        """Bytes the operator writes: 9 per 8 values."""
-        return self.K * self.N // BFP16_GROUP * BFP16_GROUP_BYTES
-
-    def quantized_size(self) -> int:
-        """Bytes of q4nx input the operator reads.
-
-        5 bits per weight, counting the scale and the min. Where the matrix is
-        interleaved with another one this spans the gaps too, because the
-        operator strides over them.
-        """
-        return qw_bytes_for(
-            self.K, self.N, self.run_out_features, self.run_period_out_features
-        )
-
-    def get_mlir_artifact(self):
-        return self._mlir_artifact(f"{self.name}.mlir", self.K, self.N)
 
     def get_kernel_artifacts(self):
         dev = aie_utils.get_current_device()
@@ -211,9 +181,8 @@ class DequantBFP(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # Both buffers are declared in BYTES. Neither has a numpy element type:
-        # a q4nx block interleaves three tables at 5 bits per weight, and a
-        # bfp16 block is 9 bytes for 8 values.
+        # Both buffers are declared in bytes: a q4nx block interleaves three
+        # tables at 5 bits per weight, and a bfp16 block is 9 bytes for 8.
         return [
             AIERuntimeArgSpec("in", (self.quantized_size(),), dtype=np.uint8),
             AIERuntimeArgSpec("out", (self.packed_size(),), dtype=np.uint8),
