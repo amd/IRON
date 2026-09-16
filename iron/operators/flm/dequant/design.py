@@ -134,21 +134,17 @@ def dequant_bfp(
     qw_bytes = qw_bytes_for(K, N, run_out_features, run_period_out_features)
     out_blocks = K * N // BFP16_GROUP
 
-    # A shim tile's BD ids are shared across its channels, and finish() returns
-    # them to a compile-time allocator that does not check the transfer
-    # finished. A window must therefore fit the tile and be awaited before the
-    # next reprograms those ids. Both budgets count LIVE_WINDOWS windows; the
-    # fill is one descriptor per column block and outlives them.
+    # A drain window holds one k-tile per queue slot it may occupy: LIVE_WINDOWS
+    # windows are in flight, and each half's channel takes SHIM_TASK_QUEUE
+    # transfers.
+    k_window = min(k_tiles, SHIM_TASK_QUEUE // LIVE_WINDOWS)
+    # Descriptor ids are per shim tile and shared across its channels. The fill
+    # holds one for a whole column block; the live drains hold the rest.
     shim_bds = get_target_model(dev.resolve()).get_num_bds(0, 0)
-    k_window = min(
-        k_tiles,
-        SHIM_TASK_QUEUE // LIVE_WINDOWS,
-        (shim_bds - 1) // (LIVE_WINDOWS * HALVES),
-    )
-    if k_window < 1:
+    live_bds = 1 + LIVE_WINDOWS * HALVES * k_window
+    if live_bds > shim_bds:
         raise ValueError(
-            f"a shim tile with {shim_bds} descriptors and a queue of "
-            f"{SHIM_TASK_QUEUE} cannot hold one drain window"
+            f"{live_bds} live shim descriptors exceed the {shim_bds} a tile has"
         )
 
     qw_l3_ty = np.ndarray[(qw_bytes,), np.dtype[np.uint8]]
@@ -252,11 +248,17 @@ def dequant_bfp(
                             out_cons_hs[c][h].drain(
                                 OUT, out_tap(cb, kb, h), wait=True, group=tg
                             )
+                # finish() awaits the transfers marked wait=True, then frees
+                # every descriptor in the group. Closing the previous window
+                # here overlaps its await with this one, which is already
+                # running.
                 if prev is not None:
                     prev.finish()
                 prev = tg
             if prev is not None:
                 prev.finish()
+            # The fill carries no wait. Freeing its descriptor is safe because
+            # a drain cannot complete before the cores consumed that fill.
             tg_fill.finish()
 
     rt = Runtime(sequence, [qw_l3_ty, out_l3_ty, qw_prods, out_conses])
