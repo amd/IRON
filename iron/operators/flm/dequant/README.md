@@ -58,8 +58,8 @@ reads one scale and one min per block.
 ## Where the work happens
 
 A DMA addresses memory in 4-byte units and a bfp16 block is 9 bytes, so no
-descriptor reaches inside layer 2. The core produces layers 1 and 2. It unpacks the
-nibbles, applies `min + scale * code`, transposes the 8x8 tile, and converts.
+descriptor reaches inside layer 2. The core produces layers 1 and 2: it unpacks
+the nibbles, applies `min + scale * code`, transposes the 8x8 tile, and converts.
 The transpose precedes the conversion because the conversion fuses 8 values
 under one exponent.
 
@@ -115,7 +115,7 @@ right size that the GEMM reads wrongly.
 The cores never call `set_rounding`, so both conversions run in the power-up
 `floor` mode: f32 to bf16 rounds toward negative infinity, and bf16 to
 bfp16ebs8 truncates onto the shared exponent. `reference.py` reproduces both,
-which is what lets the tests compare bytes.
+so the tests compare bytes.
 
 ## Validation
 

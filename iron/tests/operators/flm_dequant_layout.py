@@ -98,7 +98,6 @@ def test_bytes_match_pack_b(K, N):
     rng = np.random.default_rng(0)
     B = rng.standard_normal((K, N)).astype(np.float32)
     # The cores round to bf16 before converting, so the reference must too.
-    # Otherwise this test measures rounding.
     u = B.view(np.uint32)
     bf = ((u >> 16) + (((u & 0xFFFF) != 0) & ((u >> 31) != 0))).astype(np.uint16)
     B = (bf.astype(np.uint32) << 16).view(np.float32)
@@ -127,8 +126,8 @@ def test_bytes_match_pack_b(K, N):
 def test_engine_order_matches_file_order(K):
     """A linear read of engine order must deliver what the gather does.
 
-    That equivalence is what makes QwLayout a descriptor switch. If the two
-    sequences differed, each core would receive a different q4nx block."""
+    That equivalence makes QwLayout a descriptor switch. If the sequences
+    differed, each core would receive a different q4nx block."""
     bpr = K // K_TILE
     block_bytes = M_TILE * K_TILE * 5 // 8
 
@@ -162,9 +161,8 @@ def test_descriptors_are_dma_expressible():
 
 @pytest.mark.parametrize("K, N", E2B_SHAPES)
 def test_e2b_shapes_are_servable(K, N):
-    """Replacing the stock GEMM means dequantizing every E2B weight on device.
-    A model or a tiling rule that breaks one of these should fail here rather
-    than at a GEMM reading a wrongly ordered buffer."""
+    """Replacing the stock GEMM means dequantizing every E2B weight on device,
+    so a model or a tiling rule that breaks one of these must fail here."""
     assert K % K_TILE_B == 0, f"K={K} does not tile"
     assert N % N_TILE == 0, f"N={N} does not tile"
     assert K // K_TILE_B > 1, f"K={K} would make flm.GEMM pick tile_n=128"
