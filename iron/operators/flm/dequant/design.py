@@ -50,12 +50,6 @@ DRAIN_DIMS = [
 CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
 
-# Drain windows in flight. A window retires once the next is issued, so its
-# await overlaps the transfers of the next. One k-tile per window leaves two
-# transfers outstanding per shim channel, and 5 of a shim tile's 16 buffer
-# descriptors in use. Deeper queueing measured 4-6% slower.
-LIVE_WINDOWS = 2
-
 
 class QwLayout(StrEnum):
     """Block order in the buffer handed to the operator."""
@@ -120,7 +114,6 @@ def dequant_bfp(
     k_tiles = K // K_TILE_B
     blocks_per_row = K // K_TILE
     n_blocks = N // N_TILE
-    rounds = -(-n_blocks // COLS)
 
     cb_bytes = N_TILE * K * 5 // 8
     run_blocks, period_blocks = _run_geometry(
@@ -215,36 +208,30 @@ def dequant_bfp(
         )
 
     def sequence(QW, OUT, qw_prod_hs, out_cons_hs):
-        for r in range(rounds):
+        for cb0 in range(0, n_blocks, COLS):
+            columns = [(c, cb0 + c) for c in range(COLS) if cb0 + c < n_blocks]
+
             tg_fill = TaskGroup()
-            for c in range(COLS):
-                cb = r * COLS + c
-                if cb < n_blocks:
-                    qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg_fill)
+            for c, cb in columns:
+                qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg_fill)
 
             prev = None
             for kb in range(k_tiles):
                 tg = TaskGroup()
-                for c in range(COLS):
-                    cb = r * COLS + c
-                    if cb >= n_blocks:
-                        continue
+                for c, cb in columns:
                     for h in range(HALVES):
                         out_cons_hs[c][h].drain(
                             OUT, out_tap(cb, kb, h), wait=True, group=tg
                         )
-                # finish() awaits the transfers marked wait=True, then frees
-                # every descriptor in the group. Closing the previous window
-                # here overlaps its await with this one, which is already
-                # running.
+                # finish() awaits the group, so closing the previous k-tile
+                # here overlaps its wait with this one, already running.
                 if prev is not None:
                     prev.finish()
                 prev = tg
-            if prev is not None:
-                prev.finish()
-            # This fill is not awaited; the drains are. A core reads the fill
-            # before it writes the output a drain takes, so a completed drain
-            # implies a completed fill.
+            prev.finish()
+            # The fill is not awaited. A core reads it before it writes the
+            # output a drain takes, so a completed drain implies a completed
+            # fill.
             tg_fill.finish()
 
     rt = Runtime(sequence, [qw_l3_ty, out_l3_ty, qw_prods, out_conses])
