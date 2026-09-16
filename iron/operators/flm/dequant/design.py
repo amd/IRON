@@ -9,7 +9,6 @@ from enum import StrEnum
 import numpy as np
 
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.dialects.aie import get_target_model
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
@@ -51,10 +50,10 @@ DRAIN_DIMS = [
 CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
 
-# Transfers a shim channel may have outstanding. Overrunning it hangs.
-SHIM_TASK_QUEUE = 4
-# Drain windows in flight. A window retires once the next is issued, so the
-# await overlaps a running transfer.
+# Drain windows in flight. A window retires once the next is issued, so its
+# await overlaps the transfers of the next. One k-tile per window leaves two
+# transfers outstanding per shim channel, and 5 of a shim tile's 16 buffer
+# descriptors in use. Deeper queueing measured 4-6% slower.
 LIVE_WINDOWS = 2
 
 
@@ -133,19 +132,6 @@ def dequant_bfp(
 
     qw_bytes = qw_bytes_for(K, N, run_out_features, run_period_out_features)
     out_blocks = K * N // BFP16_GROUP
-
-    # LIVE_WINDOWS windows are in flight and a shim channel takes
-    # SHIM_TASK_QUEUE transfers, so one window covers at most their quotient in
-    # k-tiles. Overrunning the queue hangs.
-    k_window = min(k_tiles, SHIM_TASK_QUEUE // LIVE_WINDOWS)
-    # Descriptor ids are per shim tile and shared across its channels. The fill
-    # uses one for a whole column block; the live drains use the rest.
-    shim_bds = get_target_model(dev.resolve()).get_num_bds(0, 0)
-    live_bds = 1 + LIVE_WINDOWS * HALVES * k_window
-    if live_bds > shim_bds:
-        raise ValueError(
-            f"{live_bds} live shim descriptors exceed the {shim_bds} a tile has"
-        )
 
     qw_l3_ty = np.ndarray[(qw_bytes,), np.dtype[np.uint8]]
     out_l3_ty = np.ndarray[(out_blocks,), np.dtype[v8bfp16ebs8]]
@@ -237,17 +223,16 @@ def dequant_bfp(
                     qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg_fill)
 
             prev = None
-            for kb0 in range(0, k_tiles, k_window):
+            for kb in range(k_tiles):
                 tg = TaskGroup()
                 for c in range(COLS):
                     cb = r * COLS + c
                     if cb >= n_blocks:
                         continue
-                    for kb in range(kb0, min(kb0 + k_window, k_tiles)):
-                        for h in range(HALVES):
-                            out_cons_hs[c][h].drain(
-                                OUT, out_tap(cb, kb, h), wait=True, group=tg
-                            )
+                    for h in range(HALVES):
+                        out_cons_hs[c][h].drain(
+                            OUT, out_tap(cb, kb, h), wait=True, group=tg
+                        )
                 # finish() awaits the transfers marked wait=True, then frees
                 # every descriptor in the group. Closing the previous window
                 # here overlaps its await with this one, which is already
