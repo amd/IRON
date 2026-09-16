@@ -4,7 +4,7 @@
 // Dequantize one q4nx block and emit it as bfp16ebs8 in the order
 // iron.operators.flm.GEMM reads its B operand. See the operator's README.md.
 //
-// Geometry arrives as -D flags from design.py. Every macro carries the Q4NX_
+// Geometry arrives as -D flags from design.py. Every macro uses the Q4NX_
 // prefix: R, S and T collide with template parameters in the compiler's aie2p
 // built-in headers.
 #include "../aie_kernel_utils.h"

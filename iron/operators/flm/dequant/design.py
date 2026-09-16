@@ -134,12 +134,12 @@ def dequant_bfp(
     qw_bytes = qw_bytes_for(K, N, run_out_features, run_period_out_features)
     out_blocks = K * N // BFP16_GROUP
 
-    # A drain window holds one k-tile per queue slot it may occupy: LIVE_WINDOWS
-    # windows are in flight, and each half's channel takes SHIM_TASK_QUEUE
-    # transfers.
+    # LIVE_WINDOWS windows are in flight and a shim channel takes
+    # SHIM_TASK_QUEUE transfers, so one window covers at most their quotient in
+    # k-tiles. Overrunning the queue hangs.
     k_window = min(k_tiles, SHIM_TASK_QUEUE // LIVE_WINDOWS)
     # Descriptor ids are per shim tile and shared across its channels. The fill
-    # holds one for a whole column block; the live drains hold the rest.
+    # uses one for a whole column block; the live drains use the rest.
     shim_bds = get_target_model(dev.resolve()).get_num_bds(0, 0)
     live_bds = 1 + LIVE_WINDOWS * HALVES * k_window
     if live_bds > shim_bds:
@@ -163,9 +163,9 @@ def dequant_bfp(
     def core_body(qw_in, out_of, k):
         """One iteration is one q4nx block, and every block is identical work.
 
-        The loop carries no trip count and reads no runtime parameter, which is
-        what keeps the device configuration free of K and N. The shim sequence
-        bounds the real work, and the loop then blocks on an empty input fifo.
+        The loop takes no trip count and reads no runtime parameter, so no K
+        or N reaches the device configuration. The shim sequence bounds the
+        real work, and the loop then blocks on an empty input fifo.
         """
         for _ in range_(sys.maxsize):
             qw = qw_in.acquire(1)
@@ -257,8 +257,9 @@ def dequant_bfp(
                 prev = tg
             if prev is not None:
                 prev.finish()
-            # The fill carries no wait. Freeing its descriptor is safe because
-            # a drain cannot complete before the cores consumed that fill.
+            # This fill is not awaited; the drains are. A core reads the fill
+            # before it writes the output a drain takes, so a completed drain
+            # implies a completed fill.
             tg_fill.finish()
 
     rt = Runtime(sequence, [qw_l3_ty, out_l3_ty, qw_prods, out_conses])

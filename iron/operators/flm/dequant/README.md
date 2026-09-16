@@ -33,8 +33,8 @@ Each layer holds a whole number of the layer below it.
 | 5 | block | 512 B scales, 512 B mins, then layer 4 | 8192 | 5120 |
 | 6 | matrix | (N/32) x (K/256) blocks, row-major | N·K | 5·N·K/8 |
 
-A scale and a min cover 32 consecutive `k` for one `n`, so a block carries 8
-groups over its 32 `n`. The reader computes `min + scale * code`: the min is an
+A scale and a min cover 32 consecutive `k` for one `n`, so a block has 8 groups
+over its 32 `n`. The reader computes `min + scale * code`: the min is an
 offset, not a subtracted zero point.
 
 ## Output layout
@@ -64,14 +64,14 @@ The transpose precedes the conversion because the conversion fuses 8 values
 under one exponent.
 
 Layers 3 and up are multiples of 72 bytes, so one buffer descriptor covers
-them. A shim BD carries three access dimensions plus a repeat, and its size
+them. A shim BD has three access dimensions plus a repeat, and its size
 field counts 4-byte granules with a ceiling of 1023. Layer 4 is 1152 granules,
 so it splits in two and spends a dimension. A column therefore drains two
 memtile objects per slab, one per k-half, and the half rides in the offset.
 
 ## One xclbin per configuration
 
-The device configuration holds no K or N: every descriptor comes from the
+No K or N reaches the device configuration: every descriptor comes from the
 layout above, and the cores loop over identical per-block work. `config_name`
 keys the xclbin on `tile_n` and the device; `name` keys the instruction stream
 on the shape. A clean build of the test suite emits one xclbin and ten
