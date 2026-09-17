@@ -54,3 +54,20 @@ def test_out_of_bounds_slice_is_rejected_by_upstream(run):
     run.op.slice_info["invalid"] = ("packed", 512, 1536)
     with pytest.raises(ValueError):
         run.get_buffer("invalid")
+
+
+def test_input_slices_resolve_during_reference_dispatch(run, monkeypatch):
+    run.op.input_args = ["packed"]
+    parent = run.get_buffer("packed")
+
+    def evaluate():
+        assert parent.device == "cpu"
+        for name in ("first", "second"):
+            view = run._resolve_buffer(name)
+            assert view.device == "cpu"
+            np.testing.assert_array_equal(view.numpy(), parent.numpy()[:256])
+
+    monkeypatch.setattr(run, "_run", evaluate)
+    for value in (3, 7):
+        parent.fill_(value)
+        run()

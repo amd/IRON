@@ -800,6 +800,10 @@ class SequenceReferenceCallable(_PerBufferCallable):
     def _make_buffer(self, n_elements):
         return CPUOnlyTensor((n_elements,), dtype=BF16)
 
+    def _sync_inputs(self):
+        # CPU-only inputs must stay CPU-resident, including lazily created subviews.
+        pass
+
     def _run(self):
         torch = _torch()
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
