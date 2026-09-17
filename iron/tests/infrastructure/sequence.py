@@ -265,9 +265,9 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
 
     expected = torch.cat([a0 + b0, a1 + b1])
     errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
-    assert not errors, (
-        f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
-    )
+    assert (
+        not errors
+    ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
 
 
 # ---------------------------------------------------------------------------
