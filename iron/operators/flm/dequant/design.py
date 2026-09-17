@@ -3,15 +3,12 @@
 
 """q4nx to bfp16, emitting B in ``flm.GEMM``'s packed order. See README.md."""
 
-import sys
-
 import numpy as np
 
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-from aie.iron.controlflow import range_
 
 from iron.common.device_utils import get_kernel_dir
 
@@ -128,18 +125,17 @@ def dequant_bfp(
     )
 
     def core_body(qw_in, out_of, k):
-        """One iteration is one q4nx block, and every block is identical work.
+        """One q4nx block, which is every block's work.
 
-        The loop takes no trip count and reads no runtime parameter, so no K
-        or N reaches the device configuration. The shim sequence bounds the
-        real work, and the loop then blocks on an empty input fifo.
+        Worker repeats this until reconfiguration, so it takes no trip count
+        and reads no runtime parameter and no K or N reaches the device
+        configuration.
         """
-        for _ in range_(sys.maxsize):
-            qw = qw_in.acquire(1)
-            out = out_of.acquire(1)
-            k(qw, out)
-            qw_in.release(1)
-            out_of.release(1)
+        qw = qw_in.acquire(1)
+        out = out_of.acquire(1)
+        k(qw, out)
+        qw_in.release(1)
+        out_of.release(1)
 
     workers = []
     qw_prods, out_conses = [], []
