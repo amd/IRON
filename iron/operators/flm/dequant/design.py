@@ -4,7 +4,6 @@
 """q4nx to bfp16, emitting B in ``flm.GEMM``'s packed order. See README.md."""
 
 import sys
-from enum import StrEnum
 
 import numpy as np
 
@@ -51,13 +50,6 @@ CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
 
 
-class QwLayout(StrEnum):
-    """Block order in the buffer handed to the operator."""
-
-    FILE = "file"
-    ENGINE = "engine"
-
-
 def _run_geometry(run_out_features, run_period_out_features, n_blocks):
     if run_out_features is None and run_period_out_features is None:
         return n_blocks, n_blocks
@@ -90,15 +82,11 @@ def dequant_bfp(
     K,
     N,
     tile_n=N_TILE,
-    qw_layout=QwLayout.FILE,
     run_out_features=None,
     run_period_out_features=None,
     trace_size=0,
 ):
     """K in-features, N out-features. B reaches the GEMM as (K, N)."""
-    # The design generator round-trips its arguments, so a StrEnum arrives as a
-    # plain str and an identity test against it is silently false.
-    qw_layout = QwLayout(qw_layout)
     if dev.arch != AIEArch.AIE2p:
         raise NotImplementedError("bfp16ebs8 exists only on AIE2P")
     if tile_n != N_TILE:
@@ -186,15 +174,10 @@ def dequant_bfp(
             for r in range(ROWS)
         ]
 
-    # File order walks (block-column, n-half, block bytes); the k-half and the
-    # k-tile index collapse into blocks_per_row, which leaves a dimension to
-    # split the block into 10 x 512. Engine order has those blocks adjacent,
-    # so the same nest reads them linearly.
-    if qw_layout is QwLayout.ENGINE:
-        qw_strides = [2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1]
-    else:
-        qw_strides = [BLOCK_BYTES, blocks_per_row * BLOCK_BYTES, 512, 1]
+    # A column block is read straight through. The block is split 10 x 512 so
+    # the innermost size stays inside the BD's field.
     qw_sizes = [blocks_per_row, 2, BLOCK_BYTES // 512, 512]
+    qw_strides = [2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1]
 
     def qw_tap(cb):
         return TensorAccessPattern((1, qw_bytes), qw_offset(cb), qw_sizes, qw_strides)

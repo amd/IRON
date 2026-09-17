@@ -12,18 +12,16 @@ import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 
 from iron.common.test_utils import run_test
-from iron.operators.flm.dequant.design import QwLayout
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.dequant.reference import (
     random_q4nx,
     reference,
     scatter_runs,
-    to_engine_order,
 )
 
 # K = 512 is excluded: flm.GEMM picks tile_n = 128 there, which this operator
 # refuses. test_rejects_unservable_shapes covers it.
-SHAPES = [(1024, 128), (1536, 640), (2048, 256)]
+SHAPES = [(1024, 128), (1024, 512), (1536, 640), (2048, 256)]
 
 
 def _on_aie2p():
@@ -76,25 +74,15 @@ def test_output_feeds_gemm_unchanged(aie_context):
 
 
 @requires_aie2p
-@pytest.mark.parametrize("K, N", [(1024, 512), (1536, 640)])
-def test_engine_order_input(K, N, aie_context):
-    """Same bytes out as from file order."""
-    qw = random_q4nx(K, N, seed=11)
-    op = DequantBFP(K=K, N=N, qw_layout=QwLayout.ENGINE, context=aie_context)
-    _check(op, to_engine_order(qw, K, N), reference(qw, K, N), f"K={K} N={N}")
-
-
-@requires_aie2p
 def test_gate_up_interleaved_blob(aie_context):
     """gate and up share one blob at 512 out-features in a 1024 period."""
     K, N, run, period = 1024, 1024, 512, 1024
     qw = random_q4nx(K, N, seed=12)
-    blob = scatter_runs(to_engine_order(qw, K, N), K, N, run, period, seed=12)
+    blob = scatter_runs(qw, K, N, run, period, seed=12)
 
     op = DequantBFP(
         K=K,
         N=N,
-        qw_layout=QwLayout.ENGINE,
         run_out_features=run,
         run_period_out_features=period,
         context=aie_context,
@@ -116,8 +104,8 @@ def test_large_k_shapes(K, N, aie_context):
     """E2B's tall projections, whose k-tiles outnumber a shim tile's buffer
     descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches."""
     qw = random_q4nx(K, N, seed=21)
-    op = DequantBFP(K=K, N=N, qw_layout=QwLayout.ENGINE, context=aie_context)
-    _check(op, to_engine_order(qw, K, N), reference(qw, K, N), f"K={K} N={N}")
+    op = DequantBFP(K=K, N=N, context=aie_context)
+    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
 
 
 @requires_aie2p
@@ -133,11 +121,9 @@ def test_one_xclbin_serves_every_shape(aie_context):
         dict(K=1536, N=2048),
         dict(K=1024, N=320),
         dict(K=2048, N=1536),
-        dict(K=1024, N=512, qw_layout=QwLayout.ENGINE),
         dict(
             K=1024,
             N=1024,
-            qw_layout=QwLayout.ENGINE,
             run_out_features=512,
             run_period_out_features=1024,
         ),
@@ -149,8 +135,6 @@ def test_one_xclbin_serves_every_shape(aie_context):
         op = DequantBFP(context=aie_context, **case)
         qw = random_q4nx(K, N, seed=7)
         blob = qw
-        if case.get("qw_layout") is QwLayout.ENGINE:
-            blob = to_engine_order(qw, K, N)
         if case.get("run_out_features"):
             blob = scatter_runs(
                 blob, K, N, case["run_out_features"], case["run_period_out_features"], 7

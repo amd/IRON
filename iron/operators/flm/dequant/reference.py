@@ -39,7 +39,7 @@ def f32_to_bf16_floor(x):
 
 def dequantize(qw, K, N):
     """q4nx blob to f32, shaped (N out-features, K in-features)."""
-    blocks_per_row = K // K_TILE
+    k_tiles = K // K_TILE_B
     n_blocks = qw.size // BLOCK_BYTES
     if n_blocks * BLOCK_BYTES != qw.size:
         raise ValueError(
@@ -65,10 +65,14 @@ def dequantize(qw, K, N):
     m = mins[:, grp, :].transpose(0, 2, 1)
     vals = m + s * q
 
+    # Block i of the blob is the i'th the cores consume: README.md layers 6-9.
     out = np.empty((N, K), dtype=np.float32)
     for i in range(n_blocks):
-        r0 = (i // blocks_per_row) * M_TILE
-        c0 = (i % blocks_per_row) * K_TILE
+        cb, rest = divmod(i, 4 * k_tiles)
+        kb, rest = divmod(rest, 4)
+        k_half, n_half = divmod(rest, 2)
+        r0 = (2 * cb + n_half) * M_TILE
+        c0 = (2 * kb + k_half) * K_TILE
         out[r0 : r0 + M_TILE, c0 : c0 + K_TILE] = vals[i]
     return out
 
@@ -87,18 +91,6 @@ def reference(qw, K, N):
         bfp16=True,
         round_conv_even=False,
     ).numpy()
-
-
-def to_engine_order(qw, K, N):
-    """Permute a file-order blob into the order FastFlowLM's runtime writes,
-    which interleaves pairs of block-rows."""
-    bpr = K // K_TILE
-    blocks = np.asarray(qw, dtype=np.uint8).reshape(-1, BLOCK_BYTES)
-    out = np.empty_like(blocks)
-    for br in range(blocks.shape[0] // bpr):
-        for bc in range(bpr):
-            out[(br // 2) * 2 * bpr + bc * 2 + br % 2] = blocks[br * bpr + bc]
-    return out.ravel()
 
 
 def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):

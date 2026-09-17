@@ -122,30 +122,6 @@ def test_bytes_match_pack_b(K, N):
     assert np.array_equal(mine, golden)
 
 
-@pytest.mark.parametrize("K", [512, 1024, 1536, 3072, 12288])
-def test_engine_order_matches_file_order(K):
-    """A linear read of engine order must deliver what the gather does.
-
-    That equivalence makes QwLayout a descriptor switch. If the sequences
-    differed, each core would receive a different q4nx block."""
-    bpr = K // K_TILE
-    block_bytes = M_TILE * K_TILE * 5 // 8
-
-    for cb in range(3):
-        base = 2 * cb * bpr * block_bytes
-        gathered = [
-            (base + bc * block_bytes + br * bpr * block_bytes) // block_bytes
-            for bc in range(bpr)
-            for br in range(2)
-        ]
-        engine_of = {}
-        for br in range(2 * (cb + 1)):
-            for bc in range(bpr):
-                engine_of[(br // 2) * 2 * bpr + bc * 2 + br % 2] = br * bpr + bc
-        linear = [engine_of[2 * cb * bpr + i] for i in range(2 * bpr)]
-        assert gathered == linear, f"K={K} cb={cb}"
-
-
 def test_descriptors_are_dma_expressible():
     """A bfp16 block is 9 bytes and the DMA steps in 4, so only groups of
     blocks are addressable. DRAIN_DIMS is written in blocks; this checks the

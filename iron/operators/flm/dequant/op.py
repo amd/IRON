@@ -28,7 +28,6 @@ from iron.operators.flm.dequant.design import (
     K_TILE_B,
     M_TILE,
     N_TILE,
-    QwLayout,
     S,
     T,
     qw_bytes_for,
@@ -47,7 +46,6 @@ class DequantBFP(MLIROperator):
     K: int
     N: int
     tile_n: int = None
-    qw_layout: QwLayout = QwLayout.FILE
     run_out_features: int = None
     run_period_out_features: int = None
     context: object = field(default=None, repr=False)
@@ -75,8 +73,8 @@ class DequantBFP(MLIROperator):
     def _config_tag(self) -> str:
         """Everything that reaches the device configuration, and nothing else.
 
-        qw_layout and the interleave move offsets and strides inside the
-        runtime sequence, so one xclbin covers every combination of them.
+        The interleave moves offsets inside the runtime sequence, so one xclbin
+        covers every value of it.
         """
         dev = aie_utils.get_current_device().resolve().name
         return f"tn{self.tile_n}_{dev}"
@@ -93,7 +91,7 @@ class DequantBFP(MLIROperator):
         The build cache keys on filename, and ``iron.operators.Dequant`` would
         otherwise share this stem.
         """
-        base = f"FLM_DequantBFP_K{self.K}_N{self.N}_{self.qw_layout}"
+        base = f"FLM_DequantBFP_K{self.K}_N{self.N}"
         if self.run_out_features is not None:
             base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
         return f"{base}_{self._config_tag}"
@@ -125,7 +123,6 @@ class DequantBFP(MLIROperator):
                     K,
                     N,
                     self.tile_n,
-                    self.qw_layout,
                     self.run_out_features,
                     self.run_period_out_features,
                 ),

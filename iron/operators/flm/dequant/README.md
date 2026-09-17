@@ -31,11 +31,19 @@ Each layer holds a whole number of the layer below it.
 | 3 | half | 256 slices, stepping `k` by 1 | 4096 | 2048 |
 | 4 | codes | 2 halves, stepping `n` by 16 | 8192 | 4096 |
 | 5 | block | 512 B scales, 512 B mins, then layer 4 | 8192 | 5120 |
-| 6 | matrix | (N/32) x (K/256) blocks, row-major | N·K | 5·N·K/8 |
+| 6 | pair | 2 blocks, stepping `n` by 32 | 16384 | 10240 |
+| 7 | object | 2 pairs, stepping `k` by 256 | 32768 | 20480 |
+| 8 | column block | K/512 objects, stepping `k` by 512 | 64·K | 40·K |
+| 9 | matrix | N/64 column blocks, stepping `n` by 64 | N·K | 5·N·K/8 |
 
 A scale and a min cover 32 consecutive `k` for one `n`, so a block has 8 groups
 over its 32 `n`. The reader computes `min + scale * code`: the min is an
 offset, not a subtracted zero point.
+
+Layers 6 to 9 are the operator's input contract. It reads them as one linear
+sweep, so a layer 7 object is the four blocks one column's four cores take, in
+the order they take them. Whoever fills the buffer owes this order; the
+operator assumes it and validates nothing above layer 5.
 
 ## Output layout
 
@@ -79,22 +87,12 @@ instruction streams.
 
 ## Parameters
 
-`qw_layout` selects the block order in the buffer:
-
-| | order |
-|---|---|
-| `QwLayout.FILE` | layer 6 above: blocks row-major |
-| `QwLayout.ENGINE` | pairs of block-rows interleaved, which FastFlowLM's runtime writes |
-
-Both deliver the same blocks to the same cores in the same sequence, so only
-the shim descriptor differs.
-
 `run_out_features` and `run_period_out_features` describe a matrix interleaved
 with another in one buffer. FastFlowLM packs gate and up at 512 out-features
 each in a 1024 period:
 
 ```python
-DequantBFP(K=1536, N=6144, qw_layout="engine",
+DequantBFP(K=1536, N=6144,
            run_out_features=512, run_period_out_features=1024, ...)
 ```
 
