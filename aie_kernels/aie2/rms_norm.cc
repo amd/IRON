@@ -38,20 +38,20 @@ void rms_norm_general(const T *restrict input,
 
     float rms = sum_sq / cols + epsilon;
     float inv_rms = invsqrt(rms);
-    // Normalize in f32 and round once/ Mirrors layer_norm.cc's accfloat path.
-    ::aie::accum<accfloat, N> inv_rms_v;
-    inv_rms_v.from_vector(::aie::broadcast<float, N>(inv_rms), 0);
+    // Peano has no f32 vector multiply for AIE2, so the f32 scale rides in a
+    // bf16 pair and is applied as two exact products accumulated in f32. A
+    // single bf16 scale would shift every element of a norm the same way.
+    T inv_rms_hi = static_cast<T>(inv_rms);
+    T inv_rms_lo = static_cast<T>(inv_rms - static_cast<float>(inv_rms_hi));
 
     for (int i = 0; i < vector_chunks; i++) {
-        ::aie::accum<accfloat, N> reg_a;
-        reg_a.from_vector(::aie::load_v<N>(input + i * N), 0);
-        reg_a = ::aie::mul(reg_a.template to_vector<float>(), inv_rms_v.template to_vector<float>());
+        ::aie::vector<T, N> reg_a = ::aie::load_v<N>(input + i * N);
+        ::aie::accum<accfloat, N> acc = ::aie::mul(reg_a, inv_rms_hi);
+        acc = ::aie::mac(acc, reg_a, inv_rms_lo);
         if (input2) {
-            ::aie::accum<accfloat, N> reg_b;
-            reg_b.from_vector(::aie::load_v<N>(input2 + i * N), 0);
-            reg_a = ::aie::mul(reg_a.template to_vector<float>(), reg_b.template to_vector<float>());
+            acc = ::aie::mul(acc.template to_vector<T>(), ::aie::load_v<N>(input2 + i * N));
         }
-        ::aie::store_v(output + i * N, reg_a.template to_vector<T>());
+        ::aie::store_v(output + i * N, acc.template to_vector<T>());
     }
 
     if (remaining > 0) {

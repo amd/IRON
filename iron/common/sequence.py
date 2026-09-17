@@ -7,17 +7,49 @@ import time
 from pathlib import Path
 import numpy as np
 import ml_dtypes
-import pyxrt
-import torch
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 
+try:
+    import pyxrt
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+except ImportError:
+    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The two
+    # on-device dispatch policies below are XRT-native (pyxrt.elf / hw_context / run,
+    # plus XRTTensor views), so they cannot run there; _require_xrt() makes that
+    # explicit at construction. The CPU policy and the whole compile path do not care,
+    # and must keep importing.
+    pyxrt = None
+    XRTTensor = None
+
 logger = logging.getLogger(__name__)
+
+
+def _torch():
+    """Import torch for CPU reference/compare paths. Compile and NPU dispatch do not."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "OperatorSequence CPU reference/compare modes need torch. "
+            "Compile and NPU dispatch do not."
+        ) from exc
+    return torch
+
+
+def _require_xrt() -> None:
+    """Fail with the reason, rather than an AttributeError on ``None.elf``."""
+    if pyxrt is None:
+        raise RuntimeError(
+            "this OperatorSequence dispatch policy needs the XRT host runtime (pyxrt), "
+            "which is not installed. Use SequenceCPUCallable, or run a single operator "
+            "(AIEOperatorBase), which dispatches through aie.utils.DefaultNPURuntime and "
+            "works on any backend."
+        )
 
 
 # ##########################################################################
@@ -65,6 +97,12 @@ class AutoDispatch(SequenceDispatch):
         return SeparateDispatch()
 
 
+def _trace_tag(seq):
+    """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
+    untraced one's ELF. Empty when untraced."""
+    return f"_traced{seq.trace_size}" if seq.trace_size else ""
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -81,10 +119,11 @@ class FusedDispatch(SequenceDispatch):
         mlir_artifact = self.build_fused_mlir(seq)
         kernel_objects = self._collect_kernel_artifacts(seq)
         full_elf_artifact = comp.FullElfArtifact(
-            f"{seq.name}.elf",
+            f"{seq.name}{_trace_tag(seq)}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
+            trace_size=seq.trace_size,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -112,12 +151,13 @@ class FusedDispatch(SequenceDispatch):
             comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
         return comp.SequenceMLIRArtifact(
-            seq.name + "_fused.mlir",
+            f"{seq.name}{_trace_tag(seq)}_fused.mlir",
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,
             subbuffer_layout=seq.subbuffer_layout,
             buffer_sizes=seq.buffer_sizes,
             slice_info=seq.slice_info,
+            trace_size=seq.trace_size,
         )
 
     def _collect_kernel_artifacts(self, seq):
@@ -264,6 +304,7 @@ class OperatorSequence(AIEOperatorBase):
         buffer_sizes=None,
         dispatch="auto",
         extra_flags=None,
+        trace_size=0,
         share_designs=False,
         *args,
         **kwargs,
@@ -287,9 +328,10 @@ class OperatorSequence(AIEOperatorBase):
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
-        # Extra aiecc flags forwarded to the full-ELF build. Empty by default, so
-        # other sequences are unaffected.
+        # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
+        # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
+        self.trace_size = trace_size
         self.share_designs = share_designs
         self._dispatch = dispatch
 
@@ -543,6 +585,7 @@ class SequenceFullELFCallable(SequenceCallable):
     """
 
     def __init__(self, op, device_name="main", sequence_name="sequence"):
+        _require_xrt()
         self.device_name = device_name
         self.sequence_name = sequence_name
 
@@ -562,6 +605,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(0, self.input_buffer.buffer_object())
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -569,19 +614,21 @@ class SequenceFullELFCallable(SequenceCallable):
     def params(self):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
-        The ``params.txt`` describing the runtime parameters is written by
-        ``aie-lower-parameters`` directly into the aiecc work dir (see
-        ``_aiecc_work_dir``) for the fused MLIR source -- compile_mlir_module()
-        passes that dir as aiecc's explicit ``--tmpdir``, so aiecc uses it as
-        the project dir itself rather than nesting a "<input>.prj" subdirectory
-        under it. Returns ``None`` if the sequence declared no runtime
-        parameters (in which case the file is not written).
+        The ``params.txt`` describing the runtime parameters is requested from
+        aiecc via ``--get-scratchpad-parameters``; it is a graph output, so it
+        lands in aiecc's ``--output-dir``, which compile_mlir_module() points at
+        the work dir (see ``_aiecc_work_dir``) for the fused MLIR source.
+        Returns ``None`` if the sequence declared no runtime parameters: the
+        file is still written, but holds a count of zero and there is no ctrl
+        scratchpad buffer object to bind to.
         """
         if self._params is not None:
             return self._params
         mlir_filename = self.op.artifacts[0].mlir_input.filename
         params_path = comp._aiecc_work_dir(mlir_filename) / "params.txt"
         if not params_path.exists():
+            return None
+        if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
         from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
             ParameterScratchpad,
@@ -597,6 +644,20 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
+        # Trace lowering appends one buffer covering every configured design, after
+        # the consolidated three. Its size depends on how many channels and
+        # sub-designs claim a share, so read it from the lowered module.
+        self.trace_buffer = None
+        if self.op.trace_size:
+            total = comp.trace_buffer_size(self.lowered_mlir_text())
+            if total:
+                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+
+    def lowered_mlir_text(self) -> str:
+        """aiecc's post-lowering module, which carries the trace buffer layout."""
+        mlir_filename = self.op.artifacts[0].mlir_input.filename
+        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
+        return path.read_text()
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -624,6 +685,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()
@@ -683,6 +747,7 @@ class SequenceXclbinCallable(_PerBufferCallable):
     """
 
     def __init__(self, op, dispatch):
+        _require_xrt()
         self._dispatch = dispatch
         super().__init__(op)
 
@@ -736,6 +801,7 @@ class SequenceReferenceCallable(_PerBufferCallable):
         return CPUOnlyTensor((n_elements,), dtype=BF16)
 
     def _run(self):
+        torch = _torch()
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
             inputs = [
                 _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
@@ -782,6 +848,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
         kernel(*args)
 
+        torch = _torch()
         npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
         ref_out = step_op.reference(*cpu_inputs)
 

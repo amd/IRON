@@ -19,12 +19,18 @@ template <typename T_in, typename T_out> void eltwise_mul(T_in *a, T_in *b, T_ou
 template <typename T_in, typename T_out> void eltwise_vmul(T_in *a, T_in *b, T_out *c, int size)
 {
 
+    constexpr int vec_factor = 32;
     event0();
-    for (int i = 0; i < size; i += 32) {
-        auto A = aie::load_v<32>(a + i);
-        auto B = aie::load_v<32>(b + i);
+    // Bound on the last full vector, remainder scalar-wise; see add.cc.
+    const int F = size / vec_factor;
+    for (int i = 0; i < F * vec_factor; i += vec_factor) {
+        auto A = aie::load_v<vec_factor>(a + i);
+        auto B = aie::load_v<vec_factor>(b + i);
         auto C = aie::mul(A, B).template to_vector<T_out>();
         aie::store_v(c + i, C);
+    }
+    for (int i = F * vec_factor; i < size; i++) {
+        c[i] = a[i] * b[i];
     }
     event1();
 }

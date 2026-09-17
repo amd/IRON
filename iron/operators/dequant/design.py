@@ -8,6 +8,8 @@ from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
+from iron.common.device_utils import get_kernel_dir
+
 
 def my_dequant_kernel(
     dev,
@@ -62,7 +64,7 @@ def my_dequant_kernel(
     # AIE Core Function declaration
     dequant_kernel = Kernel(
         "expand_int4_to_bfloat16",
-        f"expand_aie2_{tile_size}.o",
+        f"expand_{get_kernel_dir(dev)}_{tile_size}.o",
         [in_tile_ty, out_tile_ty],
     )
 

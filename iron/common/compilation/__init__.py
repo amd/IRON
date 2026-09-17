@@ -17,10 +17,12 @@ from .base import (
     KernelObjectArtifact,
     KernelArchiveArtifact,
     PythonGeneratedMLIRArtifact,
+    RemoteFileArtifact,
     CompilationCommand,
     ShellCompilationCommand,
     PythonCallbackCompilationCommand,
     CompilationRule,
+    DownloadCompilationRule,
     GenerateMLIRFromPythonCompilationRule,
     AieccCompilationRule,
     AieccFullElfCompilationRule,
@@ -31,4 +33,5 @@ from .base import (
 from .sequence import (
     SequenceMLIRArtifact,
     FusePythonGeneratedMLIRCompilationRule,
+    trace_buffer_size,
 )

@@ -143,10 +143,14 @@ def pytest_runtest_makereport(item, call):
             nodeid_components = re.match(
                 r"^(.+?::[^\[]+)\[(iter\d+-)?(.+?)\]$", item.nodeid
             )
-            if not nodeid_components:
-                raise RuntimeError(f"Unexpected test nodeid format: {item.nodeid}")
-            test_path = nodeid_components.group(1)
-            test_name = nodeid_components.group(3)
+            if nodeid_components:
+                test_path = nodeid_components.group(1)
+                test_name = nodeid_components.group(3)
+            else:
+                # A test with no parameters carries no [...] suffix, so won't
+                # match the regex above.
+                test_path = item.nodeid
+                test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
             captured = report.capstdout
