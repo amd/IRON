@@ -109,6 +109,43 @@ def test_large_k_shapes(K, N, aie_context):
 
 
 @requires_aie2p
+@pytest.mark.extensive
+@pytest.mark.parametrize(
+    "K, N",
+    [
+        (2560, 2560),  # o-proj
+        (10240, 2560),  # down
+        (2560, 10240),  # gate/up
+    ],
+)
+def test_e4b_shapes(K, N, aie_context):
+    """E4B's projections, as B is (K, N). These are the shapes flm.GEMM's own
+    extensive set covers, so the two operators are exercised on the same model."""
+    qw = random_q4nx(K, N, seed=33)
+    op = DequantBFP(K=K, N=N, context=aie_context)
+    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+
+
+@requires_aie2p
+@pytest.mark.extensive
+def test_e4b_gate_up_interleaved(aie_context):
+    """E4B's gate/up blob: 5120 out-features each in a 10240 period."""
+    K, N, run, period = 2560, 10240, 5120, 10240
+    qw = random_q4nx(K, N, seed=34)
+    blob = scatter_runs(qw, K, N, run, period, seed=34)
+
+    op = DequantBFP(
+        K=K,
+        N=N,
+        run_out_features=run,
+        run_period_out_features=period,
+        context=aie_context,
+    )
+    assert op.quantized_size() == blob.size
+    _check(op, blob, reference(qw, K, N), "E4B gate/up interleave")
+
+
+@requires_aie2p
 def test_one_xclbin_serves_every_shape(aie_context):
     """Several shapes and parameter sets back to back on one loaded xclbin.
 

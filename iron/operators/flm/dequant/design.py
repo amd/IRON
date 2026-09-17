@@ -12,15 +12,22 @@ from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 
 from iron.common.device_utils import get_kernel_dir
 
+# flm.GEMM's B tiling, imported rather than restated: this design has to write
+# the buffer in the order that one reads it, and two copies would drift.
+from iron.operators.flm.gemm.design import (
+    BFP16_GROUP,
+    CT_MAX_K_FOR_N,
+    K_TILE as K_TILE_B,
+    N_TILE_DEFAULT as N_TILE,
+    S,
+    T,
+)
+
 # q4nx block: 32 out-features x 256 in-features, 32 weights per scale and min.
 M_TILE, K_TILE, GROUP = 32, 256, 32
 BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
 
-# flm.GEMM's B tiling. These must equal gemm/design.py's or the GEMM reads the
-# buffer in a different order than this design writes it.
-N_TILE, K_TILE_B, CT_K = 64, 512, 128
-S = T = 8
-BFP16_GROUP = 8
+CT_K = CT_MAX_K_FOR_N[N_TILE]
 
 ROWS, COLS = 4, 8
 
@@ -40,6 +47,8 @@ DRAIN_DIMS = [
     (SPLIT, RUN // SPLIT),
     (RUN // SPLIT, 1),
 ]
+DRAIN_SIZES = [d[0] for d in DRAIN_DIMS]
+DRAIN_STRIDES = [d[1] for d in DRAIN_DIMS]
 
 # Core i takes n-half i % 2 and k-half i // 2, so cores 0/1 form the k-half 0
 # object and cores 2/3 the k-half 1 object.
@@ -105,9 +114,6 @@ def dequant_bfp(
         run_out_features, run_period_out_features, n_blocks
     )
 
-    def qw_offset(cb):
-        return ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
-
     qw_bytes = qw_bytes_for(K, N, run_out_features, run_period_out_features)
     out_blocks = K * N // BFP16_GROUP
 
@@ -169,24 +175,20 @@ def dequant_bfp(
     qw_sizes = [blocks_per_row, 2, BLOCK_BYTES // 512, 512]
     qw_strides = [2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1]
 
-    def qw_tap(cb):
-        return TensorAccessPattern((1, qw_bytes), qw_offset(cb), qw_sizes, qw_strides)
-
-    def out_tap(cb, kb, h):
-        return TensorAccessPattern(
-            (1, out_blocks),
-            (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
-            [d[0] for d in DRAIN_DIMS],
-            [d[1] for d in DRAIN_DIMS],
-        )
-
     def sequence(QW, OUT, qw_prod_hs, out_cons_hs):
         for cb0 in range(0, n_blocks, COLS):
             columns = [(c, cb0 + c) for c in range(COLS) if cb0 + c < n_blocks]
 
             tg_fill = TaskGroup()
             for c, cb in columns:
-                qw_prod_hs[c].fill(QW, qw_tap(cb), group=tg_fill)
+                offset = (
+                    (cb // run_blocks) * period_blocks + cb % run_blocks
+                ) * cb_bytes
+                qw_prod_hs[c].fill(
+                    QW,
+                    TensorAccessPattern((1, qw_bytes), offset, qw_sizes, qw_strides),
+                    group=tg_fill,
+                )
 
             prev = None
             for kb in range(k_tiles):
@@ -194,7 +196,15 @@ def dequant_bfp(
                 for c, cb in columns:
                     for h in range(HALVES):
                         out_cons_hs[c][h].drain(
-                            OUT, out_tap(cb, kb, h), wait=True, group=tg
+                            OUT,
+                            TensorAccessPattern(
+                                (1, out_blocks),
+                                (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
+                                DRAIN_SIZES,
+                                DRAIN_STRIDES,
+                            ),
+                            wait=True,
+                            group=tg,
                         )
                 # finish() awaits the group, so closing the previous k-tile
                 # here overlaps its wait with this one, already running.
