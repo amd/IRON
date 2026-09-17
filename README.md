@@ -45,6 +45,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [Element-wise Add](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add/](./iron/operators/elementwise_add/) |
 | [Element-wise Mul](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul/](./iron/operators/elementwise_mul/) |
 | [GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm/](./iron/operators/gemm/) |
+| [Alternative GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/mm_fused.cc) | General Matrix Multiplication with a fused activation epilogue, specialised for transformer projection shapes. M, K and N are runtime parameters, so one xclbin serves every shape. B is stored as bfp16 on AIE2P | bfloat16, bfp16 | ✓ | ✓ | 🟢 | [iron/operators/flm/gemm/](./iron/operators/flm/gemm/) |
 | [GEMV](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv/](./iron/operators/gemv/) |
 | [GQA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
 | [MHA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
@@ -58,6 +59,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy/](./iron/operators/axpy/) |
 | [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
 | [Dequant](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant/](./iron/operators/dequant/) |
+| [Dequant to bfp16](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/q4nx_dequant.cc) | Dequant Q4NX to bfp16, laid out for the B operand of the [alternative GEMM](./iron/operators/flm/gemm/) | q4nx → bfp16 | | ✓ | 🟢 | [iron/operators/flm/dequant/](./iron/operators/flm/dequant/) |
 | [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu/](./iron/operators/relu/) |
 | [Leaky RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
 | [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
