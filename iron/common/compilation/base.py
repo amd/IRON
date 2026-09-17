@@ -618,6 +618,15 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
     link_files_from(build_dir / get_kernel_dir())
 
 
+# aiecc's own default. "1" here made every design's per-core compiles serial: on
+# the encoder-MHA design (24 cores) aiecc costs 7.7 s at -j1 and 6.0 s at -j0, and
+# nothing above 8 helps. Safe because -j does not change what aiecc produces --
+# measured on that design, insts.bin and all 24 per-core ELFs are byte-identical
+# between -j1 and -j16, and input_with_addresses.mlir differs only in the work-dir
+# path it embeds, which two runs at the SAME -j also differ in.
+_AIECC_DEFAULT_JOBS = "0"
+
+
 class AieccCompilationRule(CompilationRule):
     def __init__(self, use_chess=False, *args, **kwargs):
         self.use_chess = use_chess
@@ -636,7 +645,7 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
             mlir_source = artifact.mlir_input
             work_dir = _aiecc_work_dir(mlir_source.filename)
             options = [
-                f"-j{os.environ.get('AIECC_JOBS', '1')}",
+                f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}",
                 "--expand-load-pdis",
                 "--get-scratchpad-parameters",
             ] + artifact.extra_flags
@@ -689,7 +698,7 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         commands = []
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
         for mlir_source in mlir_sources:
-            options = [f"-j{os.environ.get('AIECC_JOBS', '1')}"]
+            options = [f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}"]
             xclbin_path = None
             insts_path = None
             do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
