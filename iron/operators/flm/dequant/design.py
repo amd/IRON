@@ -125,12 +125,6 @@ def dequant_bfp(
     )
 
     def core_body(qw_in, out_of, k):
-        """One q4nx block, which is every block's work.
-
-        Worker repeats this until reconfiguration, so it takes no trip count
-        and reads no runtime parameter and no K or N reaches the device
-        configuration.
-        """
         qw = qw_in.acquire(1)
         out = out_of.acquire(1)
         k(qw, out)
