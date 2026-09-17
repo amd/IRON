@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import aie.utils as aie_utils
+from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 
@@ -216,16 +217,10 @@ def run_test(
         else:
             raise ValueError(f"Unsupported direction: {spec.direction}")
 
-    # Run warmup iterations
-    for _ in range(warmup_iters):
-        op_func(*args)
-
-    # Run timed iterations and measure NPU execution time
-    total_npu_ns = 0
-    for _ in range(timed_iters):
-        result = op_func(*args)
-        total_npu_ns += result.npu_time
-    latency_us = (total_npu_ns / timed_iters) / 1e3
+    benchmark = run_iters(op_func, *args, warmup=warmup_iters, iters=timed_iters)
+    if benchmark.npu is None:
+        raise RuntimeError("Operator callable did not report NPU execution time")
+    latency_us = benchmark.npu.avg_us
 
     # Verify outputs
     errors = {}
