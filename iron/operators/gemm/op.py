@@ -143,13 +143,20 @@ class GEMM(MLIROperator):
             kernel_flags.append("-DC_COL_MAJ")
 
         kernel_dir = get_kernel_dir()
+        # INTERIM: aie2 sources a patched mm.cc from the tree (see the rounding
+        # note in aie_kernels/aie2/mm.cc); aie2p is unaffected and sources from
+        # the package. The -I lets the in-tree file's zero.cc and
+        # ../aie_kernel_utils.h includes resolve from the unchanged package copies.
+        if kernel_dir == "aie2":
+            mm_source = base_dir / "aie_kernels" / kernel_dir / "mm.cc"
+            kernel_flags.append(f"-I{self.context.kernels_dir / kernel_dir}")
+        else:
+            mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / kernel_dir / "mm.cc")
-                ],
+                dependencies=[SourceArtifact(mm_source)],
             ),
             KernelObjectArtifact(
                 "cast_f32_bf16.o",
