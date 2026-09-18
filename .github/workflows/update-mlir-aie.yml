@@ -51,6 +51,32 @@ jobs:
           echo "tag_with_v=$latest_tag_with_v" >> $GITHUB_OUTPUT
           echo "tag=$latest_tag" >> $GITHUB_OUTPUT
 
+      - name: Get the llvm-aie (Peano) version that release validated
+        id: matched_peano
+        if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # mlir-aie pins the Peano nightly it validated in utils/peano-requirements.txt
+          # and bumps it from its own update-peano workflow, so reading it at the release
+          # tag gives a pair that has already been tested together.
+          pin=$(gh api "repos/Xilinx/mlir-aie/contents/utils/peano-requirements.txt?ref=${{ steps.latest_release.outputs.tag_with_v }}" \
+                  --jq '.content' | base64 -d | sed -n 's/^llvm-aie==//p')
+          if [ -z "$pin" ]; then
+            echo "No llvm-aie pin found in mlir-aie at ${{ steps.latest_release.outputs.tag_with_v }}."
+            exit 1
+          fi
+          echo "Matched llvm-aie version: $pin"
+          echo "raw_version=$pin" >> $GITHUB_OUTPUT
+
+      - name: Get current llvm-aie (Peano) version
+        id: current_peano
+        if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
+        run: |
+          raw_version=$(grep 'llvm-aie==' requirements.txt | cut -d'=' -f3)
+          echo "Current llvm-aie version: $raw_version"
+          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
+
       - name: Compare versions and create PR
         if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
         env:
@@ -76,6 +102,7 @@ jobs:
           # Update requirements.txt
           sed -i "s|==${{ steps.current_version.outputs.raw_version }}|==${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
           sed -i "s|mlir-aie/releases/expanded_assets/.*|mlir-aie/releases/expanded_assets/${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
+          sed -i "s|^llvm-aie==.*|llvm-aie==${{ steps.matched_peano.outputs.raw_version }}|" requirements.txt
           
           # Commit changes
           git add requirements.txt
@@ -85,7 +112,7 @@ jobs:
           git push --set-upstream origin $new_branch
           
           # Create Pull Request
-          sed 's/Describe the intent of your PR here./This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}./' .github/PULL_REQUEST_TEMPLATE.md | \
+          sed 's|Describe the intent of your PR here.|This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}, and the llvm-aie (Peano) pin from ${{ steps.current_peano.outputs.raw_version }} to ${{ steps.matched_peano.outputs.raw_version }} -- the version that release validated.|' .github/PULL_REQUEST_TEMPLATE.md | \
           gh pr create \
             --base devel \
             --head $new_branch \
