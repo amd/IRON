@@ -168,20 +168,26 @@ class GEMM(MLIROperator):
             ),
         ]
 
-    def get_arg_spec(self):
-        dtype_in = str_to_dtype(self.dtype_in)
-        dtype_out = str_to_dtype(self.dtype_out)
+    @staticmethod
+    def arg_spec(
+        M, K, N, b_col_maj=False, c_col_maj=False, dtype_in="bf16", dtype_out="bf16"
+    ):
+        """A @ B = C, with either operand optionally stored column-major.
+
+        The layout flags transpose a declared shape rather than resize it.
+        This is the case that keeps shape rules as ordinary Python: a
+        conditional says it plainly, and any shape-expression language able to
+        express it would have become Python again.
+        """
+        a_dtype = str_to_dtype(dtype_in)
+        c_dtype = str_to_dtype(dtype_out)
         return [
-            AIERuntimeArgSpec("in", (self.M, self.K), dtype=dtype_in),  # input A
+            AIERuntimeArgSpec("in", (M, K), dtype=a_dtype),  # input A
             AIERuntimeArgSpec(
-                "in",
-                (self.K, self.N) if not self.b_col_maj else (self.N, self.K),
-                dtype=dtype_in,
+                "in", (N, K) if b_col_maj else (K, N), dtype=a_dtype
             ),  # input B (weights)
             AIERuntimeArgSpec(
-                "out",
-                (self.M, self.N) if not self.c_col_maj else (self.N, self.M),
-                dtype=dtype_out,
+                "out", (N, M) if c_col_maj else (M, N), dtype=c_dtype
             ),  # output C
         ]
 

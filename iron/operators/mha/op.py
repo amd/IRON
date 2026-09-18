@@ -104,13 +104,21 @@ class MHA(MLIROperator):
             ),
         ]
 
-    def get_arg_spec(self):
-        seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
+    @staticmethod
+    def arg_spec(num_heads, seq_len, d, num_KV_heads, num_of_pipelines=1):
+        """Q, K, V in and O out, with the sequence padded to a pipeline multiple.
+
+        The shape depends on a helper call and a branch, neither of which a
+        declarative shape notation would carry: the padding rounds seq_len up,
+        and num_KV_heads == 0 means plain MHA, so K and V are as wide as Q
+        rather than grouped.
+        """
+        seq_padding = MHA._calculate_seq_padding(seq_len, num_of_pipelines)
         # design.py declares Q/O as (heads, S_q_pad, d) and K/V as
         # (num_KV_heads, S_kv_pad * d); num_KV_heads == 0 means plain MHA.
-        kv_heads = self.num_KV_heads if self.num_KV_heads else self.num_heads
-        q_size = self.num_heads * self.d * seq_padding
-        kv_size = kv_heads * self.d * seq_padding
+        kv_heads = num_KV_heads if num_KV_heads else num_heads
+        q_size = num_heads * d * seq_padding
+        kv_size = kv_heads * d * seq_padding
         return [
             AIERuntimeArgSpec("in", (q_size,)),  # Q
             AIERuntimeArgSpec("in", (kv_size,)),  # K
@@ -118,7 +126,8 @@ class MHA(MLIROperator):
             AIERuntimeArgSpec("out", (q_size,)),  # O
         ]
 
-    def _calculate_seq_padding(self, seq_len, num_pipeline=1):
+    @staticmethod
+    def _calculate_seq_padding(seq_len, num_pipeline=1):
         return ((seq_len + 63 * num_pipeline) // (64 * num_pipeline)) * (
             64 * num_pipeline
         )

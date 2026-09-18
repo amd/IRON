@@ -51,9 +51,54 @@ class AIEOperatorBase(ABC):
         """
         pass
 
-    @abstractmethod
+    def bind(self, fn: Callable) -> dict[str, Any]:
+        """Collect ``fn``'s parameters from this operator's own attributes.
+
+        Matching is by name and nothing else: a parameter is filled from the
+        attribute of the same name, whether that is a dataclass field or a
+        property. A parameter with no matching attribute and no default is an
+        error *here*, naming both sides -- rather than a TypeError from deep
+        inside a design, or worse, a silently defaulted value.
+
+        This replaces the hand-written kwargs dict each operator used to keep,
+        which restated every field's name a second time and drifted from the
+        signature it was feeding with nothing to catch it.
+        """
+        bound = {}
+        missing = []
+        for name, parameter in inspect.signature(fn).parameters.items():
+            if parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            if hasattr(self, name):
+                bound[name] = getattr(self, name)
+            elif parameter.default is inspect.Parameter.empty:
+                missing.append(name)
+        if missing:
+            raise TypeError(
+                f"{type(self).__name__} cannot supply {sorted(missing)} to "
+                f"{getattr(fn, '__qualname__', fn)}: no attribute of that name. "
+                f"Rename the parameter to match a field, or give it a default."
+            )
+        return bound
+
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        pass
+        """Return this operator's runtime argument specification.
+
+        Derived from the ``arg_spec`` shape function the operator declares,
+        with its parameters bound from the operator's own fields. Operators
+        whose spec is not a pure function of their fields override this
+        instead.
+        """
+        arg_spec = getattr(type(self), "arg_spec", None)
+        if arg_spec is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} declares neither an arg_spec() shape "
+                f"function nor a get_arg_spec() override."
+            )
+        return arg_spec(**self.bind(arg_spec))
 
     @abstractmethod
     def get_callable(self) -> Callable[..., Any]:

@@ -91,8 +91,9 @@ class Softmax(MLIROperator):
             ]
         return [softmax_obj]
 
-    def get_arg_spec(self):
-        return same_shape_unary(self.size)
+    @staticmethod
+    def arg_spec(rows, cols):
+        return same_shape_unary(rows * cols)
 
     def reference(self, x):
         """CPU reference: row-wise softmax over ``cols``.
