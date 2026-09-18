@@ -705,9 +705,6 @@ class _PerBufferCallable(SequenceCallable):
     def _make_buffer(self, n_elements):
         raise NotImplementedError
 
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        raise NotImplementedError
-
     def _allocate_buffers(self):
         self._buffers = {}
         for name, (_, _, length) in self.op.subbuffer_layout.items():
@@ -718,8 +715,9 @@ class _PerBufferCallable(SequenceCallable):
             return self._buffers[buf_name]
         if buf_name in self.op.slice_info:
             base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            sub = self._make_subbuffer(
-                self._buffers[base_name], start_bytes, end_bytes - start_bytes
+            size_bytes = end_bytes - start_bytes
+            sub = self._buffers[base_name].subview(
+                start_bytes, (size_bytes // BF16.itemsize,), BF16
             )
             self._buffers[buf_name] = sub
             return sub
@@ -755,11 +753,6 @@ class SequenceXclbinCallable(_PerBufferCallable):
 
     def _make_buffer(self, n_elements):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
-
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        return parent.subview(
-            offset_bytes, (size_bytes // BF16.itemsize,), ml_dtypes.bfloat16
-        )
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
@@ -807,15 +800,9 @@ class SequenceReferenceCallable(_PerBufferCallable):
     def _make_buffer(self, n_elements):
         return CPUOnlyTensor((n_elements,), dtype=BF16)
 
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        start = offset_bytes // BF16.itemsize
-        end = (offset_bytes + size_bytes) // BF16.itemsize
-        # Alias the parent's memory (numpy slice is zero-copy) so a write to
-        # this slice is visible when a later step reads the parent by name.
-        view = CPUOnlyTensor((end - start,), dtype=BF16)
-        view._data = parent.data[start:end]
-        view._shape = view._data.shape
-        return view
+    def _sync_inputs(self):
+        # CPU-only inputs must stay CPU-resident, including lazily created subviews.
+        pass
 
     def _run(self):
         torch = _torch()

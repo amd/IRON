@@ -140,7 +140,7 @@ def dump_traces(
     mlir_path, mlir_text = lowered_mlir(run)
     print(f"[trace] parsing against {mlir_path}")
 
-    words = buffer.to_torch().numpy().astype(np.uint8).view(np.uint32)
+    words = buffer.numpy().view(np.uint32).reshape(-1)
     tag = _slug(tag)
     raw = (out_dir / tag).with_suffix(".txt")
     raw.write_text("\n".join(f"{w:08x}" for w in words) + "\n")
