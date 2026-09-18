@@ -190,7 +190,10 @@ def test_one_xclbin_serves_every_shape(aie_context):
 @pytest.mark.parametrize(
     "K, N, exc, match",
     [
-        (512, 128, NotImplementedError, "tile_n"),
+        # Only AIE2P's flm.GEMM picks tile_n=128 for a single-k-iteration shape.
+        # AIE2 always picks 64, which is the order this operator emits, so there
+        # is nothing to refuse there. The shape checks below are arch-independent.
+        pytest.param(512, 128, NotImplementedError, "tile_n", marks=requires_aie2p),
         (1000, 128, ValueError, "multiple of"),
         (1024, 100, ValueError, "multiple of"),
     ],
