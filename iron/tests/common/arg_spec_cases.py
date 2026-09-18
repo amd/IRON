@@ -109,7 +109,18 @@ CASES = [
         "RMSNorm",
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
-    ("rope", "RoPE", [dict(rows=16, cols=64)]),
+    (
+        "rope",
+        "RoPE",
+        [
+            dict(rows=16, cols=64),
+            # angle_rows is an independent parameter that merely defaults to
+            # rows, so the angles buffer broadcasts. Without an explicit value
+            # RoPE reads as "three buffers of one shape" and would be grouped
+            # with the elementwise binaries, which it is not.
+            dict(rows=32, cols=64, angle_rows=8),
+        ],
+    ),
     (
         "sigmoid",
         "Sigmoid",
