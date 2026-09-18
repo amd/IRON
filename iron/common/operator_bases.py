@@ -94,8 +94,9 @@ class ChanneledUnaryOperator(MLIROperator):
             )
         super().__init__(context=self.context)
 
-    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        return same_shape_unary(self.size)
+    @staticmethod
+    def arg_spec(size) -> list[AIERuntimeArgSpec]:
+        return same_shape_unary(size)
 
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.
@@ -212,8 +213,9 @@ class BinaryElementwiseOperator(MLIROperator):
             )
         super().__init__(context=self.context)
 
-    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        return same_shape_binary(self.size)
+    @staticmethod
+    def arg_spec(size) -> list[AIERuntimeArgSpec]:
+        return same_shape_binary(size)
 
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.

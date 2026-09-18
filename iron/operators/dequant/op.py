@@ -76,8 +76,12 @@ class Dequant(MLIROperator):
             )
         ]
 
-    def get_arg_spec(self):
+    @staticmethod
+    def arg_spec(size, group_size=32):
+        # Packed input: two 4-bit values per byte, plus a bf16 scale and zero
+        # point per group. __post_init__ caches these as input_size/output_size.
+        input_size = (size // 2) + (size // group_size) * 2
         return [
-            AIERuntimeArgSpec("in", (self.input_size,), dtype=np.uint8),
-            AIERuntimeArgSpec("out", (self.output_size,), dtype=bfloat16),
+            AIERuntimeArgSpec("in", (input_size,), dtype=np.uint8),
+            AIERuntimeArgSpec("out", (size,), dtype=bfloat16),
         ]

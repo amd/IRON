@@ -114,13 +114,15 @@ class RMSNorm(MLIROperator):
             )
         return artifacts
 
-    def get_arg_spec(self):
-        specs = [AIERuntimeArgSpec("in", (self.size // self.tile_size, self.tile_size))]
-        if self.weighted:
-            specs.append(AIERuntimeArgSpec("in", (self.tile_size,)))
-        specs.append(
-            AIERuntimeArgSpec("out", (self.size // self.tile_size, self.tile_size))
-        )
+    @staticmethod
+    def arg_spec(size, tile_size, weighted=False):
+        # The optional weight sits between input and output, so this is not a
+        # same-shape unary even though the two ends match.
+        rows = (size // tile_size, tile_size)
+        specs = [AIERuntimeArgSpec("in", rows)]
+        if weighted:
+            specs.append(AIERuntimeArgSpec("in", (tile_size,)))
+        specs.append(AIERuntimeArgSpec("out", rows))
         return specs
 
     def reference(self, x, w=None):

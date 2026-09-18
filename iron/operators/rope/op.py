@@ -81,11 +81,14 @@ class RoPE(MLIROperator):
             ),
         ]
 
-    def get_arg_spec(self):
+    @staticmethod
+    def arg_spec(rows, cols, angle_rows=None):
+        # The angles broadcast: angle_rows divides rows, and defaults to it.
+        angle_rows = rows if angle_rows is None else angle_rows
         return [
-            AIERuntimeArgSpec("in", (self.rows, self.cols)),  # input tensor
-            AIERuntimeArgSpec("in", (self.angle_rows, self.cols)),  # angles
-            AIERuntimeArgSpec("out", (self.rows, self.cols)),  # output
+            AIERuntimeArgSpec("in", (rows, cols)),  # input tensor
+            AIERuntimeArgSpec("in", (angle_rows, cols)),  # angles
+            AIERuntimeArgSpec("out", (rows, cols)),  # output
         ]
 
     def reference(self, x, angles):

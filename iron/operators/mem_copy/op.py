@@ -69,5 +69,6 @@ class MemCopy(MLIROperator):
             )
         ]
 
-    def get_arg_spec(self):
-        return same_shape_unary(self.size)
+    @staticmethod
+    def arg_spec(size):
+        return same_shape_unary(size)

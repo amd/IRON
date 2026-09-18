@@ -100,11 +100,12 @@ class Transpose(MLIROperator):
             ),
         ]
 
-    def get_arg_spec(self):
+    @staticmethod
+    def arg_spec(M, N, num_batches=1):
         # A transpose relayouts a flat buffer; M*N == N*M, so both sides carry
         # the same shape and only the interpretation of it changes.
-        batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
-        return same_shape_unary(batch_dim + (self.M * self.N,))
+        batch_dim = (num_batches,) if num_batches > 1 else ()
+        return same_shape_unary(batch_dim + (M * N,))
 
     def reference(self, x):
         """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""

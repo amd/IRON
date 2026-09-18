@@ -54,12 +54,11 @@ class Repeat(MLIROperator):
     def get_kernel_artifacts(self):
         return []
 
-    def get_arg_spec(self):
+    @staticmethod
+    def arg_spec(rows, cols, repeat, dtype=bfloat16):
         return [
-            AIERuntimeArgSpec("in", (self.rows, self.cols), dtype=self.dtype),
-            AIERuntimeArgSpec(
-                "out", (self.rows * self.repeat, self.cols), dtype=self.dtype
-            ),
+            AIERuntimeArgSpec("in", (rows, cols), dtype=dtype),
+            AIERuntimeArgSpec("out", (rows * repeat, cols), dtype=dtype),
         ]
 
     def reference(self, x):

@@ -93,8 +93,11 @@ class StridedCopy(MLIROperator):
     def get_kernel_artifacts(self):
         return []
 
-    def get_arg_spec(self):
+    @staticmethod
+    def arg_spec(input_buffer_size, output_buffer_size, dtype=bfloat16):
+        # The two sizes are independent: a strided copy may gather from a large
+        # buffer into a small one.
         return [
-            AIERuntimeArgSpec("in", (int(self.input_buffer_size),), dtype=self.dtype),
-            AIERuntimeArgSpec("out", (int(self.output_buffer_size),), dtype=self.dtype),
+            AIERuntimeArgSpec("in", (int(input_buffer_size),), dtype=dtype),
+            AIERuntimeArgSpec("out", (int(output_buffer_size),), dtype=dtype),
         ]

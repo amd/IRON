@@ -141,12 +141,15 @@ class GEMV(MLIROperator):
             ]
         return [matvec_obj]
 
-    def get_arg_spec(self):
-        batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
+    @staticmethod
+    def arg_spec(M, K, num_batches=1):
+        # A single batch carries no batch dimension at all, rather than one of
+        # extent 1, so the unbatched shapes stay exactly as they were.
+        batch_dim = (num_batches,) if num_batches > 1 else ()
         return [
-            AIERuntimeArgSpec("in", batch_dim + (self.M, self.K)),  # matrix
-            AIERuntimeArgSpec("in", batch_dim + (self.K,)),  # vector
-            AIERuntimeArgSpec("out", batch_dim + (self.M,)),  # output
+            AIERuntimeArgSpec("in", batch_dim + (M, K)),  # matrix
+            AIERuntimeArgSpec("in", batch_dim + (K,)),  # vector
+            AIERuntimeArgSpec("out", batch_dim + (M,)),  # output
         ]
 
     def reference(self, A, B):
