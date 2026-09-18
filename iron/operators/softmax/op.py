@@ -9,12 +9,12 @@ from iron.common.device_utils import get_kernel_dir
 from iron.common.operator_bases import lut_based_ops_artifacts
 from iron.common import (
     MLIROperator,
-    AIERuntimeArgSpec,
     KernelArchiveArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
+    same_shape_unary,
 )
 
 
@@ -92,10 +92,7 @@ class Softmax(MLIROperator):
         return [softmax_obj]
 
     def get_arg_spec(self):
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),
-            AIERuntimeArgSpec("out", (self.size,)),
-        ]
+        return same_shape_unary(self.size)
 
     def reference(self, x):
         """CPU reference: row-wise softmax over ``cols``.

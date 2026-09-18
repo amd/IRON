@@ -213,3 +213,50 @@ class AIERuntimeArgSpec:
             raise ValueError(
                 f"Invalid direction {self.direction!r}: must be one of 'in', 'out', 'inout'"
             )
+
+    @property
+    def reads(self) -> bool:
+        """Whether the step consumes this buffer.
+
+        Asking the question directly, rather than comparing ``direction``
+        against a set at each call site, is what lets ``"inout"`` answer yes to
+        both this and :attr:`writes` -- which is the case a liveness analysis
+        gets wrong if it partitions arguments into inputs and outputs.
+        """
+        return self.direction in {"in", "inout"}
+
+    @property
+    def writes(self) -> bool:
+        """Whether the step produces this buffer."""
+        return self.direction in {"out", "inout"}
+
+    def nbytes(self) -> int:
+        """Size of this argument in bytes."""
+        return int(np.prod(self.shape) * np.dtype(self.dtype).itemsize)
+
+
+def same_shape_unary(size, dtype=bfloat16):
+    """One input and one output of identical shape.
+
+    Shared by every elementwise activation and by the operators that move or
+    relayout a buffer without resizing it. Those two groups have nothing in
+    common in their *designs* -- a ReLU and a transpose generate very different
+    MLIR -- which is exactly why this is a function rather than a base class:
+    an operator can reuse the shape rule without inheriting a design it does
+    not want.
+    """
+    shape = (size,) if isinstance(size, int) else tuple(size)
+    return [
+        AIERuntimeArgSpec("in", shape, dtype=dtype),
+        AIERuntimeArgSpec("out", shape, dtype=dtype),
+    ]
+
+
+def same_shape_binary(size, dtype=bfloat16):
+    """Two inputs and one output, all of identical shape."""
+    shape = (size,) if isinstance(size, int) else tuple(size)
+    return [
+        AIERuntimeArgSpec("in", shape, dtype=dtype),
+        AIERuntimeArgSpec("in", shape, dtype=dtype),
+        AIERuntimeArgSpec("out", shape, dtype=dtype),
+    ]

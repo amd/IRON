@@ -6,7 +6,7 @@ from typing import ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
-    AIERuntimeArgSpec,
+    same_shape_unary,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -70,7 +70,4 @@ class MemCopy(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),
-            AIERuntimeArgSpec("out", (self.size,)),
-        ]
+        return same_shape_unary(self.size)

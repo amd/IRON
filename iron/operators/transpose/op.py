@@ -7,7 +7,7 @@ from typing import ClassVar, Dict
 import aie.utils as aie_utils
 from iron.common import (
     MLIROperator,
-    AIERuntimeArgSpec,
+    same_shape_unary,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -101,11 +101,10 @@ class Transpose(MLIROperator):
         ]
 
     def get_arg_spec(self):
+        # A transpose relayouts a flat buffer; M*N == N*M, so both sides carry
+        # the same shape and only the interpretation of it changes.
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
-        return [
-            AIERuntimeArgSpec("in", batch_dim + (self.M * self.N,)),
-            AIERuntimeArgSpec("out", batch_dim + (self.N * self.M,)),
-        ]
+        return same_shape_unary(batch_dim + (self.M * self.N,))
 
     def reference(self, x):
         """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""

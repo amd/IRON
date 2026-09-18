@@ -9,7 +9,12 @@ from typing import Any, ClassVar
 
 import aie.utils as aie_utils
 
-from .base import MLIROperator, AIERuntimeArgSpec
+from .base import (
+    MLIROperator,
+    AIERuntimeArgSpec,
+    same_shape_unary,
+    same_shape_binary,
+)
 from .context import AIEContext
 from .compilation import (
     KernelArchiveArtifact,
@@ -90,10 +95,7 @@ class ChanneledUnaryOperator(MLIROperator):
         super().__init__(context=self.context)
 
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),
-            AIERuntimeArgSpec("out", (self.size,)),
-        ]
+        return same_shape_unary(self.size)
 
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.
@@ -211,11 +213,7 @@ class BinaryElementwiseOperator(MLIROperator):
         super().__init__(context=self.context)
 
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        return [
-            AIERuntimeArgSpec("in", (self.size,)),
-            AIERuntimeArgSpec("in", (self.size,)),
-            AIERuntimeArgSpec("out", (self.size,)),
-        ]
+        return same_shape_binary(self.size)
 
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.
