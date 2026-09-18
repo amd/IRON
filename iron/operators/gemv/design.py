@@ -10,6 +10,13 @@ from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 
+from iron.common.shim_bd import (
+    SHIM_MAX_STRIDE,
+    SHIM_MAX_WRAP,
+    shim_gran_elems,
+    split_run,
+)
+
 """
 Matrix-vector design
 
@@ -190,36 +197,18 @@ def my_matvec(
     # gathers its own slice out of every batch with a gap in between.
     #
     # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
-    # the AIE shim's 10-bit (1023) wrap-size cap.
-    #
-    # FIXME: pull these shim BD bounds from the MLIR-AIE target model rather than
-    # hard-coding them; they live in verifyStridesWraps in
-    # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
-    MAX_WRAP = 1023
-    GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
-    # The 20-bit shim BD step field counts address granules, not elements, so the
-    # bound converts: an element-unit bound is 2x too strict for bf16.
-    MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
-
-    def split_run(run, lim=MAX_WRAP, gran=GRAN_ELEMS):
-        """Factor a contiguous run into (hi, lo), both <= lim and lo a multiple of gran
-        (the address-granularity-aligned inner size), lo maximal. None if no such
-        split exists (caller then falls back to the per-batch path)."""
-        lo_start = (lim // gran) * gran
-        for lo in range(lo_start, 0, -gran):
-            if run % lo == 0 and (run // lo) <= lim:
-                return (run // lo, lo)
-        return None
-
+    # the ShimNOC BD's 10-bit (1023) wrap-size cap -- see SHIM_MAX_WRAP/split_run() in iron.common.shim_bd.
+    A_gran, C_gran = shim_gran_elems(dtype_in), shim_gran_elems(dtype_out)
     A_run, A_bstride = (M // cols) * K, M * K
     C_run, C_bstride = (M // cols), M
-    A_split, C_split = split_run(A_run), split_run(C_run)
+    A_split = split_run(A_run, gran=A_gran)
+    C_split = split_run(C_run, gran=C_gran)
     coalesce = (
         num_batches > 1
-        and A_bstride <= MAX_STRIDE
-        and C_bstride <= MAX_STRIDE
-        and A_bstride % GRAN_ELEMS == 0
-        and C_bstride % GRAN_ELEMS == 0
+        and A_bstride <= SHIM_MAX_STRIDE
+        and C_bstride <= SHIM_MAX_STRIDE
+        and A_bstride % A_gran == 0
+        and C_bstride % C_gran == 0
         and A_split is not None
         and C_split is not None
     )

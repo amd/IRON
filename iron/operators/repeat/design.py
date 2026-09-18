@@ -10,34 +10,28 @@ import numpy as np
 from aie.dialects.aiex import TensorAccessPattern
 from aie.iron import ObjectFifo, Program, Runtime, TaskGroup
 
+from iron.common.shim_bd import SHIM_MAX_WRAP, shim_gran_elems, split_run
+
 
 def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
     elem_bytes = np.dtype(dtype).itemsize
     dtype = np.dtype[dtype]
 
-    # Split cols into cols_split chunks of cols // cols_split. This is required to
-    # satisfy hardware constraints on BD dimensions. We must choose a split that
-    # does not exceed the hardware register sizes:
-    #   - the chunk length is the innermost dim: <= 1023 (10-bit wrap) AND a whole number
-    #     of 32-bit words, since the BD's innermost size is denominated in words
-    #   - the chunk count is the next dim out: <= 1023, the same wrap field
-    # An odd cols has only odd divisors, so no split of it is ever word-aligned at bf16;
-    # that is reported here rather than left to the BD verifier.
-    granule = max(1, 4 // elem_bytes)  # elements per 32-bit word
-    cols_split = None
-    for divisor in range(1, cols + 1):
-        if cols % divisor:
-            continue
-        chunk = cols // divisor
-        if chunk <= 1023 and divisor <= 1023 and chunk % granule == 0:
-            cols_split = divisor
-            break
-    if cols_split is None:
+    # One BD-split invariant, shared with gemv: the chunk length is the innermost dim and
+    # must be <= 1023 (10-bit wrap) and a whole number of 32-bit words; the chunk count is
+    # the next dim out, same wrap field. split_run maximises the inner length, which is what
+    # keeps the innermost DMA run long. An odd cols has only odd divisors, so no split of it
+    # is ever word-aligned at bf16; that is reported here rather than left to the BD verifier.
+    granule = shim_gran_elems(dtype)
+    split = split_run(cols, gran=granule)
+    if split is None:
         raise ValueError(
             f"Cannot split cols={cols} at {elem_bytes} bytes/element: need a divisor d "
-            f"with cols//d <= 1023, d <= 1023, and cols//d a multiple of {granule} "
-            f"({granule} elements = one 32-bit word). No divisor of {cols} satisfies all three."
+            f"with cols//d <= {SHIM_MAX_WRAP}, d <= {SHIM_MAX_WRAP}, and cols//d a multiple "
+            f"of {granule} ({granule} elements = one 32-bit word). "
+            f"No divisor of {cols} satisfies all three."
         )
+    cols_split, _chunk = split  # (count, length); sizes below put the length innermost
 
     if transfer_size is None:
         transfer_size = cols
