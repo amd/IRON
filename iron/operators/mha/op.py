@@ -49,20 +49,16 @@ class MHA(MLIROperator):
                 self.operator_dir / "design.py",
                 "fused_mha",
                 (),
-                {
-                    "dev": aie_utils.get_current_device(),
-                    "heads": self.num_heads,
+                # S_q and S_kv are separate design parameters that happen to be
+                # equal for this operator, so they cannot both bind from
+                # seq_len; emulate_bf16_mmul_with_bfp16 is a fixed choice here
+                # rather than a property of the operator.
+                kwargs={
                     "S_q": self.seq_len,
                     "S_kv": self.seq_len,
-                    "d": self.d,
-                    "B_q": self.B_q,
-                    "B_kv": self.B_kv,
-                    "num_KV_heads": self.num_KV_heads,
-                    "number_of_pipelines": self.num_of_pipelines,
                     "emulate_bf16_mmul_with_bfp16": True,
-                    "trace_size": 0,
-                    "verbose": False,
                 },
+                bind_from=self,
             ),
         )
 

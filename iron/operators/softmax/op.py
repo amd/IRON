@@ -46,7 +46,7 @@ class Softmax(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
-    def _kernel_link_file(self):
+    def kernel_obj_file(self):
         kernel_dir = get_kernel_dir()
         if kernel_dir == "aie2":
             return f"{self.name}_kernels.a"
@@ -59,17 +59,7 @@ class Softmax(MLIROperator):
                 self.operator_dir / "design.py",
                 "softmax",
                 (),
-                {
-                    "dev": aie_utils.get_current_device(),
-                    "num_elements": self.size,
-                    "num_aie_columns": self.num_aie_columns,
-                    "num_channels": self.num_channels,
-                    "trace_size": 0,
-                    "tile_size": self.cols,
-                    "rtp_vector_size": self.rtp_vector_size,
-                    "vector_size_parameter": self.vector_size_parameter,
-                    "kernel_obj_file": self._kernel_link_file,
-                },
+                bind_from=self,
             ),
         )
 

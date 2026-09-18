@@ -64,6 +64,7 @@ class DesignGenerator:
     fn_name: str
     args: tuple = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
+    bind_from: Any = None
 
     def __call__(self) -> str:
         spec = importlib.util.spec_from_file_location(
@@ -71,7 +72,17 @@ class DesignGenerator:
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return str(getattr(module, self.fn_name)(*self.args, **self.kwargs))
+        fn = getattr(module, self.fn_name)
+
+        kwargs = self.kwargs
+        if self.bind_from is not None:
+            # Bind here rather than at construction: the design module is
+            # imported lazily (it pulls in the MLIR dialects), and reading its
+            # signature any earlier would defeat that. Explicit kwargs win, so
+            # an operator can still override or pass something it does not
+            # store as an attribute.
+            kwargs = {**self.bind_from.bind(fn, skip=self.kwargs), **self.kwargs}
+        return str(fn(*self.args, **kwargs))
 
 
 def plan(

@@ -92,6 +92,20 @@ class GEMM(MLIROperator):
         """Suffix encoding compile-time flags that affect the kernel binary."""
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
+    @property
+    def kernel_object(self):
+        """Object file this design links against.
+
+        Every tiling and layout choice that changes the emitted kernel is in
+        the name, so two GEMMs that differ in any of them cannot collide on
+        one object.
+        """
+        return (
+            f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}"
+            f"_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
+            f"{self._kernel_flags_suffix}.o"
+        )
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -99,26 +113,23 @@ class GEMM(MLIROperator):
                 self.operator_dir / "design.py",
                 "my_matmul",
                 (),
-                {
-                    "dev": aie_utils.get_current_device(),
-                    "M": self.M,
-                    "K": self.K,
-                    "N": self.N,
+                # Eleven of this design's parameters are named exactly as the
+                # operator names them and bind automatically. The rest are
+                # spelled differently by the design; renaming m/k/n there would
+                # mean a single-letter substitution across 30-odd sites, which
+                # could silently merge a parameter with an unrelated loop
+                # variable, so they stay explicit until op.py and design.py
+                # merge and the whole naming can be settled in one place.
+                kwargs={
                     "m": self.tile_m,
                     "k": self.tile_k,
                     "n": self.tile_n,
                     "n_aie_cols": self.num_aie_columns,
                     "dtype_in_str": self.dtype_in,
                     "dtype_out_str": self.dtype_out,
-                    "b_col_maj": int(self.b_col_maj),
-                    "c_col_maj": int(self.c_col_maj),
-                    "use_scalar": self.use_scalar,
-                    "emulate_bf16_mmul_with_bfp16": self.emulate_bf16_mmul_with_bfp16,
-                    "prio_accuracy": self.prio_accuracy,
-                    "separate_c_tiles": int(self.separate_c_tiles),
-                    "trace_size": 0,
-                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                    "kernel_object": self.kernel_object,
                 },
+                bind_from=self,
             ),
         )
 
@@ -154,7 +165,10 @@ class GEMM(MLIROperator):
             mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
         return [
             KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                # Same name the design links against -- one expression, so the
+                # object that gets built and the object that gets linked cannot
+                # drift apart.
+                self.kernel_object,
                 extra_flags=kernel_flags,
                 dependencies=[SourceArtifact(mm_source)],
             ),

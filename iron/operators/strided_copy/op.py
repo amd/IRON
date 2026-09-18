@@ -68,25 +68,8 @@ class StridedCopy(MLIROperator):
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "strided_copy",
-                (
-                    aie_utils.get_current_device(),
-                    self.dtype,
-                    self.input_buffer_size,
-                    self.input_sizes,
-                    self.input_strides,
-                    self.input_offset,
-                    self.output_buffer_size,
-                    self.output_sizes,
-                    self.output_strides,
-                    self.output_offset,
-                    self.transfer_size,
-                    self.num_aie_channels,
-                ),
-                {
-                    **self.kwargs,
-                    "input_offset_parameter": self.input_offset_parameter,
-                    "output_offset_parameter": self.output_offset_parameter,
-                },
+                kwargs=self.kwargs,
+                bind_from=self,
             ),
         )
 

@@ -51,8 +51,12 @@ class AIEOperatorBase(ABC):
         """
         pass
 
-    def bind(self, fn: Callable) -> dict[str, Any]:
+    def bind(self, fn: Callable, skip: Any = ()) -> dict[str, Any]:
         """Collect ``fn``'s parameters from this operator's own attributes.
+
+        ``skip`` names parameters the caller supplies itself; they are neither
+        bound nor reported missing, so an explicit value can stand in for an
+        attribute the operator does not have.
 
         Matching is by name and nothing else: a parameter is filled from the
         attribute of the same name, whether that is a dataclass field or a
@@ -71,6 +75,8 @@ class AIEOperatorBase(ABC):
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
             ):
+                continue
+            if name in skip:
                 continue
             if hasattr(self, name):
                 bound[name] = getattr(self, name)
@@ -130,6 +136,32 @@ class AIEOperatorBase(ABC):
     def add_artifacts(self, artifacts: list[CompilationArtifact]) -> None:
         for artifact in artifacts:
             self.artifacts.add(artifact)
+
+    # Parameters every design takes but no operator stores. Exposing them as
+    # attributes is what lets bind() fill a design's signature whole, instead
+    # of each operator keeping a dict to splice them in by hand.
+
+    @property
+    def dev(self):
+        """The device a design is generated for."""
+        return aie_utils.get_current_device()
+
+    # Bytes of trace buffer to emit; 0 disables tracing, which is what every
+    # hand-written kwargs dict passed. Deliberately a plain class attribute
+    # rather than a property: OperatorSequence and LayerNorm both assign
+    # self.trace_size, and a property without a setter cannot be shadowed by
+    # an instance attribute -- it raises instead. Left unannotated so that
+    # dataclass subclasses do not pick it up as a field.
+    trace_size = 0
+
+    @property
+    def verbose(self) -> bool:
+        """Whether a design should log while generating.
+
+        Read off the context, which is where the setting already lived; every
+        operator that passed this spelled it ``mlir_verbose`` by hand.
+        """
+        return getattr(self.context, "mlir_verbose", False)
 
 
 def _serialize_param(v: object) -> str:

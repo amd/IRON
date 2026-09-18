@@ -13,48 +13,58 @@ from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
 """
 Matrix-vector design
 
-Calls into the mv.cc kernel code. That kernel computes `m_input` output rows per call.
+Calls into the mv.cc kernel code. That kernel computes `tile_size_input` output rows per call.
 
 
- - cols: Number of AIE columns to split work across
+ - num_aie_columns: Number of AIE columns to split work across
  - M: number of rows in the matrix
  - K: number of columns in the matrix == number of rows in the vector
- - m_input: number of input rows stored on each AIE core == chunk size for data movement of input A
- - m_output: number of output rows stored on each AIE core == chunk size for data movement of output C
+ - tile_size_input: number of input rows stored on each AIE core == chunk size for data movement of input A
+ - tile_size_output: number of output rows stored on each AIE core == chunk size for data movement of output C
  - num_batches: number of iterations of this mat-vec to perform on contiguous matrices and vectors in memory (results concatenated)
 """
 
 
 def my_matvec(
     dev,
-    cols,
+    num_aie_columns,
     M,
     K,
-    m_input,
-    m_output=None,
+    tile_size_input,
+    tile_size_output=None,
     num_batches=1,
     kernel_object="mv.o",
     func_prefix="",
     verbose=False,
     epilogue="none",
 ):
-    if m_output is None:
-        m_output = m_input
+    if tile_size_output is None:
+        tile_size_output = tile_size_input
 
     if verbose:
         print(f"Device: {dev}")
         print(f"Matrix dimensions: M={M}, K={K}")
-        print(f"Tiling: m_input={m_input}, m_output={m_output}")
-        print(f"Columns: {cols}")
+        print(
+            f"Tiling: tile_size_input={tile_size_input}, tile_size_output={tile_size_output}"
+        )
+        print(f"Columns: {num_aie_columns}")
 
     # The reason for the following requirement is because we first acquire output rows from the C FIFO, then fill those acquiring rows of the A input.
     assert (
-        m_output % m_input == 0 and m_output >= m_input
-    ), "m_output must be a multiple of m_input"
-    assert m_output <= M // cols, "m_output must be less than or equal to M/cols"
-    assert (M // cols) % m_output == 0, "m_output must evenly divide M/cols"
-    assert m_input <= M // cols, "m_input must be less than or equal to M/cols"
-    assert (M // cols) % m_input == 0, "m_input must evenly divide M/cols"
+        tile_size_output % tile_size_input == 0 and tile_size_output >= tile_size_input
+    ), "tile_size_output must be a multiple of tile_size_input"
+    assert (
+        tile_size_output <= M // num_aie_columns
+    ), "tile_size_output must be less than or equal to M/num_aie_columns"
+    assert (
+        M // num_aie_columns
+    ) % tile_size_output == 0, "tile_size_output must evenly divide M/num_aie_columns"
+    assert (
+        tile_size_input <= M // num_aie_columns
+    ), "tile_size_input must be less than or equal to M/num_aie_columns"
+    assert (
+        M // num_aie_columns
+    ) % tile_size_input == 0, "tile_size_input must evenly divide M/num_aie_columns"
 
     vectorized = True
     dtype_in = np.dtype[bfloat16]
@@ -62,17 +72,17 @@ def my_matvec(
     dtype_out = np.dtype[bfloat16]
     dtype_out_str = "bf16"
 
-    assert M % cols == 0
+    assert M % num_aie_columns == 0
 
     L1_A_ty = np.ndarray[
         (
-            m_input,
+            tile_size_input,
             K,
         ),
         dtype_in,
     ]
     L1_B_ty = np.ndarray[(K,), dtype_in]
-    L1_C_ty = np.ndarray[(m_output,), dtype_out]
+    L1_C_ty = np.ndarray[(tile_size_output,), dtype_out]
     L3_A_ty = np.ndarray[
         (num_batches * M * K,),
         dtype_in,
@@ -86,15 +96,15 @@ def my_matvec(
         f"{func_prefix}{kernel_object}",
         [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
     )
-    # Optional fused activation over the full m_output C-tile, applied once per tile in core_body
-    # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose m_input
+    # Optional fused activation over the full tile_size_output C-tile, applied once per tile in core_body
+    # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose tile_size_input
     # tile can be smaller than the 16-wide activation vector.
     assert epilogue in ("none", "gelu")
     gelu_kernel = None
     if epilogue == "gelu":
         assert (
-            m_output % 16 == 0
-        ), f"gelu epilogue needs m_output % 16 == 0 (got {m_output})"
+            tile_size_output % 16 == 0
+        ), f"gelu epilogue needs tile_size_output % 16 == 0 (got {tile_size_output})"
         gelu_kernel = Kernel(
             f"{func_prefix}gelu_tile_bf16",
             f"{func_prefix}{kernel_object}",
@@ -102,31 +112,31 @@ def my_matvec(
         )
 
     A_L3L1_fifos = [
-        ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
+        ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(num_aie_columns)
     ]
     B_L3L1_fifos = [
-        ObjectFifo(L1_B_ty, name=f"B_L3L1_{i}", depth=1) for i in range(cols)
+        ObjectFifo(L1_B_ty, name=f"B_L3L1_{i}", depth=1) for i in range(num_aie_columns)
     ]
     C_L1L3_fifos = [
-        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(cols)
+        ObjectFifo(L1_C_ty, name=f"C_L1L3_{i}", depth=2) for i in range(num_aie_columns)
     ]
 
     def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, gelu_kernel=None):
         one_idx = index.constant(1)
         for _ in range_(0xFFFFFFFF):  # batch dim handled as part of this loop
             b = B_L3L1_fifo.acquire(1)
-            # The kernel function computes m output rows; each core is responsible for (M/cols) output rows, so we need to call the kernel (M/cols)/m times.
-            for i_idx in range_(M // m_output // cols):
+            # The kernel function computes m output rows; each core is responsible for (M/num_aie_columns) output rows, so we need to call the kernel (M/num_aie_columns)/m times.
+            for i_idx in range_(M // tile_size_output // num_aie_columns):
                 c = C_L1L3_fifo.acquire(1)
                 i_i32 = index.casts(T.i32(), i_idx)
-                for j_idx in range_(m_output // m_input):
+                for j_idx in range_(tile_size_output // tile_size_input):
                     j_i32 = index.casts(T.i32(), j_idx)
-                    output_row_offset = j_i32 * m_input
+                    output_row_offset = j_i32 * tile_size_input
                     a = A_L3L1_fifo.acquire(1)
-                    matvec(m_input, output_row_offset, a, b, c)
+                    matvec(tile_size_input, output_row_offset, a, b, c)
                     A_L3L1_fifo.release(1)
                 if gelu_kernel is not None:
-                    gelu_kernel(m_output, c)
+                    gelu_kernel(tile_size_output, c)
                 C_L1L3_fifo.release(1)
             B_L3L1_fifo.release(1)
 
@@ -141,23 +151,23 @@ def my_matvec(
             ]
             + ([gelu_kernel] if epilogue == "gelu" else []),
         )
-        for i in range(cols)
+        for i in range(num_aie_columns)
     ]
 
     # Distribution pattern for the input matrix A: each AIE core gets a contiguous chunk of rows.
-    # The input matrix in DDR is MxK-sized (row-major); each core processes (M/cols)xK-sized matrices in chunks of mxK-sized tiles.
+    # The input matrix in DDR is MxK-sized (row-major); each core processes (M/num_aie_columns)xK-sized matrices in chunks of mxK-sized tiles.
     # The chunking into mxK-sized tiles happens in the ObjectFIFO; the shim puts all data on the stream in sequence.
     A_taps = [
         [
             TensorAccessPattern(
                 tensor_dims=L3_A_ty.__args__[0],
-                offset=col * (M // cols) * K + batch * M * K,
-                sizes=[1, 1, 1, (M // cols) * K],
+                offset=col * (M // num_aie_columns) * K + batch * M * K,
+                sizes=[1, 1, 1, (M // num_aie_columns) * K],
                 strides=[0, 0, 0, 1],
             )
             for batch in range(num_batches)
         ]
-        for col in range(cols)
+        for col in range(num_aie_columns)
     ]
 
     # Every column gets the entirety of the vector B.
@@ -174,19 +184,19 @@ def my_matvec(
         [
             TensorAccessPattern(
                 tensor_dims=L3_C_ty.__args__[0],
-                offset=col * (M // cols) + batch * M,
-                sizes=[1, 1, 1, (M // cols)],
+                offset=col * (M // num_aie_columns) + batch * M,
+                sizes=[1, 1, 1, (M // num_aie_columns)],
                 strides=[0, 0, 0, 1],
             )
             for batch in range(num_batches)
         ]
-        for col in range(cols)
+        for col in range(num_aie_columns)
     ]
 
     # Batch coalescing replaces the per-batch unroll with a single iterated BD.
     #
-    # Within one batch the run is contiguous (A_run = (M//cols)*K elements).
-    # The batch stride is the full matrix (A_bstride = M*K), so for cols>1 each column
+    # Within one batch the run is contiguous (A_run = (M//num_aie_columns)*K elements).
+    # The batch stride is the full matrix (A_bstride = M*K), so for num_aie_columns>1 each column
     # gathers its own slice out of every batch with a gap in between.
     #
     # The contiguous run is then split into two wrap dims [run_hi, run_lo] ONLY to fit
@@ -211,8 +221,8 @@ def my_matvec(
                 return (run // lo, lo)
         return None
 
-    A_run, A_bstride = (M // cols) * K, M * K
-    C_run, C_bstride = (M // cols), M
+    A_run, A_bstride = (M // num_aie_columns) * K, M * K
+    C_run, C_bstride = (M // num_aie_columns), M
     A_split, C_split = split_run(A_run), split_run(C_run)
     coalesce = (
         num_batches > 1
@@ -244,17 +254,17 @@ def my_matvec(
             f.depth >= 2 for f in C_L1L3_fifos
         ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
         A_taps_coalesced = [
-            coalesced_tap(L3_A_ty, col * (M // cols) * K, A_split, A_bstride)
-            for col in range(cols)
+            coalesced_tap(L3_A_ty, col * (M // num_aie_columns) * K, A_split, A_bstride)
+            for col in range(num_aie_columns)
         ]
         C_taps_coalesced = [
-            coalesced_tap(L3_C_ty, col * (M // cols), C_split, C_bstride)
-            for col in range(cols)
+            coalesced_tap(L3_C_ty, col * (M // num_aie_columns), C_split, C_bstride)
+            for col in range(num_aie_columns)
         ]
 
     def sequence(A, B, C, B_L3L1_fifos_prods, A_L3L1_fifos_prods, C_L1L3_fifos_conss):
         tg_b = TaskGroup()
-        for col in range(cols):
+        for col in range(num_aie_columns):
             # Simple linear transfer of B, includes all batches in sequence
             B_L3L1_fifos_prods[col].fill(B, B_tap, group=tg_b)
         # Coalesced: one iterated BD per column covers all batches (num_waits==1, a
@@ -264,10 +274,10 @@ def my_matvec(
         num_waits = 1 if coalesce else num_batches
         for w in range(num_waits):
             tg_ac = TaskGroup()
-            for col in range(cols):
+            for col in range(num_aie_columns):
                 a_tap = A_taps_coalesced[col] if coalesce else A_taps[col][w]
                 A_L3L1_fifos_prods[col].fill(A, a_tap, group=tg_ac)
-            for col in range(cols):
+            for col in range(num_aie_columns):
                 c_tap = C_taps_coalesced[col] if coalesce else C_taps[col][w]
                 C_L1L3_fifos_conss[col].drain(
                     C,

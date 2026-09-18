@@ -78,7 +78,7 @@ class GEMV(MLIROperator):
         return f"{base}_epi{self.epilogue}"
 
     @property
-    def _kernel_link_file(self):
+    def kernel_object(self):
         # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
         # archive of (matvec, gelu); the plain matvec stays a single object.
         if self.epilogue == "gelu":
@@ -86,27 +86,12 @@ class GEMV(MLIROperator):
         return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
 
     def get_mlir_artifact(self):
-        mlir_verbose = getattr(self.context, "mlir_verbose", False)
-
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir / "design.py",
                 "my_matvec",
-                (
-                    aie_utils.get_current_device(),
-                    self.num_aie_columns,
-                    self.M,
-                    self.K,
-                    self.tile_size_input,
-                    self.tile_size_output,
-                    self.num_batches,
-                ),
-                {
-                    "verbose": mlir_verbose,
-                    "kernel_object": self._kernel_link_file,
-                    "epilogue": self.epilogue,
-                },
+                bind_from=self,
             ),
         )
 
@@ -136,7 +121,7 @@ class GEMV(MLIROperator):
             )
             return [
                 KernelArchiveArtifact(
-                    self._kernel_link_file, dependencies=[matvec_obj, gelu_obj]
+                    self.kernel_object, dependencies=[matvec_obj, gelu_obj]
                 )
             ]
         return [matvec_obj]

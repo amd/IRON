@@ -25,31 +25,31 @@ from iron.operators._trace import maybe_enable_trace
 
 def softmax(
     dev,
-    num_elements,
+    size,
     num_aie_columns,
     num_channels,
     trace_size,
-    tile_size,
+    cols,
     rtp_vector_size=None,
     vector_size_parameter=None,
     func_prefix="",
     kernel_obj_file="softmax.o",
 ):
-    per_tile_elements = tile_size
+    per_tile_elements = cols
     if rtp_vector_size is None:
         rtp_vector_size = per_tile_elements
     total_cores = num_aie_columns * num_channels
-    per_core_elements = num_elements // total_cores
-    if num_elements % total_cores != 0:
+    per_core_elements = size // total_cores
+    if size % total_cores != 0:
         raise ValueError(
-            f"Number of elements ({num_elements}) must be a multiple of {total_cores}."
+            f"Number of elements ({size}) must be a multiple of {total_cores}."
         )
     N_div_n = per_core_elements // per_tile_elements
-    chunk = num_elements // num_aie_columns // num_channels  # For offset calculation
+    chunk = size // num_aie_columns // num_channels  # For offset calculation
     dtype = bfloat16
 
     # Define tensor types
-    tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
+    tensor_ty = np.ndarray[(size,), np.dtype[dtype]]
     tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
 
     # AIE-array data movement with object fifos
@@ -148,7 +148,7 @@ def softmax(
     # and channels.
     taps = [
         TensorAccessPattern(
-            (1, num_elements),
+            (1, size),
             chunk * i * num_channels + chunk * j,
             [1, 1, 1, chunk],
             [0, 0, 0, 1],

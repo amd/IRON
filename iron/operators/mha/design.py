@@ -53,7 +53,7 @@ def main():
         prog="AIE Matrix Multiplication MLIR Design (Single Core)",
         description="Emits MLIR code for a matrix multiplication design of the given input size",
     )
-    argparser.add_argument("--heads", type=int, default=1)
+    argparser.add_argument("--num_heads", type=int, default=1)
     argparser.add_argument("--S_q", type=int, default=256)
     argparser.add_argument("--S_kv", type=int, default=256)
     argparser.add_argument("-d", type=int, default=64)
@@ -63,7 +63,7 @@ def main():
         "--num_KV_heads",
         type=int,
         default=2,
-        help="Number of heads for Key-Value pairs",
+        help="Number of num_heads for Key-Value pairs",
     )
     argparser.add_argument("--number-of-pipeline", type=int, default=1)
     argparser.add_argument("--emulate-bf16-mmul-with-bfp16", type=bool, default=False)
@@ -84,13 +84,13 @@ def main():
 
     maybe_module = fused_mha(
         dev=dev,
-        heads=args.heads,
+        num_heads=args.num_heads,
         S_q=args.S_q,
         S_kv=args.S_kv,
         d=args.d,
         B_q=args.B_q,
         B_kv=args.B_kv,
-        number_of_pipelines=args.number_of_pipeline,
+        num_of_pipelines=args.number_of_pipeline,
         num_KV_heads=args.num_KV_heads,
         emulate_bf16_mmul_with_bfp16=args.emulate_bf16_mmul_with_bfp16,
         trace_size=args.trace_size,
@@ -108,13 +108,13 @@ def main():
 
 def fused_mha(
     dev,
-    heads: int,
+    num_heads: int,
     S_q: int,
     S_kv: int,
     d: int,
     B_q: int,
     B_kv: int,
-    number_of_pipelines: int,
+    num_of_pipelines: int,
     num_KV_heads: int,
     emulate_bf16_mmul_with_bfp16: bool,
     trace_size: int = 0,
@@ -126,27 +126,27 @@ def fused_mha(
     enable_tracing = resolve_trace_size(trace_size) > 0
     dtype_str = "bf16"
 
-    if number_of_pipelines > 6:
-        number_of_pipelines_join_distribute = number_of_pipelines // 2
+    if num_of_pipelines > 6:
+        number_of_pipelines_join_distribute = num_of_pipelines // 2
     else:
-        number_of_pipelines_join_distribute = number_of_pipelines
+        number_of_pipelines_join_distribute = num_of_pipelines
 
     S_q_eff = S_q
     S_kv_eff = S_kv
-    S_q_pad = (
-        (S_q_eff + (B_q * number_of_pipelines - 1)) // (B_q * number_of_pipelines)
-    ) * (B_q * number_of_pipelines)
+    S_q_pad = ((S_q_eff + (B_q * num_of_pipelines - 1)) // (B_q * num_of_pipelines)) * (
+        B_q * num_of_pipelines
+    )
     S_kv_pad = (
-        (S_kv_eff + (B_kv * number_of_pipelines - 1)) // (B_kv * number_of_pipelines)
-    ) * (B_kv * number_of_pipelines)
+        (S_kv_eff + (B_kv * num_of_pipelines - 1)) // (B_kv * num_of_pipelines)
+    ) * (B_kv * num_of_pipelines)
     num_q_blocks = S_q_pad // B_q
     num_kv_blocks = S_kv_pad // B_kv
-    num_q_block_per_pipeline = num_q_blocks // number_of_pipelines
+    num_q_block_per_pipeline = num_q_blocks // num_of_pipelines
 
-    # VJUNG: When the number of KV heads is 0, treat it as regular MHA (num_KV_heads == heads).
-    # Otherwise, num_KV_heads < heads indicates GQA.
+    # VJUNG: When the number of KV num_heads is 0, treat it as regular MHA (num_KV_heads == num_heads).
+    # Otherwise, num_KV_heads < num_heads indicates GQA.
     if num_KV_heads == 0:
-        num_KV_heads = heads
+        num_KV_heads = num_heads
 
     assert (
         emulate_bf16_mmul_with_bfp16
@@ -158,7 +158,7 @@ def fused_mha(
 
     if verbose:
         print(f"Device: {dev}")
-        print(f"Number of heads: {heads}")
+        print(f"Number of num_heads: {num_heads}")
         print(f"MHA Dimensions: S_q={S_q}, S_kv={S_kv}, d={d}, B_q={B_q}, B_kv={B_kv}")
         print(f"Padded Dimensions: S_q_pad={S_q_pad}, S_kv_pad={S_kv_pad}")
         print(f"Data type: {dtype_str}")
@@ -166,14 +166,14 @@ def fused_mha(
         print(f"Vectorized: {vectorized}")
         print(f"Enable tracing: {enable_tracing}")
 
-    assert num_KV_heads > 0, "Number of KV heads must be greater than 0"
-    assert heads > 0, "Number of heads must be greater than 0"
+    assert num_KV_heads > 0, "Number of KV num_heads must be greater than 0"
+    assert num_heads > 0, "Number of num_heads must be greater than 0"
     assert (
-        num_KV_heads <= heads
-    ), "Number of KV heads must be less than or equal to number of heads"
+        num_KV_heads <= num_heads
+    ), "Number of KV num_heads must be less than or equal to number of num_heads"
     assert (
-        heads % num_KV_heads == 0
-    ), f"Number of heads ({heads}) must be divisible by number of KV heads ({num_KV_heads})"
+        num_heads % num_KV_heads == 0
+    ), f"Number of num_heads ({num_heads}) must be divisible by number of KV num_heads ({num_KV_heads})"
 
     assert B_q % r == 0, f"B_q must be divisible by r ({B_q} % {r} != 0)"
     assert B_kv % t == 0, f"B_kv must be divisible by t ({B_kv} % {t} != 0)"
@@ -191,7 +191,7 @@ def fused_mha(
     # Tensors living in DRAM
     Q_ty = np.ndarray[
         (
-            heads,
+            num_heads,
             S_q_pad,
             d,
         ),
@@ -280,7 +280,7 @@ def fused_mha(
         depths=[of_depth] * number_of_pipelines_join_distribute,
         tile=Tile(col=6, row=1),
     )  # Split between N pipelines
-    if number_of_pipelines > 6:
+    if num_of_pipelines > 6:
         inQ2 = ObjectFifo(
             np.ndarray[(number_of_pipelines_join_distribute * B_q, d), np.dtype[dtype]],
             name="inQ2",
@@ -334,7 +334,7 @@ def fused_mha(
         a_dims = [(B_q // r, r * B_kv), (r, t), (B_kv // t, r * t), (t, 1)]
     memA = []
     outA = []
-    for i in range(number_of_pipelines):
+    for i in range(num_of_pipelines):
         memA.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memA{i}"))
         outA.append(
             memA[i]
@@ -349,7 +349,7 @@ def fused_mha(
 
     memP = []
     outP = []
-    for i in range(number_of_pipelines):
+    for i in range(num_of_pipelines):
         memP.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memP{i}"))
         outP.append(
             memP[i]
@@ -364,7 +364,7 @@ def fused_mha(
 
     # Scale buffer for partial softmax
     scaleOF = []
-    for i in range(number_of_pipelines):
+    for i in range(num_of_pipelines):
         scaleOF.append(
             ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}")
         )  # Local to 1 pipeline
@@ -384,7 +384,7 @@ def fused_mha(
         depths=[of_depth] * number_of_pipelines_join_distribute,
         tile=Tile(col=6, row=1),
     )  # Join onto the output OF
-    if number_of_pipelines > 6:
+    if num_of_pipelines > 6:
         memO2 = ObjectFifo(
             np.ndarray[(number_of_pipelines_join_distribute * B_q, d), np.dtype[dtype]],
             name="memO2",
@@ -437,7 +437,7 @@ def fused_mha(
 
                     idx_buffer[0] += 1
                 idx_buffer[0] = 0
-                idx_buffer[1] += number_of_pipelines
+                idx_buffer[1] += num_of_pipelines
 
                 of_q.release(1)
 
@@ -501,7 +501,7 @@ def fused_mha(
 
                     idx_buffer[0] += 1
                 idx_buffer[0] = 0
-                idx_buffer[1] += number_of_pipelines
+                idx_buffer[1] += num_of_pipelines
 
     def batched_matmul_pv(
         of_p,
@@ -607,7 +607,7 @@ def fused_mha(
                 ###
 
                 idx_buffer[0] = 0
-                idx_buffer[1] += number_of_pipelines
+                idx_buffer[1] += num_of_pipelines
 
                 of_o_out.release(1)
 
@@ -621,13 +621,13 @@ def fused_mha(
                 initial_value=None,
                 use_write_rtp=True,
             )
-            for i in range(number_of_pipelines)
+            for i in range(num_of_pipelines)
         ]
         for j in range(3)
     ]
 
     worker_barrier_list = [
-        [WorkerRuntimeBarrier(initial_value=0) for i in range(number_of_pipelines)]
+        [WorkerRuntimeBarrier(initial_value=0) for i in range(num_of_pipelines)]
         for j in range(3)
     ]
 
@@ -635,7 +635,7 @@ def fused_mha(
     matmul_workers = []
     softmax_workers = []
     matmul_pv_workers = []
-    for i in range(number_of_pipelines):
+    for i in range(num_of_pipelines):
         idx_buffer_qk = Buffer(
             initial_value=np.zeros(shape=(2,), dtype=np.int32),
             name=f"idx_buffer_qk_{i}",
@@ -717,7 +717,7 @@ def fused_mha(
     # Define tensor access patterns for inputs/outputs
     # A and B are tiled across M and N respectively, while C is tiled across M and N
     Q_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
+        (num_heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
     )
 
     K_tiles = TensorTiler2D.group_tiler(
@@ -729,7 +729,7 @@ def fused_mha(
     )
 
     O_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
+        (num_heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
     )
 
     def print_tap_seq_info(tap_seq, name):
@@ -777,34 +777,34 @@ def fused_mha(
 
     # Runtime operations to move data to/from the AIE-array
     inQ_h = inQ.prod(tile=Tile(col=4, row=0))
-    inQ2_h = inQ2.prod(tile=Tile(col=4, row=0)) if number_of_pipelines > 6 else None
+    inQ2_h = inQ2.prod(tile=Tile(col=4, row=0)) if num_of_pipelines > 6 else None
     inK_h = inK.prod(tile=Tile(col=5, row=0))
     inV_h = inV.prod(tile=Tile(col=6, row=0))
     memO_h = memO.cons(tile=Tile(col=7, row=0))
-    memO2_h = memO2.cons(tile=Tile(col=7, row=0)) if number_of_pipelines > 6 else None
+    memO2_h = memO2.cons(tile=Tile(col=7, row=0)) if num_of_pipelines > 6 else None
 
     def sequence(Q, K, V, O, inQ_h, inQ2_h, inK_h, inV_h, memO_h, memO2_h):
         for j in range(3):
-            for i in range(number_of_pipelines):
+            for i in range(num_of_pipelines):
                 mha_rtps_list[j][i][0] = num_q_block_per_pipeline
                 mha_rtps_list[j][i][1] = num_kv_blocks
                 mha_rtps_list[j][i][2] = S_q_eff
                 mha_rtps_list[j][i][3] = S_kv_eff
 
         for j in range(3):
-            for i in range(number_of_pipelines):
+            for i in range(num_of_pipelines):
                 worker_barrier_list[j][i].set(1)
 
-        for head_idx in range(heads):
+        for head_idx in range(num_heads):
 
-            kv_head_idx = head_idx // (heads // num_KV_heads)
+            kv_head_idx = head_idx // (num_heads // num_KV_heads)
 
             for q_block_idx in range(num_q_block_per_pipeline):
 
                 # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
                 tg = TaskGroup()
 
-                if number_of_pipelines > 6:
+                if num_of_pipelines > 6:
                     inQ_h.fill(
                         Q,
                         tap=Q_tiles[
@@ -840,7 +840,7 @@ def fused_mha(
                     group=tg,
                 )
 
-                if number_of_pipelines > 6:
+                if num_of_pipelines > 6:
                     memO_h.drain(
                         O,
                         tap=O_tiles[
