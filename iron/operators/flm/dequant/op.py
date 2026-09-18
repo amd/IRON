@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.utils.config import cxx_header_path
 
 from iron.common import (
     AIERuntimeArgSpec,
@@ -162,10 +160,7 @@ class DequantBFP(MLIROperator):
                 f"q4nx_dequant_{get_kernel_dir(dev)}.o",
                 dependencies=[
                     SourceArtifact(
-                        Path(cxx_header_path())
-                        / "aie_kernels"
-                        / "generic"
-                        / "q4nx_dequant.cc"
+                        self.context.kernels_dir / "generic" / "q4nx_dequant.cc"
                     )
                 ],
                 extra_flags=[
