@@ -540,6 +540,22 @@
         "bfloat16"
       ]
     ],
+    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [1024], \"input_strides\": [1], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
+      [
+        "in",
+        [
+          1024
+        ],
+        "bfloat16"
+      ],
+      [
+        "out",
+        [
+          256
+        ],
+        "bfloat16"
+      ]
+    ],
     "Tanh({\"num_aie_columns\": 1, \"num_channels\": 1, \"size\": 1024, \"tile_size\": 256})": [
       [
         "in",
@@ -552,6 +568,22 @@
         "out",
         [
           1024
+        ],
+        "bfloat16"
+      ]
+    ],
+    "Transpose({\"M\": 64, \"N\": 128, \"m\": 32, \"n\": 32, \"num_aie_columns\": 1, \"num_channels\": 1, \"s\": 1})": [
+      [
+        "in",
+        [
+          8192
+        ],
+        "bfloat16"
+      ],
+      [
+        "out",
+        [
+          8192
         ],
         "bfloat16"
       ]
@@ -1114,6 +1146,22 @@
         "bfloat16"
       ]
     ],
+    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [1024], \"input_strides\": [1], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
+      [
+        "in",
+        [
+          1024
+        ],
+        "bfloat16"
+      ],
+      [
+        "out",
+        [
+          256
+        ],
+        "bfloat16"
+      ]
+    ],
     "Tanh({\"num_aie_columns\": 1, \"num_channels\": 1, \"size\": 1024, \"tile_size\": 256})": [
       [
         "in",
@@ -1126,6 +1174,22 @@
         "out",
         [
           1024
+        ],
+        "bfloat16"
+      ]
+    ],
+    "Transpose({\"M\": 64, \"N\": 128, \"m\": 32, \"n\": 32, \"num_aie_columns\": 1, \"num_channels\": 1, \"s\": 1})": [
+      [
+        "in",
+        [
+          8192
+        ],
+        "bfloat16"
+      ],
+      [
+        "out",
+        [
+          8192
         ],
         "bfloat16"
       ]

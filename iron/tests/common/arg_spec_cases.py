@@ -160,6 +160,19 @@ CASES = [
                 output_buffer_size=1024,
                 dtype=np.float32,
             ),
+            # Input and output sizes are independent here, unlike every other
+            # (in, out) operator. Equal-size cases alone would let a refactor
+            # that tied the output shape to the input pass unnoticed.
+            dict(
+                input_sizes=[1024],
+                input_strides=[1],
+                input_offset=0,
+                output_sizes=[256],
+                output_strides=[1],
+                output_offset=0,
+                input_buffer_size=1024,
+                output_buffer_size=256,
+            ),
         ],
     ),
     (
@@ -170,7 +183,13 @@ CASES = [
     (
         "transpose",
         "Transpose",
-        [dict(M=64, N=64, num_aie_columns=1, num_channels=1, m=32, n=32, s=1)],
+        [
+            dict(M=64, N=64, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
+            # Non-square, to pin that both buffers stay flat (M*N,): a transpose
+            # changes layout, not size. A square-only case cannot tell the two
+            # apart, and would let a swapped (N, M) slip through.
+            dict(M=64, N=128, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
+        ],
     ),
 ]
 
