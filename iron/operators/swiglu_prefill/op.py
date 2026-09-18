@@ -18,10 +18,10 @@ class SwiGLUPrefill(OperatorSequence):
     ``in``; persistent weight scratch ``w_gate`` / ``w_up`` / ``w_down``;
     output ``out``.
 
-    ``b_col_maj`` selects the layout all three weights are stored in, ``(K, N)``
-    when False and ``(N, K)`` when True. It is the layout the decode-side GEMV
-    reads, so a rail sharing one weight arena between prefill and decode sets it
-    rather than keeping a transposed second copy.
+    ``b_col_maj`` selects the layout all three weights are stored in: ``(K, N)``
+    when False, ``(N, K)`` when True. ``(N, K)`` is what the decode-side GEMV
+    reads, so a pipeline running prefill and decode against the same weight
+    buffers can set it instead of storing a transposed second copy of each.
     """
 
     def __init__(
