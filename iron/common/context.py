@@ -57,18 +57,19 @@ class AIEContext:
 
         Returns:
             List of ``CompilationRule`` instances configured for the current
-            mlir-aie and peano installation paths.
+            mlir-aie installation path. The LLVM binutils these rules invoke are
+            resolved by ``aie.utils.config``, which searches both the mlir-aie
+            and peano trees, so no peano path is threaded through here.
         """
         mlir_aie_dir = Path(aie.utils.config.root_path())
-        peano_dir = Path(aie.utils.config.peano_install_dir())
         use_chess = self.compiler == "chess"
 
         return [
             comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.DownloadCompilationRule(),
-            comp.KernelCompilationRule(peano_dir, mlir_aie_dir, use_chess=use_chess),
-            comp.ArchiveCompilationRule(peano_dir, mlir_aie_dir),
+            comp.KernelCompilationRule(mlir_aie_dir, use_chess=use_chess),
+            comp.ArchiveCompilationRule(),
             comp.AieccXclbinInstsCompilationRule(use_chess=use_chess),
             comp.AieccFullElfCompilationRule(use_chess=use_chess),
         ]
