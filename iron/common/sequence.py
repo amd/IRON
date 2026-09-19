@@ -236,10 +236,10 @@ class SeparateDispatch(SequenceDispatch):
         self._kernel_artifacts = {}  # id(op) -> [KernelObjectArtifact, ...]
 
     def set_up_artifacts(self, seq):
-        # Kernel objects still go through the artifact-graph rules (Peano/chess
-        # compile isn't on CompilableDesign yet); the xclbin/insts themselves
-        # are built later, in link_xclbins(), through jit_compile instead of
-        # AieccXclbinInstsCompilationRule. Each op's own artifacts are kept (not
+        # Kernel objects still go through the artifact-graph rules for any
+        # operator that has not declared them as ExternalFunctions; the
+        # xclbin/insts themselves are built later, in link_xclbins(), through
+        # jit_compile. Each op's own artifacts are kept (not
         # a fresh call per use) because move_artifacts() resolves their
         # relative filenames into real build_dir paths in place, and
         # link_xclbins() needs those resolved paths.

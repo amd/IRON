@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict
 
@@ -10,7 +11,6 @@ from aie.utils.npukernel import NPUKernel
 from iron.common import (
     AIERuntimeArgSpec,
     DesignGenerator,
-    InstsBinArtifact,
     MLIROperator,
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,
@@ -122,31 +122,42 @@ class MMPrebuilt(MLIROperator):
         return []
 
     def set_up_artifacts(self) -> None:
-        mlir_artifact = self.get_mlir_artifact()
-        self.insts_artifact = InstsBinArtifact(
-            f"{self.name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-        )
+        # Only the download. The xclbin is fetched rather than built, which is
+        # what this operator exists for, so RemoteFileArtifact is the one thing
+        # here the compile path cannot express.
         self.xclbin_artifact = RemoteFileArtifact(
             f"flm_mm_{FASTFLOWLM_COMMIT[:8]}.xclbin",
             url=XCLBIN_URL,
             sha256=XCLBIN_SHA256,
         )
-        self.add_artifacts([self.insts_artifact, self.xclbin_artifact])
+        self.add_artifacts([self.xclbin_artifact])
 
     def link_xclbin(self) -> None:
-        # Nothing to do: the xclbin is downloaded, not compiled, and the insts
-        # are an artifact that compile()'s graph pass builds. The base
-        # implementation would compile an xclbin from this operator's MLIR,
-        # which is exactly what using the prebuilt one avoids.
-        return
+        """Compile this shape's instruction stream; keep the downloaded xclbin.
+
+        compile_xclbin_insts emits both halves and only the instructions are
+        wanted: the xclbin it writes alongside them is discarded, the same way
+        flm.GEMM discards the half each of its two builds did not want.
+        """
+        if getattr(self, "_insts_path", None) is not None:
+            return
+        from iron.common.jit_compile import compile_xclbin_insts
+
+        build_dir = Path(self.context.build_dir)
+        _, self._insts_path = compile_xclbin_insts(
+            self.get_mlir_artifact().generator,
+            [],
+            build_dir / f"{self.name}.xclbin",
+            build_dir / f"{self.name}.bin",
+            kernel_name=XCLBIN_KERNEL_NAME,
+        )
 
     def get_callable(self) -> Callable[..., Any]:
+        self.link_xclbin()
         npu_kernel = NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
             kernel_name=XCLBIN_KERNEL_NAME,
-            insts_path=self.insts_artifact.filename,
+            insts_path=str(self._insts_path),
         )
         handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
 

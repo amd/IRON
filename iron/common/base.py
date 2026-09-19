@@ -284,7 +284,7 @@ class MLIROperator(AIEOperatorBase):
             object_files,
             Path(self.context.build_dir) / f"{self.name}.xclbin",
             Path(self.context.build_dir) / f"{self.name}.bin",
-            # XclbinArtifact's own former default; no caller ever overrode it.
+            # The former XclbinArtifact default; no caller ever overrode it.
             kernel_name="MLIR_AIE",
         )
 

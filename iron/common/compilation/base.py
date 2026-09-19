@@ -355,57 +355,11 @@ class SourceArtifact(CompilationArtifact):
 class MLIRArtifact(CompilationArtifact):
     """Base class for artifacts whose file is an MLIR (.mlir) module usable as aiecc input.
 
-    ``_MLIRInputMixin.mlir_input`` locates the MLIR source of a downstream
+    The MLIR source of a downstream
     target (elf/xclbin/insts.bin) by looking for a dependency of this type.
     Using a shared base class (rather than name-checking) lets other modules
     such as ``compilation/sequence.py`` opt in without creating an import cycle.
     """
-
-
-class _MLIRInputMixin:
-    """Mixin providing a mlir_input property that finds the MLIR source in dependencies."""
-
-    @property
-    def mlir_input(self):
-        result = next(
-            (d for d in self.dependencies if isinstance(d, MLIRArtifact)),
-            None,
-        )
-        if result is None:
-            raise ValueError(
-                f"No MLIR source artifact found in dependencies of {self.filename}"
-            )
-        return result
-
-
-class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
-    def __init__(
-        self,
-        filename: str,
-        mlir_input: CompilationArtifact,
-        dependencies: list[CompilationArtifact],
-        kernel_name: str = "MLIR_AIE",
-        extra_flags: list[str] | None = None,
-    ) -> None:
-        if mlir_input not in dependencies:
-            dependencies = dependencies + [mlir_input]
-        super().__init__(filename, dependencies)
-        self.kernel_name = kernel_name
-        self.extra_flags = extra_flags if extra_flags is not None else []
-
-
-class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
-    def __init__(
-        self,
-        filename: str,
-        mlir_input: CompilationArtifact,
-        dependencies: list[CompilationArtifact],
-        extra_flags: list[str] | None = None,
-    ) -> None:
-        if mlir_input not in dependencies:
-            dependencies = dependencies + [mlir_input]
-        super().__init__(filename, dependencies)
-        self.extra_flags = extra_flags if extra_flags is not None else []
 
 
 class KernelObjectArtifact(CompilationArtifact):
@@ -602,30 +556,6 @@ class DownloadCompilationRule(CompilationRule):
         partial_path.replace(target)
 
 
-class GenerateMLIRFromPythonCompilationRule(CompilationRule):
-    def matches(self, graph):
-        return any(graph.get_worklist(PythonGeneratedMLIRArtifact))
-
-    def compile(self, graph):
-        """Generate MLIR from a Python callback that uses the MLIR bindings"""
-        commands = []
-        worklist = graph.get_worklist(PythonGeneratedMLIRArtifact)
-        for artifact in worklist:
-            callback = partial(self.generate_mlir, artifact, artifact.generator)
-            commands.append(PythonCallbackCompilationCommand(callback))
-            artifact.available = True
-        return commands
-
-    @staticmethod
-    def generate_mlir(output_artifact, generator):
-        mlir_code = generator()
-        with open(output_artifact.filename, "w") as f:
-            f.write(mlir_code)
-        Path(f"{output_artifact.filename}.recipe_hash").write_text(
-            output_artifact.recipe_hash()
-        )
-
-
 def _aiecc_work_dir(mlir_filename: str) -> Path:
     """Directory aiecc writes its own 'aie.mlir' copy and '.prj' project directory
     into for the given MLIR source artifact's filename.
@@ -693,94 +623,6 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
 # between -j1 and -j16, and input_with_addresses.mlir differs only in the work-dir
 # path it embeds, which two runs at the SAME -j also differ in.
 _AIECC_DEFAULT_JOBS = "0"
-
-
-class AieccCompilationRule(CompilationRule):
-    def __init__(self, use_chess=False, *args, **kwargs):
-        self.use_chess = use_chess
-        super().__init__(*args, **kwargs)
-
-
-class AieccXclbinInstsCompilationRule(AieccCompilationRule):
-    def matches(self, graph):
-        return any(graph.get_worklist((XclbinArtifact, InstsBinArtifact)))
-
-    def compile(self, graph):
-        # If there are both xclbin and insts.bin targets based on the same source MLIR code, we can combine them into one single `aiecc.py` invocation.
-        mlir_sources = set()
-        mlir_sources_to_xclbins = {}
-        mlir_sources_to_insts = {}
-        worklist = graph.get_worklist((XclbinArtifact, InstsBinArtifact))
-        for artifact in worklist:
-            mlir_dependency = artifact.mlir_input
-            mlir_sources.add(mlir_dependency)
-            if isinstance(artifact, XclbinArtifact):
-                mlir_sources_to_xclbins.setdefault(mlir_dependency, []).append(artifact)
-            elif isinstance(artifact, InstsBinArtifact):
-                mlir_sources_to_insts.setdefault(mlir_dependency, []).append(artifact)
-
-        commands = []
-        # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
-        for mlir_source in mlir_sources:
-            options = [f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}"]
-            xclbin_path = None
-            insts_path = None
-            do_compile_xclbin = mlir_source in mlir_sources_to_xclbins
-            do_compile_insts_bin = mlir_source in mlir_sources_to_insts
-            if do_compile_xclbin:
-                first_xclbin = mlir_sources_to_xclbins[mlir_source][
-                    0
-                ]  # TODO: this does not handle the case of multiple xclbins with different kernel names or flags from the same MLIR
-                xclbin_path = os.path.abspath(first_xclbin.filename)
-                options += first_xclbin.extra_flags + [
-                    f"--xclbin-kernel-name={first_xclbin.kernel_name}",
-                ]
-            if do_compile_insts_bin:
-                first_insts_bin = mlir_sources_to_insts[mlir_source][
-                    0
-                ]  # TODO: this does not handle the case of multiple insts.bins with different flags from the same MLIR
-                insts_path = os.path.abspath(first_insts_bin.filename)
-                options += first_insts_bin.extra_flags
-
-            work_dir = _aiecc_work_dir(mlir_source.filename)
-
-            def _compile(
-                mlir_source=mlir_source,
-                xclbin_path=xclbin_path,
-                insts_path=insts_path,
-                options=options,
-                work_dir=work_dir,
-            ):
-                work_dir.mkdir(parents=True, exist_ok=True)
-                _link_build_outputs_into(work_dir, Path(mlir_source.filename).parent)
-                compile_mlir_module(
-                    Path(mlir_source.filename).read_text(),
-                    insts_path=insts_path,
-                    xclbin_path=xclbin_path,
-                    work_dir=str(work_dir),
-                    options=options,
-                    use_chess=self.use_chess,
-                    verbose=True,
-                )
-
-            commands.append(PythonCallbackCompilationCommand(_compile))
-
-            # There may be multiple targets that require an xclbin/insts.bin from the same MLIR with different names; copy them
-            for sources_to in [mlir_sources_to_xclbins, mlir_sources_to_insts]:
-                if sources_to.get(mlir_source, [])[1:]:
-                    copy_src = sources_to[mlir_source][0]
-                    for copy_dest in sources_to[mlir_source][1:]:
-                        commands.append(
-                            ShellCompilationCommand(
-                                ["cp", copy_src.filename, copy_dest.filename]
-                            )
-                        )
-
-        # Update graph
-        for artifact in worklist:
-            artifact.available = True
-
-        return commands
 
 
 class KernelCompilationRule(CompilationRule):

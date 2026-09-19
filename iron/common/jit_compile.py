@@ -116,6 +116,10 @@ def _design_generator(call_kwargs: dict):
     An IRON design returns ``ctx.module`` from its own ``mlir_mod_ctx``, not a
     module built into the ambient one. That is accepted: the module keeps its
     context alive, and ``_generate_uncached`` only calls ``verify()`` on it.
+    A few designs return that module's text instead, which is parsed here --
+    upstream calls ``.operation.verify()`` on whatever comes back, so a string
+    reaches it as "AttributeError: 'str' object has no attribute 'operation'",
+    which names neither the design nor the cause.
     """
 
     def generate(
@@ -134,7 +138,8 @@ def _design_generator(call_kwargs: dict):
                 # than the cache keys on is how a design silently ends up built
                 # for the wrong target.
                 kwargs[name] = bound
-        return design(**kwargs)
+        module = design(**kwargs)
+        return Module.parse(module) if isinstance(module, str) else module
 
     return generate
 

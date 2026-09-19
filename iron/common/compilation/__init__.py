@@ -11,8 +11,6 @@ from .base import (
     CompilationArtifact,
     SourceArtifact,
     MLIRArtifact,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,
@@ -21,9 +19,6 @@ from .base import (
     PythonCallbackCompilationCommand,
     CompilationRule,
     DownloadCompilationRule,
-    GenerateMLIRFromPythonCompilationRule,
-    AieccCompilationRule,
-    AieccXclbinInstsCompilationRule,
     KernelCompilationRule,
 )
 from .sequence import (
