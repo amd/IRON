@@ -12,7 +12,7 @@ import ml_dtypes
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators.gemm.op import GEMM
-from iron.operators.gemm.reference import generate_golden_reference
+from iron.operators.gemm.op import generate_golden_reference
 from iron.common.test_utils import run_test, verify_buffer
 
 

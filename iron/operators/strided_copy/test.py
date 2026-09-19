@@ -5,7 +5,7 @@
 import pytest
 
 from iron.operators.strided_copy.op import StridedCopy
-from iron.operators.strided_copy.reference import generate_golden_reference
+from iron.operators.strided_copy.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 # Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim) and one
