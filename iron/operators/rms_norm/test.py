@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.rms_norm.op import RMSNorm
-from iron.operators.rms_norm.reference import generate_golden_reference
+from iron.operators.rms_norm.op import generate_golden_reference
 from iron.common.test_utils import run_test
 from iron.common.utils import get_shim_dma_limit
 
