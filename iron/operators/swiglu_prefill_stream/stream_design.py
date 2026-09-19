@@ -369,7 +369,7 @@ def _prefixed(mlir_text: str, func_prefix: str) -> str:
     return mlir_text
 
 
-def region_module(mlir_text: str, func_prefix: str = ""):
+def region_module(mlir_text: str, func_prefix: str = "", renames: dict | None = None):
     """Parse a group's MLIR text into an ``aie`` module for fusion.
 
     ``OperatorSequence`` consumes ``aie.DeviceOp`` objects, so the xDSL-emitted
@@ -380,7 +380,22 @@ def region_module(mlir_text: str, func_prefix: str = ""):
     from aie.extras.context import mlir_mod_ctx
 
     with mlir_mod_ctx():
-        return ir.Module.parse(_prefixed(mlir_text, func_prefix))
+        return ir.Module.parse(_prefixed(_renamed(mlir_text, renames), func_prefix))
+
+
+def _renamed(mlir_text: str, renames: dict | None) -> str:
+    """Point the generated design at the symbols the objects actually define.
+
+    stream-dse suffixes a GEMM's symbols with its tile shape so several shapes
+    coexist in one design. ExternalFunction can only prefix, so the objects end
+    up prefixed instead and the text is rewritten to agree. Applied before
+    ``_prefixed`` so a fused group's op<idx>_ lands on top of the result.
+    """
+    if not renames:
+        return mlir_text
+    for old, new in sorted(renames.items(), key=lambda kv: len(kv[0]), reverse=True):
+        mlir_text = re.sub(rf"@{re.escape(old)}\b", f"@{new}", mlir_text)
+    return mlir_text
 
 
 def _group_text(group_index, *, k, seq_len, embedding_dim, hidden_dim, npu) -> str:
@@ -397,14 +412,31 @@ def group_digest(group_index, **dims) -> str:
 
 
 def load_group(
-    group_index, func_prefix="", *, k, seq_len, embedding_dim, hidden_dim, npu
+    *,
+    group_index,
+    func_prefix="",
+    k,
+    seq_len,
+    embedding_dim,
+    hidden_dim,
+    npu,
+    kernels_dir,
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
-    ``group_index`` selects the group, in the order :data:`GROUP_LAYERS` lists them.
-    ``func_prefix`` is injected by ``OperatorSequence``. Every group loader calls
-    this; the first generates the design and the rest reuse the files on disk.
+    ``group_index`` selects the group, in the order :data:`GROUP_LAYERS` lists
+    them, and is keyword-only like the rest: the compile cache keys on a
+    design's parameters by name, so a positional one would not reach the key.
+    ``func_prefix`` is injected by ``OperatorSequence``. Every group loader
+    calls this; the first generates the design and the rest reuse the files on
+    disk.
+
+    The kernels are declared here rather than by the operator because an
+    ExternalFunction registers into a process-global set that CompilableDesign
+    clears when it begins generating; one built earlier is discarded and its
+    object never compiled.
     """
+    renames = declare_group_kernels(group_index, k=k, kernels_dir=kernels_dir)
     text = _group_text(
         group_index,
         k=k,
@@ -413,4 +445,36 @@ def load_group(
         hidden_dim=hidden_dim,
         npu=npu,
     )
-    return region_module(text, func_prefix)
+    return region_module(text, func_prefix, renames=renames)
+
+
+def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
+    """Compile every kernel this group runs; return the symbol renames forced.
+
+    The registry is the single place a kernel's source, compile flags and
+    symbol names are declared, so the object and the generated design agree.
+    """
+    from iron.common.device_utils import get_kernel_dir
+    from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
+
+    tiles = gemm_tiles(k)
+    per_layer = {
+        GATE: (GEMM, tiles[GATE]),
+        UP: (GEMM, tiles[UP]),
+        DOWN: (GEMM, tiles[DOWN]),
+        SILU: (SILU, None),
+        MUL: (ELTWISE_MUL, None),
+    }
+    kernels_dir = Path(kernels_dir)
+    kernel_dir = get_kernel_dir()
+    renames = {}
+    layers = GROUP_LAYERS[k][group_index]
+    for kernel, shape in dict.fromkeys(per_layer[layer] for layer in layers):
+        renames.update(
+            kernel.declare_kernels(
+                kernels_dir,
+                kernel_dir,
+                **(dict(zip("mkn", shape)) if shape else {}),
+            )
+        )
+    return renames

@@ -33,7 +33,8 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16
-from iron.operators._kernels import declare_kernel, lut_sources
+from iron.common.device_utils import lut_sources
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 import torch
 from iron.common.test_utils import torch_dtype_map

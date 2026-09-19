@@ -18,7 +18,7 @@ from iron.common import (
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
-from iron.operators._kernels import lut_sources
+from iron.common.device_utils import lut_sources
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size

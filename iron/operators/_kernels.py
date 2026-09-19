@@ -34,26 +34,6 @@ def runtime_include_dirs() -> list[str]:
     ]
 
 
-def lut_sources(dev=None):
-    """``lut_based_ops.cpp`` when this arch's kernels need it, else nothing.
-
-    aie2's exp/log kernels reference its tables; aie2p's do not. Returned as a
-    bundle for declare_kernel rather than as an object to archive: the tables
-    have no MLIR call site, so an object carrying them can never be discovered
-    by tracing calls, and compiling them into the kernel's own translation unit
-    is what removes the problem rather than working around it.
-    """
-    kernel_dir = get_kernel_dir(dev) if dev is not None else get_kernel_dir()
-    if kernel_dir != "aie2":
-        return ()
-    return (
-        Path(aie.utils.config.root_path())
-        / "aie_runtime_lib"
-        / kernel_dir.upper()
-        / "lut_based_ops.cpp",
-    )
-
-
 def declare_kernel(
     name,
     arg_types,
@@ -65,6 +45,7 @@ def declare_kernel(
     include_dirs=None,
     object_file_name=None,
     bundled_sources=(),
+    symbol_prefix=None,
 ):
     """Declare the kernel a design calls, building it unless it is prebuilt.
 
@@ -96,15 +77,26 @@ def declare_kernel(
     underscore ("op0_"). ``ExternalFunction`` joins with an underscore of its
     own, for the symbol name and for the rename pass alike, so it is stripped
     here; handing it over whole yields "op0__matvec".
+
+    ``symbol_prefix`` distinguishes several objects built from one source in a
+    single design -- stream's GEMMs, one per tile shape, all from mm.cc. It
+    composes with the fusion prefix rather than replacing it, so a fused
+    stream group gets "op0_mm128_64_64_matmul_bf16_bf16": both the group it
+    belongs to and the shape it was built for.
     """
     if prebuilt is not None:
         return Kernel(f"{func_prefix}{name}", f"{func_prefix}{prebuilt}", arg_types)
-    prefix = func_prefix.rstrip("_") or None
-    if object_file_name is not None and prefix:
+    prefix = f"{func_prefix}{symbol_prefix or ''}".rstrip("_") or None
+    if object_file_name is not None and func_prefix:
         # Upstream names a defaulted object after the prefixed symbol; an
-        # explicit one is taken as given, so the prefix has to be applied here
-        # or two fused operators would share one object.
-        object_file_name = f"{prefix}_{object_file_name}"
+        # explicit one is taken as given, so the fusion prefix has to be applied
+        # here or two fused operators would share one object.
+        #
+        # The fusion prefix only. symbol_prefix distinguishes symbols *within*
+        # one design, where the object name is already distinct -- adding it
+        # here would rename the file out from under a generated design that
+        # names it, which is exactly stream's case.
+        object_file_name = f"{func_prefix.rstrip('_')}_{object_file_name}"
 
     source = Path(source)
     dirs = list(runtime_include_dirs() if include_dirs is None else include_dirs)

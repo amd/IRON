@@ -368,12 +368,10 @@ class KernelObjectArtifact(CompilationArtifact):
         filename: str,
         dependencies: list[CompilationArtifact],
         extra_flags: list[str] | None = None,
-        rename_symbols: dict[str, str] | None = None,
         prefix_symbols: str | None = None,
     ) -> None:
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
-        self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
 
 
@@ -678,8 +676,6 @@ class KernelCompilationRule(CompilationRule):
                     )
                 )
             )
-            if artifact.rename_symbols:
-                commands.extend(self._rename_symbols(artifact))
             if artifact.prefix_symbols:
                 commands.append(
                     PythonCallbackCompilationCommand(
@@ -693,13 +689,3 @@ class KernelCompilationRule(CompilationRule):
             artifact.available = True
 
         return commands
-
-    def _rename_symbols(self, artifact):
-        cmd = [aie.utils.config.objcopy_path()]
-        for old_sym, new_sym in artifact.rename_symbols.items():
-            cmd += [
-                "--redefine-sym",
-                f"{old_sym}={new_sym}",
-            ]
-        cmd += [artifact.filename]
-        return [ShellCompilationCommand(cmd)]

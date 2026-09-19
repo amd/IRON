@@ -22,8 +22,7 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from .device_utils import get_kernel_dir
-from iron.operators._kernels import lut_sources
+from .device_utils import get_kernel_dir, lut_sources
 from .utils import get_shim_dma_limit
 
 

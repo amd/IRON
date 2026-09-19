@@ -12,9 +12,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from iron.common.device_utils import get_kernel_dir
 from iron.common.sequence import OperatorSequence
-from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
 
 
 @dataclass
@@ -49,38 +47,24 @@ class _SwiGLUStreamGroup(MLIROperator):
             DesignGenerator(
                 self.operator_dir / "stream_design.py",
                 "load_group",
-                (self.group_index,),
+                (),
                 {
+                    "group_index": self.group_index,
                     "k": self.k,
                     "seq_len": self.seq_len,
                     "embedding_dim": self.embedding_dim,
                     "hidden_dim": self.hidden_dim,
                     "npu": aie_utils.get_current_device().resolve().name,
+                    "kernels_dir": self.kernels_dir,
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        # The registry is the single place a kernel's source, compile flags and
-        # symbol names are declared, so the object and the design agree.
-        design = self._design
-        gemm_tiles = design.gemm_tiles(self.k)
-        per_layer = {
-            design.GATE: (GEMM, gemm_tiles[design.GATE]),
-            design.UP: (GEMM, gemm_tiles[design.UP]),
-            design.DOWN: (GEMM, gemm_tiles[design.DOWN]),
-            design.SILU: (SILU, None),
-            design.MUL: (ELTWISE_MUL, None),
-        }
-        layers = design.GROUP_LAYERS[self.k][self.group_index]
-        kernels_dir, kernel_dir = self.context.kernels_dir, get_kernel_dir()
-        return [
-            artifact
-            for kernel, tiles in dict.fromkeys(per_layer[layer] for layer in layers)
-            for artifact in kernel.kernel_artifacts(
-                kernels_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
-            )
-        ]
+        # None: the design declares its kernels as ExternalFunctions, from
+        # inside the generator where CompilableDesign collects them. See
+        # stream_design.declare_group_kernels.
+        return []
 
     def design_key(self):
         """Groups whose generated design is byte-identical share it."""

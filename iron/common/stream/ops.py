@@ -28,6 +28,7 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.common.layout import TiledStridedLayout, tiled_2d
+from iron.operators._kernels import declare_kernel
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel
@@ -79,36 +80,45 @@ def elementwise_layouts(
     return (tiled_2d(*ELEMENTWISE_TILE, mac_rows(bfp16_mmul), T),) * nb_operands
 
 
-def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
-    """The ``mm.cc`` object specialized for one tile shape.
+def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
+    """Compile ``mm.cc`` for one tile shape, and say what its symbols became.
 
-    stream-dse emits dimension-suffixed symbols so GEMMs of different tile shapes
-    coexist in one design (``GemmKernel.function_name``/``zero_name``); rename
-    ``mm.cc``'s unsuffixed symbols to match.
+    stream-dse emits dimension-suffixed symbols so GEMMs of different tile
+    shapes coexist in one design (``GemmKernel.function_name``/``zero_name``),
+    while mm.cc defines them unsuffixed. ExternalFunction can only *prefix*, so
+    the two are reconciled the other way round: the object is prefixed, and the
+    generated MLIR is rewritten to match through the returned map.
+
+    One declaration, not two. mm.cc defines both symbols in one translation
+    unit and ``symbol_prefix`` renames every symbol an object defines, so
+    prefixing once covers ``zero_bf16`` as well.
     """
-    from iron.common.compilation import KernelObjectArtifact, SourceArtifact
-
     suffix = f"{m}_{k}_{n}"
-    return [
-        KernelObjectArtifact(
-            f"mm_{suffix}.o",
-            dependencies=[SourceArtifact(kernels_dir / kernel_dir / "mm.cc")],
-            extra_flags=[
-                f"-DDIM_M={m}",
-                f"-DDIM_K={k}",
-                f"-DDIM_N={n}",
-                "-Dbf16_bf16_ONLY",
-                # Emulating the matmul on the bfp16 MACs is what makes the 8-row
-                # MAC tile available, so it and the layouts move together.
-                "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-                "-DROUND_CONV_EVEN",
-            ],
-            rename_symbols={
-                "matmul_bf16_bf16": f"matmul_bf16_bf16_{suffix}",
-                "zero_bf16": f"zero_bf16_{suffix}",
-            },
-        )
-    ]
+    prefix = f"mm{suffix}"
+    declare_kernel(
+        # Unused as a declaration: stream-dse emits the func.func this design
+        # links against, so ExternalFunction is here only to compile the source
+        # with these flags into this object.
+        "matmul_bf16_bf16",
+        [],
+        source=kernels_dir / kernel_dir / "mm.cc",
+        object_file_name=f"mm_{suffix}.o",
+        symbol_prefix=prefix,
+        compile_flags=[
+            f"-DDIM_M={m}",
+            f"-DDIM_K={k}",
+            f"-DDIM_N={n}",
+            "-Dbf16_bf16_ONLY",
+            # Emulating the matmul on the bfp16 MACs is what makes the 8-row
+            # MAC tile available, so it and the layouts move together.
+            "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
+            "-DROUND_CONV_EVEN",
+        ],
+    )
+    return {
+        f"matmul_bf16_bf16_{suffix}": f"{prefix}_matmul_bf16_bf16",
+        f"zero_bf16_{suffix}": f"{prefix}_zero_bf16",
+    }
 
 
 @dataclass(frozen=True)
@@ -125,26 +135,31 @@ class StreamKernel:
     layouts: Callable[..., tuple[TiledStridedLayout, ...]]
     source: str | None = None
     subdir: str | None = None
-    artifacts: Callable | None = None  # overrides source/subdir when tile-specialized
+    declare: Callable | None = None  # overrides source/subdir when tile-specialized
 
-    def kernel_artifacts(self, kernels_dir, kernel_dir, **kwargs):
-        """Compilation artifacts building this kernel's object file."""
-        if self.artifacts is not None:
-            return self.artifacts(kernels_dir, kernel_dir, **kwargs)
-        from iron.common.compilation import KernelObjectArtifact, SourceArtifact
+    def declare_kernels(self, kernels_dir, kernel_dir, **kwargs) -> dict:
+        """Compile this kernel, and return any symbol renames it forces.
 
+        Called from inside the design, not the operator: an ExternalFunction
+        registers into a process-global set that CompilableDesign clears when
+        it starts generating, so one built earlier is discarded and its object
+        never compiled.
+        """
+        if self.declare is not None:
+            return self.declare(kernels_dir, kernel_dir, **kwargs)
         subdir = self.subdir or kernel_dir
-        return [
-            KernelObjectArtifact(
-                f"{self.source}.o",
-                dependencies=[
-                    SourceArtifact(kernels_dir / subdir / f"{self.source}.cc")
-                ],
-            )
-        ]
+        # No prefix: stream-dse's generated MLIR already calls these by the
+        # names the source defines, so renaming them would break the link.
+        declare_kernel(
+            self.source,
+            [],
+            source=kernels_dir / subdir / f"{self.source}.cc",
+            object_file_name=f"{self.source}.o",
+        )
+        return {}
 
 
-GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, artifacts=_gemm_artifacts)
+GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, declare=_gemm_declare)
 SILU = StreamKernel(key="silu", layouts=lambda: elementwise_layouts(2), source="silu")
 ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
