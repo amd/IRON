@@ -29,9 +29,12 @@ each is load-bearing here:
 """
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
+from typing import Any
 
+import aie.utils as aie_utils
 from aie.ir import Module
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.compile.jit.markers import CompileTime
@@ -42,12 +45,84 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
-def _generator_for(mlir_text: str, work_dir=None, object_files=()):
-    """Wrap MLIR text as a generator CompilableDesign will accept.
+# An object address in a parameter's str() would re-key the cache every process.
+_ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
-    ``graph`` and ``trace`` are never read. They exist so the digest and the
-    trace size have somewhere to live in ``compile_kwargs``, which is what the
-    cache key actually hashes.
+
+def _params_key(kwargs: dict) -> str:
+    """The design's bound parameters, spelled so the cache key can hash them.
+
+    ``_compute_recipe_hash`` hashes a callable ``compile_kwargs`` value by its
+    code identity, but every other value by ``str()``. A parameter whose
+    ``str()`` embeds an object address therefore produces a different key in
+    each process, and the failure is silent: not an error, just a cache that
+    never hits and an aiecc run on every call.
+
+    ``dev`` is exactly that (``<abc.NPU2 object at 0x7f...>``) and is dropped
+    here -- device identity already reaches the key through
+    ``_compute_artifact_hash``, which spells it as (type, arch, cols, rows)
+    rather than by identity. Anything else that looks like an address is an
+    operator bug, so it is rejected rather than quietly degraded.
+    """
+    items = []
+    for name, value in sorted(kwargs.items()):
+        if name == "dev":
+            continue
+        text = str(value)
+        if _ADDRESS.search(text):
+            raise ValueError(
+                f"design parameter {name!r} stringifies to {text!r}, which "
+                "embeds an object address. It would give this design a new "
+                "compile-cache key in every process. Give the value a stable "
+                "__str__, or pass the identity it stands for instead."
+            )
+        items.append((name, text))
+    return repr(items)
+
+
+def _design_generator(call_kwargs: dict):
+    """Adapt an IRON design function to the generator CompilableDesign wants.
+
+    Handing over the *design function* rather than MLIR text is what puts
+    generation inside ``compile()``: under its lock, and inside the window
+    where ``ExternalFunction._instances`` is collected. Kernels declared by the
+    design are therefore compiled by upstream rather than by a separate rule.
+
+    The signature is only identity, never data: ``compile_kwargs`` keys must
+    appear in it and carry ``CompileTime[T]``, so each one exists to reach the
+    cache key. The design is hashed by its code, its parameters by their text,
+    and ``chain`` by the predecessor xclbin a separate-dispatch operator links
+    onto. The values the design is actually called with are closed over, which
+    is safe only because ``params`` already spells them -- closure contents are
+    invisible to the cache key, the trap pinned by
+    ``iron/tests/infrastructure/compilable_design_contract.py``.
+
+    An IRON design returns ``ctx.module`` from its own ``mlir_mod_ctx``, not a
+    module built into the ambient one. That is accepted: the module keeps its
+    context alive, and ``_generate_uncached`` only calls ``verify()`` on it.
+    """
+
+    def generate(
+        design: CompileTime[Any],
+        params: CompileTime[str],
+        chain: CompileTime[str] = "",
+    ):
+        kwargs = dict(call_kwargs)
+        if "dev" in kwargs:
+            # Resolved now rather than at operator construction, so the design
+            # is built for whatever device this compile is bound to.
+            kwargs["dev"] = aie_utils.get_current_device()
+        return design(**kwargs)
+
+    return generate
+
+
+def _generator_for(mlir_text: str, work_dir=None, object_files=()):
+    """Wrap already-generated MLIR text as a generator CompilableDesign accepts.
+
+    The fused path still builds its text up front -- fusing several designs into
+    one module is a real transformation, not a passthrough -- so it keeps this.
+    Single operators go through :func:`_design_generator` instead.
 
     Staging happens here rather than before ``compile()``, because a cache miss
     calls ``_cleanup_failed_compilation`` on the work directory first and wipes
@@ -189,7 +264,7 @@ def compile_sequence(seq, elf_path) -> Path:
 
 
 def compile_xclbin_insts(
-    mlir_text: str,
+    generator,
     object_files,
     xclbin_path,
     insts_path,
@@ -197,13 +272,19 @@ def compile_xclbin_insts(
     xclbin_input=None,
     extra_flags=(),
 ):
-    """Compile one operator's MLIR to an xclbin and its instruction stream.
+    """Compile one operator's design to an xclbin and its instruction stream.
 
     The separate-dispatch counterpart to :func:`compile_fused_elf`. Chaining
     looks like it needs more than CompilableDesign offers -- each operator's
     xclbin links onto the previous one's via ``--xclbin-input`` so a sequence
     lands in one loadable image -- but that and the kernel name are both aiecc
     flags, which it already forwards. No local subclass is needed.
+
+    ``generator`` is the operator's ``DesignGenerator``. It is resolved but not
+    called here: the design function runs inside ``compile()``, which is what
+    lets a design declare ``ExternalFunction`` kernels and have upstream build
+    them. ``object_files`` covers operators that still declare prebuilt objects
+    instead, and is empty once one has migrated.
     """
     xclbin_path, insts_path = Path(xclbin_path), Path(insts_path)
     object_files = [Path(o) for o in object_files]
@@ -214,15 +295,22 @@ def compile_xclbin_insts(
         flags.append(f"--xclbin-input={Path(xclbin_input).resolve()}")
     flags += list(extra_flags)
 
+    design_fn, args, kwargs = generator.resolve()
+    if args:
+        raise ValueError(
+            f"design {design_fn.__qualname__} takes positional arguments "
+            f"{args!r}; the cache key only spells keyword parameters."
+        )
+
     design = CompilableDesign(
-        _generator_for(mlir_text, work_dir, object_files),
+        _design_generator(kwargs),
         object_files=object_files,
         aiecc_flags=flags,
-        # The predecessor is part of what this image is: two operators with
-        # identical MLIR chained onto different xclbins are different artifacts.
         compile_kwargs={
-            "graph": _digest(mlir_text),
-            "trace": 0,
+            "design": design_fn,
+            "params": _params_key(kwargs),
+            # The predecessor is part of what this image is: two operators with
+            # identical designs chained onto different xclbins differ.
             "chain": str(xclbin_input or ""),
         },
     )

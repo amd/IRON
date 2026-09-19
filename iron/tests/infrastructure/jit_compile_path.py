@@ -18,10 +18,17 @@ import pytest
 
 import aie.utils as aie_utils
 from aie.iron.device import from_name
+from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from iron.common.capture import capture
 from iron.common.context import AIEContext
-from iron.common.jit_compile import compile_sequence, compile_xclbin_insts, _digest
+from iron.common.jit_compile import (
+    compile_sequence,
+    compile_xclbin_insts,
+    _digest,
+    _design_generator,
+    _params_key,
+)
 from iron.operators import ElementwiseAdd
 
 
@@ -98,8 +105,6 @@ def test_tracing_does_not_reuse_an_untraced_cache_entry():
     Sharing one would hand a traced build the untraced ELF, which loads and
     runs and produces no trace.
     """
-    from iron.common.jit_compile import _digest
-
     text = "module { /* identical */ }"
     assert {"graph": _digest(text), "trace": 0} != {
         "graph": _digest(text),
@@ -130,26 +135,36 @@ def test_identical_sequences_reuse_the_compiled_elf(tmp_path):
     )
 
 
-def test_identical_operator_reuses_the_compiled_xclbin(tmp_path):
-    """The same regression, for compile_xclbin_insts (the separate-dispatch
-    and, soon, standalone-operator path) rather than the fused-ELF one."""
+def _add_design(tmp_path):
+    """A freshly built ElementwiseAdd, as its generator plus kernel objects.
+
+    Built from a new instance each call: the regression this guards is two
+    independently-constructed operators with the same recipe each rebuilding,
+    which reusing one instance would not catch.
+    """
     add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
     add.compile()
-    mlir_text = str(add.get_mlir_artifact().generator())
     objects = [
         Path(a.filename) for a in add.artifacts.bfs() if str(a.filename).endswith(".o")
     ]
+    return add.get_mlir_artifact().generator, objects
 
+
+def test_identical_operator_reuses_the_compiled_xclbin(tmp_path):
+    """The same regression, for compile_xclbin_insts (the separate-dispatch
+    and standalone-operator path) rather than the fused-ELF one."""
     xclbin_path = tmp_path / "op.xclbin"
     insts_path = tmp_path / "op.bin"
 
+    generator, objects = _add_design(tmp_path)
     first, _ = compile_xclbin_insts(
-        mlir_text, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+        generator, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
     )
     mtime1 = first.stat().st_mtime_ns
 
+    generator, objects = _add_design(tmp_path)
     second, _ = compile_xclbin_insts(
-        mlir_text, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+        generator, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
     )
     mtime2 = second.stat().st_mtime_ns
 
@@ -175,3 +190,43 @@ def test_tracing_changes_the_elf(tmp_path):
         f"no input_with_addresses.mlir under {work_dir}; the trace parser has "
         "nothing to read, so --get-input-with-addresses is not reaching aiecc"
     )
+
+
+def test_the_compile_key_is_stable_across_identical_operators():
+    """Two operators built the same way must land on one cache entry.
+
+    The key is what makes the seam worth having, and it fails silently when it
+    is wrong: an unstable key is not an error, just an aiecc run on every call.
+    """
+
+    def key_for():
+        add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+        fn, _, kwargs = add.get_mlir_artifact().generator.resolve()
+        return CompilableDesign(
+            _design_generator(kwargs),
+            compile_kwargs={"design": fn, "params": _params_key(kwargs), "chain": ""},
+        )._compute_cache_hash()
+
+    assert key_for() == key_for()
+
+
+def test_the_device_does_not_reach_the_compile_key_by_identity():
+    """``dev`` stringifies to ``<abc.NPU2 object at 0x...>``.
+
+    Hashed by str(), that would re-key the cache in every process. Device
+    identity reaches the key through _compute_artifact_hash instead, which
+    spells it as (type, arch, cols, rows).
+    """
+    device = aie_utils.get_current_device()
+    assert "0x" in str(device), "this test is pointless if dev stops being opaque"
+    assert "dev" not in _params_key({"dev": device, "M": 8})
+
+
+def test_an_opaque_design_parameter_is_rejected():
+    """Anything else carrying an address is an operator bug -- say so loudly."""
+
+    class Opaque:
+        pass
+
+    with pytest.raises(ValueError, match="embeds an object address"):
+        _params_key({"thing": Opaque(), "M": 8})

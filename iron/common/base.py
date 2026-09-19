@@ -269,10 +269,9 @@ class MLIROperator(AIEOperatorBase):
             return
         from .jit_compile import compile_xclbin_insts
 
-        mlir_text = str(self.get_mlir_artifact().generator())
         object_files = [Path(a.filename) for a in self._kernel_artifacts]
         self._xclbin_path, self._insts_path = compile_xclbin_insts(
-            mlir_text,
+            self.get_mlir_artifact().generator,
             object_files,
             Path(self.context.build_dir) / f"{self.name}.xclbin",
             Path(self.context.build_dir) / f"{self.name}.bin",

@@ -262,13 +262,10 @@ class SeparateDispatch(SequenceDispatch):
         for idx, op in enumerate(seq.unique_operators()):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
-            mlir_text = str(op.get_mlir_artifact().generator())
-            object_files = [
-                Path(a.filename) for a in self._kernel_artifacts[id(op)]
-            ]
+            object_files = [Path(a.filename) for a in self._kernel_artifacts[id(op)]]
 
             xclbin_path, insts_path = compile_xclbin_insts(
-                mlir_text,
+                op.get_mlir_artifact().generator,
                 object_files,
                 build_dir / f"{op_label}.xclbin",
                 build_dir / f"{op_label}.bin",
