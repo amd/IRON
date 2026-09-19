@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import inspect
 import logging
 import time
 from pathlib import Path
@@ -153,12 +154,11 @@ class FusedDispatch(SequenceDispatch):
 
         if getattr(seq, "elf_path", None) is not None:
             return seq.elf_path
-        mlir = self.build_fused_mlir(seq)
         objects = [
             a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
         ]
         seq.elf_path = compile_fused_elf(
-            mlir,
+            lambda: self.build_fused_mlir(seq),
             objects,
             Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
             extra_flags=seq.extra_flags,
@@ -180,7 +180,14 @@ class FusedDispatch(SequenceDispatch):
 
         for idx, op in enumerate(designs):
             generator = op.get_mlir_artifact().generator
-            if len(op.get_kernel_artifacts()) > 0:
+            # Ask the design whether it takes a prefix, rather than inferring it
+            # from the operator having kernel artifacts: an operator whose
+            # design declares ExternalFunctions reports no artifacts at all, and
+            # under the old test silently went unprefixed -- every shape then
+            # defining the same symbols, kept apart only by each core linking
+            # its own object.
+            design_fn, _, _ = generator.resolve()
+            if "func_prefix" in inspect.signature(design_fn).parameters:
                 generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)

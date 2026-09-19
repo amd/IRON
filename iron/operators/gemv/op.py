@@ -2,18 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
-    KernelArchiveArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
+import aie.utils.config
 from iron.common.device_utils import get_kernel_dir
 import numpy as np
 from ml_dtypes import bfloat16
@@ -21,7 +20,7 @@ import aie.dialects.index as index
 from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ExternalFunction, ObjectFifo, Program, Runtime, TaskGroup, Worker
 import torch
 
 
@@ -131,12 +130,14 @@ class GEMV(MLIROperator):
         return f"{base}_epi{self.epilogue}"
 
     @property
-    def kernel_object(self):
-        # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
-        # archive of (matvec, gelu); the plain matvec stays a single object.
-        if self.epilogue == "gelu":
-            return f"gemv_{self.K}k_{self.kernel_vector_size}vs_gelu_kernels.a"
-        return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
+    def kernels_dir(self):
+        """Where the design finds its C++ sources.
+
+        Passed to the design rather than resolved there so that
+        IRON_AIE_KERNELS_DIR still redirects it -- and so that pointing IRON at
+        a different kernel tree changes the compile cache key, which it should.
+        """
+        return self.context.kernels_dir
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -148,35 +149,10 @@ class GEMV(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        matvec_obj = KernelObjectArtifact(
-            f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
-            dependencies=[
-                SourceArtifact(self.context.kernels_dir / "generic" / "mv.cc")
-            ],
-            extra_flags=[
-                f"-DDIM_K={self.K}",
-                f"-DVEC_SIZE={self.kernel_vector_size}",
-            ],
-        )
-        if self.epilogue == "gelu":
-            # The gelu kernel lives in aie2p/gelu.cc, so the fused epilogue is NPU2-only.
-            if get_kernel_dir() != "aie2p":
-                raise NotImplementedError(
-                    "gemv gelu epilogue is only available on NPU2 (aie2p); "
-                    f"current kernel dir is {get_kernel_dir()!r}"
-                )
-            gelu_obj = KernelObjectArtifact(
-                "gelu.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "aie2p" / "gelu.cc")
-                ],
-            )
-            return [
-                KernelArchiveArtifact(
-                    self.kernel_object, dependencies=[matvec_obj, gelu_obj]
-                )
-            ]
-        return [matvec_obj]
+        # None: the design declares its kernels as ExternalFunctions, which
+        # CompilableDesign compiles itself. Nothing here has to name the object
+        # file a second time and keep the two spellings in step.
+        return []
 
     @staticmethod
     def arg_spec(M, K, num_batches=1):
@@ -221,7 +197,8 @@ def my_matvec(
     tile_size_input,
     tile_size_output=None,
     num_batches=1,
-    kernel_object="mv.o",
+    kernels_dir=None,
+    kernel_vector_size=64,
     func_prefix="",
     verbose=False,
     epilogue="none",
@@ -278,11 +255,29 @@ def my_matvec(
     L3_B_ty = np.ndarray[(num_batches * K,), dtype_in]
     L3_C_ty = np.ndarray[(num_batches * M,), dtype_out]
 
+    # The kernels are declared and built by one object each. Constructing them
+    # here rather than in the operator is required, not stylistic: an
+    # ExternalFunction registers itself into a process-global set that
+    # CompilableDesign clears when it starts generating, so anything built
+    # before that is discarded.
+    kernels_dir = Path(kernels_dir)
+    kernel_dir = get_kernel_dir(dev)
+    include_dirs = [
+        str(Path(aie.utils.config.root_path()) / "aie_runtime_lib" / kernel_dir.upper())
+    ]
+    # IRON spells the fusion prefix with its trailing underscore ("op0_");
+    # ExternalFunction joins with one of its own, both for the symbol name and
+    # for the rename pass, so handing it "op0_" would yield "op0__matvec".
+    symbol_prefix = func_prefix.rstrip("_") or None
     func_type = "vectorized" if vectorized else "scalar"
-    matvec = Kernel(
-        f"{func_prefix}matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        f"{func_prefix}{kernel_object}",
-        [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
+    matvec = ExternalFunction(
+        f"matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
+        source_file=str(kernels_dir / "generic" / "mv.cc"),
+        arg_types=[np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
+        include_dirs=include_dirs,
+        # mv.cc is a template over both: one source, one object per shape.
+        compile_flags=[f"-DDIM_K={K}", f"-DVEC_SIZE={kernel_vector_size}"],
+        symbol_prefix=symbol_prefix,
     )
     # Optional fused activation over the full tile_size_output C-tile, applied once per tile in core_body
     # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose tile_size_input
@@ -293,10 +288,20 @@ def my_matvec(
         assert (
             tile_size_output % 16 == 0
         ), f"gelu epilogue needs tile_size_output % 16 == 0 (got {tile_size_output})"
-        gelu_kernel = Kernel(
-            f"{func_prefix}gelu_tile_bf16",
-            f"{func_prefix}{kernel_object}",
-            [np.int32, L1_C_ty],
+        if kernel_dir != "aie2p":
+            raise NotImplementedError(
+                "gemv gelu epilogue is only available on NPU2 (aie2p); "
+                f"current kernel dir is {kernel_dir!r}"
+            )
+        # A second object, not an archive bundled with the first: each
+        # func.func carries its own link_with and aie-assign-core-link-files
+        # aggregates them onto the core.
+        gelu_kernel = ExternalFunction(
+            "gelu_tile_bf16",
+            source_file=str(kernels_dir / "aie2p" / "gelu.cc"),
+            arg_types=[np.int32, L1_C_ty],
+            include_dirs=include_dirs,
+            symbol_prefix=symbol_prefix,
         )
 
     A_L3L1_fifos = [

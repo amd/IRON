@@ -37,7 +37,7 @@ from typing import Any
 import aie.utils as aie_utils
 from aie.ir import Module
 from aie.utils.compile.jit._hash import _device_identity_key
-from aie.utils.compile.jit.compilabledesign import CompilableDesign
+from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
 from aie.utils.compile.jit.markers import CompileTime
 
 
@@ -139,12 +139,33 @@ def _design_generator(call_kwargs: dict):
     return generate
 
 
-def _generator_for(mlir_text: str, work_dir=None, object_files=()):
-    """Wrap already-generated MLIR text as a generator CompilableDesign accepts.
+def _fuse_as_children(build_mlir) -> str:
+    """Fuse the operator designs, with none of them a full ELF in its own right.
 
-    The fused path still builds its text up front -- fusing several designs into
-    one module is a real transformation, not a passthrough -- so it keeps this.
-    Single operators go through :func:`_design_generator` instead.
+    ``_iron_full_elf`` makes a design's runtime sequence load its own PDI,
+    because on that path no xclbin configures the device
+    (``aie/iron/program.py``). Exactly one program in a fused build needs that,
+    and it is not the children: ``fuse_mlir`` inlines each child's device --
+    runtime sequence included -- and drives PDI switching itself, alternating
+    between two PDIs per configure point under ``--expand-load-pdis``, with
+    ``needs_additional_reset`` keeping the count even.
+
+    Generated inside ``compile()`` without this, every child also emits a
+    ``load_pdi`` and the two schemes fight: the build succeeds, the ELF links,
+    and the device hangs at dispatch with ERT_CMD_STATE_TIMEOUT. Shadowing the
+    flag for the children is what the old code got for free by generating
+    outside ``compile()`` altogether.
+    """
+    with compile_context(_iron_full_elf=False):
+        return build_mlir()
+
+
+def _fused_generator(build_mlir, work_dir=None, object_files=()):
+    """Fuse a sequence's designs into one module, inside ``compile()``.
+
+    ``graph`` and ``trace`` are never read; they exist so the fused text's
+    digest and the trace size have somewhere to live in ``compile_kwargs``,
+    which is what the cache key hashes.
 
     Staging happens here rather than before ``compile()``, because a cache miss
     calls ``_cleanup_failed_compilation`` on the work directory first and wipes
@@ -159,8 +180,10 @@ def _generator_for(mlir_text: str, work_dir=None, object_files=()):
     ):
         if work_dir is not None:
             stage_objects(Path(work_dir), object_files)
-        # Parsed here so it lands in the mlir_mod_ctx CompilableDesign opens.
-        return Module.parse(mlir_text)
+        # Fused and parsed here so the designs' ExternalFunctions register into
+        # the set compile() collects, and the module lands in the mlir_mod_ctx
+        # it opened.
+        return Module.parse(_fuse_as_children(build_mlir))
 
     return generate
 
@@ -236,25 +259,46 @@ def fused_work_dir(elf_path) -> Path:
 
 
 def compile_fused_elf(
-    mlir_text: str, object_files, elf_path, extra_flags=(), trace_size=0
+    build_mlir, object_files, elf_path, extra_flags=(), trace_size=0
 ) -> Path:
-    """Compile fused MLIR to a full ELF, returning its path.
+    """Compile a fused sequence to a full ELF, returning its path.
 
-    ``object_files`` are the already-built, symbol-prefixed kernel objects the
-    MLIR links against.
+    ``build_mlir`` is called, not passed text: fusing several designs into one
+    module runs each operator's design, and a design that declares
+    ``ExternalFunction`` kernels only has them built if it runs inside
+    ``compile()``. Fusing outside and handing over the result registers those
+    kernels into a set ``compile()`` then clears, so the objects are never
+    built and the core fails to link.
+
+    It is called twice, and deliberately: once here for the cache key, which is
+    still the fused text's own digest -- the most precise identity available,
+    and a call this path already paid -- and once inside the generator, where
+    the kernels survive. Only the second is on the cache-miss path; generation
+    is Python building MLIR, against an aiecc run.
+
+    Both calls go through :func:`_fuse_as_children`, so both see the same
+    ``_iron_full_elf`` and the key describes the text that is actually
+    compiled. Keying under one value and building under the other produces a
+    cache entry for a different program -- which is not a build failure, so
+    nothing reports it.
+
+    ``object_files`` are kernel objects for operators that still declare
+    prebuilt ones, and is empty once they all declare ExternalFunctions.
     """
     elf_path = Path(elf_path)
     object_files = [Path(o) for o in object_files]
     work_dir = fused_work_dir(elf_path)
 
+    identity = _digest(_fuse_as_children(build_mlir))
+
     design = CompilableDesign(
-        _generator_for(mlir_text, work_dir, object_files),
+        _fused_generator(build_mlir, work_dir, object_files),
         full_elf=True,
         object_files=object_files,
         aiecc_flags=list(FUSED_ELF_FLAGS)
         + ([TRACE_FLAG] if trace_size else [])
         + list(extra_flags),
-        compile_kwargs={"graph": _digest(mlir_text), "trace": int(trace_size)},
+        compile_kwargs={"graph": identity, "trace": int(trace_size)},
     )
     hit, current_hash, stamp = _compile_if_changed(design, elf_path)
     if not hit:
@@ -275,9 +319,8 @@ def compile_sequence(seq, elf_path) -> Path:
     objects = [
         a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
     ]
-    mlir = seq._dispatch.build_fused_mlir(seq)
     return compile_fused_elf(
-        mlir,
+        lambda: seq._dispatch.build_fused_mlir(seq),
         objects,
         elf_path,
         extra_flags=getattr(seq, "extra_flags", ()) or (),
