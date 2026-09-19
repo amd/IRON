@@ -354,6 +354,13 @@ class GEMM(MLIROperator):
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
+    def link_xclbin(self) -> None:
+        # Nothing to do: set_up_artifacts() above already registered the
+        # xclbin/insts as artifacts, so compile()'s artifact-graph pass builds
+        # them. The base implementation would compile a second, shape-specific
+        # xclbin through CompilableDesign and defeat the config/shape split.
+        return
+
     def get_callable(self) -> Callable[..., Any]:
         # Explicit override, not inherited: MLIROperator.get_callable() moved
         # onto CompilableDesign-compiled paths (self._xclbin_path/_insts_path),

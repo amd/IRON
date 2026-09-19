@@ -241,12 +241,29 @@ class MLIROperator(AIEOperatorBase):
         self._kernel_artifacts = self.get_kernel_artifacts()
         self.add_artifacts(self._kernel_artifacts)
 
+    def compile(self, dry_run: bool = False) -> AIEOperatorBase:
+        """Build the artifact graph, then the xclbin+insts.
+
+        link_xclbin() is lazy for get_callable()'s benefit, but compile() is an
+        explicit request to compile and has to honour it. Once the xclbin/insts
+        pair stopped being artifacts, the base implementation alone built only
+        kernel objects -- so for a design with no C++ kernel it built nothing at
+        all, and compile() returned success for configurations whose MLIR cannot
+        even be generated. Errors that belong to compile() surfaced from
+        get_callable() instead, or not at all.
+        """
+        super().compile(dry_run=dry_run)
+        if not dry_run:
+            self.link_xclbin()
+        return self
+
     def link_xclbin(self) -> None:
         """Compile this operator's xclbin+insts through CompilableDesign, once.
 
-        Lazy and idempotent, mirroring FusedDispatch.link_elf /
-        SeparateDispatch.link_xclbins: get_callable() is the first point a
-        standalone operator actually needs a compiled binary.
+        Idempotent, mirroring FusedDispatch.link_elf /
+        SeparateDispatch.link_xclbins. compile() drives it, and get_callable()
+        also calls it so an operator that was never explicitly compiled still
+        works.
         """
         if getattr(self, "_xclbin_path", None) is not None:
             return

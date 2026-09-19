@@ -135,6 +135,13 @@ class MMPrebuilt(MLIROperator):
         )
         self.add_artifacts([self.insts_artifact, self.xclbin_artifact])
 
+    def link_xclbin(self) -> None:
+        # Nothing to do: the xclbin is downloaded, not compiled, and the insts
+        # are an artifact that compile()'s graph pass builds. The base
+        # implementation would compile an xclbin from this operator's MLIR,
+        # which is exactly what using the prebuilt one avoids.
+        return
+
     def get_callable(self) -> Callable[..., Any]:
         npu_kernel = NPUKernel(
             xclbin_path=self.xclbin_artifact.filename,
