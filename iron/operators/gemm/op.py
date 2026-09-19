@@ -34,6 +34,7 @@ from aie.iron import (
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 import torch
 from iron.common.test_utils import torch_dtype_map
@@ -112,20 +113,6 @@ class GEMM(MLIROperator):
         """Suffix encoding compile-time flags that affect the kernel binary."""
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
-    @property
-    def kernel_object(self):
-        """Object file this design links against.
-
-        Every tiling and layout choice that changes the emitted kernel is in
-        the name, so two GEMMs that differ in any of them cannot collide on
-        one object.
-        """
-        return (
-            f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}"
-            f"_{int(self.b_col_maj)}_{int(self.c_col_maj)}"
-            f"{self._kernel_flags_suffix}.o"
-        )
-
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -145,13 +132,14 @@ class GEMM(MLIROperator):
                     "n_aie_cols": self.num_aie_columns,
                     "dtype_in_str": self.dtype_in,
                     "dtype_out_str": self.dtype_out,
-                    "kernel_object": self.kernel_object,
                 },
                 bind_from=self,
             ),
         )
 
-    def get_kernel_artifacts(self):
+    @property
+    def kernel_flags(self) -> list[str]:
+        """The -D set that decides what mm.cc compiles to."""
         base_dir = self.context.base_dir
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
@@ -171,34 +159,26 @@ class GEMM(MLIROperator):
         if self.c_col_maj:
             kernel_flags.append("-DC_COL_MAJ")
 
+        if get_kernel_dir() == "aie2":
+            # INTERIM: aie2 sources a patched mm.cc from the tree (see the
+            # rounding note in aie_kernels/aie2/mm.cc). The -I lets that file's
+            # zero.cc and ../aie_kernel_utils.h resolve from the unchanged
+            # package copies.
+            kernel_flags.append(f"-I{self.context.kernels_dir / 'aie2'}")
+        return kernel_flags
+
+    @property
+    def kernel_source(self):
+        """The mm.cc this operator compiles; aie2's is patched in-tree."""
         kernel_dir = get_kernel_dir()
-        # INTERIM: aie2 sources a patched mm.cc from the tree (see the rounding
-        # note in aie_kernels/aie2/mm.cc); aie2p is unaffected and sources from
-        # the package. The -I lets the in-tree file's zero.cc and
-        # ../aie_kernel_utils.h includes resolve from the unchanged package copies.
         if kernel_dir == "aie2":
-            mm_source = base_dir / "aie_kernels" / kernel_dir / "mm.cc"
-            kernel_flags.append(f"-I{self.context.kernels_dir / kernel_dir}")
-        else:
-            mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
-        return [
-            KernelObjectArtifact(
-                # Same name the design links against -- one expression, so the
-                # object that gets built and the object that gets linked cannot
-                # drift apart.
-                self.kernel_object,
-                extra_flags=kernel_flags,
-                dependencies=[SourceArtifact(mm_source)],
-            ),
-            KernelObjectArtifact(
-                "cast_f32_bf16.o",
-                [
-                    SourceArtifact(
-                        self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
-                    )
-                ],
-            ),
-        ]
+            return self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc"
+        return self.context.kernels_dir / kernel_dir / "mm.cc"
+
+    def get_kernel_artifacts(self):
+        # None: the design declares its kernels as ExternalFunctions and
+        # upstream compiles them.
+        return []
 
     @staticmethod
     def arg_spec(
@@ -393,7 +373,9 @@ def my_matmul(
     prio_accuracy,
     separate_c_tiles,
     trace_size,
-    kernel_object=None,
+    kernel_source=None,
+    kernel_flags=(),
+    kernels_dir=None,
     func_prefix="",
 ):
     n_aie_rows = 4
@@ -533,11 +515,10 @@ def my_matmul(
 
     # AIE Core Function declarations
     scalar_suffix = "_scalar" if use_scalar else ""
-    gemm_object = (
-        f"{func_prefix}{kernel_object}"
-        if kernel_object
-        else f"{func_prefix}gemm_{m}x{k}x{n}.o"
-    )
+    # zero and matmul both come out of mm.cc, so they name one object:
+    # declared separately they would compile that translation unit twice and
+    # each copy would define both symbols.
+    mm_object = f"gemm_{m}x{k}x{n}.o"
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
@@ -545,39 +526,50 @@ def my_matmul(
         # Set the type for accumulation
         C_l1_ty_internal = np.ndarray[(m, n), np.dtype[dtype_out_internal]]
         # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
-        convert_copy_kernel = Kernel(
-            f"{func_prefix}cast_f32_bf16_row",
-            f"{func_prefix}cast_f32_bf16.o",
+        convert_copy_kernel = declare_kernel(
+            "cast_f32_bf16_row",
             [C_l1_ty_internal, C_l1_ty, np.int32],
+            source=Path(kernels_dir) / "aie2p" / "cast_f32_bf16.cc",
+            func_prefix=func_prefix,
         )
         # Fix the kernels to use f32 outputs
-        zero_kernel = Kernel(
-            f"{func_prefix}zero{scalar_suffix}_f32",
-            gemm_object,
+        zero_kernel = declare_kernel(
+            f"zero{scalar_suffix}_f32",
             [C_l1_ty_internal],
+            source=kernel_source,
+            compile_flags=kernel_flags,
+            object_file_name=mm_object,
+            func_prefix=func_prefix,
         )
-        matmul_func_name = f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_f32"
-        matmul_kernel = Kernel(
+        matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_f32"
+        matmul_kernel = declare_kernel(
             matmul_func_name,
-            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty_internal],
+            source=kernel_source,
+            compile_flags=kernel_flags,
+            object_file_name=mm_object,
+            func_prefix=func_prefix,
         )
     else:
         # No need to use separate buffers for accumulation and transfer to L2, so
         # we only need the zero and matmul kernels
         fifo_depth_out = fifo_depth
-        zero_kernel = Kernel(
-            f"{func_prefix}zero{scalar_suffix}_{dtype_out_str}",
-            gemm_object,
+        zero_kernel = declare_kernel(
+            f"zero{scalar_suffix}_{dtype_out_str}",
             [C_l1_ty],
+            source=kernel_source,
+            compile_flags=kernel_flags,
+            object_file_name=mm_object,
+            func_prefix=func_prefix,
         )
-        matmul_func_name = (
-            f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
-        )
-        matmul_kernel = Kernel(
+        matmul_func_name = f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
+        matmul_kernel = declare_kernel(
             matmul_func_name,
-            gemm_object,
             [A_l1_ty, B_l1_ty, C_l1_ty],
+            source=kernel_source,
+            compile_flags=kernel_flags,
+            object_file_name=mm_object,
+            func_prefix=func_prefix,
         )
 
     # Tile declarations as tile[row][col]

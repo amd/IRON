@@ -35,6 +35,7 @@ from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace, resolve_trace_size
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -83,14 +84,9 @@ class MHA(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self):
-        mm_source = str(self.context.kernels_dir / "aie2p" / "mm.cc")
-        softmax_source = str(self.context.kernels_dir / "aie2p" / "softmax.cc")
-        mha_source = str(self.context.kernels_dir / "aie2p" / "mha.cc")
-        passthrough_source = str(
-            self.context.kernels_dir / "generic" / "passThrough.cc"
-        )
-
+    @property
+    def kernel_flags(self) -> list[str]:
+        """The -D set mha.cc and everything it includes compile under."""
         mm_defines_rowmaj = [
             "-Dbf16_bf16_ONLY",
             f"-DDIM_M={self.B_q}",
@@ -99,27 +95,15 @@ class MHA(MLIROperator):
             "-DROUND_CONV_EVEN",
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
         ]
-        mm_defines_colmaj = mm_defines_rowmaj + [
-            "-DB_COL_MAJ",
-        ]
-        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
-        # directly, so everything is compiled into a single mha.o translation unit.
-        return [
-            KernelObjectArtifact(
-                "mha.o",
-                extra_flags=mm_defines_colmaj,
-                dependencies=[
-                    SourceArtifact(mha_source),
-                    SourceArtifact(mm_source),
-                    SourceArtifact(softmax_source),
-                ],
-            ),
-            KernelObjectArtifact(
-                "mha_passThrough.o",
-                extra_flags=["-DBIT_WIDTH=16"],
-                dependencies=[SourceArtifact(passthrough_source)],
-            ),
-        ]
+        return mm_defines_rowmaj + ["-DB_COL_MAJ"]
+
+    def get_kernel_artifacts(self):
+        # None: the design declares its kernels as ExternalFunctions. mha.cc
+        # #includes softmax.cc and mm.cc, so those are not listed here any more
+        # either -- Peano's depfile reports them and upstream's manifest
+        # validates against it, which covers transitive headers this list never
+        # did.
+        return []
 
     @staticmethod
     def arg_spec(num_heads, seq_len, d, num_KV_heads, num_of_pipelines=1):
@@ -276,6 +260,8 @@ def fused_mha(
     emulate_bf16_mmul_with_bfp16: bool,
     trace_size: int = 0,
     verbose: bool = False,
+    kernels_dir=None,
+    kernel_flags=(),
 ):
 
     of_depth = 2
@@ -370,17 +356,34 @@ def fused_mha(
 
     # AIE kernel declarations
     func_type = "" if vectorized else "_scalar"
-    zero_kernel = Kernel(f"zero_{dtype_str}", "mha.o", [qk_ty])
+    # Every one of these comes out of mha.cc, which #includes mm.cc and
+    # softmax.cc, so they all name one object: declared separately each would
+    # recompile that translation unit and redefine every symbol in it.
+    mha_source = Path(kernels_dir) / "aie2p" / "mha.cc"
 
-    memcopy_kernel_scale = Kernel(
-        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+    def mha_kernel(name, arg_types):
+        return declare_kernel(
+            name,
+            arg_types,
+            source=mha_source,
+            compile_flags=kernel_flags,
+            object_file_name="mha.o",
+        )
+
+    zero_kernel = mha_kernel(f"zero_{dtype_str}", [qk_ty])
+
+    memcopy_kernel_scale = declare_kernel(
+        "passThroughLine",
+        [s_ty, s_ty, np.int32],
+        source=Path(kernels_dir) / "generic" / "passThrough.cc",
+        compile_flags=["-DBIT_WIDTH=16"],
+        object_file_name="mha_passThrough.o",
     )
 
-    scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
+    scale_buffer_init_kernel = mha_kernel("init_scale_buffer", [s_ty, np.int32])
 
-    partial_softmax_kernel = Kernel(
+    partial_softmax_kernel = mha_kernel(
         "partial_softmax",
-        "mha.o",
         [
             qk_ty,
             qk_ty,
@@ -394,15 +397,13 @@ def fused_mha(
         ],
     )
 
-    matmul_QK = Kernel(
+    matmul_QK = mha_kernel(
         f"matmul_bf16_bf16_wrapper{func_type}",
-        "mha.o",
         [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
-    matmul_PV = Kernel(
+    matmul_PV = mha_kernel(
         "matmul_PV",
-        "mha.o",
         [
             qk_ty,
             k_ty,
@@ -414,9 +415,8 @@ def fused_mha(
         ],
     )
 
-    rescale_O = Kernel(
+    rescale_O = mha_kernel(
         "rescale_O",
-        "mha.o",
         [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 
