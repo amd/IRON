@@ -44,6 +44,7 @@ import urllib.request
 import logging
 import subprocess
 import importlib.util
+import inspect
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
@@ -60,11 +61,24 @@ from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_modu
 class DesignGenerator:
     """Lazy callable that imports source_path and calls fn_name(*args, **kwargs), returning MLIR as a string."""
 
-    source_path: Path
-    fn_name: str
+    source_path: Path | None = None
+    fn_name: str | None = None
     args: tuple = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
     bind_from: Any = None
+    fn: Callable | None = None
+
+    @property
+    def source_file(self) -> Path:
+        """The file this design is written in.
+
+        Callers depend on it for staleness, so a generator handed a function
+        directly still has to name a file: the module the function came from,
+        which is the operator's own module once a design is declared beside it.
+        """
+        if self.source_path is not None:
+            return self.source_path
+        return Path(inspect.getfile(self.fn))
 
     def resolve(self) -> tuple[Callable, tuple, dict[str, Any]]:
         """Import the design module and return it ready to call.
@@ -74,12 +88,19 @@ class DesignGenerator:
         and call itself -- which meant a change to how arguments are assembled
         reached one path and not the other.
         """
-        spec = importlib.util.spec_from_file_location(
-            self.source_path.name, self.source_path
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        fn = getattr(module, self.fn_name)
+        if self.fn is not None:
+            # An operator that declares its design alongside itself hands the
+            # function over directly. Re-importing its own module by path would
+            # execute it a second time and build a duplicate of the very class
+            # that is asking.
+            fn = self.fn
+        else:
+            spec = importlib.util.spec_from_file_location(
+                self.source_path.name, self.source_path
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            fn = getattr(module, self.fn_name)
 
         kwargs = self.kwargs
         if self.bind_from is not None:
@@ -428,7 +449,7 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
         generator: DesignGenerator,
     ) -> None:
         self.generator = generator
-        super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
+        super().__init__(filename, dependencies=[SourceArtifact(generator.source_file)])
 
 
 def _sha256_of(path: Path) -> str:
