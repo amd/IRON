@@ -137,16 +137,40 @@ class FusedDispatch(SequenceDispatch):
         return self
 
     def set_up_artifacts(self, seq):
+        # The fused MLIR and the kernel objects are registered as targets in
+        # their own right. They used to be reached only as dependencies of a
+        # FullElfArtifact, which meant the artifact that produced the ELF was
+        # also the reason its own inputs existed -- so the ELF step could not
+        # move without them losing their trigger.
         mlir_artifact = self.build_fused_mlir(seq)
         kernel_objects = self._collect_kernel_artifacts(seq)
-        full_elf_artifact = comp.FullElfArtifact(
-            f"{seq.name}{_trace_tag(seq)}.elf",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_objects,
+        seq.add_artifacts([mlir_artifact] + kernel_objects)
+        seq._fused_mlir = mlir_artifact
+
+    def link_elf(self, seq):
+        """Link the fused ELF once its MLIR and kernel objects are built.
+
+        Done here rather than as a compilation rule: this is the step that now
+        goes through CompilableDesign, which keys its cache on content, locks
+        across processes and validates depfiles -- none of which the artifact
+        graph does.
+        """
+        from .jit_compile import compile_fused_elf
+
+        if getattr(seq, "elf_path", None) is not None:
+            return seq.elf_path
+        mlir = Path(seq._fused_mlir.filename).read_text()
+        objects = [
+            a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
+        ]
+        seq.elf_path = compile_fused_elf(
+            mlir,
+            objects,
+            Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
             extra_flags=seq.extra_flags,
             trace_size=seq.trace_size,
         )
-        seq.add_artifacts([full_elf_artifact])
+        return seq.elf_path
 
     def build_fused_mlir(self, seq):
         """Build the fused MLIR source that inlines every operator into a single
@@ -193,6 +217,7 @@ class FusedDispatch(SequenceDispatch):
         return kernel_artifacts
 
     def make_callable(self, seq):
+        self.link_elf(seq)
         return SequenceFullELFCallable(seq)
 
 

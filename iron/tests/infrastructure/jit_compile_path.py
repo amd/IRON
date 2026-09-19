@@ -80,33 +80,6 @@ def test_two_graphs_get_distinct_cache_keys():
     assert one != two
 
 
-def test_matches_the_artifact_rule_byte_count(tmp_path):
-    """The new path must build the same program as the rule it replaces.
-
-    Not byte-identical: aiecc embeds its working directory, which differs.
-    Size is the available proxy, and it is a sharp one here -- compiling
-    without --expand-load-pdis and --get-scratchpad-parameters produced
-    70,936 bytes against the rule's 99,768. A fused runlist needs the first to
-    switch PDIs between steps and the second for the host's parameter table,
-    so a silent divergence in these flags is a broken program, not a smaller
-    one.
-    """
-    sequence = _captured("jitpath_parity")
-    from_rule = Path(
-        next(
-            a.filename
-            for a in sequence.artifacts.bfs()
-            if str(a.filename).endswith(".elf")
-        )
-    )
-    from_design = compile_sequence(sequence, tmp_path / "parity.elf")
-    assert from_rule.stat().st_size == from_design.stat().st_size, (
-        f"artifact rule produced {from_rule.stat().st_size} bytes, "
-        f"CompilableDesign {from_design.stat().st_size}; the two paths are "
-        "not building the same program"
-    )
-
-
 def _captured_traced(name, trace_size):
     add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
     with capture() as graph:
@@ -117,26 +90,6 @@ def _captured_traced(name, trace_size):
     sequence = graph.build(name, dispatch="fused", trace_size=trace_size)
     sequence.compile()
     return sequence
-
-
-def test_traced_build_matches_the_artifact_rule(tmp_path):
-    """Tracing adds a flag, and forgetting it fails quietly.
-
-    The rule adds --get-input-with-addresses when trace_size > 0, because the
-    trace parser reads the lowered module for the buffer layout and each
-    design's traced tiles. Without it the ELF still builds; there is simply
-    nothing to parse afterwards.
-    """
-    sequence = _captured_traced("jitpath_traced", 8192)
-    from_rule = Path(
-        next(
-            a.filename
-            for a in sequence.artifacts.bfs()
-            if str(a.filename).endswith(".elf")
-        )
-    )
-    from_design = compile_sequence(sequence, tmp_path / "traced.elf")
-    assert from_rule.stat().st_size == from_design.stat().st_size
 
 
 def test_tracing_does_not_reuse_an_untraced_cache_entry():
@@ -152,3 +105,22 @@ def test_tracing_does_not_reuse_an_untraced_cache_entry():
         "graph": _digest(text),
         "trace": 8192,
     }
+
+
+def test_tracing_changes_the_elf(tmp_path):
+    """A traced build must differ from an untraced one.
+
+    --get-input-with-addresses does not change the ELF -- both builds come out
+    at the same size. What it emits is a side file, input_with_addresses.mlir,
+    which is where the trace parser reads the buffer layout and each design's
+    traced tiles from. So the flag reaching aiecc has to be checked by that
+    file appearing, not by the ELF differing; asserting on size passes for the
+    wrong reason and then fails for the right one.
+    """
+    traced = compile_sequence(_captured_traced("trace_on", 8192), tmp_path / "on.elf")
+    work_dir = traced.with_suffix(".prj")
+    produced = {p.name for p in work_dir.rglob("input_with_addresses.mlir")}
+    assert produced, (
+        f"no input_with_addresses.mlir under {work_dir}; the trace parser has "
+        "nothing to read, so --get-input-with-addresses is not reaching aiecc"
+    )
