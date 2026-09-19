@@ -60,22 +60,17 @@ def _require_xrt() -> None:
 def full_elf_path(seq):
     """Where a fused sequence's ELF is, however it got built.
 
-    The callable used to assert ``artifacts[0]`` was a FullElfArtifact and read
-    its filename, which tied dispatch to the artifact graph having produced it.
-    A sequence compiled through CompilableDesign has the same ELF and no such
-    artifact, so ask for the path instead of the artifact: an explicit
-    ``elf_path`` if one was set, else the artifact that carries it.
+    Set by FusedDispatch.link_elf() when it compiles one. Nothing else
+    produces a full ELF now that the artifact rule is gone.
     """
-    explicit = getattr(seq, "elf_path", None)
-    if explicit is not None:
-        return explicit
-    for artifact in seq.artifacts:
-        if isinstance(artifact, comp.FullElfArtifact):
-            return artifact.filename
-    raise RuntimeError(
-        f"{seq.name!r} has no full ELF: nothing set elf_path and no "
-        "FullElfArtifact is registered"
-    )
+    elf_path = getattr(seq, "elf_path", None)
+    if elf_path is None:
+        raise RuntimeError(
+            f"{seq.name!r} has no full ELF: link_elf() has not run. "
+            "get_callable() triggers it; calling the dispatch policy directly "
+            "does not."
+        )
+    return elf_path
 
 
 class SequenceDispatch:

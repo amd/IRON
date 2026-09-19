@@ -372,23 +372,6 @@ class _MLIRInputMixin:
         return result
 
 
-class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
-    def __init__(
-        self,
-        filename: str,
-        mlir_input: CompilationArtifact,
-        dependencies: list[CompilationArtifact],
-        extra_flags: list[str] | None = None,
-        trace_size: int = 0,
-    ) -> None:
-        if mlir_input not in dependencies:
-            dependencies = dependencies + [mlir_input]
-        super().__init__(filename, dependencies)
-        self.extra_flags = extra_flags if extra_flags is not None else []
-        # Bytes of trace buffer per runlist step, 0 for an untraced build.
-        self.trace_size = trace_size
-
-
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
     def __init__(
         self,
@@ -681,50 +664,6 @@ class AieccCompilationRule(CompilationRule):
     def __init__(self, use_chess=False, *args, **kwargs):
         self.use_chess = use_chess
         super().__init__(*args, **kwargs)
-
-
-class AieccFullElfCompilationRule(AieccCompilationRule):
-    def matches(self, graph):
-        return any(graph.get_worklist(FullElfArtifact))
-
-    def compile(self, graph):
-        worklist = graph.get_worklist(FullElfArtifact)
-        commands = []
-
-        for artifact in worklist:
-            mlir_source = artifact.mlir_input
-            work_dir = _aiecc_work_dir(mlir_source.filename)
-            options = [
-                f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}",
-                "--expand-load-pdis",
-                "--get-scratchpad-parameters",
-            ] + artifact.extra_flags
-            if artifact.trace_size:
-                # The trace parser reads the lowered module for the buffer layout
-                # and each design's traced tiles and events.
-                options.append("--get-input-with-addresses")
-
-            def _compile(
-                artifact=artifact,
-                mlir_source=mlir_source,
-                work_dir=work_dir,
-                options=options,
-            ):
-                work_dir.mkdir(parents=True, exist_ok=True)
-                _link_build_outputs_into(work_dir, Path(mlir_source.filename).parent)
-                compile_mlir_module(
-                    Path(mlir_source.filename).read_text(),
-                    full_elf_path=os.path.abspath(artifact.filename),
-                    work_dir=str(work_dir),
-                    options=options,
-                    use_chess=self.use_chess,
-                    verbose=True,
-                )
-
-            commands.append(PythonCallbackCompilationCommand(_compile))
-            artifact.available = True
-
-        return commands
 
 
 class AieccXclbinInstsCompilationRule(AieccCompilationRule):
