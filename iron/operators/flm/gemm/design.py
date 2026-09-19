@@ -42,6 +42,7 @@ from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import NPU1, NPU2, Tile
 from iron.common.utils import split_run
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 
 # --- Fixed geometry -------------------------------------------------------
@@ -256,6 +257,9 @@ def gemm(
     tile_ma=None,
     kernel_object="mm_fused.o",
     trace_size=0,
+    kernel_object_name=None,
+    kernel_source=None,
+    kernel_flags=(),
 ):
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
 
@@ -413,20 +417,31 @@ def gemm(
     b_l3_ty = np.ndarray[(K * N // B_GROUP,), b_elem_ty]
     c_l3_ty = np.ndarray[(M * N,), bf16_ty]
 
-    acc_init = Kernel("mm_fused_acc_init", kernel_object, [ct_acc_ty])
+    # All three are compiled into mm_fused.cc, so they name one object:
+    # declared separately each would recompile that translation unit and
+    # redefine every symbol in it.
+    def fused_kernel(name, arg_types):
+        return declare_kernel(
+            name,
+            arg_types,
+            source=kernel_source,
+            prebuilt=kernel_object,
+            compile_flags=kernel_flags,
+            object_file_name=kernel_object_name,
+        )
+
+    acc_init = fused_kernel("mm_fused_acc_init", [ct_acc_ty])
     # The trailing int32 is the A band index: under asymmetric tile buffering
     # the core folds RHO A bands into one accumulator, so the kernel needs to
     # know which band it is writing.
-    k_step = Kernel(
+    k_step = fused_kernel(
         "mm_fused_k_step",
-        kernel_object,
         [ct_a_obj_ty, ct_b_ty, ct_acc_ty, np.int32],
     )
     # Same object as the mmul: the epilogue is compiled into mm_fused.cc, so
     # one -D flag set and one artifact cover both.
-    epilogue_chunk = Kernel(
+    epilogue_chunk = fused_kernel(
         EPILOGUE_SYMBOL,
-        kernel_object,
         # outer, half, mode, clamp_min_bits, clamp_max_bits
         [ct_out_ty, ct_acc_ty] + [np.int32] * 5,
     )

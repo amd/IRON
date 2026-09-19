@@ -219,6 +219,13 @@ def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
     ``PythonGeneratedMLIRArtifact.recipe_hash()``'s sidecar
     (``iron/common/compilation/base.py``).
     """
+    # Bind the device before hashing. _compute_artifact_hash reads
+    # get_current_device(probe_runtime=False), which is None until something
+    # binds one -- and compile() binds it moments later, from inside. So the
+    # stamp for the first build in a process records a "no device" hash that
+    # the next identical build can never match, and every process silently
+    # rebuilds once. Binding here makes both sides agree.
+    aie_utils.ensure_current_device()
     stamp = output_paths[0].with_suffix(output_paths[0].suffix + ".cache_hash")
     current = design._compute_cache_hash()
     hit = (

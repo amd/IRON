@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from typing import Any, Callable, ClassVar, Dict
@@ -18,9 +19,7 @@ from iron.common import (
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
-from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 from iron.common.operator_bases import lut_based_ops_artifacts
-from aie.utils.npukernel import NPUKernel
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -316,7 +315,14 @@ class GEMM(MLIROperator):
                     "m_chunk": self.m_chunk,
                     "epilogue": epilogue,
                     "clamp": clamp,
-                    "kernel_object": self._link_file,
+                    "kernel_object": (
+                        self._link_file
+                        if self._link_file != self._kernel_object
+                        else None
+                    ),
+                    "kernel_object_name": self._kernel_object,
+                    "kernel_source": self.kernel_source,
+                    "kernel_flags": self.kernel_flags,
                     "trace_size": 0,
                 },
             ),
@@ -328,59 +334,50 @@ class GEMM(MLIROperator):
         )
 
     def set_up_artifacts(self) -> None:
-        kernels = self.get_kernel_artifacts()
-
-        # Emitted at a reference shape and activation, so every shape sharing
-        # this configuration reuses it. No clamp, not this instance's bounds:
-        # they reach only the discarded runtime sequence.
-        config_mlir = self._mlir_artifact(
-            f"{self.config_name}.mlir",
-            *self._reference_shape,
-            Epilogue.NONE,
-            None,
-        )
-        self.xclbin_artifact = XclbinArtifact(
-            f"{self.config_name}.xclbin",
-            mlir_input=config_mlir,
-            dependencies=[config_mlir] + kernels,
-        )
-        shape_mlir = self.get_mlir_artifact()
-        self.insts_artifact = InstsBinArtifact(
-            f"{self.name}.bin",
-            mlir_input=shape_mlir,
-            # aiecc compiles the cores on the way to an instruction stream, so
-            # this needs the kernel objects too.
-            dependencies=[shape_mlir] + kernels,
-        )
-        self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
+        # Only the AIE2 archive, if this configuration needs one. Everything
+        # else this operator builds goes through link_xclbin below.
+        self.add_artifacts(self.get_kernel_artifacts())
 
     def link_xclbin(self) -> None:
-        # Nothing to do: set_up_artifacts() above already registered the
-        # xclbin/insts as artifacts, so compile()'s artifact-graph pass builds
-        # them. The base implementation would compile a second, shape-specific
-        # xclbin through CompilableDesign and defeat the config/shape split.
-        return
+        """Compile the configuration's xclbin and this shape's instructions.
 
-    def get_callable(self) -> Callable[..., Any]:
-        # Explicit override, not inherited: MLIROperator.get_callable() moved
-        # onto CompilableDesign-compiled paths (self._xclbin_path/_insts_path),
-        # but this operator's set_up_artifacts() deliberately stays on the old
-        # DAG (self.xclbin_artifact/insts_artifact) for its config/shape RTP
-        # split -- see set_up_artifacts() above. Verbatim copy of the base
-        # implementation this used to inherit silently.
-        npu_kernel = NPUKernel(
-            xclbin_path=self.xclbin_artifact.filename,
-            kernel_name=self.xclbin_artifact.kernel_name,
-            insts_path=self.insts_artifact.filename,
+        Two compiles rather than the base class's one, which is why this
+        operator overrides. The xclbin is emitted at a reference shape and
+        activation so that every shape sharing the configuration reuses it,
+        and only the instruction stream is per shape -- the RTP split this
+        operator exists for. Each build discards the half it did not want.
+        """
+        if getattr(self, "_xclbin_path", None) is not None:
+            return
+        from iron.common.jit_compile import compile_xclbin_insts
+
+        build_dir = Path(self.context.build_dir)
+        objects = [Path(a.filename) for a in self.artifacts.bfs()]
+
+        # No clamp, and not this instance's bounds: they reach only the
+        # runtime sequence, which this build discards.
+        self._xclbin_path, _ = compile_xclbin_insts(
+            self._mlir_artifact(
+                f"{self.config_name}.mlir",
+                *self._reference_shape,
+                Epilogue.NONE,
+                None,
+            ).generator,
+            objects,
+            build_dir / f"{self.config_name}.xclbin",
+            build_dir / f"{self.config_name}.bin",
+            kernel_name="MLIR_AIE",
         )
-        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+        _, self._insts_path = compile_xclbin_insts(
+            self.get_mlir_artifact().generator,
+            objects,
+            build_dir / f"{self.name}.xclbin",
+            build_dir / f"{self.name}.bin",
+            kernel_name="MLIR_AIE",
+        )
 
-        def call(*args):
-            return aie_utils.DefaultNPURuntime.run(handle, list(args))
-
-        return call
-
-    def get_kernel_artifacts(self):
+    def _kernel_build(self):
+        """The source and flags mm_fused.cc is compiled with."""
         kernel_dir = get_kernel_dir()
         kernels_dir = self.context.kernels_dir
         generic = kernels_dir / "generic"
@@ -429,21 +426,33 @@ class GEMM(MLIROperator):
             # Covers both conversions in the kernel, which must agree.
             flags.append("-DROUND_CONV_EVEN")
 
+        # The #included companions are not listed: Peano's depfile reports
+        # them and upstream's manifest validates against it, which covers the
+        # headers as well as the sources.
+        return in_tree_generic / "mm_fused.cc", flags
+
+    @property
+    def kernel_source(self):
+        return self._kernel_build()[0]
+
+    @property
+    def kernel_flags(self):
+        return self._kernel_build()[1]
+
+    def get_kernel_artifacts(self):
+        # Only the AIE2 archive is built here. The tanh LUT tables live in
+        # their own translation unit, reached from C++ with no MLIR call site,
+        # so the kernel object alone leaves them undefined at link time and
+        # nothing can discover them by tracing calls.
+        if self._link_file == self._kernel_object:
+            return []
+        kernel_dir = get_kernel_dir()
+        source, flags = self._kernel_build()
         kernel_obj = KernelObjectArtifact(
             self._kernel_object,
-            dependencies=[
-                SourceArtifact(in_tree_generic / "mm_fused.cc"),
-                SourceArtifact(generic / "mm_fused_mmul.h"),
-                SourceArtifact(generic / "activations.h"),
-                SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
-                SourceArtifact(kernels_dir / kernel_dir / "zero.cc"),
-            ],
+            dependencies=[SourceArtifact(source)],
             extra_flags=flags,
         )
-        if self._link_file == self._kernel_object:
-            return [kernel_obj]
-        # The tanh LUT tables live in their own translation unit, so on AIE2
-        # the kernel object alone leaves them undefined at link time.
         return [
             KernelArchiveArtifact(
                 self._link_file,
