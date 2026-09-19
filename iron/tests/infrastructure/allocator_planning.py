@@ -296,3 +296,30 @@ def test_planned_buffers_never_share_bytes_while_both_live():
             f"t{i}@[{a_lo},{a_hi}) and t{i+1}@[{b_lo},{b_hi}) overlap in bytes "
             "while both are live"
         )
+
+
+def test_slices_are_never_pooled():
+    """A slice has to sit at its parent's offset plus its start.
+
+    Pooling one hands it an address unrelated to its parent, and nothing
+    raises -- the slice simply reads the wrong memory. Found by probing the
+    written-slice case, which the whole-buffer tests above cannot reach.
+    """
+    from iron.common.context import AIEContext
+    from iron.common.sequence import OperatorSequence
+    from iron.operators import ElementwiseAdd
+
+    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    seq = OperatorSequence(
+        "slice_pooling_probe",
+        [(add, "x", "w", "big[0:1024]"), (add, "big[0:1024]", "w", "out")],
+        input_args=["x", "w"],
+        output_args=["out"],
+        buffer_sizes={"big": 4096},
+        dispatch="reference",
+        plan_scratch=True,
+    )
+    assert not any("[" in name for name in seq.scratch_plan()), (
+        "a sliced buffer was given a pooled offset; its address must stay "
+        "derived from its parent"
+    )

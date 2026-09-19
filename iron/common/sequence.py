@@ -409,6 +409,11 @@ class OperatorSequence(AIEOperatorBase):
 
         pinned = set(self.input_args) | set(self.output_args)
         pinned |= set(self.explicit_buffer_sizes)
+        # A slice is not free to move: it has to sit at its parent's offset
+        # plus its start, and calculate_buffer_layout resolves it that way.
+        # Pooling one would hand it an address unrelated to its parent, which
+        # is silent -- the slice simply reads the wrong memory.
+        pinned |= {name for name in sizes if "[" in name}
         ranges = live_ranges(steps, pinned=pinned)
         allocations, _ = plan(ranges, sizes)
         return {name: a.offset for name, a in allocations.items()}
