@@ -319,7 +319,7 @@ def test_slices_are_never_pooled():
         dispatch="reference",
         plan_scratch=True,
     )
-    assert not any("[" in name for name in seq.scratch_plan()), (
+    assert not any("[" in name for name in seq.infer_buffer_offsets()), (
         "a sliced buffer was given a pooled offset; its address must stay "
         "derived from its parent"
     )

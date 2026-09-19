@@ -303,7 +303,7 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         buffer_offsets=None,
-        plan_scratch=False,
+        plan_scratch=True,
         dispatch="auto",
         extra_flags=None,
         trace_size=0,
@@ -330,9 +330,10 @@ class OperatorSequence(AIEOperatorBase):
         # Planned byte offsets per buffer name; None keeps the
         # back-to-back layout this had before.
         self.buffer_offsets = buffer_offsets
-        # Opt-in: pool intermediates whose lifetimes do not overlap.
-        # Off by default because it changes where every intermediate
-        # lives, and a mistake there is wrong numbers rather than a crash.
+        # Pool intermediates whose lifetimes do not overlap. On by default:
+        # the layout is inferred from the runlist, so a caller does not supply
+        # it. Pass False to fall back to packing every buffer back to back,
+        # which is what this did before planning existed.
         self.plan_scratch = plan_scratch
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
@@ -386,7 +387,7 @@ class OperatorSequence(AIEOperatorBase):
             designs.append(op)
         return designs, design_of
 
-    def scratch_plan(self):
+    def infer_buffer_offsets(self):
         """Byte offsets letting intermediates with disjoint lifetimes overlap.
 
         Only buffers this sequence both writes and later reads are pooled.
@@ -478,7 +479,7 @@ class OperatorSequence(AIEOperatorBase):
             # for the highest byte any of them reaches.
             offsets = self.buffer_offsets
             if offsets is None and self.plan_scratch:
-                offsets = self.scratch_plan()
+                offsets = self.infer_buffer_offsets()
             offsets = offsets or {}
 
             def length_of(arg):

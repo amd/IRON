@@ -181,10 +181,10 @@ class Graph:
         input_args = kwargs.pop("input_args", inferred_inputs)
         output_args = kwargs.pop("output_args", inferred_outputs)
         if kwargs.pop("pool_scratch", True):
-            kwargs.setdefault("buffer_offsets", self.scratch_plan())
+            kwargs.setdefault("buffer_offsets", self.infer_buffer_offsets())
         return OperatorSequence(name, self.runlist, input_args, output_args, **kwargs)
 
-    def scratch_plan(self):
+    def infer_buffer_offsets(self):
         """Offsets that let intermediates whose lifetimes are disjoint overlap.
 
         Only values the recorder named itself are placed. Anything the caller
