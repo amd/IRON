@@ -636,8 +636,15 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
                 # Windows without Developer Mode cannot create symlinks.
                 shutil.copy2(target, link)
 
-    link_files_from(build_dir)
+    # Arch-scoped first. The loop skips a name already present, so whichever
+    # directory is linked first wins -- and with build_dir first, a leftover
+    # flat object (kernel objects have been arch-scoped since move_artifacts
+    # gained the segment) shadowed the correct one and the design linked
+    # against stale code. That produced "undefined symbol" failures which read
+    # as compilation bugs. The flat directory still supplies everything that
+    # is not a kernel object: the mlir, xclbin and insts.
     link_files_from(build_dir / get_kernel_dir())
+    link_files_from(build_dir)
 
 
 # aiecc's own default. "1" here made every design's per-core compiles serial: on
