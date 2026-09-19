@@ -57,6 +57,27 @@ def _require_xrt() -> None:
 # ##########################################################################
 
 
+def full_elf_path(seq):
+    """Where a fused sequence's ELF is, however it got built.
+
+    The callable used to assert ``artifacts[0]`` was a FullElfArtifact and read
+    its filename, which tied dispatch to the artifact graph having produced it.
+    A sequence compiled through CompilableDesign has the same ELF and no such
+    artifact, so ask for the path instead of the artifact: an explicit
+    ``elf_path`` if one was set, else the artifact that carries it.
+    """
+    explicit = getattr(seq, "elf_path", None)
+    if explicit is not None:
+        return explicit
+    for artifact in seq.artifacts:
+        if isinstance(artifact, comp.FullElfArtifact):
+            return artifact.filename
+    raise RuntimeError(
+        f"{seq.name!r} has no full ELF: nothing set elf_path and no "
+        "FullElfArtifact is registered"
+    )
+
+
 class SequenceDispatch:
     """Policy object that decides how an :class:`OperatorSequence` is compiled
     and how its runtime callable is built.
@@ -667,8 +688,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.device_name = device_name
         self.sequence_name = sequence_name
 
-        assert isinstance(op.artifacts[0], comp.FullElfArtifact)
-        xrt_elf = pyxrt.elf(str(op.artifacts[0].filename))
+        xrt_elf = pyxrt.elf(str(full_elf_path(op)))
         xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
