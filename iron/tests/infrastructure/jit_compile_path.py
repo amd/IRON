@@ -23,6 +23,7 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from iron.common.capture import capture
 from iron.common.context import AIEContext
 from iron.common.jit_compile import (
+    _compile_if_changed,
     compile_sequence,
     compile_xclbin_insts,
     _digest,
@@ -130,9 +131,9 @@ def test_identical_sequences_reuse_the_compiled_elf(tmp_path):
     second = compile_sequence(_captured("jitpath_cache_reuse"), elf)
     mtime2 = second.stat().st_mtime_ns
 
-    assert mtime1 == mtime2, (
-        "identical recipe recompiled the ELF instead of reusing the cache hit"
-    )
+    assert (
+        mtime1 == mtime2
+    ), "identical recipe recompiled the ELF instead of reusing the cache hit"
 
 
 def _add_design(tmp_path):
@@ -168,9 +169,9 @@ def test_identical_operator_reuses_the_compiled_xclbin(tmp_path):
     )
     mtime2 = second.stat().st_mtime_ns
 
-    assert mtime1 == mtime2, (
-        "identical recipe recompiled the xclbin instead of reusing the cache hit"
-    )
+    assert (
+        mtime1 == mtime2
+    ), "identical recipe recompiled the xclbin instead of reusing the cache hit"
 
 
 def test_tracing_changes_the_elf(tmp_path):
@@ -239,3 +240,36 @@ def test_an_opaque_design_parameter_is_rejected():
 
     with pytest.raises(ValueError, match="embeds an object address"):
         _params_key({"thing": Opaque(), "M": 8})
+
+
+def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet(tmp_path):
+    """The hash must not change once compile() binds the device.
+
+    _compute_artifact_hash reads get_current_device(probe_runtime=False), which
+    is None until something binds one, and CompilableDesign.compile() binds it
+    from inside. A key computed before that records a "no device" identity the
+    next build can never match, so every process rebuilds once -- silently,
+    since nothing fails. _compile_if_changed binds first for this reason.
+
+    The device is left unset before the call on purpose: bound beforehand, the
+    binding inside is never needed and this passes without it.
+    """
+    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    fn, _, kwargs = add.get_mlir_artifact().generator.resolve()
+    design = CompilableDesign(
+        _design_generator(kwargs),
+        compile_kwargs={"design": fn, "params": _params_key(kwargs), "chain": ""},
+    )
+    bound_hash = design._compute_cache_hash()
+
+    aie_utils.set_current_device(None)
+    assert design._compute_cache_hash() != bound_hash, (
+        "this test is pointless if the hash stopped depending on the device; "
+        "it exists because it does"
+    )
+
+    _, current, _ = _compile_if_changed(design, tmp_path / "op.xclbin")
+    assert current == bound_hash, (
+        "_compile_if_changed hashed before binding the device, so the stamp it "
+        "writes records an identity that compile() will never reproduce"
+    )

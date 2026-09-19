@@ -225,7 +225,15 @@ def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
     # stamp for the first build in a process records a "no device" hash that
     # the next identical build can never match, and every process silently
     # rebuilds once. Binding here makes both sides agree.
-    aie_utils.ensure_current_device()
+    #
+    # Guarded exactly as CompilableDesign._bind_generation_device guards it:
+    # binding probes the runtime, which a compile-only host without one cannot
+    # do. Failing to bind is not an error -- it leaves the device unset on both
+    # sides, which still agrees with itself.
+    try:
+        aie_utils.ensure_current_device()
+    except (ImportError, RuntimeError, AttributeError, ValueError, TypeError):
+        pass
     stamp = output_paths[0].with_suffix(output_paths[0].suffix + ".cache_hash")
     current = design._compute_cache_hash()
     hit = (
