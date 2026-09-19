@@ -54,7 +54,8 @@ def _captured(name, **kwargs):
         value = g(add, x, w)
         value = g(add, value, w)
         value = g(add, value, w)
-    return g, g.build(name, dispatch="reference", **kwargs)
+    kwargs.setdefault("dispatch", "reference")
+    return g, g.build(name, **kwargs)
 
 
 def _hand_written(name, **kwargs):
@@ -70,8 +71,7 @@ def _hand_written(name, **kwargs):
         runlist,
         input_args=["x", "w"],
         output_args=["out"],
-        dispatch="reference",
-        **kwargs,
+        **{"dispatch": "reference", **kwargs},
     )
 
 
@@ -122,8 +122,9 @@ def _run(sequence, inputs):
     return run.get_buffer(out_name).torch_view()[: inputs[0].numel()].clone()
 
 
+@pytest.mark.parametrize("dispatch", ["reference", "fused"])
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
-def test_captured_graph_matches_hand_written_numerically(precompile):
+def test_captured_graph_matches_hand_written_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time.
 
     ``precompile=True`` compiles before any dispatch; ``False`` leaves it to
@@ -135,8 +136,8 @@ def test_captured_graph_matches_hand_written_numerically(precompile):
     x = torch.rand(SIZE, dtype=torch.float32)
     w = torch.rand(SIZE, dtype=torch.float32)
 
-    _, captured = _captured(f"cap_num_{precompile}")
-    hand = _hand_written(f"hand_num_{precompile}")
+    _, captured = _captured(f"cap_num_{precompile}_{dispatch}", dispatch=dispatch)
+    hand = _hand_written(f"hand_num_{precompile}_{dispatch}", dispatch=dispatch)
     if precompile:
         captured.compile()
         hand.compile()
