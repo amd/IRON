@@ -381,14 +381,12 @@ class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
         dependencies: list[CompilationArtifact],
         kernel_name: str = "MLIR_AIE",
         extra_flags: list[str] | None = None,
-        xclbin_input: XclbinArtifact | None = None,
     ) -> None:
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
         self.kernel_name = kernel_name
         self.extra_flags = extra_flags if extra_flags is not None else []
-        self.xclbin_input = xclbin_input
 
 
 class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
@@ -738,11 +736,6 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 options += first_xclbin.extra_flags + [
                     f"--xclbin-kernel-name={first_xclbin.kernel_name}",
                 ]
-                if first_xclbin.xclbin_input is not None:
-                    options.append(
-                        "--xclbin-input="
-                        + os.path.abspath(first_xclbin.xclbin_input.filename)
-                    )
             if do_compile_insts_bin:
                 first_insts_bin = mlir_sources_to_insts[mlir_source][
                     0
