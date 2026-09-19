@@ -12,7 +12,6 @@ from iron.common import (
     DesignGenerator,
 )
 import aie.utils as aie_utils
-import aie.utils.config
 from iron.common.device_utils import get_kernel_dir
 import numpy as np
 from ml_dtypes import bfloat16
@@ -20,7 +19,8 @@ import aie.dialects.index as index
 from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ExternalFunction, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 import torch
 
 
@@ -128,16 +128,6 @@ class GEMV(MLIROperator):
         if self.epilogue == "none":
             return base
         return f"{base}_epi{self.epilogue}"
-
-    @property
-    def kernels_dir(self):
-        """Where the design finds its C++ sources.
-
-        Passed to the design rather than resolved there so that
-        IRON_AIE_KERNELS_DIR still redirects it -- and so that pointing IRON at
-        a different kernel tree changes the compile cache key, which it should.
-        """
-        return self.context.kernels_dir
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -262,22 +252,14 @@ def my_matvec(
     # before that is discarded.
     kernels_dir = Path(kernels_dir)
     kernel_dir = get_kernel_dir(dev)
-    include_dirs = [
-        str(Path(aie.utils.config.root_path()) / "aie_runtime_lib" / kernel_dir.upper())
-    ]
-    # IRON spells the fusion prefix with its trailing underscore ("op0_");
-    # ExternalFunction joins with one of its own, both for the symbol name and
-    # for the rename pass, so handing it "op0_" would yield "op0__matvec".
-    symbol_prefix = func_prefix.rstrip("_") or None
     func_type = "vectorized" if vectorized else "scalar"
-    matvec = ExternalFunction(
+    matvec = declare_kernel(
         f"matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        source_file=str(kernels_dir / "generic" / "mv.cc"),
-        arg_types=[np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
-        include_dirs=include_dirs,
+        [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
+        source=kernels_dir / "generic" / "mv.cc",
         # mv.cc is a template over both: one source, one object per shape.
         compile_flags=[f"-DDIM_K={K}", f"-DVEC_SIZE={kernel_vector_size}"],
-        symbol_prefix=symbol_prefix,
+        func_prefix=func_prefix,
     )
     # Optional fused activation over the full tile_size_output C-tile, applied once per tile in core_body
     # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose tile_size_input
@@ -296,12 +278,11 @@ def my_matvec(
         # A second object, not an archive bundled with the first: each
         # func.func carries its own link_with and aie-assign-core-link-files
         # aggregates them onto the core.
-        gelu_kernel = ExternalFunction(
+        gelu_kernel = declare_kernel(
             "gelu_tile_bf16",
-            source_file=str(kernels_dir / "aie2p" / "gelu.cc"),
-            arg_types=[np.int32, L1_C_ty],
-            include_dirs=include_dirs,
-            symbol_prefix=symbol_prefix,
+            [np.int32, L1_C_ty],
+            source=kernels_dir / "aie2p" / "gelu.cc",
+            func_prefix=func_prefix,
         )
 
     A_L3L1_fifos = [

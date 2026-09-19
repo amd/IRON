@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
@@ -15,7 +17,8 @@ from iron.common import (
 )
 from ml_dtypes import bfloat16
 import numpy as np
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 import torch
@@ -78,20 +81,9 @@ class Transpose(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"transpose_{self.m}x{self.n}.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "generic" / "transpose.cc"
-                    )
-                ],
-                extra_flags=[
-                    f"-DDIM_m={self.m}",
-                    f"-DDIM_n={self.n}",
-                ],
-            ),
-        ]
+        # None: the design declares its kernel as an ExternalFunction and
+        # upstream compiles it. Nothing here names the object a second time.
+        return []
 
     @staticmethod
     def arg_spec(M, N, num_batches=1):
@@ -111,7 +103,17 @@ class Transpose(MLIROperator):
 
 
 def shuffle_transpose(
-    dev, M, N, num_aie_columns, num_channels, m, n, s, num_batches=1, func_prefix=""
+    dev,
+    M,
+    N,
+    num_aie_columns,
+    num_channels,
+    m,
+    n,
+    s,
+    num_batches=1,
+    func_prefix="",
+    kernels_dir=None,
 ):
     num_elements = M * N
     per_tile_elements = m * n
@@ -218,10 +220,12 @@ def shuffle_transpose(
     ]
 
     # AIE Core Function declaration
-    transpose_kernel = Kernel(
-        f"{func_prefix}transpose_{s}x{s}",
-        f"{func_prefix}transpose_{m}x{n}.o",
+    transpose_kernel = declare_kernel(
+        f"transpose_{s}x{s}",
         [tile_ty, tile_ty],
+        source=Path(kernels_dir) / "generic" / "transpose.cc",
+        compile_flags=[f"-DDIM_m={m}", f"-DDIM_n={n}"],
+        func_prefix=func_prefix,
     )
 
     # Define a task that will run on a compute tile

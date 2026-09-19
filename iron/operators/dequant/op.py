@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -16,7 +18,8 @@ from iron.common import (
 )
 from iron.common.device_utils import get_kernel_dir
 import aie.utils as aie_utils
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 import torch
@@ -58,18 +61,9 @@ class Dequant(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"expand_{get_kernel_dir()}_{self.tile_size}.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "expand.cc")
-                ],
-                extra_flags=[
-                    f"-DTILE_SIZE={self.tile_size}",
-                    f"-DGROUP_SIZE={self.group_size}",
-                ],
-            )
-        ]
+        # None: the design declares its kernel as an ExternalFunction and
+        # upstream compiles it. Nothing here names the object a second time.
+        return []
 
     @staticmethod
     def arg_spec(size, group_size=32):
@@ -95,6 +89,7 @@ def my_dequant_kernel(
     trace_size,
     tile_size,
     group_size,
+    kernels_dir=None,
 ):
     per_tile_elements = (
         16384 if tile_size > 16384 else tile_size
@@ -138,10 +133,11 @@ def my_dequant_kernel(
     ]
 
     # AIE Core Function declaration
-    dequant_kernel = Kernel(
+    dequant_kernel = declare_kernel(
         "expand_uint4_to_bfloat16",
-        f"expand_{get_kernel_dir(dev)}_{tile_size}.o",
         [in_tile_ty, out_tile_ty],
+        source=Path(kernels_dir) / "generic" / "expand.cc",
+        compile_flags=[f"-DTILE_SIZE={tile_size}", f"-DGROUP_SIZE={group_size}"],
     )
 
     # Define a task that will run on a compute tile

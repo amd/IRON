@@ -23,32 +23,28 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU1, NPU2
 
 from iron.common import AIEContext
-from iron.common.compilation import KernelObjectArtifact
+from iron.common.compilation import CompilationArtifactGraph, KernelObjectArtifact
 from iron.common.compilation.base import _link_build_outputs_into
-from iron.operators.axpy.op import AXPY
 
 
 def _mul_kernel_object(build_dir, device):
-    """Set up an operator's artifact graph for `device` and resolve its kernel
-    object's build_dir path, without invoking Peano/xchesscc.
+    """Resolve a kernel object's build_dir path for `device`.
 
-    AXPY rather than ElementwiseMul because this is about the *artifact*
-    path: an operator whose design declares an ExternalFunction produces no
-    KernelObjectArtifact at all, and upstream keys its object on content and on
-    device identity, so two arches cannot collide there by construction. These
-    tests guard the operators still on the artifact path, and should retire
-    with it.
+    The graph is built here rather than taken from an operator. This is a
+    property of move_artifacts, not of any operator, and every operator that
+    used to serve as the vehicle has since moved its kernels to
+    ExternalFunction and stopped producing an artifact to test -- twice, so
+    far. Upstream keys such an object on content and on device identity, so
+    the collision below is unrepresentable there; these tests guard what is
+    left on the artifact path, and retire with it.
     """
     aie_utils.set_current_device(device)
     ctx = AIEContext(build_dir=build_dir)
-    op = AXPY(size=4096, tile_size=1024, num_aie_columns=1, context=ctx)
-    op.set_up_artifacts()
-    op.artifacts.move_artifacts(str(ctx.build_dir))
-    op.artifacts.populate_availability_from_filesystem()
-    for artifact in op.artifacts.bfs():
-        if isinstance(artifact, KernelObjectArtifact):
-            return artifact
-    raise AssertionError("AXPY produced no KernelObjectArtifact")
+    artifact = KernelObjectArtifact("mul.o", dependencies=[])
+    graph = CompilationArtifactGraph([artifact])
+    graph.move_artifacts(str(ctx.build_dir))
+    graph.populate_availability_from_filesystem()
+    return artifact
 
 
 def test_two_arches_do_not_resolve_the_same_kernel_object_path(tmp_path):

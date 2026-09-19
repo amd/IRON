@@ -144,6 +144,16 @@ class AIEOperatorBase(ABC):
         """The device a design is generated for."""
         return aie_utils.get_current_device()
 
+    @property
+    def kernels_dir(self):
+        """Where a design finds the C++ its kernels are compiled from.
+
+        Taken from the context rather than resolved in the design, so that
+        IRON_AIE_KERNELS_DIR still redirects it -- and so that pointing IRON at
+        a different kernel tree changes the compile cache key, which it should.
+        """
+        return self.context.kernels_dir
+
     # Bytes of trace buffer to emit; 0 disables tracing, which is what every
     # hand-written kwargs dict passed. Deliberately a plain class attribute
     # rather than a property: OperatorSequence and LayerNorm both assign

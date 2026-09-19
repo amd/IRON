@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
@@ -20,12 +22,12 @@ import numpy as np
 import math
 from aie.iron import (
     TaskGroup,
-    Kernel,
     ObjectFifo,
     Program,
     Runtime,
     Worker,
 )
+from iron.operators._kernels import declare_kernel
 from aie.iron.device import Tile, NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -66,19 +68,9 @@ class MemCopy(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        if self.bypass:
-            return []
-        return [
-            KernelObjectArtifact(
-                "mem_copy.o",
-                extra_flags=["-DBIT_WIDTH=16"],
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "generic" / "passThrough.cc"
-                    )
-                ],
-            )
-        ]
+        # None: the design declares its kernel as an ExternalFunction and
+        # upstream compiles it. Nothing here names the object a second time.
+        return []
 
     @staticmethod
     def arg_spec(size):
@@ -231,7 +223,15 @@ def create_partial_workload_config(
 
 
 def my_mem_copy(
-    dev, size, num_cores, num_channels, bypass, tile_size, trace_size, func_prefix=""
+    dev,
+    size,
+    num_cores,
+    num_channels,
+    bypass,
+    tile_size,
+    trace_size,
+    func_prefix="",
+    kernels_dir=None,
 ):
     # --------------------------------------------------------------------------
     # Configuration
@@ -266,10 +266,12 @@ def my_mem_copy(
         # --------------------------------------------------------------------------
 
         # External, binary kernel definition
-        mem_copy_fcn = Kernel(
-            f"{func_prefix}passThroughLine",
-            f"{func_prefix}mem_copy.o",
+        mem_copy_fcn = declare_kernel(
+            "passThroughLine",
             [line_type, line_type, np.int32],
+            source=Path(kernels_dir) / "generic" / "passThrough.cc",
+            compile_flags=["-DBIT_WIDTH=16"],
+            func_prefix=func_prefix,
         )
 
         # Task for the core to perform

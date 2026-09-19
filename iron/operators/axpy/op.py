@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -13,7 +15,8 @@ from iron.common import (
 )
 from ml_dtypes import bfloat16
 import numpy as np
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -31,16 +34,10 @@ class AXPY(BinaryElementwiseOperator):
     kernel_fn_name: ClassVar[str] = "saxpy"
     callback_fn: ClassVar[str] = "my_axpy"
 
-    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
-        # axpy.cc lives under aie_kernels/generic/ (not device-specific)
-        return [
-            KernelObjectArtifact(
-                "axpy.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "axpy.cc")
-                ],
-            )
-        ]
+    def get_kernel_artifacts(self):
+        # None: the design declares its kernel as an ExternalFunction and
+        # upstream compiles it. Nothing here names the object a second time.
+        return []
 
     def _mlir_callback_args(self):
         return super()._mlir_callback_args() + [self.scalar_factor]
@@ -67,6 +64,7 @@ def my_axpy(
     tile_size,
     trace_size,
     scalar_factor,
+    kernels_dir=None,
 ):
     factor = scalar_factor
     per_tile_elements = 4096 if tile_size > 4096 else tile_size
@@ -87,8 +85,10 @@ def my_axpy(
     of_outs = [ObjectFifo(tile_ty, name=f"out_{i}") for i in range(num_aie_columns)]
 
     # AIE Core Function declaration
-    axpy_bf16_vector = Kernel(
-        "saxpy", "axpy.o", [tile_ty, tile_ty, np.float32, tile_ty, np.int32]
+    axpy_bf16_vector = declare_kernel(
+        "saxpy",
+        [tile_ty, tile_ty, np.float32, tile_ty, np.int32],
+        source=Path(kernels_dir) / "generic" / "axpy.cc",
     )
 
     # Define a task that will run on a compute tile
