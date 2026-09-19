@@ -227,51 +227,80 @@ class FusedDispatch(SequenceDispatch):
 class SeparateDispatch(SequenceDispatch):
     """Chained-xclbin dispatch: one xclbin+insts per unique operator, linked
     via ``--xclbin-input`` and invoked sequentially. Owns the compiled
-    per-operator xclbin/insts maps consumed by the runtime callable.
+    per-operator xclbin/insts path maps consumed by the runtime callable.
     """
 
     name = "separate"
 
     def __init__(self):
-        self.combined_xclbin = None
-        self.op_xclbin_map = {}  # id(op) -> xclbin artifact
-        self.op_insts_map = {}  # id(op) -> insts artifact
+        self.combined_xclbin_path = None
+        self.op_xclbin_path_map = {}  # id(op) -> xclbin path
+        self.op_insts_path_map = {}  # id(op) -> insts path
         self.op_kernel_name_map = {}  # id(op) -> kernel_name
+        self._kernel_artifacts = {}  # id(op) -> [KernelObjectArtifact, ...]
 
     def set_up_artifacts(self, seq):
+        # Kernel objects still go through the artifact-graph rules (Peano/chess
+        # compile isn't on CompilableDesign yet); the xclbin/insts themselves
+        # are built later, in link_xclbins(), through jit_compile instead of
+        # AieccXclbinInstsCompilationRule. Each op's own artifacts are kept (not
+        # a fresh call per use) because move_artifacts() resolves their
+        # relative filenames into real build_dir paths in place, and
+        # link_xclbins() needs those resolved paths.
+        self._kernel_artifacts = {
+            id(op): op.get_kernel_artifacts() for op in seq.unique_operators()
+        }
+        for kernel_artifacts in self._kernel_artifacts.values():
+            seq.add_artifacts(kernel_artifacts)
+
+    def link_xclbins(self, seq):
+        """Compile the chained xclbin+insts pair per unique operator.
+
+        Mirrors ``FusedDispatch.link_elf``: called from ``make_callable`` once
+        the artifact graph has resolved kernel-object paths and compiled them,
+        so this only has to generate MLIR and hand it to CompilableDesign
+        through :func:`jit_compile.compile_xclbin_insts`.
+        """
+        if self.combined_xclbin_path is not None:
+            return
+        from .jit_compile import compile_xclbin_insts
+
         # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
         name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
+        build_dir = Path(seq.context.build_dir)
 
-        artifacts = []
-        prev_xclbin = None
+        prev_xclbin_path = None
         for idx, op in enumerate(seq.unique_operators()):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
-
-            xclbin, insts = op.get_artifacts(prefix=f"{op_label}_")
-            # Copy so we don't mutate the (possibly aliased) shared flags list.
-            xclbin.extra_flags = list(xclbin.extra_flags) + [
-                f"--xclbin-instance-name={op_label}",
-                f"--xclbin-kernel-id={kernel_id}",
+            mlir_text = str(op.get_mlir_artifact().generator())
+            object_files = [
+                Path(a.filename) for a in self._kernel_artifacts[id(op)]
             ]
-            xclbin.kernel_name = op_label
 
-            if prev_xclbin is not None:
-                xclbin.xclbin_input = prev_xclbin
-                xclbin.dependencies.add(prev_xclbin)
+            xclbin_path, insts_path = compile_xclbin_insts(
+                mlir_text,
+                object_files,
+                build_dir / f"{op_label}.xclbin",
+                build_dir / f"{op_label}.bin",
+                kernel_name=op_label,
+                xclbin_input=prev_xclbin_path,
+                extra_flags=[
+                    f"--xclbin-instance-name={op_label}",
+                    f"--xclbin-kernel-id={kernel_id}",
+                ],
+            )
 
-            artifacts.append(insts)
-            self.op_xclbin_map[id(op)] = xclbin
-            self.op_insts_map[id(op)] = insts
+            self.op_xclbin_path_map[id(op)] = xclbin_path
+            self.op_insts_path_map[id(op)] = insts_path
             self.op_kernel_name_map[id(op)] = op_label
-            prev_xclbin = xclbin
+            prev_xclbin_path = xclbin_path
 
         # The last xclbin in the chain carries all the linked instances.
-        artifacts.append(prev_xclbin)
-        self.combined_xclbin = prev_xclbin
-        seq.add_artifacts(artifacts)
+        self.combined_xclbin_path = prev_xclbin_path
 
     def make_callable(self, seq):
+        self.link_xclbins(seq)
         return SequenceXclbinCallable(seq, self)
 
 
@@ -296,6 +325,7 @@ class CompareDispatch(SeparateDispatch):
         self.raise_on_mismatch = raise_on_mismatch
 
     def make_callable(self, seq):
+        self.link_xclbins(seq)
         return SequenceCompareCallable(seq, self)
 
 
@@ -883,13 +913,13 @@ class SequenceXclbinCallable(_PerBufferCallable):
     def _allocate_buffers(self):
         super()._allocate_buffers()
         dispatch = self._dispatch
-        combined_xclbin_path = dispatch.combined_xclbin.filename
+        combined_xclbin_path = dispatch.combined_xclbin_path
         self._op_callable_map = {}  # id(op) -> NPUKernel
-        for op_id, xclbin in dispatch.op_xclbin_map.items():
+        for op_id, xclbin_path in dispatch.op_xclbin_path_map.items():
             self._op_callable_map[op_id] = NPUKernel(
-                xclbin_path=combined_xclbin_path,
+                xclbin_path=str(combined_xclbin_path),
                 kernel_name=dispatch.op_kernel_name_map[op_id],
-                insts_path=dispatch.op_insts_map[op_id].filename,
+                insts_path=str(dispatch.op_insts_path_map[op_id]),
             )
         self._execution_plan = [
             (
