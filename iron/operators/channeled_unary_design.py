@@ -20,7 +20,7 @@ def channeled_unary_design(
     trace_size,
     kernel_fn_name,
     kernel_source=None,
-    kernel_obj_file=None,
+    bundled_sources=(),
     tile_cap=4096,
     func_prefix="",
 ):
@@ -61,7 +61,7 @@ def channeled_unary_design(
         kernel_fn_name,
         [line_type, line_type, np.int32],
         source=kernel_source,
-        prebuilt=kernel_obj_file,
+        bundled_sources=bundled_sources,
         func_prefix=func_prefix,
     )
 

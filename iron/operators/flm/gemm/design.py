@@ -255,9 +255,9 @@ def gemm(
     tile_n=N_TILE_DEFAULT,
     m_chunk=None,
     tile_ma=None,
-    kernel_object="mm_fused.o",
     trace_size=0,
     kernel_object_name=None,
+    bundled_sources=(),
     kernel_source=None,
     kernel_flags=(),
 ):
@@ -425,7 +425,7 @@ def gemm(
             name,
             arg_types,
             source=kernel_source,
-            prebuilt=kernel_object,
+            bundled_sources=bundled_sources,
             compile_flags=kernel_flags,
             object_file_name=kernel_object_name,
         )

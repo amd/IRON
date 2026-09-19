@@ -21,7 +21,6 @@ from .utils import float_to_name
 from .compilation import (
     CompilationArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     SourceArtifact,
 )
 

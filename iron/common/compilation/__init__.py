@@ -14,7 +14,6 @@ from .base import (
     XclbinArtifact,
     InstsBinArtifact,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,
     CompilationCommand,
@@ -26,7 +25,6 @@ from .base import (
     AieccCompilationRule,
     AieccXclbinInstsCompilationRule,
     KernelCompilationRule,
-    ArchiveCompilationRule,
 )
 from .sequence import (
     fuse_mlir,

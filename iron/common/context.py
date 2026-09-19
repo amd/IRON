@@ -68,6 +68,5 @@ class AIEContext:
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.DownloadCompilationRule(),
             comp.KernelCompilationRule(mlir_aie_dir, use_chess=use_chess),
-            comp.ArchiveCompilationRule(),
             comp.AieccXclbinInstsCompilationRule(use_chess=use_chess),
         ]

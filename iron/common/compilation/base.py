@@ -279,7 +279,7 @@ class CompilationArtifactGraph:
         for artifact in self.bfs():
             if not Path(artifact.filename).is_absolute():
                 root = new_root
-                if isinstance(artifact, (KernelObjectArtifact, KernelArchiveArtifact)):
+                if isinstance(artifact, KernelObjectArtifact):
                     if kernel_dir is None:
                         kernel_dir = get_kernel_dir()
                     root = Path(new_root) / kernel_dir
@@ -421,12 +421,6 @@ class KernelObjectArtifact(CompilationArtifact):
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
-
-
-class KernelArchiveArtifact(CompilationArtifact):
-    """A static archive (.a) bundling one or more KernelObjectArtifacts."""
-
-    pass
 
 
 class PythonGeneratedMLIRArtifact(MLIRArtifact):
@@ -652,8 +646,8 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
     """Symlink every file already built in build_dir into work_dir.
 
     aiecc resolves an MLIR module's relative kernel-object references (e.g.
-    ``link_with = "axpy.o"``, produced by KernelCompilationRule /
-    ArchiveCompilationRule) against work_dir, since that's where
+    ``link_with = "axpy.o"``, produced by KernelCompilationRule) against
+    work_dir, since that's where
     compile_mlir_module() writes its own copy of the MLIR source. Symlinking
     makes those lookups succeed without copying kernel objects into every
     artifact's own work_dir.
@@ -867,25 +861,3 @@ class KernelCompilationRule(CompilationRule):
             ]
         cmd += [artifact.filename]
         return [ShellCompilationCommand(cmd)]
-
-
-class ArchiveCompilationRule(CompilationRule):
-    """Bundle KernelObjectArtifacts into a static archive (.a)."""
-
-    def matches(self, artifacts):
-        return any(artifacts.get_worklist(KernelArchiveArtifact))
-
-    def compile(self, artifacts):
-        ar_path = aie.utils.config.ar_path()
-        worklist = artifacts.get_worklist(KernelArchiveArtifact)
-        commands = []
-        for artifact in worklist:
-            object_files = [
-                dep.filename
-                for dep in artifact.dependencies
-                if isinstance(dep, KernelObjectArtifact)
-            ]
-            cmd = [str(ar_path), "rcs", artifact.filename] + object_files
-            commands.append(ShellCompilationCommand(cmd))
-            artifact.available = True
-        return commands

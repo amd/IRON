@@ -10,7 +10,6 @@ from typing import Any, Callable, ClassVar, Dict
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelArchiveArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
@@ -19,7 +18,7 @@ from iron.common import (
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
-from iron.common.operator_bases import lut_based_ops_artifacts
+from iron.operators._kernels import lut_sources
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -315,14 +314,10 @@ class GEMM(MLIROperator):
                     "m_chunk": self.m_chunk,
                     "epilogue": epilogue,
                     "clamp": clamp,
-                    "kernel_object": (
-                        self._link_file
-                        if self._link_file != self._kernel_object
-                        else None
-                    ),
                     "kernel_object_name": self._kernel_object,
                     "kernel_source": self.kernel_source,
                     "kernel_flags": self.kernel_flags,
+                    "bundled_sources": self.bundled_sources,
                     "trace_size": 0,
                 },
             ),
@@ -439,26 +434,15 @@ class GEMM(MLIROperator):
     def kernel_flags(self):
         return self._kernel_build()[1]
 
+    @property
+    def bundled_sources(self) -> tuple:
+        """Translation units mm_fused.cc links but never calls through MLIR."""
+        return lut_sources()
+
     def get_kernel_artifacts(self):
-        # Only the AIE2 archive is built here. The tanh LUT tables live in
-        # their own translation unit, reached from C++ with no MLIR call site,
-        # so the kernel object alone leaves them undefined at link time and
-        # nothing can discover them by tracing calls.
-        if self._link_file == self._kernel_object:
-            return []
-        kernel_dir = get_kernel_dir()
-        source, flags = self._kernel_build()
-        kernel_obj = KernelObjectArtifact(
-            self._kernel_object,
-            dependencies=[SourceArtifact(source)],
-            extra_flags=flags,
-        )
-        return [
-            KernelArchiveArtifact(
-                self._link_file,
-                dependencies=[kernel_obj] + lut_based_ops_artifacts(kernel_dir),
-            )
-        ]
+        # None: the design declares its kernels as ExternalFunctions, with the
+        # tanh lut tables compiled into the same translation unit.
+        return []
 
     def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.

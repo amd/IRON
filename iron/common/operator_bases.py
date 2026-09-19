@@ -17,31 +17,14 @@ from .base import (
 )
 from .context import AIEContext
 from .compilation import (
-    KernelArchiveArtifact,
     KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 from .device_utils import get_kernel_dir
+from iron.operators._kernels import lut_sources
 from .utils import get_shim_dma_limit
-
-
-def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
-    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
-    if kernel_dir != "aie2":
-        return []
-    mlir_aie_dir = Path(aie_utils.config.root_path())
-    return [
-        KernelObjectArtifact(
-            "lut_based_ops.o",
-            dependencies=[
-                SourceArtifact(
-                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
-                )
-            ],
-        )
-    ]
 
 
 @dataclass
@@ -115,28 +98,9 @@ class ChanneledUnaryOperator(MLIROperator):
         ]
 
     @property
-    def needs_lut_archive(self) -> bool:
-        """Whether this operator must link a prebuilt archive.
-
-        lut_based_ops.cpp defines the exp/log tables aie2's kernels use. They
-        are referenced transitively from C++, with no MLIR call site, so
-        aie-assign-core-link-files -- which finds objects by tracing func.call
-        edges -- can never discover that object. It has to be archived with the
-        kernel object and named by an ordinary link_with, so this path keeps
-        declaring a prebuilt Kernel rather than an ExternalFunction.
-
-        aie2 only, and this dev box is aie2p, so the branch is untestable here.
-        """
-        return self.needs_lut_ops and get_kernel_dir() == "aie2"
-
-    @property
-    def kernel_obj_file(self) -> str | None:
-        """The archive a prebuilt Kernel declaration links against, or None.
-
-        None tells the design to declare an ExternalFunction instead and let
-        upstream compile the kernel and name its object.
-        """
-        return f"{self.name}_kernels.a" if self.needs_lut_archive else None
+    def bundled_sources(self) -> tuple:
+        """Translation units the kernel links but never calls through MLIR."""
+        return lut_sources() if self.needs_lut_ops else ()
 
     @property
     def kernel_source(self):
@@ -157,21 +121,9 @@ class ChanneledUnaryOperator(MLIROperator):
         )
 
     def get_kernel_artifacts(self) -> list:
-        # Only the archive case builds anything here; otherwise the design's
-        # ExternalFunction is the single declaration and upstream builds it.
-        if not self.needs_lut_archive:
-            return []
-        kernel_dir = get_kernel_dir()
-        kernel_obj = KernelObjectArtifact(
-            f"{self.kernel_name}.o",
-            dependencies=[SourceArtifact(self.kernel_source)],
-        )
-        return [
-            KernelArchiveArtifact(
-                f"{self.name}_kernels.a",
-                dependencies=[kernel_obj] + lut_based_ops_artifacts(kernel_dir),
-            )
-        ]
+        # None: the design declares its kernel as an ExternalFunction, with any
+        # lut tables compiled into the same translation unit.
+        return []
 
 
 @dataclass
