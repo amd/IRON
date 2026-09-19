@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_09_18_22_38_47` at commit `2e6839d`.
+Tested on `2026_09_19_00_04_48` at commit `7b8fba7`.
 
 <details>
 <summary>iron/applications/llama_3.2_1b</summary>
@@ -12,9 +12,9 @@ Tested on `2026_09_18_22_38_47` at commit `2e6839d`.
     </thead>
     <tbody>
         <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_1]</td><td>✅ 5/5</td><td>2.07</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.10</td><td>7.84</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.08</td><td>7.79</td></tr>
         <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1]</td><td>✅ 5/5</td><td>2.02</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40]</td><td>✅ 5/5</td><td>2.02</td><td>7.65</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40]</td><td>✅ 5/5</td><td>2.02</td><td>7.60</td></tr>
     </tbody>
 </table>
 
