@@ -25,22 +25,30 @@ from aie.iron.device import NPU1, NPU2
 from iron.common import AIEContext
 from iron.common.compilation import KernelObjectArtifact
 from iron.common.compilation.base import _link_build_outputs_into
-from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.axpy.op import AXPY
 
 
 def _mul_kernel_object(build_dir, device):
-    """Set up ElementwiseMul's artifact graph for `device` and resolve its
-    kernel object's build_dir path, without invoking Peano/xchesscc."""
+    """Set up an operator's artifact graph for `device` and resolve its kernel
+    object's build_dir path, without invoking Peano/xchesscc.
+
+    AXPY rather than ElementwiseMul because this is about the *artifact*
+    path: an operator whose design declares an ExternalFunction produces no
+    KernelObjectArtifact at all, and upstream keys its object on content and on
+    device identity, so two arches cannot collide there by construction. These
+    tests guard the operators still on the artifact path, and should retire
+    with it.
+    """
     aie_utils.set_current_device(device)
     ctx = AIEContext(build_dir=build_dir)
-    op = ElementwiseMul(size=4096, tile_size=4096, num_aie_columns=1, context=ctx)
+    op = AXPY(size=4096, tile_size=1024, num_aie_columns=1, context=ctx)
     op.set_up_artifacts()
     op.artifacts.move_artifacts(str(ctx.build_dir))
     op.artifacts.populate_availability_from_filesystem()
     for artifact in op.artifacts.bfs():
         if isinstance(artifact, KernelObjectArtifact):
             return artifact
-    raise AssertionError("ElementwiseMul produced no KernelObjectArtifact")
+    raise AssertionError("AXPY produced no KernelObjectArtifact")
 
 
 def test_two_arches_do_not_resolve_the_same_kernel_object_path(tmp_path):

@@ -4,9 +4,10 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 
 
@@ -17,7 +18,7 @@ def binary_elementwise_design(
     tile_size,
     trace_size,
     kernel_fn_name,
-    kernel_obj_file,
+    kernel_source=None,
     func_prefix="",
 ):
     per_tile_elements = 4096 if tile_size > 4096 else tile_size
@@ -38,10 +39,11 @@ def binary_elementwise_design(
     of_outs = [ObjectFifo(tile_ty, name=f"out_{i}") for i in range(num_aie_columns)]
 
     # AIE Core Function declaration
-    eltwise_kernel = Kernel(
-        f"{func_prefix}{kernel_fn_name}",
-        f"{func_prefix}{kernel_obj_file}",
+    eltwise_kernel = declare_kernel(
+        kernel_fn_name,
         [tile_ty, tile_ty, tile_ty, np.int32],
+        source=kernel_source,
+        func_prefix=func_prefix,
     )
 
     # Define a task that will run on a compute tile

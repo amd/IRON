@@ -115,16 +115,33 @@ class ChanneledUnaryOperator(MLIROperator):
         ]
 
     @property
-    def kernel_obj_file(self) -> str:
-        """The file name that the MLIR Kernel declaration should link_with.
+    def needs_lut_archive(self) -> bool:
+        """Whether this operator must link a prebuilt archive.
 
-        When auxiliary objects are required (e.g. lut_based_ops.o on aie2),
-        all objects are bundled into an archive and the archive name is
-        returned so that aiecc links the entire archive.
+        lut_based_ops.cpp defines the exp/log tables aie2's kernels use. They
+        are referenced transitively from C++, with no MLIR call site, so
+        aie-assign-core-link-files -- which finds objects by tracing func.call
+        edges -- can never discover that object. It has to be archived with the
+        kernel object and named by an ordinary link_with, so this path keeps
+        declaring a prebuilt Kernel rather than an ExternalFunction.
+
+        aie2 only, and this dev box is aie2p, so the branch is untestable here.
         """
-        if self.needs_lut_ops and get_kernel_dir() == "aie2":
-            return f"{self.name}_kernels.a"
-        return f"{self.kernel_name}.o"
+        return self.needs_lut_ops and get_kernel_dir() == "aie2"
+
+    @property
+    def kernel_obj_file(self) -> str | None:
+        """The archive a prebuilt Kernel declaration links against, or None.
+
+        None tells the design to declare an ExternalFunction instead and let
+        upstream compile the kernel and name its object.
+        """
+        return f"{self.name}_kernels.a" if self.needs_lut_archive else None
+
+    @property
+    def kernel_source(self):
+        """The C++ source this operator's kernel is compiled from."""
+        return self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
         # Bound by name rather than passed by position. The old list matched
@@ -140,25 +157,21 @@ class ChanneledUnaryOperator(MLIROperator):
         )
 
     def get_kernel_artifacts(self) -> list:
-        dev = aie_utils.get_current_device()
-        kernel_dir = get_kernel_dir(dev)
+        # Only the archive case builds anything here; otherwise the design's
+        # ExternalFunction is the single declaration and upstream builds it.
+        if not self.needs_lut_archive:
+            return []
+        kernel_dir = get_kernel_dir()
         kernel_obj = KernelObjectArtifact(
             f"{self.kernel_name}.o",
-            dependencies=[
-                SourceArtifact(
-                    self.context.kernels_dir / kernel_dir / f"{self.kernel_name}.cc"
-                )
-            ],
+            dependencies=[SourceArtifact(self.kernel_source)],
         )
-        if self.needs_lut_ops and kernel_dir == "aie2":
-            lut_objs = lut_based_ops_artifacts(kernel_dir)
-            return [
-                KernelArchiveArtifact(
-                    f"{self.name}_kernels.a",
-                    dependencies=[kernel_obj] + lut_objs,
-                )
-            ]
-        return [kernel_obj]
+        return [
+            KernelArchiveArtifact(
+                f"{self.name}_kernels.a",
+                dependencies=[kernel_obj] + lut_based_ops_artifacts(kernel_dir),
+            )
+        ]
 
 
 @dataclass
@@ -231,9 +244,9 @@ class BinaryElementwiseOperator(MLIROperator):
         ]
 
     @property
-    def kernel_obj_file(self) -> str:
-        """The object file this design links against."""
-        return f"{self.kernel_name}.o"
+    def kernel_source(self):
+        """The C++ source this operator's kernel is compiled from."""
+        return self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
         # Bound by name; see the note on the unary base about position.
@@ -246,11 +259,8 @@ class BinaryElementwiseOperator(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
-        source = self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
-        return [
-            KernelObjectArtifact(
-                f"{self.kernel_name}.o",
-                dependencies=[SourceArtifact(source)],
-            ),
-        ]
+    def get_kernel_artifacts(self) -> list:
+        # The design declares its kernel as an ExternalFunction; nothing here
+        # names the object a second time. No binary operator needs the aie2
+        # lut archive, so unlike the unary base there is no prebuilt branch.
+        return []

@@ -4,9 +4,10 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 
 
@@ -18,7 +19,8 @@ def channeled_unary_design(
     tile_size,
     trace_size,
     kernel_fn_name,
-    kernel_obj_file,
+    kernel_source=None,
+    kernel_obj_file=None,
     tile_cap=4096,
     func_prefix="",
 ):
@@ -55,10 +57,12 @@ def channeled_unary_design(
     ]
 
     # External, binary kernel definition
-    kernel_fcn = Kernel(
-        f"{func_prefix}{kernel_fn_name}",
-        f"{func_prefix}{kernel_obj_file}",
+    kernel_fcn = declare_kernel(
+        kernel_fn_name,
         [line_type, line_type, np.int32],
+        source=kernel_source,
+        prebuilt=kernel_obj_file,
+        func_prefix=func_prefix,
     )
 
     # Task for the core to perform
