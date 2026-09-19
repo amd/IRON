@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
@@ -15,6 +17,7 @@ from iron.common import (
 import aie.utils as aie_utils
 import numpy as np
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
@@ -68,14 +71,10 @@ class RoPE(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"rope_{self.method_type}.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "rope.cc")
-                ],
-            ),
-        ]
+        # None: the design declares its kernel as an ExternalFunction and
+        # upstream compiles it. rope.cc defines one symbol per method, so the
+        # object is named for the symbol rather than for the method id.
+        return []
 
     @staticmethod
     def arg_spec(rows, cols, angle_rows=None):
@@ -127,17 +126,12 @@ def rope(
     trace_size=0,
     method_type=None,
     func_prefix="",
+    kernels_dir=None,
 ):
     dtype = bfloat16
 
     if angle_rows is None:
         angle_rows = rows
-    kernel_object = (
-        f"{func_prefix}rope"
-        + (f"_{method_type}" if method_type is not None else "")
-        + ".o"
-    )
-
     assert cols % (16 * 2) == 0 and cols >= (
         16 * 2
     ), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
@@ -169,10 +163,11 @@ def rope(
     # AIE Core Function declaration. method_type 0 = two-halves (HF), 1 =
     # interleaved/Llama (the "rope" symbol).
     rope_symbol = "rope_two_halves" if method_type == 0 else "rope"
-    rope_kernel = Kernel(
-        f"{func_prefix}{rope_symbol}",
-        kernel_object,
+    rope_kernel = declare_kernel(
+        rope_symbol,
         [tensor_tile_ty, angle_tile_ty, tensor_tile_ty, np.int32],
+        source=Path(kernels_dir) / "generic" / "rope.cc",
+        func_prefix=func_prefix,
     )
 
     # Define a task that will run on a compute tile

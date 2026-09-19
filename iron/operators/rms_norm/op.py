@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
@@ -18,6 +20,7 @@ from iron.common.utils import get_shim_dma_limit
 from ml_dtypes import bfloat16
 import numpy as np
 from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from iron.operators._kernels import declare_kernel
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -108,25 +111,10 @@ class RMSNorm(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        arch_dir = get_kernel_dir()
-        artifacts = [
-            KernelObjectArtifact(
-                "rms_norm.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / arch_dir / "rms_norm.cc")
-                ],
-            ),
-        ]
-        if self.weighted:
-            artifacts.append(
-                KernelObjectArtifact(
-                    "mul.o",
-                    dependencies=[
-                        SourceArtifact(self.context.kernels_dir / arch_dir / "mul.cc")
-                    ],
-                )
-            )
-        return artifacts
+        # None: the designs declare their kernels as ExternalFunctions, from
+        # two separate sources (rms_norm.cc and, when weighted, mul.cc), so
+        # each gets its own object and upstream compiles both.
+        return []
 
     @staticmethod
     def arg_spec(size, tile_size, weighted=False):
@@ -157,6 +145,7 @@ def my_rms_norm(
     tile_size,
     trace_size,
     epsilon=1e-5,
+    kernels_dir=None,
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
     total_cores = num_aie_columns * num_channels
@@ -188,8 +177,10 @@ def my_rms_norm(
     ]
 
     # AIE Core Function declaration
-    rms_norm_kernel = Kernel(
-        "rms_norm_eps", "rms_norm.o", [tile_ty, tile_ty, np.int32, np.float32]
+    rms_norm_kernel = declare_kernel(
+        "rms_norm_eps",
+        [tile_ty, tile_ty, np.int32, np.float32],
+        source=Path(kernels_dir) / get_kernel_dir(dev) / "rms_norm.cc",
     )
 
     # Define a task that will run on a compute tile
@@ -284,6 +275,7 @@ def my_weighted_rms_norm(
     trace_size,
     epsilon=1e-5,
     func_prefix="",
+    kernels_dir=None,
 ):
     per_tile_elements = weight_length
     total_cores = num_aie_columns * num_channels
@@ -324,15 +316,18 @@ def my_weighted_rms_norm(
     ]
 
     # AIE Core Function declaration
-    rms_norm_kernel = Kernel(
-        f"{func_prefix}rms_norm_eps",
-        f"{func_prefix}rms_norm.o",
+    arch_dir = get_kernel_dir(dev)
+    rms_norm_kernel = declare_kernel(
+        "rms_norm_eps",
         [tile_ty, tile_ty, np.int32, np.float32],
+        source=Path(kernels_dir) / arch_dir / "rms_norm.cc",
+        func_prefix=func_prefix,
     )
-    eltwise_mul_kernel = Kernel(
-        f"{func_prefix}eltwise_mul_bf16_vector_size",
-        f"{func_prefix}mul.o",
+    eltwise_mul_kernel = declare_kernel(
+        "eltwise_mul_bf16_vector_size",
         [tile_ty, weights_ty, tile_ty, np.int32],
+        source=Path(kernels_dir) / arch_dir / "mul.cc",
+        func_prefix=func_prefix,
     )
 
     # Define a task that will run on a compute tile

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 
 import aie.utils as aie_utils
@@ -33,6 +35,7 @@ from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.dialects.scf import _for as range_
 from ml_dtypes import bfloat16
+from iron.operators._kernels import declare_kernel
 from iron.operators._trace import maybe_enable_trace
 import torch
 from iron.common.test_utils import torch_dtype_map
@@ -67,10 +70,13 @@ class Softmax(MLIROperator):
 
     @property
     def kernel_obj_file(self):
-        kernel_dir = get_kernel_dir()
-        if kernel_dir == "aie2":
-            return f"{self.name}_kernels.a"
-        return "softmax.o"
+        """The prebuilt archive to link, or None to declare ExternalFunctions.
+
+        aie2 bundles lut_based_ops.o, whose tables softmax.cc reaches
+        transitively from C++ with no MLIR call site, so nothing can discover
+        that object by tracing calls and it has to be archived and named.
+        """
+        return f"{self.name}_kernels.a" if get_kernel_dir() == "aie2" else None
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -81,22 +87,24 @@ class Softmax(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
+        # Only the aie2 archive is built here; elsewhere the design's
+        # ExternalFunctions are the single declaration. See kernel_obj_file.
         kernel_dir = get_kernel_dir()
+        lut_objs = lut_based_ops_artifacts(kernel_dir)
+        if not lut_objs:
+            return []
         softmax_obj = KernelObjectArtifact(
             "softmax.o",
             dependencies=[
                 SourceArtifact(self.context.kernels_dir / kernel_dir / "softmax.cc")
             ],
         )
-        lut_objs = lut_based_ops_artifacts(kernel_dir)
-        if lut_objs:
-            return [
-                KernelArchiveArtifact(
-                    f"{self.name}_kernels.a",
-                    dependencies=[softmax_obj] + lut_objs,
-                )
-            ]
-        return [softmax_obj]
+        return [
+            KernelArchiveArtifact(
+                f"{self.name}_kernels.a",
+                dependencies=[softmax_obj] + lut_objs,
+            )
+        ]
 
     @staticmethod
     def arg_spec(rows, cols):
@@ -127,7 +135,8 @@ def softmax(
     rtp_vector_size=None,
     vector_size_parameter=None,
     func_prefix="",
-    kernel_obj_file="softmax.o",
+    kernel_obj_file=None,
+    kernels_dir=None,
 ):
     per_tile_elements = cols
     if rtp_vector_size is None:
@@ -159,15 +168,25 @@ def softmax(
     ]
 
     # AIE Core Function declaration
-    softmax_kernel = Kernel(
-        f"{func_prefix}softmax_bf16",
-        f"{func_prefix}{kernel_obj_file}",
+    # Both live in softmax.cc, so they name one object: declared separately
+    # they would compile that translation unit twice and each copy would
+    # define both symbols.
+    softmax_source = Path(kernels_dir) / get_kernel_dir(dev) / "softmax.cc"
+    softmax_kernel = declare_kernel(
+        "softmax_bf16",
         [tile_ty, tile_ty, np.int32],
+        source=softmax_source,
+        prebuilt=kernel_obj_file,
+        object_file_name="softmax.o",
+        func_prefix=func_prefix,
     )
-    mask_kernel = Kernel(
-        f"{func_prefix}mask_bf16",
-        f"{func_prefix}{kernel_obj_file}",
+    mask_kernel = declare_kernel(
+        "mask_bf16",
         [tile_ty, np.int32, np.int32],
+        source=softmax_source,
+        prebuilt=kernel_obj_file,
+        object_file_name="softmax.o",
+        func_prefix=func_prefix,
     )
 
     # Vector size source: either a scratchpad Parameter (synced from host each

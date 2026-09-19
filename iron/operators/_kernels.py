@@ -43,6 +43,7 @@ def declare_kernel(
     func_prefix="",
     compile_flags=(),
     include_dirs=None,
+    object_file_name=None,
 ):
     """Declare the kernel a design calls, building it unless it is prebuilt.
 
@@ -51,6 +52,14 @@ def declare_kernel(
     from C++ with no MLIR call site, so nothing can discover them by tracing
     calls. Everywhere else ``source`` is compiled by upstream.
 
+    ``object_file_name`` is for a source that defines more than one entry point
+    the design calls. Left to default, each declaration is named for its own
+    symbol and so gets its own object -- two compiles of one translation unit,
+    each defining *both* symbols, which is a duplicate definition at link.
+    Pointing them at one object name instead makes them share it: identical
+    source and flags give an identical content digest, so upstream neither
+    reports a collision nor compiles twice.
+
     ``func_prefix`` is IRON's fusion prefix and arrives with its trailing
     underscore ("op0_"). ``ExternalFunction`` joins with an underscore of its
     own, for the symbol name and for the rename pass alike, so it is stripped
@@ -58,11 +67,18 @@ def declare_kernel(
     """
     if prebuilt is not None:
         return Kernel(f"{func_prefix}{name}", f"{func_prefix}{prebuilt}", arg_types)
+    prefix = func_prefix.rstrip("_") or None
+    if object_file_name is not None and prefix:
+        # Upstream names a defaulted object after the prefixed symbol; an
+        # explicit one is taken as given, so the prefix has to be applied here
+        # or two fused operators would share one object.
+        object_file_name = f"{prefix}_{object_file_name}"
     return ExternalFunction(
         name,
+        object_file_name=object_file_name,
         source_file=str(source),
         arg_types=arg_types,
         include_dirs=runtime_include_dirs() if include_dirs is None else include_dirs,
         compile_flags=list(compile_flags),
-        symbol_prefix=func_prefix.rstrip("_") or None,
+        symbol_prefix=prefix,
     )
