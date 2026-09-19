@@ -21,7 +21,7 @@ from aie.iron.device import from_name
 
 from iron.common.capture import capture
 from iron.common.context import AIEContext
-from iron.common.jit_compile import compile_sequence, _digest
+from iron.common.jit_compile import compile_sequence, compile_xclbin_insts, _digest
 from iron.operators import ElementwiseAdd
 
 
@@ -105,6 +105,57 @@ def test_tracing_does_not_reuse_an_untraced_cache_entry():
         "graph": _digest(text),
         "trace": 8192,
     }
+
+
+def test_identical_sequences_reuse_the_compiled_elf(tmp_path):
+    """A fresh, independently-built sequence with the same recipe must not
+    pay a second aiecc compile.
+
+    CompilableDesign.compile() bypasses its own on-disk cache whenever
+    explicit output paths are given -- the caller is presumed to manage its
+    own dependency tracking. Without that tracking, an unchanged recipe
+    recompiled through aiecc every time, not just on an actual edit; measured
+    directly by mtime before this was fixed.
+    """
+    elf = tmp_path / "graph.elf"
+
+    first = compile_sequence(_captured("jitpath_cache_reuse"), elf)
+    mtime1 = first.stat().st_mtime_ns
+
+    second = compile_sequence(_captured("jitpath_cache_reuse"), elf)
+    mtime2 = second.stat().st_mtime_ns
+
+    assert mtime1 == mtime2, (
+        "identical recipe recompiled the ELF instead of reusing the cache hit"
+    )
+
+
+def test_identical_operator_reuses_the_compiled_xclbin(tmp_path):
+    """The same regression, for compile_xclbin_insts (the separate-dispatch
+    and, soon, standalone-operator path) rather than the fused-ELF one."""
+    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add.compile()
+    mlir_text = str(add.get_mlir_artifact().generator())
+    objects = [
+        Path(a.filename) for a in add.artifacts.bfs() if str(a.filename).endswith(".o")
+    ]
+
+    xclbin_path = tmp_path / "op.xclbin"
+    insts_path = tmp_path / "op.bin"
+
+    first, _ = compile_xclbin_insts(
+        mlir_text, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+    )
+    mtime1 = first.stat().st_mtime_ns
+
+    second, _ = compile_xclbin_insts(
+        mlir_text, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+    )
+    mtime2 = second.stat().st_mtime_ns
+
+    assert mtime1 == mtime2, (
+        "identical recipe recompiled the xclbin instead of reusing the cache hit"
+    )
 
 
 def test_tracing_changes_the_elf(tmp_path):

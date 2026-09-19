@@ -80,6 +80,35 @@ def stage_objects(work_dir: Path, object_files) -> None:
             shutil.copy2(obj, work_dir / obj.name)
 
 
+def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
+    """Whether ``design``'s current recipe already produced ``output_paths``.
+
+    ``CompilableDesign.compile()`` bypasses its own on-disk cache entirely
+    whenever explicit output paths are given -- its own docstring says the
+    caller "is presumed to manage their own dependency tracking". Without
+    this, an unchanged recipe recompiles through aiecc every time a fresh
+    ``CompilableDesign``/``OperatorSequence``/operator instance asks for it,
+    not just on an actual edit -- measured directly: two independently
+    constructed but identical fused sequences each rebuilt the ELF (mtime
+    changed both times).
+
+    Reuses ``CompilableDesign``'s own content hash (recipe + kernel object
+    content + device + flags) rather than inventing a second one -- already
+    relied on by ``iron/tests/infrastructure/compilable_design_contract.py``
+    -- and stamps it next to the first output, mirroring
+    ``PythonGeneratedMLIRArtifact.recipe_hash()``'s sidecar
+    (``iron/common/compilation/base.py``).
+    """
+    stamp = output_paths[0].with_suffix(output_paths[0].suffix + ".cache_hash")
+    current = design._compute_cache_hash()
+    hit = (
+        all(p.exists() for p in output_paths)
+        and stamp.exists()
+        and stamp.read_text() == current
+    )
+    return hit, current, stamp
+
+
 # Flags the artifact-graph rule passes for a full ELF, and which a fused
 # sequence does not work without. --expand-load-pdis is what makes a multi-
 # device runlist switch PDIs between steps; --get-scratchpad-parameters emits
@@ -105,7 +134,6 @@ def compile_fused_elf(
     elf_path = Path(elf_path)
     object_files = [Path(o) for o in object_files]
     work_dir = elf_path.parent / f"{elf_path.stem}.prj"
-    stage_objects(work_dir, object_files)
 
     design = CompilableDesign(
         _generator_for(mlir_text, work_dir, object_files),
@@ -116,7 +144,11 @@ def compile_fused_elf(
         + list(extra_flags),
         compile_kwargs={"graph": _digest(mlir_text), "trace": int(trace_size)},
     )
-    design.compile(full_elf_path=elf_path)
+    hit, current_hash, stamp = _compile_if_changed(design, elf_path)
+    if not hit:
+        stage_objects(work_dir, object_files)
+        design.compile(full_elf_path=elf_path)
+        stamp.write_text(current_hash)
     return elf_path
 
 
@@ -161,7 +193,6 @@ def compile_xclbin_insts(
     xclbin_path, insts_path = Path(xclbin_path), Path(insts_path)
     object_files = [Path(o) for o in object_files]
     work_dir = xclbin_path.parent / f"{xclbin_path.stem}.prj"
-    stage_objects(work_dir, object_files)
 
     flags = [f"--xclbin-kernel-name={kernel_name}"]
     if xclbin_input is not None:
@@ -180,5 +211,9 @@ def compile_xclbin_insts(
             "chain": str(xclbin_input or ""),
         },
     )
-    design.compile(xclbin_path=xclbin_path, inst_path=insts_path)
+    hit, current_hash, stamp = _compile_if_changed(design, xclbin_path, insts_path)
+    if not hit:
+        stage_objects(work_dir, object_files)
+        design.compile(xclbin_path=xclbin_path, inst_path=insts_path)
+        stamp.write_text(current_hash)
     return xclbin_path, insts_path
