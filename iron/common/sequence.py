@@ -303,6 +303,7 @@ class OperatorSequence(AIEOperatorBase):
         output_args,
         buffer_sizes=None,
         buffer_offsets=None,
+        plan_scratch=False,
         dispatch="auto",
         extra_flags=None,
         trace_size=0,
@@ -329,6 +330,10 @@ class OperatorSequence(AIEOperatorBase):
         # Planned byte offsets per buffer name; None keeps the
         # back-to-back layout this had before.
         self.buffer_offsets = buffer_offsets
+        # Opt-in: pool intermediates whose lifetimes do not overlap.
+        # Off by default because it changes where every intermediate
+        # lives, and a mistake there is wrong numbers rather than a crash.
+        self.plan_scratch = plan_scratch
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
@@ -380,6 +385,33 @@ class OperatorSequence(AIEOperatorBase):
             design_of[id(op)] = len(designs)
             designs.append(op)
         return designs, design_of
+
+    def scratch_plan(self):
+        """Byte offsets letting intermediates with disjoint lifetimes overlap.
+
+        Only buffers this sequence both writes and later reads are pooled.
+        Anything the host addresses -- the sequence's own inputs and outputs,
+        and any buffer given an explicit size -- is pinned: its contents
+        outlive the sequence, so it needs a private, stable address.
+        """
+        from .allocator import live_ranges, plan
+
+        sizes, steps = {}, []
+        for op, *bufs in self.runlist:
+            reads, writes = [], []
+            for buf, spec in zip(bufs, op.get_arg_spec()):
+                sizes.setdefault(buf, spec.nbytes())
+                if spec.reads:
+                    reads.append(buf)
+                if spec.writes:
+                    writes.append(buf)
+            steps.append((reads, writes))
+
+        pinned = set(self.input_args) | set(self.output_args)
+        pinned |= set(self.explicit_buffer_sizes)
+        ranges = live_ranges(steps, pinned=pinned)
+        allocations, _ = plan(ranges, sizes)
+        return {name: a.offset for name, a in allocations.items()}
 
     def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> args_spec
@@ -439,7 +471,10 @@ class OperatorSequence(AIEOperatorBase):
             # offsets from liveness instead, so buffers whose lifetimes do not
             # overlap share addresses; the arena still has to be large enough
             # for the highest byte any of them reaches.
-            offsets = self.buffer_offsets or {}
+            offsets = self.buffer_offsets
+            if offsets is None and self.plan_scratch:
+                offsets = self.scratch_plan()
+            offsets = offsets or {}
 
             def length_of(arg):
                 if arg in self.explicit_buffer_sizes:

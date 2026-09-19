@@ -241,3 +241,58 @@ def test_layout_is_unchanged_without_offsets():
         for off, ln in sorted(entries):
             assert off == cursor, f"{buf_type} buffers should pack back to back"
             cursor += ln
+
+
+def _chain(n_intermediates, plan_scratch):
+    """A chain where each intermediate dies as the next is produced."""
+    from iron.common.context import AIEContext
+    from iron.common.sequence import OperatorSequence
+    from iron.operators import ElementwiseAdd
+
+    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    names = [f"t{i}" for i in range(n_intermediates)]
+    runlist = [(add, "x", "w", names[0])]
+    for prev, nxt in zip(names, names[1:]):
+        runlist.append((add, prev, "w", nxt))
+    runlist.append((add, names[-1], "w", "out"))
+    seq = OperatorSequence(
+        f"chain{n_intermediates}_{plan_scratch}",
+        runlist,
+        input_args=["x", "w"],
+        output_args=["out"],
+        dispatch="reference",
+        plan_scratch=plan_scratch,
+    )
+    layout, sizes, _ = seq.calculate_buffer_layout()
+    return layout, sizes[2]
+
+
+def test_planning_reuses_addresses_of_dead_intermediates():
+    """A chain of four holds at most two intermediates live at once."""
+    _, unplanned = _chain(4, plan_scratch=False)
+    _, planned = _chain(4, plan_scratch=True)
+    assert planned < unplanned, "planning should shrink the scratch arena"
+
+
+def test_planned_buffers_never_share_bytes_while_both_live():
+    """The invariant a liveness bug would break, stated directly.
+
+    This is the one failure mode in planning that does not announce itself:
+    two buffers aliased while both are live produce wrong numbers, not a crash.
+    """
+    from iron.common.allocator import LiveRange
+
+    layout, _ = _chain(4, plan_scratch=True)
+    scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
+    # t_i is live from step i to step i+1, so consecutive ones overlap.
+    for i in range(3):
+        a, b = scratch.get(f"t{i}"), scratch.get(f"t{i+1}")
+        if a is None or b is None:
+            continue
+        assert LiveRange(i, i + 1).overlaps(LiveRange(i + 1, i + 2))
+        a_lo, a_hi = a[1], a[1] + a[2]
+        b_lo, b_hi = b[1], b[1] + b[2]
+        assert a_hi <= b_lo or b_hi <= a_lo, (
+            f"t{i}@[{a_lo},{a_hi}) and t{i+1}@[{b_lo},{b_hi}) overlap in bytes "
+            "while both are live"
+        )
