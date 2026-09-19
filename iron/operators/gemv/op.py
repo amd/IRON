@@ -35,7 +35,8 @@ class GEMV(MLIROperator):
     tile_size_input: int = 2
     tile_size_output: int | None = None
     num_batches: int = 1
-    kernel_vector_size: int = field(default=64, repr=False)
+    # None picks the widest legal size for K (see _resolve_kernel_vector_size).
+    kernel_vector_size: int | None = field(default=None, repr=False)
     # Optional fused activation applied to each output tile in the producing core.
     # "none" (default) leaves the output unchanged; "gelu" applies GELU(tanh approx).
     # repr=False keeps operator/artifact names stable for the default path.
@@ -59,10 +60,7 @@ class GEMV(MLIROperator):
             and self.tile_size_output >= self.tile_size_input
         ):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
-        if not (
-            self.K >= self.kernel_vector_size and self.K % self.kernel_vector_size == 0
-        ):
-            raise ValueError("K must be multiple of kernel_vector_size")
+        self.kernel_vector_size = self._resolve_kernel_vector_size()
         if self.epilogue not in ("none", "gelu"):
             raise ValueError(
                 f"unknown epilogue {self.epilogue!r} (expected 'none' or 'gelu')"
@@ -73,6 +71,53 @@ class GEMV(MLIROperator):
             )
 
         MLIROperator.__init__(self, context=self.context)
+
+    # Vector widths mv.cc's matvec_vectorized is instantiated at, widest first.
+    # Each is a legal aie::vector<bfloat16, r> width; anything narrower than 16
+    # is not worth a kernel launch, so a K below 32 is rejected rather than
+    # silently run at a width nothing has been tested at.
+    _KERNEL_VECTOR_SIZES: ClassVar[tuple[int, ...]] = (64, 32, 16)
+
+    def _resolve_kernel_vector_size(self) -> int:
+        """The vector width the matvec kernel is compiled at.
+
+        mv.cc requires ``DIM_K % VEC_SIZE == 0`` *and* ``DIM_K >= 2 * VEC_SIZE``
+        -- its inner loop carries a pipelining pragma that assumes at least two
+        iterations, and both are static_asserts, so getting this wrong is a C++
+        error from inside a kernel build rather than anything a caller can read.
+        The second condition is the one that is easy to miss: K == VEC_SIZE
+        divides evenly and still does not build.
+
+        Left unset, the widest legal width for this K is chosen, so callers do
+        not have to know the rule. Set explicitly, the value is checked and the
+        reason is spelled out here instead of in Peano's output.
+        """
+        legal = [
+            size
+            for size in self._KERNEL_VECTOR_SIZES
+            if self.K % size == 0 and self.K >= 2 * size
+        ]
+        if self.kernel_vector_size is None:
+            if not legal:
+                raise ValueError(
+                    f"K={self.K} has no legal kernel_vector_size: need a width w "
+                    f"in {self._KERNEL_VECTOR_SIZES} with K % w == 0 and K >= 2*w. "
+                    "K must be an even multiple of at least 16."
+                )
+            return legal[0]
+        if self.kernel_vector_size not in legal:
+            raise ValueError(
+                f"kernel_vector_size={self.kernel_vector_size} is not legal for "
+                f"K={self.K}: the matvec kernel needs K % kernel_vector_size == 0 "
+                f"and K >= 2*kernel_vector_size. "
+                + (
+                    f"Legal here: {legal}."
+                    if legal
+                    else "No width works for this K; it must be an even multiple "
+                    "of at least 16."
+                )
+            )
+        return self.kernel_vector_size
 
     @property
     def name(self) -> str:

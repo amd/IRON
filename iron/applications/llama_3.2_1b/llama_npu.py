@@ -341,11 +341,6 @@ class AIELlamaOperators:
             tile_size_input=4,
             tile_size_output=prompt_len // 8,
             num_batches=config.n_heads,
-            # head_dim is 64, which equals the default vector size, but mv.cc
-            # requires DIM_K >= 2*VEC_SIZE: its inner loop carries a pipelining
-            # pragma that assumes at least two iterations. 32 is the largest
-            # size that both divides 64 and leaves two of them.
-            kernel_vector_size=32,
             context=elf_ctx,
         )
 
