@@ -105,3 +105,50 @@ def test_matches_the_artifact_rule_byte_count(tmp_path):
         f"CompilableDesign {from_design.stat().st_size}; the two paths are "
         "not building the same program"
     )
+
+
+def _captured_traced(name, trace_size):
+    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    with capture() as graph:
+        x = graph.input("x")
+        w = graph.input("w")
+        value = graph(add, x, w)
+        value = graph(add, value, w)
+    sequence = graph.build(name, dispatch="fused", trace_size=trace_size)
+    sequence.compile()
+    return sequence
+
+
+def test_traced_build_matches_the_artifact_rule(tmp_path):
+    """Tracing adds a flag, and forgetting it fails quietly.
+
+    The rule adds --get-input-with-addresses when trace_size > 0, because the
+    trace parser reads the lowered module for the buffer layout and each
+    design's traced tiles. Without it the ELF still builds; there is simply
+    nothing to parse afterwards.
+    """
+    sequence = _captured_traced("jitpath_traced", 8192)
+    from_rule = Path(
+        next(
+            a.filename
+            for a in sequence.artifacts.bfs()
+            if str(a.filename).endswith(".elf")
+        )
+    )
+    from_design = compile_sequence(sequence, tmp_path / "traced.elf")
+    assert from_rule.stat().st_size == from_design.stat().st_size
+
+
+def test_tracing_does_not_reuse_an_untraced_cache_entry():
+    """Same MLIR, different flags, so it must be a different cache key.
+
+    Sharing one would hand a traced build the untraced ELF, which loads and
+    runs and produces no trace.
+    """
+    from iron.common.jit_compile import _digest
+
+    text = "module { /* identical */ }"
+    assert {"graph": _digest(text), "trace": 0} != {
+        "graph": _digest(text),
+        "trace": 8192,
+    }

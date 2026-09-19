@@ -49,7 +49,7 @@ def _generator_for(mlir_text: str):
     ``compile_kwargs``, which is what the cache key actually hashes.
     """
 
-    def generate(graph: CompileTime[str]):
+    def generate(graph: CompileTime[str], trace: CompileTime[int] = 0):
         # Parsed here so it lands in the mlir_mod_ctx CompilableDesign opens.
         return Module.parse(mlir_text)
 
@@ -76,8 +76,15 @@ def stage_objects(work_dir: Path, object_files) -> None:
 # a two-step graph -- so they are not optional tuning.
 FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
 
+# Only when tracing. The trace parser reads the lowered module to find the
+# buffer layout and each design's traced tiles and events, so without this a
+# traced build compiles cleanly and then has nothing to parse.
+TRACE_FLAG = "--get-input-with-addresses"
 
-def compile_fused_elf(mlir_text: str, object_files, elf_path, extra_flags=()) -> Path:
+
+def compile_fused_elf(
+    mlir_text: str, object_files, elf_path, extra_flags=(), trace_size=0
+) -> Path:
     """Compile fused MLIR to a full ELF, returning its path.
 
     ``object_files`` are the already-built, symbol-prefixed kernel objects the
@@ -91,8 +98,10 @@ def compile_fused_elf(mlir_text: str, object_files, elf_path, extra_flags=()) ->
         _generator_for(mlir_text),
         full_elf=True,
         object_files=object_files,
-        aiecc_flags=list(FUSED_ELF_FLAGS) + list(extra_flags),
-        compile_kwargs={"graph": _digest(mlir_text)},
+        aiecc_flags=list(FUSED_ELF_FLAGS)
+        + ([TRACE_FLAG] if trace_size else [])
+        + list(extra_flags),
+        compile_kwargs={"graph": _digest(mlir_text), "trace": int(trace_size)},
     )
     design.compile(full_elf_path=elf_path)
     return elf_path
@@ -109,4 +118,10 @@ def compile_sequence(seq, elf_path) -> Path:
         a.filename for a in artifacts if str(a.filename).endswith("_fused.mlir")
     )
     objects = [a.filename for a in artifacts if str(a.filename).endswith(".o")]
-    return compile_fused_elf(Path(mlir).read_text(), objects, elf_path)
+    return compile_fused_elf(
+        Path(mlir).read_text(),
+        objects,
+        elf_path,
+        extra_flags=getattr(seq, "extra_flags", ()) or (),
+        trace_size=getattr(seq, "trace_size", 0) or 0,
+    )
