@@ -21,6 +21,8 @@ import argparse
 import safetensors.torch
 import tiktoken, tiktoken.load
 
+from iron.models.llama import Llama
+
 # Configuration
 # ##########################################################################
 
@@ -59,10 +61,13 @@ class LlamaConfig:
             }
         )
 
-        # Load model weights and tokenizer
+        # Load model weights and tokenizer. The module tree names every weight
+        # once, and load_state_dict is strict, so a checkpoint that disagrees
+        # with this config on any key or shape fails here rather than at the
+        # first dispatch. The parameters share storage with self.weights.
         self.weights = safetensors.torch.load_file(weights_path)
+        self.model = Llama.from_hf(self, self.weights)
         self.tokenizer = get_tokenizer(tokenizer_path, self.special_tokens)
-        # TODO: Assert that weight dimensions match config
 
         # Compute RoPE angle look-up table
         self.angles = compute_rope_angles(
@@ -86,7 +91,7 @@ class LlamaModelState:
                 config.n_kv_groups,
                 0,
                 config.head_dim,
-                dtype=config.weights["model.layers.0.self_attn.k_proj.weight"].dtype,
+                dtype=config.model.layers[0].attn.k.weight.dtype,
             )  # (batch_size, n_kv_groups, seq_len, head_dim)
             for _ in range(config.n_layers)
         ]
@@ -96,7 +101,7 @@ class LlamaModelState:
                 config.n_kv_groups,
                 0,
                 config.head_dim,
-                dtype=config.weights["model.layers.0.self_attn.v_proj.weight"].dtype,
+                dtype=config.model.layers[0].attn.v.weight.dtype,
             )  # (batch_size, n_kv_groups, seq_len, head_dim)
             for _ in range(config.n_layers)
         ]

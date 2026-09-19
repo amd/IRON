@@ -769,8 +769,9 @@ class SequenceFullELFCallable(SequenceCallable):
         """
         if self._params is not None:
             return self._params
-        mlir_filename = self.op.artifacts[0].mlir_input.filename
-        params_path = comp._aiecc_work_dir(mlir_filename) / "params.txt"
+        from .jit_compile import fused_work_dir
+
+        params_path = fused_work_dir(full_elf_path(self.op)) / "params.txt"
         if not params_path.exists():
             return None
         if params_path.read_text().split("\n", 1)[0].strip() == "0":
@@ -800,8 +801,9 @@ class SequenceFullELFCallable(SequenceCallable):
 
     def lowered_mlir_text(self) -> str:
         """aiecc's post-lowering module, which carries the trace buffer layout."""
-        mlir_filename = self.op.artifacts[0].mlir_input.filename
-        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
+        from .jit_compile import fused_work_dir
+
+        path = fused_work_dir(full_elf_path(self.op)) / "input_with_addresses.mlir"
         return path.read_text()
 
     def get_buffer(self, buffer_name):

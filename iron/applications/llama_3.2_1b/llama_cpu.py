@@ -221,8 +221,9 @@ def transformer_block_forward(
 def llama_forward_pass(config, state):
     batch, seq_len = state.token_ids.shape
 
-    # Step 1: Token embedding
-    tok_emb_weight = config.weights["model.embed_tokens.weight"]
+    # Step 1: Token embedding. Llama 3.2 ties the output head to the token
+    # embedding, so out_head.weight is read here and again at step 5.
+    tok_emb_weight = config.model.out_head.weight
     x = torch.nn.functional.embedding(
         state.token_ids, tok_emb_weight
     )  # (batch, seq_len, emb_dim)
@@ -233,7 +234,7 @@ def llama_forward_pass(config, state):
     )
 
     # Step 3: Apply transformer blocks
-    for layer_idx in range(config.n_layers):
+    for layer_idx, block in enumerate(config.model.layers):
         x, state.attn_keys_caches[layer_idx], state.attn_values_caches[layer_idx] = (
             transformer_block_forward(
                 x,
@@ -241,45 +242,27 @@ def llama_forward_pass(config, state):
                 state.attn_values_caches[layer_idx],
                 config.n_heads,
                 config.n_kv_groups,
-                W_norm1=config.weights[
-                    f"model.layers.{layer_idx}.input_layernorm.weight"
-                ],
-                W_attn_query=config.weights[
-                    f"model.layers.{layer_idx}.self_attn.q_proj.weight"
-                ],
-                W_attn_key=config.weights[
-                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-                ],
-                W_attn_value=config.weights[
-                    f"model.layers.{layer_idx}.self_attn.v_proj.weight"
-                ],
-                W_attn_out=config.weights[
-                    f"model.layers.{layer_idx}.self_attn.o_proj.weight"
-                ],
-                W_ffn_fc1=config.weights[
-                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
-                ],
-                W_ffn_fc2=config.weights[
-                    f"model.layers.{layer_idx}.mlp.up_proj.weight"
-                ],
-                W_ffn_fc3=config.weights[
-                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
-                ],
-                W_norm2=config.weights[
-                    f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-                ],
+                W_norm1=block.norm1.weight,
+                W_attn_query=block.attn.q.weight,
+                W_attn_key=block.attn.k.weight,
+                W_attn_value=block.attn.v.weight,
+                W_attn_out=block.attn.o.weight,
+                W_ffn_fc1=block.ffn.gate.weight,
+                W_ffn_fc2=block.ffn.up.weight,
+                W_ffn_fc3=block.ffn.down.weight,
+                W_norm2=block.norm2.weight,
                 rope_angles=config.angles,
                 attn_mask=attn_mask,
             )
         )
 
     # Step 4: Final normalization
-    final_norm_weight = config.weights["model.norm.weight"]
+    final_norm_weight = config.model.norm.weight
     x = rms_norm_forward(x, final_norm_weight)
 
     # Step 5: Output projection
     logits = torch.nn.functional.linear(
-        x, config.weights["model.embed_tokens.weight"]
+        x, config.model.out_head.weight
     )  # (batch, seq_len, vocab_size)
 
     return logits, state

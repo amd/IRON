@@ -46,6 +46,18 @@ aie_ops = None
 aie_buffers = None
 
 
+def _upload(weight, *, k_major=False):
+    """A parameter on the device, in the layout this phase's kernels read.
+
+    Layout belongs to neither the checkpoint nor the module tree. The
+    checkpoint ships every projection (out, in); decode's GEMV reads it that
+    way, while prefill's GEMM wants it K-major. Keeping that disagreement to
+    one keyword here is what lets prefill name its weights by attribute access
+    on the tree instead of keeping a second list of checkpoint key strings.
+    """
+    return XRTTensor.from_torch(weight.T if k_major else weight)
+
+
 # AIE Operator Configuration
 # ##########################################################################
 
@@ -329,6 +341,11 @@ class AIELlamaOperators:
             tile_size_input=4,
             tile_size_output=prompt_len // 8,
             num_batches=config.n_heads,
+            # head_dim is 64, which equals the default vector size, but mv.cc
+            # requires DIM_K >= 2*VEC_SIZE: its inner loop carries a pipelining
+            # pragma that assumes at least two iterations. 32 is the largest
+            # size that both divides 64 and leaves two of them.
+            kernel_vector_size=32,
             context=elf_ctx,
         )
 
@@ -462,7 +479,7 @@ class AIELlamaOperators:
                     (
                         rms_norm_op,
                         "x",
-                        f"W_norm1_{layer_idx}",
+                        f"layers.{layer_idx}.norm1.weight",
                         "x_norm",
                     )  # Step 1: RMS normalization
                 ]
@@ -470,19 +487,19 @@ class AIELlamaOperators:
                     # <grouped query attention>
                     (
                         gemv_attn_query_op,
-                        f"W_attn_query_{layer_idx}",
+                        f"layers.{layer_idx}.attn.q.weight",
                         "x_norm",
                         "queries",
                     ),
                     (
                         gemv_attn_key_value_op,
-                        f"W_attn_key_{layer_idx}",
+                        f"layers.{layer_idx}.attn.k.weight",
                         "x_norm",
                         "keys",
                     ),
                     (
                         gemv_attn_key_value_op,
-                        f"W_attn_value_{layer_idx}",
+                        f"layers.{layer_idx}.attn.v.weight",
                         "x_norm",
                         "values",
                     ),
@@ -521,7 +538,7 @@ class AIELlamaOperators:
                     ),
                     (
                         gemv_attn_output_op,
-                        f"W_attn_output_decode_{layer_idx}",
+                        f"layers.{layer_idx}.attn.o.weight",
                         "attn_context",
                         "attn_output",
                     ),
@@ -529,19 +546,24 @@ class AIELlamaOperators:
                 ]
                 + [
                     (residual_add_op, "x", "attn_output", "x"),
-                    (rms_norm_op, "x", f"W_norm2_{layer_idx}", "x_norm"),
+                    (rms_norm_op, "x", f"layers.{layer_idx}.norm2.weight", "x_norm"),
                     (
                         gemv_ffn_up_gate_op,
-                        f"W_ffn_gate_{layer_idx}",
+                        f"layers.{layer_idx}.ffn.gate.weight",
                         "x_norm",
                         "ffn_gate",
                     ),
-                    (gemv_ffn_up_gate_op, f"W_ffn_up_{layer_idx}", "x_norm", "ffn_up"),
+                    (
+                        gemv_ffn_up_gate_op,
+                        f"layers.{layer_idx}.ffn.up.weight",
+                        "x_norm",
+                        "ffn_up",
+                    ),
                     (silu_ffn_op, "ffn_gate", "ffn_gate"),
                     (eltwise_mul_ffn_op, "ffn_gate", "ffn_up", "ffn_hidden"),
                     (
                         gemv_ffn_down_op,
-                        f"W_ffn_down_{layer_idx}",
+                        f"layers.{layer_idx}.ffn.down.weight",
                         "ffn_hidden",
                         "ffn_output",
                     ),
@@ -550,8 +572,8 @@ class AIELlamaOperators:
             )
             # </transformer block>
         runlist += [
-            (rms_norm_op, "x", "W_final_norm", "x"),
-            (gemv_out_head_op, "W_out_head", "x", "logits"),
+            (rms_norm_op, "x", "norm.weight", "x"),
+            (gemv_out_head_op, "out_head.weight", "x", "logits"),
         ]
 
         self.decode.fused_op = OperatorSequence(
@@ -583,58 +605,15 @@ class AIELlamaOperators:
 
         # Operator static buffers (weights, LUTs)
 
-        for layer_idx in range(config.n_layers):
-            self.decode.fused.get_buffer(f"W_norm1_{layer_idx}").torch_view()[:] = (
-                config.weights[
-                    f"model.layers.{layer_idx}.input_layernorm.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_attn_query_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
-                f"model.layers.{layer_idx}.self_attn.q_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_attn_key_{layer_idx}").torch_view()[:] = (
-                config.weights[
-                    f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_attn_value_{layer_idx}").torch_view()[
-                :
-            ] = config.weights[
-                f"model.layers.{layer_idx}.self_attn.v_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(
-                f"W_attn_output_decode_{layer_idx}"
-            ).torch_view()[:] = config.weights[
-                f"model.layers.{layer_idx}.self_attn.o_proj.weight"
-            ].flatten()
-            self.decode.fused.get_buffer(f"W_norm2_{layer_idx}").torch_view()[:] = (
-                config.weights[
-                    f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_ffn_gate_{layer_idx}").torch_view()[:] = (
-                config.weights[
-                    f"model.layers.{layer_idx}.mlp.gate_proj.weight"
-                ].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_ffn_up_{layer_idx}").torch_view()[:] = (
-                config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].flatten()
-            )
-            self.decode.fused.get_buffer(f"W_ffn_down_{layer_idx}").torch_view()[:] = (
-                config.weights[
-                    f"model.layers.{layer_idx}.mlp.down_proj.weight"
-                ].flatten()
-            )
+        # Decode's GEMV reads each projection exactly as the checkpoint ships
+        # it, so there is no layout to choose here and the parameter name is
+        # already the buffer name. flatten() adapts to the buffer's shape, not
+        # the weight's: get_buffer() hands back a 1-D view of the arena. A name
+        # only one side knows raises here rather than leaving a buffer zeroed.
+        for name, param in config.model.named_parameters():
+            self.decode.fused.get_buffer(name).torch_view()[:] = param.flatten()
         scale_factor = 1.0 / math.sqrt(config.head_dim)
         self.decode.fused.get_buffer("attn_scale_factor").fill_(scale_factor)
-        self.decode.fused.get_buffer("W_final_norm").torch_view()[:] = config.weights[
-            "model.norm.weight"
-        ].flatten()
-        self.decode.fused.get_buffer("W_out_head").torch_view()[:] = config.weights[
-            "model.embed_tokens.weight"
-        ].flatten()
         self.decode.fused.input_buffer.to("npu")
         self.decode.fused.scratch_buffer.to("npu")
         self.decode.fused.output_buffer.to("npu")
@@ -742,77 +721,39 @@ class AIELlamaBuffers:
             for _ in range(config.n_layers)
         ]
 
+        blocks = config.model.layers
         # Transformer block layer-wise RMS norm
-        self.W_norm1 = []
-        self.W_norm2 = []
+        self.W_norm1 = [_upload(b.norm1.weight) for b in blocks]
+        self.W_norm2 = [_upload(b.norm2.weight) for b in blocks]
         # Attention projection weights
-        self.W_attn_query_prefill = []
-        self.W_attn_key_prefill = []
-        self.W_attn_value_prefill = []
+        self.W_attn_query_prefill = [
+            _upload(b.attn.q.weight, k_major=True) for b in blocks
+        ]
+        self.W_attn_key_prefill = [
+            _upload(b.attn.k.weight, k_major=True) for b in blocks
+        ]
+        self.W_attn_value_prefill = [
+            _upload(b.attn.v.weight, k_major=True) for b in blocks
+        ]
         # SwiGLU FFN weights
-        self.W_ffn_gate_prefill = []
-        self.W_ffn_up_prefill = []
-        self.W_ffn_down_prefill = []
-        for layer_idx in range(config.n_layers):
-            self.W_norm1.append(
-                XRTTensor.from_torch(
-                    config.weights[f"model.layers.{layer_idx}.input_layernorm.weight"]
-                )
-            )
-            self.W_norm2.append(
-                XRTTensor.from_torch(
-                    config.weights[
-                        f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-                    ]
-                )
-            )
-            self.W_attn_query_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[
-                        f"model.layers.{layer_idx}.self_attn.q_proj.weight"
-                    ].T
-                )
-            )
-            self.W_attn_key_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[
-                        f"model.layers.{layer_idx}.self_attn.k_proj.weight"
-                    ].T
-                )
-            )
-            self.W_attn_value_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[
-                        f"model.layers.{layer_idx}.self_attn.v_proj.weight"
-                    ].T
-                )
-            )
-            self.W_ffn_gate_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[f"model.layers.{layer_idx}.mlp.gate_proj.weight"].T
-                )
-            )
-            self.W_ffn_up_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[f"model.layers.{layer_idx}.mlp.up_proj.weight"].T
-                )
-            )
-            self.W_ffn_down_prefill.append(
-                XRTTensor.from_torch(
-                    config.weights[f"model.layers.{layer_idx}.mlp.down_proj.weight"].T
-                )
-            )
+        self.W_ffn_gate_prefill = [
+            _upload(b.ffn.gate.weight, k_major=True) for b in blocks
+        ]
+        self.W_ffn_up_prefill = [_upload(b.ffn.up.weight, k_major=True) for b in blocks]
+        self.W_ffn_down_prefill = [
+            _upload(b.ffn.down.weight, k_major=True) for b in blocks
+        ]
 
         # Final RMS norm weights
-        self.W_final_norm = XRTTensor.from_torch(config.weights["model.norm.weight"])
-        # Final linear layer (unpadded/unpartitioned, used by GEMV)
-        self.W_out_head = XRTTensor.from_torch(
-            config.weights["model.embed_tokens.weight"]
-        )
+        self.W_final_norm = _upload(config.model.norm.weight)
+        # Final linear layer (unpadded/unpartitioned, used by GEMV) -- M-major
+        # even here, unlike the projections above: GEMV reads it directly and
+        # partition_B slices the same M-major matrix for the GEMM path.
+        self.W_out_head = _upload(config.model.out_head.weight)
         W_out_head_parts = aie_ops.prefill.gemv_out_head_compilable.partition_B(
             # Zero-copy bfloat16 bitcast: view as uint16 (same width) then reinterpret
             # as ml_dtypes.bfloat16. Matches the pattern used in Tensor.from_torch().
-            config.weights["model.embed_tokens.weight"]
+            config.model.out_head.weight.detach()
             .view(torch.uint16)
             .numpy()
             .view(ml_dtypes.bfloat16),
@@ -984,7 +925,7 @@ def grouped_query_attention_forward_prefill(
     context = context.transpose(1, 2).contiguous().view(batch, seq_len, -1)
 
     output = torch.nn.functional.linear(
-        context, config.weights[f"model.layers.{layer_idx}.self_attn.o_proj.weight"]
+        context, config.model.layers[layer_idx].attn.o.weight
     )
 
     return output, keys_cache, values_cache
@@ -1090,7 +1031,7 @@ def llama_forward_pass_prefill(config, state):
     aie_buffers.prefill.rope_angles.to("npu")
 
     # Step 2: Token embedding
-    tok_emb_weight = config.weights["model.embed_tokens.weight"]
+    tok_emb_weight = config.model.out_head.weight
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
     attn_mask = torch.triu(
         torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
@@ -1176,7 +1117,7 @@ def llama_forward_pass_decode(config, state):
     ] = angles_slice.flatten()
 
     # Token embedding (on CPU)
-    tok_emb_weight = config.weights["model.embed_tokens.weight"]
+    tok_emb_weight = config.model.out_head.weight
     x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
     aie_ops.decode.fused.get_buffer("x").torch_view().view(-1, config.emb_dim)[
         :seq_len, :

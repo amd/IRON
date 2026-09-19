@@ -123,6 +123,21 @@ FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
 TRACE_FLAG = "--get-input-with-addresses"
 
 
+def fused_work_dir(elf_path) -> Path:
+    """Directory aiecc writes a fused ELF's build outputs into.
+
+    The fused MLIR stopped being an artifact when fuse_mlir() became a plain
+    generator, so there is no MLIR filename left to derive this from the way
+    ``comp._aiecc_work_dir`` does for the artifact-graph paths. The ELF path is
+    the only stable name, and callers that need aiecc's graph outputs
+    afterwards -- ``params.txt`` for the runtime-parameter scratchpad,
+    ``input_with_addresses.mlir`` for the trace layout -- must derive it from
+    here rather than re-deriving the convention.
+    """
+    elf_path = Path(elf_path)
+    return elf_path.parent / f"{elf_path.stem}.prj"
+
+
 def compile_fused_elf(
     mlir_text: str, object_files, elf_path, extra_flags=(), trace_size=0
 ) -> Path:
@@ -133,7 +148,7 @@ def compile_fused_elf(
     """
     elf_path = Path(elf_path)
     object_files = [Path(o) for o in object_files]
-    work_dir = elf_path.parent / f"{elf_path.stem}.prj"
+    work_dir = fused_work_dir(elf_path)
 
     design = CompilableDesign(
         _generator_for(mlir_text, work_dir, object_files),
