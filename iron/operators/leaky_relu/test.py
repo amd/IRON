@@ -5,7 +5,7 @@
 import pytest
 
 from iron.operators.leaky_relu.op import LeakyReLU
-from iron.operators.leaky_relu.reference import generate_golden_reference
+from iron.operators.leaky_relu.op import generate_golden_reference
 from iron.common.test_utils import run_test, make_channeled_unary_params
 
 

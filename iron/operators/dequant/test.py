@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.dequant.op import Dequant
-from iron.operators.dequant.reference import generate_golden_reference
+from iron.operators.dequant.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 

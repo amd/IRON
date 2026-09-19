@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.axpy.op import AXPY
-from iron.operators.axpy.reference import generate_golden_reference
+from iron.operators.axpy.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
