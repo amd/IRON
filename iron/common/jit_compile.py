@@ -68,7 +68,16 @@ def stage_objects(work_dir: Path, object_files) -> None:
             shutil.copy2(obj, work_dir / obj.name)
 
 
-def compile_fused_elf(mlir_text: str, object_files, elf_path) -> Path:
+# Flags the artifact-graph rule passes for a full ELF, and which a fused
+# sequence does not work without. --expand-load-pdis is what makes a multi-
+# device runlist switch PDIs between steps; --get-scratchpad-parameters emits
+# the parameter table the host writes through. Compiling without them produces
+# a smaller ELF that is not the same program -- 70,936 bytes against 99,768 on
+# a two-step graph -- so they are not optional tuning.
+FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
+
+
+def compile_fused_elf(mlir_text: str, object_files, elf_path, extra_flags=()) -> Path:
     """Compile fused MLIR to a full ELF, returning its path.
 
     ``object_files`` are the already-built, symbol-prefixed kernel objects the
@@ -82,6 +91,7 @@ def compile_fused_elf(mlir_text: str, object_files, elf_path) -> Path:
         _generator_for(mlir_text),
         full_elf=True,
         object_files=object_files,
+        aiecc_flags=list(FUSED_ELF_FLAGS) + list(extra_flags),
         compile_kwargs={"graph": _digest(mlir_text)},
     )
     design.compile(full_elf_path=elf_path)

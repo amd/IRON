@@ -78,3 +78,30 @@ def test_two_graphs_get_distinct_cache_keys():
     one = _digest("module { /* graph one */ }")
     two = _digest("module { /* graph two */ }")
     assert one != two
+
+
+def test_matches_the_artifact_rule_byte_count(tmp_path):
+    """The new path must build the same program as the rule it replaces.
+
+    Not byte-identical: aiecc embeds its working directory, which differs.
+    Size is the available proxy, and it is a sharp one here -- compiling
+    without --expand-load-pdis and --get-scratchpad-parameters produced
+    70,936 bytes against the rule's 99,768. A fused runlist needs the first to
+    switch PDIs between steps and the second for the host's parameter table,
+    so a silent divergence in these flags is a broken program, not a smaller
+    one.
+    """
+    sequence = _captured("jitpath_parity")
+    from_rule = Path(
+        next(
+            a.filename
+            for a in sequence.artifacts.bfs()
+            if str(a.filename).endswith(".elf")
+        )
+    )
+    from_design = compile_sequence(sequence, tmp_path / "parity.elf")
+    assert from_rule.stat().st_size == from_design.stat().st_size, (
+        f"artifact rule produced {from_rule.stat().st_size} bytes, "
+        f"CompilableDesign {from_design.stat().st_size}; the two paths are "
+        "not building the same program"
+    )
