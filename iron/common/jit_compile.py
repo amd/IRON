@@ -36,6 +36,7 @@ from typing import Any
 
 import aie.utils as aie_utils
 from aie.ir import Module
+from aie.utils.compile.jit._hash import _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.compile.jit.markers import CompileTime
 
@@ -49,6 +50,18 @@ def _digest(text: str) -> str:
 _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
 
+def _is_device(value) -> bool:
+    """Whether a design parameter is an IRON device.
+
+    Duck-typed on exactly the attributes ``_device_identity_key`` reads, rather
+    than on the parameter being called ``dev``: the name a design gives it is
+    not what makes it a device, and keying on the name would both miss a design
+    that spells it differently and drop a non-device parameter that happens to
+    share the name.
+    """
+    return all(hasattr(value, attr) for attr in ("arch", "cols", "rows"))
+
+
 def _params_key(kwargs: dict) -> str:
     """The design's bound parameters, spelled so the cache key can hash them.
 
@@ -58,15 +71,18 @@ def _params_key(kwargs: dict) -> str:
     each process, and the failure is silent: not an error, just a cache that
     never hits and an aiecc run on every call.
 
-    ``dev`` is exactly that (``<abc.NPU2 object at 0x7f...>``) and is dropped
-    here -- device identity already reaches the key through
-    ``_compute_artifact_hash``, which spells it as (type, arch, cols, rows)
-    rather than by identity. Anything else that looks like an address is an
-    operator bug, so it is rejected rather than quietly degraded.
+    A device is exactly that -- ``<abc.NPU2 object at 0x7f...>``. Upstream
+    splits identity into a recipe (generator, parameters, flags) and an
+    artifact (sources, objects, tools, device), so a device is spelled here the
+    same way ``_compute_artifact_hash`` spells it, via ``_device_identity_key``:
+    (type, arch, cols, rows), which is stable across processes and still
+    distinguishes NPU1 from NPU2. Anything else carrying an address is an
+    operator bug, and is rejected rather than quietly degraded.
     """
     items = []
     for name, value in sorted(kwargs.items()):
-        if name == "dev":
+        if _is_device(value):
+            items.append((name, repr(_device_identity_key(value))))
             continue
         text = str(value)
         if _ADDRESS.search(text):
@@ -108,10 +124,16 @@ def _design_generator(call_kwargs: dict):
         chain: CompileTime[str] = "",
     ):
         kwargs = dict(call_kwargs)
-        if "dev" in kwargs:
-            # Resolved now rather than at operator construction, so the design
-            # is built for whatever device this compile is bound to.
-            kwargs["dev"] = aie_utils.get_current_device()
+        bound = aie_utils.get_current_device()
+        for name, value in kwargs.items():
+            if _is_device(value):
+                # Re-read rather than reuse what the operator resolved: by the
+                # time the generator runs, compile() has called
+                # ensure_current_device(), which can bind a device that was
+                # merely inferred before. Generating against a different one
+                # than the cache keys on is how a design silently ends up built
+                # for the wrong target.
+                kwargs[name] = bound
         return design(**kwargs)
 
     return generate

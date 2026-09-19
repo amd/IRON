@@ -210,16 +210,25 @@ def test_the_compile_key_is_stable_across_identical_operators():
     assert key_for() == key_for()
 
 
-def test_the_device_does_not_reach_the_compile_key_by_identity():
-    """``dev`` stringifies to ``<abc.NPU2 object at 0x...>``.
+def test_a_device_parameter_is_keyed_by_identity_not_address():
+    """A device stringifies to ``<abc.NPU2 object at 0x...>``.
 
-    Hashed by str(), that would re-key the cache in every process. Device
-    identity reaches the key through _compute_artifact_hash instead, which
-    spells it as (type, arch, cols, rows).
+    Hashed by str() that would re-key the cache every process, so it is spelled
+    the way _compute_artifact_hash spells it. The key must still tell two
+    devices apart -- dropping it entirely would be stable and wrong, handing an
+    NPU1 build to NPU2.
     """
-    device = aie_utils.get_current_device()
-    assert "0x" in str(device), "this test is pointless if dev stops being opaque"
-    assert "dev" not in _params_key({"dev": device, "M": 8})
+    npu2 = _params_key({"dev": from_name("npu2", n_cols=8), "M": 8})
+    npu1 = _params_key({"dev": from_name("npu1", n_cols=4), "M": 8})
+    assert "0x" not in npu2, f"address leaked into the key: {npu2}"
+    assert npu2 != npu1, "the key stopped distinguishing devices"
+
+
+def test_a_device_is_recognised_by_shape_not_by_parameter_name():
+    """Designs need not call it ``dev``; what makes it a device is its API."""
+    device = from_name("npu2", n_cols=8)
+    assert _params_key({"target": device}) == _params_key({"target": device})
+    assert "0x" not in _params_key({"target": device})
 
 
 def test_an_opaque_design_parameter_is_rejected():
