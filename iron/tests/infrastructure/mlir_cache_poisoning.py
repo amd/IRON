@@ -18,7 +18,8 @@ later standalone build trusted the prefixed file and asked the linker for
 
 Three independent things closed this: ``PythonGeneratedMLIRArtifact`` now keys
 its own availability on a recipe hash of the generator's current kwargs (see
-``mlir_recipe_hash.py`` for the device-free unit tests of that mechanism);
+the compile cache key now carries func_prefix, so this is the
+end-to-end check that it does);
 fused MLIR generation is no longer an artifact at all -- ``fuse_mlir()`` is a
 plain function that calls each operator's generator in-memory and returns
 text; and standalone dispatch (``MLIROperator.link_xclbin()``) does the same

@@ -138,12 +138,6 @@ class GEMV(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions, which
-        # CompilableDesign compiles itself. Nothing here has to name the object
-        # file a second time and keep the two spellings in step.
-        return []
-
     @staticmethod
     def arg_spec(M, K, num_batches=1):
         # A single batch carries no batch dimension at all, rather than one of

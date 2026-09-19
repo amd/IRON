@@ -9,7 +9,6 @@ from typing import ClassVar, Dict
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -109,12 +108,6 @@ class RMSNorm(MLIROperator):
                 ),
             ),
         )
-
-    def get_kernel_artifacts(self):
-        # None: the designs declare their kernels as ExternalFunctions, from
-        # two separate sources (rms_norm.cc and, when weighted, mul.cc), so
-        # each gets its own object and upstream compiles both.
-        return []
 
     @staticmethod
     def arg_spec(size, tile_size, weighted=False):

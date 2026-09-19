@@ -20,7 +20,6 @@ from .context import AIEContext
 from .utils import float_to_name
 from .compilation import (
     CompilationArtifact,
-    KernelObjectArtifact,
     SourceArtifact,
 )
 
@@ -235,20 +234,13 @@ class MLIROperator(AIEOperatorBase):
     def get_mlir_artifact(self) -> CompilationArtifact:
         pass
 
-    @abstractmethod
-    def get_kernel_artifacts(self) -> list[CompilationArtifact]:
-        pass
-
     def set_up_artifacts(self) -> None:
-        # Kernel objects still go through the artifact-graph rules (Peano/chess
-        # compile isn't on CompilableDesign yet -- its own kernel auto-compile
-        # only triggers for upstream's ExternalFunction, which no IRON design
-        # uses). The xclbin/insts pair is no longer an artifact: link_xclbin()
-        # builds it lazily, through CompilableDesign, the first time
-        # get_callable() needs it. Kept on self so link_xclbin() can read
-        # their resolved (post move_artifacts()) paths later.
-        self._kernel_artifacts = self.get_kernel_artifacts()
-        self.add_artifacts(self._kernel_artifacts)
+        # Nothing. An operator's kernels are ExternalFunctions its design
+        # declares, and CompilableDesign compiles them; its xclbin and
+        # instructions are built by link_xclbin(). The artifact graph survives
+        # only for what genuinely is not compiled -- see flm.MMPrebuilt, whose
+        # xclbin is downloaded.
+        return
 
     def compile(self, dry_run: bool = False) -> AIEOperatorBase:
         """Build the artifact graph, then the xclbin+insts.
@@ -278,10 +270,8 @@ class MLIROperator(AIEOperatorBase):
             return
         from .jit_compile import compile_xclbin_insts
 
-        object_files = [Path(a.filename) for a in self._kernel_artifacts]
         self._xclbin_path, self._insts_path = compile_xclbin_insts(
             self.get_mlir_artifact().generator,
-            object_files,
             Path(self.context.build_dir) / f"{self.name}.xclbin",
             Path(self.context.build_dir) / f"{self.name}.bin",
             # The former XclbinArtifact default; no caller ever overrode it.

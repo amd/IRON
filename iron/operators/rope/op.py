@@ -9,7 +9,6 @@ from typing import ClassVar, Dict
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -69,12 +68,6 @@ class RoPE(MLIROperator):
             f"{self.name}.mlir",
             DesignGenerator(fn=rope, bind_from=self),
         )
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernel as an ExternalFunction and
-        # upstream compiles it. rope.cc defines one symbol per method, so the
-        # object is named for the symbol rather than for the method id.
-        return []
 
     @staticmethod
     def arg_spec(rows, cols, angle_rows=None):

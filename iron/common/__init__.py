@@ -14,7 +14,6 @@ from .base import (
 from .operator_bases import ChanneledUnaryOperator, BinaryElementwiseOperator
 from .context import AIEContext
 from .compilation import (
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,

@@ -18,11 +18,6 @@ each is load-bearing here:
 * The generator must return an MLIR ``Module``. ``_generate_uncached`` calls
   ``module.operation.verify()`` on whatever comes back, so text raises
   ``AttributeError``.
-* ``object_files`` does **not** stage anything -- it feeds the artifact hash
-  only. Kernel objects have to be copied into the work directory under their
-  bare names, because the fused MLIR's ``link_with`` names them without a
-  directory. This is what ``_link_build_outputs_into`` already does, and it is
-  why that step has to survive the move rather than being deleted with the DAG.
 * The cache key does not see closure contents, so two graphs whose generators
   share a code object collide. The MLIR's own digest is passed through
   ``compile_kwargs`` to give each graph a distinct key.
@@ -165,7 +160,7 @@ def _fuse_as_children(build_mlir) -> str:
         return build_mlir()
 
 
-def _fused_generator(build_mlir, work_dir=None, object_files=()):
+def _fused_generator(build_mlir):
     """Fuse a sequence's designs into one module, inside ``compile()``.
 
     ``graph`` and ``trace`` are never read; they exist so the fused text's
@@ -183,26 +178,12 @@ def _fused_generator(build_mlir, work_dir=None, object_files=()):
         trace: CompileTime[int] = 0,
         chain: CompileTime[str] = "",
     ):
-        if work_dir is not None:
-            stage_objects(Path(work_dir), object_files)
         # Fused and parsed here so the designs' ExternalFunctions register into
         # the set compile() collects, and the module lands in the mlir_mod_ctx
         # it opened.
         return Module.parse(_fuse_as_children(build_mlir))
 
     return generate
-
-
-def stage_objects(work_dir: Path, object_files) -> None:
-    """Put kernel objects where aiecc will look for them.
-
-    Copied under bare names: the fused MLIR asks for ``op0_add.o``, not a path.
-    """
-    work_dir.mkdir(parents=True, exist_ok=True)
-    for obj in object_files:
-        obj = Path(obj)
-        if obj.exists():
-            shutil.copy2(obj, work_dir / obj.name)
 
 
 def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
@@ -220,9 +201,7 @@ def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
     Reuses ``CompilableDesign``'s own content hash (recipe + kernel object
     content + device + flags) rather than inventing a second one -- already
     relied on by ``iron/tests/infrastructure/compilable_design_contract.py``
-    -- and stamps it next to the first output, mirroring
-    ``PythonGeneratedMLIRArtifact.recipe_hash()``'s sidecar
-    (``iron/common/compilation/base.py``).
+    -- and stamps it next to the first output.
     """
     # Bind the device before hashing. _compute_artifact_hash reads
     # get_current_device(probe_runtime=False), which is None until something
@@ -278,9 +257,7 @@ def fused_work_dir(elf_path) -> Path:
     return elf_path.parent / f"{elf_path.stem}.prj"
 
 
-def compile_fused_elf(
-    build_mlir, object_files, elf_path, extra_flags=(), trace_size=0
-) -> Path:
+def compile_fused_elf(build_mlir, elf_path, extra_flags=(), trace_size=0) -> Path:
     """Compile a fused sequence to a full ELF, returning its path.
 
     ``build_mlir`` is called, not passed text: fusing several designs into one
@@ -302,19 +279,15 @@ def compile_fused_elf(
     cache entry for a different program -- which is not a build failure, so
     nothing reports it.
 
-    ``object_files`` are kernel objects for operators that still declare
-    prebuilt ones, and is empty once they all declare ExternalFunctions.
     """
     elf_path = Path(elf_path)
-    object_files = [Path(o) for o in object_files]
     work_dir = fused_work_dir(elf_path)
 
     identity = _digest(_fuse_as_children(build_mlir))
 
     design = CompilableDesign(
-        _fused_generator(build_mlir, work_dir, object_files),
+        _fused_generator(build_mlir),
         full_elf=True,
-        object_files=object_files,
         aiecc_flags=list(FUSED_ELF_FLAGS)
         + ([TRACE_FLAG] if trace_size else [])
         + list(extra_flags),
@@ -322,7 +295,6 @@ def compile_fused_elf(
     )
     hit, current_hash, stamp = _compile_if_changed(design, elf_path)
     if not hit:
-        stage_objects(work_dir, object_files)
         design.compile(full_elf_path=elf_path)
         stamp.write_text(current_hash)
     return elf_path
@@ -331,17 +303,12 @@ def compile_fused_elf(
 def compile_sequence(seq, elf_path) -> Path:
     """Compile an already-set-up OperatorSequence's fused MLIR to an ELF.
 
-    The sequence must have run ``compile()`` first, which is what produces the
-    kernel objects this consumes; the fused MLIR itself is generated fresh
-    here (``FusedDispatch.build_fused_mlir`` is a plain function now, not an
-    on-disk artifact).
+    The fused MLIR is generated fresh here: build_fused_mlir is a plain
+    function, not an on-disk artifact, and running it inside compile() is what
+    lets each child design's ExternalFunction kernels be collected and built.
     """
-    objects = [
-        a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
-    ]
     return compile_fused_elf(
         lambda: seq._dispatch.build_fused_mlir(seq),
-        objects,
         elf_path,
         extra_flags=getattr(seq, "extra_flags", ()) or (),
         trace_size=getattr(seq, "trace_size", 0) or 0,
@@ -350,7 +317,6 @@ def compile_sequence(seq, elf_path) -> Path:
 
 def compile_xclbin_insts(
     generator,
-    object_files,
     xclbin_path,
     insts_path,
     kernel_name: str,
@@ -368,12 +334,9 @@ def compile_xclbin_insts(
     ``generator`` is the operator's ``DesignGenerator``. It is resolved but not
     called here: the design function runs inside ``compile()``, which is what
     lets a design declare ``ExternalFunction`` kernels and have upstream build
-    them. ``object_files`` covers operators that still declare prebuilt objects
-    instead, and is empty once one has migrated.
+    them.
     """
     xclbin_path, insts_path = Path(xclbin_path), Path(insts_path)
-    object_files = [Path(o) for o in object_files]
-    work_dir = xclbin_path.parent / f"{xclbin_path.stem}.prj"
 
     flags = [f"--xclbin-kernel-name={kernel_name}"]
     if xclbin_input is not None:
@@ -389,7 +352,6 @@ def compile_xclbin_insts(
 
     design = CompilableDesign(
         _design_generator(kwargs),
-        object_files=object_files,
         aiecc_flags=flags,
         compile_kwargs={
             "design": design_fn,
@@ -401,7 +363,6 @@ def compile_xclbin_insts(
     )
     hit, current_hash, stamp = _compile_if_changed(design, xclbin_path, insts_path)
     if not hit:
-        stage_objects(work_dir, object_files)
         design.compile(xclbin_path=xclbin_path, inst_path=insts_path)
         stamp.write_text(current_hash)
     return xclbin_path, insts_path

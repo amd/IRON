@@ -17,7 +17,6 @@ from .base import (
 )
 from .context import AIEContext
 from .compilation import (
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -42,7 +41,8 @@ class ChanneledUnaryOperator(MLIROperator):
         - For operators with extra parameters (e.g. alpha, trace_size), add
           dataclass fields and override _mlir_callback_args().
         - For operators requiring multiple kernels, extra compile flags, or
-          external source files, override get_kernel_artifacts() directly.
+          external source files, declare them in the design with
+          iron.operators._kernels.declare_kernel.
         - For non-standard arg specs, override get_arg_spec() directly.
         - If none of these fit, subclass MLIROperator instead.
     """
@@ -118,11 +118,6 @@ class ChanneledUnaryOperator(MLIROperator):
                 bind_from=self,
             ),
         )
-
-    def get_kernel_artifacts(self) -> list:
-        # None: the design declares its kernel as an ExternalFunction, with any
-        # lut tables compiled into the same translation unit.
-        return []
 
 
 @dataclass
@@ -209,9 +204,3 @@ class BinaryElementwiseOperator(MLIROperator):
                 bind_from=self,
             ),
         )
-
-    def get_kernel_artifacts(self) -> list:
-        # The design declares its kernel as an ExternalFunction; nothing here
-        # names the object a second time. No binary operator needs the aie2
-        # lut archive, so unlike the unary base there is no prebuilt branch.
-        return []

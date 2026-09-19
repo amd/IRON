@@ -66,5 +66,4 @@ class AIEContext:
 
         return [
             comp.DownloadCompilationRule(),
-            comp.KernelCompilationRule(mlir_aie_dir, use_chess=use_chess),
         ]

@@ -60,12 +60,6 @@ class _SwiGLUStreamGroup(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions, from
-        # inside the generator where CompilableDesign collects them. See
-        # stream_design.declare_group_kernels.
-        return []
-
     def design_key(self):
         """Groups whose generated design is byte-identical share it."""
         return self._design.group_digest(

@@ -117,10 +117,6 @@ class MMPrebuilt(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self):
-        # None to build: every core program is inside the downloaded xclbin.
-        return []
-
     def set_up_artifacts(self) -> None:
         # Only the download. The xclbin is fetched rather than built, which is
         # what this operator exists for, so RemoteFileArtifact is the one thing
@@ -146,7 +142,6 @@ class MMPrebuilt(MLIROperator):
         build_dir = Path(self.context.build_dir)
         _, self._insts_path = compile_xclbin_insts(
             self.get_mlir_artifact().generator,
-            [],
             build_dir / f"{self.name}.xclbin",
             build_dir / f"{self.name}.bin",
             kernel_name=XCLBIN_KERNEL_NAME,

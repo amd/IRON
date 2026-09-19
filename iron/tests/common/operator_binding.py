@@ -105,9 +105,6 @@ def test_operator_without_a_shape_function_says_so():
         def get_mlir_artifact(self):
             pass
 
-        def get_kernel_artifacts(self):
-            return []
-
     with pytest.raises(NotImplementedError, match="Specless"):
         Specless().get_arg_spec()
 

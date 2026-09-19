@@ -62,12 +62,14 @@ def test_captured_graph_compiles_to_an_elf(tmp_path):
     assert elf.read_bytes()[:4] == b"\x7fELF", "not an ELF"
 
 
-def test_kernel_objects_are_staged_under_bare_names(tmp_path):
-    """object_files does not stage; the work dir has to be populated.
+def test_kernel_objects_land_in_the_work_dir_under_bare_names(tmp_path):
+    """The fused MLIR's link_with names objects without a directory.
 
-    The fused MLIR's link_with names objects without a directory, so a path
-    that is merely declared is not a path aiecc can find. This is the one
-    thing the retirement cannot delete along with the artifact graph.
+    IRON used to copy them there itself, because object_files= only feeds the
+    artifact hash. It no longer does: the designs declare ExternalFunctions and
+    CompilableDesign compiles them straight into the work dir. The requirement
+    is unchanged, so this still checks it -- what was deleted is IRON's
+    separate step for meeting it.
     """
     sequence = _captured("jitpath_stage")
     elf = tmp_path / "graph.elf"
@@ -159,13 +161,13 @@ def test_identical_operator_reuses_the_compiled_xclbin(tmp_path):
 
     generator, objects = _add_design(tmp_path)
     first, _ = compile_xclbin_insts(
-        generator, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+        generator, xclbin_path, insts_path, kernel_name="MLIR_AIE"
     )
     mtime1 = first.stat().st_mtime_ns
 
     generator, objects = _add_design(tmp_path)
     second, _ = compile_xclbin_insts(
-        generator, objects, xclbin_path, insts_path, kernel_name="MLIR_AIE"
+        generator, xclbin_path, insts_path, kernel_name="MLIR_AIE"
     )
     mtime2 = second.stat().st_mtime_ns
 

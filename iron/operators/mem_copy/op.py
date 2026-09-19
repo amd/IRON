@@ -9,7 +9,6 @@ from typing import ClassVar, Dict
 from iron.common import (
     MLIROperator,
     same_shape_unary,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -66,11 +65,6 @@ class MemCopy(MLIROperator):
                 bind_from=self,
             ),
         )
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernel as an ExternalFunction and
-        # upstream compiles it. Nothing here names the object a second time.
-        return []
 
     @staticmethod
     def arg_spec(size):

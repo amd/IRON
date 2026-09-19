@@ -9,7 +9,6 @@ import numpy as np
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -174,11 +173,6 @@ class GEMM(MLIROperator):
         if kernel_dir == "aie2":
             return self.context.base_dir / "aie_kernels" / kernel_dir / "mm.cc"
         return self.context.kernels_dir / kernel_dir / "mm.cc"
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions and
-        # upstream compiles them.
-        return []
 
     @staticmethod
     def arg_spec(

@@ -133,17 +133,13 @@ class FusedDispatch(SequenceDispatch):
         return self
 
     def set_up_artifacts(self, seq):
-        # Kernel objects still go through the artifact-graph rules (Peano/chess
-        # compile isn't on CompilableDesign yet). The fused MLIR itself is no
-        # longer an artifact: build_fused_mlir() computes it fresh, in memory,
-        # when link_elf() needs it, and CompilableDesign keys its own cache on
-        # that text's content -- there is nothing left for the artifact graph
-        # to cache or trigger.
-        kernel_objects = self._collect_kernel_artifacts(seq)
-        seq.add_artifacts(kernel_objects)
+        # Nothing. Each child's kernels are ExternalFunctions its design
+        # declares, compiled by CompilableDesign when the fused ELF is built,
+        # and the fused MLIR is computed fresh in memory by build_fused_mlir().
+        return
 
     def link_elf(self, seq):
-        """Link the fused ELF once its MLIR and kernel objects are built.
+        """Link the fused ELF.
 
         Done here rather than as a compilation rule: this is the step that now
         goes through CompilableDesign, which keys its cache on content, locks
@@ -154,12 +150,8 @@ class FusedDispatch(SequenceDispatch):
 
         if getattr(seq, "elf_path", None) is not None:
             return seq.elf_path
-        objects = [
-            a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
-        ]
         seq.elf_path = compile_fused_elf(
             lambda: self.build_fused_mlir(seq),
-            objects,
             Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
             extra_flags=seq.extra_flags,
             trace_size=seq.trace_size,
@@ -204,17 +196,6 @@ class FusedDispatch(SequenceDispatch):
             seq.slice_info,
         )
 
-    def _collect_kernel_artifacts(self, seq):
-        """Kernel artifacts from all child operators, prefixed per operator index."""
-        kernel_artifacts = []
-        for idx, op in enumerate(seq.unique_designs()[0]):
-            objs = op.get_kernel_artifacts()
-            for obj in objs:
-                obj.filename = f"op{idx}_{obj.filename}"
-                obj.prefix_symbols = f"op{idx}_"
-            kernel_artifacts.extend(objs)
-        return kernel_artifacts
-
     def make_callable(self, seq):
         self.link_elf(seq)
         return SequenceFullELFCallable(seq)
@@ -233,21 +214,12 @@ class SeparateDispatch(SequenceDispatch):
         self.op_xclbin_path_map = {}  # id(op) -> xclbin path
         self.op_insts_path_map = {}  # id(op) -> insts path
         self.op_kernel_name_map = {}  # id(op) -> kernel_name
-        self._kernel_artifacts = {}  # id(op) -> [KernelObjectArtifact, ...]
 
     def set_up_artifacts(self, seq):
-        # Kernel objects still go through the artifact-graph rules for any
-        # operator that has not declared them as ExternalFunctions; the
-        # xclbin/insts themselves are built later, in link_xclbins(), through
-        # jit_compile. Each op's own artifacts are kept (not
-        # a fresh call per use) because move_artifacts() resolves their
-        # relative filenames into real build_dir paths in place, and
-        # link_xclbins() needs those resolved paths.
-        self._kernel_artifacts = {
-            id(op): op.get_kernel_artifacts() for op in seq.unique_operators()
-        }
-        for kernel_artifacts in self._kernel_artifacts.values():
-            seq.add_artifacts(kernel_artifacts)
+        # Nothing, for the same reason as FusedDispatch: each operator's
+        # kernels are declared by its design and compiled by CompilableDesign
+        # in link_xclbins().
+        return
 
     def link_xclbins(self, seq):
         """Compile the chained xclbin+insts pair per unique operator.
@@ -269,11 +241,8 @@ class SeparateDispatch(SequenceDispatch):
         for idx, op in enumerate(seq.unique_operators()):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
-            object_files = [Path(a.filename) for a in self._kernel_artifacts[id(op)]]
-
             xclbin_path, insts_path = compile_xclbin_insts(
                 op.get_mlir_artifact().generator,
-                object_files,
                 build_dir / f"{op_label}.xclbin",
                 build_dir / f"{op_label}.bin",
                 kernel_name=op_label,

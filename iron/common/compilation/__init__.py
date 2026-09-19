@@ -11,7 +11,6 @@ from .base import (
     CompilationArtifact,
     SourceArtifact,
     MLIRArtifact,
-    KernelObjectArtifact,
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,
     CompilationCommand,
@@ -19,7 +18,6 @@ from .base import (
     PythonCallbackCompilationCommand,
     CompilationRule,
     DownloadCompilationRule,
-    KernelCompilationRule,
 )
 from .sequence import (
     fuse_mlir,

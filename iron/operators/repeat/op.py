@@ -45,9 +45,6 @@ class Repeat(MLIROperator):
             DesignGenerator(fn=repeat, bind_from=self),
         )
 
-    def get_kernel_artifacts(self):
-        return []
-
     @staticmethod
     def arg_spec(rows, cols, repeat, dtype=bfloat16):
         return [

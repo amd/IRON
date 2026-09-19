@@ -10,7 +10,6 @@ from typing import Any, Callable, ClassVar, Dict
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -249,7 +248,7 @@ class GEMM(MLIROperator):
     def _kernel_object(self) -> str:
         """Object name over every flag that changes the emitted code.
 
-        Every -D flag from ``get_kernel_artifacts`` has to appear, for the
+        Every -D flag from ``kernel_flags`` has to appear, for the
         cache reason above. ``ck`` looks derivable from tile_n, but that is a
         tuning table: naming it means retuning an entry does not also require
         wiping the build dir.
@@ -328,11 +327,6 @@ class GEMM(MLIROperator):
             f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue, self.clamp
         )
 
-    def set_up_artifacts(self) -> None:
-        # Only the AIE2 archive, if this configuration needs one. Everything
-        # else this operator builds goes through link_xclbin below.
-        self.add_artifacts(self.get_kernel_artifacts())
-
     def link_xclbin(self) -> None:
         """Compile the configuration's xclbin and this shape's instructions.
 
@@ -347,7 +341,6 @@ class GEMM(MLIROperator):
         from iron.common.jit_compile import compile_xclbin_insts
 
         build_dir = Path(self.context.build_dir)
-        objects = [Path(a.filename) for a in self.artifacts.bfs()]
 
         # No clamp, and not this instance's bounds: they reach only the
         # runtime sequence, which this build discards.
@@ -358,14 +351,12 @@ class GEMM(MLIROperator):
                 Epilogue.NONE,
                 None,
             ).generator,
-            objects,
             build_dir / f"{self.config_name}.xclbin",
             build_dir / f"{self.config_name}.bin",
             kernel_name="MLIR_AIE",
         )
         _, self._insts_path = compile_xclbin_insts(
             self.get_mlir_artifact().generator,
-            objects,
             build_dir / f"{self.name}.xclbin",
             build_dir / f"{self.name}.bin",
             kernel_name="MLIR_AIE",
@@ -438,11 +429,6 @@ class GEMM(MLIROperator):
     def bundled_sources(self) -> tuple:
         """Translation units mm_fused.cc links but never calls through MLIR."""
         return lut_sources()
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions, with the
-        # tanh lut tables compiled into the same translation unit.
-        return []
 
     def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.

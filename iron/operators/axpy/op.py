@@ -8,7 +8,6 @@ from typing import ClassVar
 
 from iron.common import (
     BinaryElementwiseOperator,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -33,11 +32,6 @@ class AXPY(BinaryElementwiseOperator):
     kernel_name: ClassVar[str] = "axpy"
     kernel_fn_name: ClassVar[str] = "saxpy"
     callback_fn: ClassVar[str] = "my_axpy"
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernel as an ExternalFunction and
-        # upstream compiles it. Nothing here names the object a second time.
-        return []
 
     def _mlir_callback_args(self):
         return super()._mlir_callback_args() + [self.scalar_factor]

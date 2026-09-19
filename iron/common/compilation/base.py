@@ -50,9 +50,7 @@ from functools import partial
 from typing import Any, Callable
 import sys
 
-from iron.common.device_utils import get_kernel_dir
 import aie.utils.config
-from aie.utils.compile.jit._hash import _compute_recipe_hash, _device_identity_key
 from aie.utils.compile.utils import (
     compile_cxx_core_function,
     compile_mlir_module,
@@ -268,22 +266,10 @@ class CompilationArtifactGraph:
         ]
 
     def move_artifacts(self, new_root: str) -> None:
-        """Make all artifact paths point into a build directory.
-
-        Kernel objects/archives get an extra get_kernel_dir() segment: their
-        filename (e.g. "mul.o") does not encode arch, but their compiled
-        content does, and is_available_in_filesystem() only compares mtimes --
-        so two arches sharing one path would silently reuse each other's object.
-        """
-        kernel_dir = None
+        """Make all artifact paths point into a build directory."""
         for artifact in self.bfs():
             if not Path(artifact.filename).is_absolute():
-                root = new_root
-                if isinstance(artifact, KernelObjectArtifact):
-                    if kernel_dir is None:
-                        kernel_dir = get_kernel_dir()
-                    root = Path(new_root) / kernel_dir
-                artifact.filename = str(Path(root) / Path(artifact.filename).name)
+                artifact.filename = str(Path(new_root) / Path(artifact.filename).name)
 
     def add(self, artifact: CompilationArtifact) -> None:
         self.artifacts.append(artifact)
@@ -362,20 +348,14 @@ class MLIRArtifact(CompilationArtifact):
     """
 
 
-class KernelObjectArtifact(CompilationArtifact):
-    def __init__(
-        self,
-        filename: str,
-        dependencies: list[CompilationArtifact],
-        extra_flags: list[str] | None = None,
-        prefix_symbols: str | None = None,
-    ) -> None:
-        super().__init__(filename, dependencies)
-        self.extra_flags = extra_flags if extra_flags is not None else []
-        self.prefix_symbols = prefix_symbols
-
-
 class PythonGeneratedMLIRArtifact(MLIRArtifact):
+    """Carries the DesignGenerator an operator compiles from.
+
+    No longer built: the design runs inside CompilableDesign.compile(), which
+    keys its own cache on the generator and its parameters, so nothing writes
+    this file and nothing checks it for staleness.
+    """
+
     def __init__(
         self,
         filename: str,
@@ -383,40 +363,6 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
     ) -> None:
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_file)])
-
-    def recipe_hash(self) -> str:
-        """Content identity of the MLIR this artifact's generator would produce right now.
-
-        Independent of ``filename`` and mtime, on purpose: a fused build
-        mutates a shared operator's ``generator.kwargs`` (``func_prefix``) in
-        place without touching the artifact's path, so a standalone build
-        reusing that path sees a newer mtime and nothing to say the content
-        underneath it changed. Keying availability on this hash instead makes
-        that whole class of collision detectable regardless of what changed --
-        not just the one kwarg a past fix happened to rename around.
-
-        ``dev`` goes through ``_device_identity_key`` rather than
-        ``str(device)``: the raw object's default ``repr`` embeds its memory
-        address, which would invalidate on every fresh ``from_name()`` call
-        even when the device itself hasn't changed.
-        """
-        fn, args, kwargs = self.generator.resolve()
-        if args:
-            raise NotImplementedError(
-                "recipe_hash does not support positional generator args "
-                f"(got {args!r} for {getattr(fn, '__qualname__', fn)}); "
-                "route them through kwargs/bind_from instead"
-            )
-        kwargs = dict(kwargs)
-        if "dev" in kwargs:
-            kwargs["dev"] = _device_identity_key(kwargs["dev"])
-        return _compute_recipe_hash(fn, kwargs, aiecc_flags=(), compile_flags=())
-
-    def is_available_in_filesystem(self) -> bool:
-        if not super().is_available_in_filesystem():
-            return False
-        stamp = Path(f"{self.filename}.recipe_hash")
-        return stamp.exists() and stamp.read_text() == self.recipe_hash()
 
 
 def _sha256_of(path: Path) -> str:
@@ -568,124 +514,3 @@ def _aiecc_work_dir(mlir_filename: str) -> Path:
     """
     p = Path(mlir_filename)
     return p.parent / (p.name + ".d")
-
-
-def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
-    """Symlink every file already built in build_dir into work_dir.
-
-    aiecc resolves an MLIR module's relative kernel-object references (e.g.
-    ``link_with = "axpy.o"``, produced by KernelCompilationRule) against
-    work_dir, since that's where
-    compile_mlir_module() writes its own copy of the MLIR source. Symlinking
-    makes those lookups succeed without copying kernel objects into every
-    artifact's own work_dir.
-
-    Kernel objects live under build_dir/<arch> (see move_artifacts), so they
-    are linked from there too, flattened -- the reference in the MLIR carries
-    no directory. Only the current arch's subdirectory is linked: walking all
-    of them would put both arches' "mul.o" in one work_dir and reinstate the
-    collision the per-arch scoping exists to prevent.
-    """
-
-    def link_files_from(directory: Path) -> None:
-        if not directory.is_dir():
-            return
-        for entry in directory.iterdir():
-            if entry.is_dir():
-                continue
-            link = work_dir / entry.name
-            if link.exists():
-                continue
-            target = entry.resolve()
-            try:
-                link.symlink_to(target)
-            except OSError:
-                # Windows without Developer Mode cannot create symlinks.
-                shutil.copy2(target, link)
-
-    # Arch-scoped first. The loop skips a name already present, so whichever
-    # directory is linked first wins -- and with build_dir first, a leftover
-    # flat object (kernel objects have been arch-scoped since move_artifacts
-    # gained the segment) shadowed the correct one and the design linked
-    # against stale code. That produced "undefined symbol" failures which read
-    # as compilation bugs. The flat directory still supplies everything that
-    # is not a kernel object: the mlir, xclbin and insts.
-    link_files_from(build_dir / get_kernel_dir())
-    link_files_from(build_dir)
-
-
-# aiecc's own default. "1" here made every design's per-core compiles serial: on
-# the encoder-MHA design (24 cores) aiecc costs 7.7 s at -j1 and 6.0 s at -j0, and
-# nothing above 8 helps. Safe because -j does not change what aiecc produces --
-# measured on that design, insts.bin and all 24 per-core ELFs are byte-identical
-# between -j1 and -j16, and input_with_addresses.mlir differs only in the work-dir
-# path it embeds, which two runs at the SAME -j also differ in.
-_AIECC_DEFAULT_JOBS = "0"
-
-
-class KernelCompilationRule(CompilationRule):
-    """Compile KernelObjectArtifacts using Peano (clang++) or xchesscc."""
-
-    def __init__(self, mlir_aie_dir, use_chess=False, *args, **kwargs):
-        self.mlir_aie_dir = mlir_aie_dir
-        self.use_chess = use_chess
-        super().__init__(*args, **kwargs)
-
-    def matches(self, artifacts):
-        return any(artifacts.get_worklist(KernelObjectArtifact))
-
-    def compile(self, artifacts):
-        worklist = artifacts.get_worklist(KernelObjectArtifact)
-        commands = []
-
-        kernel_dir = get_kernel_dir()
-        runtime_lib_include_path = (
-            Path(self.mlir_aie_dir) / "aie_runtime_lib" / kernel_dir.upper()
-        )
-
-        for artifact in worklist:
-            if len(artifact.dependencies) < 1:
-                raise RuntimeError(
-                    "Expected at least one dependency (the C source code) for KernelObjectArtifact"
-                )
-            source_file = artifact.dependencies[0]
-            if not isinstance(source_file, SourceArtifact):
-                raise RuntimeError(
-                    "Expected KernelObject dependency to be a C source file"
-                )
-
-            # -Wno-missing-template-arg-list-after-template-kw only applies to
-            # the Peano (clang) path: xchesscc's own front end doesn't
-            # recognize it.
-            compile_args = list(artifact.extra_flags)
-            if not self.use_chess:
-                compile_args = [
-                    "-Wno-missing-template-arg-list-after-template-kw"
-                ] + compile_args
-
-            commands.append(
-                PythonCallbackCompilationCommand(
-                    partial(
-                        compile_cxx_core_function,
-                        source_path=source_file.filename,
-                        target_arch=kernel_dir,
-                        output_path=artifact.filename,
-                        include_dirs=[str(runtime_lib_include_path)],
-                        compile_args=compile_args,
-                        use_chess=self.use_chess,
-                    )
-                )
-            )
-            if artifact.prefix_symbols:
-                commands.append(
-                    PythonCallbackCompilationCommand(
-                        partial(
-                            prefix_symbols_in_object,
-                            artifact.filename,
-                            artifact.prefix_symbols,
-                        )
-                    )
-                )
-            artifact.available = True
-
-        return commands

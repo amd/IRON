@@ -11,7 +11,6 @@ from ml_dtypes import bfloat16
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -59,11 +58,6 @@ class Dequant(MLIROperator):
                 bind_from=self,
             ),
         )
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernel as an ExternalFunction and
-        # upstream compiles it. Nothing here names the object a second time.
-        return []
 
     @staticmethod
     def arg_spec(size, group_size=32):

@@ -9,7 +9,6 @@ import numpy as np
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -96,14 +95,6 @@ class MHA(MLIROperator):
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
         ]
         return mm_defines_rowmaj + ["-DB_COL_MAJ"]
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions. mha.cc
-        # #includes softmax.cc and mm.cc, so those are not listed here any more
-        # either -- Peano's depfile reports them and upstream's manifest
-        # validates against it, which covers transitive headers this list never
-        # did.
-        return []
 
     @staticmethod
     def arg_spec(num_heads, seq_len, d, num_KV_heads, num_of_pipelines=1):

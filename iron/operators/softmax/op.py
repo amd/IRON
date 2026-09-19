@@ -10,7 +10,6 @@ import aie.utils as aie_utils
 from iron.common.device_utils import get_kernel_dir
 from iron.common import (
     MLIROperator,
-    KernelObjectArtifact,
     SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
@@ -79,11 +78,6 @@ class Softmax(MLIROperator):
             # over rather than importing this module a second time by path.
             DesignGenerator(fn=softmax, bind_from=self),
         )
-
-    def get_kernel_artifacts(self):
-        # None: the design declares its kernels as ExternalFunctions, with the
-        # lut tables compiled into the same translation unit.
-        return []
 
     @staticmethod
     def arg_spec(rows, cols):
