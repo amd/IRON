@@ -15,7 +15,7 @@ the regime llama_npu.py's prefill RoPE shape sits in
 
 import torch
 
-from iron.operators.rope.reference import reference
+from iron.operators.rope.op import reference
 
 
 def _block_major_expected(x, angles, rows, angle_rows):

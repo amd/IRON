@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.transpose.op import Transpose
-from iron.operators.transpose.reference import generate_golden_reference
+from iron.operators.transpose.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 

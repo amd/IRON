@@ -5,7 +5,7 @@
 import pytest
 import aie.utils as aie_utils
 from iron.operators.rope.op import RoPE
-from iron.operators.rope.reference import generate_golden_reference
+from iron.operators.rope.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 

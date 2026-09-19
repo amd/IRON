@@ -5,7 +5,7 @@
 import pytest
 
 from iron.operators.repeat.op import Repeat
-from iron.operators.repeat.reference import generate_golden_reference
+from iron.operators.repeat.op import generate_golden_reference
 from iron.common.test_utils import run_test
 
 
