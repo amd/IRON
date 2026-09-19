@@ -183,6 +183,15 @@ class FusedDispatch(SequenceDispatch):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
+                # The prefix changes what this MLIR *is*, so it has to change
+                # where it is written. These artifacts are dependencies of the
+                # SequenceMLIRArtifact and so get compiled to disk; sharing a
+                # filename with the standalone build left prefixed MLIR in its
+                # cache slot, and a later standalone build trusted it and asked
+                # the linker for op0_add.o. The failure surfaced as an
+                # undefined symbol in a build that had done nothing wrong.
+                name = Path(mlir_artifact.filename)
+                mlir_artifact.filename = str(name.with_name(f"op{idx}_{name.name}"))
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)
             operator_mlir_map[op_name] = mlir_artifact
