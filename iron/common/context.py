@@ -64,7 +64,6 @@ class AIEContext:
         use_chess = self.compiler == "chess"
 
         return [
-            comp.FusePythonGeneratedMLIRCompilationRule(),
             comp.GenerateMLIRFromPythonCompilationRule(),
             comp.DownloadCompilationRule(),
             comp.KernelCompilationRule(peano_dir, mlir_aie_dir, use_chess=use_chess),

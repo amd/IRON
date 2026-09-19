@@ -124,15 +124,16 @@ def compile_sequence(seq, elf_path) -> Path:
     """Compile an already-set-up OperatorSequence's fused MLIR to an ELF.
 
     The sequence must have run ``compile()`` first, which is what produces the
-    fused MLIR and the kernel objects this consumes.
+    kernel objects this consumes; the fused MLIR itself is generated fresh
+    here (``FusedDispatch.build_fused_mlir`` is a plain function now, not an
+    on-disk artifact).
     """
-    artifacts = list(seq.artifacts.bfs())
-    mlir = next(
-        a.filename for a in artifacts if str(a.filename).endswith("_fused.mlir")
-    )
-    objects = [a.filename for a in artifacts if str(a.filename).endswith(".o")]
+    objects = [
+        a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
+    ]
+    mlir = seq._dispatch.build_fused_mlir(seq)
     return compile_fused_elf(
-        Path(mlir).read_text(),
+        mlir,
         objects,
         elf_path,
         extra_flags=getattr(seq, "extra_flags", ()) or (),

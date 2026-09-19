@@ -132,15 +132,14 @@ class FusedDispatch(SequenceDispatch):
         return self
 
     def set_up_artifacts(self, seq):
-        # The fused MLIR and the kernel objects are registered as targets in
-        # their own right. They used to be reached only as dependencies of a
-        # FullElfArtifact, which meant the artifact that produced the ELF was
-        # also the reason its own inputs existed -- so the ELF step could not
-        # move without them losing their trigger.
-        mlir_artifact = self.build_fused_mlir(seq)
+        # Kernel objects still go through the artifact-graph rules (Peano/chess
+        # compile isn't on CompilableDesign yet). The fused MLIR itself is no
+        # longer an artifact: build_fused_mlir() computes it fresh, in memory,
+        # when link_elf() needs it, and CompilableDesign keys its own cache on
+        # that text's content -- there is nothing left for the artifact graph
+        # to cache or trigger.
         kernel_objects = self._collect_kernel_artifacts(seq)
-        seq.add_artifacts([mlir_artifact] + kernel_objects)
-        seq._fused_mlir = mlir_artifact
+        seq.add_artifacts(kernel_objects)
 
     def link_elf(self, seq):
         """Link the fused ELF once its MLIR and kernel objects are built.
@@ -154,7 +153,7 @@ class FusedDispatch(SequenceDispatch):
 
         if getattr(seq, "elf_path", None) is not None:
             return seq.elf_path
-        mlir = Path(seq._fused_mlir.filename).read_text()
+        mlir = self.build_fused_mlir(seq)
         objects = [
             a.filename for a in seq.artifacts.bfs() if str(a.filename).endswith(".o")
         ]
@@ -167,45 +166,35 @@ class FusedDispatch(SequenceDispatch):
         )
         return seq.elf_path
 
-    def build_fused_mlir(self, seq):
-        """Build the fused MLIR source that inlines every operator into a single
-        module.
+    def build_fused_mlir(self, seq) -> str:
+        """Build the fused MLIR source that inlines every operator into a
+        single module, and return it as text.
 
         ``seq``'s buffer-layout attributes (``subbuffer_layout``,
         ``buffer_sizes``, ``slice_info``) must already be set.
         """
-        operator_mlir_map = {}
+        operator_generators = {}
         comp_runlist = []
         designs, design_of = seq.unique_designs()
         design_names = []
 
         for idx, op in enumerate(designs):
-            mlir_artifact = op.get_mlir_artifact()
+            generator = op.get_mlir_artifact().generator
             if len(op.get_kernel_artifacts()) > 0:
-                # This mutates what the artifact's generator produces without
-                # touching its path. That used to require also renaming the
-                # artifact's filename by hand, since a shared path let a
-                # standalone build trust a stale, prefixed file with a newer
-                # mtime than its source and ask the linker for op0_add.o.
-                # PythonGeneratedMLIRArtifact now keys its own availability on
-                # a recipe hash of the generator's current kwargs, so that
-                # collision is caught regardless of filename.
-                mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
+                generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)
-            operator_mlir_map[op_name] = mlir_artifact
+            operator_generators[op_name] = generator
 
         for op, *bufs in seq.runlist:
             comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
-        return comp.SequenceMLIRArtifact(
-            f"{seq.name}{_trace_tag(seq)}_fused.mlir",
-            operator_mlir_map=operator_mlir_map,
-            runlist=comp_runlist,
-            subbuffer_layout=seq.subbuffer_layout,
-            buffer_sizes=seq.buffer_sizes,
-            slice_info=seq.slice_info,
-            trace_size=seq.trace_size,
+        return comp.fuse_mlir(
+            operator_generators,
+            comp_runlist,
+            seq.subbuffer_layout,
+            seq.buffer_sizes,
+            seq.slice_info,
         )
 
     def _collect_kernel_artifacts(self, seq):

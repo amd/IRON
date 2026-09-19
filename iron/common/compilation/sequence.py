@@ -8,9 +8,6 @@ Temporal fusion of multiple MLIR modules into one module with multiple devices a
 from __future__ import annotations
 
 import numpy as np
-import importlib.util
-from functools import partial
-from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
@@ -19,14 +16,7 @@ import ml_dtypes
 
 from typing import Any
 
-from . import (
-    CompilationArtifactGraph,
-    CompilationRule,
-    CompilationCommand,
-    PythonCallbackCompilationCommand,
-    PythonGeneratedMLIRArtifact,
-    MLIRArtifact,
-)
+from . import DesignGenerator
 
 RESET_DEVICE = "reset_device"
 
@@ -44,28 +34,6 @@ def trace_buffer_size(mlir_text: str) -> int:
     """
     slices = get_trace_slices(mlir_text)
     return max((s["offset"] + s["size"] for s in slices), default=0)
-
-
-class SequenceMLIRArtifact(MLIRArtifact):
-    def __init__(
-        self,
-        filename: str,
-        operator_mlir_map: dict[str, PythonGeneratedMLIRArtifact],
-        runlist: list[tuple[str, ...]],
-        subbuffer_layout: dict[str, tuple[str, int, int]],
-        buffer_sizes: tuple[int, int, int],
-        slice_info: dict[str, tuple[str, int, int]] | None = None,
-        trace_size: int = 0,
-    ) -> None:
-        dependencies = list(operator_mlir_map.values())
-        super().__init__(filename, dependencies)
-        self.operator_mlir_map = operator_mlir_map
-        self.runlist = runlist
-        self.subbuffer_layout = subbuffer_layout
-        self.buffer_sizes = buffer_sizes
-        self.slice_info = slice_info or {}
-        # Bytes of trace buffer per runlist step, 0 for an untraced build.
-        self.trace_size = trace_size
 
 
 # Helper Functions
@@ -88,21 +56,15 @@ def extract_runtime_sequence_arg_types(dev_op: Any) -> list[Any]:
     raise RuntimeError("Could not find runtime sequence in device operation")
 
 
-def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
-    """Extract MLIR module from a PythonGeneratedMLIRArtifact.
+def get_child_mlir_module(generator: DesignGenerator) -> Any:
+    """Call a per-operator MLIR generator and return its raw Module.
 
-    Uses the artifact's DesignGenerator to dynamically import the design
-    module and call the callback, returning the raw (non-stringified) MLIR
-    module object for further inspection by the fusion pass.
+    Shares DesignGenerator.resolve() rather than repeating the import and
+    call: this path needs the module object instead of its string form
+    (DesignGenerator.__call__ stringifies), and when the two were separate a
+    change to argument assembly reached only one.
     """
-    if not isinstance(mlir_artifact, PythonGeneratedMLIRArtifact):
-        raise TypeError(
-            f"Expected PythonGeneratedMLIRArtifact, got {type(mlir_artifact).__name__}"
-        )
-    # Share DesignGenerator.resolve() rather than repeating the import and
-    # call: this path needs the module object instead of its string form, and
-    # when the two were separate a change to argument assembly reached only one.
-    callback_function, args, kwargs = mlir_artifact.generator.resolve()
+    callback_function, args, kwargs = generator.resolve()
     return callback_function(*args, **kwargs)
 
 
@@ -126,13 +88,27 @@ def needs_additional_reset(runlist: list[Any]) -> bool:
     return points % 2 == 1
 
 
-def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
-    """Fuse multiple MLIR modules by inlining their device operations and adding a new main device and runtime sequence that call into sequence of operations based on a runlist."""
+def fuse_mlir(
+    operator_generators: dict[str, DesignGenerator],
+    runlist: list[tuple[str, ...]],
+    subbuffer_layout: dict[str, tuple[str, int, int]],
+    buffer_sizes: tuple[int, int, int],
+    slice_info: dict[str, tuple[str, int, int]] | None = None,
+) -> str:
+    """Fuse multiple MLIR modules into one, and return the result as text.
 
-    input_buffer_size, output_buffer_size, scratch_buffer_size = artifact.buffer_sizes
+    Inlines each operator's device operations and adds a new main device and
+    runtime sequence that calls into them in ``runlist`` order. A plain
+    function rather than an artifact+rule: nothing here needs the artifact
+    graph's file-based caching, since the caller (``FusedDispatch.link_elf``)
+    hands the returned text straight to ``CompilableDesign``, which keys its
+    own cache on the text's content.
+    """
+    slice_info = slice_info or {}
+    input_buffer_size, output_buffer_size, scratch_buffer_size = buffer_sizes
 
     # Extract device operations and module-level parameter decls from each
-    # operator's MLIR artifact.  Note: in the current MLIR-AIE pipeline,
+    # operator's MLIR generator.  Note: in the current MLIR-AIE pipeline,
     # ``aiex.scratchpad_parameter`` ops are emitted at *module* scope (above the
     # ``aie.device``), because the scratchpad is a single hardware resource
     # shared across all PDIs in a runlist and the verifier on
@@ -143,8 +119,8 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
     operator_param_decls: dict[str, dict[str, ir.Type]] = {}
     device_ty = None
     sequence_arg_types = {}
-    for op_name, mlir_artifact in artifact.operator_mlir_map.items():
-        mlir_module = get_child_mlir_module(mlir_artifact)
+    for op_name, generator in operator_generators.items():
+        mlir_module = get_child_mlir_module(generator)
         device_ops = []
         params_here: dict[str, ir.Type] = {}
         for op in mlir_module.body.operations:
@@ -207,7 +183,7 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 
-        needs_reset = needs_additional_reset(artifact.runlist)
+        needs_reset = needs_additional_reset(runlist)
         if needs_reset:
 
             @aie.device(device_ty)
@@ -242,7 +218,7 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                 # Execute operations in runlist order
                 configure_op = None
                 last_op_name = None
-                for op_name, *buffer_names in artifact.runlist:
+                for op_name, *buffer_names in runlist:
                     expected_arg_types = sequence_arg_types[op_name]
 
                     # Avoid reconfiguring altogether if the same op is called multiple times consecutively
@@ -261,20 +237,18 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                         buffer_ssa_values = []
                         for idx, buf_name in enumerate(buffer_names):
                             # Check if this is a sliced buffer
-                            if buf_name in artifact.slice_info:
-                                base_name, start, end = artifact.slice_info[buf_name]
+                            if buf_name in slice_info:
+                                base_name, start, end = slice_info[buf_name]
                                 # Get parent buffer info
                                 buf_type, parent_offset, parent_length = (
-                                    artifact.subbuffer_layout[base_name]
+                                    subbuffer_layout[base_name]
                                 )
                                 # Calculate actual offset and length for slice
                                 offset = parent_offset + start
                                 length = end - start
                             else:
                                 # Regular buffer
-                                buf_type, offset, length = artifact.subbuffer_layout[
-                                    buf_name
-                                ]
+                                buf_type, offset, length = subbuffer_layout[buf_name]
 
                             # Subview Op
                             consolidated_buf = consolidated_buffers[buf_type]
@@ -326,26 +300,4 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
                     reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
                     reset_op.body.blocks.append()
 
-        # Write the fused MLIR to file
-        with open(artifact.filename, "w") as f:
-            f.write(str(ctx.module))
-
-
-# Compilation Rules
-# ##########################################################################
-
-
-class FusePythonGeneratedMLIRCompilationRule(CompilationRule):
-    """Compilation rule that fuses multiple MLIR modules into one."""
-
-    def matches(self, graph: CompilationArtifactGraph) -> bool:
-        return any(graph.get_worklist(SequenceMLIRArtifact))
-
-    def compile(self, graph: CompilationArtifactGraph) -> list[CompilationCommand]:
-        commands: list[CompilationCommand] = []
-        worklist = graph.get_worklist(SequenceMLIRArtifact)
-        for artifact in worklist:
-            callback = partial(fuse_mlir, artifact)
-            commands.append(PythonCallbackCompilationCommand(callback))
-            artifact.available = True
-        return commands
+        return str(ctx.module)

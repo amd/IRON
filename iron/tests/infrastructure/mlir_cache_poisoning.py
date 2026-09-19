@@ -4,24 +4,28 @@
 
 """A fused build must not leave its MLIR in the standalone operator's slot.
 
-``FusedDispatch.build_fused_mlir`` takes each operator's MLIR artifact and
-mutates its generator::
+``FusedDispatch.build_fused_mlir`` takes each operator's MLIR generator and
+mutates it::
 
-    mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
+    generator.kwargs["func_prefix"] = f"op{idx}_"
 
-without changing the artifact's filename. Those artifacts are dependencies of
-the SequenceMLIRArtifact, so they are compiled to disk -- writing symbol-
-prefixed MLIR to the path a standalone build of the same operator reads.
+This used to be a mutation of a ``PythonGeneratedMLIRArtifact`` that was also
+a dependency of ``SequenceMLIRArtifact``, so the artifact graph compiled it to
+disk -- writing symbol-prefixed MLIR to the exact path a standalone build of
+the same operator reads. The cache keyed only on filename and mtime, so a
+later standalone build trusted the prefixed file and asked the linker for
+``op0_add.o``, which a standalone build never produces.
 
-This used to poison the standalone build: the cache keyed only on filename and
-mtime, so it trusted the prefixed file and asked the linker for ``op0_add.o``,
-which a standalone build never produces. ``PythonGeneratedMLIRArtifact`` now
-keys its own availability on a recipe hash of the generator's current kwargs
-(see ``mlir_recipe_hash.py`` for the device-free unit tests of that
-mechanism), so the standalone build detects the mismatch and regenerates
-unprefixed MLIR in place, regardless of what filename either build used.
+Two independent things closed this: ``PythonGeneratedMLIRArtifact`` now keys
+its own availability on a recipe hash of the generator's current kwargs (see
+``mlir_recipe_hash.py`` for the device-free unit tests of that mechanism), and
+separately, fused MLIR generation is no longer an artifact at all --
+``fuse_mlir()`` is a plain function that calls each operator's generator
+in-memory and returns text, so a fused build never writes a per-operator
+``.mlir`` file to disk in the first place. Either alone would have prevented
+this; both mean there is nothing left to poison.
 
-The failure is far from its cause: it surfaces as an undefined symbol at link
+The failure is far from its cause: it surfaced as an undefined symbol at link
 time, in a build that did nothing wrong, possibly in a different process or
 session from the fused build that poisoned it.
 

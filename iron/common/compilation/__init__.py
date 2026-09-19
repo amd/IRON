@@ -29,7 +29,6 @@ from .base import (
     ArchiveCompilationRule,
 )
 from .sequence import (
-    SequenceMLIRArtifact,
-    FusePythonGeneratedMLIRCompilationRule,
+    fuse_mlir,
     trace_buffer_size,
 )

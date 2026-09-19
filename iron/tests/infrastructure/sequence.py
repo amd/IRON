@@ -20,8 +20,6 @@ The ``OperatorSequence`` dispatch modes covered here are:
 * ``"reference"``– pure-CPU evaluation via each operator's ``reference()``.
 """
 
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -29,7 +27,6 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
 from iron.common.sequence import OperatorSequence
-from iron.common.compilation.sequence import fuse_mlir
 from iron.common.test_utils import verify_buffer
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
@@ -127,7 +124,7 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
-def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
+def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
     """The single-dispatch (fused) path emits one ``aie.device`` per operator
     plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
@@ -139,15 +136,11 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
     seq = _build_add_relu_sequence(aie_context, "fused", "infra_fused_mlir")
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
-    # NPU2-only). This mirrors what set_up_artifacts() feeds to the compiler.
+    # NPU2-only). This mirrors what link_elf() feeds to the compiler.
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
     )
-    mlir_artifact = seq._dispatch.build_fused_mlir(seq)
-    mlir_artifact.filename = str(tmp_path / mlir_artifact.filename)
-    fuse_mlir(mlir_artifact)
-
-    text = Path(mlir_artifact.filename).read_text()
+    text = seq._dispatch.build_fused_mlir(seq)
 
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
