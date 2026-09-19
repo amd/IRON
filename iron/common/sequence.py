@@ -549,7 +549,16 @@ class OperatorSequence(AIEOperatorBase):
         )
 
     def get_callable(self):
-        """Return the runtime callable for the resolved dispatch policy."""
+        """Return the runtime callable for the resolved dispatch policy.
+
+        Compiles first if that has not happened yet, so a caller can dispatch
+        a sequence without compiling it explicitly. Calling ``compile()``
+        beforehand remains the ahead-of-time path and does the same work --
+        the only difference is when. ``compile()`` skips artifacts already on
+        disk, so arriving here twice costs nothing the second time.
+        """
+        if not hasattr(self, "subbuffer_layout"):
+            self.compile()
         return self._dispatch.make_callable(self)
 
     def get_layout_for_buffer(self, buffer_name):
