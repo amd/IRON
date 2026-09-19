@@ -101,8 +101,9 @@ class ChanneledUnaryOperator(MLIROperator):
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.
 
-        Subclasses with extra parameters (e.g. alpha, trace_size) should
-        override this method.
+        Retained for the operators that append an extra parameter and build
+        their own artifact (axpy's scalar_factor, leaky_relu's alpha). The
+        base itself binds by name instead.
         """
         return [
             aie_utils.get_current_device(),
@@ -110,11 +111,11 @@ class ChanneledUnaryOperator(MLIROperator):
             self.num_aie_columns,
             self.num_channels,
             self.tile_size,
-            0,
+            self.trace_size,
         ]
 
     @property
-    def _kernel_link_file(self) -> str:
+    def kernel_obj_file(self) -> str:
         """The file name that the MLIR Kernel declaration should link_with.
 
         When auxiliary objects are required (e.g. lut_based_ops.o on aie2),
@@ -126,17 +127,15 @@ class ChanneledUnaryOperator(MLIROperator):
         return f"{self.kernel_name}.o"
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        callback_args = self._mlir_callback_args() + [
-            self.kernel_fn_name,
-            self._kernel_link_file,
-            self.tile_cap,
-        ]
+        # Bound by name rather than passed by position. The old list matched
+        # the design's signature by order alone, so inserting a parameter into
+        # that signature shifted every argument after it silently.
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir.parent / "channeled_unary_design.py",
                 "channeled_unary_design",
-                tuple(callback_args),
+                bind_from=self,
             ),
         )
 
@@ -220,28 +219,30 @@ class BinaryElementwiseOperator(MLIROperator):
     def _mlir_callback_args(self) -> list[Any]:
         """Return the callback_args list for PythonGeneratedMLIRArtifact.
 
-        Subclasses with extra parameters (e.g. scalar_factor) should
-        override this method.
+        Retained for axpy, which appends scalar_factor and builds its own
+        artifact. The base itself binds by name instead.
         """
         return [
             aie_utils.get_current_device(),
             self.size,
             self.num_aie_columns,
             self.tile_size,
-            0,
+            self.trace_size,
         ]
 
+    @property
+    def kernel_obj_file(self) -> str:
+        """The object file this design links against."""
+        return f"{self.kernel_name}.o"
+
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        callback_args = self._mlir_callback_args() + [
-            self.kernel_fn_name,
-            f"{self.kernel_name}.o",
-        ]
+        # Bound by name; see the note on the unary base about position.
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir.parent / "binary_elementwise_design.py",
                 "binary_elementwise_design",
-                tuple(callback_args),
+                bind_from=self,
             ),
         )
 

@@ -99,12 +99,11 @@ def get_child_mlir_module(mlir_artifact: PythonGeneratedMLIRArtifact) -> Any:
         raise TypeError(
             f"Expected PythonGeneratedMLIRArtifact, got {type(mlir_artifact).__name__}"
         )
-    gen = mlir_artifact.generator
-    spec = importlib.util.spec_from_file_location(gen.source_path.name, gen.source_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    callback_function = getattr(module, gen.fn_name)
-    return callback_function(*gen.args, **gen.kwargs)
+    # Share DesignGenerator.resolve() rather than repeating the import and
+    # call: this path needs the module object instead of its string form, and
+    # when the two were separate a change to argument assembly reached only one.
+    callback_function, args, kwargs = mlir_artifact.generator.resolve()
+    return callback_function(*args, **kwargs)
 
 
 def needs_additional_reset(runlist: list[Any]) -> bool:

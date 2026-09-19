@@ -13,7 +13,7 @@ from iron.operators._trace import maybe_enable_trace
 def channeled_unary_design(
     dev,
     size,
-    num_columns,
+    num_aie_columns,
     num_channels,
     tile_size,
     trace_size,
@@ -35,22 +35,22 @@ def channeled_unary_design(
         fifo_kwargs = {"depth": fifodepth}
 
     # Calculate number of iterations per core
-    total_cores = num_columns * num_channels
+    total_cores = num_aie_columns * num_channels
     per_core_elements = size // total_cores
     N_div_n = per_core_elements // line_size
 
     # Chunk size sent per DMA channel
-    chunk = size // num_columns // num_channels
+    chunk = size // num_aie_columns // num_channels
 
     # Dataflow with ObjectFifos
     of_ins = [
         ObjectFifo(line_type, name=f"in{i}_{j}", **fifo_kwargs)
-        for i in range(num_columns)
+        for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
     of_outs = [
         ObjectFifo(line_type, name=f"out{i}_{j}", **fifo_kwargs)
-        for i in range(num_columns)
+        for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
 
@@ -80,7 +80,7 @@ def channeled_unary_design(
                 kernel_fcn,
             ],
         )
-        for i in range(num_columns)
+        for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
 
@@ -92,7 +92,7 @@ def channeled_unary_design(
             [1, 1, 1, chunk],
             [0, 0, 0, 1],
         )
-        for i in range(num_columns)
+        for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
 
@@ -101,7 +101,7 @@ def channeled_unary_design(
         tg = TaskGroup()
 
         # Fill the input objectFIFOs with data
-        for i in range(num_columns):
+        for i in range(num_aie_columns):
             for j in range(num_channels):
                 in_prods[i * num_channels + j].fill(
                     a_in,
@@ -109,7 +109,7 @@ def channeled_unary_design(
                     group=tg,
                 )
         # Drain the output objectFIFOs with data
-        for i in range(num_columns):
+        for i in range(num_aie_columns):
             for j in range(num_channels):
                 out_conses[i * num_channels + j].drain(
                     b_out,

@@ -66,7 +66,14 @@ class DesignGenerator:
     kwargs: dict[str, Any] = field(default_factory=dict)
     bind_from: Any = None
 
-    def __call__(self) -> str:
+    def resolve(self) -> tuple[Callable, tuple, dict[str, Any]]:
+        """Import the design module and return it ready to call.
+
+        Every caller goes through here. The fusion pass needs the raw module
+        object rather than its string form, so it used to repeat the import
+        and call itself -- which meant a change to how arguments are assembled
+        reached one path and not the other.
+        """
         spec = importlib.util.spec_from_file_location(
             self.source_path.name, self.source_path
         )
@@ -80,9 +87,13 @@ class DesignGenerator:
             # imported lazily (it pulls in the MLIR dialects), and reading its
             # signature any earlier would defeat that. Explicit kwargs win, so
             # an operator can still override or pass something it does not
-            # store as an attribute.
+            # store as an attribute -- the fusion pass sets func_prefix that way.
             kwargs = {**self.bind_from.bind(fn, skip=self.kwargs), **self.kwargs}
-        return str(fn(*self.args, **kwargs))
+        return fn, self.args, kwargs
+
+    def __call__(self) -> str:
+        fn, args, kwargs = self.resolve()
+        return str(fn(*args, **kwargs))
 
 
 def plan(
