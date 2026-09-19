@@ -4,7 +4,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-from typing import ClassVar, Dict
+from typing import Any, Callable, ClassVar, Dict
 
 from iron.common import (
     MLIROperator,
@@ -20,6 +20,7 @@ from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 from iron.common.operator_bases import lut_based_ops_artifacts
+from aie.utils.npukernel import NPUKernel
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -352,6 +353,25 @@ class GEMM(MLIROperator):
             dependencies=[shape_mlir] + kernels,
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
+
+    def get_callable(self) -> Callable[..., Any]:
+        # Explicit override, not inherited: MLIROperator.get_callable() moved
+        # onto CompilableDesign-compiled paths (self._xclbin_path/_insts_path),
+        # but this operator's set_up_artifacts() deliberately stays on the old
+        # DAG (self.xclbin_artifact/insts_artifact) for its config/shape RTP
+        # split -- see set_up_artifacts() above. Verbatim copy of the base
+        # implementation this used to inherit silently.
+        npu_kernel = NPUKernel(
+            xclbin_path=self.xclbin_artifact.filename,
+            kernel_name=self.xclbin_artifact.kernel_name,
+            insts_path=self.insts_artifact.filename,
+        )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+
+        def call(*args):
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+
+        return call
 
     def get_kernel_artifacts(self):
         kernel_dir = get_kernel_dir()

@@ -20,8 +20,6 @@ from .context import AIEContext
 from .utils import float_to_name
 from .compilation import (
     CompilationArtifact,
-    XclbinArtifact,
-    InstsBinArtifact,
     KernelObjectArtifact,
     KernelArchiveArtifact,
     SourceArtifact,
@@ -232,35 +230,45 @@ class MLIROperator(AIEOperatorBase):
     def get_kernel_artifacts(self) -> list[CompilationArtifact]:
         pass
 
-    def get_artifacts(
-        self, prefix: str = ""
-    ) -> tuple[XclbinArtifact, InstsBinArtifact]:
-        operator_name = prefix + self.name
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps = self.get_kernel_artifacts()
-        xclbin_artifact = XclbinArtifact(
-            f"{operator_name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-        )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-        )
-        return xclbin_artifact, insts_artifact
-
     def set_up_artifacts(self) -> None:
-        xclbin_artifact, insts_artifact = self.get_artifacts()
-        self.xclbin_artifact = xclbin_artifact
-        self.insts_artifact = insts_artifact
-        self.add_artifacts([xclbin_artifact, insts_artifact])
+        # Kernel objects still go through the artifact-graph rules (Peano/chess
+        # compile isn't on CompilableDesign yet -- its own kernel auto-compile
+        # only triggers for upstream's ExternalFunction, which no IRON design
+        # uses). The xclbin/insts pair is no longer an artifact: link_xclbin()
+        # builds it lazily, through CompilableDesign, the first time
+        # get_callable() needs it. Kept on self so link_xclbin() can read
+        # their resolved (post move_artifacts()) paths later.
+        self._kernel_artifacts = self.get_kernel_artifacts()
+        self.add_artifacts(self._kernel_artifacts)
+
+    def link_xclbin(self) -> None:
+        """Compile this operator's xclbin+insts through CompilableDesign, once.
+
+        Lazy and idempotent, mirroring FusedDispatch.link_elf /
+        SeparateDispatch.link_xclbins: get_callable() is the first point a
+        standalone operator actually needs a compiled binary.
+        """
+        if getattr(self, "_xclbin_path", None) is not None:
+            return
+        from .jit_compile import compile_xclbin_insts
+
+        mlir_text = str(self.get_mlir_artifact().generator())
+        object_files = [Path(a.filename) for a in self._kernel_artifacts]
+        self._xclbin_path, self._insts_path = compile_xclbin_insts(
+            mlir_text,
+            object_files,
+            Path(self.context.build_dir) / f"{self.name}.xclbin",
+            Path(self.context.build_dir) / f"{self.name}.bin",
+            # XclbinArtifact's own former default; no caller ever overrode it.
+            kernel_name="MLIR_AIE",
+        )
 
     def get_callable(self) -> Callable[..., Any]:
+        self.link_xclbin()
         npu_kernel = NPUKernel(
-            xclbin_path=self.xclbin_artifact.filename,
-            kernel_name=self.xclbin_artifact.kernel_name,
-            insts_path=self.insts_artifact.filename,
+            xclbin_path=str(self._xclbin_path),
+            kernel_name="MLIR_AIE",
+            insts_path=str(self._insts_path),
         )
         handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
 

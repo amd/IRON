@@ -16,25 +16,27 @@ the same operator reads. The cache keyed only on filename and mtime, so a
 later standalone build trusted the prefixed file and asked the linker for
 ``op0_add.o``, which a standalone build never produces.
 
-Two independent things closed this: ``PythonGeneratedMLIRArtifact`` now keys
+Three independent things closed this: ``PythonGeneratedMLIRArtifact`` now keys
 its own availability on a recipe hash of the generator's current kwargs (see
-``mlir_recipe_hash.py`` for the device-free unit tests of that mechanism), and
-separately, fused MLIR generation is no longer an artifact at all --
-``fuse_mlir()`` is a plain function that calls each operator's generator
-in-memory and returns text, so a fused build never writes a per-operator
-``.mlir`` file to disk in the first place. Either alone would have prevented
-this; both mean there is nothing left to poison.
+``mlir_recipe_hash.py`` for the device-free unit tests of that mechanism);
+fused MLIR generation is no longer an artifact at all -- ``fuse_mlir()`` is a
+plain function that calls each operator's generator in-memory and returns
+text; and standalone dispatch (``MLIROperator.link_xclbin()``) does the same
+-- it calls the generator directly rather than reading a compiled artifact
+off disk. Any one of the three would have prevented this; together there is
+nothing left to poison, on either side.
 
 The failure is far from its cause: it surfaced as an undefined symbol at link
 time, in a build that did nothing wrong, possibly in a different process or
 session from the fused build that poisoned it.
 
-Needs a device: both builds run for real, because the whole point is what
-lands on disk.
+Needs a device: the fused build runs for real, because the whole point is
+what it leaves lying around; the standalone side only needs a device to
+generate its own MLIR at all (device-specialized designs read the current
+device), not to compile anything.
 """
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -62,14 +64,14 @@ def _operator():
 
 
 def _linked_objects(operator):
-    """What the operator's own MLIR tells the linker to bring in."""
-    operator.compile()
-    mlir = next(
-        a.filename
-        for a in operator.artifacts.bfs()
-        if str(a.filename).endswith(".mlir")
-    )
-    return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', Path(mlir).read_text())))
+    """What the operator's own MLIR tells the linker to bring in.
+
+    Calls the generator directly rather than compiling and reading a file
+    back: a standalone build no longer writes its MLIR to disk either (see
+    the module docstring), so there is nothing to read.
+    """
+    mlir = str(operator.get_mlir_artifact().generator())
+    return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 
 def test_fused_build_does_not_poison_the_standalone_mlir():
