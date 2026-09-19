@@ -302,6 +302,7 @@ class OperatorSequence(AIEOperatorBase):
         input_args,
         output_args,
         buffer_sizes=None,
+        buffer_offsets=None,
         dispatch="auto",
         extra_flags=None,
         trace_size=0,
@@ -325,6 +326,9 @@ class OperatorSequence(AIEOperatorBase):
         self.name = name + "_shared" if share_designs else name
         self.input_args = input_args
         self.output_args = output_args
+        # Planned byte offsets per buffer name; None keeps the
+        # back-to-back layout this had before.
+        self.buffer_offsets = buffer_offsets
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
         )  # Optional dict: buffer_name -> size_in_bytes
@@ -430,22 +434,46 @@ class OperatorSequence(AIEOperatorBase):
         slice_info = {}  # full_buffer_name -> (base_name, start, end)
 
         def add_buffers(buffer_type, args_list):
-            offset = 0
-            for arg in args_list:
+            # Without a plan, buffers pack back to back in declaration order and
+            # every one stays resident for the whole sequence. A plan assigns
+            # offsets from liveness instead, so buffers whose lifetimes do not
+            # overlap share addresses; the arena still has to be large enough
+            # for the highest byte any of them reaches.
+            offsets = self.buffer_offsets or {}
+
+            def length_of(arg):
                 if arg in self.explicit_buffer_sizes:
                     # Explicit size specified - this is a parent buffer for slices
-                    length = self.explicit_buffer_sizes[arg]
-                    subbuffer_layout[arg] = (buffer_type, offset, length)
-                    offset += length
-                elif arg in args:
-                    arg_spec = args[arg]
-                    length = int(
-                        np.prod(arg_spec.shape) * np.dtype(arg_spec.dtype).itemsize
-                    )
-                    subbuffer_layout[arg] = (buffer_type, offset, length)
-                    offset += length
-                # Note: sliced buffers are handled separately, not in args_list
-            return offset  # == total length
+                    return self.explicit_buffer_sizes[arg]
+                if arg in args:
+                    spec = args[arg]
+                    return int(np.prod(spec.shape) * np.dtype(spec.dtype).itemsize)
+                return None  # sliced buffers are handled separately
+
+            # Unplanned buffers first, packed back to back exactly as before.
+            cursor = 0
+            planned = []
+            for arg in args_list:
+                length = length_of(arg)
+                if length is None:
+                    continue
+                if arg in offsets:
+                    planned.append((arg, length))
+                    continue
+                subbuffer_layout[arg] = (buffer_type, cursor, length)
+                cursor += length
+
+            # Then the planned ones, rebased past everything unplanned. A plan
+            # is relative to its own pool and starts at zero, so applying it
+            # directly would drop the first planned buffer on top of the
+            # weights -- an aliasing that is silent, because the arena simply
+            # does not grow.
+            end = cursor
+            for arg, length in planned:
+                at = cursor + offsets[arg]
+                subbuffer_layout[arg] = (buffer_type, at, length)
+                end = max(end, at + length)
+            return end  # arena size
 
         # Add sliced buffer entries to layout (they reference parent buffers)
         for buf_name, (base_name, start, end, args_spec) in sliced_buffers.items():

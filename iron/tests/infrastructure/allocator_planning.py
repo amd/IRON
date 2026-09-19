@@ -173,6 +173,23 @@ def test_empty_graph():
 # --- integration with OperatorSequence's arena layout -----------------------
 
 
+@pytest.fixture(autouse=True)
+def device():
+    """Operators read the ShimDMA limit at construction, so one must be set.
+
+    Without it get_current_device() returns None and construction dies with
+    "'NoneType' object has no attribute 'resolve'" -- which reads like a bug in
+    the code under test rather than a missing fixture.
+    """
+    import aie.utils as aie_utils
+    from aie.iron.device import from_name
+
+    previous = aie_utils.get_current_device()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    yield
+    aie_utils.set_current_device(previous)
+
+
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
     from iron.common.context import AIEContext
@@ -193,11 +210,6 @@ def _two_step_sequence(buffer_offsets):
     return layout, sizes
 
 
-@pytest.mark.xfail(
-    reason="OperatorSequence does not accept buffer_offsets yet; these pin the "
-    "contract the wiring step must satisfy",
-    strict=True,
-)
 def test_planned_offsets_do_not_collide_with_unplanned():
     """Planned scratch must be placed past every unplanned buffer.
 
@@ -214,11 +226,6 @@ def test_planned_offsets_do_not_collide_with_unplanned():
     )
 
 
-@pytest.mark.xfail(
-    reason="OperatorSequence does not accept buffer_offsets yet; these pin the "
-    "contract the wiring step must satisfy",
-    strict=True,
-)
 def test_layout_is_unchanged_without_offsets():
     """The default path must lay out exactly as it did before.
 
