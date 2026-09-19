@@ -51,6 +51,7 @@ from typing import Any, Callable
 import sys
 
 from iron.common.device_utils import get_kernel_dir
+from aie.utils.compile.jit._hash import _compute_recipe_hash, _device_identity_key
 from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_module
 
 # Global Functions
@@ -434,6 +435,40 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_file)])
 
+    def recipe_hash(self) -> str:
+        """Content identity of the MLIR this artifact's generator would produce right now.
+
+        Independent of ``filename`` and mtime, on purpose: a fused build
+        mutates a shared operator's ``generator.kwargs`` (``func_prefix``) in
+        place without touching the artifact's path, so a standalone build
+        reusing that path sees a newer mtime and nothing to say the content
+        underneath it changed. Keying availability on this hash instead makes
+        that whole class of collision detectable regardless of what changed --
+        not just the one kwarg a past fix happened to rename around.
+
+        ``dev`` goes through ``_device_identity_key`` rather than
+        ``str(device)``: the raw object's default ``repr`` embeds its memory
+        address, which would invalidate on every fresh ``from_name()`` call
+        even when the device itself hasn't changed.
+        """
+        fn, args, kwargs = self.generator.resolve()
+        if args:
+            raise NotImplementedError(
+                "recipe_hash does not support positional generator args "
+                f"(got {args!r} for {getattr(fn, '__qualname__', fn)}); "
+                "route them through kwargs/bind_from instead"
+            )
+        kwargs = dict(kwargs)
+        if "dev" in kwargs:
+            kwargs["dev"] = _device_identity_key(kwargs["dev"])
+        return _compute_recipe_hash(fn, kwargs, aiecc_flags=(), compile_flags=())
+
+    def is_available_in_filesystem(self) -> bool:
+        if not super().is_available_in_filesystem():
+            return False
+        stamp = Path(f"{self.filename}.recipe_hash")
+        return stamp.exists() and stamp.read_text() == self.recipe_hash()
+
 
 def _sha256_of(path: Path) -> str:
     with open(path, "rb") as f:
@@ -589,6 +624,9 @@ class GenerateMLIRFromPythonCompilationRule(CompilationRule):
         mlir_code = generator()
         with open(output_artifact.filename, "w") as f:
             f.write(mlir_code)
+        Path(f"{output_artifact.filename}.recipe_hash").write_text(
+            output_artifact.recipe_hash()
+        )
 
 
 def _aiecc_work_dir(mlir_filename: str) -> Path:

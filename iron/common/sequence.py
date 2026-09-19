@@ -182,16 +182,15 @@ class FusedDispatch(SequenceDispatch):
         for idx, op in enumerate(designs):
             mlir_artifact = op.get_mlir_artifact()
             if len(op.get_kernel_artifacts()) > 0:
+                # This mutates what the artifact's generator produces without
+                # touching its path. That used to require also renaming the
+                # artifact's filename by hand, since a shared path let a
+                # standalone build trust a stale, prefixed file with a newer
+                # mtime than its source and ask the linker for op0_add.o.
+                # PythonGeneratedMLIRArtifact now keys its own availability on
+                # a recipe hash of the generator's current kwargs, so that
+                # collision is caught regardless of filename.
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
-                # The prefix changes what this MLIR *is*, so it has to change
-                # where it is written. These artifacts are dependencies of the
-                # SequenceMLIRArtifact and so get compiled to disk; sharing a
-                # filename with the standalone build left prefixed MLIR in its
-                # cache slot, and a later standalone build trusted it and asked
-                # the linker for op0_add.o. The failure surfaced as an
-                # undefined symbol in a build that had done nothing wrong.
-                name = Path(mlir_artifact.filename)
-                mlir_artifact.filename = str(name.with_name(f"op{idx}_{name.name}"))
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)
             operator_mlir_map[op_name] = mlir_artifact

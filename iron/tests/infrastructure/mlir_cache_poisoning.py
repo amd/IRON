@@ -11,9 +11,15 @@ mutates its generator::
 
 without changing the artifact's filename. Those artifacts are dependencies of
 the SequenceMLIRArtifact, so they are compiled to disk -- writing symbol-
-prefixed MLIR to the path a standalone build of the same operator reads. The
-cache keys on filename and mtime, so the standalone build then trusts it and
-asks the linker for ``op0_add.o``, which a standalone build never produces.
+prefixed MLIR to the path a standalone build of the same operator reads.
+
+This used to poison the standalone build: the cache keyed only on filename and
+mtime, so it trusted the prefixed file and asked the linker for ``op0_add.o``,
+which a standalone build never produces. ``PythonGeneratedMLIRArtifact`` now
+keys its own availability on a recipe hash of the generator's current kwargs
+(see ``mlir_recipe_hash.py`` for the device-free unit tests of that
+mechanism), so the standalone build detects the mismatch and regenerates
+unprefixed MLIR in place, regardless of what filename either build used.
 
 The failure is far from its cause: it surfaces as an undefined symbol at link
 time, in a build that did nothing wrong, possibly in a different process or
