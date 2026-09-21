@@ -62,6 +62,7 @@ class Target:
         func_prefix: str = "",
         verbose: bool = False,
         trace_size: int = 0,
+        image: str = "elf",
     ):
         from pathlib import Path
 
@@ -73,6 +74,11 @@ class Target:
         self.func_prefix = func_prefix
         self.verbose = verbose
         self.trace_size = trace_size
+        # "elf": per-call values reach the array through the parameter
+        # scratchpad. "xclbin": there is none (spike S2); they are dispatch-
+        # time scalars of the sequence, and a core-read value is a resident
+        # the sequence writes (bind it to the runtime-parameter buffer).
+        self.image = image
         self.base_dir = None  # the IRON checkout; set by build_design from the context
         self.barriers: list[Any] = []
 
@@ -173,20 +179,43 @@ class Sequence:
                 f"it (uses_value) or the build has not created it yet"
             )
         data = self._rt_data[buffer.name]
-        offset_parameter = offset_by.param if offset_by is not None else None
+        dynamic = offset_by is not None and offset_by.ssa is not None
+        offset_parameter = offset_by.param if offset_by is not None and not dynamic else None
         tasks = []
         for i, acc in enumerate(accesses):
             last = i == len(accesses) - 1
             fn = getattr(handle, verb)
-            tasks.append(
-                fn(
-                    data,
-                    acc.tap() if isinstance(acc, Access) else acc,
-                    wait=wait and last,
-                    group=group if group is not None else self._group,
-                    offset_parameter=offset_parameter,
-                )
+            common = dict(
+                wait=wait and last,
+                group=group if group is not None else self._group,
             )
+            if dynamic:
+                # The dispatch-time form: the same pattern, its offset the
+                # per-call scalar plus the static one, regenerated per call.
+                if not isinstance(acc, Access):
+                    raise TypeError(
+                        f"{offset_by.name}: a dispatch-time offset needs an Access, "
+                        f"got {acc!r}"
+                    )
+                tasks.append(
+                    fn(
+                        data,
+                        sizes=list(acc.sizes),
+                        strides=list(acc.strides),
+                        offset=_plus(offset_by.ssa, acc.offset),
+                        transfer_len=acc.count,
+                        **common,
+                    )
+                )
+            else:
+                tasks.append(
+                    fn(
+                        data,
+                        acc.tap() if isinstance(acc, Access) else acc,
+                        offset_parameter=offset_parameter,
+                        **common,
+                    )
+                )
         return tasks[-1] if len(tasks) == 1 else tasks
 
     def _handle(self, stream):
@@ -292,6 +321,16 @@ def plan(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Acces
     return [(stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks]
 
 
+def _plus(ssa, constant: int):
+    """``ssa + constant`` as a sequence value; the scalar alone when constant is 0."""
+    if not constant:
+        return ssa
+    from aie.extras.dialects import arith
+    from aie.helpers.util import np_dtype_to_mlir_type
+
+    return ssa + arith.constant(int(constant), np_dtype_to_mlir_type(np.int32))
+
+
 def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
     """Residents, then barriers, then the parameter sync, before any DMA."""
     values = op.residents()
@@ -315,6 +354,17 @@ def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
     for buf, words in writes.values():
         for index in sorted(words):
             buf[index] = words[index]
+    # A core-read value on an image without a scratchpad: written from the
+    # sequence's per-call scalar, after the residents, before the barriers.
+    for value in list(ov.values) + list(op.values):
+        for buf, index in value.targets:
+            if value.ssa is None:
+                raise ValueError(
+                    f"{value.name} is bound to a runtime-parameter buffer but is "
+                    f"not a dispatch-time scalar here; bind only under an image "
+                    f"without a scratchpad (target.image != 'elf')"
+                )
+            buf[index] = value.ssa
     unknown = set(values) - set(ov.residents)
     if unknown:
         raise ValueError(
@@ -323,7 +373,7 @@ def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
         )
     for b in target.barriers:
         b.set(1)
-    if op.values or ov.values:
+    if target.image == "elf" and (op.values or ov.values):
         rt.sync_parameters()
 
 
@@ -377,6 +427,8 @@ def build_design(
     verbose: bool = False,
     trace_size: int = 0,
     code: str = "",
+    image: str = "elf",
+    **dispatch,
 ):
     """Generate the MLIR module for one declared operator.
 
@@ -394,22 +446,35 @@ def build_design(
         from .foreign import build_foreign
 
         return build_foreign(dev, op)
-    target = Target(dev, kernels_dir, func_prefix, verbose, trace_size)
+    target = Target(dev, kernels_dir, func_prefix, verbose, trace_size, image)
     target.base_dir = getattr(op.context, "base_dir", None)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
-    for value in ov.values:
+    # On a full ELF they are scratchpad parameters; on an xclbin, which has
+    # no scratchpad (spike S2), every one is a dispatch-time scalar of the
+    # sequence, handed in by the generator's keyword parameters (see
+    # ``mlir_artifact_for``), and DispatchTime members are always that.
+    values = list(ov.values) + list(op.values)
+    for value in values:
         value.symbol = value_symbol(op, value)
-        value.param = ScratchpadParameter(value.symbol, value.dtype)
-    for value in op.values:
-        if value.kind == "dispatch":
-            raise NotImplementedError(
-                f"{type(op).__name__}.{value.name} is a DispatchTime value; generated "
-                f"sequences arrive with the packaging step (OPERATOR_MODEL_PLAN.md §8)"
+        value.ssa = None
+        value.targets = []
+        if image == "elf" and value.kind != "dispatch":
+            value.param = ScratchpadParameter(value.symbol, value.dtype)
+        elif image == "elf":
+            raise ValueError(
+                f"{type(op).__name__}.{value.name} is a DispatchTime value, which a "
+                f"full ELF cannot carry (its stream is fixed at build time); "
+                f"package as xclbin (OPERATOR_MODEL_PLAN.md §6, §8)"
             )
-        value.symbol = value_symbol(op, value)
-        value.param = ScratchpadParameter(value.symbol, value.dtype)
+        else:
+            if value.symbol not in dispatch:
+                raise ValueError(
+                    f"{type(op).__name__}.{value.name}: no dispatch parameter "
+                    f"{value.symbol!r} was handed to build_design"
+                )
+            value.param = dispatch[value.symbol]
 
     workers = ov.design(target)
     if workers is None:
@@ -421,10 +486,14 @@ def build_design(
     buffers = op.buffers
     fn_args: list[Any] = [b.flat_type for b in buffers]
     fn_args.append(handles)
-    params = [v.param for v in ov.values] + [v.param for v in op.values]
+    params = [v.param for v in values]
 
     def sequence(*args):
         rt_data = {b.name: a for b, a in zip(buffers, args)}
+        if image != "elf":
+            # A dispatch parameter arrives in the body as its live scalar.
+            for value, scalar in zip(values, args[len(buffers) + 1 :]):
+                value.ssa = scalar
         seq = Sequence(op, ov, rt_data)
         _preamble(seq, op, ov, target)
         if op.has_design_override():
@@ -468,13 +537,23 @@ def _design_code(op: Operator) -> str:
     return h.hexdigest()[:24]
 
 
+def dispatch_parameters(op: Operator) -> list[tuple[str, Any]]:
+    """The (symbol, dtype) of every per-call value, as dispatch-time scalars."""
+    return [
+        (value_symbol(op, v), v.dtype) for v in list(op.ov.values) + list(op.values)
+    ]
+
+
 def mlir_artifact_for(
-    op: Operator, filename: str | None = None
+    op: Operator, filename: str | None = None, image: str = "elf"
 ) -> PythonGeneratedMLIRArtifact:
     """The artifact the existing compile path expects, carrying ``build_design``.
 
     ``filename`` names the module for an operator whose stem is not its own
-    name (flm/gemm's configuration-only build).
+    name (flm/gemm's configuration-only build). ``image`` is the image the
+    module is built for: on ``"xclbin"`` its per-call values are the
+    generator's dispatch-time parameters, so the two images are two modules
+    and two cache keys.
     """
     return PythonGeneratedMLIRArtifact(
         filename or f"{op.name}.mlir",
@@ -482,6 +561,8 @@ def mlir_artifact_for(
             fn=build_design,
             kwargs={
                 "op": op,
+                "image": image,
+                "dispatch": dispatch_parameters(op) if image != "elf" else [],
                 "code": _design_code(op),
                 # Spelled here, not bound by name from the operator: the
                 # device reaches the cache key by identity, the kernel tree

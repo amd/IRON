@@ -37,10 +37,19 @@ class DecodeGraph:
     tensor, since the elementwise multiply takes one.
     """
 
-    def __init__(self, config, max_seq_len, *, num_aie_columns=8, tensor=None):
+    def __init__(self, config, max_seq_len, *, num_aie_columns=None, tensor=None):
         model = config.model
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
+        if num_aie_columns is None:
+            # The device's width: eight on NPU2, four on NPU1. The tile sizes
+            # below divide by it, so it is fixed when the graph is written.
+            import aie.utils as aie_utils
+
+            from iron.common.utils import device_columns
+
+            dev = aie_utils.get_current_device()
+            num_aie_columns = device_columns(dev) if dev is not None else 8
         L, cols = max_seq_len, num_aie_columns
         self.max_seq_len = L
         self.keys = [

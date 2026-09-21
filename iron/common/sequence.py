@@ -10,6 +10,7 @@ import numpy as np
 import ml_dtypes
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
+from .jit_compile import DispatchStream
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
@@ -334,7 +335,7 @@ class SeparateDispatch(SequenceDispatch):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
             xclbin_path, insts_path = compile_xclbin_insts(
-                op.get_mlir_artifact().generator,
+                op.get_mlir_artifact(image="xclbin").generator,
                 build_dir / f"{op_label}.xclbin",
                 build_dir / f"{op_label}.bin",
                 kernel_name=op_label,
@@ -1033,12 +1034,24 @@ class SequenceXclbinCallable(_PerBufferCallable):
         dispatch = self._dispatch
         combined_xclbin_path = dispatch.combined_xclbin_path
         self._op_callable_map = {}  # id(op) -> NPUKernel
+        # Per-call scalars of dispatch-time kernels, by symbol; a graph sets
+        # them before each run (CompiledGraph._write_values).
+        self.dispatch_values = {}
         for op_id, xclbin_path in dispatch.op_xclbin_path_map.items():
-            self._op_callable_map[op_id] = NPUKernel(
-                xclbin_path=str(combined_xclbin_path),
-                kernel_name=dispatch.op_kernel_name_map[op_id],
-                insts_path=str(dispatch.op_insts_path_map[op_id]),
-            )
+            stream = dispatch.op_insts_path_map[op_id]
+            if isinstance(stream, DispatchStream):
+                self._op_callable_map[op_id] = NPUKernel(
+                    xclbin_path=str(combined_xclbin_path),
+                    kernel_name=dispatch.op_kernel_name_map[op_id],
+                    dispatch_params=list(stream.params),
+                    dispatch_lib_path=str(stream.lib_path),
+                )
+            else:
+                self._op_callable_map[op_id] = NPUKernel(
+                    xclbin_path=str(combined_xclbin_path),
+                    kernel_name=dispatch.op_kernel_name_map[op_id],
+                    insts_path=str(stream),
+                )
         self._execution_plan = [
             (
                 self._op_callable_map[id(step_op)],
@@ -1057,7 +1070,8 @@ class SequenceXclbinCallable(_PerBufferCallable):
             self._run_step(step_idx, kernel, args, step)
 
     def _run_step(self, step_idx, kernel, args, step):
-        kernel(*args)
+        scalars = {name: self.dispatch_values[name] for name in kernel.dispatch_params}
+        kernel(*args, **scalars)
 
 
 def _reshape_for_spec(flat_tensor, spec):

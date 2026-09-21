@@ -37,11 +37,14 @@ def test_npu1_forces_xclbin_and_a_scratchpad_value_has_no_home_there_yet():
     t = _traced(Value("pos", "scratchpad", np.int32))
     with pytest.raises(ValueError, match="npu1 has no full-ELF dispatch"):
         plan("npu1", t, image=ELF)
-    # An xclbin run has no parameter scratchpad (S2): until the value lowers
-    # as DispatchTime, the plan refuses by name rather than building an image
-    # the value cannot reach.
-    with pytest.raises(NotImplementedError, match="pos is a Scratchpad value.*spike S2"):
-        plan("npu1", t, boundaries=each_step)
+    # An xclbin run has no parameter scratchpad (S2): the value is a dispatch-
+    # time scalar of its kernel, and the report says which way it lowers.
+    p = plan("npu1", t, boundaries=each_step)
+    assert p.image == XCLBIN and "dispatch-time scalar" in p.values[0][2]
+    assert "spike S3" in p.values[0][2]
+    # On a chunked image the fused sequence does not forward scalars yet.
+    with pytest.raises(NotImplementedError, match="chunked image"):
+        plan("npu1", t)
     assert plan("npu2", t).values[0][2] == "patched through the parameter scratchpad"
 
 

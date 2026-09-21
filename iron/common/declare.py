@@ -714,7 +714,15 @@ class BufferView:
 
 
 class BoundValue:
-    """A per-call value on an operator (or, for a core-read Scratchpad, an overlay)."""
+    """A per-call value on an operator (or, for a core-read Scratchpad, an overlay).
+
+    On a full ELF ``param`` is the upstream ``ScratchpadParameter`` the
+    build creates. On an image without a scratchpad (xclbin, spike S2) the
+    value is lowered as a dispatch-time scalar of the sequence: ``param`` is
+    the dispatch parameter, ``ssa`` its live value inside the sequence body,
+    an offset use adds it to the transfer's offset, and a core-read use is a
+    resident the preamble writes from it (``bind``, as a Resident binds).
+    """
 
     def __init__(self, member: _Value, owner) -> None:
         self.member = member
@@ -723,6 +731,15 @@ class BoundValue:
         self.dtype = member.dtype
         self.param = None  # the upstream ScratchpadParameter, set by the build
         self.symbol: str | None = None
+        self.ssa = None  # the sequence's scalar, when lowered at dispatch time
+        self.targets: list[tuple[Any, int]] = []
+
+    def bind(self, buffers, index: int = 0) -> None:
+        """Bind to one runtime-parameter buffer, or one per worker; the preamble
+        writes ``[index]`` from the per-call value (an image without a scratchpad)."""
+        if not isinstance(buffers, (list, tuple)):
+            buffers = [buffers]
+        self.targets.extend((b, index) for b in buffers)
 
     def __repr__(self) -> str:
         return f"<{self.kind} {self.name} {np.dtype(self.dtype).name}>"
@@ -1663,10 +1680,10 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
         return [b.arg_spec() for b in self.buffers]
 
-    def get_mlir_artifact(self):
+    def get_mlir_artifact(self, image: str = "elf"):
         from .build import mlir_artifact_for
 
-        return mlir_artifact_for(self)
+        return mlir_artifact_for(self, image=image)
 
     def __repr__(self) -> str:
         own = ", ".join(

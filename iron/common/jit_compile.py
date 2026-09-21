@@ -23,7 +23,9 @@ each is load-bearing here:
   ``compile_kwargs`` to give each graph a distinct key.
 """
 
+import dataclasses
 import hashlib
+import inspect
 import re
 import shutil
 from pathlib import Path
@@ -117,11 +119,18 @@ def _design_generator(call_kwargs: dict):
     which names neither the design nor the cause.
     """
 
-    def generate(
-        design: CompileTime[Any],
-        params: CompileTime[str],
-        chain: CompileTime[str] = "",
-    ):
+    # A design built for an xclbin declares its per-call values as dispatch-
+    # time scalars: keyword-only DispatchTime[T] parameters of the generator,
+    # which CompilableDesign hands in as dispatch parameters and the design
+    # forwards to its Runtime. Declared by spelling the signature, since the
+    # set is the operator's.
+    dispatch = list(call_kwargs.pop("dispatch", None) or [])
+
+    def generate(*positional, **kw):
+        # CompilableDesign passes the compile parameters positionally and the
+        # dispatch parameters by name; bind both through the spelled signature.
+        kw = generate.__signature__.bind(*positional, **kw).arguments
+        design = kw["design"]
         kwargs = dict(call_kwargs)
         bound = aie_utils.get_current_device()
         for name, value in kwargs.items():
@@ -133,9 +142,24 @@ def _design_generator(call_kwargs: dict):
                 # than the cache keys on is how a design silently ends up built
                 # for the wrong target.
                 kwargs[name] = bound
+        for symbol, _ in dispatch:
+            kwargs[symbol] = kw[symbol]
         module = design(**kwargs)
         return Module.parse(module) if isinstance(module, str) else module
 
+    from aie.iron import DispatchTime
+
+    P = inspect.Parameter
+    parameters = [
+        P("design", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[Any]),
+        P("params", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[str]),
+        P("chain", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[str], default=""),
+    ] + [
+        P(symbol, P.KEYWORD_ONLY, annotation=DispatchTime[dtype])
+        for symbol, dtype in dispatch
+    ]
+    generate.__signature__ = inspect.Signature(parameters)
+    generate.__annotations__ = {p.name: p.annotation for p in parameters}
     return generate
 
 
@@ -421,6 +445,15 @@ def compile_insts(generator, insts_path, extra_flags=()) -> Path:
     return insts_path
 
 
+@dataclasses.dataclass(frozen=True)
+class DispatchStream:
+    """What a dispatch-time design has instead of a static instruction stream:
+    the host library that generates one per call, and the scalars it takes."""
+
+    lib_path: Path
+    params: tuple
+
+
 def compile_xclbin_insts(
     generator,
     xclbin_path,
@@ -430,6 +463,11 @@ def compile_xclbin_insts(
     extra_flags=(),
 ):
     """Compile one operator's design to an xclbin and its instruction stream.
+
+    A design with dispatch-time parameters has no static stream: the second
+    element is then a :class:`DispatchStream`, the bridge library aiecc's
+    ``--get-npu-cpp`` output compiles to, from which the runtime generates
+    each call's stream.
 
     The separate-dispatch counterpart to :func:`compile_fused_elf`. Chaining
     looks like it needs more than CompilableDesign offers -- each operator's
@@ -467,6 +505,17 @@ def compile_xclbin_insts(
             "chain": str(xclbin_input or ""),
         },
     )
+    if design.dispatch_params:
+        from aie.utils.compile.jit import _manifest
+
+        hit, current_hash, stamp = _compile_if_changed(design, xclbin_path)
+        kernel_dir = xclbin_path.parent / f"{xclbin_path.stem}.prj"
+        lib = _manifest.resolve_dispatch_library(kernel_dir) if hit else None
+        if lib is None:
+            design.compile(xclbin_path=xclbin_path)
+            lib = design.get_dispatch_lib_path()
+            stamp.write_text(current_hash)
+        return xclbin_path, DispatchStream(Path(lib), tuple(design.dispatch_params))
     hit, current_hash, stamp = _compile_if_changed(design, xclbin_path, insts_path)
     if not hit:
         design.compile(xclbin_path=xclbin_path, inst_path=insts_path)

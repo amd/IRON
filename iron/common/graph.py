@@ -713,12 +713,6 @@ class CompiledGraph:
         from .build import value_symbol
 
         self.traced = traced
-        for _, name, value in traced.bindings:
-            if value.kind == "dispatch":
-                raise NotImplementedError(
-                    f"{value!r}: DispatchTime values arrive with the packaging "
-                    f"step (OPERATOR_MODEL_PLAN.md §8)"
-                )
         self.symbols = []
         for op, name, value in traced.bindings:
             bound = getattr(op, name, None)
@@ -823,11 +817,19 @@ class CompiledGraph:
         if not self.symbols:
             return
         params = getattr(self.callable, "params", None)
-        if params is None:
-            raise NotImplementedError(
-                "per-call values on this dispatch path arrive with the packaging "
-                "step (OPERATOR_MODEL_PLAN.md §6, §8)"
-            )
-        for name, symbol, dtype in self.symbols:
-            params.write(symbol, np.dtype(dtype).type(values[name]))
-        params.sync()
+        if params is not None:
+            for name, symbol, dtype in self.symbols:
+                params.write(symbol, np.dtype(dtype).type(values[name]))
+            params.sync()
+            return
+        if hasattr(self.callable, "dispatch_values"):
+            # An image without a scratchpad: each kernel takes its values as
+            # dispatch-time scalars and regenerates its stream (§6).
+            self.callable.dispatch_values = {
+                symbol: np.dtype(dtype).type(values[name])
+                for name, symbol, dtype in self.symbols
+            }
+            return
+        raise NotImplementedError(
+            f"{type(self.callable).__name__} takes no per-call values"
+        )

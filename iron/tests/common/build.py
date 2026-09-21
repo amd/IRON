@@ -220,6 +220,7 @@ def test_preamble_writes_residents_and_rejects_missing_ones():
 
     class FakeTarget:
         barriers = []
+        image = "elf"
 
     _preamble(Sequence(op, ov, {}), op, ov, FakeTarget())
     assert rtps == [{0: 10}, {0: 10}]

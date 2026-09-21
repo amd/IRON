@@ -89,8 +89,10 @@ class SoftmaxOverlay(Overlay):
             for i in range(cols)
             for j in range(chans)
         ]
-        # [count, vector_size] per core, or [count] when vector_size is a scratchpad value
-        dynamic = isinstance(self.vector_size, BoundValue)
+        # [count, vector_size] per core, or [count] when vector_size is a
+        # scratchpad value the core reads. On an image without a scratchpad
+        # the per-call value is written into [1] by the sequence instead.
+        dynamic = isinstance(self.vector_size, BoundValue) and target.image == "elf"
         rtp_ty = np.ndarray[(1 if dynamic else 2,), np.dtype[np.int32]]
         rtps = [target.rtp(rtp_ty, name=f"rtp_{k}") for k in range(n_cores)]
         barriers = [target.barrier() for _ in range(n_cores)]
