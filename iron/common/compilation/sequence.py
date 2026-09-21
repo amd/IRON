@@ -100,7 +100,7 @@ def fuse_mlir(
     Inlines each operator's device operations and adds a new main device and
     runtime sequence that calls into them in ``runlist`` order. A plain
     function rather than an artifact+rule: nothing here needs the artifact
-    graph's file-based caching, since the caller (``FusedDispatch.link_elf``)
+    graph's file-based caching, since the caller (``FusedImage.link``)
     hands the returned text straight to ``CompilableDesign``, which keys its
     own cache on the text's content.
     """

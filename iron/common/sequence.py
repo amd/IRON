@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import ml_dtypes
 from . import compilation as comp
-from .base import AIEOperatorBase, MLIROperator
+from .base import AIEOperatorBase
+from .declare import Operator
 from .jit_compile import DispatchStream
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
@@ -20,10 +21,10 @@ try:
     import pyxrt
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 except ImportError:
-    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The two
-    # on-device dispatch policies below are XRT-native (pyxrt.elf / hw_context / run,
-    # plus XRTTensor views), so they cannot run there; _require_xrt() makes that
-    # explicit at construction. The CPU policy and the whole compile path do not care,
+    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The
+    # on-device callables below are XRT-native (pyxrt.elf / hw_context / run, plus
+    # XRTTensor views), so they cannot run there; _require_xrt() makes that explicit
+    # at construction. The reference mode and the whole compile path do not care,
     # and must keep importing.
     pyxrt = None
     XRTTensor = None
@@ -47,77 +48,15 @@ def _require_xrt() -> None:
     """Fail with the reason, rather than an AttributeError on ``None.elf``."""
     if pyxrt is None:
         raise RuntimeError(
-            "this OperatorSequence dispatch policy needs the XRT host runtime (pyxrt), "
-            "which is not installed. Use SequenceCPUCallable, or run a single operator "
-            "(AIEOperatorBase), which dispatches through aie.utils.DefaultNPURuntime and "
-            "works on any backend."
+            "this OperatorSequence mode needs the XRT host runtime (pyxrt), which is "
+            "not installed. Use the reference mode, or run a single operator, which "
+            "dispatches through aie.utils.DefaultNPURuntime and works on any backend."
         )
 
 
 # ##########################################################################
-# Dispatch policies
+# Images: what a sequence builds, per mode
 # ##########################################################################
-
-
-def full_elf_path(seq):
-    """Where a fused sequence's ELF is, however it got built.
-
-    Set by FusedDispatch.link_elf() when it compiles one. Nothing else
-    produces a full ELF now that the artifact rule is gone.
-    """
-    elf_path = getattr(seq, "elf_path", None)
-    if elf_path is None:
-        raise RuntimeError(
-            f"{seq.name!r} has no full ELF: link_elf() has not run. "
-            "get_callable() triggers it; calling the dispatch policy directly "
-            "does not."
-        )
-    return elf_path
-
-
-class SequenceDispatch:
-    """Policy object that decides how an :class:`OperatorSequence` is compiled
-    and how its runtime callable is built.
-
-    One concrete policy corresponds to one dispatch mode. The three hooks are:
-
-    * ``resolve(device)`` -- the only device-aware step; expands ``"auto"`` to
-      a concrete policy and validates device requirements. Called once, at
-      ``set_up_artifacts()`` time (the device is not known at construction).
-    * ``set_up_artifacts(seq)`` -- registers the compile artifacts for this
-      mode on the owning sequence.
-    * ``make_callable(seq)`` -- returns the runtime callable for this mode.
-    """
-
-    name = None
-
-    def resolve(self, device):
-        """Return the concrete policy for ``device`` (default: unchanged)."""
-        return self
-
-    def set_up_artifacts(self, seq):
-        """Register the compile artifacts needed by this mode on ``seq``."""
-        raise NotImplementedError
-
-    def link(self, seq):
-        """Build this mode's image and return its path; ``None`` if it has none.
-
-        The ahead-of-time half of ``make_callable``: everything up to, but
-        not including, the runtime that loads it, so a host without an NPU
-        can compile a sequence and hand the image on.
-        """
-        return None
-
-    def make_callable(self, seq):
-        """Return the runtime callable for this mode."""
-        raise NotImplementedError
-
-
-def platform_default(device) -> "SequenceDispatch":
-    """The image a hand-written sequence gets when it names none: the full ELF
-    on NPU2, the per-step xclbin chain elsewhere. A graph goes through
-    ``packaging.plan`` instead, which also weighs its values and boundaries."""
-    return FusedDispatch() if isinstance(device, NPU2) else SeparateDispatch()
 
 
 def _trace_tag(seq):
@@ -126,120 +65,84 @@ def _trace_tag(seq):
     return f"_traced{seq.trace_size}" if seq.trace_size else ""
 
 
-class FusedDispatch(SequenceDispatch):
-    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
+def build_fused_mlir(seq) -> str:
+    """The fused MLIR text: every design inlined into one module.
 
-    name = "fused"
+    ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
+    ``slice_info``) must already be set.
+    """
+    operator_generators = {}
+    comp_runlist = []
+    designs, design_of = seq.unique_designs()
+    design_names = []
 
-    def resolve(self, device):
-        if not isinstance(device, NPU2):
-            raise RuntimeError(
-                "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
-            )
-        return self
+    for idx, op in enumerate(designs):
+        generator = op.get_mlir_artifact().generator
+        # Ask the design whether it takes a prefix, rather than inferring it
+        # from the operator having kernel artifacts: an operator whose
+        # design declares ExternalFunctions reports no artifacts at all, and
+        # under the old test silently went unprefixed -- every shape then
+        # defining the same symbols, kept apart only by each core linking
+        # its own object.
+        design_fn, _, _ = generator.resolve()
+        if "func_prefix" in inspect.signature(design_fn).parameters:
+            generator.kwargs["func_prefix"] = f"op{idx}_"
+        op_name = f"op{idx}_{op.__class__.__name__}"
+        design_names.append(op_name)
+        operator_generators[op_name] = generator
 
-    def set_up_artifacts(self, seq):
-        # Nothing. Each child's kernels are ExternalFunctions its design
-        # declares, compiled by CompilableDesign when the fused ELF is built,
-        # and the fused MLIR is computed fresh in memory by build_fused_mlir().
-        return
+    for op, *bufs in seq.runlist:
+        comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
-    def link_elf(self, seq):
-        """Link the fused ELF.
+    return comp.fuse_mlir(
+        operator_generators,
+        comp_runlist,
+        seq.subbuffer_layout,
+        seq.buffer_sizes,
+        seq.slice_info,
+    )
 
-        Done here rather than as a compilation rule: this is the step that now
-        goes through CompilableDesign, which keys its cache on content, locks
-        across processes and validates depfiles -- none of which the artifact
-        graph does.
+
+class FusedImage:
+    """The full ELF: every design fused into one module (NPU2 only)."""
+
+    def link(self, seq):
+        """Link the ELF once (idempotent); returns its path.
+
+        Goes through CompilableDesign, which keys its cache on content, locks
+        across processes and validates depfiles.
         """
         from .jit_compile import compile_fused_elf
 
-        if getattr(seq, "elf_path", None) is not None:
-            return seq.elf_path
-        seq.elf_path = compile_fused_elf(
-            lambda: self.build_fused_mlir(seq),
-            Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
-            extra_flags=seq.extra_flags,
-            trace_size=seq.trace_size,
-        )
+        if not isinstance(aie_utils.get_current_device(), NPU2):
+            raise RuntimeError(
+                "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
+            )
+        if getattr(seq, "elf_path", None) is None:
+            seq.elf_path = compile_fused_elf(
+                lambda: build_fused_mlir(seq),
+                Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
+                extra_flags=seq.extra_flags,
+                trace_size=seq.trace_size,
+            )
         return seq.elf_path
 
-    def build_fused_mlir(self, seq) -> str:
-        """Build the fused MLIR source that inlines every operator into a
-        single module, and return it as text.
 
-        ``seq``'s buffer-layout attributes (``subbuffer_layout``,
-        ``buffer_sizes``, ``slice_info``) must already be set.
-        """
-        operator_generators = {}
-        comp_runlist = []
-        designs, design_of = seq.unique_designs()
-        design_names = []
-
-        for idx, op in enumerate(designs):
-            generator = op.get_mlir_artifact().generator
-            # Ask the design whether it takes a prefix, rather than inferring it
-            # from the operator having kernel artifacts: an operator whose
-            # design declares ExternalFunctions reports no artifacts at all, and
-            # under the old test silently went unprefixed -- every shape then
-            # defining the same symbols, kept apart only by each core linking
-            # its own object.
-            design_fn, _, _ = generator.resolve()
-            if "func_prefix" in inspect.signature(design_fn).parameters:
-                generator.kwargs["func_prefix"] = f"op{idx}_"
-            op_name = f"op{idx}_{op.__class__.__name__}"
-            design_names.append(op_name)
-            operator_generators[op_name] = generator
-
-        for op, *bufs in seq.runlist:
-            comp_runlist.append((design_names[design_of[id(op)]], *bufs))
-
-        return comp.fuse_mlir(
-            operator_generators,
-            comp_runlist,
-            seq.subbuffer_layout,
-            seq.buffer_sizes,
-            seq.slice_info,
-        )
-
-    def link(self, seq):
-        return self.link_elf(seq)
-
-    def make_callable(self, seq):
-        self.link_elf(seq)
-        return SequenceFullELFCallable(seq)
-
-
-class SeparateDispatch(SequenceDispatch):
-    """Chained-xclbin dispatch: one xclbin+insts per unique operator, linked
-    via ``--xclbin-input`` and invoked sequentially. Owns the compiled
-    per-operator xclbin/insts path maps consumed by the runtime callable.
-    """
-
-    name = "separate"
+class XclbinChain:
+    """One xclbin and instruction stream per design, each linked onto the
+    previous (``--xclbin-input``); the last link carries every kernel. Holds
+    the per-operator paths the xclbin callable dispatches with."""
 
     def __init__(self):
         self.combined_xclbin_path = None
         self.op_xclbin_path_map = {}  # id(op) -> xclbin path
-        self.op_insts_path_map = {}  # id(op) -> insts path
-        self.op_kernel_name_map = {}  # id(op) -> kernel_name
+        self.op_insts_path_map = {}  # id(op) -> insts path, or a DispatchStream
+        self.op_kernel_name_map = {}  # id(op) -> kernel name
 
-    def set_up_artifacts(self, seq):
-        # Nothing, for the same reason as FusedDispatch: each operator's
-        # kernels are declared by its design and compiled by CompilableDesign
-        # in link_xclbins().
-        return
-
-    def link_xclbins(self, seq):
-        """Compile the chained xclbin+insts pair per unique operator.
-
-        Mirrors ``FusedDispatch.link_elf``: called from ``make_callable`` once
-        the artifact graph has resolved kernel-object paths and compiled them,
-        so this only has to generate MLIR and hand it to CompilableDesign
-        through :func:`jit_compile.compile_xclbin_insts`.
-        """
+    def link(self, seq):
+        """Build the chain once (idempotent); returns the last link."""
         if self.combined_xclbin_path is not None:
-            return
+            return self.combined_xclbin_path
         from .jit_compile import compile_xclbin_insts
 
         # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
@@ -277,63 +180,7 @@ class SeparateDispatch(SequenceDispatch):
 
         # The last xclbin in the chain carries all the linked instances.
         self.combined_xclbin_path = prev_xclbin_path
-
-    def link(self, seq):
-        self.link_xclbins(seq)
         return self.combined_xclbin_path
-
-    def make_callable(self, seq):
-        self.link_xclbins(seq)
-        return SequenceXclbinCallable(seq, self)
-
-
-class CompareDispatch(SeparateDispatch):
-    """Same compile path as ``separate``, but the callable additionally re-runs
-    each operator's CPU ``reference()`` on the NPU-produced inputs and flags
-    per-step deviation.
-
-    Args:
-        rel_tol / abs_tol: Per-step tolerances; a step counts as a mismatch
-            only when it exceeds both.
-        raise_on_mismatch: When True (default), raise ``RuntimeError`` on the
-            first mismatching step instead of only logging it.
-    """
-
-    name = "compare"
-
-    def __init__(self, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
-        super().__init__()
-        self.rel_tol = rel_tol
-        self.abs_tol = abs_tol
-        self.raise_on_mismatch = raise_on_mismatch
-
-    def make_callable(self, seq):
-        self.link_xclbins(seq)
-        return SequenceCompareCallable(seq, self)
-
-
-class ReferenceDispatch(SequenceDispatch):
-    """Pure-CPU evaluation via each operator's ``reference()``; compiles nothing."""
-
-    name = "reference"
-
-    def set_up_artifacts(self, seq):
-        pass
-
-    def make_callable(self, seq):
-        return SequenceReferenceCallable(seq)
-
-
-# The image builders (fused, separate, chunked) and the two harness modes
-# (reference, compare) a hand-written OperatorSequence can name. A graph does
-# not name one: packaging.plan derives it from the device, the values and the
-# boundaries, and hands the instance in.
-_DISPATCH_ALIASES = {
-    "fused": FusedDispatch,
-    "separate": SeparateDispatch,
-    "compare": CompareDispatch,
-    "reference": ReferenceDispatch,
-}
 
 
 # ##########################################################################
@@ -346,18 +193,13 @@ class OperatorSequence(AIEOperatorBase):
     single dispatch.
 
     Args:
-        dispatch: Dispatch strategy, given either as a mode name or as a
-            :class:`SequenceDispatch` instance. Recognised names:
-            ``"auto"`` (default) selects ``"fused"`` on NPU2 and
-            ``"separate"`` on NPU1.  ``"fused"`` uses a single-ELF
-            dispatch (requires NPU2).  ``"separate"`` compiles each
-            sub-operator to its own xclbin and invokes them sequentially.
-            ``"reference"`` runs only the per-operator CPU reference
-            implementations (no NPU compilation/dispatch).  ``"compare"``
-            runs the ``"separate"`` xclbin path and, after each NPU step,
-            also runs the operator's CPU reference on the NPU-produced
-            inputs and logs the deviation for testing/debugging.  Pass a
-            :class:`CompareDispatch` instance to tune the compare tolerances.
+        dispatch: The mode. ``"auto"`` (default) is ``"fused"`` on NPU2 and
+            ``"separate"`` elsewhere. ``"fused"`` builds one full ELF (NPU2
+            only); ``"separate"`` one xclbin per design, chained, dispatched
+            one step at a time. ``"reference"`` builds nothing and runs each
+            operator's CPU ``reference()``; ``"compare"`` runs the chain and
+            after each step re-runs the reference on the NPU-produced inputs
+            (``SequenceCompareCallable`` holds the tolerances).
     """
 
     def __init__(
@@ -376,14 +218,14 @@ class OperatorSequence(AIEOperatorBase):
         *args,
         **kwargs,
     ):
-        dispatch = self._coerce_dispatch(dispatch)
+        mode = self._coerce_dispatch(dispatch)
         if not all(
-            isinstance(op, MLIROperator) and all(isinstance(buf, str) for buf in bufs)
+            isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
         ):
             raise TypeError(
-                "runlist entries must be (MLIROperator, *str) tuples; "
-                "each operator must be an MLIROperator and each buffer name must be a str"
+                "runlist entries must be (Operator, *str) tuples; "
+                "each operator must be an Operator and each buffer name must be a str"
             )
         super().__init__(*args, **kwargs)
         self.runlist = runlist
@@ -408,20 +250,17 @@ class OperatorSequence(AIEOperatorBase):
         # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
         self.trace_size = trace_size
         self.share_designs = share_designs
-        self._dispatch = dispatch
+        self.mode = mode  # None until the device is known (set_up_artifacts)
+        self._image = None  # the mode's image builder, once resolved
 
     @staticmethod
     def _coerce_dispatch(dispatch):
-        """Normalise the ``dispatch`` argument to a :class:`SequenceDispatch`."""
         if dispatch == "auto" or dispatch is None:
             return None  # the platform default, resolved when the device is known
-        if isinstance(dispatch, SequenceDispatch):
+        if isinstance(dispatch, str) and dispatch in _MODES:
             return dispatch
-        elif isinstance(dispatch, str) and dispatch in _DISPATCH_ALIASES:
-            return _DISPATCH_ALIASES[dispatch]()
         raise TypeError(
-            f"dispatch {dispatch!r} is not one of {sorted(_DISPATCH_ALIASES)}, "
-            f"'auto', or a SequenceDispatch"
+            f"dispatch {dispatch!r} is not one of {sorted(_MODES)} or 'auto'"
         )
 
     def unique_operators(self):
@@ -611,15 +450,18 @@ class OperatorSequence(AIEOperatorBase):
         return subbuffer_layout, buffer_sizes, slice_info
 
     def set_up_artifacts(self):
-        """Resolve the dispatch policy and build its compile artifacts."""
+        """Lay the buffers out and settle the mode; nothing else is an artifact
+        (each design's kernels are compiled with its image)."""
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
-        device = aie_utils.get_current_device()
-        if self._dispatch is None:
-            self._dispatch = platform_default(device)
-        self._dispatch = self._dispatch.resolve(device)
-        self._dispatch.set_up_artifacts(self)
+        if self.mode is None:
+            # The platform default for a hand-written sequence; a graph goes
+            # through packaging.plan, which also weighs its values and boundaries.
+            npu2 = isinstance(aie_utils.get_current_device(), NPU2)
+            self.mode = "fused" if npu2 else "separate"
+        image, _ = _MODES[self.mode]
+        self._image = image() if image is not None else None
 
     def compile(self, dry_run: bool = False):
         """Build the artifacts and the image, ahead of time.
@@ -636,10 +478,11 @@ class OperatorSequence(AIEOperatorBase):
         return self
 
     def link(self):
-        """Build this sequence's image for its dispatch; sets ``self.image``."""
+        """Build this sequence's image, once; sets ``self.image`` (``None`` for
+        the reference mode)."""
         if not hasattr(self, "subbuffer_layout"):
             AIEOperatorBase.compile(self)
-        self.image = self._dispatch.link(self)
+        self.image = self._image.link(self) if self._image is not None else None
         return self.image
 
     def get_arg_spec(self):
@@ -649,17 +492,13 @@ class OperatorSequence(AIEOperatorBase):
         )
 
     def get_callable(self):
-        """Return the runtime callable for the resolved dispatch policy.
-
-        Compiles first if that has not happened yet, so a caller can dispatch
-        a sequence without compiling it explicitly. Calling ``compile()``
-        beforehand remains the ahead-of-time path and does the same work --
-        the only difference is when. ``compile()`` skips artifacts already on
-        disk, so arriving here twice costs nothing the second time.
-        """
+        """The runtime callable of this sequence's mode, compiling first if
+        that has not happened (``compile()`` beforehand is the ahead-of-time
+        path; the work is the same, only when it happens differs)."""
         if not hasattr(self, "subbuffer_layout"):
             self.compile()
-        return self._dispatch.make_callable(self)
+        self.link()
+        return _MODES[self.mode][1](self)
 
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
@@ -700,25 +539,45 @@ def _n_elements(nbytes):
 
 
 class SequenceCallable:
-    """Base for the runtime callables of an ``OperatorSequence``.
+    """Runs an ``OperatorSequence`` once per call.
 
-    Subclasses provide a buffer model (``_allocate_buffers`` / ``get_buffer``)
-    and a step-execution primitive (``_run``). Shared here: step/arg zipping,
-    input and output syncing, and timing. Calling the object runs the whole
-    sequence once.
+    Buffers are one per name, a slice a view into its parent; inputs sync to
+    the device before the run and everything else back to the host after.
+    Subclasses give the buffer (``_make_buffer``) and the run (``_run``); the
+    full-ELF callable replaces the buffer model with its three arenas.
     """
 
-    def __init__(self, op):
-        self.op = op
+    def __init__(self, seq):
+        self.op = seq
         self.last_elapsed = 0.0
         self._buffer_cache = {}
         self._allocate_buffers()
 
+    def _make_buffer(self, n_elements):
+        return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
+
     def _allocate_buffers(self):
-        raise NotImplementedError
+        self._buffers = {}
+        for name, (_, _, length) in self.op.subbuffer_layout.items():
+            self._buffers[name] = self._make_buffer(_n_elements(length))
+
+    def _resolve_buffer(self, buf_name):
+        if buf_name in self._buffers:
+            return self._buffers[buf_name]
+        if buf_name in self.op.slice_info:
+            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
+            size_bytes = end_bytes - start_bytes
+            sub = self._buffers[base_name].subview(
+                start_bytes, (size_bytes // BF16.itemsize,), BF16
+            )
+            self._buffers[buf_name] = sub
+            return sub
+        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
 
     def get_buffer(self, buffer_name):
-        raise NotImplementedError
+        if buffer_name not in self._buffer_cache:
+            self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
+        return self._buffer_cache[buffer_name]
 
     def _iter_steps(self):
         """Yield ``(op, in_names, in_specs, out_name, out_spec)`` per runlist step."""
@@ -734,10 +593,13 @@ class SequenceCallable:
             yield step_op, in_names, in_specs, out_name, out_spec
 
     def _sync_inputs(self):
-        pass
+        for name in self.op.input_args:
+            self._buffers[name].to("npu")
 
     def _sync_outputs(self):
-        pass
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                self._buffers[name].to("cpu")
 
     def _run(self):
         raise NotImplementedError
@@ -751,23 +613,23 @@ class SequenceCallable:
 
 
 class SequenceFullELFCallable(SequenceCallable):
-    """Single-ELF dispatch (NPU2): every operator shares three consolidated
+    """The full ELF (NPU2): every operator shares three consolidated
     input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
     sub-view into whichever consolidated buffer holds the named argument.
     """
 
-    def __init__(self, op, device_name="main", sequence_name="sequence"):
+    def __init__(self, seq, device_name="main", sequence_name="sequence"):
         _require_xrt()
         self.device_name = device_name
         self.sequence_name = sequence_name
 
-        xrt_elf = pyxrt.elf(str(full_elf_path(op)))
+        xrt_elf = pyxrt.elf(str(seq.elf_path))
         xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
 
-        super().__init__(op)
+        super().__init__(seq)
 
         # Persistent run handle: reused across dispatches so that the
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
@@ -797,7 +659,7 @@ class SequenceFullELFCallable(SequenceCallable):
             return self._params
         from .jit_compile import fused_work_dir
 
-        params_path = fused_work_dir(full_elf_path(self.op)) / "params.txt"
+        params_path = fused_work_dir(self.op.elf_path) / "params.txt"
         if not params_path.exists():
             return None
         if params_path.read_text().split("\n", 1)[0].strip() == "0":
@@ -829,7 +691,7 @@ class SequenceFullELFCallable(SequenceCallable):
         """aiecc's post-lowering module, which carries the trace buffer layout."""
         from .jit_compile import fused_work_dir
 
-        path = fused_work_dir(full_elf_path(self.op)) / "input_with_addresses.mlir"
+        path = fused_work_dir(self.op.elf_path) / "input_with_addresses.mlir"
         return path.read_text()
 
     def get_buffer(self, buffer_name):
@@ -869,85 +731,36 @@ class SequenceFullELFCallable(SequenceCallable):
             raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
 
 
-class _PerBufferCallable(SequenceCallable):
-    """Callable whose buffers are allocated one per name, with slice views into
-    their parent. Inputs sync to the device before the run, all non-input
-    buffers back to the host afterwards.
-    """
-
-    def _make_buffer(self, n_elements):
-        raise NotImplementedError
-
-    def _allocate_buffers(self):
-        self._buffers = {}
-        for name, (_, _, length) in self.op.subbuffer_layout.items():
-            self._buffers[name] = self._make_buffer(_n_elements(length))
-
-    def _resolve_buffer(self, buf_name):
-        if buf_name in self._buffers:
-            return self._buffers[buf_name]
-        if buf_name in self.op.slice_info:
-            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            size_bytes = end_bytes - start_bytes
-            sub = self._buffers[base_name].subview(
-                start_bytes, (size_bytes // BF16.itemsize,), BF16
-            )
-            self._buffers[buf_name] = sub
-            return sub
-        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
-
-    def get_buffer(self, buffer_name):
-        if buffer_name not in self._buffer_cache:
-            self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
-        return self._buffer_cache[buffer_name]
-
-    def _sync_inputs(self):
-        for name in self.op.input_args:
-            self._buffers[name].to("npu")
-
-    def _sync_outputs(self):
-        for name in self.op.subbuffer_layout:
-            if name not in self.op.input_args:
-                self._buffers[name].to("cpu")
-
-
-class SequenceXclbinCallable(_PerBufferCallable):
+class SequenceXclbinCallable(SequenceCallable):
     """Executes each runlist step as its own xclbin dispatch. Buffers shared by
-    name give zero-copy handoff between consecutive operators.
-
-    The compiled per-operator xclbin/insts maps live on the ``SeparateDispatch``
-    policy passed in as ``dispatch``.
+    name give zero-copy handoff between consecutive operators. The chain's
+    per-operator paths are on ``seq._image`` (an :class:`XclbinChain`).
     """
 
-    def __init__(self, op, dispatch):
+    def __init__(self, seq):
         _require_xrt()
-        self._dispatch = dispatch
-        super().__init__(op)
-
-    def _make_buffer(self, n_elements):
-        return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
+        super().__init__(seq)
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
-        dispatch = self._dispatch
-        combined_xclbin_path = dispatch.combined_xclbin_path
+        chain = self.op._image
         self._op_callable_map = {}  # id(op) -> NPUKernel
         # Per-call scalars of dispatch-time kernels, by symbol; a graph sets
         # them before each run (CompiledGraph._write_values).
         self.dispatch_values = {}
-        for op_id, xclbin_path in dispatch.op_xclbin_path_map.items():
-            stream = dispatch.op_insts_path_map[op_id]
+        for op_id, xclbin_path in chain.op_xclbin_path_map.items():
+            stream = chain.op_insts_path_map[op_id]
             if isinstance(stream, DispatchStream):
                 self._op_callable_map[op_id] = NPUKernel(
-                    xclbin_path=str(combined_xclbin_path),
-                    kernel_name=dispatch.op_kernel_name_map[op_id],
+                    xclbin_path=str(chain.combined_xclbin_path),
+                    kernel_name=chain.op_kernel_name_map[op_id],
                     dispatch_params=list(stream.params),
                     dispatch_lib_path=str(stream.lib_path),
                 )
             else:
                 self._op_callable_map[op_id] = NPUKernel(
-                    xclbin_path=str(combined_xclbin_path),
-                    kernel_name=dispatch.op_kernel_name_map[op_id],
+                    xclbin_path=str(chain.combined_xclbin_path),
+                    kernel_name=chain.op_kernel_name_map[op_id],
                     insts_path=str(stream),
                 )
         self._execution_plan = [
@@ -978,7 +791,7 @@ def _reshape_for_spec(flat_tensor, spec):
     return flat_tensor[:n].reshape(spec.shape)
 
 
-class SequenceReferenceCallable(_PerBufferCallable):
+class SequenceReferenceCallable(SequenceCallable):
     """Pure-CPU evaluation via each operator's ``reference()``; no NPU dispatch.
     Device syncs are no-ops on the CPU buffers.
     """
@@ -1004,17 +817,18 @@ class SequenceReferenceCallable(_PerBufferCallable):
 
 
 class SequenceCompareCallable(SequenceXclbinCallable):
-    """Runs the xclbin pipeline and, after each step, re-runs the operator's
+    """Runs the xclbin chain and, after each step, re-runs the operator's
     reference on the same NPU-produced inputs, logging per-step deviation. The
     NPU output propagates on both sides, so each comparison isolates a single
-    operator (no error accumulation).
+    operator (no error accumulation). A step is a mismatch when it exceeds
+    both tolerances; ``raise_on_mismatch`` turns the first one into an error.
     """
 
-    def __init__(self, op, dispatch):
-        super().__init__(op, dispatch)
-        self.rel_tol = dispatch.rel_tol
-        self.abs_tol = dispatch.abs_tol
-        self.raise_on_mismatch = dispatch.raise_on_mismatch
+    def __init__(self, seq, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
+        super().__init__(seq)
+        self.rel_tol = rel_tol
+        self.abs_tol = abs_tol
+        self.raise_on_mismatch = raise_on_mismatch
         self.last_step_stats = []
 
     def _read_to_cpu(self, name, spec):
@@ -1088,3 +902,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
                 f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
             )
         self.last_step_stats.append(stats)
+
+
+# The modes a sequence can be built in: the image (None builds nothing) and
+# the callable that runs it.
+_MODES = {
+    "fused": (FusedImage, SequenceFullELFCallable),
+    "separate": (XclbinChain, SequenceXclbinCallable),
+    "reference": (None, SequenceReferenceCallable),
+    "compare": (XclbinChain, SequenceCompareCallable),
+}

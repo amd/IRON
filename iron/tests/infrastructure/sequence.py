@@ -26,7 +26,7 @@ import torch
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
-from iron.common.sequence import OperatorSequence
+from iron.common.sequence import OperatorSequence, build_fused_mlir
 from iron.common.test_utils import verify_buffer
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
@@ -102,9 +102,9 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
     expected_mode = (
         "fused" if isinstance(aie_utils.get_current_device(), NPU2) else "separate"
     )
-    assert seq._dispatch.name == expected_mode, (
-        f"auto dispatch resolved to {seq._dispatch.name!r}, expected "
-        f"{expected_mode!r} on this device"
+    assert seq.mode == expected_mode, (
+        f"auto dispatch resolved to {seq.mode!r}, expected {expected_mode!r} "
+        "on this device"
     )
 
     run = seq.get_callable()
@@ -136,11 +136,11 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
     seq = _build_add_relu_sequence(aie_context, "fused", "infra_fused_mlir")
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
-    # NPU2-only). This mirrors what link_elf() feeds to the compiler.
+    # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
     )
-    text = seq._dispatch.build_fused_mlir(seq)
+    text = build_fused_mlir(seq)
 
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
@@ -202,7 +202,7 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 #     rather than a hand-rolled numpy view. Not covered by
 #     test_dispatch_modes_bit_identical above, since reference() is a CPU
 #     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see CompareDispatch's rel_tol/abs_tol).
+#     tolerance, not bit-for-bit (see SequenceCompareCallable's rel_tol/abs_tol).
 # ---------------------------------------------------------------------------
 
 _SLICE_SIZE = 1024
@@ -302,7 +302,7 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
         context=aie_context,
     )
     seq.compile()
-    assert seq._dispatch.name == "compare"
+    assert seq.mode == "compare"
 
     run = seq.get_callable()
     _set_input(run, "a", a)

@@ -27,7 +27,6 @@ import dataclasses
 import hashlib
 import inspect
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -331,8 +330,10 @@ def compile_sequence(seq, elf_path) -> Path:
     function, not an on-disk artifact, and running it inside compile() is what
     lets each child design's ExternalFunction kernels be collected and built.
     """
+    from .sequence import build_fused_mlir
+
     return compile_fused_elf(
-        lambda: seq._dispatch.build_fused_mlir(seq),
+        lambda: build_fused_mlir(seq),
         elf_path,
         extra_flags=getattr(seq, "extra_flags", ()) or (),
         trace_size=getattr(seq, "trace_size", 0) or 0,
