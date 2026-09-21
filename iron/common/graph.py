@@ -567,14 +567,38 @@ class GraphFunction:
 
     # -- compiling and calling -----------------------------------------------------
 
-    def compile(self, dev=None, *, context=None, dispatch="auto", **shapes):
-        """Compile for the given input shapes and return a :class:`CompiledGraph`."""
-        if dev is not None:
-            import aie.utils as aie_utils
+    def compile(
+        self,
+        dev=None,
+        *,
+        boundaries=None,
+        image=None,
+        verbose=False,
+        context=None,
+        **shapes,
+    ):
+        """Compile for the given input shapes and return a :class:`CompiledGraph`.
 
+        ``boundaries`` and ``image`` are the two packaging choices
+        (:mod:`iron.common.packaging`); everything else is derived and, under
+        ``verbose``, printed.
+        """
+        import aie.utils as aie_utils
+
+        from .packaging import plan
+
+        if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
-        self._compiled = CompiledGraph(traced, context=context, dispatch=dispatch)
+        chosen = plan(
+            aie_utils.get_current_device().resolve().name, traced, boundaries, image
+        )
+        if verbose:
+            print(chosen.report(self.__name__))
+        self._compiled = CompiledGraph(
+            traced, context=context, dispatch=chosen.dispatch
+        )
+        self._compiled.plan = chosen
         return self._compiled
 
     def __call__(self, *tensors, **values):

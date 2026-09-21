@@ -859,6 +859,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
+| packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
 | llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | **needs a run**: the whole point; parity against the token snapshot (§18) is the gate |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | **needs a run**: `CompiledGraph` builds through `OperatorSequence` and writes values through `params`; untested against a toolchain |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
@@ -941,7 +942,24 @@ core-read member (the tracer looks on both). `llama_npu.py` compiles it
 against `build_elf`, calls it per token, and seeds the caches after
 prefill through `CompiledGraph.write(state, tensor)`, which also pushes
 the bytes to the device. Prefill is unchanged (per-operator xclbins,
-O11). The snapshot
+O11).
+
+Step 5 is started at the surface: `compile(dev, boundaries=, image=,
+verbose=)` derives the image by the §8 rules, refuses `image=elf` where a
+rule forbids it (naming the value, the boundaries or the device), reports
+each value's lowering, and lowers `elf` to the fused ELF and `xclbin` +
+`each_step` to the chained per-operator xclbin that exist today. The rest
+of step 5 needs a device: a fused sequence in an xclbin (S1) is what
+`chunks(n)` and `image="xclbin"` alone would build; modules over several
+graphs (S4); the §11 prototypes (instructions-only compile against a
+shared overlay, the callee-sequence pruning); and deleting the dispatch
+hierarchy, which the graph lowering still stands on. O6 is settled as
+free functions (`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
+
+What to run first on the toolchain, in order, is unchanged (below); after
+it, the decode graph: `pytest iron/tests/common`, then the llama
+application against the token snapshot, with §18's two candidates the
+first things to try if it drifts. The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. Every operator now serves
 `get_arg_spec()` from its declared buffers.
