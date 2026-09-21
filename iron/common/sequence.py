@@ -167,43 +167,16 @@ class FusedDispatch(SequenceDispatch):
         )
         return seq.elf_path
 
-    def build_fused_mlir(self, seq) -> str:
+    def build_fused_mlir(self, seq, runlist=None) -> str:
         """Build the fused MLIR source that inlines every operator into a
         single module, and return it as text.
 
         ``seq``'s buffer-layout attributes (``subbuffer_layout``,
-        ``buffer_sizes``, ``slice_info``) must already be set.
+        ``buffer_sizes``, ``slice_info``) must already be set. ``runlist``
+        is a slice of the sequence's, for a chunk: the module carries the
+        designs that slice uses, over the whole sequence's buffer layout.
         """
-        operator_generators = {}
-        comp_runlist = []
-        designs, design_of = seq.unique_designs()
-        design_names = []
-
-        for idx, op in enumerate(designs):
-            generator = op.get_mlir_artifact().generator
-            # Ask the design whether it takes a prefix, rather than inferring it
-            # from the operator having kernel artifacts: an operator whose
-            # design declares ExternalFunctions reports no artifacts at all, and
-            # under the old test silently went unprefixed -- every shape then
-            # defining the same symbols, kept apart only by each core linking
-            # its own object.
-            design_fn, _, _ = generator.resolve()
-            if "func_prefix" in inspect.signature(design_fn).parameters:
-                generator.kwargs["func_prefix"] = f"op{idx}_"
-            op_name = f"op{idx}_{op.__class__.__name__}"
-            design_names.append(op_name)
-            operator_generators[op_name] = generator
-
-        for op, *bufs in seq.runlist:
-            comp_runlist.append((design_names[design_of[id(op)]], *bufs))
-
-        return comp.fuse_mlir(
-            operator_generators,
-            comp_runlist,
-            seq.subbuffer_layout,
-            seq.buffer_sizes,
-            seq.slice_info,
-        )
+        return build_fused_mlir(seq, runlist)
 
     def link(self, seq):
         return self.link_elf(seq)
@@ -211,6 +184,108 @@ class FusedDispatch(SequenceDispatch):
     def make_callable(self, seq):
         self.link_elf(seq)
         return SequenceFullELFCallable(seq)
+
+
+def build_fused_mlir(seq, runlist=None) -> str:
+    """The fused module for ``runlist`` (default: all of ``seq``'s steps)."""
+    if runlist is None:
+        runlist = seq.runlist
+    operator_generators = {}
+    comp_runlist = []
+    designs, design_of = seq.unique_designs()
+    used = {design_of[id(op)] for op, *_ in runlist}
+    design_names = {}
+
+    for idx, op in enumerate(designs):
+        if idx not in used:
+            continue
+        generator = op.get_mlir_artifact().generator
+            # Ask the design whether it takes a prefix, rather than inferring it
+            # from the operator having kernel artifacts: an operator whose
+            # design declares ExternalFunctions reports no artifacts at all, and
+            # under the old test silently went unprefixed -- every shape then
+            # defining the same symbols, kept apart only by each core linking
+            # its own object.
+        design_fn, _, _ = generator.resolve()
+        if "func_prefix" in inspect.signature(design_fn).parameters:
+            generator.kwargs["func_prefix"] = f"op{idx}_"
+        op_name = f"op{idx}_{op.__class__.__name__}"
+        design_names[idx] = op_name
+        operator_generators[op_name] = generator
+
+    for op, *bufs in runlist:
+        comp_runlist.append((design_names[design_of[id(op)]], *bufs))
+
+    return comp.fuse_mlir(
+        operator_generators,
+        comp_runlist,
+        seq.subbuffer_layout,
+        seq.buffer_sizes,
+        seq.slice_info,
+    )
+
+
+class ChunkedDispatch(SequenceDispatch):
+    """Chunked dispatch: a fused sub-sequence of ``n`` steps per kernel, in one xclbin.
+
+    ``boundaries=chunks(n)`` in the packaging surface, and ``image=xclbin``
+    with no boundaries is one chunk of every step (spike S1's construction).
+    Each chunk is the fused module of its steps over the whole sequence's
+    buffer layout, compiled as an xclbin kernel with its configuration
+    switches expanded, and linked onto the previous chunk's xclbin; the
+    callable runs the kernels in order over the three arena buffers, as
+    the full ELF's one sequence would. Not on this path: scratchpad
+    values, which an xclbin run has no scratchpad for (spike S2).
+    """
+
+    name = "chunked"
+
+    def __init__(self, n=None):
+        if n is not None and n < 1:
+            raise ValueError("chunks(n) needs n >= 1")
+        self.n = n
+        self.chunks = []  # (label, xclbin_path, insts_path, n_steps)
+        self.combined_xclbin_path = None
+
+    def resolve(self, device):
+        return self
+
+    def set_up_artifacts(self, seq):
+        return
+
+    def slices(self, seq):
+        n = self.n or len(seq.runlist)
+        return [seq.runlist[i : i + n] for i in range(0, len(seq.runlist), n)]
+
+    def link_xclbins(self, seq):
+        if self.combined_xclbin_path is not None:
+            return
+        from .jit_compile import compile_fused_xclbin
+
+        name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
+        build_dir = Path(seq.context.build_dir)
+        previous = None
+        for idx, steps in enumerate(self.slices(seq)):
+            label = f"f{name_hash}_chunk{idx}"
+            xclbin_path, insts_path = compile_fused_xclbin(
+                lambda steps=steps: build_fused_mlir(seq, steps),
+                build_dir,
+                label,
+                kernel_id=f"0x{0x901 + idx:x}",
+                xclbin_input=previous,
+                extra_flags=seq.extra_flags,
+            )
+            self.chunks.append((label, xclbin_path, insts_path, len(steps)))
+            previous = xclbin_path
+        self.combined_xclbin_path = previous
+
+    def link(self, seq):
+        self.link_xclbins(seq)
+        return self.combined_xclbin_path
+
+    def make_callable(self, seq):
+        self.link_xclbins(seq)
+        return SequenceChunkedCallable(seq, self)
 
 
 class SeparateDispatch(SequenceDispatch):
@@ -333,6 +408,7 @@ _DISPATCH_ALIASES = {
     "separate": SeparateDispatch,
     "compare": CompareDispatch,
     "reference": ReferenceDispatch,
+    "chunked": ChunkedDispatch,
 }
 
 
@@ -742,7 +818,76 @@ class SequenceCallable:
         self._sync_outputs()
 
 
-class SequenceFullELFCallable(SequenceCallable):
+class _ArenaCallable(SequenceCallable):
+    """Buffer model of a fused sequence: three consolidated input/output/
+    scratch buffers addressed by offset. ``get_buffer`` returns a sub-view
+    into whichever holds the named argument.
+    """
+
+    def _allocate_buffers(self):
+        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
+        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
+        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
+        self.scratch_buffer = XRTTensor(
+            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
+        )
+        self.trace_buffer = None
+
+    def get_buffer(self, buffer_name):
+        if buffer_name in self._buffer_cache:
+            return self._buffer_cache[buffer_name]
+        buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+        parent = {
+            "input": self.input_buffer,
+            "output": self.output_buffer,
+            "scratch": self.scratch_buffer,
+        }[buf_type]
+        sub = parent.subview(offset, (length // BF16.itemsize,), ml_dtypes.bfloat16)
+        self._buffer_cache[buffer_name] = sub
+        return sub
+
+    def _sync_inputs(self):
+        # Sub-views handed out by get_buffer() share the parent's coherence map, so
+        # a write through one (e.g. torch_view()) marks its byte range host-dirty
+        # there too, and `to("npu")` here syncs every dirty range in one pass.
+        self.input_buffer.to("npu")
+
+    def _sync_outputs(self):
+        # _run just rewrote the output arena on the device, so the device holds the
+        # authoritative copy. Force the device->host sync: assert device residency first
+        # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
+        # range "cpu" (otherwise a looped dispatch would read stale output).
+        self.output_buffer.device = "npu"
+        self.output_buffer.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
+
+
+class SequenceChunkedCallable(_ArenaCallable):
+    """Chunked dispatch: the arenas of a fused sequence, run through one
+    xclbin kernel per chunk, in order."""
+
+    def __init__(self, op, dispatch):
+        _require_xrt()
+        self._dispatch = dispatch
+        super().__init__(op)
+        self.kernels = [
+            NPUKernel(
+                xclbin_path=str(dispatch.combined_xclbin_path),
+                kernel_name=label,
+                insts_path=str(insts_path),
+            )
+            for label, _, insts_path, _ in dispatch.chunks
+        ]
+
+    def _run(self):
+        args = [self.input_buffer, self.output_buffer, self.scratch_buffer]
+        for kernel in self.kernels:
+            kernel(*args)
+
+
+class SequenceFullELFCallable(_ArenaCallable):
     """Single-ELF dispatch (NPU2): every operator shares three consolidated
     input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
     sub-view into whichever consolidated buffer holds the named argument.
@@ -802,16 +947,10 @@ class SequenceFullELFCallable(SequenceCallable):
         return self._params
 
     def _allocate_buffers(self):
-        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
-        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
-        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
-        self.scratch_buffer = XRTTensor(
-            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
-        )
+        super()._allocate_buffers()
         # Trace lowering appends one buffer covering every configured design, after
         # the consolidated three. Its size depends on how many channels and
         # sub-designs claim a share, so read it from the lowered module.
-        self.trace_buffer = None
         if self.op.trace_size:
             total = comp.trace_buffer_size(self.lowered_mlir_text())
             if total:
@@ -823,36 +962,6 @@ class SequenceFullELFCallable(SequenceCallable):
 
         path = fused_work_dir(full_elf_path(self.op)) / "input_with_addresses.mlir"
         return path.read_text()
-
-    def get_buffer(self, buffer_name):
-        if buffer_name in self._buffer_cache:
-            return self._buffer_cache[buffer_name]
-        buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-        parent = {
-            "input": self.input_buffer,
-            "output": self.output_buffer,
-            "scratch": self.scratch_buffer,
-        }[buf_type]
-        sub = parent.subview(offset, (length // BF16.itemsize,), ml_dtypes.bfloat16)
-        self._buffer_cache[buffer_name] = sub
-        return sub
-
-    def _sync_inputs(self):
-        # Sub-views handed out by get_buffer() share the parent's coherence map, so
-        # a write through one (e.g. torch_view()) marks its byte range host-dirty
-        # there too, and `to("npu")` here syncs every dirty range in one pass.
-        self.input_buffer.to("npu")
-
-    def _sync_outputs(self):
-        # _run just rewrote the output arena on the device, so the device holds the
-        # authoritative copy. Force the device->host sync: assert device residency first
-        # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
-        # range "cpu" (otherwise a looped dispatch would read stale output).
-        self.output_buffer.device = "npu"
-        self.output_buffer.to("cpu")
-        if self.trace_buffer is not None:
-            self.trace_buffer.device = "npu"
-            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()

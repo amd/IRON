@@ -1031,6 +1031,7 @@ and the decode graph's parity against the token snapshot (§18).
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, `iron/tests/toolchain/spikes.py`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
+| `chunks(n)` and the one-chunk xclbin (step 5) | `sequence.py` `ChunkedDispatch`, `jit_compile.py` `compile_fused_xclbin`, `packaging.py` | 12 packaging tests: chunks and `image=xclbin` pick the chunked dispatch, a scratchpad value is refused on that image by name | the swiglu graph builds at `chunks(2)` (three kernels) and as one kernel, each chunk's stream with its switches expanded | **needs a device**: the run (S1) |
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
@@ -1130,14 +1131,23 @@ rest, the toolchain halves are done (§12's second table): the fused
 sequence builds as an xclbin with its stream expanded (S1's build), two
 sequences build into one ELF (S4's build), the control scratchpad is
 settled from XRT's source as ELF-only (S2), and the instructions-only
-compile is in use (§11). What still needs a device: running S1's image,
-which decides whether `chunks(n)` and `image="xclbin"` alone have a
-construction; loading S4's two sequences by name, which is what modules
-over several graphs stand on; S3; the callee-sequence pruning once
-`DispatchTime` values reach graphs; and deleting the dispatch hierarchy,
-whose callables are the XRT path and cannot be exercised here. O6 is
-settled as free functions (`iron.chunks`, `iron.each_step`); O7 by
-`Plan.report`.
+compile is in use (§11). Then, on the assumption that S1 runs,
+`chunks(n)` and `image="xclbin"` alone are built: `ChunkedDispatch`
+fuses each chunk of the runlist over the whole sequence's buffer layout,
+compiles it as one xclbin kernel with its configuration switches
+expanded (`compile_fused_xclbin`, through `compile_mlir_module` since
+the multi-device names need `{0}` templates), links the chunks into one
+image, and `SequenceChunkedCallable` runs the kernels in order over the
+three arenas. The swiglu decode graph at `chunks(2)` is three kernels
+for five steps and at `image=xclbin` one; both build. A graph with
+`Scratchpad` values is refused on that image by name (S2) until they
+lower as `DispatchTime` values, which is the next piece. What still
+needs a device: running S1's image (and so every chunked build); loading
+S4's two sequences by name, which is what modules over several graphs
+stand on; S3; the `DispatchTime` lowering with its callee-sequence
+pruning; and deleting the dispatch hierarchy, whose callables are the
+XRT path and cannot be exercised here. O6 is settled as free functions
+(`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
 
 The sandbox verification now reaches every `design()` body: the design
 probe runs each converted overlay's array construction and each

@@ -236,6 +236,16 @@ def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
 # a two-step graph -- so they are not optional tuning.
 FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
 
+# A fused sequence as an xclbin kernel: the switches expanded, the dispatch
+# device's xclbin and stream requested (their names are templates, see
+# compile_fused_xclbin). No scratchpad: an xclbin run has none (spike S2).
+FUSED_XCLBIN_FLAGS = (
+    "--expand-load-pdis",
+    "--device-name=main",
+    "--get-xclbin",
+    "--get-npu-insts",
+)
+
 # Only when tracing. The trace parser reads the lowered module to find the
 # buffer layout and each design's traced tiles and events, so without this a
 # traced build compiles cleanly and then has nothing to parse.
@@ -313,6 +323,59 @@ def compile_sequence(seq, elf_path) -> Path:
         extra_flags=getattr(seq, "extra_flags", ()) or (),
         trace_size=getattr(seq, "trace_size", 0) or 0,
     )
+
+
+def compile_fused_xclbin(
+    build_mlir, build_dir, label, *, kernel_id, xclbin_input=None, extra_flags=()
+):
+    """Compile a fused sequence as one xclbin kernel; return (xclbin, insts).
+
+    The chunked image (OPERATOR_MODEL_PLAN.md §8, spike S1): the fused
+    module's dispatch device becomes a kernel named ``label`` whose
+    instruction stream carries every configuration switch expanded inline
+    (``--expand-load-pdis``), and links onto ``xclbin_input`` so a sequence
+    of chunks lands in one loadable image. A multi-device module needs the
+    ``{0}`` name templates, which ``CompilableDesign`` does not allow, so
+    this goes to ``compile_mlir_module`` directly; it builds the kernels the
+    designs declare into the work directory, where aiecc links them.
+    """
+    from aie.iron.kernel import ExternalFunction
+    from aie.utils.compile import compile_mlir_module
+
+    build_dir = Path(build_dir)
+    work_dir = build_dir / f"{label}.prj"
+    xclbin_path = build_dir / f"{label}_main.xclbin"
+    insts_path = build_dir / f"{label}_main_sequence.bin"
+    ExternalFunction._instances.clear()
+    text = _fuse_as_children(build_mlir)
+    flags = list(FUSED_XCLBIN_FLAGS) + [
+        f"--xclbin-kernel-name={label}",
+        f"--xclbin-instance-name={label}",
+        f"--xclbin-kernel-id={kernel_id}",
+        f"--xclbin-name={build_dir / (label + '_{0}.xclbin')}",
+        f"--npu-insts-name={build_dir / (label + '_{0}.bin')}",
+    ]
+    if xclbin_input is not None:
+        flags.append(f"--xclbin-input={Path(xclbin_input).resolve()}")
+    flags += list(extra_flags)
+    current = _digest(text + "\n".join(flags))
+    stamp = xclbin_path.with_suffix(xclbin_path.suffix + ".cache_hash")
+    if (
+        xclbin_path.exists()
+        and insts_path.exists()
+        and stamp.exists()
+        and stamp.read_text() == current
+    ):
+        return xclbin_path, insts_path
+    work_dir.mkdir(parents=True, exist_ok=True)
+    compile_mlir_module(
+        text, work_dir=work_dir, options=flags, device=aie_utils.get_current_device()
+    )
+    for path in (xclbin_path, insts_path):
+        if not path.exists():
+            raise RuntimeError(f"aiecc produced no {path.name} in {build_dir}")
+    stamp.write_text(current)
+    return xclbin_path, insts_path
 
 
 def compile_insts(generator, insts_path, extra_flags=()) -> Path:

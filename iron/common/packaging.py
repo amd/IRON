@@ -17,10 +17,14 @@ dispatch); more than one boundary forces ``xclbin`` (one image, N
 kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
 an error naming the member, the boundaries or the device.
 
-What the lowering can build today: ``elf`` is the fused ELF, ``xclbin``
-with ``each_step`` is the chained per-operator xclbin. A fused sequence
-in an xclbin and chunked boundaries wait on spike S1 and are refused by
-name rather than built wrong.
+What the lowering builds: ``elf`` is the fused ELF; ``xclbin`` with
+``each_step`` is the chained per-operator xclbin; ``xclbin`` with
+``chunks(n)``, or alone, is the chained chunked xclbin (a fused
+sub-sequence per kernel, its configuration switches expanded), which is
+spike S1's construction: it builds, and whether it runs is S1's question.
+An xclbin run has no parameter scratchpad (spike S2, from XRT's source),
+so a graph with per-call values is refused on that image until they
+lower as DispatchTime values (§6).
 """
 
 from __future__ import annotations
@@ -53,12 +57,15 @@ class Plan:
     """What ``compile`` decided, and why."""
 
     image: str
-    dispatch: str
+    dispatch: object  # a dispatch name, or a SequenceDispatch instance
     reasons: list
     values: list  # (name, kind, lowering)
 
     def report(self, name: str) -> str:
-        lines = [f"{name}: image {self.image}, dispatch {self.dispatch!r}"]
+        spelled = getattr(self.dispatch, "name", self.dispatch)
+        if getattr(self.dispatch, "n", None):
+            spelled = f"{spelled}({self.dispatch.n})"
+        lines = [f"{name}: image {self.image}, dispatch {spelled!r}"]
         lines += [f"  {r}" for r in self.reasons]
         for vname, kind, lowering in self.values:
             lines.append(f"  {vname}: {kind}; {lowering}")
@@ -99,27 +106,23 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         dispatch = "fused"
     elif boundaries == each_step:
         dispatch = "separate"
-    elif boundaries is None:
-        raise NotImplementedError(
-            f"{traced.name}: one fused sequence in an xclbin has no proven "
-            f"construction yet (OPERATOR_MODEL_PLAN.md spike S1); pass "
-            f"boundaries=each_step, or package for NPU2 as an ELF"
-        )
     else:
-        raise NotImplementedError(
-            f"{traced.name}: chunks({boundaries.n}) needs a fused sequence in an "
-            f"xclbin (OPERATOR_MODEL_PLAN.md spike S1); each_step is what runs today"
-        )
+        from .sequence import ChunkedDispatch
+
+        dispatch = ChunkedDispatch(None if boundaries is None else boundaries.n)
 
     values = []
     for v in traced.values:
         if v.kind == "scratchpad":
-            lowering = (
-                "patched through the parameter scratchpad"
-                if chosen == ELF
-                else "scratchpad on an xclbin path is unverified (spike S2); an "
-                "offset-only use lowers as DispatchTime, a core-read one cannot"
-            )
+            if chosen == ELF:
+                lowering = "patched through the parameter scratchpad"
+            else:
+                raise NotImplementedError(
+                    f"{traced.name}: {v.name} is a Scratchpad value and an xclbin "
+                    f"run has no parameter scratchpad (OPERATOR_MODEL_PLAN.md "
+                    f"spike S2); on this image it must lower as a DispatchTime "
+                    f"value (§6), which is not built yet"
+                )
         else:
             lowering = "sizes, strides and offsets regenerated per call"
         values.append((v.name, v.kind, lowering))
