@@ -842,11 +842,18 @@ What is on this branch, and how far each piece has been verified. Three
 environments are distinguished: **sandbox**, a session with no device,
 where the pure-Python layers run under pytest against a stub of the
 upstream module names; **lowering**, the same session with the pinned
-mlir-aie wheel installed (its release asset downloads even though its
-index page does not) but no Peano and no device, where every design
-generates real MLIR and `aiecc --get-npu-insts` places, routes, assigns
-addresses, lowers the DMAs and emits the instruction stream; and
-**device**, a machine with Peano and hardware, where nothing here has run.
+mlir-aie wheel, Peano and `aiebu-asm` installed but no device, where
+every design generates real MLIR, `aiecc` places, routes, assigns
+addresses, lowers the DMAs and emits the instruction stream, the kernels
+compile, and a traced graph builds to the fused ELF `xrt::module`
+loads; and **device**, a machine with hardware, where nothing here has
+run. How the toolchain was obtained without a device is worth a line,
+since the index pages that name the assets are what a sandbox cannot
+reach: the mlir-aie wheel and the Peano wheel are release assets whose
+download URLs resolve directly (Peano's name and version are spelled out
+in mlir-aie's `utils/update_peano_version.py`), and `aiebu-asm` builds
+from `Xilinx/aiebu` with its three submodules and Boost. `xclbinutil`
+(XRT) was not obtained, so the xclbin path is unverified past its MLIR.
 
 ### The lowering gate
 
@@ -860,9 +867,45 @@ foreign mm_prebuilt sequence (raw-dialect emission, no cores); and the
 swiglu graphs' operators. All lower. The fused module `swiglu_decode`
 builds through `OperatorSequence` (five devices: four configurations and
 the dispatch sequence with `aiex.configure`) places and routes and emits
-one instruction stream per device, the main one included; only
-`--expand-load-pdis` (which forces core compilation) and the ELF itself
-need Peano.
+one instruction stream per device, the main one included.
+
+### The full ELF
+
+`iron/tests/toolchain/full_elf.py` goes the rest of the way on two
+graphs, through the same path `CompiledGraph` takes
+(`TracedGraph.sequence` → `OperatorSequence` → `compile_sequence`): the
+kernels compile with Peano, every core links, each design's PDI is
+generated, and `aiebu-asm` assembles the streams and PDIs into one ELF.
+The swiglu decode graph builds in about 17 s (four PDIs, an empty
+parameter table). The llama decode graph at the scaled test config (two
+blocks, 50 steps, 6 bound values) builds in about a minute to a 6.3 MB
+ELF whose scratchpad parameter table, emitted only on this path, has
+exactly two rows:
+
+| parameter | kind | written where |
+|---|---|---|
+| `StridedCopy_..._out_offset` | `addr` | patched into the sequence's descriptors |
+| `Softmax_r16_n256_c1_ch1_npu2_vector_size` | `core` | read by the core behind its barrier |
+
+Six bindings, two rows, and that is the sharing the graph intends: the
+key and value copies of every block are one design, so one
+`cache_offset` write reaches them all, and likewise the softmax's
+vector size. The test asserts each bound value's symbol is in the table.
+
+The GEMV object gate is satisfied by construction: no kernel source
+differs from the PR 215 tree and GEMV's MLIR is byte-identical, so the
+same aiecc run produces the same object.
+
+The device-free suites were also run against the real package instead of
+the stub. `iron/tests/common` passes, with the design probe skipping
+itself (its fakes would have to stand in for a runtime the package
+refuses to enter outside a placed program, and the lowering gate runs the
+same cases for real). In `iron/tests/infrastructure`, `lazy_imports.py`
+needed its notion of a composite updated (a graph function's factory,
+not an `OperatorSequence` subclass) and passes; what fails there fails
+for want of hardware or of `xclbinutil`: `sequence.py` and
+`graph_dispatch.py` need `pyxrt` and a bound device, `jit_compile_path.py`
+builds an xclbin. Those are the on-device list below.
 
 Against the PR 215 tree, generated MLIR for the same constructions:
 
@@ -899,12 +942,13 @@ and the decode graph's parity against the token snapshot (§18).
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
-| lowering gate (see above) | `iron/tests/toolchain/lowering.py`, `lowering_graph.py` | 116 + 12 lowerings to instruction streams; MLIR diffed against PR 215 per case | **needs Peano and a device**: kernels and numbers |
+| lowering gate (see above) | `iron/tests/toolchain/lowering.py`, `lowering_graph.py` | 116 + 12 lowerings to instruction streams; MLIR diffed against PR 215 per case | kernels compile (the full ELF, next row); **needs a device**: numbers |
+| full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values | **needs a device**: loading, `params.write`, numbers |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
-| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | **needs a run**: the whole point; parity against the token snapshot (§18) is the gate |
-| graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | **needs a run**: `CompiledGraph` builds through `OperatorSequence` and writes values through `params`; untested against a toolchain |
+| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
+| graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF) verified by the full-ELF gate; **needs a device**: writing values through `params` and calling |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
@@ -1008,10 +1052,12 @@ device widths. That is the closest a device-free run gets; the remaining
 gap is whether the calls are what upstream accepts, which only the
 toolchain says.
 
-What to run first on the toolchain, in order, is unchanged (below); after
-it, the decode graph: `pytest iron/tests/common`, then the llama
-application against the token snapshot, with §18's two candidates the
-first things to try if it drifts. The snapshot
+What to run first on a device, in order: `pytest iron/tests/toolchain`
+(it is what the lowering environment already passes; a device changes
+nothing there), `pytest iron/tests/infrastructure` (the three ported
+recorder tests that need a run), the GEMV and ReLU operator tests, then
+the llama application against the token snapshot, with §18's two
+candidates the first things to try if it drifts. The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. Every operator now serves
 `get_arg_spec()` from its declared buffers.
@@ -1035,9 +1081,10 @@ Two findings while building, both now stated in the code:
   legal ones; it is the general form of mha's `legalize_tap` and a natural
   upstream contribution.
 
-What to run first on the toolchain, in order: `pytest iron/tests/common`
-(the device-free modules, now without the stub); the GEMV object gate;
-`pytest iron/operators/gemv iron/operators/relu`; then the rest of the ten.
+`pytest iron/tests/common` passes without the stub, against the real
+bindings, and the GEMV object gate is settled above; what remains of the
+original toolchain list is the on-device half: `pytest
+iron/operators/gemv iron/operators/relu`, then the rest of the ten.
 
 ---
 

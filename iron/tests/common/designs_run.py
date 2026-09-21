@@ -9,12 +9,23 @@ every stream and resident (the build refuses an unbound one), the preamble
 writing every resident, and the sequence issuing its transfers. What it
 cannot check is that the calls are what upstream accepts; that is the
 toolchain's job.
+
+With the real mlir-aie package installed the probe is skipped: its fakes
+would have to stand in for the runtime the package refuses to run outside
+a placed program, and ``iron/tests/toolchain/lowering.py`` already runs
+the same case table through the real one, to an instruction stream.
 """
 
 import importlib
+import importlib.util
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("aie._mlir_libs") is not None,
+    reason="the real mlir-aie package is installed; iron/tests/toolchain covers these cases",
+)
 
 from iron.common.build import build_design
 from iron.tests.common.cases import CASES

@@ -33,7 +33,10 @@ def _modules_after_importing(name):
     program = (
         "import sys\n"
         f"from iron.operators import {name}\n"
-        f"assert {name}.__name__ == {name!r}\n"
+        # A class carries its own name; a graph function's factory carries the
+        # snake_case one (swiglu_decode for SwiGLUDecode).
+        f"assert getattr({name}, '__name__', '').replace('_', '').lower() "
+        f"== {name!r}.lower(), {name}.__name__\n"
         # Only the .op modules: importing an operator necessarily creates the
         # namespace package around it, which says nothing about laziness.
         "print('\\n'.join(sorted(m for m in sys.modules "
@@ -49,14 +52,14 @@ def _modules_after_importing(name):
 def _is_composite(name):
     """Whether `name` is built from other operators rather than from a kernel.
 
-    A composite is an OperatorSequence: it holds a runlist of other operators,
-    so importing it must import them. That is composition, not an eager
-    catalog, and the two need different expectations.
+    A composite is a graph function (a factory returning one, not a class):
+    its body calls other operators, so importing it must import them. That
+    is composition, not an eager catalog, and the two need different
+    expectations.
     """
-    from iron.common.sequence import OperatorSequence
     from iron import operators
 
-    return issubclass(getattr(operators, name), OperatorSequence)
+    return not isinstance(getattr(operators, name), type)
 
 
 @pytest.mark.parametrize("name", sorted(_OPERATOR_MODULES))
