@@ -155,7 +155,6 @@ class FLMGEMMOverlay(Overlay):
     n_chunks = Resident(np.int32, optional=True)
     n_units = Resident(np.int32, optional=True)
 
-
     # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:
@@ -629,7 +628,6 @@ class GEMM(Operator[FLMGEMMOverlay]):
         to=FLMGEMMOverlay.b,
     )
     C = Out(M, N, from_=FLMGEMMOverlay.c)
-
 
     # -- construction ------------------------------------------------------------
 

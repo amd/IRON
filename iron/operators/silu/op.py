@@ -3,6 +3,8 @@
 
 from typing import ClassVar
 
+import torch
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator, tunable
 
 
@@ -23,6 +25,4 @@ class SiLU(ChanneledUnaryOperator[SiLUOverlay]):
     """AIE-accelerated SiLU activation function"""
 
     def reference(self, x):
-        from iron.operators.silu.reference import reference
-
-        return reference(x)
+        return torch.nn.functional.silu(x)

@@ -3,6 +3,8 @@
 
 from typing import ClassVar
 
+import torch
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
@@ -19,4 +21,5 @@ class SigmoidOverlay(ChanneledUnaryOverlay):
 class Sigmoid(ChanneledUnaryOperator[SigmoidOverlay]):
     """AIE-accelerated Sigmoid activation function"""
 
-    pass
+    def reference(self, x):
+        return torch.sigmoid(x)

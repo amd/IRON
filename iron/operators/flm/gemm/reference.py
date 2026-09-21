@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 from iron.operators.flm.gemm.design import Epilogue
 
 
@@ -56,29 +55,3 @@ def reference(input_a, input_b, epilogue=Epilogue.NONE, clamp=None):
     out_dtype = input_a.dtype
     C = torch.matmul(input_a.float(), input_b.float()).to(out_dtype)
     return apply_epilogue(C, epilogue, clamp)
-
-
-def generate_golden_reference(
-    M: int,
-    K: int,
-    N: int,
-    dtype="bf16",
-    seed=42,
-    epilogue=Epilogue.NONE,
-    clamp=None,
-    scale=4.0,
-):
-    """Random A (signed) and B (non-negative), scaled by ``scale``.
-
-    ``scale`` matters for the epilogue tests: the result grows like
-    ``sqrt(K) * scale**2``, and at the default scale a K=512 product lands
-    around +-200, where gelu/silu are indistinguishable from the identity (or
-    from zero). Activation tests pass a smaller scale so the result sits in the
-    range where the curve is actually interesting.
-    """
-    torch.manual_seed(seed)
-    dtype_torch = torch_dtype_map[dtype]
-    input_a = torch.randn(M, K, dtype=dtype_torch) * scale
-    input_b = torch.rand(K, N, dtype=dtype_torch) * scale
-    output = reference(input_a, input_b, epilogue, clamp)
-    return {"input": input_a, "input_b": input_b, "output": output}

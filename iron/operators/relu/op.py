@@ -3,6 +3,8 @@
 
 from typing import ClassVar
 
+import torch
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
@@ -19,6 +21,4 @@ class ReLU(ChanneledUnaryOperator[ReLUOverlay]):
     """AIE-accelerated ReLU activation function"""
 
     def reference(self, x):
-        from iron.operators.relu.reference import reference
-
-        return reference(x)
+        return torch.nn.functional.relu(x)

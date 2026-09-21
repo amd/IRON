@@ -5,8 +5,7 @@
 import pytest
 
 from iron.operators.layer_norm.op import LayerNorm
-from iron.operators.layer_norm.reference import generate_golden_reference
-from iron.common.test_utils import run_test, make_channeled_unary_params
+from iron.common.test_utils import golden, run_test, make_channeled_unary_params
 
 
 def get_params():
@@ -32,8 +31,6 @@ def test_layer_norm(
 
     rows = input_length // tile_size
     cols = tile_size
-    golden_ref = generate_golden_reference(rows=rows, cols=cols)
-
     operator = LayerNorm(
         size=input_length,
         num_aie_columns=num_aie_columns,
@@ -42,11 +39,10 @@ def test_layer_norm(
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.1, abs_tol=0.1
+        operator, data.inputs, data.outputs, rel_tol=0.1, abs_tol=0.1
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

@@ -6,8 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.axpy.op import AXPY
-from iron.operators.axpy.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -47,10 +46,6 @@ def get_params():
     get_params(),
 )
 def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_context):
-    golden_ref = generate_golden_reference(
-        input_length=input_length, scalar=scalar_factor
-    )
-
     operator = AXPY(
         size=input_length,
         num_aie_columns=num_aie_columns,
@@ -59,11 +54,10 @@ def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_conte
         context=aie_context,
     )
 
-    input_buffers = {"x": golden_ref["A"], "y": golden_ref["B"]}
-    output_buffers = {"output": golden_ref["C"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-6
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

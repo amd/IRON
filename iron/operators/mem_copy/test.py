@@ -6,8 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.mem_copy.op import MemCopy
-from iron.operators.mem_copy.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -62,8 +61,6 @@ def get_params():
 def test_mem_copy(
     input_length, num_cores, num_channels, bypass, tile_size, aie_context
 ):
-    golden_ref = generate_golden_reference(input_length=input_length)
-
     operator = MemCopy(
         size=input_length,
         num_cores=num_cores,
@@ -74,14 +71,13 @@ def test_mem_copy(
     )
 
     # num_cores >= num_channels is required: each channel must have at least one core assigned
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
         # A copy that alters a value is a broken copy, so gate it exactly.
         operator,
-        input_buffers,
-        output_buffers,
+        data.inputs,
+        data.outputs,
         rel_tol=0.0,
         abs_tol=0.0,
     )

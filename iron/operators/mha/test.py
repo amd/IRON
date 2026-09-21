@@ -7,8 +7,7 @@ import math
 import pytest
 
 from iron.operators.mha.op import MHA
-from iron.operators.mha.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -39,15 +38,6 @@ def get_params():
     "seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params()
 )
 def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
-    golden_ref = generate_golden_reference(
-        S_q=seq_len,
-        S_kv=seq_len,
-        d=dim,
-        heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        num_pipeline=num_pipelines,
-    )
-
     operator = MHA(
         num_heads=num_heads,
         seq_len=seq_len,
@@ -57,15 +47,10 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
         context=aie_context,
     )
 
-    input_buffers = {
-        "Q": golden_ref["Q"].flatten(),
-        "K": golden_ref["K"].flatten(),
-        "V": golden_ref["V"].flatten(),
-    }
-    output_buffers = {"O": golden_ref["O"].flatten()}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=4.0e-2, abs_tol=1.5e-1
+        operator, data.inputs, data.outputs, rel_tol=4.0e-2, abs_tol=1.5e-1
     )
 
     error_threshold = 0.005

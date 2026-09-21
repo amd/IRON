@@ -24,7 +24,6 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.tiling import Access
-from iron.common.test_utils import torch_dtype_map
 
 
 @operator
@@ -178,7 +177,6 @@ class Transpose(Operator[TransposeOverlay]):
     x = In(optional(num_batches), M, N, to=TransposeOverlay.x)
     y = Out(optional(num_batches), N, M, from_=TransposeOverlay.y)
 
-
     def compatible(self) -> None:
         ov = self.ov
         if self.M % ov.m != 0:
@@ -253,22 +251,3 @@ def reference(x):
     """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth);
     of each matrix when a batch dimension leads."""
     return torch.transpose(x, -2, -1)
-
-
-def generate_golden_reference(
-    rows: int, cols: int, dtype="bf16", seed=42, num_batches=1
-):
-    torch.manual_seed(seed)
-    val_range = 4
-    # num_batches>1: B independent (rows,cols) matrices laid back-to-back; each is
-    # transposed independently and the results concatenated in the same order.
-    input_tensor = (
-        torch.rand(num_batches, rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    )
-    output_tensor = torch.stack(
-        [reference(input_tensor[b]) for b in range(num_batches)]
-    )
-    # drop batch dimension if num_batches == 1
-    input_tensor = torch.squeeze(input_tensor, 0)
-    output_tensor = torch.squeeze(output_tensor, 0)
-    return {"input": input_tensor, "output": output_tensor}

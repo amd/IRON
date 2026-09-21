@@ -8,7 +8,6 @@ import torch
 from ml_dtypes import bfloat16
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
-from iron.common.test_utils import torch_dtype_map
 
 
 @operator
@@ -20,7 +19,6 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
     kernel_name: ClassVar[str] = "leaky_relu"
     kernel_fn_name: ClassVar[str] = "leaky_relu_bf16"
     kernel_object: ClassVar[str] = "leaky_relu.o"  # as the old design named it
-
 
     # Minimum per-core line length (in bfloat16 elements) required by the
     # vectorized kernels. They tell the pipeliner a minimum loop-trip count via
@@ -53,20 +51,5 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
 class LeakyReLU(ChanneledUnaryOperator[LeakyReLUOverlay]):
     """AIE-accelerated Leaky ReLU operator"""
 
-    pass
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def generate_golden_reference(input_length: int, alpha=0.01, dtype="bf16", seed=42):
-    torch.manual_seed(seed)
-    val_range = 4
-    input_tensor = (
-        torch.rand(input_length, dtype=torch_dtype_map[dtype]) * val_range
-        - val_range / 2
-    )
-    output_tensor = torch.nn.functional.leaky_relu(input_tensor, negative_slope=alpha)
-    return {"input": input_tensor, "output": output_tensor}
+    def reference(self, x):
+        return torch.nn.functional.leaky_relu(x, negative_slope=self.ov.alpha)

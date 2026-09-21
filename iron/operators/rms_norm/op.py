@@ -22,7 +22,6 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.utils import device_columns, get_shim_dma_limit
-from iron.common.test_utils import torch_dtype_map
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -47,7 +46,6 @@ class RMSNormOverlay(Overlay):
     x = StreamIn(per_tile, per=(num_aie_columns, num_channels))
     y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
     count = Resident(np.int32)
-
 
     def tuning(self, dev) -> "RMSNormOverlay":
         cols = self.num_aie_columns
@@ -340,18 +338,3 @@ def reference(x, w=None, weighted=False, eps=1e-5):
     if weighted:
         out = out * w
     return out
-
-
-def generate_golden_reference(
-    rows: int, cols: int, dtype="bf16", seed=42, weighted=False, eps=1e-5
-):
-    torch.manual_seed(seed)
-    val_range = 4
-    input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    if weighted:
-        weights = torch.rand(cols, dtype=torch_dtype_map[dtype]) * val_range
-        output_tensor = reference(input_tensor, weights, weighted=True, eps=eps)
-        return {"input": input_tensor, "weight": weights, "output": output_tensor}
-    else:
-        output_tensor = reference(input_tensor, eps=eps)
-        return {"input": input_tensor, "output": output_tensor}

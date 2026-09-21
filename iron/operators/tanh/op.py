@@ -3,6 +3,8 @@
 
 from typing import ClassVar
 
+import torch
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
@@ -19,4 +21,5 @@ class TanhOverlay(ChanneledUnaryOverlay):
 class Tanh(ChanneledUnaryOperator[TanhOverlay]):
     """AIE-accelerated Tanh activation function"""
 
-    pass
+    def reference(self, x):
+        return torch.tanh(x)

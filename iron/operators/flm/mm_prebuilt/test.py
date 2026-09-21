@@ -19,11 +19,8 @@ import torch
 
 import aie.utils as aie_utils
 
-from iron.common.test_utils import run_test
-from iron.operators.flm.gemm.reference import (
-    apply_epilogue,
-    generate_golden_reference,
-)
+from iron.common.test_utils import golden, run_test
+from iron.operators.flm.gemm.reference import apply_epilogue
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
 
@@ -62,20 +59,14 @@ BUDGET_FLOOR = 2e-2
     ],
 )
 def test_mm_prebuilt(M, K, N, epilogue, clamp, aie_context):
-    golden_ref = generate_golden_reference(
-        M=M, K=K, N=N, epilogue=epilogue, clamp=clamp
-    )
-
     operator = MMPrebuilt(
         M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, context=aie_context
     )
+    # B drawn row-major (K, N); the operator consumes it packed (pack_B).
+    data = golden(operator, normal=("A",), B=(K, N))
 
-    input_buffers = {
-        "A": golden_ref["input"].flatten(),
-        # B is consumed pre-packed; see MMPrebuilt.pack_B.
-        "B": operator.pack_B(golden_ref["input_b"]),
-    }
-    output_buffers = {"C": golden_ref["output"].flatten()}
+    input_buffers = {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])}
+    output_buffers = {"C": data["C"].flatten()}
 
     # The overlay's error is made in the ACCUMULATOR -- it runs in the core's
     # power-up floor rounding, worth about BUDGET_FLOOR of the accumulated mass
@@ -88,11 +79,7 @@ def test_mm_prebuilt(M, K, N, epilogue, clamp, aie_context):
     # no bound over this reference can be both correct and useful -- the
     # accumulator error alone exceeds their whole output range -- so they are
     # covered functionally by test_mm_prebuilt_epilogue_matches_accumulator.
-    mass = float(
-        K
-        * golden_ref["input"].abs().float().mean()
-        * golden_ref["input_b"].abs().float().mean()
-    )
+    mass = float(K * data["A"].abs().float().mean() * data["B"].abs().float().mean())
     abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
@@ -134,9 +121,9 @@ def test_mm_prebuilt_epilogue_matches_accumulator(epilogue, clamp, aie_context):
     # A small input scale keeps the accumulator in the range where these curves
     # are actually curved; at the default scale the product lands around +-900,
     # where gelu and silu are indistinguishable from the identity.
-    golden_ref = generate_golden_reference(M=M, K=K, N=N, scale=0.5)
-    A = golden_ref["input"]
-    B = golden_ref["input_b"]
+    probe = MMPrebuilt(M=M, K=K, N=N, context=aie_context)
+    data = golden(probe, normal=("A",), scale=0.5, B=(K, N))
+    A, B = data["A"], data["B"]
 
     def run(epi, clm):
         op = MMPrebuilt(M=M, K=K, N=N, epilogue=epi, clamp=clm, context=aie_context)

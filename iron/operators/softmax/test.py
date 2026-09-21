@@ -6,8 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.softmax.op import Softmax
-from iron.operators.softmax.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_optimal_columns_channels(input_length, tile_size, max_columns):
@@ -64,8 +63,6 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
     rows = input_length // tile_size
     cols = tile_size
 
-    golden_ref = generate_golden_reference(rows=rows, cols=cols)
-
     operator = Softmax(
         rows=rows,
         cols=cols,
@@ -74,11 +71,10 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
         context=aie_context,
     )
 
-    input_buffers = {"in": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-6
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

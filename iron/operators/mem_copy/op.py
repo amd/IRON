@@ -64,7 +64,6 @@ class MemCopyOverlay(Overlay):
     s = StreamIn(line_size, per=num_cores)
     d = StreamOut(line_size, per=num_cores)
 
-
     def tuning(self, dev) -> "MemCopyOverlay":
         from iron.common.utils import device_columns
 
@@ -253,6 +252,10 @@ class MemCopy(Operator[MemCopyOverlay]):
     def tile_size(self) -> int:
         return self.ov.tile_size
 
+    def reference(self, x):
+        """CPU reference: the copy."""
+        return x.clone()
+
     # -- the runtime sequence --------------------------------------------------
 
     def design(self, rt):
@@ -342,21 +345,3 @@ class MemCopy(Operator[MemCopyOverlay]):
                     for j in range(partial.num_cores_with_full_tiles):
                         rt.drain(d[idx + j], (y, partial.full_taps[j]), wait=True)
                 idx += partial.num_cores_with_full_tiles
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def generate_golden_reference(input_length):
-    torch.manual_seed(42)
-
-    # Generate random input data
-    val_range = 4
-    A = torch.rand(input_length, dtype=torch.bfloat16) * val_range
-
-    return {
-        "input": A,
-        "output": A.clone(),
-    }

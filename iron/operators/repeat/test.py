@@ -5,8 +5,7 @@
 import pytest
 
 from iron.operators.repeat.op import Repeat
-from iron.operators.repeat.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -38,8 +37,6 @@ def test_repeat(rows, cols, repeat, transfer_size, aie_context):
     is the whole failure mode here, since the only caller uses this to expand KV
     groups to attention heads and a misrouted group is numerically plausible.
     """
-    golden_ref = generate_golden_reference(rows=rows, cols=cols, repeat=repeat)
-
     operator = Repeat(
         rows=rows,
         cols=cols,
@@ -48,10 +45,12 @@ def test_repeat(rows, cols, repeat, transfer_size, aie_context):
         context=aie_context,
     )
 
+    data = golden(operator)
+
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
-        {"input": golden_ref["input"]},
-        {"output": golden_ref["output"]},
+        data.inputs,
+        data.outputs,
         rel_tol=0.0,
         abs_tol=0.0,
     )

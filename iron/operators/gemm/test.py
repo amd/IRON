@@ -12,8 +12,7 @@ import ml_dtypes
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators.gemm.op import GEMM
-from iron.operators.gemm.op import generate_golden_reference
-from iron.common.test_utils import run_test, verify_buffer
+from iron.common.test_utils import golden, run_test, verify_buffer
 
 
 def get_params():
@@ -119,14 +118,6 @@ def test_gemm(
 ):
     total_N = N * partition_N
 
-    golden_ref = generate_golden_reference(
-        M=M,
-        K=K,
-        N=total_N,
-        b_col_maj=b_col_maj,
-        c_col_maj=c_col_maj,
-    )
-
     operator = GEMM(
         M=M,
         K=K,
@@ -142,16 +133,14 @@ def test_gemm(
         context=aie_context,
     )
 
+    # One (M, K) @ (K, total_N) product in the operator's layouts; with
+    # partitions, each runs its own N columns of it against the same A.
+    data = golden(
+        operator, normal=("A",), B=(total_N, K) if b_col_maj else (K, total_N)
+    )
     if partition_N == 1:
-        input_buffers = {
-            "A": golden_ref["input"].flatten(),
-            "B": golden_ref["input_b"][0].flatten(),
-        }
-        output_buffers = {
-            "C": golden_ref["output"][0].flatten(),
-        }
         errors, latency_us, bandwidth_gbps = run_test(
-            operator, input_buffers, output_buffers, rel_tol=0.005, abs_tol=0.005
+            operator, data.inputs, data.outputs, rel_tol=0.005, abs_tol=0.005
         )
     else:
         compilable = operator.compile()
@@ -159,18 +148,14 @@ def test_gemm(
 
         # Convert B_full torch bfloat16 → numpy bfloat16 for partition_B
         B_full_np = (
-            golden_ref["input_b"][0]
-            .contiguous()
-            .view(torch.uint16)
-            .numpy()
-            .view(ml_dtypes.bfloat16)
+            data["B"].contiguous().view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
         )
 
         # Partition B using the operator method (handles slicing and padding)
         B_parts = compilable.partition_B(B_full_np, partition_N)
 
         # Create A XRTTensor (shared across all partitions)
-        A_buf = XRTTensor.from_torch(golden_ref["input"].flatten())
+        A_buf = XRTTensor.from_torch(data["A"].flatten())
 
         # Allocate per-partition B and C XRTTensors
         arg_spec = compilable.get_arg_spec()
@@ -203,14 +188,14 @@ def test_gemm(
             C_concat = torch.cat(C_parts_torch, dim=1)
 
         # Compare concatenated output to full reference
-        C_expected = golden_ref["output"][0]
+        C_expected = data["C"]
         buf_errors = verify_buffer(
             C_concat, "C", C_expected, rel_tol=0.005, abs_tol=0.005
         )
         errors = {"C": buf_errors} if buf_errors else {}
 
         # Calculate bandwidth
-        a_bytes = golden_ref["input"].nelement() * 2  # bf16 = 2 bytes
+        a_bytes = data["A"].nelement() * 2  # bf16 = 2 bytes
         b_bytes = sum(p.nbytes for p in B_parts)
         c_bytes = C_concat.nelement() * 2
         total_bytes = a_bytes + b_bytes + c_bytes

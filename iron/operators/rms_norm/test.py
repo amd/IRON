@@ -6,8 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.rms_norm.op import RMSNorm, WeightedRMSNorm
-from iron.operators.rms_norm.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -74,9 +73,6 @@ def test_rms_norm(
     input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
 ):
     rows = input_length // tile_size
-    cols = tile_size
-    golden_ref = generate_golden_reference(rows=rows, cols=cols, weighted=weighted)
-
     operator = (WeightedRMSNorm if weighted else RMSNorm)(
         rows=rows,
         num_aie_columns=num_aie_columns,
@@ -85,13 +81,10 @@ def test_rms_norm(
         context=aie_context,
     )
 
-    input_buffers = {"input1": golden_ref["input"]}
-    if weighted:
-        input_buffers["weight"] = golden_ref["weight"]
-    output_buffers = {"output": golden_ref["output"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-6
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

@@ -25,15 +25,14 @@ from iron.operators.flm.gemm.design import (
     _default_l1,
 )
 from iron.operators.flm.gemm.op import GEMM
-from iron.operators.flm.gemm.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
 CONV_EVEN, FLOOR = Rounding
 
 # Activation tests run at a smaller scale so the result lands where the curve
-# is not flat. generate_golden_reference grows the result like sqrt(K)*scale**2,
+# is not flat. The golden product grows like sqrt(K)*scale**2,
 # so at the default 4.0 a K=512 product sits around +-200, where gelu and silu
 # are indistinguishable from the identity.
 INPUT_SCALE = 4.0
@@ -121,8 +120,21 @@ def get_params():
     return params
 
 
-def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
-    """Run ``operator`` against its golden reference and return run_test's result.
+def vectors(operator, scale=4.0):
+    """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
+
+    ``scale`` matters for the epilogue tests: the result grows like
+    ``sqrt(K) * scale**2``, and at the default scale a K=512 product lands
+    around +-200, where gelu/silu are indistinguishable from the identity (or
+    from zero). Activation tests pass a smaller scale so the result sits in the
+    range where the curve is actually interesting. B is drawn row-major
+    ``(K, N)``; the operator consumes it packed (see ``GEMM.pack_B``).
+    """
+    return golden(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
+
+
+def check_on_device(operator, data, rounding=CONV_EVEN):
+    """Run ``operator`` against its golden vectors and return run_test's result.
 
     Bounds the error absolutely, as a fraction of the accumulated mass
     K * mean|a| * mean|b|. A relative tolerance cannot work: with signed A the
@@ -133,23 +145,16 @@ def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
     while NPU1 accumulates four native bf16 macs in f32 (~20x tighter). floor
     truncates, so its bias accumulates and gets a looser bound on both.
     """
-    mass = (
-        K
-        * golden_ref["input"].abs().float().mean()
-        * golden_ref["input_b"].abs().float().mean()
-    )
+    A, B = data["A"], data["B"]
+    mass = operator.K * A.abs().float().mean() * B.abs().float().mean()
     if aie_utils.get_current_device().resolve().name == "npu1":
         budget = 0.002 if rounding is FLOOR else 0.0002
     else:
         budget = 0.05 if rounding is FLOOR else 0.004
     return run_test(
         operator,
-        {
-            "A": golden_ref["input"].flatten(),
-            # B is consumed pre-packed; see GEMM.pack_B.
-            "B": operator.pack_B(golden_ref["input_b"]),
-        },
-        {"C": golden_ref["output"].flatten()},
+        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {"C": data["C"].flatten()},
         rel_tol=0.04,
         abs_tol=float(budget * mass),
     )
@@ -163,10 +168,6 @@ def check_on_device(operator, golden_ref, K, rounding=CONV_EVEN):
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
 def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
-    golden_ref = generate_golden_reference(
-        M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, scale=scale
-    )
-
     operator = GEMM(
         M=M,
         K=K,
@@ -178,7 +179,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     )
 
     errors, latency_us, bandwidth_gbps = check_on_device(
-        operator, golden_ref, K, rounding
+        operator, vectors(operator, scale), rounding
     )
 
     gflops = (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9
@@ -218,11 +219,9 @@ def test_gemm_split_leg_bounds_runs(aie_context):
     despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
-    golden_ref = generate_golden_reference(M=M, K=K, N=N)
-
     operator = GEMM(M=M, K=K, N=N, context=aie_context)
 
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
+    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, vectors(operator))
     assert not errors, "Test failed"
 
 
@@ -275,10 +274,11 @@ def tile_option_params():
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    golden_ref = generate_golden_reference(M=M, K=K, N=N, scale=INPUT_SCALE)
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, context=aie_context)
     assert operator.tile_n == tile_n and operator.tile_ma == tile_ma
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, golden_ref, K)
+    errors, _latency_us, _bandwidth_gbps = check_on_device(
+        operator, vectors(operator, INPUT_SCALE)
+    )
     assert not errors, "Test failed"
 
 
@@ -316,21 +316,12 @@ def test_one_xclbin_serves_every_shape(aie_context):
     xclbin = None
     for M, K, N, epilogue in shapes:
         operator = GEMM(M=M, K=K, N=N, epilogue=epilogue, context=aie_context)
-        golden_ref = generate_golden_reference(
-            M=M, K=K, N=N, epilogue=epilogue, scale=4.0 if epilogue == "none" else 0.5
-        )
-        mass = (
-            K
-            * golden_ref["input"].abs().float().mean()
-            * golden_ref["input_b"].abs().float().mean()
-        )
+        data = vectors(operator, 4.0 if epilogue == "none" else 0.5)
+        mass = K * data["A"].abs().float().mean() * data["B"].abs().float().mean()
         errors, _, _ = run_test(
             operator,
-            {
-                "A": golden_ref["input"].flatten(),
-                "B": operator.pack_B(golden_ref["input_b"]),
-            },
-            {"C": golden_ref["output"].flatten()},
+            {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
+            {"C": data["C"].flatten()},
             rel_tol=0.04,
             abs_tol=float(0.004 * mass),
         )
@@ -357,10 +348,7 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
     xclbin = None
     for clamp in bounds:
         operator = GEMM(M=M, K=K, N=N, clamp=clamp, context=aie_context)
-        golden_ref = generate_golden_reference(
-            M=M, K=K, N=N, clamp=clamp, scale=INPUT_SCALE
-        )
-        errors, _, _ = check_on_device(operator, golden_ref, K)
+        errors, _, _ = check_on_device(operator, vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
         stamp = (

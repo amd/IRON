@@ -3,6 +3,8 @@
 
 from typing import ClassVar
 
+import torch
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
@@ -20,4 +22,6 @@ class GELUOverlay(ChanneledUnaryOverlay):
 class GELU(ChanneledUnaryOperator[GELUOverlay]):
     """AIE-accelerated GELU activation function"""
 
-    pass
+    def reference(self, x):
+        """CPU reference: the tanh approximation the kernel computes."""
+        return torch.nn.functional.gelu(x, approximate="tanh")

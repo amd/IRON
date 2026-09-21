@@ -144,7 +144,6 @@ class MMPrebuilt(Operator[MMPrebuiltOverlay]):
     B = In(K, N, to=MMPrebuiltOverlay.b)
     C = Out(M, N, from_=MMPrebuiltOverlay.c)
 
-
     @property
     def name(self) -> str:
         """Artifact stem. Prefixed for the same reason as flm.GEMM's."""

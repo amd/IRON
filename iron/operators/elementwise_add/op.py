@@ -19,6 +19,4 @@ class ElementwiseAdd(BinaryElementwiseOperator[ElementwiseAddOverlay]):
     """AIE-accelerated element-wise addition"""
 
     def reference(self, a, b):
-        from iron.operators.elementwise_add.reference import reference
-
-        return reference(a, b)
+        return a + b

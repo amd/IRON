@@ -171,86 +171,40 @@ class Dequant(Operator[DequantOverlay]):
             "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.per_tile
         }
 
+    def pack(self, values, scales):
+        """Quantize ``values`` (bf16, ``size``) by ``scales`` (bf16, one per
+        ``group_size``, zero point 0) into the kernel's packed uint8 layout;
+        the inverse of :meth:`reference`. Values are rounded half to even
+        and clipped to the int4 range, as ``torch.quantize_per_channel`` does.
+        """
+        tile, group = self.ov.tile_size, self.ov.group_size
+        if tile is None:
+            raise ValueError("Dequant.pack needs tile_size (tune the overlay)")
+        n_tiles, groups = self.size // tile, tile // group
+        v = values.reshape(n_tiles, groups, group).to(torch.float32)
+        s = scales.reshape(n_tiles, groups, 1).to(torch.float32)
+        q = torch.round(v / s).clamp(0, 15).to(torch.uint8)
+        nibbles = (q[..., 0::2] | (q[..., 1::2] << 4)).reshape(n_tiles, tile // 2)
+        scale_bytes = scales.reshape(n_tiles, groups).contiguous().view(torch.uint8)
+        return torch.cat([nibbles, scale_bytes.reshape(n_tiles, -1)], dim=1).reshape(-1)
 
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
+    def reference(self, x):
+        """CPU reference: int4 values times their group's bf16 scale, in f32.
 
-
-def generate_golden_reference(input_length, tile_size, group_size):
-    torch.manual_seed(42)
-
-    if input_length % tile_size != 0:
-        raise ValueError("Input length must be a multiple of tile size.")
-    if tile_size % group_size != 0:
-        raise ValueError("Tile size must be a multiple of group size.")
-
-    num_tiles = input_length // tile_size
-    num_scale_factors = tile_size // group_size
-    scale_size = num_scale_factors * 2  # Total bytes (uint8 elements) for scale factors
-    per_tile_size = tile_size // 2
-    per_tile_bytes = (
-        scale_size + per_tile_size
-    )  # Total bytes (uint8 elements) after processing each tile
-    val_range = 3.75  # Values in [0, 3.75)
-
-    # Generate golden output with uniform distribution between 0 and val_range
-    # This output will be quantized to be used as the input
-    A = (
-        torch.rand(num_tiles * num_scale_factors, group_size, dtype=torch.bfloat16)
-        * val_range
-    )
-
-    # Generate scale factors in [0.25, 1) for each tile
-    # The quantized values will thus be within [0,15], which is the range of int4
-    # Zero points for each tile are fixed to 0 since the kernel only uses the scale factors
-    r1, r2 = 1 / val_range, 1
-    scales = r1 + (r2 - r1) * torch.rand(
-        num_tiles * num_scale_factors, dtype=torch.bfloat16
-    )
-    zero_points = torch.zeros(num_tiles * num_scale_factors, dtype=torch.bfloat16)
-
-    A = torch.quantize_per_channel(
-        A.to(torch.float32),
-        scales=scales.to(torch.float32),
-        zero_points=zero_points.to(torch.float32),
-        axis=0,
-        dtype=torch.quint8,
-    )
-    B = torch.dequantize(A)
-
-    # Convert A from a quantized tensor type to regular tensor type for data packing
-    # We do the data packing here instead of the host to show how the data would need to be
-    # manipulated from a PyTorch standpoint in order to use the dequant kernel.
-    A = A.int_repr()
-
-    # Concatenate the bottom four bits of every two elements across the tiles in A to generate
-    # an 8-bit value (little endian order). This is because there's no native 4-bit datatype in C++.
-    # At the end of each tile, concatenate the bf16 scale factor, which comes out to two int8 values.
-    A_concat = torch.zeros(num_tiles, per_tile_bytes, dtype=torch.uint8)
-    for i in range(num_tiles):
-        for j in range(num_scale_factors):
-            for k in range(group_size // 2):
-                A_concat[i, j * (group_size // 2) + k] = torch.bitwise_or(
-                    torch.bitwise_and(A[i * num_scale_factors + j, 2 * k], 0x0F),
-                    torch.bitwise_and(A[i * num_scale_factors + j, 2 * k + 1], 0x0F)
-                    * 2**4,
-                )
-        for j in range(num_scale_factors):
-            A_concat[i, per_tile_size + 2 * j] = torch.bitwise_and(
-                scales[i * num_scale_factors + j].view(torch.uint16), 0xFF
-            )
-            # Extract high byte (bits 15-8) of the bfloat16 bit pattern.
-            # View as int16 (same width), promote to int32 for bitwise_right_shift
-            # support, shift right 8, then mask to 8 bits. The & 0xFF also
-            # handles sign-extension from int32 arithmetic right shift.
-            A_concat[i, per_tile_size + 2 * j + 1] = torch.bitwise_and(
-                scales[i * num_scale_factors + j].view(torch.int16).to(torch.int32)
-                >> 8,
-                0xFF,
-            )
-
-    return {
-        "input": A_concat,
-        "output": B,
-    }
+        The packed tile is ``tile_size // 2`` bytes of nibbles (element ``2k``
+        in the low nibble of byte ``k``, ``2k + 1`` in the high) followed by
+        one little-endian bf16 scale per ``group_size`` values; the zero point
+        is 0. Results are exact in f32, as ``torch.dequantize`` gives them.
+        """
+        tile, group = self.ov.tile_size, self.ov.group_size
+        if tile is None:
+            raise ValueError("Dequant.reference needs tile_size (tune the overlay)")
+        n_tiles, groups = self.size // tile, tile // group
+        packed = x.reshape(n_tiles, tile // 2 + groups * 2)
+        nibbles = packed[:, : tile // 2].to(torch.int32)
+        q = torch.stack([nibbles & 0xF, nibbles >> 4], dim=-1).reshape(
+            n_tiles, groups, group
+        )
+        scales = packed[:, tile // 2 :].reshape(n_tiles, groups, 2).contiguous()
+        scales = scales.view(torch.bfloat16).to(torch.float32)  # (n_tiles, groups, 1)
+        return (q.to(torch.float32) * scales).reshape(self.size)

@@ -5,8 +5,7 @@
 import pytest
 
 from iron.operators.strided_copy.op import StridedCopy
-from iron.operators.strided_copy.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 # Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim) and one
 # token's keys land in slot t of every group. SEQ is 128 rather than the real 2048 to
@@ -74,17 +73,13 @@ def get_params():
 @pytest.mark.parametrize("kwargs", get_params())
 def test_strided_copy(kwargs, aie_context):
     """StridedCopy moves data and computes nothing, so the gate is exact equality."""
-    # transfer_size only sizes the ObjectFifo; it does not move the data anywhere else,
-    # so the golden is computed without it.
-    golden_kwargs = {k: v for k, v in kwargs.items() if k != "transfer_size"}
-    golden_ref = generate_golden_reference(**golden_kwargs)
-
     operator = StridedCopy(**kwargs, context=aie_context)
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
-        {"input": golden_ref["input"]},
-        {"output": golden_ref["output"]},
+        data.inputs,
+        data.outputs,
         rel_tol=0.0,
         abs_tol=0.0,
     )

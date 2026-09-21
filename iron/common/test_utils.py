@@ -46,10 +46,11 @@ def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden
 
     Each ``In`` buffer, in declaration order, is ``torch.rand`` of its declared
     shape and dtype times ``scale`` (``torch.randn`` for the names in
-    ``normal``, shifted to centre on zero for those in ``centered``), or comes
-    from ``given``: a tensor as it is, or a shape to draw in place of the
-    declared one (an operand the sequence packs, such as flm GEMM's B). The
-    outputs are ``op.reference(*inputs)`` under the declared output names.
+    ``normal``, shifted to centre on zero for those in ``centered``; an
+    integer buffer draws uniformly on ``[0, scale]``), or comes from
+    ``given``: a tensor as it is, or a shape to draw in place of the declared
+    one (an operand the sequence packs, such as flm GEMM's B). The outputs
+    are ``op.reference(*inputs)`` under the declared output names.
     """
     unknown = set(given) - {b.name for b in op.inputs}
     if unknown:
@@ -62,10 +63,16 @@ def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden
             inputs[b.name] = value
             continue
         shape = tuple(b.shape) if value is None else tuple(value)
-        draw = torch.randn if b.name in normal else torch.rand
-        t = draw(shape, dtype=torch_dtype(b.dtype)) * scale
-        if b.name in centered:
-            t = t - scale / 2
+        # A buffer whose dtype follows tuning (flm GEMM's packed B) has none
+        # until tuned; the unpacked operand a shape override asks for is bf16.
+        dtype = torch.bfloat16 if b.dtype is None else torch_dtype(b.dtype)
+        if not dtype.is_floating_point:
+            t = torch.randint(0, int(scale) + 1, shape, dtype=dtype)
+        else:
+            draw = torch.randn if b.name in normal else torch.rand
+            t = draw(shape, dtype=dtype) * scale
+            if b.name in centered:
+                t = t - scale / 2
         inputs[b.name] = t
     out = op.reference(*inputs.values())
     outs = (out,) if isinstance(out, torch.Tensor) else tuple(out)
@@ -75,6 +82,7 @@ def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden
             f"{type(op).__name__}.reference returned {len(outs)} outputs for {names}"
         )
     return Golden(inputs, dict(zip(names, outs)))
+
 
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 

@@ -21,7 +21,6 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.tiling import Access
-from iron.common.test_utils import torch_dtype_map
 
 
 @operator
@@ -42,7 +41,6 @@ class StridedCopyOverlay(Overlay):
 
     s = StreamIn(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
     d = StreamOut(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
-
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo
@@ -85,7 +83,6 @@ class StridedCopy(Operator[StridedCopyOverlay]):
     # Per-call addends on the two base addresses, patched into the descriptors.
     in_offset = Scratchpad(np.int32)
     out_offset = Scratchpad(np.int32)
-
 
     @classmethod
     def overlay_defaults(cls, kwargs):
@@ -291,39 +288,3 @@ def reference(
             )
         out[dst_c] = input_flat[src_c]
     return out
-
-
-def generate_golden_reference(
-    input_buffer_size,
-    input_sizes,
-    input_strides,
-    input_offset,
-    output_buffer_size,
-    output_sizes,
-    output_strides,
-    output_offset,
-    num_aie_channels=1,
-    input_offset_addend=0,
-    output_offset_addend=0,
-    dtype="bf16",
-    seed=42,
-):
-    torch.manual_seed(seed)
-    val_range = 4
-    input_tensor = (
-        torch.rand(int(input_buffer_size), dtype=torch_dtype_map[dtype]) * val_range
-    )
-    output_tensor = reference(
-        input_tensor,
-        input_sizes,
-        input_strides,
-        input_offset,
-        output_buffer_size,
-        output_sizes,
-        output_strides,
-        output_offset,
-        num_aie_channels=num_aie_channels,
-        input_offset_addend=input_offset_addend,
-        output_offset_addend=output_offset_addend,
-    )
-    return {"input": input_tensor, "output": output_tensor}

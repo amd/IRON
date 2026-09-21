@@ -6,8 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.transpose.op import Transpose
-from iron.operators.transpose.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -79,8 +78,6 @@ def get_params():
 )
 @pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s,num_batches", get_params())
 def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_context):
-    golden_ref = generate_golden_reference(rows=M, cols=N, num_batches=num_batches)
-
     operator = Transpose(
         M=M,
         N=N,
@@ -93,15 +90,14 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_contex
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
+    data = golden(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
         # A transpose is a permutation. Any tolerance here also accepts some class of
         # wrong permutation, so gate it exactly.
         operator,
-        input_buffers,
-        output_buffers,
+        data.inputs,
+        data.outputs,
         rel_tol=0.0,
         abs_tol=0.0,
     )

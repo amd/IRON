@@ -44,7 +44,6 @@ class RoPEOverlay(Overlay):
     lut_rows = Resident(np.int32)  # angle rows each core consumes
     rows_per_lut = Resident(np.int32)  # input rows per angle row
 
-
     def validate(self) -> None:
         if not (self.cols % 32 == 0 and self.cols >= 32):
             raise ValueError("cols must be multiple of 32 and >= 32")
@@ -118,7 +117,6 @@ class RoPE(Operator[RoPEOverlay]):
     x = In(rows, RoPEOverlay.cols, to=RoPEOverlay.x)
     angles = In(angle_rows, RoPEOverlay.cols, to=RoPEOverlay.lut)
     y = Out(rows, RoPEOverlay.cols, from_=RoPEOverlay.y)
-
 
     def validate(self) -> None:
         if self.angle_rows is None:
@@ -227,69 +225,47 @@ def compute_rope_params(
     return cos, sin
 
 
-def apply_rope(x, cos, sin, method_type=0):
-    """Apply rotary position embedding to input tensor."""
-    if method_type == 0:  # For the two-halves method used in HF transformers
-        # x: (n_heads, seq_len, head_dim)
-        n_heads, seq_len, head_dim = x.shape
-        assert head_dim % 2 == 0, "Head dimension must be even"
+LLAMA3_FREQ_CONFIG = {
+    "factor": 32.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_context_length": 8192,
+}
 
-        # Split x into first half and second half
-        x1 = x[..., : head_dim // 2]  # First half
-        x2 = x[..., head_dim // 2 :]  # Second half
 
-        # Adjust sin and cos shapes
-        cos = cos[:seq_len, :]  # Shape: (seq_len, head_dim / 2)
-        sin = sin[:seq_len, :]
-
-        # Apply the rotary transformation
-        x_rotated = torch.empty_like(x)
-        x_rotated[..., : head_dim // 2] = (x1 * cos) + (-x2 * sin)
-        x_rotated[..., head_dim // 2 :] = (x2 * cos) + (x1 * sin)
-
-        # It's ok to use lower-precision after applying cos and sin rotation
-        return x_rotated.to(dtype=x.dtype)
-    elif method_type == 1:  # For the interleaved method used in the Llama paper
-        # x: (n_heads, seq_len, head_dim)
-        n_heads, seq_len, head_dim = x.shape
-        assert head_dim % 2 == 0, "Head dimension must be even"
-
-        # Split x into even and odd columns
-        x_even = x[..., ::2]  # Even columns
-        x_odd = x[..., 1::2]  # Odd columns
-
-        # Adjust sin and cos shapes
-        cos = cos[:seq_len, :]  # Shape: (seq_len, head_dim / 2)
-        sin = sin[:seq_len, :]
-
-        # Apply the rotary transformation and interleave the even and odd outputs
-        x_rotated = torch.empty_like(x)
-        x_rotated[..., ::2] = (x_even * cos) - (x_odd * sin)
-        x_rotated[..., 1::2] = (x_even * sin) + (x_odd * cos)
-
-        # It's ok to use lower-precision after applying cos and sin rotation
-        return x_rotated.to(dtype=x.dtype)
-    else:
-        raise ValueError("Invalid method_type. Must be 0 or 1.")
+def angle_table(
+    rows, cols, method_type=0, theta_base=500000.0, freq_config=LLAMA3_FREQ_CONFIG
+):
+    """The ``angles`` buffer for ``rows`` positions: bf16 ``[cos, sin, ...]``
+    pairs along each row, the table the device kernel reads (Llama 3's
+    frequency scaling by default)."""
+    cos, sin = compute_rope_params(
+        head_dim=cols,
+        theta_base=theta_base,
+        context_length=rows,
+        method_type=method_type,
+        freq_config=freq_config,
+    )
+    table = torch.zeros((rows, cols), dtype=torch.bfloat16)
+    table[:, ::2] = cos[:, : cols // 2]
+    table[:, 1::2] = sin[:, : cols // 2]
+    return table
 
 
 def reference(x, angles, method_type=0, rows=None, cols=None):
     """CPU reference for RoPE from the operator's packed ``angles`` buffer.
 
     ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the last
-    dim (length ``cols``).  Only ``method_type == 0`` (TWO_HALVES) is supported
-    here; the golden-data generator uses :func:`apply_rope`, which additionally
-    supports the interleaved method and works from the full-precision cos/sin
-    tables.  ``angles`` may have fewer rows than ``x``; in that case each angle
-    row is repeated for ``rows / angles.shape[0]`` *consecutive* rows of ``x``,
-    matching the device kernel (design.py's ``core_body`` acquires one angle
-    row and applies it to that many consecutive input rows before moving on).
+    dim (length ``cols``), the bf16 table the device reads. ``method_type`` 0
+    rotates the two halves of a row, 1 rotates even/odd pairs (the Llama
+    paper's interleaving). ``angles`` may have fewer rows than ``x``; in that
+    case each angle row is repeated for ``rows / angles.shape[0]``
+    *consecutive* rows of ``x``, matching the device kernel (design.py's
+    ``core_body`` acquires one angle row and applies it to that many
+    consecutive input rows before moving on).
     """
-    if method_type != 0:
-        raise NotImplementedError(
-            f"RoPE reference only supports method_type=0 (TWO_HALVES), "
-            f"got {method_type}"
-        )
+    if method_type not in (0, 1):
+        raise ValueError(f"method_type must be 0 or 1, got {method_type}")
     if cols is None:
         cols = x.shape[-1]
     if rows is None:
@@ -306,62 +282,14 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
             cos = cos[:rows]
             sin = sin[:rows]
     x32 = x.to(torch.float32)
-    x1, x2 = x32[..., :half], x32[..., half:]
+    if method_type == 1:
+        x1, x2 = x32[..., 0::2], x32[..., 1::2]
+    else:
+        x1, x2 = x32[..., :half], x32[..., half:]
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
-    return torch.cat([y1, y2], dim=-1).to(torch.bfloat16)
-
-
-def generate_golden_reference(
-    rows=4096,
-    cols=64,
-    context_len=131072,
-    method_type=0,
-    rope_theta_base=500000.0,
-    rope_freq_factor=32.0,
-    rope_freq_low_factor=1.0,
-    rope_freq_high_factor=4.0,
-    rope_freq_orig_ctx_len=8192,
-    seed=42,
-):
-    torch.manual_seed(seed)
-
-    # Generate golden inputs
-    freq_config = {
-        "factor": rope_freq_factor,
-        "low_freq_factor": rope_freq_low_factor,
-        "high_freq_factor": rope_freq_high_factor,
-        "original_context_length": rope_freq_orig_ctx_len,
-    }
-    cos, sin = compute_rope_params(
-        head_dim=cols,
-        theta_base=rope_theta_base,
-        context_length=context_len,
-        method_type=method_type,
-        freq_config=freq_config,
-    )
-    val_range = 4
-    # Head count is inferred from rows and context_len. This logic assumes rows is either
-    # smaller than context_len (1 head, seq_len == rows) or an exact multiple of context_len
-    # (n_heads == rows // context_len).
-    if context_len < rows and rows % context_len != 0:
-        raise ValueError(
-            f"rows ({rows}) must be a multiple of context_len ({context_len}) when rows > context_len"
-        )
-    n_heads = rows // context_len if context_len < rows else 1
-    seq_len = rows // n_heads
-    A = torch.rand(n_heads, seq_len, cols, dtype=torch.bfloat16) * val_range
-
-    # Create the lut by interleaving cos and sin
-    B = torch.zeros((seq_len, cols), dtype=torch.bfloat16)
-    B[:, ::2] = cos[:seq_len, : cols // 2]
-    B[:, 1::2] = sin[:seq_len, : cols // 2]
-
-    # Generate golden outputs
-    C = apply_rope(A, cos, sin, method_type)
-
-    return {
-        "A": A,
-        "B": B,
-        "C": C,
-    }
+    if method_type == 1:
+        y = torch.stack([y1, y2], dim=-1).reshape(x.shape)
+    else:
+        y = torch.cat([y1, y2], dim=-1)
+    return y.to(torch.bfloat16)

@@ -22,7 +22,6 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.device_utils import lut_sources
-from iron.common.test_utils import torch_dtype_map
 
 
 @operator
@@ -217,7 +216,6 @@ class Softmax(Operator[SoftmaxOverlay]):
         return reference(x.reshape(self.rows, self.cols), int(vector_size))
 
 
-
 @operator
 class DynamicSoftmax(Softmax, Operator[DynamicSoftmaxOverlay]):
     """Softmax whose valid row length is a per-call value: ``Softmax(x,
@@ -225,6 +223,7 @@ class DynamicSoftmax(Softmax, Operator[DynamicSoftmaxOverlay]):
 
     x = In(Softmax.rows, SoftmaxOverlay.cols, to=SoftmaxOverlay.x)
     y = Out(Softmax.rows, SoftmaxOverlay.cols, from_=SoftmaxOverlay.y)
+
 
 # --------------------------------------------------------------------------
 # The CPU reference this operator is checked against.
@@ -243,17 +242,3 @@ def reference(x, vector_size=None):
         x = x.clone()
         x[..., vector_size:] = torch.finfo(x.dtype).min
     return torch.softmax(x, dim=-1)
-
-
-def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
-    """
-    Generate golden reference data for softmax.
-
-    Returns:
-        dict: Dictionary with tensors for inputs and outputs
-    """
-    torch.manual_seed(seed)
-    val_range = 4
-    input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    output_tensor = reference(input_tensor)
-    return {"input": input_tensor, "output": output_tensor}

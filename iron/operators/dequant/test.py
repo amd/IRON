@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch
 import aie.utils as aie_utils
 
 from iron.operators.dequant.op import Dequant
-from iron.operators.dequant.op import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import golden, run_test
 
 
 def get_params():
@@ -56,12 +56,6 @@ def get_params():
 def test_dequant(
     input_length, num_aie_columns, num_channels, tile_size, group_size, aie_context
 ):
-    golden_ref = generate_golden_reference(
-        input_length=input_length,
-        tile_size=tile_size,
-        group_size=group_size,
-    )
-
     operator = Dequant(
         size=input_length,
         num_aie_columns=num_aie_columns,
@@ -71,13 +65,17 @@ def test_dequant(
         context=aie_context,
     )
 
-    input_buffers = {
-        "input": golden_ref["input"].flatten(),
-    }
-    output_buffers = {"output": golden_ref["output"].flatten()}
+    # Values in [0, 3.75) with scales in [1/3.75, 1) keep every quantized
+    # value inside int4's [0, 15].
+    torch.manual_seed(42)
+    values = torch.rand(input_length, dtype=torch.bfloat16) * 3.75
+    scales = 1 / 3.75 + (1 - 1 / 3.75) * torch.rand(
+        input_length // group_size, dtype=torch.bfloat16
+    )
+    data = golden(operator, x=operator.pack(values, scales))
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.01, abs_tol=1e-6
+        operator, data.inputs, data.outputs, rel_tol=0.01, abs_tol=1e-6
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

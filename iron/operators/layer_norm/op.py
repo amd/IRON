@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import ClassVar
+
+import torch
 from dataclasses import field
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
@@ -23,4 +25,12 @@ class LayerNorm(ChanneledUnaryOperator[LayerNormOverlay]):
     # Hardware trace buffer size; 0 disables tracing.
     trace_size: int = field(default=0, repr=False, kw_only=True)
 
-    pass
+    def reference(self, x):
+        """CPU reference: each ``tile_size`` row normalised on its own, no affine."""
+        cols = self.ov.tile_size
+        if cols is None:
+            raise ValueError("LayerNorm.reference needs tile_size (tune the overlay)")
+        y = torch.nn.functional.layer_norm(
+            x.reshape(-1, cols), normalized_shape=(cols,)
+        )
+        return y.reshape(x.shape)
