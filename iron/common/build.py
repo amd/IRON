@@ -465,6 +465,15 @@ def mlir_artifact_for(
     return PythonGeneratedMLIRArtifact(
         filename or f"{op.name}.mlir",
         DesignGenerator(
-            fn=build_design, bind_from=op, kwargs={"op": op, "code": _design_code(op)}
+            fn=build_design,
+            kwargs={
+                "op": op,
+                "code": _design_code(op),
+                # Spelled here, not bound by name from the operator: the
+                # device reaches the cache key by identity, the kernel tree
+                # by path (pointing IRON at another tree changes the key).
+                "dev": op.dev,
+                "kernels_dir": op.kernels_dir,
+            },
         ),
     )

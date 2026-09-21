@@ -47,60 +47,16 @@ class AIEOperatorBase(ABC):
         """
         pass
 
-    def bind(self, fn: Callable, skip: Any = ()) -> dict[str, Any]:
-        """Collect ``fn``'s parameters from this operator's own attributes.
-
-        ``skip`` names parameters the caller supplies itself; they are neither
-        bound nor reported missing, so an explicit value can stand in for an
-        attribute the operator does not have.
-
-        Matching is by name and nothing else: a parameter is filled from the
-        attribute of the same name, whether that is a dataclass field or a
-        property. A parameter with no matching attribute and no default is an
-        error *here*, naming both sides -- rather than a TypeError from deep
-        inside a design, or worse, a silently defaulted value.
-
-        This replaces the hand-written kwargs dict each operator used to keep,
-        which restated every field's name a second time and drifted from the
-        signature it was feeding with nothing to catch it.
-        """
-        bound = {}
-        missing = []
-        for name, parameter in inspect.signature(fn).parameters.items():
-            if parameter.kind in (
-                inspect.Parameter.VAR_POSITIONAL,
-                inspect.Parameter.VAR_KEYWORD,
-            ):
-                continue
-            if name in skip:
-                continue
-            if hasattr(self, name):
-                bound[name] = getattr(self, name)
-            elif parameter.default is inspect.Parameter.empty:
-                missing.append(name)
-        if missing:
-            raise TypeError(
-                f"{type(self).__name__} cannot supply {sorted(missing)} to "
-                f"{getattr(fn, '__qualname__', fn)}: no attribute of that name. "
-                f"Rename the parameter to match a field, or give it a default."
-            )
-        return bound
-
     def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        """Return this operator's runtime argument specification.
+        """This operator's runtime arguments: direction, shape and dtype each.
 
-        Derived from the ``arg_spec`` shape function the operator declares,
-        with its parameters bound from the operator's own fields. Operators
-        whose spec is not a pure function of their fields override this
-        instead.
+        A declared operator (:mod:`iron.common.declare`) serves it from its
+        ``In``/``Out``/``InOut`` members; anything else overrides.
         """
-        arg_spec = getattr(type(self), "arg_spec", None)
-        if arg_spec is None:
-            raise NotImplementedError(
-                f"{type(self).__name__} declares neither an arg_spec() shape "
-                f"function nor a get_arg_spec() override."
-            )
-        return arg_spec(**self.bind(arg_spec))
+        raise NotImplementedError(
+            f"{type(self).__name__} declares no buffers and does not override "
+            f"get_arg_spec()."
+        )
 
     @abstractmethod
     def get_callable(self) -> Callable[..., Any]:
@@ -333,30 +289,3 @@ class AIERuntimeArgSpec:
     def nbytes(self) -> int:
         """Size of this argument in bytes."""
         return int(np.prod(self.shape) * np.dtype(self.dtype).itemsize)
-
-
-def same_shape_unary(size, dtype=bfloat16):
-    """One input and one output of identical shape.
-
-    Shared by every elementwise activation and by the operators that move or
-    relayout a buffer without resizing it. Those two groups have nothing in
-    common in their *designs* -- a ReLU and a transpose generate very different
-    MLIR -- which is exactly why this is a function rather than a base class:
-    an operator can reuse the shape rule without inheriting a design it does
-    not want.
-    """
-    shape = (size,) if isinstance(size, int) else tuple(size)
-    return [
-        AIERuntimeArgSpec("in", shape, dtype=dtype),
-        AIERuntimeArgSpec("out", shape, dtype=dtype),
-    ]
-
-
-def same_shape_binary(size, dtype=bfloat16):
-    """Two inputs and one output, all of identical shape."""
-    shape = (size,) if isinstance(size, int) else tuple(size)
-    return [
-        AIERuntimeArgSpec("in", shape, dtype=dtype),
-        AIERuntimeArgSpec("in", shape, dtype=dtype),
-        AIERuntimeArgSpec("out", shape, dtype=dtype),
-    ]

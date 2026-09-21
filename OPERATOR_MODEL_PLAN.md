@@ -856,6 +856,8 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | mha (§14 step 3, part) | `iron/operators/mha/op.py` | eight-pipeline sequence checked transfer by transfer (two shims, K/V per head, waited drains); inference from shapes | **needs a run**; Q/O descriptors are now linear runs rather than `(rows, d)` tiles, same bytes in the same order |
 | flm/gemm (§14 step 3, part) | `iron/operators/flm/gemm/op.py`, `design.py` (constants only) | legacy defaults reproduced (tile_n by K, m_chunk fallback), config/name stems unchanged, B's packed spec, residents, unsplit and split sequences transfer by transfer | **needs a run**: the two-compile `link_xclbin` now builds the configuration module from a copy at the reference shape; `dev.arch`/target-model calls are faked here |
 | mem_copy (§14 step 3, part) | `iron/operators/mem_copy/op.py` | whole, partial and tiny sizes: elements filled equal elements drained, padding groups awaited | **needs a run**: idle-fifo placement moved from the design into `build_design` (`RuntimeEndpoint(AnyShimTile)`) |
+| swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
+| step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
@@ -882,13 +884,22 @@ and `iron.common.foreign` emitting the raw-dialect sequence the old
 queue bound comes from the stream's `depth`. The C12 read-back against
 `input_with_addresses.mlir` is not done: a downloaded xclbin has no such
 file, so the check is structural (every stream pinned, every resident
-addressed) at class creation. Remaining in step 3: swiglu_prefill_stream
-(`from_spec`) and the two swiglu composites as graph functions (which wait
-on step 6). The snapshot
+addressed) at class creation. swiglu_prefill_stream's group is
+`Operator.from_spec`: a class built at run time from the exported shapes,
+with the group digest as its sharing key and the stream-dse loader as its
+artifact; the `OperatorSequence` composite around it stays until step 6.
+
+Step 4 is done except for two spellings step 7 still consumes:
+strided_copy's `*_offset_parameter` fields and softmax's
+`vector_size_parameter` (llama names its scratchpad symbols with them).
+They go with the llama rewrite. The snapshot test is gone with its
+purpose; the shape regression net is now the per-operator device-free
+tests in `iron/tests/common`, which pin shapes, tuning, residents and
+transfers rather than a recorded table. Remaining in step 3: the two
+swiglu composites as graph functions (which wait on step 6). The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
-WeightedRMSNorm added to the case matrix. `arg_spec`, `bind()` and the
-snapshot are still in the tree and still consumed by the unconverted
-operators; the converted ones serve `get_arg_spec()` from their buffers.
+WeightedRMSNorm added to the case matrix. Every operator now serves
+`get_arg_spec()` from its declared buffers.
 
 Two findings while building, both now stated in the code:
 

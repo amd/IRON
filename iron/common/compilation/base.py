@@ -69,7 +69,6 @@ class DesignGenerator:
     fn_name: str | None = None
     args: tuple = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
-    bind_from: Any = None
     fn: Callable | None = None
 
     @property
@@ -106,15 +105,7 @@ class DesignGenerator:
             spec.loader.exec_module(module)
             fn = getattr(module, self.fn_name)
 
-        kwargs = self.kwargs
-        if self.bind_from is not None:
-            # Bind here rather than at construction: the design module is
-            # imported lazily (it pulls in the MLIR dialects), and reading its
-            # signature any earlier would defeat that. Explicit kwargs win, so
-            # an operator can still override or pass something it does not
-            # store as an attribute -- the fusion pass sets func_prefix that way.
-            kwargs = {**self.bind_from.bind(fn, skip=self.kwargs), **self.kwargs}
-        return fn, self.args, kwargs
+        return fn, self.args, self.kwargs
 
     def __call__(self) -> str:
         fn, args, kwargs = self.resolve()

@@ -449,3 +449,34 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
     assert Group.infer((64, 128), (128, 256)) == {}
     with pytest.raises(ValueError):
         Group.infer((64, 128), (128, 512))
+
+
+# --------------------------------------------------------------------------
+# Two behaviours the old shape functions existed to express, now declared
+# --------------------------------------------------------------------------
+
+
+def test_gemm_layout_flags_transpose_rather_than_resize():
+    from iron.operators.gemm.op import GEMM, GEMMOverlay
+
+    plain = GEMM(GEMMOverlay(), M=256, K=64, N=512).get_arg_spec()
+    b_major = GEMM(GEMMOverlay(b_col_maj=True), M=256, K=64, N=512).get_arg_spec()
+    c_major = GEMM(GEMMOverlay(c_col_maj=True), M=256, K=64, N=512).get_arg_spec()
+    assert plain[1].shape == (64, 512) and b_major[1].shape == (512, 64)
+    assert plain[2].shape == (256, 512) and c_major[2].shape == (512, 256)
+    # Transposing a layout must not change how many bytes move.
+    assert plain[1].nbytes() == b_major[1].nbytes()
+    assert plain[2].nbytes() == c_major[2].nbytes()
+
+
+def test_mha_pads_the_sequence_and_groups_kv():
+    from iron.operators.mha.op import MHA, MHAOverlay
+
+    grouped = MHA(MHAOverlay(), num_heads=8, seq_len=100, num_KV_heads=2).get_arg_spec()
+    plain = MHA(MHAOverlay(), num_heads=8, seq_len=100).get_arg_spec()
+    # 100 rounds up to 128, so Q is 8 heads x 128 x 64.
+    assert grouped[0].shape == (8, 128, 64)
+    # Grouped K/V are narrower than Q; plain K/V are exactly as wide.
+    assert grouped[1].shape == (2, 128, 64)
+    assert plain[1].shape == plain[0].shape
+    assert [spec.direction for spec in grouped] == ["in", "in", "in", "out"]
