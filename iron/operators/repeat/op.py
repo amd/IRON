@@ -72,6 +72,10 @@ class Repeat(Operator[RepeatOverlay]):
 
     _name_aliases: ClassVar[Dict[str, str]] = {"repeat": "by"}
 
+    @property
+    def dtype(self):
+        return self.ov.dtype
+
     def validate(self) -> None:
         expected = self.rows * self.repeat
         if self.out_rows is None:
