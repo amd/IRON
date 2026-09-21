@@ -133,10 +133,11 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 All available operators can be found in `iron/operators`. These each contain:
 
-- `op.py`: The Python operator interface -- an easy access point to integrate operators into your project that prescribes how to compile the operator (build artifacts) and how to call it at runtime (buffer sizes, etc.)
-- `design.py`: The implementation of the operator's NPU code. Often references a C++ compute kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) for the compute core code and describes the data movement using ObjectFIFOs.
+- `op.py`: The operator, declared as two classes (see `iron/common/declare.py` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
 - `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
 - `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
+
+Operators compose into graph functions: a Python function called on handles, traced once for its shapes, compiled to one image and called per token (`iron.graph`, see `iron/common/graph.py`; `iron/applications/llama_3.2_1b/decode_graph.py` is the worked example).
 
 > NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`
@@ -194,16 +195,16 @@ See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/
 IRON uses a three-layer architecture:
 
 1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator has: `op.py` (interface), `design.py` (MLIR-AIE implementation), `reference.py` (CPU reference), `test.py` (validation)
+   - Each operator has: `op.py` (the declared overlay and operator, with the array's design), `reference.py` (CPU reference), `test.py` (validation)
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): Low-level C++ compute kernels
    - Organized by architecture: `generic/`, `aie2/`, `aie2p/`
    - Vectorized using AIE API for optimal performance
 
 3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
+   - The declaration layer (`declare.py`), the derived runtime sequence (`build.py`, `tiling.py`) and graph functions (`graph.py`, `packaging.py`)
    - MLIR-AIE compilation pipeline
    - XRT runtime integration
-   - Operator fusion framework
 
 ## Performance
 

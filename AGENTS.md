@@ -124,8 +124,18 @@ reuse lint
 
 1. **Operators** (`iron/operators/`)
    - Each operator directory contains:
-     - `op.py`: Python interface (inherits from `MLIROperator`) - defines operator parameters, compilation artifacts, and runtime argument specs
-     - `design.py`: NPU implementation using MLIR-AIE Python API - defines ObjectFIFOs, Workers, and Runtime sequences
+     - `op.py`: the operator, declared as two classes (`iron/common/declare.py`,
+       `OPERATOR_MODEL_PLAN.md`). The **overlay** (`XOverlay(Overlay)`) is the
+       array configuration: `tunable()` fields filled by `tuning(dev)` from the
+       device alone, `StreamIn`/`StreamOut` members in tile units, `Resident`
+       values the cores read (trip counts), and `design(target)`, which builds
+       ObjectFIFOs and Workers and binds each stream to a fifo's shim end. The
+       **operator** (`X(Operator[XOverlay])`) is the host side: `dim()` fields,
+       `In`/`Out` buffers declared by shape against the overlay's streams,
+       `residents()` from the extents, and optionally `design(rt)` when the
+       runtime sequence is not the derived one. Foreign overlays (a downloaded
+       xclbin) declare an `Xclbin` attribute and pinned streams instead of
+       `design()`.
      - `reference.py`: CPU reference implementation for validation
      - `test.py`: End-to-end test (build, run, verify against reference)
 
@@ -139,9 +149,16 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`, `CompositeOperator`)
+   - `declare.py`: the declaration layer (`Overlay`, `Operator`, `@operator`,
+     `dim`/`tunable`, streams, buffers, `Scratchpad`/`DispatchTime`, `Resident`,
+     `Xclbin`, inference)
+   - `build.py`, `tiling.py`, `foreign.py`: the library-owned build: the
+     derived runtime sequence, legal DMA descriptors, the foreign-overlay path
+   - `graph.py`, `packaging.py`: graph functions (`iron.graph`, `iron.state`)
+     and `compile(dev, boundaries=, image=)`
+   - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`)
    - `compilation/`: Compilation artifact system (MLIR → xclbin)
-   - `fusion.py`: Operator sequencing framework (`OperatorSequence`)
+   - `sequence.py`: the image builder a graph lowers onto (`OperatorSequence`)
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
@@ -166,19 +183,27 @@ reuse lint
 - Used to parallelize work across multiple columns
 - Format: `(tensor_shape, offset, dimensions, strides)`
 
-**Runtime Sequence**: Host-side control flow
+**Runtime Sequence**: Host-side control flow. The library derives it from
+the operator's declaration (each buffer split over its stream's slots); an
+operator that needs a different order overrides `design(rt)`:
 
-- `rt.fill()`: DMA data from host → NPU (shim → L2/L1)
-- `rt.drain()`: DMA data from NPU → host
-- `rt.start()`: Launch workers
-- `rt.task_group()`: Coordinate parallel DMA operations
+- `rt.fill(slot, view)`: DMA data from host → NPU (shim → L2/L1)
+- `rt.drain(slot, view)`: DMA data from NPU → host
+- `rt.group()`: Coordinate parallel DMA operations
+- views are slices of the declared buffers (`self.A[:, r0:r1, :]`) or
+  explicit `Access` descriptors; `tiling.legalize` makes them legal
+
+**Per-call values**: `Scratchpad(T)` members are patched into descriptors
+or read by cores without a rebuild; `DispatchTime(T)` regenerates the
+sequence per call (xclbin only). A graph binds them to keyword-only
+parameters.
 
 **Compilation Flow**:
 
 ```text
-design.py (Python MLIR-AIE API)
+op.py (XOverlay.design + X.design or the derived sequence)
     ↓
-PythonGeneratedMLIRArtifact
+iron.common.build.build_design (library-owned Runtime/Program)
     ↓
 MLIR (.mlir file)
     ↓ (aie-opt + aie-translate via Peano toolchain)
@@ -241,16 +266,22 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 ## Adding a New Operator
 
 1. Create directory in `iron/operators/<operator_name>/`
-2. Implement `op.py`:
-   - Subclass `MLIROperator`
-   - Implement `get_operator_name()`, `get_mlir_artifact()`, `get_kernel_artifacts()`, `get_arg_spec()`
-   - Add validation for dimension constraints (assert statements)
-   - Define tile sizes and column counts
-3. Implement `design.py`:
-   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo, Kernel)
-   - Define function that builds MLIR-AIE design
-   - Use `range_()` for loops (not Python `range`)
-   - Handle device-specific logic (NPU1 vs NPU2) if needed
+2. Declare the overlay in `op.py` (`@operator class XOverlay(Overlay)`):
+   - `tunable()` fields with device defaults in `tuning(dev)`; `dim()` fields
+     only for what a host shape names
+   - `StreamIn`/`StreamOut` members in tile units (`per=` a column count)
+   - a `Resident` for every trip count the core reads, so the array never
+     depends on the extent
+   - `design(target)`: build ObjectFIFOs and Workers (`target.kernel(...)`,
+     `target.rtp(...)`, `target.barrier()`), `range_()` for loops, and
+     `self.x[i].bind(fifo.prod())` / `self.count.bind(rtps)` for every member
+3. Declare the operator (`@operator class X(Operator[XOverlay])`):
+   - `dim()` fields; `In`/`Out` buffers with `to=`/`from_=` naming the stream
+   - `compatible()` for divisibility against the tuned overlay, `residents()`
+     for the counts
+   - `design(rt)` only if the derived sequence is not the one you want
+   - see `iron/common/operator_bases.py` for the elementwise families, and
+     `gemm/op.py` or `mha/op.py` for hand-written sequences
 4. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
    and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
@@ -263,43 +294,37 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - Use `verify_buffer()` from `iron.common.test_utils`
 7. Register operator in `iron/operators/__init__.py`
 
-## Operator Sequences
+## Graph Functions
 
-IRON supports chaining multiple operators into a single ELF file, so they run
-back-to-back within a single dispatch. This is *temporal* sequencing (distinct
-kernels executed one after another, with the NPU command processor
-reconfiguring the array between steps) rather than *operator fusion* (a single
-kernel computing multiple operations at once). This works only with the "full
-ELF" flow, which uses ELF files at runtime. The ELF files take the place of
-`xclbin`s:
+Operators compose into a graph function: a Python function called on
+handles, traced once for its shapes, compiled to one image and called per
+token. Inputs are its positional parameters, outputs its return values,
+weights whatever tensors it closes over, `iron.state(...)` device-resident
+state it closes over, and keyword-only parameters annotated
+`Scratchpad[T]` per-call values:
 
 ```python
-from iron.common.sequence import OperatorSequence
+import iron
+from iron.common.declare import Scratchpad
 
-# Define individual operators
-gemm1 = AIEGEMM(...)
-relu = AIERELU(...)
-gemm2 = AIEGEMM(...)
+kv = iron.state((n_kv_groups, max_len * head_dim))
 
-# Create an operator sequence with a runlist
-# Intermediate buffers are automatically managed
-seq_op = OperatorSequence(
-    name="gemm_relu_gemm_seq",
-    runlist=[
-        (gemm1, "in", "temp1"),      # (operator, input_buffers, output_buffers)
-        (relu, "temp1", "temp2"),
-        (gemm2, "temp2", "out"),
-    ],
-    input_args={"in": size_in},
-    output_args={"out": size_out},
-    context=ctx
-)
+@iron.graph(names_from=model)
+def decode(x, angles, *, pos: Scratchpad[np.int32]):
+    h = RMSNorm(x, model.norm.weight)             # a bare tensor is a weight
+    k = RoPE(GEMV(model.wk, h), angles)          # class calls infer overlay and extent
+    StridedCopy(k, kv, out_offset=pos, ...)      # a state passed as an output is written
+    return GEMV(model.wo, h)
+
+net = decode.compile(dev, x=(1, emb), angles=(1, head_dim))
+logits = net(x_tok, ang_tok, pos=n * head_dim)
 ```
 
-Benefits of operator sequences:
-
-- Reduces host ↔ NPU data transfers
-- Runs a chain of operators using a single host-side dispatch (one CPU/host interrupt for the whole sequence vs. one interrupt per operator otherwise)
+Overlays with equal `design_key()` are one array; operators with equal keys
+are one build. `compile(dev, boundaries=, image=)` derives the image (a
+fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
+`verbose=True` prints why. `iron/applications/llama_3.2_1b/decode_graph.py`
+is the worked example; `iron/tests/common/graph.py` traces it device-free.
 
 ## Common Patterns
 
