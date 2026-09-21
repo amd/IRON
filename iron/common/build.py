@@ -150,15 +150,21 @@ class Sequence:
 
     # -- transfers ---------------------------------------------------------
 
-    def fill(self, stream, source, *, group=None, wait: bool = False):
-        return self._transfer("fill", stream, source, group, wait)
+    def fill(self, stream, source, *, group=None, wait: bool = False, offset_by=None):
+        return self._transfer("fill", stream, source, group, wait, offset_by)
 
-    def drain(self, stream, dest, *, group=None, wait: bool = True):
-        return self._transfer("drain", stream, dest, group, wait)
+    def drain(self, stream, dest, *, group=None, wait: bool = True, offset_by=None):
+        return self._transfer("drain", stream, dest, group, wait, offset_by)
 
-    def _transfer(self, verb: str, stream, what, group, wait: bool):
+    def _transfer(self, verb: str, stream, what, group, wait: bool, offset_by=None):
         handle = self._handle(stream)
-        buffer, accesses, offset_by = self._resolve(what)
+        buffer, accesses, sliced_by = self._resolve(what)
+        offset_by = offset_by or sliced_by
+        if offset_by is not None and offset_by.param is None:
+            raise ValueError(
+                f"{offset_by.name} has no device parameter: the operator does not use "
+                f"it (uses_value) or the build has not created it yet"
+            )
         data = self._rt_data[buffer.name]
         offset_parameter = offset_by.param if offset_by is not None else None
         tasks = []

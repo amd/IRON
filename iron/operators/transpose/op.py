@@ -1,294 +1,231 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
-from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
-import aie.utils as aie_utils
-from iron.common import (
-    MLIROperator,
-    same_shape_unary,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-from ml_dtypes import bfloat16
 import numpy as np
-from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
-from iron.operators._kernels import declare_kernel
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.iron.controlflow import range_
 import torch
+from ml_dtypes import bfloat16
+
+from iron.common.declare import (
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    optional,
+    tunable,
+)
+from iron.common.tiling import Access
 from iron.common.test_utils import torch_dtype_map
 
 
-@dataclass
-class Transpose(MLIROperator):
-    """AIE-accelerated transpose operator.
+@operator
+class TransposeOverlay(Overlay):
+    """The array for a shuffle transpose: one core per (column, channel).
 
-    ``num_batches`` > 1 performs that many independent (M,N)->(N,M) transposes on
-    contiguous matrices laid back-to-back in memory (results concatenated), mirroring
-    GEMV's batching — the per-batch tile work rides the same ObjectFifos, so B batched
-    transposes cost ONE dispatch instead of B unrolled ones.
+    The memtile partially transposes each m x n tile on the way in so a core
+    only transposes s x s sub-tiles. The three trip counts (batches, tiles
+    per column, tiles per channel) are residents the sequence writes.
     """
 
-    M: int
-    N: int
-    num_aie_columns: int
-    num_channels: int
-    m: int
-    n: int
-    s: int
-    num_batches: int = 1
-    context: object = field(default=None, repr=False)
+    m: int = tunable()
+    n: int = tunable()
+    s: int = tunable()
+    num_aie_columns: int = tunable()
+    num_channels: int = tunable()
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
-        "num_batches": "batch",
-    }
+    x = StreamIn(m, n, per=(num_aie_columns, num_channels))
+    y = StreamOut(m, n, per=(num_aie_columns, num_channels))
+    batches = Resident(np.int32)
+    col_tiles = Resident(np.int32)
+    chan_tiles = Resident(np.int32)
 
-    def __post_init__(self):
-        if self.M % self.m != 0:
-            raise ValueError(f"Matrix rows ({self.M}) must be a multiple of {self.m}")
-        if self.N % self.n != 0:
-            raise ValueError(
-                f"Matrix columns ({self.N}) must be a multiple of {self.n}"
-            )
+    def validate(self) -> None:
         if self.m % self.s != 0:
             raise ValueError(f"AIE tile rows ({self.m}) must be a multiple of {self.s}")
         if self.n % self.s != 0:
             raise ValueError(
                 f"AIE tile columns ({self.n}) must be a multiple of {self.s}"
             )
-        if (
-            self.M
-            * self.N
-            % (self.m * self.n * self.num_aie_columns * self.num_channels)
-            != 0
-        ):
+        if self.m * self.n > 8192:
             raise ValueError(
+                f"Kernel tile size {self.m * self.n} needs to be below 8192 to fit within data memory."
+            )
+        if self.s == 4 and (self.m <= 4 or self.n <= 4):
+            raise ValueError(
+                f"Kernel tile {self.s} needs AIE tile rows > 4 and columns > 4."
+            )
+        if self.s == 8 and (self.m <= 16 or self.n <= 16):
+            raise ValueError(
+                f"Kernel tile {self.s} needs AIE tile rows > 16 and columns > 16."
+            )
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
+
+        m, n, s = self.m, self.n, self.s
+        cols, chans = self.num_aie_columns, self.num_channels
+        n_cores = cols * chans
+        tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
+        depth = 1 if m * n > 4096 else 2
+        # The memtile reshuffle: sizes/strides only, so it is extent-free.
+        l2l1 = [m // s, s, n // s, s], [s, m, s * m, 1]
+
+        kernel = target.kernel(
+            f"transpose_{s}x{s}",
+            [tile_ty, tile_ty],
+            source=target.kernels_dir / "generic" / "transpose.cc",
+            compile_flags=[f"-DDIM_m={m}", f"-DDIM_n={n}"],
+        )
+        of_l3l2 = [
+            ObjectFifo(tile_ty, name=f"of_in1s_L3L2_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_l2l1 = [
+            of_l3l2[k]
+            .cons(dims_from_stream=_transformation_dims(*l2l1))
+            .forward(
+                obj_type=tile_ty,
+                name=f"of_in1s_L2L1_{k // chans}_{k % chans}",
+                depth=depth,
+            )
+            for k in range(n_cores)
+        ]
+        of_outs = [
+            ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        i32x3 = np.ndarray[(3,), np.dtype[np.int32]]
+        counts = [target.rtp(i32x3, name=f"counts_{k}") for k in range(n_cores)]
+        barriers = [target.barrier() for _ in range(n_cores)]
+
+        def core_body(of_in, of_out, transpose, counts, barrier):
+            barrier.wait_for_value(1)
+            batches = counts[0]
+            col_tiles = counts[1]
+            chan_tiles = counts[2]
+            # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
+            for _ in range_(batches):
+                for _ in range_(col_tiles):
+                    for _ in range_(chan_tiles):
+                        elem_in = of_in.acquire(1)
+                        elem_out = of_out.acquire(1)
+                        transpose(elem_in, elem_out)
+                        of_out.release(1)
+                        of_in.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [of_l2l1[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
+            )
+            for k in range(n_cores)
+        ]
+        for k in range(n_cores):
+            self.x[k].bind(of_l3l2[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        self.batches.bind(counts, 0)
+        self.col_tiles.bind(counts, 1)
+        self.chan_tiles.bind(counts, 2)
+        return workers
+
+
+def _transformation_dims(sizes, strides):
+    """What ``TensorAccessPattern.transformation_dims`` returns for these sizes/strides."""
+    from aie.helpers.taplib.tap import TensorAccessPattern
+
+    return TensorAccessPattern((1, 1), 0, sizes, strides).transformation_dims
+
+
+@operator
+class Transpose(Operator[TransposeOverlay]):
+    """AIE-accelerated transpose operator.
+
+    ``num_batches`` > 1 performs that many independent (M,N)->(N,M) transposes on
+    contiguous matrices laid back-to-back in memory (results concatenated),
+    mirroring GEMV's batching: the per-batch tile work rides the same
+    ObjectFifos, so B batched transposes cost ONE dispatch instead of B.
+    """
+
+    M: int = dim()
+    N: int = dim()
+    num_batches: int = dim(1)
+
+    x = In(optional(num_batches), M, N, to=TransposeOverlay.x)
+    y = Out(optional(num_batches), N, M, from_=TransposeOverlay.y)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {"num_batches": "batch"}
+
+    def compatible(self) -> None:
+        ov = self.ov
+        if self.M % ov.m != 0:
+            raise Incompatible(f"Matrix rows ({self.M}) must be a multiple of {ov.m}")
+        if self.N % ov.n != 0:
+            raise Incompatible(
+                f"Matrix columns ({self.N}) must be a multiple of {ov.n}"
+            )
+        if self.M * self.N % (ov.m * ov.n * ov.num_aie_columns * ov.num_channels) != 0:
+            raise Incompatible(
                 "Transfer size must be divisible by m*n*num_columns*num_channels"
             )
-        MLIROperator.__init__(self, context=self.context)
+        if (self.M // ov.num_channels) % ov.m or (self.N // ov.num_aie_columns) % ov.n:
+            raise Incompatible(
+                f"each channel's {self.M // ov.num_channels} rows and each column's "
+                f"{self.N // ov.num_aie_columns} columns must be whole tiles ({ov.m} x {ov.n})"
+            )
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(fn=shuffle_transpose, bind_from=self),
-        )
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        return {
+            "batches": self.num_batches,
+            "col_tiles": self.N // ov.n // ov.num_aie_columns,
+            "chan_tiles": self.M // ov.m // ov.num_channels,
+        }
 
-    @staticmethod
-    def arg_spec(M, N, num_batches=1):
-        # A transpose relayouts a flat buffer; M*N == N*M, so both sides carry
-        # the same shape and only the interpretation of it changes.
-        batch_dim = (num_batches,) if num_batches > 1 else ()
-        return same_shape_unary(batch_dim + (M * N,))
+    def design(self, rt):
+        """One task group per batch (a parallel fill+drain over all cores), so the
+        contiguous matrices stream through the same fifos in sequence."""
+        ov = self.ov
+        M, N, nb = self.M, self.N, self.num_batches
+        m, n, cols, chans = ov.m, ov.n, ov.num_aie_columns, ov.num_channels
+        elems = M * N
+        for batch in range(nb):
+            with rt.group() as tg:
+                for i in range(cols):
+                    for j in range(chans):
+                        k = i * chans + j
+                        # Partially transposes the input on the way in so the
+                        # kernel only transposes s x s sub-tiles.
+                        tap_in = Access(
+                            self.x.elements,
+                            batch * elems + (M // chans) * j * N + (N // cols) * i,
+                            (M // chans // m, N // cols // n, m, n),
+                            (m * N, n, N, 1),
+                        )
+                        rt.fill(ov.x[k], (self.x, tap_in), group=tg)
+                for i in range(cols):
+                    for j in range(chans):
+                        k = i * chans + j
+                        tap_out = Access(
+                            self.y.elements,
+                            batch * elems + (N // cols) * i * M + (M // chans) * j,
+                            (M // chans // m, N // cols // n, n, m),
+                            (m, n * M, M, 1),
+                        )
+                        rt.drain(ov.y[k], (self.y, tap_out), group=tg, wait=True)
 
     def reference(self, x):
         """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""
         return reference(x.reshape(self.M, self.N))
-
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-
-def shuffle_transpose(
-    dev,
-    M,
-    N,
-    num_aie_columns,
-    num_channels,
-    m,
-    n,
-    s,
-    num_batches=1,
-    func_prefix="",
-    kernels_dir=None,
-):
-    num_elements = M * N
-    per_tile_elements = m * n
-    dtype = bfloat16
-
-    if M % m != 0:
-        raise ValueError(f"Matrix rows ({M}) must be a multiple of {m}.")
-    if N % n != 0:
-        raise ValueError(f"Matrix columns ({N}) must be a multiple of {n}.")
-    if m % s != 0:
-        raise ValueError(f"AIE tile rows ({m}) must be a multiple of {s}.")
-    if n % s != 0:
-        raise ValueError(f"AIE tile columns ({n}) must be a multiple of {s}.")
-    if per_tile_elements > 8192:
-        raise ValueError(
-            f"Kernel tile size {per_tile_elements} needs to be below 8192 to fit within data memory."
-        )
-
-    # Minimum tile sizes required by the two kernels
-    if s == 4 and (m <= 4 or n <= 4):
-        raise ValueError(f"Kernel tile {s} needs AIE tile rows > 4 and columns > 4.")
-    if s == 8 and (m <= 16 or n <= 16):
-        raise ValueError(f"Kernel tile {s} needs AIE tile rows > 16 and columns > 16.")
-
-    # Define tensor types. The runtime tensor spans all batches (contiguous matrices);
-    # per-tile work on the cores is identical regardless of batch count.
-    tensor_ty = np.ndarray[(num_batches * num_elements,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
-
-    fifodepth = 1 if per_tile_elements > 4096 else 2
-
-    # Create a TensorAccessPattern for each channel
-    # to describe the data movement
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels. Partially transposes the input
-    # data so that the kernel only needs to
-    # transpose s*s-sized sub-tiles.
-    # The L3 tensors hold num_batches contiguous (M,N) matrices stacked along the row
-    # dimension: in-dims (num_batches*M, N), out-dims (num_batches*N, M); at num_batches==1
-    # these are simply (M,N)/(N,M). Each (i,j) column/channel emits one TAP per batch, offset
-    # by batch*num_elements; the per-batch internal sizes/strides are the same for every batch
-    # because each matrix is contiguous and row-major.
-    in_dims = (num_batches * M, N)
-    out_dims = (num_batches * N, M)
-    taps_in_L3L2 = [
-        [
-            TensorAccessPattern(
-                in_dims,
-                batch * num_elements
-                + (M // num_channels) * j * N
-                + (N // num_aie_columns) * i,
-                [M // num_channels // m, N // num_aie_columns // n, m, n],
-                [m * N, n, N, 1],
-            )
-            for batch in range(num_batches)
-        ]
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    taps_in_L2L1 = [
-        TensorAccessPattern(
-            (M, N),
-            (M // num_channels) * j * N + (N // num_aie_columns) * i,
-            [m // s, s, n // s, s],
-            [s, m, s * m, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    taps_out_L1L3 = [
-        [
-            TensorAccessPattern(
-                out_dims,
-                batch * num_elements
-                + (N // num_aie_columns) * i * M
-                + (M // num_channels) * j,
-                [M // num_channels // m, N // num_aie_columns // n, n, m],
-                [m, n * M, M, 1],
-            )
-            for batch in range(num_batches)
-        ]
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE-array data movement with object fifos
-    of_in1s_L3L2 = [
-        ObjectFifo(tile_ty, name=f"of_in1s_L3L2_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_in1s_L2L1 = [
-        of_in1s_L3L2[i * num_channels + j]
-        .cons(dims_from_stream=taps_in_L2L1[i * num_channels + j].transformation_dims)
-        .forward(obj_type=tile_ty, name=f"of_in1s_L2L1_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_outs = [
-        ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE Core Function declaration
-    transpose_kernel = declare_kernel(
-        f"transpose_{s}x{s}",
-        [tile_ty, tile_ty],
-        source=Path(kernels_dir) / "generic" / "transpose.cc",
-        compile_flags=[f"-DDIM_m={m}", f"-DDIM_n={n}"],
-        func_prefix=func_prefix,
-    )
-
-    # Define a task that will run on a compute tile
-    def core_body(of_in1, of_out, transpose_kernel):
-        # Process num_batches contiguous matrices through the same FIFOs: num_batches x the per-matrix
-        # tile iterations. The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
-        for _ in range_(num_batches):
-            # Number of sub-matrix "tile" iterations
-            for _ in range_(N // n // num_aie_columns):
-                for _ in range_(M // m // num_channels):
-                    elem_in1 = of_in1.acquire(1)
-                    elem_out = of_out.acquire(1)
-                    transpose_kernel(elem_in1, elem_out)
-                    of_out.release(1)
-                    of_in1.release(1)
-
-    # Create a worker to run the task on a compute tile
-    my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s_L2L1[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                transpose_kernel,
-            ],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, C, of_in1s_L3L2_prods, of_outs_conss):
-
-        # One task group per batch (each a parallel fill+drain over all columns/channels), so the
-        # num_batches contiguous matrices stream through the same FIFOs in sequence.
-        for batch in range(num_batches):
-            # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-            tg = TaskGroup()
-
-            # Fill the input objectFIFOs with data
-            for i in range(num_aie_columns):
-                for j in range(num_channels):
-                    of_in1s_L3L2_prods[i * num_channels + j].fill(
-                        A,
-                        taps_in_L3L2[i * num_channels + j][batch],
-                        group=tg,
-                    )
-            # Drain the output objectFIFOs of data
-            for i in range(num_aie_columns):
-                for j in range(num_channels):
-                    of_outs_conss[i * num_channels + j].drain(
-                        C,
-                        taps_out_L1L3[i * num_channels + j][batch],
-                        wait=True,  # wait for the transfer to complete and data to be available
-                        group=tg,
-                    )
-            tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            tensor_ty,
-            tensor_ty,
-            [of.prod() for of in of_in1s_L3L2],
-            [of.cons() for of in of_outs],
-        ],
-    )
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt, workers=my_workers).resolve_program()
 
 
 # --------------------------------------------------------------------------

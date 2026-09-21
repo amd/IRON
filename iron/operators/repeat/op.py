@@ -1,154 +1,143 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import field
 from typing import ClassVar, Dict
+
+import numpy as np
+import torch
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
+from iron.common.declare import (
+    In,
+    Operator,
+    Out,
+    Overlay,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    tunable,
 )
-import aie.utils as aie_utils
-import numpy as np
-from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import ObjectFifo, Program, Runtime, TaskGroup
-import torch
+from iron.common.tiling import Access, granule_elements
+from iron.common.utils import DMA_BD_MAX_WRAP
 from iron.common.test_utils import torch_dtype_map
 
 
-@dataclass
-class Repeat(MLIROperator):
+@operator
+class RepeatOverlay(Overlay):
+    """A memtile pass-through of ``transfer_size`` elements; no cores.
+
+    The repeat is entirely in the runtime sequence's descriptors: the input
+    is re-read ``repeat`` times and the output interleaved. ``cols`` sizes
+    the pass-through and is therefore overlay-tier.
+    """
+
+    cols: int = dim()
+    transfer_size: int | None = tunable(None, repr=False)
+    dtype: object = field(default=bfloat16, repr=False)
+
+    s = StreamIn(transfer_size, dtype=dtype)
+    d = StreamOut(transfer_size, dtype=dtype)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {"transfer_size": "ts"}
+
+    def tuning(self, dev) -> "RepeatOverlay":
+        return dataclasses.replace(self, transfer_size=self.transfer_size or self.cols)
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo
+
+        fifo_in = ObjectFifo(self.s.tile, name="fifo_in", depth=2)
+        fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
+        self.s.bind(fifo_in.prod())
+        self.d.bind(fifo_out.cons())
+        return []
+
+
+@operator
+class Repeat(Operator[RepeatOverlay]):
     """AIE-accelerated repeat-interleave operator"""
 
-    rows: int
-    cols: int
-    repeat: int
-    transfer_size: int | None = None
-    dtype: object = field(default=bfloat16, repr=False)
-    context: object = field(default=None, repr=False)
+    rows: int = dim()
+    repeat: int = dim()
+    # rows * repeat; derived unless given, since a shape may not be an expression.
+    out_rows: int | None = dim(None, repr=False)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
-        "repeat": "by",
-        "transfer_size": "ts",
-    }
+    x = In(rows, RepeatOverlay.cols, dtype=RepeatOverlay.dtype, to=RepeatOverlay.s)
+    y = Out(
+        out_rows, RepeatOverlay.cols, dtype=RepeatOverlay.dtype, from_=RepeatOverlay.d
+    )
 
-    def __post_init__(self):
-        MLIROperator.__init__(self, context=self.context)
+    _name_aliases: ClassVar[Dict[str, str]] = {"repeat": "by"}
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(fn=repeat, bind_from=self),
-        )
+    def validate(self) -> None:
+        expected = self.rows * self.repeat
+        if self.out_rows is None:
+            self.out_rows = expected
+        elif self.out_rows != expected:
+            raise ValueError(
+                f"out_rows={self.out_rows} is not rows * repeat ({expected})"
+            )
+        self._cols_split()  # reject an unsplittable cols at construction
 
-    @staticmethod
-    def arg_spec(rows, cols, repeat, dtype=bfloat16):
-        return [
-            AIERuntimeArgSpec("in", (rows, cols), dtype=dtype),
-            AIERuntimeArgSpec("out", (rows * repeat, cols), dtype=dtype),
-        ]
+    @property
+    def cols(self) -> int:
+        return self.ov.cols
 
-    def reference(self, x):
-        """CPU reference: repeat-interleave along the leading dimension."""
-        return reference(x, self.repeat)
+    def _cols_split(self) -> int:
+        """Split cols into cols_split chunks of cols // cols_split.
 
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-"""
-Repeat interleave
-"""
-
-
-def repeat(dev, dtype, rows, cols, repeat, transfer_size=None):
-    elem_bytes = np.dtype(dtype).itemsize
-    dtype = np.dtype[dtype]
-
-    # Split cols into cols_split chunks of cols // cols_split. This is required to
-    # satisfy hardware constraints on BD dimensions. We must choose a split that
-    # does not exceed the hardware register sizes:
-    #   - the chunk length is the innermost dim: <= 1023 (10-bit wrap) AND a whole number
-    #     of 32-bit words, since the BD's innermost size is denominated in words
-    #   - the chunk count is the next dim out: <= 1023, the same wrap field
-    # An odd cols has only odd divisors, so no split of it is ever word-aligned at bf16;
-    # that is reported here rather than left to the BD verifier.
-    granule = max(1, 4 // elem_bytes)  # elements per 32-bit word
-    cols_split = None
-    for divisor in range(1, cols + 1):
-        if cols % divisor:
-            continue
-        chunk = cols // divisor
-        if chunk <= 1023 and divisor <= 1023 and chunk % granule == 0:
-            cols_split = divisor
-            break
-    if cols_split is None:
+        The chunk length is the innermost descriptor dimension, at most 1023
+        and a whole number of 32-bit words; the chunk count is the next
+        dimension out, at most 1023. An odd cols has only odd divisors, so
+        no split of it is ever word-aligned at bf16; that is reported here
+        rather than left to the BD verifier.
+        """
+        cols = self.ov.cols
+        granule = granule_elements(self.ov.dtype)
+        for divisor in range(1, cols + 1):
+            if cols % divisor:
+                continue
+            chunk = cols // divisor
+            if (
+                chunk <= DMA_BD_MAX_WRAP
+                and divisor <= DMA_BD_MAX_WRAP
+                and chunk % granule == 0
+            ):
+                return divisor
+        elem_bytes = np.dtype(self.ov.dtype).itemsize
         raise ValueError(
             f"Cannot split cols={cols} at {elem_bytes} bytes/element: need a divisor d "
             f"with cols//d <= 1023, d <= 1023, and cols//d a multiple of {granule} "
             f"({granule} elements = one 32-bit word). No divisor of {cols} satisfies all three."
         )
 
-    if transfer_size is None:
-        transfer_size = cols
+    def design(self, rt):
+        rows, cols, repeat = self.rows, self.ov.cols, self.repeat
+        cols_split = self._cols_split()
+        chunk = cols // cols_split
+        # The chunk length is innermost so the contiguous run is the innermost
+        # dimension; the chunk count sits outside it. The input's outermost
+        # (iteration) dimension re-reads the whole matrix ``repeat`` times with
+        # a zero stride; the output's interleaves.
+        input_tap = Access(
+            self.x.elements, 0, (repeat, rows, cols_split, chunk), (0, cols, chunk, 1)
+        )
+        output_tap = Access(
+            self.y.elements,
+            0,
+            (repeat, rows, cols_split, chunk),
+            (cols, cols * repeat, chunk, 1),
+        )
+        with rt.group() as tg:
+            rt.fill(self.ov.s, (self.x, input_tap), group=tg)
+            rt.drain(self.ov.d, (self.y, output_tap), group=tg, wait=True)
 
-    inp_ty = np.ndarray[
-        (rows, cols),
-        dtype,
-    ]
-    out_ty = np.ndarray[
-        (rows * repeat, cols),
-        dtype,
-    ]
-    transfer_ty = np.ndarray[
-        (transfer_size,),
-        dtype,
-    ]
-
-    input_tap = TensorAccessPattern(
-        tensor_dims=(rows, cols),
-        offset=0,
-        # The chunk LENGTH is innermost so the contiguous run is the innermost dim; the
-        # chunk COUNT sits outside it. Swapping these two produces the same address
-        # sequence, but putting the count innermost makes the unsplit case (cols_split
-        # == 1) a 1-element innermost dim, which is not a whole 32-bit word for any
-        # sub-word dtype and is rejected by the BD verifier.
-        sizes=[repeat, rows, cols_split, cols // cols_split],
-        strides=[0, cols, cols // cols_split, 1],
-    )
-
-    output_tap = TensorAccessPattern(
-        tensor_dims=(rows * repeat, cols),
-        offset=0,
-        sizes=[repeat, rows, cols_split, cols // cols_split],
-        strides=[cols, cols * repeat, cols // cols_split, 1],
-    )
-
-    # Use smaller FIFOs for the transfer amount
-    fifo_in = ObjectFifo(transfer_ty, name="fifo_in", depth=2)
-    fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
-
-    def sequence(inp, out, fifo_in_prod, fifo_out_cons):
-        tg = TaskGroup()
-        fifo_in_prod.fill(inp, input_tap, group=tg)
-        fifo_out_cons.drain(out, output_tap, group=tg, wait=True)
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            inp_ty,
-            out_ty,
-            fifo_in.prod(),
-            fifo_out.cons(),
-        ],
-    )
-    return Program(dev, rt).resolve_program()
+    def reference(self, x):
+        """CPU reference: repeat-interleave along the leading dimension."""
+        return reference(x, self.repeat)
 
 
 # --------------------------------------------------------------------------

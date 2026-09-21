@@ -1225,7 +1225,22 @@ class Operator(MLIROperator, Generic[O]):
 
     @property
     def values(self) -> list[BoundValue]:
-        return [self._bound[m.name] for m in self._members if isinstance(m, _Value)]
+        """The per-call values this instance uses (see :meth:`uses_value`)."""
+        return [
+            self._bound[m.name]
+            for m in self._members
+            if isinstance(m, _Value) and self.uses_value(m.name)
+        ]
+
+    def uses_value(self, name: str) -> bool:
+        """Whether this instance drives the declared per-call value ``name``.
+
+        A value an instance does not use gets no device parameter and no
+        sync. The default is every declared value; an operator whose values
+        are optional (a strided copy with or without a patched offset)
+        overrides this.
+        """
+        return True
 
     def _bind(self) -> None:
         bound: dict[str, Any] = {}

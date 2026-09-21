@@ -1,67 +1,145 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import field
 from typing import ClassVar, Dict
 
+import numpy as np
+import torch
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
+from iron.common.declare import (
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Scratchpad,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    tunable,
 )
-import aie.utils as aie_utils
-import numpy as np
-from aie.dialects.aiex import TensorAccessPattern
-from aie.iron import (
-    ObjectFifo,
-    Program,
-    Runtime,
-    ScratchpadParameter,
-    TaskGroup,
-    sync_parameters,
-)
-import torch
+from iron.common.tiling import Access
 from iron.common.test_utils import torch_dtype_map
 
 
-@dataclass
-class StridedCopy(MLIROperator):
-    """AIE-accelerated strided copy operator"""
+@operator
+class StridedCopyOverlay(Overlay):
+    """A memtile pass-through, one channel per fifo; no cores.
 
-    input_sizes: list
-    input_strides: list
-    input_offset: int
-    output_sizes: list
-    output_strides: list
-    output_offset: int
-    input_buffer_size: int = field(repr=False)
-    output_buffer_size: int = field(repr=False)
+    Each channel's descriptor carries 1/num_aie_channels of the tensor, so the
+    fifo object is sized against the per-channel share (``transfer_size``). A
+    descriptor shorter than the object starves the memtile's S2MM: it never
+    completes an object, never releases the lock, and the drain never returns
+    (ERT_CMD_STATE_TIMEOUT). An integer multiple is fine; it cycles the buffer.
+    """
+
+    transfer_size: int = tunable()
+    num_aie_channels: int = tunable(1)
     dtype: object = field(default=bfloat16, repr=False)
-    transfer_size: int | None = None
-    num_aie_channels: int = 1
-    input_offset_parameter: str | None = None
-    output_offset_parameter: str | None = None
-    kwargs: dict = field(default_factory=dict, repr=False)
-    context: object = field(default=None, repr=False)
+
+    s = StreamIn(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
+    d = StreamOut(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
+        "transfer_size": "tr",
+        "num_aie_channels": "ch",
+    }
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo
+
+        for c in range(self.num_aie_channels):
+            fifo_in = ObjectFifo(self.s.tile, name=f"fifo_in_{c}", depth=1)
+            fifo_out = fifo_in.cons().forward(name=f"fifo_out_{c}", depth=1)
+            self.s[c].bind(fifo_in.prod())
+            self.d[c].bind(fifo_out.cons())
+        return []
+
+
+def _pad4(sizes, strides):
+    """Pad to 4-D: dropping leading dimensions leaves BD registers uninitialised."""
+    sizes, strides = list(sizes), list(strides)
+    return [1] * (4 - len(sizes)) + sizes, [0] * (4 - len(strides)) + strides
+
+
+@operator
+class StridedCopy(Operator[StridedCopyOverlay]):
+    """AIE-accelerated strided copy operator.
+
+    Gathers by the input pattern and scatters by the output pattern, split
+    across the overlay's channels on the highest-index non-unit dimension.
+    Useful for data layout manipulation such as ``input[0, :, 0] -> output[:, 0, 0]``.
+    """
+
+    input_buffer_size: int = dim(repr=False)
+    output_buffer_size: int = dim(repr=False)
+    input_sizes: tuple = ()
+    input_strides: tuple = ()
+    input_offset: int = 0
+    output_sizes: tuple = ()
+    output_strides: tuple = ()
+    output_offset: int = 0
+    # Legacy: the device symbols of the two per-call offsets. Naming one is what
+    # enables it (see uses_value); a graph handle replaces this in step 6.
+    input_offset_parameter: str | None = field(default=None)
+    output_offset_parameter: str | None = field(default=None)
+
+    x = In(input_buffer_size, dtype=StridedCopyOverlay.dtype, to=StridedCopyOverlay.s)
+    y = Out(
+        output_buffer_size, dtype=StridedCopyOverlay.dtype, from_=StridedCopyOverlay.d
+    )
+    # Per-call addends on the two base addresses, patched into the descriptors.
+    in_offset = Scratchpad(np.int32)
+    out_offset = Scratchpad(np.int32)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
         "input_sizes": "isz",
         "input_strides": "ist",
         "input_offset": "ioff",
         "output_sizes": "osz",
         "output_strides": "ost",
         "output_offset": "ooff",
-        "transfer_size": "tr",
-        "num_aie_channels": "ch",
         "input_offset_parameter": "ipar",
         "output_offset_parameter": "opar",
     }
 
-    def __post_init__(self):
+    @classmethod
+    def _classic(cls, kwargs):
+        kwargs.pop("kwargs", None)
+        if kwargs.get("transfer_size") is None:
+            sizes = kwargs.get("input_sizes", ())
+            channels = kwargs.get("num_aie_channels", 1)
+            kwargs["transfer_size"] = int(np.prod(sizes)) // channels
+        return super()._classic(kwargs)
+
+    def uses_value(self, name: str) -> bool:
+        return {
+            "in_offset": self.input_offset_parameter,
+            "out_offset": self.output_offset_parameter,
+        }[name] is not None
+
+    def value_symbol(self, value):
+        return {
+            "in_offset": self.input_offset_parameter,
+            "out_offset": self.output_offset_parameter,
+        }[value.name]
+
+    @property
+    def transfer_size(self) -> int:
+        return self.ov.transfer_size
+
+    @property
+    def num_aie_channels(self) -> int:
+        return self.ov.num_aie_channels
+
+    @property
+    def dtype(self):
+        return self.ov.dtype
+
+    def validate(self) -> None:
         if len(self.input_sizes) != len(self.input_strides):
             raise ValueError(
                 f"input_sizes and input_strides must have the same length "
@@ -72,200 +150,70 @@ class StridedCopy(MLIROperator):
                 f"output_sizes and output_strides must have the same length "
                 f"({len(self.output_sizes)} vs {len(self.output_strides)})"
             )
-        MLIROperator.__init__(self, context=self.context)
+        n_in, n_out = int(np.prod(self.input_sizes)), int(np.prod(self.output_sizes))
+        if n_in != n_out:
+            raise ValueError(
+                f"a copy moves the same element count both ways: input_sizes "
+                f"{list(self.input_sizes)} has {n_in} elements, output_sizes "
+                f"{list(self.output_sizes)} has {n_out}"
+            )
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                fn=strided_copy,
-                kwargs=self.kwargs,
-                bind_from=self,
-            ),
-        )
+    def compatible(self) -> None:
+        from iron.common.declare import Incompatible
 
-    @staticmethod
-    def arg_spec(input_buffer_size, output_buffer_size, dtype=bfloat16):
-        # The two sizes are independent: a strided copy may gather from a large
-        # buffer into a small one.
+        channels = self.ov.num_aie_channels
+        for label, sizes in (
+            ("input_sizes", self.input_sizes),
+            ("output_sizes", self.output_sizes),
+        ):
+            padded, _ = _pad4(sizes, sizes)
+            highest = max(i for i, sz in enumerate(padded) if sz >= 1)
+            if padded[highest] % channels:
+                raise Incompatible(
+                    f"Highest dimension of {label} must be divisible by num_aie_channels"
+                )
+        per_channel = int(np.prod(self.input_sizes)) // channels
+        if per_channel % self.ov.transfer_size:
+            raise Incompatible(
+                f"transfer_size {self.ov.transfer_size} must divide the per-channel transfer "
+                f"{per_channel} (= {int(np.prod(self.input_sizes))} / {channels} channels)"
+            )
+
+    def _taps(self, buffer, sizes, strides, offset):
+        sizes, strides = _pad4(sizes, strides)
+        highest = max(i for i, sz in enumerate(sizes) if sz >= 1)
+        channels = self.ov.num_aie_channels
+        share = sizes[highest] // channels
+        split = sizes[:highest] + [share] + sizes[highest + 1 :]
         return [
-            AIERuntimeArgSpec("in", (int(input_buffer_size),), dtype=dtype),
-            AIERuntimeArgSpec("out", (int(output_buffer_size),), dtype=dtype),
+            Access(
+                buffer.elements,
+                offset + c * share * strides[highest],
+                tuple(split),
+                tuple(strides),
+            )
+            for c in range(channels)
         ]
 
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-"""
-Strided copy design
-
-This can be useful for data layout manipulation and data copying such as:
-input[0, :, 0] -> output[:, 0, 0]
-"""
-
-
-def strided_copy(
-    dev,
-    dtype,
-    input_buffer_size,
-    input_sizes,
-    input_strides,
-    input_offset,
-    output_buffer_size,
-    output_sizes,
-    output_strides,
-    output_offset,
-    transfer_size=None,
-    num_aie_channels=1,
-    input_offset_parameter=None,
-    output_offset_parameter=None,
-):
-    assert len(input_sizes) == len(input_strides)
-    assert len(output_sizes) == len(output_strides)
-
-    # Pad out dimensions to 4D; dropping leading dimensions leads to compiler not initializing these registers, causing hard-to-debug errors
-    input_sizes = [1] * (4 - len(input_sizes)) + list(input_sizes)
-    input_strides = [0] * (4 - len(input_strides)) + list(input_strides)
-    output_sizes = [1] * (4 - len(output_sizes)) + list(output_sizes)
-    output_strides = [0] * (4 - len(output_strides)) + list(output_strides)
-
-    input_highest_sz_idx = max(idx for idx, sz in enumerate(input_sizes) if sz >= 1)
-    output_highest_sz_idx = max(idx for idx, sz in enumerate(output_sizes) if sz >= 1)
-    assert (
-        input_sizes[input_highest_sz_idx] % num_aie_channels == 0
-    ), "Highest dimension of input_sizes must be divisible by num_aie_channels"
-    assert (
-        output_sizes[output_highest_sz_idx] % num_aie_channels == 0
-    ), "Highest dimension of output_sizes must be divisible by num_aie_channels"
-
-    # Each channel's BD carries 1/num_aie_channels of the tensor, so the ObjectFifo object
-    # is sized against the per-channel share. A BD shorter than the object starves the
-    # MemTile's S2MM -- it never completes an object, never releases the lock, and the
-    # drain's dma_await_task never returns (ERT_CMD_STATE_TIMEOUT). An integer multiple is
-    # fine; it just cycles the buffer.
-    assert int(np.prod(input_sizes)) == int(np.prod(output_sizes)), (
-        f"a copy moves the same element count both ways: input_sizes {input_sizes} "
-        f"has {int(np.prod(input_sizes))} elements, output_sizes {output_sizes} has "
-        f"{int(np.prod(output_sizes))}"
-    )
-    per_channel_size = int(np.prod(input_sizes)) // num_aie_channels
-    if transfer_size is None:
-        transfer_size = per_channel_size
-    assert per_channel_size % transfer_size == 0, (
-        f"transfer_size {transfer_size} must divide the per-channel transfer "
-        f"{per_channel_size} (= {int(np.prod(input_sizes))} / {num_aie_channels} channels)"
-    )
-    transfer_ty = np.ndarray[
-        (transfer_size,),
-        np.dtype[dtype],
-    ]
-
-    inp_ty = np.ndarray[
-        (int(input_buffer_size),),
-        np.dtype[dtype],
-    ]
-    out_ty = np.ndarray[
-        (int(output_buffer_size),),
-        np.dtype[dtype],
-    ]
-
-    # input_offset_parameter (and output_offset_parameter) is the name of an
-    # aiex.scratchpad_parameter used to patch the DMA BD base address at runtime. The
-    # statically-computed offset is used as the base; the parameter's value is
-    # additively combined onto it inside the BD address registers via UPDATE_REG.
-    # The host writes the byte offset into the ctrl scratchpad before each
-    # dispatch via ParameterScratchpad.
-    in_offset_param = (
-        ScratchpadParameter(input_offset_parameter, np.int32)
-        if input_offset_parameter is not None
-        else None
-    )
-    out_offset_param = (
-        ScratchpadParameter(output_offset_parameter, np.int32)
-        if output_offset_parameter is not None
-        else None
-    )
-
-    input_taps = [
-        TensorAccessPattern(
-            tensor_dims=(int(input_buffer_size),),
-            offset=(
-                input_offset
-                + c
-                * (input_sizes[input_highest_sz_idx] // num_aie_channels)
-                * input_strides[input_highest_sz_idx]
-            ),
-            sizes=(
-                input_sizes[:input_highest_sz_idx]
-                + [input_sizes[input_highest_sz_idx] // num_aie_channels]
-                + input_sizes[input_highest_sz_idx + 1 :]
-            ),
-            strides=list(input_strides),
+    def design(self, rt):
+        ins = self._taps(
+            self.x, self.input_sizes, self.input_strides, self.input_offset
         )
-        for c in range(num_aie_channels)
-    ]
-
-    output_taps = [
-        TensorAccessPattern(
-            tensor_dims=(int(output_buffer_size),),
-            offset=(
-                output_offset
-                + c
-                * (output_sizes[output_highest_sz_idx] // num_aie_channels)
-                * output_strides[output_highest_sz_idx]
-            ),
-            sizes=(
-                output_sizes[:output_highest_sz_idx]
-                + [output_sizes[output_highest_sz_idx] // num_aie_channels]
-                + output_sizes[output_highest_sz_idx + 1 :]
-            ),
-            strides=list(output_strides),
+        outs = self._taps(
+            self.y, self.output_sizes, self.output_strides, self.output_offset
         )
-        for c in range(num_aie_channels)
-    ]
-
-    # Use smaller FIFOs for the transfer amount
-    fifos_in = [
-        ObjectFifo(transfer_ty, name=f"fifo_in_{c}", depth=1)
-        for c in range(num_aie_channels)
-    ]
-    fifos_out = [
-        fifos_in[c].cons().forward(name=f"fifo_out_{c}", depth=1)
-        for c in range(num_aie_channels)
-    ]
-
-    def sequence(inp, out, fifos_in_prods, fifos_out_conss):
-        if in_offset_param is not None or out_offset_param is not None:
-            sync_parameters()
-        tg = TaskGroup()
-        for c in range(num_aie_channels):
-            fifos_in_prods[c].fill(
-                inp,
-                input_taps[c],
-                group=tg,
-                offset_parameter=in_offset_param,
-            )
-            fifos_out_conss[c].drain(
-                out,
-                output_taps[c],
-                group=tg,
-                wait=True,
-                offset_parameter=out_offset_param,
-            )
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            inp_ty,
-            out_ty,
-            [of.prod() for of in fifos_in],
-            [of.cons() for of in fifos_out],
-        ],
-    )
-    return Program(dev, rt).resolve_program()
+        in_off = self.in_offset if self.uses_value("in_offset") else None
+        out_off = self.out_offset if self.uses_value("out_offset") else None
+        with rt.group() as tg:
+            for c in range(self.ov.num_aie_channels):
+                rt.fill(self.ov.s[c], (self.x, ins[c]), group=tg, offset_by=in_off)
+                rt.drain(
+                    self.ov.d[c],
+                    (self.y, outs[c]),
+                    group=tg,
+                    wait=True,
+                    offset_by=out_off,
+                )
 
 
 # --------------------------------------------------------------------------
