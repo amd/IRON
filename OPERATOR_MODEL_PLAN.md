@@ -3,1203 +3,849 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Operator model: interfaces on both sides — the operator's host ABI, the overlay's device ABI
+# Operator model: overlays, operators, and derived sequences
 
-Draft plan. Input to a plan-refining session, not approved work.
+Design, agreed in a review of the 2026-09-20 draft. Supersedes the
+`OPERATOR_MODEL_PLAN.md` on branch `operator-model-argspec` (PR 215). Nothing
+here is built. §12 lists the spikes that gate the parts that need hardware.
 
-Branch `operator-model-argspec`. Baselines (always
-`source /opt/xilinx/xrt/setup.sh` first, or 40–100 tests fail in a way that
-impersonates a toolchain regression): `iron/tests` 745 passed / 13 skipped;
-`iron/operators` 3165 passed with 5 known `mem_copy` 16-core timeouts.
-
-This consolidates two earlier drafts. The superseded one proposed shape
-annotations on the design function's signature; §21 records why that lost and
-what was measured to establish it.
-
-**Nothing here is built. §19 step 0 gates all of it**, because the one
-load-bearing unverified claim fails as a device hang rather than a build error.
+The previous draft's diagnosis of today's tree stands and is not repeated:
+every file and line it cites was checked and lands where it says. What changed
+is the design built on top of that diagnosis. §1 is the summary of what moved
+and why; the rest is the design as agreed.
 
 ---
 
-## 1. Priorities driving this
+## 1. What changed from the previous draft
 
-In roughly the order they were raised:
-
-1. **General purpose.** LLMs, CNNs, anything composed of IRON operators. Not a
-   llama-shaped abstraction, and specifically *not* a `forward()` method.
-2. **No string names.** Buffers, weights, and runtime values addressed by handles
-   and by parameter identity, not by hand-typed strings.
-3. **Library quality.** Other people write models against this: stability, docs,
-   a real test surface per operator.
-4. **Prefill is in scope**, not just decode.
-5. **Per-operator tuning, easy to override** by a user who wants something else.
-6. **Tuning may fail.** Some operators legitimately have no legal config for a
-   given shape/device. Per-device decisions must come from the target model's
-   numbers, not hard-coded constants.
-7. **Minimal duplicated spec logic**, to shrink the surface for typos.
-8. **Static and build-time checking for new operators, including untested ones.**
-9. **Fix the operators that flatten** real 2-D shapes into one dimension.
-   Believed to be an artifact of old mlir-aie limits since lifted.
-10. Coverage checks **run on every build unless disabled**.
-11. pyright suppression lives in **pyrightconfig, not per-file**.
-12. `Tuning[T]` is **IRON-local** (not upstreamed for now).
-
-Three more were added while drafting, and they shape the whole document:
-
-13. **Nothing works by accident.** Every contract is enforced by a check that
-    names the mistake, the operator, and the fix. Where the hardware forces a
-    restriction, the error explains the hardware reason.
-14. **Overlay and runtime sequence are separable, and the model must say so.**
-    A full ELF is one packaging option among several, not the shape of the
-    system. llama must run with and without it, and with and without separately
-    reusable sequences — by composing different objects, not by rewriting the
-    model.
-15. **Types, not strings; primitives, not strategies.** Priority 2 applies to
-    every value the model carries, not just buffers. A packaging choice is a
-    *class*, not a string compared in an if-tree. A tuning result is a typed
-    instance, not a `dict` of names. And the library ships the *tools* to say
-    what happens at each dispatch boundary and each compile — not a menu of
-    blessed strategies with names like `"fused"`.
-
-### Vocabulary warning
-
-IRON and mlir-aie use **overlay** for different things. Here an *overlay* is the
-configured array — per-core ELFs plus the CDO/PDI that loads them — which is the
-FPGA sense of the word. mlir-aie uses it narrowly, for the *control-packet
-routing* overlay (`--generate-ctrl-pkt-overlay`, `@ctrl_pkt_overlay`, pass
-`aie-generate-column-control-overlay`). Where this plan means that one it says
-**control route**. Decision taken: keep `Overlay` for the IRON noun.
+| previous draft | now | why |
+|---|---|---|
+| one `interface()` method per operator, declaring host buffers | two classes: an **Overlay** declares what configures the array, an **Operator** declares the host buffers against it | the overlay depends on data movement *into* the array (tile shapes, columns, dtypes); the sequence depends on host extents. One declaration conflated them, so nothing could be reused by construction and everything had to be checked by comparison. flm/gemm already lives this split by hand |
+| shapes are arbitrary Python over compile-time fields | a shape dimension is a **bare field or an integer**; a conditional may only test a field with a default | inference becomes a lookup instead of a solver. The draft's own examples (`size // tile_size`, `if b_col_maj`) needed the resolver it claimed to have dissolved |
+| declaration in a method body, names recovered by a `__setattr__` hook | declaration **at class level**, names from the descriptor protocol, fields usable by bare name | once shapes are field references there is nothing left for a method body to do; the hook and its three guard checks go |
+| `tuning()` on the operator, deriving overlay tunables from the extent (`tile_size_output = M // cols`) | `tuning(dev)` on the **overlay**, from the device only; `for_extent(...)` is the explicit opt-out | tuning from `M` makes the overlay depend on the extent, which defeats reuse. The operator author chooses reuse or per-shape performance, per call site |
+| the design restates the ABI (`L3_*_ty`, `Runtime(seq, fn_args=[...])`) and E7 checks identity | the **library owns `Runtime` and `Program`**; a buffer names its stream (`to=`/`from_=`) and the fill/drain sequence is **derived**; `design(rt)` is an override for irregular operators | deletes the second spelling and the checks that policed it. Most sequence designs in the tree are "tile this buffer over that stream across the columns" |
+| three runtime tiers named by what rebuilds (`HostResident`, `SequenceResident`, a plain field) | two author-named markers, **`Scratchpad`** and upstream's **`DispatchTime`** | the third tier is a plain field and needs no name; reusing upstream's name avoids two vocabularies for one mechanism |
+| four packaging constructors (`Overlay`, `StaticSequence`/`GeneratedSequence`, `Elf`/`Xclbin`) | **`compile(dev, boundaries=, image=)`**, everything else derived from the declaration and reported | with author-named markers the sequence kind is already declared, and the image follows from device, boundaries and markers. Only boundaries and an image override were ever the user's to choose |
+| `Overlay` ABI (bindings, residents, sizes) read back from files and compared (E23) | agreement **by construction** for overlays IRON builds; read-back kept only for a foreign xclbin (`Overlay.from_xclbin`) | the sequence is built from the overlay's typed stream declarations, so there is nothing to compare except divisibility |
+| llama four ways as the acceptance gate | **one configuration at parity**, NPU1 fallback contingent on a spike, the rest measured as experiments | the four-way matrix multiplied hardware test time for configurations two spikes may rule out |
+| 31 enforcement rows | the checks that trace to an observed failure or to a mechanism this design introduces (§10) | six of the 31 guarded the hook this design removes; the coverage rows guarded hand-written sequences this design derives |
+| a recorder: `g.input(shape)`, `g.param`, `g.state`, `g(Op, ...)`, outputs read by handle | a **graph function**: inputs are parameters, outputs are return values, weights are closed-over tensors, state is a closed-over `iron.state`; several graphs compile together as a **module** sharing one buffer plan | declaring inputs by shape and reading outputs by handle predates tracing; the function form is also upstream's `@iron.jit` convention, so IRON stops diverging from it |
 
 ---
 
-## 2. Diagnosis: what `llama_npu.py`'s 1182 lines actually are
+## 2. Goals
 
-| chunk | lines | what |
-|---|---:|---|
-| operator construction | ~370 | `GEMV(M=..., K=..., num_aie_columns=8, tile_size_output=dim//8, ...)` ×30 |
-| runlist + sequence | ~140 | string-threaded `(op, "x", f"layers.{i}...", "x_norm")` |
-| buffers + weight upload | ~160 | `XRTTensor`, `_upload`, subviews |
-| prefill host glue | ~300 | CPU/NPU ping-pong: softmax, `torch.matmul`, `torch.cat` on host |
-| decode glue + main | ~90 | |
+Kept from the previous draft, in its numbering: 1 general purpose, 2 no string
+names, 3 library quality, 4 prefill in scope, 5 per-operator tuning easy to
+override, 6 tuning may fail, 7 minimal duplicated spec logic, 8 static and
+build-time checking, 9 un-flatten real 2-D shapes, 11 pyright config not
+per-file, 12 `Tuning` is IRON-local.
 
-`capture()` as it stands attacks only the ~140-line runlist. **Operator
-construction is the biggest chunk**, which is why this work centres on the
-operator model rather than on the graph recorder.
+Rewritten:
 
-The prefill ~300 is a *different* problem — missing and unfused operators, not
-authoring. No declaration scheme fixes it. See O5.
+- **13 (nothing works by accident)** now has a stopping rule: a check exists
+  because a failure was observed in this tree, or because a mechanism this
+  design introduces would otherwise fail silently. Not because a mistake is
+  imaginable.
+- **14 (overlay and sequence are separable)** is now the *structure* of the
+  operator model (§3), not a packaging option.
+- **15 (types not strings; primitives not strategies)** is narrowed back to
+  priority 2. A validated enum never caused a bug here; strings for buffers did.
+- **10 (coverage checks on every build)** is retired. A derived sequence covers
+  its buffers by construction; an overridden one gets the checks in §10.
+
+Added:
+
+- **Performance is measured, and does not regress.** Parity on the llama token
+  stream is the gate; per-token latency is recorded before and after.
+- **Build time has a budget.** Anything that runs on every build is measured
+  against it.
+- **One PR demonstrates the whole thing.** Upstream changes are prototyped in
+  IRON by extension where possible (§11), so the PR runs end to end before
+  anything lands upstream.
+- **The operator author decides reuse versus performance.** The library makes
+  reuse the default and specialisation explicit, and never chooses silently.
+
+Dropped: designing now for CNNs. No CNN operator exists; the design does not
+block one and does not shape itself around one.
 
 ---
 
-## 3. The core idea: the declaration lives in a method body
+## 3. The layering
 
-The superseded draft's entire spelling problem — deferred annotations,
-`localns`, free names, module-level `Dim`s, pyright suppression, evaluating one
-annotation at a time, branch-parameter retry — existed to get a design's
-**parameter names into annotation scope**. Python evaluates annotations in the
-*enclosing* scope.
+An operator's fields sort by what a change rebuilds:
 
-A method body doesn't have that problem. `self.M` is simply in scope.
+| tier | lives in | examples (GEMV) | changing it rebuilds |
+|---|---|---|---|
+| **overlay** | the `Overlay` class | `K` (baked into the kernel), `cols`, `tile_out`, `vec`, dtypes, fifo depths, shim pins | cores, routing, PDI |
+| **sequence** | the `Operator` class | `M`, `num_batches`, offsets, strides | the instruction stream only |
+| **per-call** | a marker on the `Operator` | `n_rows`, `cache_offset` | nothing (`Scratchpad`) or the stream (`DispatchTime`) |
+
+Each layer has an ABI. The overlay's is the **streams** that enter and leave
+the array, in tile units, with their shim bindings. The operator's is the
+**host buffers**, in extents, each naming the stream it feeds or drains. A
+sequence is written against the overlay's stream declarations, so direction,
+dtype, tile shape and shim binding agree by construction. The only thing left
+to check is divisibility (`compatible()`, §5).
+
+Upstream's own seam already matches this: `Program(dev, rt)` takes workers and
+fifos on one side and a `Runtime` on the other. Today every IRON design builds
+both in one function.
+
+### The discipline that makes reuse real
+
+A core program must not bake a host extent into its loop trip count, or the
+overlay silently depends on `M`. **A core's trip count is either unbounded or
+supplied by the sequence through a resident parameter, never a compile-time
+constant derived from a host extent.** Both patterns exist in the tree: gemv
+and mha loop forever; gemm, mha and flm/gemm read their counts from runtime
+parameters the sequence writes before the first DMA. Every other design today
+computes its count from `size` or `M` at compile time, so the migration in
+§14 rewrites each of those loops. This is checkable: **build the overlay at
+two extents and require the core ELFs to be byte-identical** (the trick from
+the flm/gemm migration commit). It runs once per overlay class in the test
+suite, not on every build.
+
+### What it buys
+
+flm/gemm's one-xclbin-many-shapes, for every operator. In the fused llama
+graph the q, k, v and o projections are GEMVs at different `M`; today each is
+a separate design, under this design they are one overlay and four sequences.
+Whether the current fusion pass skips a reconfiguration when consecutive steps
+share a device is **unverified** (O5) and is not counted until it is.
+
+---
+
+## 4. Declaring an overlay
 
 ```python
-@dataclass
-class GEMV(MLIROperator):
-    """Matrix-vector product ``C = A @ B``, optionally batched."""
+@operator
+class GEMVOverlay(Overlay):
+    """Array configuration for C = A @ B. Row-blocks of A per column, B broadcast."""
 
-    M: int
-    K: int
-    num_batches: int = 1
-    num_aie_columns: Tuning[int] = 8
-    tile_size_input: Tuning[int] = 4
-    tile_size_output: Tuning[int] | None = None
+    K: int = dim()                       # baked into the kernel: -DDIM_K
+    cols: int = tunable(None)               # None: tuning fills it from the device
+    tile_out: int = tunable(64)             # rows of C one core produces per acquire
+    vec: int = tunable(None)                # kernel vector width
 
-    def interface(self):
-        """The host-visible ABI: buffers in call order, then runtime values."""
-        self.A = In(self.num_batches, self.M, self.K)
-        self.B = In(self.num_batches, self.K)
-        self.C = Out(self.num_batches, self.M)
+    a = StreamIn(tile_out, K, per_column=True)
+    b = StreamIn(K, broadcast=True)
+    c = StreamOut(tile_out, per_column=True)
 
-    def tuning(self, dev) -> "GEMV":
-        cols = self.num_aie_columns or dev.cols
-        if self.M % cols:
-            raise Untunable(f"M={self.M} does not divide across {cols} columns on {dev}")
-        return replace(self, num_aie_columns=cols, tile_size_output=self.M // cols)
+    def tuning(self, dev) -> "GEMVOverlay":
+        cols = self.cols or dev.columns()
+        vec = self.vec or next((w for w in (64, 32, 16) if self.K % w == 0 and self.K >= 2 * w), None)
+        if vec is None:
+            raise Untunable(f"K={self.K}: no vector width in (64, 32, 16) divides it")
+        return replace(self, cols=cols, vec=vec)
+
+    def design(self, dev):
+        matvec = declare_kernel(
+            f"matvec_{self.vec}", [np.int32, np.int32, self.a.tile, self.b.tile, self.c.tile],
+            source=dev.kernels_dir / "generic" / "mv.cc",
+            compile_flags=[f"-DDIM_K={self.K}", f"-DVEC_SIZE={self.vec}"],
+        )
+        of_b = ObjectFifo(self.b.tile, name="B")
+        self.b.bind(of_b.prod())
+        workers = []
+        for col in range(self.cols):
+            of_a = ObjectFifo(self.a.tile, name=f"A{col}")
+            of_c = ObjectFifo(self.c.tile, name=f"C{col}")
+            self.a[col].bind(of_a.prod())
+            self.c[col].bind(of_c.cons())
+            workers.append(Worker(_core, [of_a.cons(), of_b.cons(), of_c.prod(), matvec, self.K, self.tile_out]))
+        return workers
+
+
+def _core(of_a, of_b, of_c, matvec, K, tile_out):
+    for _ in range_(sys.maxsize):            # forever: the sequence decides how much flows
+        b = of_b.acquire(1)
+        a = of_a.acquire(1)
+        c = of_c.acquire(1)
+        matvec(K, tile_out, a, b, c)
+        of_c.release(1); of_a.release(1); of_b.release(1)
+```
+
+**`dim()` and `tunable()`** return dataclass field specifiers. Pyright sees
+`K: int` as a required constructor argument and `cols: int` as optional. In the
+class body the name `K` is bound to the specifier, so the stream declarations
+below it use the bare name. After the class is built, `@operator` re-attaches
+each field as a class attribute, so `GEMVOverlay.K` names the dimension from
+outside and `ov.K` is the integer on an instance. A `tunable` is what the
+previous draft called `Tuning[T]`: a field `tuning()` may set, and pyright
+checks `replace()` against the real field list.
+
+**Streams** are declared unannotated, so the dataclass machinery ignores them
+and the descriptor supplies the type. `per_column=True` makes the stream a list
+indexed by column; `broadcast=True` makes it one fifo with every core as a
+consumer. A stream's shim binding is the placer's unless pinned with `via=`
+(§9). Direction is not spelled: `StreamIn` is a shim producer, `StreamOut` a
+shim consumer.
+
+**`tuning(dev)`** sees the device and nothing else, so a tuned overlay serves
+every extent. `Untunable` is an expected outcome. An author who wants today's
+one-configuration-per-shape behaviour asks for it at the call site:
+
+```python
+ov = GEMVOverlay(K=2048).tuned(dev)                        # reusable across every M
+ov = GEMVOverlay(K=2048).tuned(dev).for_extent(M=1024)     # specialised, explicit
+```
+
+`for_extent` produces a distinct overlay. The graph builder warns when a
+specialisation stops two operators sharing one, so per-extent overlays never
+multiply silently.
+
+**`design(dev)`** builds the array and binds each declared stream to the shim
+end of a fifo. It returns the workers. It never constructs `Runtime` or
+`Program`; the library does (§5). An overlay built by someone else has no
+`design()` and is declared with `Overlay.from_xclbin` (§9).
+
+**Sharing** keys off `design_key()`, which already exists, not off dataclass
+hashing. Two overlays with equal keys are one build.
+
+---
+
+## 5. Declaring an operator
+
+```python
+@operator
+class GEMV(Operator[GEMVOverlay]):
+    """C = A @ B, optionally batched."""
+
+    M: int = dim()
+    num_batches: int = dim(1)
+
+    A = In(num_batches, M, GEMVOverlay.K, to=GEMVOverlay.a)
+    B = In(num_batches, GEMVOverlay.K,    to=GEMVOverlay.b)
+    C = Out(num_batches, M,               from_=GEMVOverlay.c)
+
+    def compatible(self):
+        unit = self.ov.cols * self.ov.tile_out
+        if self.M % unit:
+            raise Incompatible(f"M={self.M} is not a multiple of the {unit} rows the overlay drains per pass")
 
     def reference(self, A, B):
         return A @ B
 ```
 
-Conditional shapes are ordinary Python:
+That is the whole operator. Each dimension is written once as a field and once
+per shape it appears in; that is the floor for a pyright-checked constructor,
+and it was chosen over a one-mention form (`In("num_batches", "M", "K")`)
+because that form needs strings and, as the previous draft measured, makes
+pyright reject valid constructor calls.
+
+**The sequence is derived** from `to=` and `from_=`. A's `M` axis is split
+across the overlay's columns and fed in `tile_out`-row tiles, B is filled once
+per batch, C is drained per column. Splitting a run that exceeds the BD wrap
+limit is the library's job, once, instead of GEMV's, repeat's and mha's.
+
+The derived sequence has a fixed shape: a **preamble** that writes every
+resident parameter the overlay declares (trip counts, RTPs) and sets the
+worker barriers; then every fill; then every drain, each waited. Two fill
+options cover what the regular operators need beyond plain tiling: a
+**broadcast** fill to a per-channel fifo (weighted rms_norm's weight), and a
+**repeated** re-read of a buffer through a stride-zero outer dimension
+(repeat, gemv's B, flm/gemm's B).
+
+Surveyed against every design on the PR 215 branch: **14 operators are
+derivable** as they stand (relu, gelu, silu, sigmoid, tanh, layer_norm,
+elementwise_add, elementwise_mul, axpy, leaky_relu, dequant, rms_norm both
+designs, rope) plus softmax once the preamble exists; **eight need
+`design(rt)`** (strided_copy, transpose, mem_copy, gemv, gemm, mha, flm/gemm,
+mm_prebuilt); repeat is borderline and is treated as an override; the two
+swiglu composites become graph functions (§8). The eight are mostly about
+TaskGroup and wait structure (an outer group held across batches, one wait
+per batch, queue-depth retirement, drain issued before fill) and the tiler
+does not learn any of that.
+
+**An operator overrides `design(rt)`** when the derivation cannot express its
+pattern. This is what the derived one is equivalent to:
 
 ```python
-        self.B = In(self.N, self.K) if self.b_col_maj else In(self.K, self.N)
+    def design(self, rt):
+        rows = self.M // self.ov.cols
+        rt.fill(self.ov.b, self.B)
+        for col in range(self.ov.cols):
+            rt.fill(self.ov.a[col], self.A[:, col * rows:(col + 1) * rows, :])
+            rt.drain(self.ov.c[col], self.C[:, col * rows:(col + 1) * rows], wait=True)
 ```
 
-**Field annotations still carry meaning.** A plain field is compile-time;
-`Tuning[T]` marks a knob. Both are real dataclass fields, so pyright checks
-`GEMV(M="2048")`, missing arguments and bogus kwargs — measured in §16 as the
-most valuable static checks, and the ones synthesised fields destroy.
+Slicing a declared buffer yields the access pattern; there is no
+`TensorAccessPattern` to hand-build for the regular cases. `rt` is opened by
+the library from the buffer members in declaration order, so `fn_args` and
+`rt.sequence(...)` are not written, and the preamble above runs before the
+override's body.
 
-**`tuning()` returns an instance, not a `dict`.** `dataclasses.replace` is
-checked by pyright against the real field list, so "tuning set a knob that
-doesn't exist" and "tuning set a compile-time field it has no business setting"
-are both static errors (E9) rather than runtime dict-key checks.
+**`compatible()`** is the only cross-layer check an author writes, and it is
+where the overlay's tile granularity meets the operator's extent. The library
+calls it when the operator is bound to a tuned overlay.
 
-### Names without strings
+**`reference()`** takes the `In` members in declaration order and is the only
+oracle for the math.
 
-`MLIROperator.__setattr__` records interface assignments in declaration order, as
-`nn.Module` does for parameters. **The attribute name becomes the name**, so
-diagnostics say `'A'` and `'output_offset'` without anyone typing a string, and
-`output_offset_parameter="cache_offset"` disappears.
-
-This is the one piece of magic in the plan. It is paid for by E1–E3.
+**`InOut`** exists for in-place operators (RoPE, residual add), matching
+upstream's marker.
 
 ---
 
-## 4. Per-operator tuning
+## 6. Per-call values
 
-Two tiers. A constant knob is just a field default; a knob derived from shape
-gets the `tuning()` method above. A call-site override is fed **into** it, so
-dependent knobs re-derive rather than silently keeping values computed for a
-different `cols`:
+Two markers, author-named, declared in the class body beside the buffers:
 
 ```python
-g(GEMV, w, x)                                       # infer shapes, default tuning
-g(GEMV.tuned(num_aie_columns=2), w, x)              # override a knob, dependents re-derive
-g(GEMV(M=2048, K=2048, num_aie_columns=2), w, x)    # fully explicit -- works today
+@operator
+class StridedCopy(Operator[CopyOverlay]):
+    n: int = dim()
+    src = In(n, to=CopyOverlay.s)
+    dst = Out(MAX, from_=CopyOverlay.d)
+
+    dst_offset = Scratchpad(np.int32)        # patched into the BD; free per call; works under full ELF
+    n_live     = DispatchTime(np.int32)      # regenerates the stream per call; xclbin only
+
+    def design(self, rt):
+        rt.fill(self.ov.s, self.src[:self.n_live])
+        rt.drain(self.ov.d, self.dst[self.dst_offset:], wait=True)
 ```
 
-`Untunable` is an expected outcome, not a bug — better than defaulting into a
-config that compiles and then hangs (cf. the `mem_copy` 16-core failures, which
-compile fine and fail at runtime on the 8-column box).
+| marker | can | cannot | cost per call | packaging |
+|---|---|---|---|---|
+| `Scratchpad(T)` | move a DMA base address; be read by a core | change a size or stride | a few words plus a sync | any |
+| `DispatchTime(T)` | change sizes, strides, offsets | be read by a core on its own | stream regeneration plus a buffer allocation | xclbin only |
 
-This retires a live FIXME in `iron/operators/gemv/op.py` (`MAX_WRAP = 1023`,
-"pull these shim BD bounds from the MLIR-AIE target model rather than
-hard-coding").
+Misuse is a build error naming the marker. A `Scratchpad` used at a size
+position, or a `DispatchTime` member in a sequence packaged as a full ELF,
+each says which member, what it does, and the two ways out.
 
-**What the target model actually exposes**, checked rather than assumed:
+**A value belongs to the operator instance, and reuse means sharing.** A
+`Scratchpad` is one device symbol per design; the strided copy llama reuses
+across 32 layers has one, written once per token. Binding one handle at many
+call sites is explicit sharing. Binding different handles to one instance is
+an error.
 
-| wanted | available | how |
-|---|---|---|
-| columns, rows, memtile rows | **yes** | `tm.columns()`, `tm.rows()`, `tm.get_num_mem_tile_rows()` |
-| BDs per shim tile | **yes** | `tm.get_num_bds(0, 0)` — 16; `flm/gemm/design.py:277` already reads it |
-| shim DMA channels per direction | **yes** | `get_num_source_shim_mux_connections`; see §6 for the trap |
-| L1 bytes per core | not checked | |
-| shim BD wrap/stride caps (the `MAX_WRAP` FIXME) | **not checked** | this is the one the FIXME needs; verify before promising `dev.max_wrap` |
+**Shapes never reference a per-call value**, a `tunable`, or anything but a
+`dim()` or an integer. A per-dispatch extent is a `DispatchTime` member next
+to a buffer declared at its maximum:
 
-### The resolution pipeline, and the shape/tuning invariant
+```python
+    max_rows: int = dim()
+    x = In(max_rows, tile, to=...)
+    n_rows = DispatchTime(np.int32)         # how much of x is live on this call
+```
+
+The bound `n_rows <= max_rows` is enforced on the handle at write time.
+Scratchpad values are limited to 30 bits and `float32` is unsupported; the
+marker says so.
+
+### Lowering on a path without a scratchpad
+
+On NPU1 the packaging is per-step xclbin (§8). Whether an xclbin dispatch has
+a control scratchpad at all is **unverified** (spike S2). If it does not, the
+library lowers as follows and reports it:
 
 ```
-operand shapes -> unify -> compile-time fields -> tuning() -> Tuning knobs -> construct
+llama decode, npu1, per-step xclbin:
+  StridedCopy.cache_offset: scratchpad unavailable on this path; lowered as DispatchTime
+      (stream regenerated per call)
+  Softmax.vector_size: scratchpad unavailable and the core reads it; no lowering exists.
+      Make it a compile-time field or package for NPU2.
 ```
 
-**A shape may reference compile-time fields only, never a `Tuning` knob**, or the
-pipeline is a cycle. This holds naturally for all 12 operators, and it *forces
-the right taxonomy*: `RMSNorm`'s `tile_size` is shape-bearing
-(`rows = (size // tile_size, tile_size)`), so it must become a compile-time
-field — which is also priority 9's un-flattening. The same invariant extends to
-runtime values in §9.
+The first is automatic because an offset-only use is provably equivalent and
+each step is one design with one sequence and no PDI load, which is the shape
+the dispatch bridge accepts today. The second is an error because nothing
+equivalent exists, unless the sequence can write a dispatch value into tile
+memory with a register write, which is **unverified** (spike S3).
 
 ---
 
-## 5. What a compiled operator actually is
+## 7. The shape rule, and inference
 
-Everything from here rests on this section. The claims are read out of the
-toolchain, not assumed.
-
-`aiecc`'s own dependency graph (`aiecc --emit-dot`) splits at the tail. Up to
-`physical_with_elfs.mlir` both modes are identical; after it:
-
-| half | artifacts | a function of | **not** a function of |
-|---|---|---|---|
-| **overlay** — the configured array | `elfs_{0}.elf` (one per core), `cdo_{0}` → `{0}.pdi`; in xclbin packaging also `memTopology/kernels/partition_{0}.json` → `aie.xclbin` | the design, its compile-time fields, the device | the call order, the buffer bindings, any runtime value |
-| **sequence** — the instruction stream | `npu_seq_{0}.mlir` → `npu_program_{0}.bin` → `insts_{0}.bin` (or `npu_insts_full_elf_{0}.bin` + `full_elf_{0}.ctrlpkt.bin` on the ELF path) | the overlay it targets, the steps in it, the overlay's ABI (§6) | the *contents* of any buffer |
-
-The XRT dispatch ABI makes the split visible, and makes clear why the ELF path
-gives it up:
+**A shape dimension is a `dim()` field or an integer literal.** A conditional
+may only test a field that has a default or is passed explicitly, never one
+being inferred. GEMM's layout flags are the only conditional in the tree:
 
 ```python
-# xclbin: the sequence is argument 1. Swappable per call.
-kernel(3, insts_bo, insts_bytes, *buffers)              # hostruntime.py:331
-
-# full ELF: buffers only. There is no instruction-buffer slot at all.
-for i, buf in enumerate(buffers):
-    run.set_arg(i, buf)                                 # hostruntime.py:344-371
+    B = In.select(b_col_maj, (N, K), (K, N), to=GEMMOverlay.b)
 ```
 
-Upstream's runtime already caches the two halves independently — `hw_context`
-keyed on `(xclbin_path, mtime)` (`hostruntime.py:817`), the instruction BO keyed
-separately on `(insts_path, mtime)` (`:586-602`). **That is the structural basis
-for one overlay and many sequences, and it exists today.** IRON already exploits
-it in `SeparateDispatch`, which builds one `NPUKernel` per operator all pointing
-at one chained xclbin, differing only by kernel name and insts path
-(`iron/common/sequence.py:877-894`).
+An operator whose host shape is genuinely an expression of its fields
+re-expresses itself with the expression's result as the field. RMSNorm's
+`(size // tile_size, tile_size)` becomes `rows: int = dim()` with `size`
+derived. That is priority 9's un-flattening, and it is a constructor change
+for every such operator, listed in §14.
 
-The full-ELF path collapses the split by construction: `hw_context` comes from
-`pyxrt.elf` and is keyed on `(elf_path, mtime)` (`hostruntime.py:713`), the
-kernel name is `"<device>:<sequence>"`, and no instruction cache is kept at all.
+**Inference is a lookup.** `GEMV(wk, x)` in a graph walks each `In`'s dimensions,
+pairs position with operand dimension, binds the field or checks the literal,
+and raises on conflict naming both operands. Overlay-tier fields (`K`) and
+sequence-tier fields (`M`) are inferred the same way; the builder constructs
+the overlay, deduplicates it by `design_key()`, tunes it once, then constructs
+the operator against it. Tunable overrides in inferred form are passed through:
+`GEMV(wk, x, cols=2)`.
 
-### Three degrees of sequence reuse
+```python
+ov = GEMVOverlay(K=2048)                   # explicit
+q  = GEMV(ov, M=2048)
+kv = GEMV(ov, M=512)                       # same overlay, different extent
 
-| level | what is reused | cost of a new sequence | available |
-|---|---|---|---|
-| **L1 — separate files** | the overlay's `hw_context`, across sequences in one process | a full `aiecc` run (both halves) | **now**; `SeparateDispatch` does it |
-| **L2 — separate compiles** | the overlay's *compilation* | one `aiecc` run of the sequence half only | **no** — `--sequence-name`/`--device-name` exist as aiecc flags but nothing in Python drives them, and `--xclbin-input` needs a fresh run per kernel. Upstream ask; O8 |
-| **L3 — host-generated** | everything; the sequence is built in-process | microseconds, no aiecc, via a prebuilt `dispatch-<digest>.so` | **now**, as the dispatch bridge — xclbin packaging only. §11 |
+@iron.graph
+def step(x):
+    hq = q(wq, x)                          # explicit instance
+    hk = GEMV(wk, x)                       # inferred; overlay deduplicated with ov
+    return hq, hk
+```
 
-**L3 already delivers what L2 is wanted for**, in the case where only scalars
-change between sequences — which is llama's case. That is why §11 makes it a
-sequence *type* rather than a footnote.
-
-### How the overlay reaches the array
-
-`aiex.configure` lowers to load-PDI firmware instructions, and
-`ExpandMode = {none, write32, ctrlpkt}` (`AIEXAttrs.td:41-42`) decides what those
-become. This is a property of the **sequence**, because it determines what ends
-up in the instruction stream:
-
-| mode | mechanism | consequence |
-|---|---|---|
-| `Pdi` (`none`) | `load_pdi` against a PDI packaged in the image | the image must carry the PDI; the sequence alone cannot configure the array |
-| `Inline` (`write32`) | `--expand-load-pdis` rewrites it to `write32`/`blockwrite` **inside the instruction stream** | the sequence is self-configuring. Bigger: 99,768 bytes against 70,936 on a two-step graph (`jit_compile.py:231-237`) — and the smaller one is a different, broken program, not a tuning win |
-| `CtrlPkt` | `--load-pdi-to-ctrl-pkt`; config streamed as control packets over a control route | implies `--generate-ctrl-pkt-overlay`; mutually exclusive with `--expand-load-pdis` |
-
-`Inline` is the load-bearing one. It is what lets a runtime sequence carry its
-own array configuration; IRON already forces it for every fused ELF and the
-device hangs without it. It is also, per §11, exactly what the dispatch bridge
-needs — a convergence neither side currently knows about.
+Because a bare field name in a shape is already the symbolic form, there is no probe run.
+"This dimension names a tunable or a per-call value" is checked once at class
+creation.
 
 ---
 
-## 6. The overlay has an interface too
+## 8. Graphs, modules, and packaging
 
-`interface()` is the operator's **host** ABI. An overlay has a symmetric
-**device** ABI, and a sequence is valid against an overlay only if it agrees on
-it. Comparing content hashes — an earlier draft's check — is a crude proxy: two
-builds can hash differently for irrelevant reasons while agreeing perfectly, or
-hash-match on the recipe while the core that reads a resident value has moved.
+### A graph is a function
 
-```python
-@dataclass(frozen=True)
-class ShimBinding:
-    arg: int              # runtime_sequence argument index
-    tile: Tile            # shim column, row 0
-    direction: Direction  # MM2S (enters the array) | S2MM (leaves it)
-    channel: int          # 0..1
-
-@dataclass(frozen=True)
-class ResidentSymbol:
-    name: str
-    address: int
-    readers: tuple[Tile, ...]
-
-class Overlay:
-    hash:      str
-    bindings:  tuple[ShimBinding, ...]      # which shim/channel each buffer uses
-    residents: tuple[ResidentSymbol, ...]   # RTP scratchpad layout + who reads it
-    sizes:     tuple[int, ...]              # expected memref element counts
-```
-
-**None of this needs new tooling — it is already on disk**, and two of the three
-files are ones IRON already opens:
-
-| field | source | who reads it today |
-|---|---|---|
-| `bindings` | `input_with_addresses.mlir` | IRON reads this file already, for trace layout (`sequence.py:779`, `tracing_utils.py:68`) — but never for bindings |
-| `residents` | `params.txt`, from `--get-scratchpad-parameters` | `ParameterScratchpad`, `sequence.py:731-757` |
-| `sizes` | `parse_dma_sizes` on `input_with_addresses.mlir` | `CompilableDesign.validate_tensor_args` |
-
-Bindings are a two-hop join inside one file. Real generated output from
-`build/FLM_GEMM_M1024_K10240_N2560_tn64_ma32_emf_conv_even_npu2.mlir.d/input_with_addresses.mlir`:
-
-```mlir
-// :5453   arg index -> memref
-aie.runtime_sequence(%arg0: memref<10485760xbf16>,
-                     %arg1: memref<3276800x!aiex.bfp<"v8bfp16ebs8">>,
-                     %arg2: memref<2621440xbf16>)
-
-// :5650+  arg -> symbol, via the dma_bd operand
-%0 = aiex.dma_configure_task_for @B_L3L2_0_shim_alloc { aie.dma_bd(%arg1 : ...) }
-
-// :6731+  symbol -> (tile, direction, channel)
-aie.shim_dma_allocation @A_L3L2_0_shim_alloc(%shim_noc_tile_0_0, MM2S, 0)
-aie.shim_dma_allocation @B_L3L2_0_shim_alloc(%shim_noc_tile_0_0, MM2S, 1)
-aie.shim_dma_allocation @C_L2L3_0_shim_alloc(%shim_noc_tile_3_0, S2MM, 0)
-aie.shim_dma_allocation @C_L2L3_3_shim_alloc(%shim_noc_tile_1_0, S2MM, 0)
-```
-
-Note the scramble on `C`: logical fifo `_0` lands in column 3, `_3` in column 1.
-Pure placer output, no author intent — and the placer sorts fifos **by name**
-(`program.py:162`), so renaming a fifo silently permutes the bindings. That is
-the reuse hazard in one line, and it is invisible today.
-
-Neither `params.txt` nor `kernels_main.json` carries bindings, so
-`input_with_addresses.mlir` is the only source.
-
-### Existence proof: IRON already does this agreement by hand
-
-`iron/operators/flm/mm_prebuilt` is a sequence written against an overlay someone
-else compiled — a **downloaded xclbin**. It works only because the author
-hand-matched the shim bindings, in the only place in the tree that pins a channel
-(`design.py:109-116`):
+Inputs are its parameters, outputs are its return values, constants are what
+it closes over, and tracing supplies the shapes. This is upstream's
+`@iron.jit` convention, tensors positional and per-call scalars keyword-only.
 
 ```python
-shim = [aie.tile(c, 0) for c in range(COLS)]
-for r in range(ROWS):
-    aie.shim_dma_allocation(f"A_{r}", shim[A_SOURCE_COL[r]], DMAChannelDir.MM2S, 0)
-for c in range(COLS):
-    aie.shim_dma_allocation(f"B_{c}", shim[c], DMAChannelDir.MM2S, 1)
-    aie.shim_dma_allocation(f"C_{c}", shim[c], DMAChannelDir.S2MM, 0)
-```
+kv = [iron.state((cfg.n_kv_groups, MAX, cfg.head_dim)) for _ in range(cfg.n_layers)]
 
-with the reason at `:49-51` — *"Unlike flm.gemm — which lets the placer choose —
-this must match the placement baked into the downloaded xclbin."*
-
-And the failure of the contract is recorded too, at `:24-27`:
-
-> `iron.operators.flm.gemm` is a port of this overlay… Its own instruction stream
-> still cannot drive this xclbin: it writes no runtime parameters, and **its
-> lowering puts B on MM2S channel 0 in the odd columns.**
-
-That is a sequence that cannot drive an overlay, diagnosed by hand and written
-into a comment. `Overlay.bindings` plus E23 turns it into a message.
-
-### Constraining a binding
-
-Verified controllable, end to end. The pin goes on the ObjectFifo handle that the
-`Runtime` receives (`objectfifo.py:260-351`; it takes effect at
-`runtime/runtime.py:301-305`):
-
-```python
-of_c.cons(tile=Tile(1, 0), channel=0)     # col 1, row 0 = shim
-```
-
-**Direction is not spelled, and must not be.** It follows from which end sits at
-the shim: `.prod()` ⇒ `MM2S` (enters), `.cons()` ⇒ `S2MM` (leaves)
-(`iron/dataflow/flow.py:48-57`). Which means `In`/`Out` in `interface()` already
-carries it, and the operator-level spelling needs only column and channel:
-
-```python
-    def interface(self):
-        self.A = In(self.M, self.K)                          # placer assigns
-        self.C = Out(self.M, via=Shim(col=1, channel=0))     # this one is pinned
-```
-
-The design passes the constraint through to `.cons(tile=, channel=)`; if it
-forgets, the post-compile read-back of `input_with_addresses.mlir` catches it
-(E29). So the design does not have to be trusted — it has to be *checked*.
-
-### What the hardware allows, and what nobody has exercised
-
-- **2 MM2S + 2 S2MM per shim tile**, on npu1 and npu2 alike. Device-wide that is
-  16 MM2S on npu2, 8 on npu1. IRON already wraps the query as
-  `get_shim_dma_limit` (`iron/common/utils.py:7-19`) and guards on it
-  (`operator_bases.py:70-75`). The accessor is
-  `get_num_source_shim_mux_connections`, **not**
-  `get_num_*_switchbox_connections` — the latter returns 0 for `DMA` on row 0,
-  because the shim DMA hangs off the shim mux. Easy trap; worth a comment
-  wherever it is used.
-- **Existing pins.** `gemm/op.py:1021-1026` and `mha/op.py:927-932` pin shim
-  *tiles*; `mem_copy/op.py:352-355` explicitly opts out with
-  `RuntimeEndpoint(AnyShimTile)`. Only `mm_prebuilt` pins a channel.
-- **`channel=` is unexercised.** Zero call sites in IRON, and no Python-side
-  validation that `channel < 2` — an out-of-range value fails deep in lowering or
-  not at all. E30 validates it at `interface()` time against the target model.
-- **Re-pinning raises rather than merges** (`objectfifo.py:293-302`), comparing
-  by `(col, row)` because `Tile.__eq__` is identity-based
-  (`device/tile.py:107-110`).
-- **Pinning constrains everything else's routing.** `flm/gemm` has zero placement
-  slack — *"the memtiles pack to exactly 512 KB"* (`design.py:516-517`) — so
-  adding shim pins there will surface "number of input DMA channel exceeded"
-  rather than just working. Constraint is a tool, not a default.
-
-**Correction to a standing belief:** `flm/gemm` does *not* demonstrate shim
-control. Its one placement pin is a **memtile** (`design.py:523-533`,
-`tile=Tile(c, 1)`), with a comment saying everything else is left to the placer.
-Its README claims A broadcasts from columns 0/2/4/6 (`README.md:58`); that is
-what the placer currently produces, but nothing pins it, and the name-sorted
-placer can move it. That line should be corrected or the pin should be added —
-tracked as O13, independent of this plan.
-
----
-
-## 7. Lifecycle
-
-```python
-op  = GEMV(M=2048, K=2048)     # __init__ -> interface(). Cheap. No validation, no MLIR.
-op  = op.specialize(dev)       # run tuning(), bind device, validate
-ov  = Overlay(op, dev)         # core ELFs + PDI; publishes bindings/residents/sizes (§6)
-seq = StaticSequence(ov, op)   # TXN / insts, written against ov's ABI
-net = Xclbin(ov, seq).load(dev)
-net(A, B, C)
-```
-
-The `specialize` split is load-bearing, not cosmetic. Today validation is spread
-between `__post_init__` and five asserts inside `my_matvec`. Moving it to
-`specialize()` is what lets `__init__` tolerate **symbols**, which is how
-inference works:
-
-```python
-probe = GEMV(M=Sym("M"), K=Sym("K"), num_batches=Sym("b"))   # interface only, nothing validated
-unify(probe.interface, operand_shapes)                        # -> {M: 2048, K: 2048, b: 1}
-op = GEMV(M=2048, K=2048, num_batches=1)                      # construct for real
-```
-
-A symbol only has to survive *construction*, never a branch or an arithmetic
-operation. That is why `num_batches` — which is both branched on *and* the thing
-we want to infer, and which the annotation draft needed rank-directed branch
-resolution for — is simply not a problem here.
-
-`specialize()` is also upstream's word for binding a dynamic parameter to a
-constant, so one method covers both jobs (§9, §11).
-
-**Honest caveat on `Overlay` / `Sequence`.** Today `aiecc` emits both halves from
-one invocation, so constructing both is *one* build underneath. What the plan
-buys immediately is that the halves are **named, published and checked
-separately** (§6) — which is L1, and which is what packaging needs in order to
-reuse a `hw_context` across sequences. Splitting the *compile* is L2 and needs
-upstream (O8). The API is shaped for L2 now so that landing it later is not a
-signature change.
-
----
-
-## 8. The design consumes the interface
-
-```python
-def my_matvec(dev, interface, M, K, num_batches, num_aie_columns, tile_size_input, ...):
-    A, B, C = interface
-    L1_A_ty = np.ndarray[(tile_size_input, K), bf16]
-    ...
-    rt = Runtime(sequence, [A, B, C, *fifo_endpoints])
-```
-
-`L3_A_ty` / `L3_B_ty` / `L3_C_ty` disappear — they *were* the duplicate. One
-declaration in `interface()`, consumed by the design, enforced by identity (E7).
-This is what deletes `arg_spec` and `bind()` outright: order, direction, shapes
-and dtypes all fall out of one declaration.
-
-**Known divergence from upstream.** mlir-aie's `@iron.jit` convention is
-`def design(a: In, b: Out, *, N: CompileTime[int])`, classified by
-`split_params()`. Here the design takes the interface positionally instead. That
-is defensible — an IRON design is an internal function called by an operator, not
-a user-facing jit entry point — but it is a real divergence, and §11 shows it has
-a concrete consequence for `SequenceResident` values. See O4.
-
----
-
-## 9. Runtime values: named by what rebuilds
-
-A value that changes at runtime has to live somewhere, and where it lives decides
-what a change costs. The declaration says *where*, so the cost is legible at the
-declaration site:
-
-```python
-    def interface(self):
-        self.src = In(self.n_kv_groups, self.head_dim)
-        self.dst = Out(self.n_kv_groups, self.seq_len, self.head_dim)
-
-        self.output_offset = HostResident(np.int32)      # in a buffer the device reads
-        self.n_tokens      = SequenceResident(np.int32)  # in the instruction stream
-    # a plain dataclass field is OverlayResident         # in the array configuration
-```
-
-| tier | lives in | changing it rebuilds | cost |
-|---|---|---|---|
-| `HostResident` | a resident BO the device reads (`aiex.scratchpad_parameter`) | **nothing** | a few words + a sync |
-| `SequenceResident` | the instruction stream | the **Sequence** | stream regen + BO alloc per call |
-| `OverlayResident` (a plain field) | the array configuration | the **Overlay** | a full compile — 8–12 ms/token if done per value (`project_patch_elf_measured`) |
-
-Each tier is named for the artifact §5 defines, so "why is this slow" answers
-itself and the error message needs no translation:
-
-```
-n_tokens is SequenceResident, so changing it rebuilds the Sequence
-(stream regen + BO alloc per call). Declare it HostResident to make it free,
-or as a plain field to bake it into the Overlay.
-```
-
-Deliberately **not** reusing upstream's `DispatchTime` for the middle tier:
-upstream's `DispatchTime` *is* `SequenceResident`, and naming the free tier
-anything with "dispatch" in it next to that would be a trap.
-
-Verified that `HostResident` is genuinely free and genuinely powerful:
-`strided_copy/op.py:174-189` passes a `ScratchpadParameter` as
-`offset_parameter=` to `.fill()`/`.drain()` with `sync_parameters()` in the
-sequence — so it drives DMA offsets, under full ELF. That is why llama's
-`cache_offset` works today (`llama_npu.py:1101-1104`), and llama needs nothing
-above the bottom tier.
-
-### Choosing a tier
-
-The author declares the tier. There is **no lazy compile and no silent deopt** —
-`compile()` compiles, using the declared tiers as written.
-
-Inference belongs only where the call *is* the entry point and compiling on the
-first call is the whole contract:
-
-```python
-# compile-on-demand: eager, declared tiers used as written. No inference.
-net = decode.compile(dev)
-
-# JIT: values are in hand at the call, so specializing a SequenceResident that
-# only ever takes one value to an OverlayResident constant is expected, not sneaky.
-@iron.jit
-def decode_step(x, offset): ...
-```
-
-A JIT that specializes must still be driven by **cardinality**, not by "it has
-not changed yet". `cache_offset` takes one distinct value per token, unbounded;
-specializing it is exactly the `patch_elf` disaster at 8–12 ms/token.
-
-### Sharing is forced by the hardware, so make it explicit
-
-A `HostResident` is **one named device symbol per design**. A fused sequence that
-reuses one `StridedCopy` across 32 layers has one symbol, written once per token.
-llama relies on this today and it happens to be correct only because all 32
-layers want the same value.
-
-Per-call-site values are not implementable on this mechanism — distinct symbols
-would mean distinct designs, i.e. 32 compiled variants. So the contract is: **a
-runtime value belongs to the operator instance, and reuse means sharing.**
-Stated, documented, and checked (E10), not inherited.
-
-```python
-offset = g.param(np.int32)
-for i, blk in enumerate(model.layers):
-    g(StridedCopy.tuned(output_offset=offset), k, kc[i])
-...
-net[offset] = n * cfg.head_dim
-```
-
-Binding the same handle at many call sites is explicit sharing and legal. Binding
-*different* handles to one operator instance is the accident, and it is an error
-(E10).
-
-### The shape invariant, extended
-
-**A shape may reference compile-time fields only** — never a `Tuning` knob, a
-`HostResident`, or a `SequenceResident`. One logical reason (§4's pipeline would
-cycle) and one physical (a shape must be an `int` at build time). Upstream
-already enforces it loudly for the middle tier: `_DispatchParameter` poisons
-`__index__`, `__bool__`, arithmetic and comparisons (`markers.py:150-159`). IRON
-enforces the same for `Tuning` and `HostResident` (E4, E5).
-
----
-
-## 10. Primitives, not strategies
-
-Today `dispatch="fused"|"separate"` is one string carrying four decisions. An
-earlier draft replaced it with a four-axis `Deployment` record and a set of named
-presets. That is the same mistake at higher resolution: it still enumerates
-blessed combinations, and it still cannot express *partial* fusion, which is the
-case that motivated the exercise.
-
-**So there is no `Deployment` and there are no mode names.** There are four
-constructors.
-
-```python
-class Sequence:
-    """One entry point's instruction stream, written against one overlay's ABI."""
-    overlay: Overlay
-    steps: tuple[Step, ...]
-    configure: Configure  # Pdi() | Inline() | CtrlPkt(); derived, overridable
-
-class StaticSequence(Sequence):
-    """insts.bin from aiecc --get-npu-insts. Read once, cached on (path, mtime)."""
-
-class GeneratedSequence(Sequence):
-    """dispatch-<digest>.so from --npu-cpp-emit-dispatch-shim. Called per dispatch."""
-    params: tuple[SequenceResident, ...]
-
-class Elf(Image):
-    def __init__(self, overlay: Overlay, sequence: StaticSequence): ...
-class Xclbin(Image):
-    def __init__(self, overlay: Overlay, *sequences: Sequence): ...
-```
-
-Read the two `Image` signatures: they carry the legality story an earlier draft
-needed a table for.
-
-- **`Elf` takes exactly one sequence, and it must be static.** A full ELF has no
-  instruction-buffer argument to swap a per-call stream into
-  (`hostruntime.py:344-371`), so `Elf(ov, generated)` is a **pyright error**, not
-  a runtime one. "`SequenceResident` ⇒ xclbin" stops being a rule and becomes a
-  type.
-- **`Xclbin` takes any number of sequences.** That is the chained-xclbin reality:
-  one image, N kernels, one shared `hw_context` (`sequence.py:877-894`). The
-  asymmetry between the two constructors is real and is now in the signature
-  instead of buried in a policy class.
-
-### Dispatch boundaries are structure, not a mode
-
-The `schedule="fused"|"stepped"` axis is gone, because it was never a mode — it
-was a question about **where the host regains control**, and that is a property
-of how you carve the graph into sequences.
-
-```python
-decode = g.build()          # -> Graph, with .steps
-ov     = Overlay(decode, dev)
-
-# one sequence: one dispatch, host sees nothing in between
-Xclbin(ov, StaticSequence(ov, decode.steps))
-
-# one sequence per operator: today's "separate"
-Xclbin(ov, *[StaticSequence(ov, [s]) for s in decode.steps])
-
-# partial: four dispatches, eight layers each. Not expressible today at all.
-Xclbin(ov, *[StaticSequence(ov, c) for c in decode.chunks(8)])
-```
-
-The third form is what justifies the rework. It is also how a graph too large for
-one instruction stream gets split, and how a host-side operation is interleaved
-without giving up fusion everywhere else.
-
-### What is derived, and what the user says
-
-| decision | default | why |
-|---|---|---|
-| `Sequence.configure` | `Inline()` if the sequence spans more than one device configuration, else `Pdi()` | a multi-config sequence *cannot* work with `Pdi()`. Overridable to `CtrlPkt()`, which has no automatic answer |
-| which `Image` | `Elf` on NPU2 with one static sequence, `Xclbin` otherwise | today's `AutoDispatch`, kept as a **function returning a composed object**, not a mode anything branches on |
-| `Sequence` subclass | `StaticSequence` unless the steps declare `SequenceResident` values | declaring one *is* the request for a generated sequence |
-| shim bindings | the placer assigns | §6; constrain per-buffer with `via=`, verified post-compile (E29) |
-
-Every default is a one-line function over the primitives, so a user who wants
-something else calls the constructor directly. Nothing downstream asks "which
-mode am I in".
-
-### What survives as runtime checks
-
-| check | when | reason |
-|---|---|---|
-| `Elf(ov, ...)` where `ov.device` is NPU1 | `Elf.__init__` | NPU1 has no full-ELF dispatch (`sequence.py:128-133`) |
-| sequence's ABI disagrees with the overlay's | `Image.__init__` | §6 — names the binding, not just a hash |
-| `GeneratedSequence` whose lowering leaves >1 runtime sequence | build | inherited from `_check_runtime_sequence_abi` |
-| `CtrlPkt()` and `Inline()` together | build | mutually exclusive aiecc flags |
-
----
-
-## 11. `StaticSequence` vs `GeneratedSequence`
-
-### The gate today is a side effect, not a decision
-
-```python
-has_dispatch = bool(self.dispatch_params)
-...
-inst_path = None if has_dispatch else kernel_dir / "insts.bin"
-compiler_options.append("--get=npu_lowered.mlir")          if has_dispatch
-npu_cpp_path = kernel_dir / "dispatch_gen.cpp"             if has_dispatch
-npu_cpp_emit_dispatch_shim = has_dispatch
-dispatch_so_path = compile_dispatch_bridge(...)            if has_dispatch
-```
-
-Five build decisions keyed off "does any value happen to be dynamic". Which kind
-of sequence you get is not expressible; it is inferred.
-
-### Both kinds land in the same slot
-
-```python
-# StaticSequence    -- insts.bin read from disk, cached on (path, mtime)
-insts_bo = runtime._read_insts_cached(seq.insts_path)
-
-# GeneratedSequence -- dispatch-<digest>.so called host-side
-insts    = seq.bridge.generate([cache_offset, softmax_vector_size])
-insts_bo = allocate_cacheable_bo(insts)                               # hostruntime.py:299-312
-
-# identical from here
-kernel(3, insts_bo, insts_bytes, *buffers)                            # hostruntime.py:331
-```
-
-`GeneratedSequence` is not a different dispatch path; it is a different
-**producer** for argument 1, and `SequenceResident` values are that producer's
-**arguments**. A `GeneratedSequence` with zero of them is coherent; it needs
-`has_dispatch` widened to `has_dispatch or generated`, and the existing ABI check
-already tolerates it (`len(c_types) != len(dispatch_params)`, and `0 == 0`
-passes). Whether to allow it in production is O11.
-
-### The convergence nobody has noticed
-
-```python
-if len(sequences) != 1:
-    raise DispatchCompileError(
-        f"dispatch bridge requires exactly one runtime_sequence; found {len(sequences)}.")
-if requires_pdi_resources:          # any aiex.npu.load_pdi survived lowering
-    raise DispatchCompileError(
-        "The Python dispatch runtime cannot supply load_pdi resources. "
-        "Use aiecc --get-npu-cpp with a native host that packages the "
-        "referenced PDIs, or specialize all dispatch parameters and use full_elf=True.")
-```
-
-That second message assumes the only escape is full ELF. **IRON's fused path
-already takes the other escape without knowing it**: `Inline()`
-(`--expand-load-pdis`) rewrites every `load_pdi` into `write32`/`blockwrite`
-inside the stream, so `requires_pdi_resources` should be false by construction.
-The same flag a multi-step sequence cannot run without is the flag the dispatch
-bridge needs. Confirming that is step 0b (§12).
-
-### The declaration tension this creates
-
-`CompilableDesign` derives `dispatch_params` by **introspecting the design's
-signature**, keyword-only. This plan's design takes the interface positionally:
-
-```python
-def my_matvec(dev, interface, M, K, ...):
-    A, B, C, n_tokens = interface
-    rt = Runtime(seq, fn_args=[A, B, C, n_tokens])   # nothing here says DispatchTime
-```
-
-```python
-# (a) the design declares them too; interface() is checked against it.
-#     Costs a second declaration -- exactly what this plan exists to delete.
-def my_matvec(dev, interface, M, K, *, n_tokens: DispatchTime[np.int32]): ...
-
-# (b) @operator synthesizes an annotated wrapper from interface(). More magic.
-
-# (c) IRON supplies the classification directly; interface() stays the single
-#     source of truth. Plain attributes -- just derived in __init__ today.
-CompilableDesign(gen, dispatch_params=["n_tokens"], dispatch_param_types=[np.int32])
-```
-
-**Recommended: (c)**, as a small upstream ask, with an IRON subclass in the
-meantime. It is also the only option that keeps the strings out — the list is
-generated from the recorded interface members rather than typed. (a) is the
-fallback, degrading to a drift check rather than a correctness hole.
-
-Inherited free either way: `_DispatchParameter._bind` (`markers.py:140-146`)
-already enforces "forwarded exactly once into `Runtime(seq, fn_args=[...])`".
-
-### The cost to measure
-
-`GeneratedSequence` copies a fresh `uint32` array out of the `.so` per call
-(`_dispatch_bridge.py:144-192`) and allocates a new cacheable BO per call
-(`hostruntime.py:299-312`). Against a `HostResident` write — a few words into a
-resident BO — the prior is that generated **loses** on latency. The point of
-making it a type is that the answer becomes a number, and that it buys what a
-scratchpad cannot: changing DMA *sizes and strides*, not just offsets.
-
----
-
-## 12. llama four ways — the acceptance criterion
-
-**Test fixtures, not API.** The model code above `decode = g.build()` is
-identical in all four.
-
-```python
-decode = g.build()
-ov     = Overlay(decode, dev)          # shared by all four
-
-net = Elf(ov, StaticSequence(ov, decode.steps)).load(dev)                        # A
-net = Xclbin(ov, *[StaticSequence(ov, [s]) for s in decode.steps]).load(dev)     # B
-net = Xclbin(ov, StaticSequence(ov, decode.steps)).load(dev)                     # Ca
-net = Xclbin(ov, GeneratedSequence(ov, decode.steps)).load(dev)                  # Cb
-```
-
-| | image | sequences | kind | dispatches/token | |
-|---|---|---|---|---|---|
-| **A** | `Elf` | 1 | static | 1 | today's path; the baseline. NPU2 only |
-| **B** | `Xclbin` | ~15 | static | ~15 | today; runs on NPU1. Overlay shared across every step |
-| **Ca** | `Xclbin` | 1 | static | 1 | **one overlay, one reusable insts.bin** |
-| **Cb** | `Xclbin` | 1 | generated | 1 | per-token scalars with no scratchpad |
-
-A fifth — `decode.chunks(8)`, four sequences of eight layers — costs nothing
-extra to express and is unreachable today.
-
-### Ca carries the shared risk
-
-The fused MLIR emits `aiex.configure`/`aiex.run` per step
-(`compilation/sequence.py:219-297`), which under `Inline()` expands into
-`write32`/`blockwrite` inside the instruction stream — at which point the
-xclbin's packaged PDI is needed only to establish the partition. That *should*
-make Ca work. Nothing in the tree does it, and `_fuse_as_children` forces
-`_iron_full_elf=False` on children for a related-but-different reason
-(`jit_compile.py:142-160`), the failure mode being a link that succeeds and a
-device that hangs with `ERT_CMD_STATE_TIMEOUT`.
-
-### Cb adds two constraints on top
-
-- **exactly one `aie.runtime_sequence` survives into `npu_lowered.mlir`.** The
-  fused module starts with one per child device plus `main:sequence`.
-  `aie-materialize-runtime-sequences` inlines `aiex.run` callees but the pass
-  description does not say whether the callees are **erased**.
-- **no `aiex.npu.load_pdi` survives.** Should hold under `Inline()`.
-
-### Step 0: settle both before writing any model code
-
-```bash
-# 0a -- the shared risk. Two-operator fused graph, full_elf=False.
-aiecc ... --expand-load-pdis --get-xclbin --get-npu-insts ...
-# dispatch via opcode 3; it either runs or it hangs.
-
-# 0b -- Cb's two extra constraints, same build plus:
-aiecc ... --get=npu_lowered.mlir --get-npu-cpp --npu-cpp-emit-dispatch-shim ...
-grep -c 'aie.runtime_sequence' <prj>/npu_lowered.mlir     # must be 1
-grep -c 'aiex.npu.load_pdi'    <prj>/npu_lowered.mlir     # must be 0
-```
-
-An afternoon each. If 0a hangs, the primitives survive unchanged — `Xclbin` with
-one multi-step sequence has no legal construction, llama-without-ELF means config
-B only, and Ca/Cb defer behind an upstream fix.
-
-### What to measure once they run
-
-Per-token latency A vs B vs Ca vs Cb, plus `chunks(8)`; build time and artifact
-size; and for Cb, host-side regeneration cost per token against the
-`HostResident` write it replaces. Per `project_npu_bimodal_timing`: interleave
-the configurations, ≥8 rounds — a non-interleaved min-of-medians has fabricated a
-5% "win" here before.
-
----
-
-## 13. Harnesses compose too
-
-What `compare` actually requires is **a boundary after every step** — a list of
-single-step sequences, not a mode:
-
-```python
-probs = Reference(decode).run(inputs)      # never receives an overlay
-
-net = Compare(ov, [StaticSequence(ov, [s]) for s in decode.steps],
-              rel_tol=0.05, abs_tol=1e-2).load(dev)
-```
-
-`Compare` cannot be handed one multi-step sequence, because there would be
-nowhere to interrupt — structural rather than documented. `Reference` never
-receives an overlay, so "reference compiles nothing" is likewise in the
-signature.
-
----
-
-## 14. Verification for a new operator with no tests
-
-**Duplication and verification pull in opposite directions.** A second
-declaration catches *drift*, never *wrongness* — a matching typo passes. IRON
-proves this today: `GEMV.arg_spec` says `(M,K),(K,),(M,)`, the design forty lines
-later says `(num_batches*M*K,),(num_batches*K,),(num_batches*M,)`, and
-`arg_spec_snapshot.json` (a third restatement, 22 classes) has blessed the
-disagreement. Green.
-
-So verification must come from *structure and behaviour*, not restatement. That
-is why §8 has the design consume the interface rather than restate it, and why
-the checks in §15 are mostly structural rather than comparisons between two
-hand-written specs.
-
-The build-time coverage checks (E15–E20) are only *possible* because of the
-single declaration: today the shape in `arg_spec` and the `tensor_dims` in the
-TAPs come from different places, so comparing them proves nothing.
-
-**Separately, and worth fixing independently of this plan:** `run_test` uses the
-arg spec for direction and order only and never checks `spec.shape` /
-`spec.dtype`, while tests feed it pre-flattened data. That is why the GEMV rank
-disagreement above is invisible. Tightening it will surface some currently-green
-failures.
-
----
-
-## 15. Enforcement matrix
-
-**T1** static, **T2** import/registration, **T3** specialize, **T4** build,
-**T5** compose/load, **T6** hardware.
-
-| id | mistake | when | mechanism |
-|---|---|---|---|
-| E1 | a name assigned twice, or conditionally | T2 | `__setattr__` records; `interface()` replayed, each name assigned exactly once |
-| E2 | an interface member assigned outside `interface()` | T2 | `__setattr__` rejects these types outside the `interface()` call frame |
-| E3 | count/order disagrees with the design | T4 | identity check against `Runtime` fn_args (E7) |
-| E4 | a shape reads a `Tuning` knob | T2 | symbolic probe run twice under **different tuning**; the interface must be identical |
-| E5 | a shape reads a `HostResident`/`SequenceResident` | T2 | poisoned `__index__` raises, naming the value |
-| E6 | `interface()` doesn't survive symbols | T2 | symbolic smoke construction at registration — catches validation that leaked into `__init__` |
-| E7 | the design re-declares types instead of consuming the interface | T4 | the first N `Runtime` fn_args must be the *same objects* as the declared members |
-| E8 | `reference()` arity disagrees with the `In` members | T2 | signature check |
-| E9 | `tuning()` sets a field that doesn't exist, or a non-`Tuning` one | **T1** | `dataclasses.replace` return type; pyright |
-| E10 | one operator instance bound to two different value handles | T2 (graph build) | recorded per instance; error explains one-symbol-per-design |
-| E11 | a `HostResident` never written before dispatch | T6 | sync-time check on the handle |
-| E12 | no legal tuning for this shape/device | T3 | `Untunable`, raised by `tuning()` |
-| E13 | a `GeneratedSequence` packaged into an `Elf` | **T1** | `Elf.__init__(self, overlay, sequence: StaticSequence)`; pyright |
-| E14 | `Overlay`/`Sequence` built before `specialize()` | T3/T4 | state machine on the base class |
-| E15 | a declared tensor never forwarded to `Runtime` | T4 | fn_args inspection |
-| E16 | an `Out` never drained, an `In` never filled | T4 | sequence inspection |
-| E17 | DMA addresses past the end of a declared buffer | T4 | `access_order()` max vs `prod(shape)` |
-| E18 | part of an `Out` never written | T4 | `access_count() == 0` — silent garbage |
-| E19 | part of an `In` never read | T4 | `access_count() == 0` |
-| E20 | an `Out` written twice | T4 | `access_count() > 1` |
-| E21 | wrong type / missing arg / bogus kwarg at construction | T1 | pyright on real dataclass fields |
-| E22 | the kernel computes the wrong thing | T6 | `reference()` — the only oracle |
-| E23 | a sequence composed against an overlay it does not match | T5 | §6 ABI comparison; names the disagreeing **binding or symbol**, not a hash |
-| E24 | `Elf` on NPU1 | T5 | `Elf.__init__`, from `overlay.device` |
-| E25 | `Inline()` and `CtrlPkt()` requested together | T4 | mutually exclusive aiecc flags |
-| E26 | a `SequenceResident` declared but never forwarded to `Runtime` | T4 | inherited: `_DispatchParameter._bind` |
-| E27 | a `GeneratedSequence` whose lowering leaves >1 runtime sequence | T4 | inherited: `_check_runtime_sequence_abi`, re-raised naming the sequence |
-| E28 | `Compare` handed a multi-step sequence | T1 | its constructor takes a list of sequences |
-| E29 | a `via=Shim(...)` constraint the design didn't honour | T4 | read `input_with_addresses.mlir` back; compare to the declared constraint |
-| E30 | `via=Shim(channel=2)` — past the hardware limit | T2 | 2 per direction per shim tile, from the target model. **Unvalidated today at any layer** |
-| E31 | more shim endpoints than the device has | T3 | `get_shim_dma_limit` — already exists, already used; extend to the graph |
-
-T4 uses `TensorAccessPattern`'s `tensor_dims`, `offset`, `sizes`, `strides`,
-`access_order()`, `access_count()` (per-element touch count) and
-`compare_access_orders()` (`aie/helpers/taplib/tap.py`).
-
-T4 runs on every build unless disabled: `compile(check=False)`, with a size
-threshold that degrades to bounds-checking-only for very large buffers
-(`access_count()` materialises a buffer-sized array — llama's 2048-padded
-attention buffers × 32 heads is real build time). See O3.
-
-**E4 is worth calling out.** "Shapes must not depend on tuning" is usually a
-convention people violate quietly. Running the symbolic probe twice under
-different tuning and comparing turns it into a mechanical check that costs
-microseconds.
-
-**E9, E13 and E28 are T1** as a direct result of §3's `replace()` and §10's
-constructor signatures — each was a runtime check in an earlier draft. That is
-the payoff of priority 15.
-
-**E29–E31 are the §6 rows**, and E30 catches a real gap: nothing in IRON or
-mlir-aie validates a pinned channel against the 2-per-direction limit today, and
-there are zero call sites to have noticed.
-
-**Not enforceable without a test:** the math (E22), and access *order* — coverage
-can be complete while the permutation is wrong. `compare_access_orders()` helps
-where a fill and a drain should correspond, but it is not general.
-
----
-
-## 16. Measurements taken
-
-Probe at `/scratch/ehunhoff/spelling_probe/` (separate venv; `ironenv`
-untouched, per requirements.txt drift risk).
-
-**Spelling vs type checkers.** mlir-aie uses pyright,
-`typeCheckingMode: "standard"`; IRON configures no checker today.
-
-| spelling | pyright std | pyright strict | mypy --strict |
-|---|---|---|---|
-| `In[M, K]`, free names | 7 errors | — | — |
-| `Annotated[Tensor, Shape[M,K]]`, free names | 7 errors | — | — |
-| `In[M, K]`, module-level Dims | clean | clean | 33 errors |
-| `Annotated[In, Shape[M,K]]`, module Dims | clean | clean | clean |
-| `In[M, K]` + config suppression | clean | clean | n/a |
-
-Suppression does **not** leak: a normal module still reports undefined names.
-Strict is *better* than standard here — same result, more call-site checking.
-All of this is why the annotation approach was *viable*; §3 is why it lost
-anyway.
-
-**Synthesised dataclass fields — the decisive one.** Measured: pyright reports
-`No parameter named "M"` on **valid** calls. `@dataclass_transform` does not help
-(PEP 681 infers from class-body annotations). Worse than unchecked. This is what
-forces real, hand-written dataclass fields in §3.
-
-**Resolver for the annotation approach.** ~90 lines; classification, evaluation,
-inference, error messages. Two findings from building it, both of which are
-*dissolved* rather than solved by putting the declaration in a method body:
-
-- Annotations must be evaluated one at a time — evaluating them together forces
-  `(N,K) if b_col_maj else (K,N)` while `b_col_maj` is still symbolic.
-- A parameter a shape *branches* on cannot be symbolic; a forced symbol names
-  itself, drops to its default and retries.
-
----
-
-## 17. Authoring
-
-The operator model is invisible from here, and so are the artifacts until you ask
-for a specific composition.
-
-```python
-with capture(model) as g:
-    x      = g.input((1, cfg.emb_dim))
-    angles = g.input((1, cfg.head_dim))
-    offset = g.param(np.int32)
-    kc = [g.state((cfg.n_kv_groups, MAX, cfg.head_dim)) for _ in range(cfg.n_layers)]
-
+@iron.graph
+def decode(x, angles, *, pos: Scratchpad[np.int32]):
     for i, blk in enumerate(model.layers):
-        h = g(RMSNorm, x, blk.norm1.weight)
-        q = g(RoPE, g(GEMV, blk.attn.q.weight, h), angles)
+        h = RMSNorm(x, blk.norm1.weight)                  # a bare tensor is a weight
+        q = RoPE(GEMV(blk.attn.q.weight, h), angles)      # RoPE is InOut: q is h's buffer
+        k = RoPE(GEMV(blk.attn.k.weight, h), angles)
+        StridedCopy(k, kv[i], dst_offset=pos)             # writes state; returns nothing
+        scores = [Softmax(GEMV(kv[i][g], q[g])) for g in range(cfg.n_kv_groups)]
         ...
-    logits = g(GEMV, model.out_head.weight, g(RMSNorm, x, model.norm.weight))
+        x = ElementwiseAdd(x, o)
+    return GEMV(model.out_head.weight, RMSNorm(x, model.norm.weight))
 
-decode = g.build()
-net = decode.compile(dev)            # composes the §10 defaults
-net[x] = embed(token); net[offset] = n * cfg.head_dim; net()
-probs = net[logits]
+net = decode.compile(dev, x=(1, cfg.emb_dim), angles=(1, cfg.head_dim))
+logits = net(x_tok, angles_tok, pos=n * cfg.head_dim)
 ```
 
-No strings. `capture(model)` learns `id(tensor) -> name` from
-`named_parameters()`, so a parameter *is* its handle. Every intermediate is
-undeclared — `infer_buffer_offsets` already pools by live range, which deletes
-`AIEPrefillBuffers` (~70 lines of `XRTTensor`/`subview`).
+| role | spelling |
+|---|---|
+| input | a positional parameter |
+| output | a return value; a tuple for several; returned as device tensors with `.numpy()` |
+| weight | any tensor the function closes over; identity is the tensor, uploaded once |
+| state | an `iron.state(...)` created outside and closed over; persists on the device |
+| per-call scalar | a keyword-only parameter with a marker, bound to an operator's `Scratchpad` or `DispatchTime` member; one handle at many call sites is sharing (§6) |
+| intermediate | a local; pooled by live range |
+| slice | indexing a handle; static slices are views, a per-call offset is the operator's marker |
+| in-place | invisible; an `InOut` operator returns the handle it was given |
 
-Prefill differs by passing the matmul class in (`def ffn(g, blk, x, mm=GEMV)`),
-which also turns the `.T` layout disagreement into `GEMM.tuned(b_col_maj=True)`
-and deletes `_upload(k_major=...)`.
+**Operators are called on handles.** `GEMV(w, h)` infers the overlay and the
+extent from its arguments (§7); an explicit instance is `GEMV(ov, M=2048)` and
+is then called the same way. The class tells the two apart by whether it
+received handles. That overloading is the one wart in this form, and torch
+lives with the same one between `nn.Linear` and `F.linear` (O9).
 
-Not llama-shaped: a CNN is `g(Conv2D, net.conv1.weight, x)` in the same graph,
-same allocator, same handles.
+**Names come from the model if one is offered**, and only for diagnostics
+and the upload log: `iron.graph(names_from=model)` maps parameter identity to
+its `named_parameters()` name. A tensor that is not a registered parameter
+(a RoPE table, a packed weight) is still a weight; it is named by where it
+was used.
 
-`decode.compile(dev)` is three lines of library code over the primitives, and a
-user who wants something else writes those three lines:
+**Composites are graph functions.** swiglu_prefill and swiglu_decode are
+today `OperatorSequence`s of children; they become functions that call GEMM,
+SiLU and ElementwiseMul, and `CompositeOperator` goes.
+
+**Shapes come from `compile()` or from the first call.** `compile(dev, ...)`
+with shapes is the documented path. Calling an uncompiled graph with real
+tensors compiles for those shapes, says so once, and dispatches. A new input
+shape on a compiled graph is an error, not a recompile.
+
+**`reference`** is the same function traced against each operator's
+`reference()`; `compare` runs both with a boundary after every step.
+
+### A module is several graphs over one buffer plan
+
+llama has prefill and decode, and today they are unrelated: prefill runs
+per-operator xclbins on its own tensors in its own weight layout, decode runs
+a fused ELF with the weights uploaded into its arena. Weights are uploaded
+twice, in two layouts, and the KV cache is threaded by hand. Two graph
+functions that close over the same tensors and the same state objects compile
+together as a **module**: one allocation for weights, state and intermediates
+across both, weights uploaded once, state shared because it is the same
+bytes, one image with one entry point per graph.
 
 ```python
-ov          = Overlay(decode, dev)
-decode_net  = Xclbin(ov, StaticSequence(ov, decode.steps)).load(dev)
-prefill_net = Xclbin(ov, StaticSequence(ov, prefill.steps)).load(dev)   # same overlay
+llama = iron.compile(dev, prefill=prefill, decode=decode,
+                     prefill=dict(tokens=(MAX, cfg.emb_dim), angles=(MAX, cfg.head_dim)),
+                     decode=dict(x=(1, cfg.emb_dim), angles=(1, cfg.head_dim)))
+llama.prefill(tok, ang, n=len(prompt))
+logits = llama.decode(x, ang, pos=p)
 ```
 
-The second form is what makes E23 meaningful, and it is the shape L2 would slot
-into without an API change.
+Under **xclbin** a module is what `SeparateDispatch` already builds: one
+chained image, one kernel per entry point, one hardware context because the
+runtime keys contexts on the xclbin path. User tensors are allocated against
+the device with a fixed memory group, not against a kernel, so a weight
+uploaded once is a valid argument to both kernels. Nothing new is needed.
 
----
+Under **full ELF** a module needs one ELF carrying two runtime sequences.
+The kernel naming convention (`<device>:<sequence>`) suggests it was designed
+for, but nothing in IRON or upstream's Python does it (**spike S4**). If it
+cannot, the fallback is one ELF per graph with an upload per graph, which is
+today's behaviour made explicit; sharing device buffers across two hardware
+contexts is consistent with how IRON allocates them but is unexercised.
 
-## 18. What this deletes
+### The image is chosen per module
 
-**From today's tree:** `arg_spec`, `bind()`, `arg_spec_snapshot.json`, the
-`L3_*_ty` re-declarations, `*_parameter="string"` kwargs, and the whole
-`SequenceDispatch` hierarchy — `AutoDispatch`, `FusedDispatch`,
-`SeparateDispatch`, `CompareDispatch`, `ReferenceDispatch`, `_DISPATCH_ALIASES`,
-and `full_elf_path(seq)`'s "however it got built" escape hatch.
+One buffer plan means one image, so the rules below apply to the whole
+module, not to each graph. For llama that decides the shape of the two
+targets:
 
-**From the annotation draft:** deferred annotations · `localns` evaluation · free
-names in annotations · module-level `Dim`s · the `In[...]` vs
-`Annotated[In, Shape[...]]` question · pyright suppression in pyrightconfig · the
-`dims()` import · evaluating annotations one at a time · branch-parameter retry ·
-rank-directed branch resolution · synthesise-vs-verify the field list ·
-`@operator` reading a design signature.
+- **NPU2: an ELF module.** prefill pads its length to a compile-time maximum
+  and masks, as softmax already does for its vector size, so no `DispatchTime`
+  member forces the module to xclbin. decode keeps `Scratchpad` on the path
+  where it is known to work. One ELF with two sequences if S4 passes, two ELFs
+  otherwise.
+- **NPU1: an xclbin module**, built from the same source. Per-step kernels,
+  `cache_offset` lowered per §6 unless S2 passes, prefill's length as a
+  `DispatchTime` value if it wants one. The same build is the S1 experiment
+  on NPU2, where a fused decode kernel in an xclbin has never been run.
 
-**From the `Deployment` draft:** the `Deployment` record, its four string-valued
-axes, its five presets, its eight-row legality table; the `Scalar`/`Extent`/
-`Shape` role taxonomy; and the lazy-compile/`Frozen()` deopt machinery.
+### Boundaries and image override
 
-**Kept throughout:** `Tuning[T]` as an IRON-local marker (now a *field*
-annotation), the tuning policy and `Untunable`, per-device numbers from the
-target model, the un-flattening, the capture/handle authoring surface, and the T4
-coverage checks.
+Two arguments, both optional. Everything else is derived and printed under
+`verbose`.
 
-**Cost.** The `__setattr__` hook is magic where an annotation is declarative; the
-design diverges from upstream's `In`/`Out` convention (§8) with a real
-consequence for `SequenceResident` (§11); `interface()` is structurally a method
-returning the spec — which was objected to early on, though the objection was to
-a *parallel* declaration and here the design consumes it (E7 makes that
-mechanical). And the primitives are more to learn than `dispatch="fused"` for a
-user who only ever wants the default — mitigated only by `decode.compile(dev)`
-being genuinely the common path.
+```python
+net = decode.compile(dev)                                  # full ELF on NPU2, per-step xclbin on NPU1
+net = decode.compile(dev, image=Xclbin)                    # one fused sequence in an xclbin (spike S1)
+net = decode.compile(dev, boundaries=chunks(8))            # four dispatches of eight layers
+net = decode.compile(dev, boundaries=each_step)            # today's "separate"
+```
 
----
-
-## 19. Sequencing
-
-| step | what | blocks |
-|---|---|---|
-| **0a** | spike Ca: two-op fused graph, `full_elf=False` + `--expand-load-pdis`, opcode-3 dispatch | §10–§12 |
-| **0b** | spike Cb: the two greps, then the shim | `GeneratedSequence` being real |
-| 1 | `interface()` + `__setattr__` + `replace()`-based `tuning()` + E1–E9, on GEMV alone | — |
-| 2 | the design consumes the interface (E7), deleting `arg_spec` for GEMV | — |
-| 3 | `Overlay.bindings/residents/sizes` published and checked (§6, E23/E29–E31) — **standalone value even if everything else slips**; it would have caught the `mm_prebuilt` mismatch | — |
-| 4 | `Sequence`/`Image`/harnesses, reproducing A and B exactly, 745/3165 baselines held | 5 |
-| 5 | Ca and `chunks(n)`, if 0a said yes | 7 |
-| 6 | remaining operators (O6), then llama rewritten against the capture surface | — |
-| 7 | Cb, measured; `project-dispatch-bridge-not-applicable` revised or confirmed | — |
-
-Steps 0a/0b, 1–2, and 3 touch disjoint files and can proceed in parallel. Per
-`project_parallel_work_constraints`, the NPU device and the build dirs are the
-only contention points — 0a/0b need the device, 1–3 do not.
-
-Step 3 is worth calling out: it needs no new toolchain feature, reads files IRON
-already opens, and pays for itself the first time two sequences share an overlay.
-
----
-
-## 20. Open questions
-
-- **O1. Does `interface()` assign to `self`, or return a list?** Assignment is
-  the only stringless route to *names*, and names are what make the E-messages
-  good. Returning a list needs no hook but numbers the members.
-- **O2. Does `__init__` validate at all?** It must tolerate symbols, so probably
-  not — everything moves to `specialize()`. A behaviour change for anyone relying
-  on `GEMV(M=7)` raising immediately.
-- **O3. T4 opt-out and size threshold.** `compile(check=False)` is the obvious
-  home. What is the threshold, and is it per-operator or global?
-- **O4. Accept the divergence from upstream's design signature (§8)?** §11 makes
-  it concrete: it forces the (a)/(b)/(c) choice. Recommendation (c) is an
-  upstream ask.
-- **O5. Prefill scope.** ~300 lines of CPU/NPU ping-pong need real operators
-  (masked softmax, attention context matmul, cache concat). Larger than the
-  authoring rewrite. Sequence it after decode?
-- **O6. Pilot operator and conversion order.** GEMV first; then what?
-- **O7. Branch or worktree**, to keep the 745 / 3165 baselines undisturbed.
-- **O8. Is L2 worth filing upstream?** `--sequence-name` and `--device-name`
-  exist but are unused from Python. L3 covers llama's case; L2 matters for graphs
-  where the *structure* changes but the overlay does not. Needs a second consumer
-  before filing.
-- **O9. Does `Tuning[T]` still want upstreaming** now that it is a field
-  annotation rather than a design-signature one? It is a genuine gap next to
-  `CompileTime`.
-- **O10. How much default is too much?** `decode.compile(dev)` hides four
-  constructor calls. Should it report what it composed under `verbose`?
-- **O11. Should a `GeneratedSequence` with zero `SequenceResident` values be
-  allowed?** Coherent, and the cheapest form of step 0b, but strictly slower than
-  static in production. Allow-and-warn, or reject outside tests?
-- **O12. Where does `chunks(n)` live** — on `Graph`, or a free function over
-  `.steps`? A method invites "what's the right n", which has no general answer.
-- **O13. `flm/gemm` README line 58** claims A broadcasts from shim columns
-  0/2/4/6. True today, pinned by nothing, and the placer sorts by fifo name.
-  Correct the doc or add the pin — independent of this plan, but someone will
-  rely on it.
-- **O14. Does `via=` belong on the interface at all,** given that pinning
-  constrains routing for everything else and `flm/gemm` has zero placement slack?
-  The weaker version — publish and check, never constrain — is most of the value
-  at none of the risk. Decide after step 3.
-- **O15. Verify the shim BD wrap/stride caps** in the target model before
-  promising them to `tuning()` (§4). The `MAX_WRAP = 1023` FIXME depends on it.
-
----
-
-## 21. Looked at and dismissed
-
-| option | why not |
+| rule | consequence |
 |---|---|
-| Shape annotations on the design signature | the scope problem and everything in §18's second list; retained as the fallback if `__setattr__` collection proves worse than expected. §16 has the measurements |
-| `Layer` + backend + `using()` + `infer` (exists on `ehunhoff/graph-capture-frontend`, incl. a 67-line `llama_model.py` and `iron/nn/`) | too much machinery; indirection the declaration model removes |
-| `forward()` on the model tree | llama-shaped; `iron/models/llama.py` is deliberately parameters-only |
-| Central `iron.shapes` registry of dim names | a global namespace of every dim any operator might use, edited per new operator |
-| Module-level `M, K = dims(...)` per design module | works (measured clean) but names each dim three times |
-| `Annotated[In, Shape[M,K]]` | only buys mypy, which nobody here runs |
-| Per-arg lambda `In[lambda p: (p.M, p.K)]` / `@shapes` decorator | noisy; a deferred annotation *is* a lambda over a namespace, so this was the same mechanism spelled explicitly |
-| `declare()` in the body + sentinel exception | control flow by exception |
-| String dim names `In["M", "K"]` | conditionals inexpressible; strings |
-| Reading `A.shape` inside the design | upstream `_TensorPlaceholder` poisons attribute access on purpose |
-| A general inverse shape solver | no precedent in torch/JAX/ONNX/MLIR — all go params→shapes. Reframed as lazy specialization (`LazyLinear`, `flax.linen.Dense`) |
-| Symbolic unification of the existing `arg_spec` | superseded: the declaration *is* the symbolic form |
-| Einops-style shape DSL | GEMM's own docstring: "any shape-expression language able to express it would have become Python again" |
-| Killing GEMV's `num_batches` conditional | unnecessary — conditionals work in a method body (§3) |
-| interface-then-`yield` in the design body | same scope fix, but adds a generator protocol, a purity rule for the pre-yield prefix, and drops tensor params from the signature |
-| Synthesised dataclass fields | measured in §16 — pyright rejects *valid* calls; `dataclass_transform` does not help |
-| Per-call-site runtime values | not implementable: one scratchpad symbol per design; distinct symbols mean distinct designs |
-| Two markers for scratchpad values (offset vs core-read) | same object, same mechanism; the distinction is in the design's use |
-| Naming the tiers by role (`Scalar`/`Extent`/`Shape`) | abstractions over what the design does with a value; `shape` collides with flm.GEMM, and none of the three says what a change costs. §9 names the rebuilt artifact instead |
-| Lazy compile + observe-and-deopt | `compile()` silently recompiling mid-run is the opposite of priority 13. Inference belongs only in the JIT path, where the call *is* the entry point |
-| Keeping one `dispatch=` string | the combinations are a product, not a list, and partial fusion is not in the product at all. `"fused"` already means two different things depending on the device |
-| A `Deployment` record with typed axes and presets | still enumerates blessed combinations; still cannot express `chunks(8)`; needed an eight-row legality table for facts two constructor signatures now carry |
-| `Deployment` as a policy class hierarchy (today's `SequenceDispatch`) | scatters one matrix across five classes, and makes every error message a local decision |
-| Comparing overlay/sequence **hashes** for compatibility | too crude in both directions — irrelevant differences fail, and a moved RTP reader passes. §6 compares the ABI |
-| `DispatchTime[T]` as the mechanism for llama's `cache_offset` | it regenerates the whole stream; a scratchpad write is a few words. It is now `SequenceResident` and is an *option*, measured as config Cb (§12), not the default |
-| Treating `SequenceResident` as a special parameter kind | it is an argument to a `GeneratedSequence` |
-| Leaving `has_dispatch` as the gate | makes "which kind of sequence is this" an inference rather than a decision |
-| `tuning()` returning a `dict` | string keys, no pyright, and a runtime check for what `replace()` catches in the editor |
-| Exposing raw aiecc flags on the primitives | `--expand-load-pdis` is not tuning — without it the program links and hangs. `Inline()` carries the meaning, not the flag |
-| `compare`/`reference` as dispatch modes | `compare` needs a boundary after every step, `reference` needs no device; both are structural facts their constructors now state |
+| a `DispatchTime` member anywhere in the module | that graph's sequence is generated per call; the image is `Xclbin` |
+| the device is NPU1 | `Xclbin`; NPU1 has no full-ELF dispatch |
+| more than one boundary in any graph | `Xclbin`; one image, N kernels, one shared hardware context |
+| otherwise | `Elf` |
+| a sequence spans more than one device configuration | its PDI loads are expanded inline (`--expand-load-pdis`); a multi-configuration sequence cannot run otherwise |
+
+Asking for `image=Elf` when a rule forbids it is an error that names the
+member, the graph, or the device.
+
+**Overlays are compiled once per module** and shared by every sequence that
+declares against them. Today `aiecc` emits both halves from one invocation, so
+sharing saves reconfigurations and hardware contexts but not compile time. An
+instructions-only compile exists in `aiecc` (the instruction branch roots on
+the placed-and-routed module) and is exposed to IRON as described in §11; it
+does not apply to a sequence whose PDI loads are expanded inline, since that
+flag forces per-core compilation back on. So compile-time reuse is real for
+per-step and chunked builds and not for a single fused sequence.
+
+**A sequence is not image-agnostic.** Full-ELF instruction streams are emitted
+with DDR address folding forced off; xclbin streams fold. The library compiles
+the sequence for the image it will live in, and never moves one between them.
 
 ---
 
-## 22. Carried risk, unrelated to this work
+## 9. The three operators that do not declare a shape function today
+
+**flm/gemm fits.** Its dtype depends on the bfp16 packing, which is an overlay
+tunable, and a buffer's dtype can reference a field the same way a dimension
+does. Its config-versus-shape split is what §3 was modelled on:
+
+```python
+@operator
+class FLMGEMMOverlay(Overlay):
+    K: int = dim()
+    N: int = dim()
+    b_format: str = tunable("bfp16ebs8")
+
+    a = StreamIn(64, K)
+    b = StreamIn(K, 64, dtype=b_format)
+    c = StreamOut(64, 64)
+
+
+@operator
+class FLMGEMM(Operator[FLMGEMMOverlay]):
+    M: int = dim()
+    A = In(M, FLMGEMMOverlay.K, to=FLMGEMMOverlay.a)
+    B = In(FLMGEMMOverlay.K, FLMGEMMOverlay.N, dtype=FLMGEMMOverlay.b_format, to=FLMGEMMOverlay.b)
+    C = Out(M, FLMGEMMOverlay.N, from_=FLMGEMMOverlay.c)
+```
+
+**mm_prebuilt fits, and is why `Overlay` has a second constructor.** Its array
+is downloaded, so it has no `design()`. Its streams carry the shim pins that
+today are hand-matched in comments, and its runtime parameters are resident
+symbols:
+
+```python
+@operator
+class MMPrebuiltOverlay(Overlay, source=Xclbin.download(URL)):
+    a = StreamIn(128, 128, per_row=True,    via=[Shim(col=2 * r, channel=0) for r in range(4)])
+    b = StreamIn(128, 128, per_column=True, via=[Shim(col=c, channel=1) for c in range(8)])
+    c = StreamOut(128, 128, per_column=True, via=[Shim(col=c, channel=0) for c in range(8)])
+    rtp = Resident(np.int32, address=4096, lock=10)
+```
+
+This is the one case that keeps the previous draft's post-compile read-back:
+an overlay IRON did not build gets its declared bindings checked against
+`input_with_addresses.mlir`, and a sequence declared against it that cannot
+drive it gets a message naming the binding. That is the flm/gemm-against-
+mm_prebuilt mismatch that is currently a comment.
+
+`via=` pins a shim column and channel. `channel` is validated against the
+two-per-direction limit from the target model at class creation; nothing
+validates it today at any layer. Pinning constrains routing for everything
+else, so it is a tool for foreign overlays and not a default.
+
+**swiglu_prefill_stream does not fit.** Its shapes come from a graph that
+stream-dse exports at build time. It gets a dynamic escape, private to the
+stream package: `Operator.from_spec(...)` builds the members from the exported
+description at class-creation time, and gives up pyright for that one
+operator, which already skips its tests when stream-dse is absent.
+
+---
+
+## 10. Checks
+
+Each row names the failure or mechanism that justifies it. **T1** pyright,
+**T2** class creation, **T3** tune/bind, **T4** build, **T5** hardware.
+
+| id | mistake | when | because |
+|---|---|---|---|
+| C1 | wrong type, missing argument, bogus kwarg at construction | T1 | real dataclass fields; the most valuable static check the previous draft measured |
+| C2 | `tuning()` sets a field that is not a `tunable` | T1 | `replace()` against the real field list |
+| C3 | a shape dimension is a `tunable`, a per-call value, or an expression | T2 | the shape rule (§7); the pipeline would cycle |
+| C4 | a member declared with an annotation | T2 | it would become a constructor argument |
+| C5 | a `Scratchpad` used at a size position; a `DispatchTime` read by a core | T4 | the hardware rule in §6 |
+| C6 | a `DispatchTime` member in a full-ELF sequence | T4 | no instruction-buffer argument to swap; upstream raises the same |
+| C7 | `via=Shim(channel=2)` | T2 | two per direction per shim tile; unvalidated today |
+| C8 | more shim endpoints than the device has | T3 | `get_shim_dma_limit` exists; extend to the graph |
+| C9 | no legal tuning for this `K` on this device | T3 | `Untunable`; the mem_copy 16-core hang compiled fine |
+| C10 | extent not a multiple of the overlay's tile unit | T3 | `compatible()` |
+| C11 | an overlay's core ELFs differ between two extents | test suite | the reuse discipline (§3), byte-identity; fails today for every design with a compile-time trip count |
+| C12 | a foreign overlay's declared bindings disagree with its file | T4 | the mm_prebuilt case (§9) |
+| C13 | a declared buffer never filled or drained in an overridden `design(rt)` | T4 | the derived sequence cannot make this mistake; an override can |
+| C14 | DMA addresses past the end of a buffer in an overridden `design(rt)` | T4 | bounds from the slice, cheap; the coverage checks beyond this are opt-in test utilities |
+| C15 | a `Scratchpad` never written before dispatch | T5 | sync-time check on the handle |
+| C16 | one instance bound to two per-call handles | graph build | one symbol per design (§6) |
+| C17 | `n_rows > max_rows` | write time | the bound is declared beside the buffer |
+| C18 | the kernel computes the wrong thing | T5 | `reference()`; the only oracle |
+| C19 | `image=Elf` requested for a module a rule forbids | compile | names the `DispatchTime` member, the graph with several boundaries, or the device |
+| C20 | a compiled graph called with a new input shape | call | no silent recompile; the message names the parameter and both shapes |
+
+Retired from the previous draft: E1, E2, E6, E14 (guarded the `__setattr__`
+hook), E3, E7, E15 (guarded the design's restatement of the ABI), E16–E20 as
+every-build checks (the derived sequence covers by construction; kept as test
+utilities for overrides), E23 as a general check (agreement by construction;
+kept for foreign overlays as C12), E25, E27, E28 (packaging choices the user
+no longer makes).
+
+Access *order* is still not checkable without a test: coverage can be
+complete while the permutation is wrong.
+
+---
+
+## 11. Upstream dependencies, prototyped in IRON
+
+Three upstream changes are needed. Each is prototyped in IRON by extension so
+the PR runs end to end, and filed upstream as its own change.
+
+| need | upstream state | IRON prototype |
+|---|---|---|
+| **instructions-only compile** against an already-built overlay | `aiecc --get-npu-insts [--sequence-name=]` already skips per-core compilation; `CompilableDesign.compile()` refuses an insts-only call | call `compile_mlir_module(insts_path=...)` directly, bypassing the guard |
+| **dispatch bridge on a fused graph** | `aie-materialize-runtime-sequences` inlines callee sequences but does not erase them, so any fused graph leaves more than one `aie.runtime_sequence` in `npu_lowered.mlir` and the bridge's check rejects it; `aiecc` itself prunes non-selected sequences on its own C++ edge | prune the callee sequences from the lowered module before the check reads it |
+| **scratchpad on the xclbin path** | `ParameterScratchpad` reads a run handle's control-scratchpad buffer, wired only to the full-ELF flow | **spike S2** first; if the buffer exists on an xclbin run, wrap it in IRON; if not, the lowering rule in §6 applies and no prototype is possible |
+
+Also upstream: a builder for `aiex.configure`/`aiex.run` (IRON emits them by
+rewriting MLIR text today), and multiple runtime sequences per device
+(upstream hardcodes one device `main` with one sequence `sequence`). The
+second is what an ELF module with two entry points needs (S4); until it
+exists, IRON emits the second sequence by the same text rewriting the fusion
+pass already does. Neither blocks the decode-only PR.
+
+---
+
+## 12. Spikes, before any model code
+
+| id | question | how | if no |
+|---|---|---|---|
+| **S1** | does one fused, multi-configuration sequence dispatch correctly from an xclbin via the opcode-3 path, with PDI loads expanded inline? | two-operator fused graph, `full_elf=False`, `--expand-load-pdis --get-xclbin --get-npu-insts`; it runs or it hangs | `image=Xclbin` with one boundary has no legal construction; NPU1 is per-step only; `chunks(n)` still works (each chunk is its own kernel) |
+| **S2** | does an xclbin dispatch have a control scratchpad? | XRT run handle on an xclbin kernel; try `get_ctrl_scratchpad_bo()` | §6's lowering rule; `Scratchpad` is full-ELF only; softmax's `vector_size` needs S3 or a compile-time field on NPU1 |
+| **S3** | can a `DispatchTime` value be written into tile memory by the sequence? | one design with a register write whose value is a dispatch parameter; read it back from the core | core-read per-call values are `Scratchpad` only |
+| **S4** | can one full ELF carry two runtime sequences, dispatched by name? | a device with two `aie.runtime_sequence` ops through `--get-full-elf`; load and run each | an ELF module is one ELF per graph with an upload per graph (§8) |
+
+An afternoon each. S1 needs the device; S2 and S3 need a device and no design
+work; S4 needs only `aiecc`. None of §4–§7 depends on any of them, and S4
+matters only once prefill joins the module.
+
+---
+
+## 13. Acceptance
+
+The PR is done when:
+
+1. **Every operator is on the new declaration.** All 22, including the three
+   in §9. `arg_spec`, `bind()`, the snapshot, the `*_parameter="..."` kwargs
+   and the dispatch hierarchy are deleted, not left beside their replacements.
+2. **llama decode is rewritten as a graph function** and runs fully fused
+   on NPU2 as an ELF module of one graph, with the **same token stream** as
+   the snapshot taken before the rewrite, and per-token latency within noise
+   of today's, measured interleaved over at least eight rounds. Prefill stays
+   as it is today and feeds the same state objects.
+3. **NPU1 per-step xclbin runs llama decode**, contingent on S2 or on the §6
+   lowering rule plus S3 for softmax. If neither route exists for softmax, the
+   PR says so and NPU1 llama is a follow-up.
+4. **`iron/tests` and `iron/operators` baselines hold** (745 / 13 skipped and
+   3165 with the five known mem_copy timeouts, on the PR 215 branch).
+5. **`chunks(n)` works** on the llama graph, since it costs nothing extra to
+   express and is the case the packaging layer exists for.
+
+Measured as experiments, not gates: `image=Xclbin` with one boundary (S1),
+per-token latency across boundary choices, and the host-side regeneration cost
+of a `DispatchTime` step against a `Scratchpad` write.
+
+Prefill stays out. Its ~300 lines are missing operators, not authoring, and no
+declaration scheme fixes that. It is the next plan, and it is where the
+module (§8) and S4 become load-bearing.
+
+---
+
+## 14. Sequencing
+
+| step | what | needs |
+|---|---|---|
+| 0 | spikes S1–S3 | device |
+| 1 | `Overlay`, `Operator`, `dim`/`tunable`, streams, `In`/`Out`/`InOut`, `Scratchpad`/`DispatchTime`, `@operator`, the tiler, library-owned `Runtime`/`Program`; GEMV alone, byte-identical object to today's | — |
+| 2 | the derivable operators: the two elementwise bases (eight operators), axpy, leaky_relu, dequant, rms_norm, rope, softmax; each finite core loop rewritten to read its count from a resident (§3) | 1 |
+| 3 | the overrides: strided_copy, transpose, mem_copy, repeat, gemm, mha, flm/gemm, mm_prebuilt (`from_xclbin`), swiglu_prefill_stream (`from_spec`); the two swiglu composites as graph functions | 1, 6 |
+| 4 | delete `arg_spec`, `bind()`, the snapshot test, `L3_*_ty`, `*_parameter=` | 2, 3 |
+| 5 | packaging: `compile(dev, boundaries=, image=)`, the derivation rules, modules, harnesses; delete the dispatch hierarchy; the §11 prototypes | 1, S1 |
+| 6 | `@iron.graph`: tracing, handles, `iron.state`, weights by identity, inference, `chunks`; replaces the recorder | 1 |
+| 7 | llama decode as a graph function; parity against the snapshot; NPU1 per S2/S3 | 4, 5, 6 |
+
+Constructor changes forced by the shape rule, to list in the PR description:
+RMSNorm (`size, tile_size` → `rows, tile_size`), and any other operator whose
+arg_spec today computes a dimension rather than naming one (to be enumerated
+in step 2).
+
+---
+
+## 15. What this deletes
+
+From today's tree: `arg_spec` (14 shape functions), `bind()` and its 15
+`bind_from=` sites, `arg_spec_snapshot.json` and its three tests, the `L3_*_ty`
+restatements, `output_offset_parameter`/`vector_size_parameter` and their
+string spellings in llama, `SequenceDispatch` and its five subclasses,
+`_DISPATCH_ALIASES`, `full_elf_path()`, one of the two `infer_buffer_offsets`
+implementations, `CompositeOperator` and the two swiglu `OperatorSequence`
+composites, the recorder's `g.named()`/`g.slice()` string surface, and GEMV's,
+repeat's and mha's private copies of the BD wrap split.
+
+From the previous draft: `interface()`, the `__setattr__` hook and its replay,
+the symbolic probe, `specialize()` on the operator, `HostResident`/
+`SequenceResident`/`OverlayResident`, `StaticSequence`/`GeneratedSequence`,
+`Elf`/`Xclbin` as user constructors, `Overlay.bindings/residents/sizes` as a
+general mechanism, `via=` on host buffers, `Compare`/`Reference` as classes,
+and E1–E3, E6, E7, E14–E20, E23, E25, E27, E28.
+
+Kept throughout: `Untunable` and per-device numbers from the target model,
+the un-flattening, `Tuning` (as `tunable`) IRON-local, the capture surface as the
+authoring layer, and the decode-drift snapshot (§18).
+
+---
+
+## 16. Open questions
+
+- **O1. Resolved.** Tiler scope is sized in §5: 14 derivable plus softmax,
+  eight overrides, repeat treated as an override.
+- **O2. Tunable overrides in inferred form.** `GEMV(wk, x, cols=2)` reaches the
+  overlay; is that the spelling, or `GEMV.with_(cols=2)(wk, x)`?
+- **O3. Resolved.** Upstream's tile placer and channel allocator both use
+  stable sorts keyed on constraint level and channel demand, so **op order is
+  the final tiebreak for shim tile and channel**, and op order is the
+  fifo-name sort. A rename can move an unpinned shim endpoint. For overlays
+  IRON builds this is reproducibility only, since the sequence binds to the
+  fifo it got: the library names a per-column stream's fifos from declaration
+  position and column, zero-padded, never from the attribute name. For
+  foreign overlays every stream is pinned and pinned endpoints place first.
+  A `per_column` stream does not guarantee column `c`'s shim is in physical
+  column `c`; the placer picks by flow centroid and load. An author who needs
+  a physical column pins it.
+- **O4. Resolved.** Five library sites consumed arg_spec, all wanting
+  direction, shape and dtype per buffer, which the declared members carry.
+  Only `share_designs` consumed arg_spec *agreement*, and under the new model
+  that check inverts: two operators sharing an overlay are expected to differ
+  in extent, so the check is "same overlay key, and each `compatible()`
+  passes."
+- **O9. The class-call overloading.** `GEMV(w, h)` records a step and
+  `GEMV(ov, M=2048)` constructs. Accepted as the default; the alternative is
+  a lowercase functional namespace (`iron.ops.gemv`) beside the classes.
+- **O10. State semantics.** How `iron.state` is reset, read back to the host,
+  and sized when the module has two graphs writing it. Decided in step 6.
+- **O11. Host work between boundaries.** `chunks(n)` returns control to the
+  host between dispatches; whether a graph function can express host compute
+  at a boundary, or whether that is two graphs in a module, is prefill's
+  problem and is deferred with it.
+- **O5. Reconfiguration skipping.** Whether the fusion pass skips a PDI load
+  when consecutive steps share an overlay. If not, the shared-overlay win in §3
+  is hardware contexts only until it does.
+- **O6. `chunks(n)` placement.** A method on the build or a free function over
+  the steps.
+- **O7. Verbose report format.** What `compile(dev, verbose=True)` prints: the
+  image, each sequence's kind and boundaries, each per-call value's lowering.
+- **O8. The `MAX_WRAP` FIXME.** `iron/common/utils.py` already has
+  `DMA_BD_MAX_WRAP` and a shared `split_run`, with a comment arguing the wrap
+  is identical across every target model IRON builds for. The tiler uses the
+  shared helper; the FIXME closes by deletion, not by `dev.max_wrap`.
+
+---
+
+## 17. Corrections to the previous draft's claims about upstream
+
+For the record, so nobody re-derives them:
+
+- `aie-materialize-runtime-sequences` **does not erase** inlined callee
+  sequences; an upstream test asserts the callee device survives. The previous
+  draft's spike 0b would fail on its first grep. This is why §11 prunes before
+  the bridge's check.
+- The instruction branch in `aiecc` roots on the placed-and-routed module, not
+  on the module with compiled ELFs, so an instructions-only compile already
+  exists in the toolchain. `--expand-load-pdis` forces it back onto compiled
+  cores. The previous draft's L2 was near, and unavailable for exactly the
+  mode it called load-bearing.
+- `ParameterScratchpad` is wired only to the full-ELF dispatch flow. The
+  previous draft's configs B, Ca and Cb could not carry `cache_offset` as
+  written.
+- Full-ELF instruction streams are emitted with DDR address folding forced
+  off; xclbin streams fold. A sequence is not interchangeable between images.
+- `requires_pdi_resources` is a local flag inside the bridge's check, not an
+  attribute. `_check_runtime_sequence_abi` is a module function in
+  `_dispatch_compile.py`, not a method. `split_params` and
+  `_TensorPlaceholder` live in `_introspect.py` and `_serialization.py`.
+- Upstream already has `specialize(**overrides)` meaning "bind a dispatch
+  parameter"; the previous draft's `op.specialize(dev)` reused the name for a
+  different operation.
+- `InOut` exists upstream and was omitted.
+- `schedule=` never existed in the tree; the previous draft was deleting it
+  from its own earlier version.
+- IRON never passes `dispatch_params` to anything; the previous draft's §11
+  critique of `has_dispatch` describes upstream code.
+
+---
+
+## 18. Carried risk, unrelated to this work
 
 **NPU decode output degrades after a few tokens** versus `llama_cpu.py` on the
-same prompt and seed. Prefill reproduces exactly and the first tokens agree, then
-the NPU drifts.
+same prompt and seed. Prefill reproduces exactly and the first tokens agree,
+then the NPU drifts. Not the weight-naming refactor; uploaded bytes are
+`torch.equal` for all 146 parameters. `iron/applications/llama_3.2_1b/test.py`
+asserts only `returncode == 0`, so it does not catch this, and **a rewritten
+llama will inherit it and look guilty.**
 
-Not the weight-naming refactor — uploaded bytes are `torch.equal` for all 146
-parameters. Predates observation; `llama_npu.py` could not run on this host until
-XRT 2.26. `iron/applications/llama_3.2_1b/test.py` asserts only
-`returncode == 0`, so it does not catch this, and **a rewritten llama will
-inherit it and look guilty.**
-
-Decision taken: snapshot the current token stream as a before/after artifact and
-proceed. Cheapest real probe if revisited: compare NPU vs CPU *logits* for one
-decode step rather than sampled tokens.
+Decision: snapshot the current token stream before step 7 and make parity
+against that snapshot the gate, not parity against the CPU. Cheapest real
+probe if revisited: compare NPU versus CPU *logits* for one decode step rather
+than sampled tokens.
