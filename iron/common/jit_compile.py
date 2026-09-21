@@ -315,6 +315,49 @@ def compile_sequence(seq, elf_path) -> Path:
     )
 
 
+def compile_insts(generator, insts_path, extra_flags=()) -> Path:
+    """Compile one design's instruction stream only, against an image built elsewhere.
+
+    The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
+    whose array is already built (flm/gemm's configuration xclbin at the
+    reference shape, mm_prebuilt's downloaded image, any operator sharing an
+    overlay) needs only its runtime sequence lowered. ``aiecc
+    --get-npu-insts`` does exactly that, without compiling a core, so no
+    kernel object and no Peano are involved. ``CompilableDesign.compile()``
+    refuses an instructions-only request (its xclbin and insts paths must be
+    set together), so this goes to ``compile_mlir_module`` directly, keyed on
+    the generated text like the fused path.
+    """
+    from aie.iron.kernel import ExternalFunction
+    from aie.utils.compile import compile_mlir_module
+
+    insts_path = Path(insts_path)
+    design_fn, args, kwargs = generator.resolve()
+    if args:
+        raise ValueError(
+            f"design {design_fn.__qualname__} takes positional arguments "
+            f"{args!r}; the cache key only spells keyword parameters."
+        )
+    # No core is compiled, so the kernels a design declares are not built;
+    # clearing the registry keeps one process's designs from colliding on a
+    # kernel name, as CompilableDesign does before generating.
+    ExternalFunction._instances.clear()
+    module = design_fn(**kwargs)
+    text = module if isinstance(module, str) else str(module)
+    flags = list(extra_flags)
+    current = _digest(text + "\n".join(flags))
+    stamp = insts_path.with_suffix(insts_path.suffix + ".cache_hash")
+    if insts_path.exists() and stamp.exists() and stamp.read_text() == current:
+        return insts_path
+    work_dir = insts_path.parent / f"{insts_path.stem}.prj"
+    work_dir.mkdir(parents=True, exist_ok=True)  # aiecc's input is written into it
+    compile_mlir_module(text, insts_path=insts_path, work_dir=work_dir, options=flags)
+    if not insts_path.exists():
+        raise RuntimeError(f"aiecc produced no instruction stream at {insts_path}")
+    stamp.write_text(current)
+    return insts_path
+
+
 def compile_xclbin_insts(
     generator,
     xclbin_path,

@@ -655,15 +655,17 @@ the PR runs end to end, and filed upstream as its own change.
 
 | need | upstream state | IRON prototype |
 |---|---|---|
-| **instructions-only compile** against an already-built overlay | `aiecc --get-npu-insts [--sequence-name=]` already skips per-core compilation; `CompilableDesign.compile()` refuses an insts-only call | call `compile_mlir_module(insts_path=...)` directly, bypassing the guard |
-| **dispatch bridge on a fused graph** | `aie-materialize-runtime-sequences` inlines callee sequences but does not erase them, so any fused graph leaves more than one `aie.runtime_sequence` in `npu_lowered.mlir` and the bridge's check rejects it; `aiecc` itself prunes non-selected sequences on its own C++ edge | prune the callee sequences from the lowered module before the check reads it |
+| **instructions-only compile** against an already-built overlay | `aiecc --get-npu-insts [--sequence-name=]` already skips per-core compilation; `CompilableDesign.compile()` refuses an insts-only call (its xclbin and insts paths "must be set together") | **done**: `jit_compile.compile_insts(generator, insts_path)` calls `compile_mlir_module(insts_path=...)` directly, keyed on the generated text; flm/gemm's per-shape compile and mm_prebuilt's link use it, so neither builds a kernel or an image it discards |
+| **dispatch bridge on a fused graph** | `_check_runtime_sequence_abi` still requires exactly one `aie.runtime_sequence`, and also refuses any `aiex.npu.load_pdi` ("the Python dispatch runtime cannot supply load_pdi resources"); the DMA-size parser already picks the call-graph root among several sequences | prune the callee sequences from the lowered module before the check reads it, and compile with `--expand-load-pdis` so no `load_pdi` survives; buildable here, not yet done, and only needed once `DispatchTime` values reach graphs |
 | **scratchpad on the xclbin path** | `ParameterScratchpad` reads a run handle's control-scratchpad buffer, wired only to the full-ELF flow | **spike S2** first; if the buffer exists on an xclbin run, wrap it in IRON; if not, the lowering rule in §6 applies and no prototype is possible |
 
 Also upstream: a builder for `aiex.configure`/`aiex.run` (IRON emits them by
-rewriting MLIR text today), and multiple runtime sequences per device
-(upstream hardcodes one device `main` with one sequence `sequence`). The
-second is what an ELF module with two entry points needs (S4); until it
-exists, IRON emits the second sequence by the same text rewriting the fusion
+rewriting MLIR text today). Multiple runtime sequences per device turned
+out to exist already: `aiecc --sequence-name` defaults to all, a device
+with two `aie.runtime_sequence` ops builds to one full ELF carrying both
+(S4 below), and `SequenceFullELFCallable` already names its kernel
+`device:sequence`. What remains for a module with two entry points is
+IRON emitting the second sequence, by the same text rewriting the fusion
 pass already does. Neither blocks the decode-only PR.
 
 ---
@@ -680,6 +682,15 @@ pass already does. Neither blocks the decode-only PR.
 An afternoon each. S1 needs the device; S2 and S3 need a device and no design
 work; S4 needs only `aiecc`. None of §4–§7 depends on any of them, and S4
 matters only once prefill joins the module.
+
+What the toolchain and the sources settled without a device (§19 has the
+artifacts):
+
+| id | settled | how |
+|---|---|---|
+| **S1**, build half | aiecc builds it: the fused swiglu module with `--expand-load-pdis --get-xclbin --get-npu-insts` yields `main.xclbin` (an 8-column partition, one PDI, the DPU kernel) and a 123 KB `main_sequence.bin` for the fused sequence, the four configurations' writes expanded inline, next to one xclbin and stream per configuration | the run, and whether the expanded stream configures the array the partition covers, is the device's half |
+| **S2** | **no.** `xrt::run::get_ctrl_scratchpad_bo()` throws "No module associated with run object" unless the run was made from an `xrt::module`, and only `module_run_aie_gen2_plus` (the full-ELF module) implements it; the base module throws "Not supported" | read from XRT's `xrt_kernel.cpp` and `xrt_module.cpp`; so §6's rule holds: `Scratchpad` is full-ELF only, and NPU1's softmax length needs S3 or a compile-time field |
+| **S4**, build half | **yes.** A device with two `aie.runtime_sequence` ops (`sequence` and `silu_only`) builds through `--get-full-elf` to one ELF whose symbol table carries both; `SequenceFullELFCallable` addresses a sequence as `main:<name>` already | loading and running each by name is the device's half |
 
 ---
 
@@ -1019,6 +1030,7 @@ and the decode graph's parity against the token snapshot (§18).
 | xclbin (see above) | `iron/tests/toolchain/xclbin.py`, `patches/` | — | separate dispatch on both devices, one kernel per design; flm/gemm's two compiles; mm_prebuilt's instructions and image; a plain operator on npu1 | **needs a device**: running the chain |
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
+| step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, `iron/tests/toolchain/spikes.py`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
@@ -1113,13 +1125,19 @@ Step 5 is started at the surface: `compile(dev, boundaries=, image=,
 verbose=)` derives the image by the §8 rules, refuses `image=elf` where a
 rule forbids it (naming the value, the boundaries or the device), reports
 each value's lowering, and lowers `elf` to the fused ELF and `xclbin` +
-`each_step` to the chained per-operator xclbin that exist today. The rest
-of step 5 needs a device: a fused sequence in an xclbin (S1) is what
-`chunks(n)` and `image="xclbin"` alone would build; modules over several
-graphs (S4); the §11 prototypes (instructions-only compile against a
-shared overlay, the callee-sequence pruning); and deleting the dispatch
-hierarchy, which the graph lowering still stands on. O6 is settled as
-free functions (`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
+`each_step` to the chained per-operator xclbin that exist today. Of the
+rest, the toolchain halves are done (§12's second table): the fused
+sequence builds as an xclbin with its stream expanded (S1's build), two
+sequences build into one ELF (S4's build), the control scratchpad is
+settled from XRT's source as ELF-only (S2), and the instructions-only
+compile is in use (§11). What still needs a device: running S1's image,
+which decides whether `chunks(n)` and `image="xclbin"` alone have a
+construction; loading S4's two sequences by name, which is what modules
+over several graphs stand on; S3; the callee-sequence pruning once
+`DispatchTime` values reach graphs; and deleting the dispatch hierarchy,
+whose callables are the XRT path and cannot be exercised here. O6 is
+settled as free functions (`iron.chunks`, `iron.each_step`); O7 by
+`Plan.report`.
 
 The sandbox verification now reaches every `design()` body: the design
 probe runs each converted overlay's array construction and each

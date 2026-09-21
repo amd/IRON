@@ -265,21 +265,14 @@ class MMPrebuilt(Operator[MMPrebuiltOverlay]):
         self.add_artifacts([self.xclbin_artifact])
 
     def link_xclbin(self) -> None:
-        """Compile this shape's instruction stream; keep the downloaded xclbin.
-
-        compile_xclbin_insts emits both halves and only the instructions are
-        wanted: the xclbin it writes alongside them is discarded.
-        """
+        """Compile this shape's instruction stream; the image is the downloaded one."""
         if getattr(self, "_insts_path", None) is not None:
             return
-        from iron.common.jit_compile import compile_xclbin_insts
+        from iron.common.jit_compile import compile_insts
 
         build_dir = Path(self.context.build_dir)
-        _, self._insts_path = compile_xclbin_insts(
-            self.get_mlir_artifact().generator,
-            build_dir / f"{self.name}.xclbin",
-            build_dir / f"{self.name}.bin",
-            kernel_name=self.ov.foreign.kernel_name,
+        self._insts_path = compile_insts(
+            self.get_mlir_artifact().generator, build_dir / f"{self.name}.bin"
         )
 
     def get_callable(self) -> Callable[..., Any]:

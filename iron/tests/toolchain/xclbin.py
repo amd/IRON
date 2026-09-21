@@ -107,6 +107,10 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
     assert Path(op._insts_path).name == f"{op.name}.bin"
     assert Path(op._xclbin_path).stat().st_size > 0
     assert Path(op._insts_path).stat().st_size > 0
+    # The shape's own compile is instructions-only: no second xclbin, no
+    # second kernel build.
+    assert not (tmp_path / f"{op.name}.xclbin").exists()
+    assert sorted(p.name for p in tmp_path.glob("*.xclbin")) == [f"{op.config_name}.xclbin"]
 
 
 def test_mm_prebuilt_builds_its_instructions_for_the_foreign_image(npu2, tmp_path):

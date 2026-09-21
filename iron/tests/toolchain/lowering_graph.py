@@ -84,6 +84,24 @@ def test_mm_prebuilt_foreign_sequence_lowers(tmp_path):
     lower(op, tmp_path)
 
 
+def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
+    """The §11 instructions-only compile: mm_prebuilt's image is downloaded,
+    so its link step lowers only the sequence. No kernel, no Peano, and the
+    second request is a cache hit."""
+    from iron.common.context import AIEContext
+    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
+
+    op = MMPrebuilt(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    op.link_xclbin()
+    insts = Path(op._insts_path)
+    assert insts.stat().st_size > 0
+    assert not list(tmp_path.glob("*.xclbin")), "an instructions-only compile built an image"
+    first = insts.stat().st_mtime_ns
+    again = MMPrebuilt(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    again.link_xclbin()
+    assert Path(again._insts_path).stat().st_mtime_ns == first, "the same sequence recompiled"
+
+
 def test_swiglu_graphs_operators_lower(tmp_path):
     from iron.operators.swiglu_decode.op import swiglu_decode
     from iron.operators.swiglu_prefill.op import swiglu_prefill

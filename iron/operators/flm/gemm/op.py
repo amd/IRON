@@ -1026,12 +1026,12 @@ class GEMM(Operator[FLMGEMMOverlay]):
         Two compiles rather than the base class's one. The xclbin is emitted
         at a reference shape and activation so that every shape sharing the
         configuration reuses it, and only the instruction stream is per
-        shape. Each build discards the half it did not want.
+        shape: an instructions-only compile, no kernel built twice.
         """
         if getattr(self, "_xclbin_path", None) is not None:
             return
         from iron.common.build import mlir_artifact_for
-        from iron.common.jit_compile import compile_xclbin_insts
+        from iron.common.jit_compile import compile_insts, compile_xclbin_insts
 
         build_dir = Path(self.context.build_dir)
         tuned = self.tuned(aie_utils.get_current_device())
@@ -1045,11 +1045,8 @@ class GEMM(Operator[FLMGEMMOverlay]):
             build_dir / f"{self.config_name}.bin",
             kernel_name="MLIR_AIE",
         )
-        _, self._insts_path = compile_xclbin_insts(
-            self.get_mlir_artifact().generator,
-            build_dir / f"{self.name}.xclbin",
-            build_dir / f"{self.name}.bin",
-            kernel_name="MLIR_AIE",
+        self._insts_path = compile_insts(
+            self.get_mlir_artifact().generator, build_dir / f"{self.name}.bin"
         )
 
     # -- host-side helpers -------------------------------------------------------
