@@ -42,6 +42,19 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
     _lower_all(traced, tmp_path)
 
 
+def test_prefill_graph_operators_lower_with_their_value(tmp_path):
+    from iron.tests.common.llama_model import Config as _Config
+
+    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
+    from llama_graphs import DecodeGraph, PrefillGraph
+
+    cfg = _Config()
+    decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
+    traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
+    assert [v.name for _, _, v in traced.bindings] == ["last"]
+    _lower_all(traced, tmp_path)
+
+
 @pytest.mark.parametrize(
     "M,K,N",
     [(512, 1024, 1024), (512, 1024, 10240), (256, 512, 512)],
@@ -86,17 +99,17 @@ def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
     op.link_xclbin()
     insts = Path(op._insts_path)
     assert insts.stat().st_size > 0
-    assert not list(
-        tmp_path.glob("*.xclbin")
-    ), "an instructions-only compile built an image"
+    assert not list(tmp_path.glob("*.xclbin")), (
+        "an instructions-only compile built an image"
+    )
     first = insts.stat().st_mtime_ns
     again = MMPrebuilt(
         M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path))
     )
     again.link_xclbin()
-    assert (
-        Path(again._insts_path).stat().st_mtime_ns == first
-    ), "the same sequence recompiled"
+    assert Path(again._insts_path).stat().st_mtime_ns == first, (
+        "the same sequence recompiled"
+    )
 
 
 def test_swiglu_graphs_operators_lower(tmp_path):

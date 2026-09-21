@@ -29,6 +29,7 @@ APP = Path(__file__).resolve().parents[2] / "applications" / "llama_3.2_1b"
 sys.path.insert(0, str(APP))
 
 import llama_cpu  # noqa: E402
+import llama_npu  # noqa: E402
 from llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
 from llama_inference_harness import LlamaModelState  # noqa: E402
 
@@ -205,3 +206,47 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
     assert torch.allclose(got[0], expected[0], atol=0.05 * expected[0].abs().max())
     drift = [(a - b).abs().max().item() for a, b in zip(got[1:], expected[1:])]
     assert max(drift) > 0.05 * expected[1].abs().max(), drift
+
+
+class _Image:
+    """A compiled graph stood in by its reference: the application's view of one."""
+
+    def __init__(self, graph):
+        self.graph = graph
+
+    def __call__(self, *tensors, **values):
+        out = self.graph.reference(*tensors, **values)
+        return type("Out", (), {"to_torch": lambda _: out})()
+
+    def read(self, state):
+        return state.host.clone()
+
+    def write(self, state, tensor):
+        state.host = tensor.reshape(state.shape).to(torch.bfloat16)
+
+
+def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
+    """llama_npu.py's own forward pass, its two images stood in by the graph
+    references: the embedding, the prompt's padding and its last-row offset,
+    the angles, the cache handoff and decode's values are the application's."""
+    config, prompt, n_tokens, expected, _ = cpu
+    graph = decode_graph(config)
+    prefill = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
+    npu = llama_npu.AIELlama.__new__(llama_npu.AIELlama)
+    npu.decode_graph = graph
+    npu.decode, npu.prefill = _Image(graph.graph), _Image(prefill.graph)
+    monkeypatch.setattr(llama_npu, "npu", npu)
+    monkeypatch.setattr(llama_npu, "max_seq_len", config.context_length)
+
+    state = LlamaModelState(config)
+    state.token_ids = prompt
+    logits, state = llama_npu.llama_forward_pass(config, state)
+    assert logits.shape == (1, 1, config.vocab_size)
+    _assert_close([logits[0, -1].float()], [_first_logits(config, prompt).float()])
+    got, token = [], logits[0, -1].argmax()
+    for _ in range(n_tokens):
+        state.token_ids = token.reshape(1, 1)
+        logits, state = llama_npu.llama_forward_pass(config, state)
+        got.append(logits[0, -1].float())
+        token = logits[0, -1].argmax()
+    _assert_close(got, expected)

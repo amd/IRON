@@ -75,16 +75,9 @@ def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
     assert (work / "params.txt").read_text().split("\n", 1)[0].strip() == "0"
 
 
-def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
-    from iron.tests.common.llama_model import Config as _Config
-
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph
+def _assert_values_in_table(traced, work):
     from iron.common.build import value_symbol
 
-    cfg = _Config()
-    traced = DecodeGraph(cfg, 256).trace(cfg)
-    elf, work = build_elf(traced, "decode", tmp_path)
     table = _params(work)
     # Every value the graph bound is a parameter the host can write.
     for op, name, value in traced.bindings:
@@ -93,3 +86,28 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
             bound = next(v for v in op.ov.values if v.name == name)
         symbol = value_symbol(op, bound)
         assert symbol in table, f"{symbol} ({value.name}) missing from {sorted(table)}"
+
+
+def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
+    from iron.tests.common.llama_model import Config as _Config
+
+    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
+    from llama_graphs import DecodeGraph
+
+    cfg = _Config()
+    traced = DecodeGraph(cfg, 256).trace(cfg)
+    _, work = build_elf(traced, "decode", tmp_path)
+    _assert_values_in_table(traced, work)
+
+
+def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
+    from iron.tests.common.llama_model import Config as _Config
+
+    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
+    from llama_graphs import DecodeGraph, PrefillGraph
+
+    cfg = _Config()
+    decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
+    traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
+    _, work = build_elf(traced, "prefill", tmp_path)
+    _assert_values_in_table(traced, work)

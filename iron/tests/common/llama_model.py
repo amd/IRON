@@ -23,20 +23,31 @@ class _Attn:
     pass
 
 
+def _draw(gen):
+    def w(*shape, scale):
+        return _Param((torch.randn(*shape, generator=gen) * scale).to(torch.bfloat16))
+
+    return w
+
+
+def _zeros(*shape, scale):
+    """Shape-only weights: a build reads shapes, and zero pages cost nothing."""
+    return _Param(torch.zeros(*shape, dtype=torch.bfloat16))
+
+
 class _Block:
-    def __init__(self, gen, E, H, G, D, F):
-        w = lambda *shape, scale: _Param(  # noqa: E731
-            (torch.randn(*shape, generator=gen) * scale).to(torch.bfloat16)
-        )
+    def __init__(self, w, E, H, G, D, F):
         self.norm1, self.norm2 = w(E, scale=0.1), w(E, scale=0.1)
         self.norm1.weight += 1
         self.norm2.weight += 1
         self.attn = _Attn()
-        self.attn.q, self.attn.k = w(H * D, E, scale=E**-0.5), w(
-            G * D, E, scale=E**-0.5
+        self.attn.q, self.attn.k = (
+            w(H * D, E, scale=E**-0.5),
+            w(G * D, E, scale=E**-0.5),
         )
-        self.attn.v, self.attn.o = w(G * D, E, scale=E**-0.5), w(
-            E, H * D, scale=(H * D) ** -0.5
+        self.attn.v, self.attn.o = (
+            w(G * D, E, scale=E**-0.5),
+            w(E, H * D, scale=(H * D) ** -0.5),
         )
         self.ffn = _Attn()
         self.ffn.gate, self.ffn.up = w(F, E, scale=E**-0.5), w(F, E, scale=E**-0.5)
@@ -44,11 +55,12 @@ class _Block:
 
 
 class _Model:
-    def __init__(self, cfg, seed=0):
+    def __init__(self, cfg, seed=0, *, w=None):
         gen = torch.Generator().manual_seed(seed)
+        w = w or _draw(gen)
         self.layers = [
             _Block(
-                gen,
+                w,
                 cfg.emb_dim,
                 cfg.n_heads,
                 cfg.n_kv_groups,
@@ -57,15 +69,9 @@ class _Model:
             )
             for _ in range(cfg.n_layers)
         ]
-        self.norm = _Param(
-            (1 + 0.1 * torch.randn(cfg.emb_dim, generator=gen)).to(torch.bfloat16)
-        )
-        self.out_head = _Param(
-            (
-                torch.randn(cfg.vocab_size, cfg.emb_dim, generator=gen)
-                * cfg.emb_dim**-0.5
-            ).to(torch.bfloat16)
-        )
+        self.norm = w(cfg.emb_dim, scale=0.1)
+        self.norm.weight += 1
+        self.out_head = w(cfg.vocab_size, cfg.emb_dim, scale=cfg.emb_dim**-0.5)
 
     def named_parameters(self):
         for i, blk in enumerate(self.layers):
@@ -101,8 +107,19 @@ class Config:
     emb_dim, hidden_dim, vocab_size = 256, 512, 1024
     context_length = 64
 
-    def __init__(self):
-        self.model = _Model(self)
+    def __init__(self, *, w=None):
+        self.model = _Model(self, w=w)
         self.angles = compute_rope_angles(self.head_dim, self.context_length).to(
             torch.bfloat16
         )
+
+
+class Llama1B(Config):
+    """Llama 3.2 1B's real shape, with zero weights: for builds, not numbers."""
+
+    n_layers, n_heads, n_kv_groups, head_dim = 16, 32, 8, 64
+    emb_dim, hidden_dim, vocab_size = 2048, 8192, 128256
+    context_length = 2048
+
+    def __init__(self):
+        super().__init__(w=_zeros)
