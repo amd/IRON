@@ -274,9 +274,9 @@ def test_optional_leading_dim_is_omitted_when_one():
     assert MV(ov, M=64, num_batches=3).C.shape == (3, 64)
 
 
-def test_arg_spec_compat_view_matches_todays_shapes():
+def test_buffers_carry_direction_shape_and_dtype():
     ov = MVOverlay(K=256)
-    specs = MV(ov, M=64, num_batches=2).get_arg_spec()
+    specs = MV(ov, M=64, num_batches=2).buffers
     assert [(s.direction, s.shape) for s in specs] == [
         ("in", (2, 64, 256)),
         ("in", (2, 256)),
@@ -285,22 +285,15 @@ def test_arg_spec_compat_view_matches_todays_shapes():
     assert specs[0].dtype is bfloat16
 
 
-def test_arg_spec_carries_the_declared_dtype_and_answers_reads_writes():
-    """The sizing contract: every buffer-sizing caller (sequence layout,
-    XRTTensor allocation) trusts ``spec.dtype`` and ``spec.nbytes()``; the
-    liveness analysis trusts ``reads``/``writes``, where ``inout`` is both."""
-    from iron.common import AIERuntimeArgSpec
+def test_buffers_carry_the_declared_dtype_and_size():
+    """The sizing contract: the sequence layout and the test harness allocate
+    from ``b.dtype`` and ``b.nbytes`` of a declared buffer."""
     from iron.operators.repeat.op import Repeat
 
-    in_spec, out_spec = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).get_arg_spec()
-    assert in_spec.dtype == np.int32 and out_spec.dtype == np.int32
-    assert out_spec.nbytes() == 8 * 64 * 4 * 4
-    assert (in_spec.reads, in_spec.writes) == (True, False)
-    assert (out_spec.reads, out_spec.writes) == (False, True)
-    both = AIERuntimeArgSpec("inout", ())
-    assert both.reads and both.writes and both.nbytes() == 2
-    with pytest.raises(ValueError, match="Invalid direction"):
-        AIERuntimeArgSpec("sideways", (16,))
+    x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
+    assert x.dtype == np.int32 and y.dtype == np.int32
+    assert (x.direction, y.direction) == ("in", "out")
+    assert y.nbytes == 8 * 64 * 4 * 4
 
 
 def test_instance_values_shadow_dim_refs():
@@ -459,7 +452,7 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
     )
     op = Group(Group._overlay_class())
     assert [b.name for b in op.buffers] == ["input", "w_gate", "left"]
-    assert [s.shape for s in op.get_arg_spec()] == [(64, 128), (128, 256), (64, 256)]
+    assert [b.shape for b in op.buffers] == [(64, 128), (128, 256), (64, 256)]
     assert (op.seq_len, op.k) == (64, 2)
     assert op.design_key() == "abc123"
     assert op.get_mlir_artifact() == "artifact"
@@ -477,21 +470,21 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
 def test_gemm_layout_flags_transpose_rather_than_resize():
     from iron.operators.gemm.op import GEMM, GEMMOverlay
 
-    plain = GEMM(GEMMOverlay(), M=256, K=64, N=512).get_arg_spec()
-    b_major = GEMM(GEMMOverlay(b_col_maj=True), M=256, K=64, N=512).get_arg_spec()
-    c_major = GEMM(GEMMOverlay(c_col_maj=True), M=256, K=64, N=512).get_arg_spec()
+    plain = GEMM(GEMMOverlay(), M=256, K=64, N=512).buffers
+    b_major = GEMM(GEMMOverlay(b_col_maj=True), M=256, K=64, N=512).buffers
+    c_major = GEMM(GEMMOverlay(c_col_maj=True), M=256, K=64, N=512).buffers
     assert plain[1].shape == (64, 512) and b_major[1].shape == (512, 64)
     assert plain[2].shape == (256, 512) and c_major[2].shape == (512, 256)
     # Transposing a layout must not change how many bytes move.
-    assert plain[1].nbytes() == b_major[1].nbytes()
-    assert plain[2].nbytes() == c_major[2].nbytes()
+    assert plain[1].nbytes == b_major[1].nbytes
+    assert plain[2].nbytes == c_major[2].nbytes
 
 
 def test_mha_pads_the_sequence_and_groups_kv():
     from iron.operators.mha.op import MHA, MHAOverlay
 
-    grouped = MHA(MHAOverlay(), num_heads=8, seq_len=100, num_KV_heads=2).get_arg_spec()
-    plain = MHA(MHAOverlay(), num_heads=8, seq_len=100).get_arg_spec()
+    grouped = MHA(MHAOverlay(), num_heads=8, seq_len=100, num_KV_heads=2).buffers
+    plain = MHA(MHAOverlay(), num_heads=8, seq_len=100).buffers
     # 100 rounds up to 128, so Q is 8 heads x 128 x 64.
     assert grouped[0].shape == (8, 128, 64)
     # Grouped K/V are narrower than Q; plain K/V are exactly as wide.

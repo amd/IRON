@@ -5,62 +5,32 @@
 import pytest
 import aie.utils as aie_utils
 
+from iron.common.test_utils import operator_test
 from iron.operators.axpy.op import AXPY
-from iron.common.test_utils import golden, run_test
 
 
-def get_params():
+def cases():
     max_aie_columns = aie_utils.get_current_device().cols
-    input_lengths = [1024, 2048, 4096, 8192]
-    scalar_factors = [3.0, 10.0]
-
-    params = []
-    for input_length in input_lengths:
-        for num_aie_columns in range(1, max_aie_columns + 1):
-            tile_size = input_length // num_aie_columns
-            if tile_size * num_aie_columns != input_length:
+    out = []
+    for size in [1024, 2048, 4096, 8192]:
+        for cols in range(1, max_aie_columns + 1):
+            tile_size = size // cols
+            if tile_size * cols != size:
                 continue
-            for scalar in scalar_factors:
-                # Determine if this is a regular test case
-                is_regular = input_length == 2048 and scalar == 3.0
-                marks = [] if is_regular else [pytest.mark.extensive]
-
-                params.append(
+            for scalar in (3.0, 10.0):
+                regular = size == 2048 and scalar == 3.0
+                out.append(
                     pytest.param(
-                        input_length,
-                        num_aie_columns,
-                        tile_size,
-                        scalar,
-                        marks=marks,
+                        dict(
+                            size=size,
+                            num_aie_columns=cols,
+                            tile_size=tile_size,
+                            scalar_factor=scalar,
+                        ),
+                        marks=[] if regular else [pytest.mark.extensive],
                     )
                 )
-    return params
+    return out
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "input_length,num_aie_columns,tile_size,scalar_factor",
-    get_params(),
-)
-def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_context):
-    operator = AXPY(
-        size=input_length,
-        num_aie_columns=num_aie_columns,
-        tile_size=tile_size,
-        scalar_factor=scalar_factor,
-        context=aie_context,
-    )
-
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-6
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+test_axpy = operator_test(AXPY, cases())

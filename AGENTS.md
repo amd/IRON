@@ -166,7 +166,7 @@ reuse lint
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: Test utilities (`verify_buffer`, `nearly_equal`)
+   - `test_utils.py`: the operator test harness (`golden`, `run_test`, `operator_test`, `verify_buffer`, `record_metric`)
 
 ### Key Concepts
 
@@ -295,9 +295,13 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 5. Give the operator a `reference(*inputs)` (torch, on the declared shapes)
 6. Implement `test.py` with pytest tests
    - Use `@pytest.mark.extensive` for slower/larger tests
-   - `data = golden(op)` then `run_test(op, data.inputs, data.outputs, ...)`
-     from `iron.common.test_utils`; `normal=`, `centered=`, `scale=` and a
-     given tensor or shape per input cover operators that want other draws
+   - `test_x = operator_test(X, cases, rel_tol=, abs_tol=)` from
+     `iron.common.test_utils`, with the cases as dicts of constructor
+     arguments (`channeled_unary_cases`/`binary_elementwise_cases` for the
+     elementwise families); `draw=` passes `golden()` its arguments
+     (`normal=`, `centered=`, a given tensor or shape per input)
+   - a test with a body of its own calls `run_test(op, golden(op), ...)` and
+     `record_metric()` for any figure beyond latency and bandwidth
 7. Register operator in `iron/operators/__init__.py`
 
 ## Graph Functions

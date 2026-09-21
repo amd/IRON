@@ -1231,6 +1231,25 @@ tools are installed, the devices, the swiglu graph) and the `device` and
 graph tests, the reference parity test and the toolchain gates trace is
 one `iron/tests/common/llama_model.py`.
 
+**The operator tests are one function each.** `operator_test(cls, cases,
+rel_tol=, abs_tol=, draw=)` in `iron/common/test_utils.py` is the
+parametrized test: construct, `golden()`, `run_test()`, assert; the 18
+operators whose test was the same thirty lines around a parameter sweep
+are now a case list and that one call (`channeled_unary_cases` and
+`binary_elementwise_cases` build the elementwise families' sweeps). The
+tests with real bodies (gemm's partitions, flm GEMM's epilogues, gemv's
+epilogue, mha's error rate) keep them. Metrics are no longer scraped out
+of stdout by regex: `run_test` records latency and bandwidth through
+`record_metric`, a test records anything more (throughput), and the root
+conftest writes what was recorded. `verify_buffer` compares with
+mlir-aie's `aie.utils.verify.nearly_equal` (same rule; a NaN now fails
+rather than passing). `AIERuntimeArgSpec` and `get_arg_spec()` are gone:
+the sequence layout, the callables and the harness read the declared
+buffers (`op.buffers`: direction, shape, dtype, nbytes) directly. Same
+cases on both devices before and after (608 on NPU2, 464 on NPU1; rms
+norm's sweep is two tests, one per class); the ids are the operators'
+own field names now.
+
 What to run first on a device, in order: `pytest iron/tests/toolchain`
 (it is what the lowering environment already passes; a device changes
 nothing there), `pytest iron/tests/infrastructure` (the three ported

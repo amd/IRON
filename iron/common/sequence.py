@@ -283,7 +283,7 @@ class OperatorSequence(AIEOperatorBase):
             key = op.design_key() if self.share_designs else None
             if key is not None and key in first_with_key:
                 shared = designs[first_with_key[key]]
-                if op.get_arg_spec() != shared.get_arg_spec():
+                if _signature(op) != _signature(shared):
                     raise ValueError(
                         f"{op.name} and {shared.name} report the same design_key but "
                         "different runtime arguments, so the design cannot be shared"
@@ -309,11 +309,11 @@ class OperatorSequence(AIEOperatorBase):
         sizes, steps = {}, []
         for op, *bufs in self.runlist:
             reads, writes = [], []
-            for buf, spec in zip(bufs, op.get_arg_spec()):
-                sizes.setdefault(buf, spec.nbytes())
-                if spec.reads:
+            for buf, b in zip(bufs, op.buffers):
+                sizes.setdefault(buf, b.nbytes)
+                if b.direction in ("in", "inout"):
                     reads.append(buf)
-                if spec.writes:
+                if b.direction in ("out", "inout"):
                     writes.append(buf)
             steps.append((reads, writes))
 
@@ -329,20 +329,20 @@ class OperatorSequence(AIEOperatorBase):
         return {name: a.offset for name, a in allocations.items()}
 
     def calculate_buffer_layout(self):
-        args = {}  # base_buffer_name -> args_spec
+        args = {}  # base_buffer_name -> the declared buffer
         sliced_buffers = (
             {}
-        )  # full_buffer_name (with slice) -> (base_name, start, end, args_spec)
+        )  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
 
         for op, *bufs in self.runlist:
-            args_specs = op.get_arg_spec()
-            if len(args_specs) != len(bufs):
+            declared = op.buffers
+            if len(declared) != len(bufs):
                 raise ValueError(
-                    f"Number of buffers ({len(bufs)}) must match operator argument "
-                    f"specification ({len(args_specs)}) for operator {op!r}"
+                    f"Number of buffers ({len(bufs)}) must match the operator's "
+                    f"declared buffers ({len(declared)}) for operator {op!r}"
                 )
             for i, buf_name in enumerate(bufs):
-                args_spec = args_specs[i]
+                args_spec = declared[i]
 
                 # Parse slice notation: "buffer_name[start:end]"
                 if "[" in buf_name and buf_name.endswith("]"):
@@ -396,8 +396,7 @@ class OperatorSequence(AIEOperatorBase):
                     # Explicit size specified - this is a parent buffer for slices
                     return self.explicit_buffer_sizes[arg]
                 if arg in args:
-                    spec = args[arg]
-                    return int(np.prod(spec.shape) * np.dtype(spec.dtype).itemsize)
+                    return args[arg].nbytes
                 return None  # sliced buffers are handled separately
 
             # Unplanned buffers first, packed back to back exactly as before.
@@ -485,12 +484,6 @@ class OperatorSequence(AIEOperatorBase):
         self.image = self._image.link(self) if self._image is not None else None
         return self.image
 
-    def get_arg_spec(self):
-        raise NotImplementedError(
-            "OperatorSequence does not expose a unified arg spec; "
-            "use get_layout_for_buffer() to inspect individual buffer layouts"
-        )
-
     def get_callable(self):
         """The runtime callable of this sequence's mode, compiling first if
         that has not happened (``compile()`` beforehand is the ahead-of-time
@@ -531,6 +524,11 @@ BF16 = np.dtype(ml_dtypes.bfloat16)
 
 def _n_elements(nbytes):
     return max(nbytes, BF16.itemsize) // BF16.itemsize
+
+
+def _signature(op):
+    """The runtime arguments an operator takes: direction, shape and dtype each."""
+    return [(b.direction, tuple(b.shape), np.dtype(b.dtype)) for b in op.buffers]
 
 
 # ##########################################################################
@@ -580,13 +578,13 @@ class SequenceCallable:
         return self._buffer_cache[buffer_name]
 
     def _iter_steps(self):
-        """Yield ``(op, in_names, in_specs, out_name, out_spec)`` per runlist step."""
+        """Yield ``(op, in_names, in_buffers, out_name, out_buffer)`` per runlist step."""
         for step_op, *buf_names in self.op.runlist:
-            specs = step_op.get_arg_spec()
+            specs = step_op.buffers
             if len(specs) != len(buf_names):
                 raise ValueError(
-                    f"Operator {step_op!r} arg-spec count {len(specs)} does not "
-                    f"match runlist buffer count {len(buf_names)}"
+                    f"Operator {step_op!r} declares {len(specs)} buffers but the "
+                    f"runlist names {len(buf_names)}"
                 )
             *in_names, out_name = buf_names
             *in_specs, out_spec = specs

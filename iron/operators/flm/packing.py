@@ -117,7 +117,7 @@ def pack_b(
             # loads.
             out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
-        # native f32 weight); the kernels and get_arg_spec() assume the result
+        # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning
         # whatever B.dtype was.
         return out.to(torch.bfloat16)

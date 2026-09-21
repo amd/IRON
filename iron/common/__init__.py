@@ -3,7 +3,7 @@
 
 """Common utilities and base classes for IRON operators."""
 
-from .base import AIEOperatorBase, AIERuntimeArgSpec
+from .base import AIEOperatorBase
 from .operator_bases import (
     ChanneledUnaryOperator,
     ChanneledUnaryOverlay,

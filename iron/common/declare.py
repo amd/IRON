@@ -57,7 +57,7 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .base import AIEOperatorBase, AIERuntimeArgSpec, _serialize_param
+from .base import AIEOperatorBase, _serialize_param
 
 # Short spellings in artifact stems, for the fields every family shares.
 _NAME_ALIASES = {
@@ -666,9 +666,6 @@ class BoundBuffer:
             if _resolve_dim(d.ref, self._op) > 1:
                 n += 1
         return n
-
-    def arg_spec(self) -> AIERuntimeArgSpec:
-        return AIERuntimeArgSpec(self.direction, tuple(self.shape), self.dtype)
 
     def __getitem__(self, index) -> "BufferView":
         """A basic slice of this buffer, for ``rt.fill``/``rt.drain`` in an override.
@@ -1680,9 +1677,6 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         base = type(self).__name__ + "_" + "_".join(own + self.ov.name_parts())
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
-
-    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        return [b.arg_spec() for b in self.buffers]
 
     def get_mlir_artifact(self, image: str = "elf"):
         from .build import mlir_artifact_for

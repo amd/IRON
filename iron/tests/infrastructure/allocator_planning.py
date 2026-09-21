@@ -13,31 +13,34 @@ alone (pinning).
 
 import pytest
 
-from iron.common.base import AIERuntimeArgSpec
+from types import SimpleNamespace
+
 from iron.common.allocator import LiveRange, live_ranges, peak_live_bytes, plan
 
 
+def _buf(direction):
+    return SimpleNamespace(direction=direction, shape=(1,), nbytes=2)
+
+
 class Op:
-    """Stand-in operator: N inputs then M outputs, with real arg specs."""
+    """Stand-in operator: N inputs then M outputs, declared like a real one's buffers."""
 
     def __init__(self, n_in, n_out=1):
-        self.specs = [AIERuntimeArgSpec("in", (1,))] * n_in + [
-            AIERuntimeArgSpec("out", (1,))
-        ] * n_out
-
-    def get_arg_spec(self):
-        return self.specs
+        self.buffers = [_buf("in")] * n_in + [_buf("out")] * n_out
 
 
 def steps_of(runlist):
     """The (reads, writes) of each entry, which is all liveness needs."""
     steps = []
     for op, *bufs in runlist:
-        specs = op.get_arg_spec()
         steps.append(
             (
-                [b for b, s in zip(bufs, specs) if s.reads],
-                [b for b, s in zip(bufs, specs) if s.writes],
+                [b for b, s in zip(bufs, op.buffers) if s.direction in ("in", "inout")],
+                [
+                    b
+                    for b, s in zip(bufs, op.buffers)
+                    if s.direction in ("out", "inout")
+                ],
             )
         )
     return steps

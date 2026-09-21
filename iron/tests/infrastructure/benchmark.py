@@ -10,7 +10,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
-from iron.common.base import AIEOperatorBase, AIERuntimeArgSpec
+
+from iron.common.base import AIEOperatorBase
 from iron.common import test_utils
 
 
@@ -25,10 +26,13 @@ class _Operator(AIEOperatorBase):
     def compile(self):
         return self
 
-    def get_arg_spec(self):
+    @property
+    def buffers(self):
+        from ml_dtypes import bfloat16
+
         return [
-            AIERuntimeArgSpec("in", (32,)),
-            AIERuntimeArgSpec("out", (32,)),
+            SimpleNamespace(name="a", direction="in", shape=(32,), dtype=bfloat16),
+            SimpleNamespace(name="b", direction="out", shape=(32,), dtype=bfloat16),
         ]
 
     def get_callable(self):

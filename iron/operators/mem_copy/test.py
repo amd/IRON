@@ -5,84 +5,41 @@
 import pytest
 import aie.utils as aie_utils
 
+from iron.common.test_utils import operator_test
 from iron.operators.mem_copy.op import MemCopy
-from iron.common.test_utils import golden, run_test
 
 
-def get_params():
+def cases():
     max_columns = aie_utils.get_current_device().cols
-
-    input_lengths = [1024, 2048, 4096, 8192]
-    bypass_modes = [False, True]
-
-    params = []
-
-    for input_length in input_lengths:
-        for num_cores in range(1, max_columns * 2 + 1):  # Up to MAX_COLUMNS * 2 cores
-            for num_channels in range(1, 3):  # 1 or 2 channels
-                for bypass in bypass_modes:
-                    # Calculate the maximum cores that can be utilized with 1 or 2 shim channels
-                    max_cores = max_columns * num_channels  # MAX_COLUMNS * num_channels
-
-                    if max_cores >= num_cores and num_cores >= num_channels:
-                        tile_size = input_length // num_cores
-
-                        # Cap tile_size at 8192
-                        if tile_size > 8192:
-                            tile_size = 8192
-
-                        # Only proceed if tile_size * num_cores == input_length (exact division)
-                        if tile_size * num_cores == input_length:
-                            is_regular = input_length == 2048 and bypass == False
-                            marks = [] if is_regular else [pytest.mark.extensive]
-
-                            params.append(
-                                pytest.param(
-                                    input_length,
-                                    num_cores,
-                                    num_channels,
-                                    bypass,
-                                    tile_size,
-                                    marks=marks,
-                                )
-                            )
-
-    return params
+    out = []
+    for size in [1024, 2048, 4096, 8192]:
+        for num_cores in range(1, max_columns * 2 + 1):
+            for channels in (1, 2):
+                # A channel needs at least one core, and a core a shim channel.
+                if not channels <= num_cores <= max_columns * channels:
+                    continue
+                for bypass in (False, True):
+                    tile_size = min(size // num_cores, 8192)
+                    if tile_size * num_cores != size:
+                        continue
+                    out.append(
+                        pytest.param(
+                            dict(
+                                size=size,
+                                num_cores=num_cores,
+                                num_channels=channels,
+                                bypass=bypass,
+                                tile_size=tile_size,
+                            ),
+                            marks=(
+                                []
+                                if size == 2048 and not bypass
+                                else [pytest.mark.extensive]
+                            ),
+                        )
+                    )
+    return out
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "input_length,num_cores,num_channels,bypass,tile_size",
-    get_params(),
-)
-def test_mem_copy(
-    input_length, num_cores, num_channels, bypass, tile_size, aie_context
-):
-    operator = MemCopy(
-        size=input_length,
-        num_cores=num_cores,
-        num_channels=num_channels,
-        bypass=bypass,
-        tile_size=tile_size,
-        context=aie_context,
-    )
-
-    # num_cores >= num_channels is required: each channel must have at least one core assigned
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        # A copy that alters a value is a broken copy, so gate it exactly.
-        operator,
-        data.inputs,
-        data.outputs,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+# A copy that alters a value is a broken copy, so gate it exactly.
+test_mem_copy = operator_test(MemCopy, cases(), rel_tol=0.0, abs_tol=0.0)

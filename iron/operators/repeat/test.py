@@ -4,61 +4,35 @@
 
 import pytest
 
+from iron.common.test_utils import operator_test
 from iron.operators.repeat.op import Repeat
-from iron.common.test_utils import golden, run_test
 
+# rows, cols, repeat, transfer_size.
+#
+# design.py splits cols into chunks <= 1023 by picking the smallest divisor that
+# gets under the hardware limit, so cols on either side of 1023 take different
+# paths and both need covering. The llama arm is the shape the only caller in the
+# tree actually dispatches: n_kv_groups=8 groups expanded to n_heads=32 over a
+# max_seq_len=2048 context of head_dim=64, i.e. repeat=4 with cols=2048*64.
+CASES = [
+    dict(rows=8, cols=64, repeat=4, transfer_size=None),
+    dict(rows=8, cols=512, repeat=4, transfer_size=64),
+    dict(rows=4, cols=1024, repeat=2, transfer_size=None),
+    pytest.param(
+        dict(rows=4, cols=2048, repeat=2, transfer_size=None),
+        marks=[pytest.mark.extensive],
+    ),
+    pytest.param(
+        dict(rows=8, cols=2048 * 64, repeat=4, transfer_size=64),
+        marks=[pytest.mark.extensive],
+    ),
+]
 
-def get_params():
-    # rows, cols, repeat, transfer_size.
-    #
-    # design.py splits cols into chunks <= 1023 by picking the smallest divisor that
-    # gets under the hardware limit, so cols on either side of 1023 take different
-    # paths and both need covering. The llama arm is the shape the only caller in the
-    # tree actually dispatches: n_kv_groups=8 groups expanded to n_heads=32 over a
-    # max_seq_len=2048 context of head_dim=64, i.e. repeat=4 with cols=2048*64.
-    return [
-        pytest.param(8, 64, 4, None),
-        pytest.param(8, 512, 4, 64),
-        pytest.param(4, 1024, 2, None),
-        pytest.param(4, 2048, 2, None, marks=[pytest.mark.extensive]),
-        pytest.param(8, 2048 * 64, 4, 64, marks=[pytest.mark.extensive]),
-    ]
-
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize("rows,cols,repeat,transfer_size", get_params())
-def test_repeat(rows, cols, repeat, transfer_size, aie_context):
-    """Repeat moves data and computes nothing, so the gate is exact equality.
-
-    A tolerance gate would accept a permutation that reads the wrong group -- which
-    is the whole failure mode here, since the only caller uses this to expand KV
-    groups to attention heads and a misrouted group is numerically plausible.
-    """
-    operator = Repeat(
-        rows=rows,
-        cols=cols,
-        repeat=repeat,
-        transfer_size=transfer_size,
-        context=aie_context,
-    )
-
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        data.inputs,
-        data.outputs,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+# Repeat moves data and computes nothing, so the gate is exact equality. A
+# tolerance gate would accept a permutation that reads the wrong group, which
+# is the whole failure mode here: the only caller uses this to expand KV groups
+# to attention heads, and a misrouted group is numerically plausible.
+test_repeat = operator_test(Repeat, CASES, rel_tol=0.0, abs_tol=0.0)
 
 
 @pytest.mark.parametrize(

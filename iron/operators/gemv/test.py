@@ -9,7 +9,7 @@ from iron.operators.gemv.op import GEMV, gelu_tanh_approx
 from iron.common.device_utils import get_kernel_dir
 import numpy as np
 import torch
-from iron.common.test_utils import golden, run_test
+from iron.common.test_utils import golden, record_metric, run_test
 
 
 def get_params():
@@ -37,11 +37,6 @@ def get_params():
     return params
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output", get_params()
 )
@@ -60,11 +55,7 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_cont
         operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-
-    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"Test failed with errors: {errors}"
 
@@ -89,11 +80,6 @@ def get_batched_params():
     return out
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output,num_batches",
     get_batched_params(),
@@ -115,19 +101,11 @@ def test_gemv_batched(
         operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-    gflops = (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"batched GEMV failed: {errors}"
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output",
     [
@@ -165,9 +143,6 @@ def test_gemv_gelu(
         operator, input_buffers, output_buffers, rel_tol=0.06, abs_tol=2e-2
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"Test failed with errors: {errors}"

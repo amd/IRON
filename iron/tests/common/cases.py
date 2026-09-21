@@ -139,11 +139,9 @@ CASES = [
     ),
     ("silu", "SiLU", [dict(size=1024, num_aie_columns=1, tile_size=256)]),
     ("softmax", "Softmax", [dict(rows=16, cols=64)]),
-    # SwiGLUDecode / SwiGLUPrefill / SwiGLUPrefillStream are deliberately absent:
-    # all three are OperatorSequence subclasses, and OperatorSequence raises
-    # from get_arg_spec() ("does not expose a unified arg spec; use
-    # get_layout_for_buffer()"). Only the leaf operator of that family declares
-    # one -- the per-group stream operator, covered here.
+    # SwiGLUDecode / SwiGLUPrefill are graph functions and SwiGLUPrefillStream
+    # an OperatorSequence: none declares buffers of its own. Only the leaf
+    # operator of that family does, the per-group stream operator, covered here.
     (
         "strided_copy",
         "StridedCopy",

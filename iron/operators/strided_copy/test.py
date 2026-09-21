@@ -4,8 +4,8 @@
 
 import pytest
 
+from iron.common.test_utils import operator_test
 from iron.operators.strided_copy.op import StridedCopy
-from iron.common.test_utils import golden, run_test
 
 # Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim) and one
 # token's keys land in slot t of every group. SEQ is 128 rather than the real 2048 to
@@ -43,51 +43,28 @@ def _flat(size, num_aie_channels=1, transfer_size=None):
     )
 
 
-def get_params():
-    return [
-        pytest.param(_flat(1024), id="contiguous"),
-        pytest.param(_flat(1024, num_aie_channels=2), id="two_channels"),
-        pytest.param(_flat(1024, num_aie_channels=4), id="four_channels"),
-        pytest.param(
-            _flat(1024, num_aie_channels=2, transfer_size=256),
-            id="two_channels_chunked",
-        ),
-        pytest.param(_flat(1024, transfer_size=256), id="chunked_transfer"),
-        pytest.param(_kv_slot(SEQ, 0), id="kv_slot0"),
-        pytest.param(_kv_slot(SEQ, 5), id="kv_slot5"),
-        pytest.param(_kv_slot(SEQ, SEQ - 1), id="kv_slot_last"),
-        # The KV-cache write is what num_aie_channels exists to widen, so it carries the
-        # strided arms too -- the flat cases split a stride-1 run, these split head_dim.
-        pytest.param(_kv_slot(SEQ, 5, num_aie_channels=2), id="kv_slot5_two_channels"),
-        pytest.param(_kv_slot(SEQ, 5, num_aie_channels=4), id="kv_slot5_four_channels"),
-        pytest.param(
-            _kv_slot(2048, 1000), id="kv_llama_full", marks=[pytest.mark.extensive]
-        ),
-    ]
+CASES = [
+    pytest.param(_flat(1024), id="contiguous"),
+    pytest.param(_flat(1024, num_aie_channels=2), id="two_channels"),
+    pytest.param(_flat(1024, num_aie_channels=4), id="four_channels"),
+    pytest.param(
+        _flat(1024, num_aie_channels=2, transfer_size=256), id="two_channels_chunked"
+    ),
+    pytest.param(_flat(1024, transfer_size=256), id="chunked_transfer"),
+    pytest.param(_kv_slot(SEQ, 0), id="kv_slot0"),
+    pytest.param(_kv_slot(SEQ, 5), id="kv_slot5"),
+    pytest.param(_kv_slot(SEQ, SEQ - 1), id="kv_slot_last"),
+    # The KV-cache write is what num_aie_channels exists to widen, so it carries the
+    # strided arms too -- the flat cases split a stride-1 run, these split head_dim.
+    pytest.param(_kv_slot(SEQ, 5, num_aie_channels=2), id="kv_slot5_two_channels"),
+    pytest.param(_kv_slot(SEQ, 5, num_aie_channels=4), id="kv_slot5_four_channels"),
+    pytest.param(
+        _kv_slot(2048, 1000), id="kv_llama_full", marks=[pytest.mark.extensive]
+    ),
+]
 
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize("kwargs", get_params())
-def test_strided_copy(kwargs, aie_context):
-    """StridedCopy moves data and computes nothing, so the gate is exact equality."""
-    operator = StridedCopy(**kwargs, context=aie_context)
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        data.inputs,
-        data.outputs,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+# StridedCopy moves data and computes nothing, so the gate is exact equality.
+test_strided_copy = operator_test(StridedCopy, CASES, rel_tol=0.0, abs_tol=0.0)
 
 
 def test_transfer_size_not_dividing_per_channel_share_is_rejected(aie_context):

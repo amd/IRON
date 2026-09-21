@@ -31,7 +31,7 @@ from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream
 # against come from swiglu_decode's reference, which it shares.
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.operators.swiglu_prefill_stream.reference import INPUT, OUTPUT, WEIGHTS
-from iron.common.test_utils import verify_buffer
+from iron.common.test_utils import record_metric, verify_buffer
 
 # The MILP-feasible shape on the whole-array Strix (npu2) target.
 SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM = 256, 512, 2048
@@ -59,10 +59,6 @@ def _staged(operator, golden_ref):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
 @pytest.mark.parametrize("k", FUSION_GROUPS)
 def test_swiglu_prefill_stream(k, aie_context):
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
@@ -102,9 +98,9 @@ def test_swiglu_prefill_stream(k, aie_context):
         latencies.append((time.perf_counter() - start) * 1e6)
     elapsed_us = min(latencies)
     total_bytes = 4 * SEQ_LEN * EMBEDDING_DIM  # bf16 in + out
-    print(f"Latency (us): {elapsed_us:.2f}")
     print(
         f"Latency min/mean/max (us): {elapsed_us:.2f} / "
         f"{sum(latencies) / len(latencies):.2f} / {max(latencies):.2f}"
     )
-    print(f"Effective Bandwidth: {total_bytes / (elapsed_us * 1e-6) / 1e9:.4f} GB/s")
+    record_metric("Latency", elapsed_us)
+    record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)

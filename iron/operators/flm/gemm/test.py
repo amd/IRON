@@ -25,7 +25,7 @@ from iron.operators.flm.gemm.design import (
     _default_l1,
 )
 from iron.operators.flm.gemm.op import GEMM
-from iron.common.test_utils import golden, run_test
+from iron.common.test_utils import golden, record_metric, run_test
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -160,11 +160,6 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
     )
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
 def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
@@ -182,10 +177,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
         operator, vectors(operator, scale), rounding
     )
 
-    gflops = (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
-    print(f"Throughput: {gflops:.6e} GFLOP/s\n")
+    record_metric("Throughput", (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, "Test failed"
 

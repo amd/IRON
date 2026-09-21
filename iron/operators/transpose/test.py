@@ -5,104 +5,60 @@
 import pytest
 import aie.utils as aie_utils
 
+from iron.common.test_utils import operator_test
 from iron.operators.transpose.op import Transpose
-from iron.common.test_utils import golden, run_test
 
 
-def get_params():
+def cases():
     max_aie_columns = aie_utils.get_current_device().cols
-    input_lengths = [64, 2048]
-    n_list = [64, 128, 256, 512]
-    s_list = [8]
-    m = 64
-    n = 64
-
-    params = []
-    for M in input_lengths:
-        for N in n_list:
-            for s in s_list:
-                for num_aie_columns in range(1, max_aie_columns + 1):
-                    for num_channels in [1, 2]:
-                        row_part = M // num_channels
-                        col_part = N // num_aie_columns
-                        if row_part % m != 0 or col_part % n != 0:
-                            continue
-                        check_length = (
-                            row_part * col_part * num_channels * num_aie_columns
+    m = n = 64
+    out = []
+    for M in (64, 2048):
+        for N in (64, 128, 256, 512):
+            for cols in range(1, max_aie_columns + 1):
+                for channels in (1, 2):
+                    if (M // channels) % m or (N // cols) % n:
+                        continue
+                    if (M // channels) * (N // cols) * channels * cols != M * N:
+                        continue
+                    out.append(
+                        pytest.param(
+                            dict(
+                                M=M,
+                                N=N,
+                                num_aie_columns=cols,
+                                num_channels=channels,
+                                m=m,
+                                n=n,
+                                s=8,
+                                num_batches=1,
+                            ),
+                            marks=(
+                                [] if (M, N) == (2048, 64) else [pytest.mark.extensive]
+                            ),
                         )
-                        length = M * N
-                        if check_length != length:
-                            continue
-
-                        is_regular = M == 2048 and N == 64
-                        marks = [] if is_regular else [pytest.mark.extensive]
-
-                        params.append(
-                            pytest.param(
-                                M,
-                                N,
-                                num_aie_columns,
-                                num_channels,
-                                m,
-                                n,
-                                s,
-                                1,
-                                marks=marks,
-                            )
-                        )
-
-    # num_batches>1: batch B independent same-shape transposes into one dispatch
-    # (regular shape, single column/channel). num_batches=2 runs in the default
-    # suite; the larger batch is extensive.
+                    )
+    # num_batches > 1: independent same-shape transposes in one dispatch, on
+    # the regular shape; two batches in the default suite, four extensive.
     for nb in (2, 4):
-        params.append(
+        out.append(
             pytest.param(
-                2048,
-                64,
-                1,
-                1,
-                m,
-                n,
-                8,
-                nb,
+                dict(
+                    M=2048,
+                    N=64,
+                    num_aie_columns=1,
+                    num_channels=1,
+                    m=m,
+                    n=n,
+                    s=8,
+                    num_batches=nb,
+                ),
                 marks=[] if nb == 2 else [pytest.mark.extensive],
             )
         )
+    return out
 
-    return params
 
-
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s,num_batches", get_params())
-def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_context):
-    operator = Transpose(
-        M=M,
-        N=N,
-        num_aie_columns=aie_columns,
-        num_channels=channels,
-        m=m,
-        n=n,
-        s=s,
-        num_batches=num_batches,
-        context=aie_context,
-    )
-
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        # A transpose is a permutation. Any tolerance here also accepts some class of
-        # wrong permutation, so gate it exactly.
-        operator,
-        data.inputs,
-        data.outputs,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+# A transpose is a permutation. Any tolerance here also accepts some class of
+# wrong permutation, so gate it exactly.
+test_transpose = operator_test(Transpose, cases(), rel_tol=0.0, abs_tol=0.0)

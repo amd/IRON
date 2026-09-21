@@ -8,8 +8,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar
 
-import numpy as np
-from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 
 from . import compilation as comp
@@ -40,17 +38,6 @@ class AIEOperatorBase(ABC):
         separately via compile().
         """
         pass
-
-    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
-        """This operator's runtime arguments: direction, shape and dtype each.
-
-        A declared operator (:mod:`iron.common.declare`) serves it from its
-        ``In``/``Out``/``InOut`` members; anything else overrides.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} declares no buffers and does not override "
-            f"get_arg_spec()."
-        )
 
     @abstractmethod
     def get_callable(self) -> Callable[..., Any]:
@@ -129,38 +116,3 @@ def _serialize_param(v: object) -> str:
     if isinstance(v, (list, tuple)):
         return "x".join(str(x) for x in v)
     return str(v)
-
-
-@dataclass(frozen=True)
-class AIERuntimeArgSpec:
-    """Specification for a single runtime argument of an AIE operator."""
-
-    direction: str
-    shape: tuple[int, ...]
-    dtype: np.dtype = dataclasses.field(default_factory=lambda: bfloat16)
-
-    def __post_init__(self) -> None:
-        if self.direction not in {"in", "out", "inout"}:
-            raise ValueError(
-                f"Invalid direction {self.direction!r}: must be one of 'in', 'out', 'inout'"
-            )
-
-    @property
-    def reads(self) -> bool:
-        """Whether the step consumes this buffer.
-
-        Asking the question directly, rather than comparing ``direction``
-        against a set at each call site, is what lets ``"inout"`` answer yes to
-        both this and :attr:`writes` -- which is the case a liveness analysis
-        gets wrong if it partitions arguments into inputs and outputs.
-        """
-        return self.direction in {"in", "inout"}
-
-    @property
-    def writes(self) -> bool:
-        """Whether the step produces this buffer."""
-        return self.direction in {"out", "inout"}
-
-    def nbytes(self) -> int:
-        """Size of this argument in bytes."""
-        return int(np.prod(self.shape) * np.dtype(self.dtype).itemsize)

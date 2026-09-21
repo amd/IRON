@@ -399,7 +399,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
         op.config_name == f"FLM_GEMM_tn64_ck128_ma{ov.tile_ma}_mc1_emf_conv_even_npu2"
     )
     assert op.name == op.config_name + "_M512_K1024_N1024"
-    a, b, c = op.get_arg_spec()
+    a, b, c = op.buffers
     assert a.shape == (512, 1024) and c.shape == (512, 1024)
     assert b.shape == (flm.packed_b_size(1024, 1024, True),) and b.dtype is np.uint8
     assert op.residents() == {
@@ -425,7 +425,7 @@ def test_flm_gemm_declared_overlay_tunes_from_the_device_only(flm):
     assert op.ov.tile_n == 64
     untuned = flm.GEMM(flm.FLMGEMMOverlay(), M=256, K=512, N=512)
     with pytest.raises(flm.Incompatible, match="tuned overlay"):
-        untuned.get_arg_spec()  # B's layout follows the device
+        [b.shape for b in untuned.buffers]  # B's layout follows the device
 
 
 def test_flm_gemm_unsplit_sequence_issues_c_then_a_then_b_per_block(flm):

@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from iron.common.test_utils import verify_buffer
+from iron.common.test_utils import record_metric, verify_buffer
 from iron.operators.elementwise_mul.op import ElementwiseMul
 from iron.operators.silu.op import SiLU
 from iron.operators.swiglu_prefill.op import swiglu_prefill
@@ -26,10 +26,6 @@ def _step_output(net, op_type):
     return net.buffer(step.outputs[0])
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
 @pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
 def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
@@ -52,9 +48,8 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     elapsed_us = (time.perf_counter() - start) * 1e6
 
     total_bytes = (x.numel() + seq_len * embedding_dim) * 2  # bf16
-    bandwidth_gbps = total_bytes / (elapsed_us * 1e-6) / 1e9
-    print(f"Latency (us): {elapsed_us:.2f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
+    record_metric("Latency", elapsed_us)
+    record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
 
     errors = {}
     swished_buf, product_buf = _step_output(net, SiLU), _step_output(

@@ -12,7 +12,7 @@ import ml_dtypes
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators.gemm.op import GEMM
-from iron.common.test_utils import golden, run_test, verify_buffer
+from iron.common.test_utils import golden, record_metric, run_test, verify_buffer
 
 
 def get_params():
@@ -93,11 +93,6 @@ def get_params():
     return params
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N",
     get_params(),
@@ -158,9 +153,10 @@ def test_gemm(
         A_buf = XRTTensor.from_torch(data["A"].flatten())
 
         # Allocate per-partition B and C XRTTensors
-        arg_spec = compilable.get_arg_spec()
-        c_shape = arg_spec[2].shape
-        c_dtype = arg_spec[2].dtype
+        c_shape, c_dtype = (
+            tuple(compilable.buffers[2].shape),
+            compilable.buffers[2].dtype,
+        )
 
         B_bufs = []
         C_bufs = []
@@ -200,11 +196,9 @@ def test_gemm(
         c_bytes = C_concat.nelement() * 2
         total_bytes = a_bytes + b_bytes + c_bytes
         bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
+        record_metric("Latency", latency_us)
+        record_metric("Bandwidth", bandwidth_gbps)
 
-    gflops = (2.0 * M * K * total_N) / (latency_us * 1e-6) / 1e9
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s")
-    print(f"Throughput: {gflops:.6e} GFLOP/s\n")
+    record_metric("Throughput", (2.0 * M * K * total_N) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, "Test failed"

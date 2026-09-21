@@ -7,10 +7,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 import pytest
-import sys
 import statistics
 
 from iron.common import AIEContext
+from iron.common import test_utils
 import aie.utils as aie_utils
 
 
@@ -67,17 +67,10 @@ class CSVReporter:
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
 
-    def add_result(
-        self, test_path, test_name, passed, captured_output, metric_patterns
-    ):
+    def add_result(self, test_path, test_name, passed, metrics):
         key = (test_path, test_name)
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
-
-        for metric_name, pattern in metric_patterns.items():
-            match = re.search(pattern, captured_output)
-            if not match:
-                continue
-            value = float(match.group("value"))
+        for metric_name, value in metrics:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
     def finalize_results(self):
@@ -126,7 +119,7 @@ def csv_reporter(request):
     reporter.write_csv()
 
 
-# Hook into test completion to capture metrics in CSVReporter
+# Hook into test completion to collect each test's metrics into the CSVReporter
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -153,25 +146,16 @@ def pytest_runtest_makereport(item, call):
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
-            captured = report.capstdout
-
-            # Get metric patterns from test item's markers
-            metric_patterns = {}
-            for marker in item.iter_markers("metrics"):
-                metric_patterns = marker.kwargs
-                break
-
+            # What the test reported through test_utils.record_metric (run_test
+            # records latency and bandwidth; a test adds its own, e.g. throughput).
             csv_reporter.add_result(
-                test_path, test_name, passed, captured, metric_patterns
+                test_path, test_name, passed, test_utils.take_metrics()
             )
 
 
 def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     config._csv_reporter = CSVReporter(csv_path)
-    config.addinivalue_line(
-        "markers", "metrics(**patterns): specify metric patterns for this test"
-    )
 
 
 def pytest_collection_modifyitems(config, items):

@@ -52,6 +52,7 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
 from iron.operators.flm import MMPrebuilt
+from iron.common.test_utils import record_metric
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
 # run. See the note in the module docstring.
@@ -169,22 +170,6 @@ class Candidate:
         return (max(self.round_medians) - self.us) / self.us * 100.0
 
 
-@pytest.mark.metrics(
-    FLMLatency=r"flm latency \(us\): (?P<value>[\d\.]+)",
-    PrebuiltLatency=r"prebuilt latency \(us\): (?P<value>[\d\.]+)",
-    GEMMLatency=r"gemm latency \(us\): (?P<value>[\d\.]+)",
-    SpeedupVsPrebuilt=r"speedup vs prebuilt: (?P<value>[\d\.]+)",
-    SpeedupVsGEMM=r"speedup vs gemm: (?P<value>[\d\.]+)",
-    # The budget below is loose enough that a toolchain change could move the
-    # error a long way inside it unnoticed, so record the numbers too.
-    FLMErr=r"flm err/mass: (?P<value>[\d\.e\+-]+)",
-    PrebuiltErr=r"prebuilt err/mass: (?P<value>[\d\.e\+-]+)",
-    GEMMErr=r"gemm err/mass: (?P<value>[\d\.e\+-]+)",
-    FLMThroughput=r"flm throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-    FLMJitterPct=r"flm jitter \(%\): (?P<value>[\d\.]+)",
-    FLMXclbinKB=r"flm xclbin \(KB\): (?P<value>[\d\.]+)",
-    GEMMXclbinKB=r"gemm xclbin \(KB\): (?P<value>[\d\.]+)",
-)
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
 def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
     A, B, expected, mass = make_inputs(M, K, N)
@@ -246,14 +231,27 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
     by_name = {c.name: c for c in candidates}
     flm = by_name["flm"]
 
+    # Recorded for the CSV as well as printed: the error budget below is loose
+    # enough that a toolchain change could move the error a long way inside it
+    # unnoticed, so the numbers are kept too.
     print()
+    label = {"flm": "FLM", "prebuilt": "Prebuilt", "gemm": "GEMM"}
     for c in candidates:
+        kb = c.xclbin.stat().st_size / 1024
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
-        print(f"{c.name} xclbin (KB): {c.xclbin.stat().st_size / 1024:.1f}")
+        print(f"{c.name} xclbin (KB): {kb:.1f}")
+        record_metric(f"{label[c.name]}Latency", c.us)
+        record_metric(f"{label[c.name]}Err", c.err)
+        record_metric(f"{label[c.name]}XclbinKB", kb)
     if "prebuilt" in by_name:
         print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
+        record_metric("SpeedupVsPrebuilt", by_name["prebuilt"].us / flm.us)
     print(f"speedup vs gemm: {by_name['gemm'].us / flm.us:.3f}")
-    print(f"flm throughput: {2.0 * M * K * N / (flm.us * 1e-6) / 1e9:.6e} GFLOP/s")
+    record_metric("SpeedupVsGEMM", by_name["gemm"].us / flm.us)
+    throughput = 2.0 * M * K * N / (flm.us * 1e-6) / 1e9
+    print(f"flm throughput: {throughput:.6e} GFLOP/s")
     print(f"flm jitter (%): {flm.jitter_pct:.2f}")
+    record_metric("FLMThroughput", throughput)
+    record_metric("FLMJitterPct", flm.jitter_pct)
     print()

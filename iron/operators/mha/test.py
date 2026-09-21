@@ -30,10 +30,6 @@ def get_params():
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
 @pytest.mark.parametrize(
     "seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params()
 )
@@ -56,8 +52,6 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
     error_threshold = 0.005
     max_acceptable_errors = int(seq_len * dim * num_heads * error_threshold)
 
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     print(
         "({} errors out of {} max allowable)".format(
             len(errors["O"]), max_acceptable_errors
@@ -80,7 +74,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
 def test_arg_spec_matches_design_shapes(
     seq_len, dim, num_heads, num_pipelines, num_kv_heads
 ):
-    """get_arg_spec sizes the runtime buffers; design.py declares the MLIR arg
+    """The declared buffers size the runtime buffers; design.py declares the MLIR arg
     types. The two must agree.
     """
     op = MHA(
@@ -90,7 +84,7 @@ def test_arg_spec_matches_design_shapes(
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
     )
-    q, k, v, o = (math.prod(spec.shape) for spec in op.get_arg_spec())
+    q, k, v, o = (math.prod(b.shape) for b in op.buffers)
 
     pad = op.ov.seq_padding(seq_len)
     kv_heads = num_kv_heads if num_kv_heads else num_heads

@@ -5,89 +5,41 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.operators.rms_norm.op import RMSNorm, WeightedRMSNorm
-from iron.common.test_utils import golden, run_test
+from iron.common.test_utils import operator_test
 from iron.common.utils import get_shim_dma_limit
+from iron.operators.rms_norm.op import RMSNorm, WeightedRMSNorm
 
 
-def get_params():
+def cases(weighted):
     dev = aie_utils.get_current_device()
-    max_aie_columns = dev.cols
     shim_dma_limit = get_shim_dma_limit(dev)
-    input_lengths = [1024, 2048, 4096, 8192]
-
-    params = []
-    for weighted in [False, True]:
-        for input_length in input_lengths:
-            for num_aie_columns in range(1, max_aie_columns + 1):
-                num_channels_options = range(1, 3)
-                for num_channels_rms in num_channels_options:  # 1 or 2
-                    # Skip configs that exceed device limits.
-                    if num_aie_columns * num_channels_rms > shim_dma_limit:
-                        continue
-                    # Weighted design uses one weight FIFO per channel shared across
-                    # columns; ShimDMA output budget = num_channels * (num_aie_columns + 1).
-                    if (
-                        weighted
-                        and num_channels_rms * (num_aie_columns + 1) > shim_dma_limit
-                    ):
-                        continue
-                    total_cores = num_aie_columns * num_channels_rms
-                    if not weighted:
-                        tile_size = input_length // total_cores
-                        if tile_size > 8192:
-                            tile_size = 8192
-                        check_length = tile_size * total_cores
-                    else:
-                        tile_size = input_length // total_cores
-                        if tile_size > 4096:
-                            tile_size = 4096
-                        check_length = tile_size * total_cores
-                    if check_length == input_length:
-                        is_regular = input_length == 2048
-                        marks = [] if is_regular else [pytest.mark.extensive]
-
-                        params.append(
-                            pytest.param(
-                                input_length,
-                                num_aie_columns,
-                                num_channels_rms,
-                                tile_size,
-                                weighted,
-                                marks=marks,
-                            )
-                        )
-
-    return params
+    tile_cap = 4096 if weighted else 8192
+    out = []
+    for size in [1024, 2048, 4096, 8192]:
+        for cols in range(1, dev.cols + 1):
+            for channels in (1, 2):
+                if cols * channels > shim_dma_limit:
+                    continue
+                # The weight row is one fifo per channel shared across the
+                # columns: the ShimDMA budget is channels * (columns + 1).
+                if weighted and channels * (cols + 1) > shim_dma_limit:
+                    continue
+                tile_size = min(size // (cols * channels), tile_cap)
+                if tile_size * cols * channels != size:
+                    continue
+                out.append(
+                    pytest.param(
+                        dict(
+                            rows=size // tile_size,
+                            num_aie_columns=cols,
+                            num_channels=channels,
+                            tile_size=tile_size,
+                        ),
+                        marks=[] if size == 2048 else [pytest.mark.extensive],
+                    )
+                )
+    return out
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
-@pytest.mark.parametrize(
-    "input_length,num_aie_columns,num_channels,tile_size,weighted",
-    get_params(),
-)
-def test_rms_norm(
-    input_length, num_aie_columns, num_channels, tile_size, weighted, aie_context
-):
-    rows = input_length // tile_size
-    operator = (WeightedRMSNorm if weighted else RMSNorm)(
-        rows=rows,
-        num_aie_columns=num_aie_columns,
-        num_channels=num_channels,
-        tile_size=tile_size,
-        context=aie_context,
-    )
-
-    data = golden(operator)
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-6
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+test_rms_norm = operator_test(RMSNorm, cases(weighted=False))
+test_weighted_rms_norm = operator_test(WeightedRMSNorm, cases(weighted=True))
