@@ -74,39 +74,3 @@ def test_compile_for_npu1_at_each_step_links_the_chained_xclbins(tmp_path):
     assert net._callable is None
     # Four designs for five steps: the chain has four links.
     assert len(list(tmp_path.glob("f*_op*.xclbin"))) == 4
-
-
-@pytest.mark.skipif(XCLBINUTIL is None, reason="no xclbinutil on the PATH")
-def test_compile_at_chunks_links_one_fused_kernel_per_chunk(tmp_path):
-    """boundaries=chunks(2) on five steps: three kernels (2, 2, 1 steps) in one
-    chained xclbin, each a fused sub-sequence with its switches expanded, run
-    over the three arenas. Spike S1's construction; the run is its question."""
-    fn, E = _swiglu_decode()
-    net = fn.compile(
-        NPU2(),
-        boundaries=iron.chunks(2),
-        context=AIEContext(build_dir=str(tmp_path)),
-        x=(1, E),
-    )
-    dispatch = net.sequence._dispatch
-    assert net.plan.image == "xclbin" and dispatch.name == "chunked"
-    assert [n for *_, n in dispatch.chunks] == [2, 2, 1]
-    for label, xclbin_path, insts_path, _ in dispatch.chunks:
-        assert Path(xclbin_path).stat().st_size > 0
-        assert Path(insts_path).stat().st_size > 0
-        assert label in Path(xclbin_path).name
-    assert Path(net.image) == dispatch.chunks[-1][1]
-    # A chunk of two GEMV steps carries two configurations' writes: its stream
-    # is much larger than a per-operator one (the separate dispatch's ~3 KB).
-    assert Path(dispatch.chunks[0][2]).stat().st_size > 20_000
-
-
-@pytest.mark.skipif(XCLBINUTIL is None, reason="no xclbinutil on the PATH")
-def test_compile_for_xclbin_alone_is_one_fused_kernel(tmp_path):
-    fn, E = _swiglu_decode()
-    net = fn.compile(
-        NPU2(), image=iron.XCLBIN, context=AIEContext(build_dir=str(tmp_path)), x=(1, E)
-    )
-    dispatch = net.sequence._dispatch
-    assert dispatch.name == "chunked" and [n for *_, n in dispatch.chunks] == [5]
-    assert Path(net.image).stat().st_size > 0

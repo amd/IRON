@@ -17,17 +17,15 @@ dispatch); more than one boundary forces ``xclbin`` (one image, N
 kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
 an error naming the member, the boundaries or the device.
 
-What the lowering builds: ``elf`` is the fused ELF; ``xclbin`` with
-``each_step`` is the chained per-operator xclbin; ``xclbin`` with
-``chunks(n)``, or alone, is the chained chunked xclbin (a fused
-sub-sequence per kernel, its configuration switches expanded), which is
-spike S1's construction: it builds, and whether it runs is S1's question.
-An xclbin run has no parameter scratchpad (spike S2, from XRT's source),
-so on that image every per-call value is a dispatch-time scalar of its
-kernel (§6): an offset use regenerates the kernel's stream per call, a
-core-read use is written into the array by the sequence (spike S3). Built
-for ``each_step``; a chunked image with values waits on the fused
-sequence forwarding its chunks' scalars.
+What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
+with ``each_step`` is the chained per-operator xclbin. A fused sequence
+in an xclbin and chunked boundaries wait on spike S1 and are refused by
+name rather than built wrong (their construction is shelved on the branch
+``claude/iron-pr215-step5-extras``). An xclbin run has no parameter
+scratchpad (spike S2, from XRT's source), so on that image every per-call
+value is a dispatch-time scalar of its kernel (§6): an offset use
+regenerates the kernel's stream per call, a core-read use is written into
+the array by the sequence (spike S3).
 """
 
 from __future__ import annotations
@@ -60,15 +58,12 @@ class Plan:
     """What ``compile`` decided, and why."""
 
     image: str
-    dispatch: object  # a dispatch name, or a SequenceDispatch instance
+    dispatch: str
     reasons: list
     values: list  # (name, kind, lowering)
 
     def report(self, name: str) -> str:
-        spelled = getattr(self.dispatch, "name", self.dispatch)
-        if getattr(self.dispatch, "n", None):
-            spelled = f"{spelled}({self.dispatch.n})"
-        lines = [f"{name}: image {self.image}, dispatch {spelled!r}"]
+        lines = [f"{name}: image {self.image}, dispatch {self.dispatch!r}"]
         lines += [f"  {r}" for r in self.reasons]
         for vname, kind, lowering in self.values:
             lines.append(f"  {vname}: {kind}; {lowering}")
@@ -109,10 +104,17 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         dispatch = "fused"
     elif boundaries == each_step:
         dispatch = "separate"
+    elif boundaries is None:
+        raise NotImplementedError(
+            f"{traced.name}: one fused sequence in an xclbin has no proven "
+            f"construction yet (OPERATOR_MODEL_PLAN.md spike S1); pass "
+            f"boundaries=each_step, or package for NPU2 as an ELF"
+        )
     else:
-        from .sequence import ChunkedDispatch
-
-        dispatch = ChunkedDispatch(None if boundaries is None else boundaries.n)
+        raise NotImplementedError(
+            f"{traced.name}: chunks({boundaries.n}) needs a fused sequence in an "
+            f"xclbin (OPERATOR_MODEL_PLAN.md spike S1); each_step is what runs today"
+        )
 
     values = []
     for v in traced.values:
@@ -127,12 +129,6 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         else:
             lowering = "sizes, strides and offsets regenerated per call"
         values.append((v.name, v.kind, lowering))
-    if values and chosen == XCLBIN and boundaries != each_step:
-        raise NotImplementedError(
-            f"{traced.name}: per-call values on a chunked image are not built "
-            f"yet (the fused sequence must forward its chunks' dispatch scalars); "
-            f"pass boundaries=each_step"
-        )
     return Plan(chosen, dispatch, reasons, values)
 
 
