@@ -95,6 +95,7 @@ def fuse_mlir(
     buffer_sizes: tuple[int, int, int],
     slice_info: dict[str, tuple[str, int, int]] | None = None,
     child_scalars: dict[str, list[str]] | None = None,
+    sequences: dict[str, list[tuple[str, ...]]] | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
 
@@ -109,6 +110,11 @@ def fuse_mlir(
     sequence takes after its buffers (an image without a scratchpad). The
     main sequence then takes one ``i32`` per distinct name, after the three
     arenas, in first-use order, and forwards each child its own.
+
+    ``sequences`` (a module) names several runlists, each becoming its own
+    runtime sequence of the main device over the same arenas, named for its
+    entry point; ``runlist`` is then their concatenation, which is what the
+    buffer layout was computed over.
     """
     slice_info = slice_info or {}
     child_scalars = child_scalars or {}
@@ -195,7 +201,8 @@ def fuse_mlir(
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 
-        needs_reset = needs_additional_reset(runlist)
+        entries = sequences or {"sequence": runlist}
+        needs_reset = any(needs_additional_reset(r) for r in entries.values())
         if needs_reset:
 
             @aie.device(device_ty)
@@ -214,14 +221,7 @@ def fuse_mlir(
             ]  # TODO: support for other data types
             itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
 
-            # RuntimeSequenceOp
-            @aiex.runtime_sequence(
-                np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
-                np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
-                np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
-                *([np.int32] * len(main_scalars)),
-            )
-            def sequence(input_buf, output_buf, scratch_buf, *scalar_args):
+            def body(input_buf, output_buf, scratch_buf, scalar_args, runlist):
                 consolidated_buffers = {
                     "input": input_buf,
                     "output": output_buf,
@@ -313,8 +313,23 @@ def fuse_mlir(
                             sequence_sym_ref_attr, buffer_ssa_values + scalars
                         )
 
-                if needs_reset:
+                if needs_additional_reset(runlist):
                     reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
                     reset_op.body.blocks.append()
+
+            # One runtime sequence per entry point (a module), or the one
+            # named "sequence", all over the same arenas and scalars.
+            arg_types = [
+                np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
+                np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
+                np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
+                *([np.int32] * len(main_scalars)),
+            ]
+            for entry_name, entry_runlist in entries.items():
+
+                def sequence(input_buf, output_buf, scratch_buf, *scalar_args, _r=entry_runlist):
+                    body(input_buf, output_buf, scratch_buf, scalar_args, _r)
+
+                aiex.runtime_sequence(*arg_types, sym_name=entry_name)(sequence)
 
         return str(ctx.module)

@@ -706,10 +706,49 @@ def graph(fn=None, *, names_from=None):
 # --------------------------------------------------------------------------
 
 
+class _EntryCallable:
+    """One graph's entry point into a module's shared callable.
+
+    Made on first use, like a graph's own callable: the module's sequence
+    loads its image once and hands out one run per entry point (a named
+    sequence of the full ELF, or a range of steps of the xclbin chain).
+    """
+
+    def __init__(self, sequence, name: str, steps: tuple[int, int]):
+        self.sequence, self.name, self.steps = sequence, name, steps
+        self._shared = None
+
+    @property
+    def shared(self):
+        if self._shared is None:
+            self._shared = self.sequence.get_callable()
+        return self._shared
+
+    def get_buffer(self, buffer_name):
+        return self.shared.get_buffer(buffer_name)
+
+    @property
+    def params(self):
+        return self.shared.entry_params(self.name)
+
+    @property
+    def dispatch_values(self):
+        return self.shared.dispatch_values
+
+    @dispatch_values.setter
+    def dispatch_values(self, values):
+        self.shared.dispatch_values = values
+
+    def __call__(self):
+        self.shared.run_entry(self.name, self.steps)
+
+
 class CompiledGraph:
     """A traced graph built into an image, ready to call."""
 
-    def __init__(self, traced: TracedGraph, context=None, dispatch="auto"):
+    def __init__(
+        self, traced: TracedGraph, context=None, dispatch="auto", *, sequence=None, callable=None
+    ):
         from .build import value_symbol
 
         self.traced = traced
@@ -721,10 +760,13 @@ class CompiledGraph:
             self.symbols.append((value.name, value_symbol(op, bound), value.dtype))
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
-        # first use, so a host without an NPU can still compile.
-        self.sequence = traced.sequence(dispatch=dispatch, context=context).compile()
+        # first use, so a host without an NPU can still compile. A graph in a
+        # module is handed the module's sequence and its entry point instead.
+        if sequence is None:
+            sequence = traced.sequence(dispatch=dispatch, context=context).compile()
+        self.sequence = sequence
         self.image = self.sequence.image
-        self._callable = None
+        self._callable = callable
         self._uploaded = False
 
     @property

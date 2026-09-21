@@ -14,6 +14,8 @@ _LAZY = {
     "state": "iron.common.graph",
     "GraphFunction": "iron.common.graph",
     "CompiledGraph": "iron.common.graph",
+    "compile": "iron.common.module",
+    "CompiledModule": "iron.common.module",
     "chunks": "iron.common.packaging",
     "each_step": "iron.common.packaging",
     "ELF": "iron.common.packaging",
