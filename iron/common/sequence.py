@@ -187,11 +187,21 @@ class FusedDispatch(SequenceDispatch):
         return SequenceFullELFCallable(seq)
 
 
-def build_fused_mlir(seq, runlist=None) -> str:
-    """The fused module for ``runlist`` (default: all of ``seq``'s steps)."""
+def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:
+    """The fused module for ``runlist`` (default: all of ``seq``'s steps).
+
+    For an ``"xclbin"`` image each design's per-call values are dispatch-time
+    scalars (§6): the child is generated with a dispatch parameter per value,
+    the main sequence takes one scalar per distinct symbol and forwards it,
+    and ``scalars`` (a list the caller passes) receives those symbols in the
+    main sequence's order.
+    """
+    from .build import dispatch_parameters, mlir_artifact_for
+
     if runlist is None:
         runlist = seq.runlist
     operator_generators = {}
+    child_scalars = {}
     comp_runlist = []
     designs, design_of = seq.unique_designs()
     used = {design_of[id(op)] for op, *_ in runlist}
@@ -200,7 +210,15 @@ def build_fused_mlir(seq, runlist=None) -> str:
     for idx, op in enumerate(designs):
         if idx not in used:
             continue
-        generator = op.get_mlir_artifact().generator
+        generator = mlir_artifact_for(op, image=image).generator
+        symbols = [s for s, _ in generator.kwargs.pop("dispatch", [])]
+        if image != "elf" and symbols:
+            from aie.utils.compile.jit.markers import _DispatchParameter
+
+            for position, (symbol, dtype) in enumerate(dispatch_parameters(op)):
+                generator.kwargs[symbol] = _DispatchParameter(
+                    symbol, dtype, position, owner=op
+                )
             # Ask the design whether it takes a prefix, rather than inferring it
             # from the operator having kernel artifacts: an operator whose
             # design declares ExternalFunctions reports no artifacts at all, and
@@ -213,9 +231,17 @@ def build_fused_mlir(seq, runlist=None) -> str:
         op_name = f"op{idx}_{op.__class__.__name__}"
         design_names[idx] = op_name
         operator_generators[op_name] = generator
+        child_scalars[op_name] = symbols if image != "elf" else []
 
     for op, *bufs in runlist:
         comp_runlist.append((design_names[design_of[id(op)]], *bufs))
+
+    if scalars is not None:
+        scalars.clear()
+        for op_name, *_ in comp_runlist:
+            for name in child_scalars[op_name]:
+                if name not in scalars:
+                    scalars.append(name)
 
     return comp.fuse_mlir(
         operator_generators,
@@ -223,6 +249,7 @@ def build_fused_mlir(seq, runlist=None) -> str:
         seq.subbuffer_layout,
         seq.buffer_sizes,
         seq.slice_info,
+        child_scalars=child_scalars,
     )
 
 
@@ -268,15 +295,19 @@ class ChunkedDispatch(SequenceDispatch):
         previous = None
         for idx, steps in enumerate(self.slices(seq)):
             label = f"f{name_hash}_chunk{idx}"
-            xclbin_path, insts_path = compile_fused_xclbin(
-                lambda steps=steps: build_fused_mlir(seq, steps),
+            scalars: list[str] = []
+            xclbin_path, stream = compile_fused_xclbin(
+                lambda steps=steps, scalars=scalars: build_fused_mlir(
+                    seq, steps, image="xclbin", scalars=scalars
+                ),
                 build_dir,
                 label,
                 kernel_id=f"0x{0x901 + idx:x}",
                 xclbin_input=previous,
                 extra_flags=seq.extra_flags,
+                scalars=scalars,
             )
-            self.chunks.append((label, xclbin_path, insts_path, len(steps)))
+            self.chunks.append((label, xclbin_path, stream, len(steps)))
             previous = xclbin_path
         self.combined_xclbin_path = previous
 
@@ -873,19 +904,29 @@ class SequenceChunkedCallable(_ArenaCallable):
         _require_xrt()
         self._dispatch = dispatch
         super().__init__(op)
-        self.kernels = [
-            NPUKernel(
-                xclbin_path=str(dispatch.combined_xclbin_path),
-                kernel_name=label,
-                insts_path=str(insts_path),
-            )
-            for label, _, insts_path, _ in dispatch.chunks
-        ]
+        self.dispatch_values = {}  # symbol -> scalar, set by a graph per call
+        self.kernels = []
+        for label, _, stream, _ in dispatch.chunks:
+            if isinstance(stream, DispatchStream):
+                kernel = NPUKernel(
+                    xclbin_path=str(dispatch.combined_xclbin_path),
+                    kernel_name=label,
+                    dispatch_params=list(stream.params),
+                    dispatch_lib_path=str(stream.lib_path),
+                )
+            else:
+                kernel = NPUKernel(
+                    xclbin_path=str(dispatch.combined_xclbin_path),
+                    kernel_name=label,
+                    insts_path=str(stream),
+                )
+            self.kernels.append(kernel)
 
     def _run(self):
         args = [self.input_buffer, self.output_buffer, self.scratch_buffer]
         for kernel in self.kernels:
-            kernel(*args)
+            scalars = {n: self.dispatch_values[n] for n in kernel.dispatch_params}
+            kernel(*args, **scalars)
 
 
 class SequenceFullELFCallable(_ArenaCallable):

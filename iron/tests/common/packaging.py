@@ -42,8 +42,9 @@ def test_npu1_forces_xclbin_and_a_scratchpad_value_has_no_home_there_yet():
     p = plan("npu1", t, boundaries=each_step)
     assert p.image == XCLBIN and "dispatch-time scalar" in p.values[0][2]
     assert "spike S3" in p.values[0][2]
-    # On a chunked image the fused sequence does not forward scalars yet.
-    with pytest.raises(NotImplementedError, match="chunked image"):
+    # On a chunked image the fused sequence forwards the scalars its chunks
+    # use, but its stream's PDI preloads are beyond the Python dispatch bridge.
+    with pytest.raises(NotImplementedError, match="chunked image.*PDI loads"):
         plan("npu1", t)
     assert plan("npu2", t).values[0][2] == "patched through the parameter scratchpad"
 

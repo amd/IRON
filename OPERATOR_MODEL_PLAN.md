@@ -669,7 +669,7 @@ the PR runs end to end, and filed upstream as its own change.
 | need | upstream state | IRON prototype |
 |---|---|---|
 | **instructions-only compile** against an already-built overlay | `aiecc --get-npu-insts [--sequence-name=]` already skips per-core compilation; `CompilableDesign.compile()` refuses an insts-only call (its xclbin and insts paths "must be set together") | **done**: `jit_compile.compile_insts(generator, insts_path)` calls `compile_mlir_module(insts_path=...)` directly, keyed on the generated text; flm/gemm's per-shape compile and mm_prebuilt's link use it, so neither builds a kernel or an image it discards |
-| **dispatch bridge on a fused graph** | `_check_runtime_sequence_abi` still requires exactly one `aie.runtime_sequence`, and also refuses any `aiex.npu.load_pdi` ("the Python dispatch runtime cannot supply load_pdi resources"); the DMA-size parser already picks the call-graph root among several sequences | prune the callee sequences from the lowered module before the check reads it, and compile with `--expand-load-pdis` so no `load_pdi` survives; the per-step form of dispatch-time values is built (§19), the chunked form (the fused sequence forwarding its chunks' scalars, then this pruning) is not |
+| **dispatch bridge on a fused graph** | the single-sequence check is met by pruning the callees from the lowered module (the dispatch device is the fusion's `main`; `compile_fused_xclbin`). What stops it is the second check: the bridge refuses any `aiex.npu.load_pdi`, and a multi-configuration stream always has them, because `--expand-load-pdis` preloads an empty PDI before each configuration's writes (`AIEExpandLoadPdi.cpp`); the Python dispatch runtime cannot supply PDI resources | the fused sequence now takes one scalar per distinct symbol its steps use and forwards them (`fuse_mlir`), and the chunk builds to its xclbin and lowered module; the bridge's refusal is surfaced by name (`compile_fused_xclbin`, `packaging.plan`). Values on a chunked image need a native dispatch host (`aiecc --get-npu-cpp`), or the values fixed at compile time; the per-step form is built and is what NPU1 decode uses |
 | **scratchpad on the xclbin path** | `ParameterScratchpad` reads a run handle's control-scratchpad buffer, wired only to the full-ELF flow | **spike S2** first; if the buffer exists on an xclbin run, wrap it in IRON; if not, the lowering rule in §6 applies and no prototype is possible |
 
 Also upstream: a builder for `aiex.configure`/`aiex.run` (IRON emits them by
@@ -1045,6 +1045,7 @@ and the decode graph's parity against the token snapshot (§18).
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, `iron/tests/toolchain/spikes.py`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
+| values on a chunked image | `compilation/sequence.py` `fuse_mlir` (scalar block arguments forwarded per step), `jit_compile.py` `compile_fused_xclbin` | packaging refuses by name | the chunk builds its xclbin and a lowered module with one sequence taking the scalars; the bridge refuses its PDI preloads, surfaced by name (`iron/tests/toolchain/dispatch.py`) | **needs a native host**: not a device question |
 | dispatch-time values (§6 on an xclbin image) | `build.py` (`image`, `_plus`, the preamble's value writes), `jit_compile.py` (`_design_generator`'s dispatch parameters, `DispatchStream`), `sequence.py`, `graph.py`, `softmax/op.py` | packaging reports the lowering per value; the build tests' preamble | `iron/tests/toolchain/dispatch.py`: a softmax with a per-call row length and a copy at a per-call offset build as dispatch-time kernels with their bridge libraries at `each_step` on both devices; the scaled decode graph builds the same way for NPU1: 50 steps on 18 kernels, the copies and softmaxes dispatch-time, the graph's column count now following the device | **needs a device**: the regenerated streams, S3's read |
 | `chunks(n)` and the one-chunk xclbin (step 5) | `sequence.py` `ChunkedDispatch`, `jit_compile.py` `compile_fused_xclbin`, `packaging.py` | 12 packaging tests: chunks and `image=xclbin` pick the chunked dispatch, a scratchpad value is refused on that image by name | the swiglu graph builds at `chunks(2)` (three kernels) and as one kernel, each chunk's stream with its switches expanded | **needs a device**: the run (S1) |
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
@@ -1160,13 +1161,17 @@ lower as `DispatchTime` values, which is the next piece. Then, S2 being a no, pe
 §6 says: dispatch-time scalars of each kernel, an offset use in the
 dynamic transfer form and a core-read use written into the array by the
 sequence (S3's toolchain half, a yes). The decode graph builds for NPU1
-at `each_step` that way, which is acceptance item 3's build. What still
-needs a device: running S1's image (and so every chunked build); loading
-S4's two sequences by name, which is what modules over several graphs
-stand on; S3's read and the regenerated streams; values on a chunked
-image (the fused sequence forwarding its chunks' scalars, then the
-callee-sequence pruning); and deleting the dispatch hierarchy, whose
-callables are the XRT path and cannot be exercised here. O6 is settled as free functions
+at `each_step` that way, which is acceptance item 3's build. Values on a
+chunked image go as far as the toolchain allows: the fused sequence takes
+and forwards its steps' scalars and the chunk builds, but upstream's
+Python dispatch bridge refuses the PDI preloads every multi-configuration
+stream carries, so that combination is refused by name, and acceptance
+item 5 (`chunks(n)` on the llama graph, which has values) needs a native
+dispatch host or the values fixed per compile. What still needs a device:
+running S1's image (and so every chunked build); loading S4's two
+sequences by name, which is what modules over several graphs stand on;
+S3's read and the regenerated streams; and deleting the dispatch
+hierarchy, whose callables are the XRT path and cannot be exercised here. O6 is settled as free functions
 (`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
 
 The sandbox verification now reaches every `design()` body: the design

@@ -94,6 +94,7 @@ def fuse_mlir(
     subbuffer_layout: dict[str, tuple[str, int, int]],
     buffer_sizes: tuple[int, int, int],
     slice_info: dict[str, tuple[str, int, int]] | None = None,
+    child_scalars: dict[str, list[str]] | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
 
@@ -103,8 +104,19 @@ def fuse_mlir(
     graph's file-based caching, since the caller (``FusedDispatch.link_elf``)
     hands the returned text straight to ``CompilableDesign``, which keys its
     own cache on the text's content.
+
+    ``child_scalars`` names, per operator, the dispatch-time scalars its
+    sequence takes after its buffers (an image without a scratchpad). The
+    main sequence then takes one ``i32`` per distinct name, after the three
+    arenas, in first-use order, and forwards each child its own.
     """
     slice_info = slice_info or {}
+    child_scalars = child_scalars or {}
+    main_scalars: list[str] = []
+    for op_name, *_ in runlist:
+        for name in child_scalars.get(op_name, ()):
+            if name not in main_scalars:
+                main_scalars.append(name)
     input_buffer_size, output_buffer_size, scratch_buffer_size = buffer_sizes
 
     # Extract device operations and module-level parameter decls from each
@@ -207,13 +219,15 @@ def fuse_mlir(
                 np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
                 np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
+                *([np.int32] * len(main_scalars)),
             )
-            def sequence(input_buf, output_buf, scratch_buf):
+            def sequence(input_buf, output_buf, scratch_buf, *scalar_args):
                 consolidated_buffers = {
                     "input": input_buf,
                     "output": output_buf,
                     "scratch": scratch_buf,
                 }
+                scalar_of = dict(zip(main_scalars, scalar_args))
 
                 # Execute operations in runlist order
                 configure_op = None
@@ -292,9 +306,12 @@ def fuse_mlir(
                             )
                             buffer_ssa_values.append(reinterpreted)
 
-                        # Run Op
+                        # Run Op; the child's scalars follow its buffers.
                         sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
-                        run_op = aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
+                        scalars = [scalar_of[n] for n in child_scalars.get(op_name, ())]
+                        run_op = aiex.RunOp(
+                            sequence_sym_ref_attr, buffer_ssa_values + scalars
+                        )
 
                 if needs_reset:
                     reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
