@@ -247,10 +247,6 @@ class BinaryElementwiseOverlay(Overlay):
 
     kernel_name: ClassVar[str]
     kernel_fn_name: ClassVar[str]
-    # Name parts: "col" rather than the unary family's "c", so a name with
-    # both a column and a channel count stays unambiguous.
-    _name_aliases: ClassVar[dict[str, str]] = {"num_aie_columns": "col"}
-
     def tuning(self, dev) -> "BinaryElementwiseOverlay":
         tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
         cols = self.num_aie_columns

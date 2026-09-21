@@ -3,7 +3,7 @@
 
 import dataclasses
 from dataclasses import field
-from typing import ClassVar, Dict
+from typing import ClassVar
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -60,11 +60,6 @@ class GEMVOverlay(Overlay):
     b = StreamIn(K, per=num_aie_columns, depth=1)
     c = StreamOut(tile_size_output, per=num_aie_columns, depth=2)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "num_aie_columns": "col",
-        "tile_size_input": "tsi",
-        "tile_size_output": "tso",
-    }
 
     # Vector widths mv.cc's matvec_vectorized is instantiated at, widest first.
     # Each is a legal aie::vector<bfloat16, r> width; anything narrower than 16
@@ -272,7 +267,6 @@ class GEMV(Operator[GEMVOverlay]):
     B = In(optional(num_batches), GEMVOverlay.K, to=GEMVOverlay.b)  # vector
     C = Out(optional(num_batches), M, from_=GEMVOverlay.c)  # output
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"num_batches": "batch"}
 
     def compatible(self):
         ov = self.ov

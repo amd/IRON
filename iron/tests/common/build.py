@@ -382,13 +382,17 @@ def _record(ov):
     return log
 
 
-def test_flm_gemm_classic_construction_reproduces_the_old_defaults(flm):
-    op = flm.GEMM(M=512, K=1024, N=1024)
+def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
+    # Keyword construction leaves every tunable to the overlay's tuning,
+    # which reads the device alone; the operator's extent is checked against
+    # the tuned overlay by compatible(), not folded into its defaults.
+    assert flm.GEMM(M=512, K=1024, N=1024).ov.tile_n is None
+    op = flm.GEMM(M=512, K=1024, N=1024).tuned(_NPU2())
     ov = op.ov
     assert (ov.tile_n, ov.m_chunk, ov.rows, ov.cols, ov.bfp16_b) == (64, 1, 4, 8, True)
     assert ov.tile_ma == flm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
-    # K = 512 on NPU2 picks the wider tile, as the old __post_init__ did.
-    assert flm.GEMM(M=256, K=512, N=1024).tile_n == 128
+    # tile_n is tuning, not a function of K: the same on every shape.
+    assert flm.GEMM(M=256, K=512, N=1024).tuned(_NPU2()).tile_n == 64
     assert (
         op.config_name == f"FLM_GEMM_tn64_ck128_ma{ov.tile_ma}_mc1_emf_conv_even_npu2"
     )
@@ -407,7 +411,7 @@ def test_flm_gemm_classic_construction_reproduces_the_old_defaults(flm):
         "n_units": 2,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
-        flm.GEMM(M=100, K=1024, N=1024)
+        flm.GEMM(M=100, K=1024, N=1024).tuned(_NPU2())  # M tiles to the array's rows
     with pytest.raises(ValueError, match="not in epilogue_modes"):
         flm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
 
@@ -423,7 +427,7 @@ def test_flm_gemm_declared_overlay_tunes_from_the_device_only(flm):
 
 
 def test_flm_gemm_unsplit_sequence_issues_c_then_a_then_b_per_block(flm):
-    op = flm.GEMM(M=512, K=1024, N=1024)
+    op = flm.GEMM(M=512, K=1024, N=1024).tuned(_NPU2())
     ov = op.ov
     log = _record(ov)
     op.design(Sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"}))
@@ -444,7 +448,7 @@ def test_flm_gemm_unsplit_sequence_issues_c_then_a_then_b_per_block(flm):
 
 def test_flm_gemm_split_sequence_drains_one_row_block_at_a_time(flm):
     # N = 10240 puts C's row-block stride past the 20-bit step: c_split.
-    op = flm.GEMM(M=512, K=1024, N=10240)
+    op = flm.GEMM(M=512, K=1024, N=10240).tuned(_NPU2())
     assert op._c_split and not op._a_split
     ov = op.ov
     log = _record(ov)

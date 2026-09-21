@@ -5,8 +5,8 @@
 
 One matrix, reused: the shapes each operator reads, varied over the shape
 and dtype decisions it makes, with the tuning knobs at one valid value.
-Every case constructs on a device-free host, which is what lets the design
-probe (``designs_run.py``) execute every overlay's ``design()`` anywhere.
+Every case constructs on a device-free host; ``iron/tests/toolchain/lowering.py``
+runs the same table through the real lowering, to an instruction stream.
 """
 
 import numpy as np
@@ -54,8 +54,8 @@ CASES = [
                 M=512,
                 K=256,
                 N=512,
-                dtype_in="bf16",
-                dtype_out="f32",
+                dtype_in=bfloat16,
+                dtype_out=np.float32,
                 tile_m=32,
                 tile_k=32,
                 tile_n=32,
@@ -112,13 +112,13 @@ CASES = [
     (
         "rms_norm",
         "RMSNorm",
-        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
         "rms_norm",
         "WeightedRMSNorm",
         # The weight row sits between the input and the output.
-        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
         "rope",

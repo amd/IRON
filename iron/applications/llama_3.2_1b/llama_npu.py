@@ -25,7 +25,7 @@ sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
 from iron.operators import (
-    RMSNorm,
+    WeightedRMSNorm,
     GEMM,
     GEMV,
     ElementwiseAdd,
@@ -79,12 +79,11 @@ class AIELlamaOperators:
         # Prefill operators
 
         self.prefill.rms_norm = (
-            RMSNorm(
-                size=prompt_len * config.emb_dim,
+            WeightedRMSNorm(
+                rows=prompt_len,
                 num_aie_columns=8,
-                num_channels=1,  # weighted=True with 8 columns needs 9 ShimDMA fills/channel; max 16 total forces num_channels=1
+                num_channels=1,  # the weight row on 8 columns needs 9 ShimDMA fills/channel; max 16 total forces num_channels=1
                 tile_size=config.emb_dim,
-                weighted=True,
                 context=self.context,
             )
             .compile()

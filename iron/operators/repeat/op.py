@@ -3,7 +3,6 @@
 
 import dataclasses
 from dataclasses import field
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -41,7 +40,6 @@ class RepeatOverlay(Overlay):
     s = StreamIn(transfer_size, dtype=dtype)
     d = StreamOut(transfer_size, dtype=dtype)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"transfer_size": "ts"}
 
     def tuning(self, dev) -> "RepeatOverlay":
         return dataclasses.replace(self, transfer_size=self.transfer_size or self.cols)
@@ -70,7 +68,6 @@ class Repeat(Operator[RepeatOverlay]):
         out_rows, RepeatOverlay.cols, dtype=RepeatOverlay.dtype, from_=RepeatOverlay.d
     )
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"repeat": "by"}
 
     @property
     def dtype(self):

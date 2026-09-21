@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar, Dict
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -21,7 +21,6 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
     kernel_fn_name: ClassVar[str] = "leaky_relu_bf16"
     kernel_object: ClassVar[str] = "leaky_relu.o"  # as the old design named it
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"alpha": "a"}
 
     # Minimum per-core line length (in bfloat16 elements) required by the
     # vectorized kernels. They tell the pipeliner a minimum loop-trip count via

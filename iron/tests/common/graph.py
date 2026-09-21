@@ -383,7 +383,7 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
         "Repeat",
         "GEMV",
         "ElementwiseMul",
-        "Softmax",
+        "DynamicSoftmax",
         "Transpose",
         "GEMV",
         "GEMV",

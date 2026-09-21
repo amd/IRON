@@ -19,7 +19,7 @@ line, which is the hand-written sequence kept as an override.
 import dataclasses
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List
+from typing import List
 
 import numpy as np
 import torch
@@ -64,11 +64,6 @@ class MemCopyOverlay(Overlay):
     s = StreamIn(line_size, per=num_cores)
     d = StreamOut(line_size, per=num_cores)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "num_cores": "cores",
-        "num_channels": "chans",
-        "tile_size": "tile",
-    }
 
     def tuning(self, dev) -> "MemCopyOverlay":
         from iron.common.utils import device_columns

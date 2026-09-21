@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -49,7 +48,6 @@ class RMSNormOverlay(Overlay):
     y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
     count = Resident(np.int32)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"epsilon": "eps"}
 
     def tuning(self, dev) -> "RMSNormOverlay":
         cols = self.num_aie_columns
@@ -261,8 +259,8 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
 class RMSNorm(Operator[RMSNormOverlay]):
     """AIE-accelerated RMS Normalization layer (unweighted).
 
-    ``RMSNorm(..., weighted=True)`` constructs a :class:`WeightedRMSNorm`; the
-    legacy ``size=`` spelling is ``rows * tile_size``.
+    ``rows`` rows of ``tile_size`` elements; :class:`WeightedRMSNorm` is the
+    form with a learned weight row, which a graph call with a weight picks.
     """
 
     rows: int = dim()
@@ -270,30 +268,12 @@ class RMSNorm(Operator[RMSNormOverlay]):
     x = In(rows, RMSNormOverlay.tile_size, to=RMSNormOverlay.x)
     y = Out(rows, RMSNormOverlay.tile_size, from_=RMSNormOverlay.y)
 
-    def __new__(cls, *args, **kwargs):
-        if cls is RMSNorm and kwargs.pop("weighted", False):
-            return WeightedRMSNorm(*args, **kwargs)
-        return super().__new__(cls)
-
     @classmethod
     def resolve_class(cls, n_operands, kwargs):
         # RMSNorm(x, w) in a graph: a bare weight tensor selects the weighted form.
-        if cls is RMSNorm and (n_operands == 2 or kwargs.pop("weighted", False)):
+        if cls is RMSNorm and n_operands == 2:
             return WeightedRMSNorm
         return cls
-
-    @classmethod
-    def _classic(cls, kwargs):
-        kwargs.pop("weighted", None)
-        if "size" in kwargs:
-            size = kwargs.pop("size")
-            tile = kwargs.get("tile_size")
-            if tile is None or size % tile:
-                raise ValueError(
-                    f"size ({size}) must be a multiple of tile_size ({tile})"
-                )
-            kwargs["rows"] = size // tile
-        return super()._classic(kwargs)
 
     @property
     def size(self) -> int:

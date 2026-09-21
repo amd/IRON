@@ -3,7 +3,6 @@
 
 import dataclasses
 from dataclasses import field
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -44,10 +43,6 @@ class StridedCopyOverlay(Overlay):
     s = StreamIn(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
     d = StreamOut(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "transfer_size": "tr",
-        "num_aie_channels": "ch",
-    }
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo
@@ -91,23 +86,14 @@ class StridedCopy(Operator[StridedCopyOverlay]):
     in_offset = Scratchpad(np.int32)
     out_offset = Scratchpad(np.int32)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "input_sizes": "isz",
-        "input_strides": "ist",
-        "input_offset": "ioff",
-        "output_sizes": "osz",
-        "output_strides": "ost",
-        "output_offset": "ooff",
-    }
 
     @classmethod
-    def _classic(cls, kwargs):
-        kwargs.pop("kwargs", None)
+    def overlay_defaults(cls, kwargs):
+        """The transfer size is the per-channel share of the copy unless given."""
         if kwargs.get("transfer_size") is None:
             sizes = kwargs.get("input_sizes", ())
             channels = kwargs.get("num_aie_channels", 1)
             kwargs["transfer_size"] = int(np.prod(sizes)) // channels
-        return super()._classic(kwargs)
 
     def uses_value(self, name: str) -> bool:
         # An offset is patched only when a graph binds a handle to it.

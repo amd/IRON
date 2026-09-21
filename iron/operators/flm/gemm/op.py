@@ -19,7 +19,7 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 import dataclasses
 from dataclasses import field
 from pathlib import Path
-from typing import Any, ClassVar, Dict
+from typing import Any
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -155,12 +155,6 @@ class FLMGEMMOverlay(Overlay):
     n_chunks = Resident(np.int32, optional=True)
     n_units = Resident(np.int32, optional=True)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "tile_n": "tn",
-        "tile_ma": "ma",
-        "m_chunk": "mc",
-        "rounding": "rnd",
-    }
 
     # -- checks ----------------------------------------------------------------
 
@@ -636,40 +630,8 @@ class GEMM(Operator[FLMGEMMOverlay]):
     )
     C = Out(M, N, from_=FLMGEMMOverlay.c)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"epilogue": "epi"}
 
     # -- construction ------------------------------------------------------------
-
-    @classmethod
-    def _classic(cls, kwargs):
-        """``GEMM(M=, K=, N=, tile_n=, ...)``: tuned for the current device now.
-
-        Reproduces the old shape-dependent defaults, which the overlay's own
-        tuning (device only) does not: tile_n=128 at K = 512 on NPU2, and
-        m_chunk falling back to 1 where the shape cannot use the table's
-        value.
-        """
-        dev = aie_utils.get_current_device()
-        if kwargs.get("tile_n") is None:
-            # The trade flips with K on NPU2: one k iteration has too little
-            # compute to hide n=64's extra A traffic, so n=128 wins there by
-            # ~9% and n=64 by ~20% at K >= 1024. NPU1 stays compute-bound
-            # and n=64 wins at every K.
-            single_k_iter = kwargs["K"] // K_TILE <= 1
-            kwargs["tile_n"] = (
-                128 if (dev.arch == AIEArch.AIE2p and single_k_iter) else 64
-            )
-        if kwargs.get("m_chunk") is None:
-            want = M_CHUNK_FOR_N[kwargs["tile_n"]]
-            rows = M_TILE * compute_rows(dev)
-            M, K = kwargs["M"], kwargs["K"]
-            m_row_blocks = M // rows if M % rows == 0 else 0
-            fits = m_row_blocks and m_row_blocks % want == 0
-            if fits and not _hw_stride_ok(compute_rows(dev) * M_TILE * K):
-                fits = False
-            kwargs["m_chunk"] = want if fits else 1
-        ov, kwargs = super()._classic(kwargs)
-        return ov.tuned(dev), kwargs
 
     # -- legacy accessors ------------------------------------------------------
 

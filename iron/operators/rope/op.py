@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -45,10 +44,6 @@ class RoPEOverlay(Overlay):
     lut_rows = Resident(np.int32)  # angle rows each core consumes
     rows_per_lut = Resident(np.int32)  # input rows per angle row
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "num_aie_columns": "col",
-        "method_type": "m",
-    }
 
     def validate(self) -> None:
         if not (self.cols % 32 == 0 and self.cols >= 32):
@@ -124,7 +119,6 @@ class RoPE(Operator[RoPEOverlay]):
     angles = In(angle_rows, RoPEOverlay.cols, to=RoPEOverlay.lut)
     y = Out(rows, RoPEOverlay.cols, from_=RoPEOverlay.y)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"angle_rows": "arows"}
 
     def validate(self) -> None:
         if self.angle_rows is None:

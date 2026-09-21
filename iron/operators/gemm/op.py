@@ -3,7 +3,6 @@
 
 import dataclasses
 from dataclasses import field
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -33,17 +32,6 @@ _DTYPES = {
     "i16": np.int16,
     "i32": np.int32,
 }
-
-
-def _dtype(spec):
-    """A numpy scalar type from the legacy string spelling or a type."""
-    if isinstance(spec, str):
-        if spec in _DTYPES:
-            return _DTYPES[spec]
-        from aie.iron import str_to_dtype
-
-        return str_to_dtype(spec)
-    return spec
 
 
 def _dtype_str(t) -> str:
@@ -116,13 +104,6 @@ class GEMMOverlay(Overlay):
     k_div_k = Resident(np.int32)  # reduction steps per output tile
     n_tiles = Resident(np.int32)  # output tiles per core
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "tile_m": "tm",
-        "tile_k": "tk",
-        "tile_n": "tn",
-        "b_col_maj": "bc",
-        "c_col_maj": "cc",
-    }
 
     # -- derived geometry ---------------------------------------------------
 
@@ -553,13 +534,6 @@ class GEMM(Operator[GEMMOverlay]):
         dtype=GEMMOverlay.dtype_out,
         from_=GEMMOverlay.c,
     )
-
-    @classmethod
-    def _classic(cls, kwargs):
-        for key in ("dtype_in", "dtype_out"):
-            if key in kwargs:
-                kwargs[key] = _dtype(kwargs[key])
-        return super()._classic(kwargs)
 
     # -- legacy accessors ----------------------------------------------------
 

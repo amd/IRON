@@ -991,10 +991,10 @@ references were made faithful for it: StridedCopy had none; Softmax
 ignored the vector size; GEMV's and Transpose's did not batch.
 
 The device-free suites were also run against the real package instead of
-the stub. `iron/tests/common` passes, with the design probe skipping
-itself (its fakes would have to stand in for a runtime the package
-refuses to enter outside a placed program, and the lowering gate runs the
-same cases for real). In `iron/tests/infrastructure`, `lazy_imports.py`
+the stub. `iron/tests/common` passes (the stubbed design probe it once
+held is gone: the lowering gate runs the same case table for real, and
+the probe only ever ran where the real package was absent). In
+`iron/tests/infrastructure`, `lazy_imports.py`
 needed its notion of a composite updated (a graph function's factory,
 not an `OperatorSequence` subclass) and passes; what fails there fails
 for want of hardware: `sequence.py` and `graph_dispatch.py` need
@@ -1048,7 +1048,6 @@ and the decode graph's parity against the token snapshot (§18).
 | the dispatch hierarchy (step 5, acceptance 1) | `sequence.py` | — | `AutoDispatch` is gone: a graph never names a dispatch (`packaging.plan` derives the instance from device, values and boundaries), and a hand-written sequence that names none gets `platform_default`. What remains are the image builders (`fused`, `separate`, `chunked`) and the two harness modes (`reference`, `compare`) the operator and infrastructure tests drive by name; deleting those would remove the hand-written-runlist API those device tests stand on, so they stay as the plan's builders | **needs a device**: the infrastructure tests that name them |
 | dispatch-time values (§6 on an xclbin image) | `build.py` (`image`, `_plus`, the preamble's value writes), `jit_compile.py` (`_design_generator`'s dispatch parameters, `DispatchStream`), `sequence.py`, `graph.py`, `softmax/op.py` | packaging reports the lowering per value; the build tests' preamble | `iron/tests/toolchain/dispatch.py`: a softmax with a per-call row length and a copy at a per-call offset build as dispatch-time kernels with their bridge libraries at `each_step` on both devices; the scaled decode graph builds the same way for NPU1: 50 steps on 18 kernels, the copies and softmaxes dispatch-time, the graph's column count now following the device; at Llama 3.2 1B's real size it is 386 steps on 19 kernels, two of them dispatch-time, in under a minute | **needs a device**: the regenerated streams, S3's read |
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
-| design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
 | llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
@@ -1106,9 +1105,9 @@ tracing forced: a flat declared buffer (`In(size)`) takes an operand of any
 rank; every overlay tunable has a device default (elementwise tiles of
 256, every column the shim budget allows, RMSNorm one core, transpose 64 x
 64 x 8) so inferred construction needs no tuning arguments, and a call site
-that knows its extent passes better ones; construction goes through each
-class's `_classic` translation so derived overlay fields (a transfer size)
-are filled the same way on both paths. Lowering targets `OperatorSequence`
+that knows its extent passes better ones; both construction paths go
+through `_split_kwargs`, and `overlay_defaults` fills the one kind of
+overlay field the operator's own extent decides (a copy's transfer size). Lowering targets `OperatorSequence`
 as it stands (a fused ELF on NPU2, per-step xclbins on NPU1); `compile(dev,
 boundaries=, image=)` and the image rules are step 5. O2 is settled as the
 kwargs spelling (`GEMV(wk, x, num_aie_columns=8)`). O9 stands: the class
@@ -1170,12 +1169,25 @@ drive the dispatch builders by name. O6 is settled as free functions
 (`iron.chunks`, `iron.each_step`, the former refused by name here); O7
 by `Plan.report`.
 
-The sandbox verification now reaches every `design()` body: the design
-probe runs each converted overlay's array construction and each
-operator's sequence with the upstream API stubbed to no-ops, on both
-device widths. That is the closest a device-free run gets; the remaining
-gap is whether the calls are what upstream accepts, which only the
-toolchain says.
+**One spelling per operator.** The keyword constructor takes exactly the
+declared fields: `RMSNorm(rows=)` and `WeightedRMSNorm(rows=)` rather than
+`RMSNorm(size=, weighted=)`, `GEMM(dtype_in=bfloat16)` rather than
+`"bf16"`, and `Softmax(x, vector_size=n)` with a per-call `n` resolves to
+`DynamicSoftmax` (a class of its own, exported by name like
+`WeightedRMSNorm`). The per-class `_classic` translators, the `__new__`
+that swapped RMSNorm's class, and the eighteen `_name_aliases` tables that
+kept old artifact stems are gone; artifact names are the declared field
+names, so a build cache filled before this point is rebuilt once. Two
+hooks replace them: `resolve_class(n_operands, kwargs)` picks the class
+from the operands and the per-call values, and `overlay_defaults(kwargs)`
+fills an overlay tunable the operator's extent decides (strided copy's
+transfer size). What was a shape-dependent default is now tuning: flm
+GEMM's `tile_n` is the table's 64 on every K (the old constructor chose
+128 at K = 512 on NPU2, a measured 9% there; pass `tile_n=128` at a call
+site that wants it), and `m_chunk` is the table's value, checked against
+the extent by `compatible()` rather than silently reduced to 1. The
+llama prefill and the rms_norm operator test construct in the new
+spelling.
 
 What to run first on a device, in order: `pytest iron/tests/toolchain`
 (it is what the lowering environment already passes; a device changes

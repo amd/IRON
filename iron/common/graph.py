@@ -312,22 +312,22 @@ class Tracer:
         operands = [self.operand(a) for a in args]
         kwargs = dict(kwargs)
         # A keyword whose value is a per-call handle binds a value member: the
-        # operator's own, or one on the overlay a class picks for it (the
-        # dynamic softmax), which the class's translation sees first.
+        # operator's own, or one on the overlay of the class resolve_class
+        # picks for it (the dynamic softmax).
         values = {
             k: kwargs.pop(k) for k in list(kwargs) if isinstance(kwargs[k], Value)
         }
         if isinstance(target, type):
-            cls = target.resolve_class(len(operands), kwargs)
+            # The class sees the values too: a family that picks a member from
+            # a bound value (the dynamic softmax) decides here.
+            cls = target.resolve_class(len(operands), {**kwargs, **values})
             own = self._split_values(cls, values)
             n_in = sum(
                 1
                 for m in cls._members
                 if isinstance(m, _Buffer_) and m.direction != "out"
             )
-            op = self._construct(
-                cls, operands[:n_in], operands[n_in:], {**kwargs, **values}
-            )
+            op = self._construct(cls, operands[:n_in], operands[n_in:], kwargs)
         else:
             op = target
             own = self._split_values(type(op), values)
@@ -363,7 +363,7 @@ class Tracer:
         # The class's own translation splits overlay fields from the
         # operator's and fills what it derives (a transfer size, a dtype
         # spelling), exactly as the keyword constructor does.
-        ov, op_kwargs = cls._classic({**kwargs, **inferred})
+        ov, op_kwargs = cls._split_kwargs({**kwargs, **inferred})
         # One build per distinct overlay: equal keys are one array.
         ov = self.overlays.setdefault(ov.design_key(), ov)
         return cls(ov, **op_kwargs)

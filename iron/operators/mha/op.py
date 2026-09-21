@@ -20,7 +20,6 @@ and V, and drains O.
 
 import dataclasses
 from dataclasses import field
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -83,11 +82,6 @@ class MHAOverlay(Overlay):
     s_q = Resident(np.int32)  # the unpadded sequence length, for masking
     s_kv = Resident(np.int32)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "num_of_pipelines": "p",
-        "B_q": "bq",
-        "B_kv": "bkv",
-    }
 
     # -- checks ----------------------------------------------------------------
 
@@ -621,11 +615,6 @@ class MHA(Operator[MHAOverlay]):
     V = In(num_KV_heads, seq_pad, MHAOverlay.d, to=MHAOverlay.v)
     O = Out(num_heads, seq_pad, MHAOverlay.d, from_=MHAOverlay.o)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        "num_heads": "h",
-        "num_KV_heads": "kv",
-        "seq_len": "s",
-    }
 
     # -- legacy accessors ------------------------------------------------------
 

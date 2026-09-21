@@ -13,7 +13,7 @@ same shapes and on the same inputs.
 """
 
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict
+from typing import Any, Callable
 
 import numpy as np
 
@@ -144,13 +144,6 @@ class MMPrebuilt(Operator[MMPrebuiltOverlay]):
     B = In(K, N, to=MMPrebuiltOverlay.b)
     C = Out(M, N, from_=MMPrebuiltOverlay.c)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"epilogue": "epi"}
-
-    @classmethod
-    def _classic(cls, kwargs):
-        ov, kwargs = super()._classic(kwargs)
-        # The device check at construction, as before.
-        return ov.tuned(aie_utils.get_current_device()), kwargs
 
     @property
     def name(self) -> str:

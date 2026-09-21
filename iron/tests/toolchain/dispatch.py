@@ -96,7 +96,7 @@ def test_values_become_dispatch_time_kernels_at_each_step(device, tmp_path):
         type(op).__name__: dispatch.op_insts_path_map[id(op)]
         for op in net.sequence.unique_operators()
     }
-    assert set(streams) == {"Softmax", "StridedCopy"}
+    assert set(streams) == {"DynamicSoftmax", "StridedCopy"}
     for name, stream in streams.items():
         assert isinstance(stream, DispatchStream), f"{name} has a static stream"
         assert Path(stream.lib_path).exists(), f"{name}: no dispatch library"

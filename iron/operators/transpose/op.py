@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar, Dict
 
 import dataclasses
 
@@ -179,7 +178,6 @@ class Transpose(Operator[TransposeOverlay]):
     x = In(optional(num_batches), M, N, to=TransposeOverlay.x)
     y = Out(optional(num_batches), N, M, from_=TransposeOverlay.y)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {"num_batches": "batch"}
 
     def compatible(self) -> None:
         ov = self.ov

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar, Dict
 
 import numpy as np
 import torch
@@ -162,18 +161,12 @@ class Softmax(Operator[SoftmaxOverlay]):
     y = Out(rows, SoftmaxOverlay.cols, from_=SoftmaxOverlay.y)
 
     @classmethod
-    def _classic(cls, kwargs):
-        # A graph binding a per-call vector_size picks the dynamic overlay.
-        if kwargs.get("vector_size") is not None and not isinstance(
-            kwargs["vector_size"], int
-        ):
-            kwargs.pop("vector_size")
-            names = {
-                f.name for f in SoftmaxOverlay.__dataclass_fields__.values() if f.init
-            }
-            ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
-            return DynamicSoftmaxOverlay(**ov_kwargs), kwargs
-        return super()._classic(kwargs)
+    def resolve_class(cls, n_operands, kwargs):
+        # Softmax(x, vector_size=<per-call value>) in a graph is the dynamic form.
+        v = kwargs.get("vector_size")
+        if cls is Softmax and v is not None and not isinstance(v, int):
+            return DynamicSoftmax
+        return cls
 
     @property
     def cols(self) -> int:
@@ -223,6 +216,15 @@ class Softmax(Operator[SoftmaxOverlay]):
             )
         return reference(x.reshape(self.rows, self.cols), int(vector_size))
 
+
+
+@operator
+class DynamicSoftmax(Softmax, Operator[DynamicSoftmaxOverlay]):
+    """Softmax whose valid row length is a per-call value: ``Softmax(x,
+    vector_size=n)`` in a graph with ``n`` a per-call handle."""
+
+    x = In(Softmax.rows, SoftmaxOverlay.cols, to=SoftmaxOverlay.x)
+    y = Out(Softmax.rows, SoftmaxOverlay.cols, from_=SoftmaxOverlay.y)
 
 # --------------------------------------------------------------------------
 # The CPU reference this operator is checked against.

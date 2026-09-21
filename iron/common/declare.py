@@ -1081,18 +1081,11 @@ def _finish_operator(cls: type, fields: dict[str, Field]) -> None:
         generated_init = cls.__init__
 
         def __init__(self, ov=None, *args, **kwargs):
-            # A __new__ that returns a subclass instance (RMSNorm -> WeightedRMSNorm)
-            # has already initialised it; Python calls __init__ again regardless.
-            if getattr(self, "_iron_initialised", False):
-                return
             if ov is None or not isinstance(ov, Overlay):
                 if ov is not None:
                     args = (ov,) + args
-                # A class may override _classic to translate a legacy spelling
-                # (a size that is now rows, a flag that now picks an overlay).
-                ov, kwargs = type(self)._classic(dict(kwargs))
+                ov, kwargs = type(self)._split_kwargs(dict(kwargs))
             generated_init(self, ov, *args, **kwargs)
-            self._iron_initialised = True
 
         __init__.__wrapped__ = generated_init  # type: ignore[attr-defined]
         cls.__init__ = __init__  # type: ignore[misc]
@@ -1370,15 +1363,21 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
     # -- library surface ---------------------------------------------------
 
     @classmethod
-    def _classic(cls, kwargs: dict) -> tuple["Overlay", dict]:
-        """Split legacy keyword arguments into an overlay and the operator's own.
+    def overlay_defaults(cls, kwargs: dict) -> None:
+        """Fill, in place, overlay tunables this operator's own extent decides.
 
-        The default takes every overlay field out of ``kwargs`` and builds
-        the operator's overlay class from them. Override to translate a
-        legacy spelling; the override then calls ``super()._classic``.
+        An overlay is tuned from the device alone, so a tunable whose right
+        value follows from the operator's shape (a copy's transfer size from
+        its sizes) is defaulted here, at construction, when it was not
+        given. The default fills nothing.
         """
+
+    @classmethod
+    def _split_kwargs(cls, kwargs: dict) -> tuple["Overlay", dict]:
+        """Split keyword arguments into the overlay's and the operator's own."""
         overlay_cls = cls._overlay_class
         assert overlay_cls is not None
+        cls.overlay_defaults(kwargs)
         names = {f.name for f in dataclasses.fields(overlay_cls) if f.init}
         ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
         return overlay_cls(**ov_kwargs), kwargs
