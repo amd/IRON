@@ -1,83 +1,157 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
-from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-import aie.utils as aie_utils
 import numpy as np
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-from iron.operators._kernels import declare_kernel
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.helpers.dialects.scf import _for as range_
-from ml_dtypes import bfloat16
-from iron.operators._trace import maybe_enable_trace
 import torch
+from ml_dtypes import bfloat16
+
+from iron.common.declare import (
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    tunable,
+)
 
 
-@dataclass
-class RoPE(MLIROperator):
-    """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
+@operator
+class RoPEOverlay(Overlay):
+    """The array for RoPE: one core per column, each rotating rows of ``cols``.
 
-    rows: int
-    cols: int
-    angle_rows: int | None = None
-    num_aie_columns: int = 1
+    Applies RoPE to each row of the input against a row of precomputed
+    angles. The angle table may have fewer rows than the input; each angle
+    row is then reused for ``rows / angle_rows`` consecutive input rows,
+    which is the layout of a tensor holding several heads per token.
+
+    - cols: the head dimension; rope.cc processes two 16-element vectors at a time
+    - method_type: 0 = two-halves (HF), 1 = interleaved/Llama
+    """
+
+    cols: int = dim()
+    num_aie_columns: int = tunable(1)
     method_type: int = 0
-    context: object = field(default=None, repr=False)
+
+    x = StreamIn(1, cols, per=num_aie_columns)
+    lut = StreamIn(1, cols, per=num_aie_columns)
+    y = StreamOut(1, cols, per=num_aie_columns)
+    lut_rows = Resident(np.int32)  # angle rows each core consumes
+    rows_per_lut = Resident(np.int32)  # input rows per angle row
 
     _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
         "num_aie_columns": "col",
-        "angle_rows": "arows",
         "method_type": "m",
     }
 
-    def __post_init__(self):
-        if self.angle_rows is None:
-            self.angle_rows = self.rows
-
-        if not (self.cols % (16 * 2) == 0 and self.cols >= (16 * 2)):
+    def validate(self) -> None:
+        if not (self.cols % 32 == 0 and self.cols >= 32):
             raise ValueError("cols must be multiple of 32 and >= 32")
-        if self.rows % self.num_aie_columns != 0:
-            raise ValueError("rows must be divisible by num_aie_columns")
-        if not (self.angle_rows <= self.rows and self.rows % self.angle_rows == 0):
-            raise ValueError("angle_rows must divide rows")
-        if not (
-            self.angle_rows >= self.num_aie_columns
-            and self.angle_rows % self.num_aie_columns == 0
-        ):
-            raise ValueError("angle_rows must be divisible by num_aie_columns")
         if self.method_type not in {0, 1}:
             raise ValueError(f"method_type must be 0 or 1, got {self.method_type}")
 
-        MLIROperator.__init__(self, context=self.context)
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(fn=rope, bind_from=self),
+        tile = self.x.tile
+        n = self.num_aie_columns
+        symbol = "rope_two_halves" if self.method_type == 0 else "rope"
+        kernel = target.kernel(
+            symbol,
+            [tile, self.lut.tile, tile, np.int32],
+            source=target.kernels_dir / "generic" / "rope.cc",
         )
+        of_in = [ObjectFifo(tile, name=f"in_{i}") for i in range(n)]
+        of_lut = [ObjectFifo(self.lut.tile, name=f"lut_{i}") for i in range(n)]
+        of_out = [ObjectFifo(tile, name=f"out_{i}") for i in range(n)]
+        i32x2 = np.ndarray[(2,), np.dtype[np.int32]]
+        counts = [target.rtp(i32x2, name=f"counts_{i}") for i in range(n)]
+        barriers = [target.barrier() for _ in range(n)]
+        cols = self.cols
 
-    @staticmethod
-    def arg_spec(rows, cols, angle_rows=None):
-        # The angles broadcast: angle_rows divides rows, and defaults to it.
-        angle_rows = rows if angle_rows is None else angle_rows
-        return [
-            AIERuntimeArgSpec("in", (rows, cols)),  # input tensor
-            AIERuntimeArgSpec("in", (angle_rows, cols)),  # angles
-            AIERuntimeArgSpec("out", (rows, cols)),  # output
+        def core_body(of_in, of_lut, of_out, rope_kernel, counts, barrier):
+            barrier.wait_for_value(1)
+            lut_rows = counts[0]
+            rows_per_lut = counts[1]
+            for _ in range_(lut_rows):
+                elem_lut = of_lut.acquire(1)
+                for _ in range_(rows_per_lut):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    rope_kernel(elem_in, elem_lut, elem_out, cols)
+                    of_in.release(1)
+                    of_out.release(1)
+                of_lut.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [
+                    of_in[i].cons(),
+                    of_lut[i].cons(),
+                    of_out[i].prod(),
+                    kernel,
+                    counts[i],
+                    barriers[i],
+                ],
+            )
+            for i in range(n)
         ]
+        for i in range(n):
+            self.x[i].bind(of_in[i].prod())
+            self.lut[i].bind(of_lut[i].prod())
+            self.y[i].bind(of_out[i].cons())
+        self.lut_rows.bind(counts, 0)
+        self.rows_per_lut.bind(counts, 1)
+        return workers
+
+
+@operator
+class RoPE(Operator[RoPEOverlay]):
+    """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
+
+    rows: int = dim()
+    angle_rows: int | None = dim(None)
+
+    x = In(rows, RoPEOverlay.cols, to=RoPEOverlay.x)
+    angles = In(angle_rows, RoPEOverlay.cols, to=RoPEOverlay.lut)
+    y = Out(rows, RoPEOverlay.cols, from_=RoPEOverlay.y)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {"angle_rows": "arows"}
+
+    def validate(self) -> None:
+        if self.angle_rows is None:
+            self.angle_rows = self.rows
+        if not (self.angle_rows <= self.rows and self.rows % self.angle_rows == 0):
+            raise ValueError("angle_rows must divide rows")
+
+    def compatible(self) -> None:
+        n = self.ov.num_aie_columns
+        if self.rows % n:
+            raise Incompatible("rows must be divisible by num_aie_columns")
+        if not (self.angle_rows >= n and self.angle_rows % n == 0):
+            raise Incompatible("angle_rows must be divisible by num_aie_columns")
+
+    def residents(self) -> dict[str, int]:
+        return {
+            "lut_rows": self.angle_rows // self.ov.num_aie_columns,
+            "rows_per_lut": self.rows // self.angle_rows,
+        }
+
+    @property
+    def cols(self) -> int:
+        return self.ov.cols
+
+    @property
+    def method_type(self) -> int:
+        return self.ov.method_type
 
     def reference(self, x, angles):
         """CPU reference for RoPE.
@@ -89,170 +163,6 @@ class RoPE(MLIROperator):
         ``angles`` may have fewer rows than ``x``; in that case the angles
         are tiled along the row dimension to match ``x``."""
         return reference(x, angles, self.method_type, self.rows, self.cols)
-
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-"""
-Rotary Positional Encoding (RoPE) design
-
-Applies RoPE to each row of the input tensor.
-Expects input tensor of shape (rows, cols) and a tensor of precomputed angles (look-up table) of shape (angle_rows, cols).
-Another interpretation of the input tensor is (rows / num_heads, num_heads, cols), where num_heads = rows / angle_rows.
-
-- rows: number of rows in the input tensor (e.g., number of tokens)
-- cols: number of columns in the input tensor (e.g., head dimension)
-- angle_rows: number of input rows in the angle look-up table.
-  If this is less than `rows`, each row of angles will be reused for `rows / angle_rows` consecutive rows of the input tensor.
-  This is useful for models where multiple heads share the same positional encodings and the heads are 'interspersed' in the input tensor (i.e. input tensor shape is (rows, n_heads, cols)).
-"""
-
-
-def rope(
-    dev,
-    rows,
-    cols,
-    angle_rows=None,
-    num_aie_columns=1,
-    trace_size=0,
-    method_type=None,
-    func_prefix="",
-    kernels_dir=None,
-):
-    dtype = bfloat16
-
-    if angle_rows is None:
-        angle_rows = rows
-    assert cols % (16 * 2) == 0 and cols >= (
-        16 * 2
-    ), "cols must be multiple of 32 and >= 32 (rope.cc kernel processes two 16-element vectors at a time)"
-    assert rows % num_aie_columns == 0, "rows must be divisible by num_aie_columns"
-    assert angle_rows <= rows and rows % angle_rows == 0, "angle_rows must divide rows"
-    assert (
-        angle_rows >= num_aie_columns and angle_rows % num_aie_columns == 0
-    ), "angle_rows must be divisible by num_aie_columns"
-
-    tensor_rows_per_aie_column = rows // num_aie_columns
-    angle_rows_per_aie_column = angle_rows // num_aie_columns
-    tensor_rows_per_angle_row = rows // angle_rows
-
-    # Define tensor types
-    tensor_ty = np.ndarray[(rows, cols), np.dtype[dtype]]
-    angle_ty = np.ndarray[(angle_rows, cols), np.dtype[dtype]]
-    tensor_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
-    angle_tile_ty = np.ndarray[(1, cols), np.dtype[dtype]]
-
-    # AIE-array data movement with object fifos (one per column, not per channel)
-    of_in = [ObjectFifo(tensor_tile_ty, name=f"in_{i}") for i in range(num_aie_columns)]
-    of_lut = [
-        ObjectFifo(angle_tile_ty, name=f"lut_{i}") for i in range(num_aie_columns)
-    ]
-    of_out = [
-        ObjectFifo(tensor_tile_ty, name=f"out_{i}") for i in range(num_aie_columns)
-    ]
-
-    # AIE Core Function declaration. method_type 0 = two-halves (HF), 1 =
-    # interleaved/Llama (the "rope" symbol).
-    rope_symbol = "rope_two_halves" if method_type == 0 else "rope"
-    rope_kernel = declare_kernel(
-        rope_symbol,
-        [tensor_tile_ty, angle_tile_ty, tensor_tile_ty, np.int32],
-        source=Path(kernels_dir) / "generic" / "rope.cc",
-        func_prefix=func_prefix,
-    )
-
-    # Define a task that will run on a compute tile
-    def core_body(of_in, of_lut, of_out, rope_kernel):
-        # Number of sub-vector "tile" iterations
-        for _ in range_(angle_rows_per_aie_column):
-            elem_lut = of_lut.acquire(1)
-            for _ in range_(tensor_rows_per_angle_row):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                rope_kernel(elem_in, elem_lut, elem_out, cols)
-                of_in.release(1)
-                of_out.release(1)
-            of_lut.release(1)
-
-    # Create a worker to run the task on a compute tile (one per column)
-    my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in[i].cons(),
-                of_lut[i].cons(),
-                of_out[i].prod(),
-                rope_kernel,
-            ],
-        )
-        for i in range(num_aie_columns)
-    ]
-
-    # This pattern chops the data into equal chunks and moves them in parallel across the columns
-    tensor_taps = [
-        TensorAccessPattern(
-            (rows, cols),
-            i * tensor_rows_per_aie_column * cols,  # Start offset for column i
-            [1, 1, 1, tensor_rows_per_aie_column * cols],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-    ]
-    angle_taps = [
-        TensorAccessPattern(
-            (angle_rows, cols),
-            i * angle_rows_per_aie_column * cols,  # Start offset for column i
-            [1, 1, 1, angle_rows_per_aie_column * cols],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-    ]
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, B, C, of_in_prods, of_lut_prods, of_out_conss):
-
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = TaskGroup()
-
-        # Fill the input objectFIFOs with data
-        for i in range(num_aie_columns):
-            of_in_prods[i].fill(
-                A,
-                tensor_taps[i],
-                group=tg,
-            )
-            of_lut_prods[i].fill(
-                B,
-                angle_taps[i],
-                group=tg,
-            )
-        # Drain the output objectFIFOs with data
-        for i in range(num_aie_columns):
-            of_out_conss[i].drain(
-                C,
-                tensor_taps[i],
-                wait=True,  # wait for the transfer to complete and data to be available
-                group=tg,
-            )
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            tensor_ty,
-            angle_ty,
-            tensor_ty,
-            [of.prod() for of in of_in],
-            [of.prod() for of in of_lut],
-            [of.cons() for of in of_out],
-        ],
-    )
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    prog = Program(dev, rt, workers=my_workers)
-    maybe_enable_trace(prog, trace_size, my_workers)
-    return prog.resolve_program()
 
 
 # --------------------------------------------------------------------------

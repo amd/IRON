@@ -1,229 +1,165 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import field
+from typing import ClassVar, Dict
 
 import numpy as np
+import torch
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
+from iron.common.declare import (
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    StreamIn,
+    StreamOut,
+    Untunable,
+    dim,
+    operator,
+    tunable,
 )
-from iron.common.device_utils import get_kernel_dir
-import aie.utils as aie_utils
-from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
-from iron.operators._kernels import declare_kernel
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.iron.controlflow import range_
-import torch
 
 
-@dataclass
-class Dequant(MLIROperator):
-    """AIE-accelerated dequantization operator"""
+@operator
+class DequantOverlay(Overlay):
+    """The array for int4 -> bf16 dequantization: one core per (column, channel).
 
-    size: int
-    num_aie_columns: int
-    num_channels: int
-    tile_size: int
+    A core takes ``per_tile`` values as ``in_tile`` packed bytes (two 4-bit
+    values per byte plus a bf16 scale and zero point per ``group_size``) and
+    produces ``per_tile`` bf16 values.
+    """
+
+    num_aie_columns: int = tunable()
+    num_channels: int = tunable()
+    tile_size: int = tunable()
     group_size: int = field(default=32, repr=False)
-    context: object = field(default=None, repr=False)
+    # Filled by tuning: the largest tile 64 KB of L1 holds, and its packed size.
+    per_tile: int | None = tunable(None, repr=False)
+    in_tile: int | None = tunable(None, repr=False)
 
-    def __post_init__(self):
-        # Calculate buffer sizes (in bytes)
-        # Input: int4 packed data + scale factors
-        self.input_size = (self.size // 2) + (self.size // self.group_size) * 2
-        self.output_size = self.size
+    x = StreamIn(in_tile, dtype=np.uint8, per=(num_aie_columns, num_channels))
+    y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
+    count = Resident(np.int32)
 
+    def tuning(self, dev) -> "DequantOverlay":
         total_cores = self.num_aie_columns * self.num_channels
-        if self.size % total_cores != 0:
-            raise ValueError(
-                f"size ({self.size}) must be divisible by total cores ({total_cores})"
-            )
         if total_cores > 16:
-            raise ValueError(f"total cores ({total_cores}) must be <= 16")
-        MLIROperator.__init__(self, context=self.context)
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                fn=my_dequant_kernel,
-                bind_from=self,
-            ),
+            raise Untunable(f"total cores ({total_cores}) must be <= 16")
+        per_tile = min(self.tile_size, 16384)
+        return dataclasses.replace(
+            self,
+            per_tile=per_tile,
+            in_tile=(per_tile // 2) + (per_tile // self.group_size) * 2,
         )
 
-    @staticmethod
-    def arg_spec(size, group_size=32):
-        # Packed input: two 4-bit values per byte, plus a bf16 scale and zero
-        # point per group. __post_init__ caches these as input_size/output_size.
-        input_size = (size // 2) + (size // group_size) * 2
-        return [
-            AIERuntimeArgSpec("in", (input_size,), dtype=np.uint8),
-            AIERuntimeArgSpec("out", (size,), dtype=bfloat16),
-        ]
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
 
+        in_tile_ty, out_tile_ty = self.x.tile, self.y.tile
+        cols, chans = self.num_aie_columns, self.num_channels
+        depth = 1 if self.tile_size > 8192 else 2
 
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-
-def my_dequant_kernel(
-    dev,
-    size,
-    num_aie_columns,
-    num_channels,
-    trace_size,
-    tile_size,
-    group_size,
-    kernels_dir=None,
-):
-    per_tile_elements = (
-        16384 if tile_size > 16384 else tile_size
-    )  # Largest tile size for 64KB in L1 and possible
-    # group size of 1 with objfifo depth of 1
-    total_cores = num_aie_columns * num_channels
-    per_core_elements = size // total_cores
-    if size % total_cores != 0:
-        raise ValueError(
-            f"Number of elements ({size}) must be a multiple of {total_cores}."
-        )
-    N_div_n = per_core_elements // per_tile_elements
-    chunk = size // num_aie_columns // num_channels  # For offset calculation
-    in_dtype = np.uint8
-    out_dtype = bfloat16
-
-    # Input data: int4 packed data + scale factors
-    # For N int4 values, we need N/2 bytes + N/group_size scale factors (bfloat16, 2 bytes each)
-    input_tensor_size = (size // 2) + (size // group_size) * 2
-    input_tile_size = (per_tile_elements // 2) + (per_tile_elements // group_size) * 2
-
-    # Define tensor types
-    in_tensor_ty = np.ndarray[(input_tensor_size,), np.dtype[in_dtype]]
-    out_tensor_ty = np.ndarray[(size,), np.dtype[out_dtype]]
-    in_tile_ty = np.ndarray[(input_tile_size,), np.dtype[in_dtype]]
-    out_tile_ty = np.ndarray[(per_tile_elements,), np.dtype[out_dtype]]
-
-    fifodepth = 1 if tile_size > 8192 else 2
-    enable_trace = trace_size > 0
-
-    # AIE-array data movement with object fifos
-    of_in1s = [
-        ObjectFifo(in_tile_ty, name=f"in1_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_outs = [
-        ObjectFifo(out_tile_ty, name=f"out_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE Core Function declaration
-    dequant_kernel = declare_kernel(
-        "expand_uint4_to_bfloat16",
-        [in_tile_ty, out_tile_ty],
-        source=Path(kernels_dir) / "generic" / "expand.cc",
-        compile_flags=[f"-DTILE_SIZE={tile_size}", f"-DGROUP_SIZE={group_size}"],
-    )
-
-    # Define a task that will run on a compute tile
-    def core_body(of_in1, of_out, dequant_kernel):
-        # Number of sub-vector "tile" iterations
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out.acquire(1)
-            dequant_kernel(elem_in1, elem_out)
-            of_in1.release(1)
-            of_out.release(1)
-
-    # Create a worker to run the task on a compute tile
-    my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                dequant_kernel,
+        kernel = target.kernel(
+            "expand_uint4_to_bfloat16",
+            [in_tile_ty, out_tile_ty],
+            source=target.kernels_dir / "generic" / "expand.cc",
+            compile_flags=[
+                f"-DTILE_SIZE={self.tile_size}",
+                f"-DGROUP_SIZE={self.group_size}",
             ],
         )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
+        of_ins = [
+            ObjectFifo(in_tile_ty, name=f"in1_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(out_tile_ty, name=f"out_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        i32 = np.ndarray[(1,), np.dtype[np.int32]]
+        counts = [target.rtp(i32, name=f"count_{k}") for k in range(cols * chans)]
+        barriers = [target.barrier() for _ in range(cols * chans)]
 
-    # Create a TensorAccessPattern for each channel
-    # to describe the data movement
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels.
-    in_chunk = (chunk // 2) + (chunk // group_size) * 2
-    taps_in = [
-        TensorAccessPattern(
-            (1, input_tensor_size),
-            in_chunk * i * num_channels + in_chunk * j,
-            [1, 1, 1, in_chunk],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    taps_out = [
-        TensorAccessPattern(
-            (1, size),
-            chunk * i * num_channels + chunk * j,
-            [1, 1, 1, chunk],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
+        def core_body(of_in, of_out, dequant, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                dequant(elem_in, elem_out)
+                of_in.release(1)
+                of_out.release(1)
 
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, C, of_in1s_prods, of_outs_conss):
+        workers = [
+            Worker(
+                core_body,
+                [of_ins[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
+            )
+            for k in range(cols * chans)
+        ]
+        for k in range(cols * chans):
+            self.x[k].bind(of_ins[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        self.count.bind(counts)
+        return workers
 
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = TaskGroup()
 
-        # Fill the input objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                of_in1s_prods[i * num_channels + j].fill(
-                    A,
-                    taps_in[i * num_channels + j],
-                    group=tg,
-                )
-        # Drain the output objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                of_outs_conss[i * num_channels + j].drain(
-                    C,
-                    taps_out[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    group=tg,
-                )
-        tg.finish()
+@operator
+class Dequant(Operator[DequantOverlay]):
+    """AIE-accelerated dequantization operator"""
 
-    rt = Runtime(
-        sequence,
-        [
-            in_tensor_ty,
-            out_tensor_ty,
-            [of.prod() for of in of_in1s],
-            [of.cons() for of in of_outs],
-        ],
-    )
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    prog = Program(dev, rt, workers=my_workers)
-    if enable_trace:
-        prog.enable_trace(trace_size)
-    return prog.resolve_program()
+    size: int = dim()
+    # The packed input's length: two 4-bit values per byte plus a bf16 scale
+    # and zero point per group. Derived from size unless given.
+    packed: int | None = dim(None, repr=False)
+
+    x = In(packed, dtype=np.uint8, to=DequantOverlay.x)
+    y = Out(size, from_=DequantOverlay.y)
+
+    def validate(self) -> None:
+        expected = (self.size // 2) + (self.size // self.ov.group_size) * 2
+        if self.packed is None:
+            self.packed = expected
+        elif self.packed != expected:
+            raise ValueError(
+                f"packed={self.packed} does not match size={self.size} with "
+                f"group_size={self.ov.group_size} (expected {expected})"
+            )
+
+    @property
+    def input_size(self) -> int:
+        return self.packed
+
+    @property
+    def output_size(self) -> int:
+        return self.size
+
+    def compatible(self) -> None:
+        ov = self.ov
+        total_cores = ov.num_aie_columns * ov.num_channels
+        if self.size % total_cores:
+            raise Incompatible(
+                f"size ({self.size}) must be divisible by total cores ({total_cores})"
+            )
+        if (self.size // total_cores) % ov.per_tile:
+            raise Incompatible(
+                f"size ({self.size}) leaves each core {self.size // total_cores} "
+                f"elements, not a multiple of the {ov.per_tile}-element tile"
+            )
+
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        return {
+            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.per_tile
+        }
 
 
 # --------------------------------------------------------------------------

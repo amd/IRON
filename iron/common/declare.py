@@ -300,6 +300,7 @@ class _Stream(_Member):
         dtype: Any = bfloat16,
         per: _DimSpec | None = None,
         broadcast: bool = False,
+        replicate: bool = False,
         via: Shim | list[Shim] | None = None,
         depth: int = 2,
     ) -> None:
@@ -307,10 +308,17 @@ class _Stream(_Member):
             raise DeclarationError(
                 "a stream is either per=<dim> or broadcast, not both"
             )
+        if replicate and per is None:
+            raise DeclarationError(
+                "replicate=True needs per=<dim>: every slot receives the whole buffer"
+            )
         self.dims = tuple(dims)
         self.dtype = dtype
         self.per = per
         self.broadcast = broadcast
+        # per= slots that each receive the whole buffer (one fill per slot)
+        # rather than a share of it.
+        self.replicate = replicate
         self.via = via
         self.depth = depth
 
@@ -411,6 +419,7 @@ class BoundStream:
         self.name = member.name
         self.direction = member.direction
         self.broadcast = member.broadcast
+        self.replicate = member.replicate
         self.depth = member.depth
         self.via = member.via
         self._handle_slots: list[Any] | None = None
@@ -712,13 +721,19 @@ def _resolve_dtype(spec, instance):
 
 
 def _members_of(cls: type) -> list[_Member]:
-    """Members declared in this class body and its ``@operator`` bases, in order."""
-    seen: dict[str, _Member] = {}
-    for klass in reversed(cls.__mro__):
+    """Members declared in this class body and its ``@operator`` bases, in order.
+
+    The most derived class's body order wins for the members it declares;
+    inherited members it does not redeclare follow, in their own order. So a
+    subclass that inserts a buffer between two inherited ones (a weight
+    between an input and an output) gets the order it wrote.
+    """
+    ordered: dict[str, _Member] = {}
+    for klass in cls.__mro__:
         for name, value in vars(klass).items():
-            if isinstance(value, _Member):
-                seen[name] = value
-    return list(seen.values())
+            if isinstance(value, _Member) and name not in ordered:
+                ordered[name] = value
+    return list(ordered.values())
 
 
 def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> tuple:
@@ -911,18 +926,21 @@ def _finish_operator(cls: type, fields: dict[str, Field]) -> None:
     # builds the overlay itself. Untyped, and goes away once every call site
     # passes an overlay.
     if overlay_cls is not None:
-        overlay_field_names = {f.name for f in dataclasses.fields(overlay_cls)}
         generated_init = cls.__init__
 
         def __init__(self, ov=None, *args, **kwargs):
+            # A __new__ that returns a subclass instance (RMSNorm -> WeightedRMSNorm)
+            # has already initialised it; Python calls __init__ again regardless.
+            if getattr(self, "_iron_initialised", False):
+                return
             if ov is None or not isinstance(ov, Overlay):
                 if ov is not None:
                     args = (ov,) + args
-                ov_kwargs = {
-                    k: kwargs.pop(k) for k in list(kwargs) if k in overlay_field_names
-                }
-                ov = overlay_cls(**ov_kwargs)
+                # A class may override _classic to translate a legacy spelling
+                # (a size that is now rows, a flag that now picks an overlay).
+                ov, kwargs = type(self)._classic(dict(kwargs))
             generated_init(self, ov, *args, **kwargs)
+            self._iron_initialised = True
 
         __init__.__wrapped__ = generated_init  # type: ignore[attr-defined]
         cls.__init__ = __init__  # type: ignore[misc]
@@ -1025,6 +1043,10 @@ class Overlay:
     @property
     def specialised(self) -> bool:
         return bool(self._specialised)
+
+    def value_symbol(self, value: "BoundValue") -> str | None:
+        """An explicit device symbol for a core-read per-call value, or ``None``."""
+        return None
 
     def design_key(self) -> tuple:
         """Identity for sharing: the class and every compared field value."""
@@ -1163,6 +1185,24 @@ class Operator(MLIROperator, Generic[O]):
         return cls.design is not Operator.design
 
     # -- library surface ---------------------------------------------------
+
+    @classmethod
+    def _classic(cls, kwargs: dict) -> tuple["Overlay", dict]:
+        """Split legacy keyword arguments into an overlay and the operator's own.
+
+        The default takes every overlay field out of ``kwargs`` and builds
+        the operator's overlay class from them. Override to translate a
+        legacy spelling; the override then calls ``super()._classic``.
+        """
+        overlay_cls = cls._overlay_class
+        assert overlay_cls is not None
+        names = {f.name for f in dataclasses.fields(overlay_cls) if f.init}
+        ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
+        return overlay_cls(**ov_kwargs), kwargs
+
+    def value_symbol(self, value: "BoundValue") -> str | None:
+        """An explicit device symbol for a per-call value, or ``None`` for the default."""
+        return None
 
     def tuned(self, dev) -> "Operator":
         """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""

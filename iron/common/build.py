@@ -249,6 +249,9 @@ def plan(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Acces
     """
     if stream.count == 1:
         return [(stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))]
+    if stream.replicate:
+        everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
+        return [(stream[i], everything) for i in range(stream.count)]
     axis = buffer.batch_axes
     if axis >= len(buffer.shape):
         raise ValueError(
@@ -350,7 +353,7 @@ def build_design(
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
     for value in ov.values:
-        value.symbol = _symbol(op, value)
+        value.symbol = ov.value_symbol(value) or _symbol(op, value)
         value.param = ScratchpadParameter(value.symbol, value.dtype)
     for value in op.values:
         if value.kind == "dispatch":
@@ -358,7 +361,7 @@ def build_design(
                 f"{type(op).__name__}.{value.name} is a DispatchTime value; generated "
                 f"sequences arrive with the packaging step (OPERATOR_MODEL_PLAN.md §8)"
             )
-        value.symbol = _symbol(op, value)
+        value.symbol = op.value_symbol(value) or _symbol(op, value)
         value.param = ScratchpadParameter(value.symbol, value.dtype)
 
     workers = ov.design(target)

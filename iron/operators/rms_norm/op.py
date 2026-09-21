@@ -1,441 +1,327 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
-
-from dataclasses import dataclass, field
+import dataclasses
 from typing import ClassVar, Dict
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-import aie.utils as aie_utils
-from iron.common.device_utils import get_kernel_dir
-from iron.common.utils import get_shim_dma_limit
-from ml_dtypes import bfloat16
 import numpy as np
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-from iron.operators._kernels import declare_kernel
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.iron.controlflow import range_
 import torch
+from ml_dtypes import bfloat16
+
+from iron.common.declare import (
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    StreamIn,
+    StreamOut,
+    Untunable,
+    dim,
+    operator,
+    tunable,
+)
+from iron.common.utils import get_shim_dma_limit
 from iron.common.test_utils import torch_dtype_map
 
+_I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
-@dataclass
-class RMSNorm(MLIROperator):
-    """AIE-accelerated RMS Normalization layer"""
 
-    size: int
-    num_aie_columns: int
-    num_channels: int
-    tile_size: int
-    weighted: bool = False
+@operator
+class RMSNormOverlay(Overlay):
+    """The array for row-wise RMS normalization: one core per (column, channel).
+
+    ``tile_size`` is the row length and is shape-bearing (the host buffers are
+    ``rows x tile_size``), so it is a dimension of the overlay, not a tunable.
+    """
+
+    tile_size: int = dim()
+    num_aie_columns: int = tunable()
+    num_channels: int = tunable()
     epsilon: float = 1e-5  # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
-    context: object = field(default=None, repr=False)
+    # The core's tile: min(tile_size, 8192). Filled by tuning.
+    per_tile: int | None = tunable(None, repr=False)
 
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
-        "weighted": "w",
-        "epsilon": "eps",
-    }
+    x = StreamIn(per_tile, per=(num_aie_columns, num_channels))
+    y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
+    count = Resident(np.int32)
 
-    def __post_init__(self):
-        dev = aie_utils.get_current_device()
-        shim_dma_limit = get_shim_dma_limit(dev)
+    _name_aliases: ClassVar[Dict[str, str]] = {"epsilon": "eps"}
 
-        # The weighted design uses one weight ObjectFifo per channel shared across all
-        # columns, so its ShimDMA budget is:
-        #   (num_aie_columns * num_channels) in-fills
-        #   + num_channels weight-fills
-        #   + (num_aie_columns * num_channels) out-drains
-        # The binding constraint is on the output (host→AIE) shim DMA channels:
-        #   num_channels * (num_aie_columns + 1) <= shim_dma_limit
-        if self.weighted:
-            weighted_shim_usage = self.num_channels * (self.num_aie_columns + 1)
-            if weighted_shim_usage > shim_dma_limit:
-                raise ValueError(
-                    f"weighted RMSNorm with num_aie_columns={self.num_aie_columns}, "
-                    f"num_channels={self.num_channels} requires {weighted_shim_usage} ShimDMA "
-                    f"output channels but device only has {shim_dma_limit}"
+    def tuning(self, dev) -> "RMSNormOverlay":
+        if dev is not None:
+            limit = get_shim_dma_limit(dev)
+            channels = self.num_aie_columns * self.num_channels
+            if channels > limit:
+                raise Untunable(
+                    f"num_aie_columns * num_channels ({channels}) exceeds ShimDMA "
+                    f"limit of {limit} for this device"
                 )
-        max_multiple = self.num_aie_columns * self.num_channels * self.tile_size
-        if self.size % max_multiple != 0:
-            raise ValueError(
-                f"size ({self.size}) must be a multiple of "
-                f"num_aie_columns * num_channels * tile_size ({max_multiple})"
+        return dataclasses.replace(self, per_tile=min(self.tile_size, 8192))
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
+
+        tile_ty = self.x.tile
+        cols, chans = self.num_aie_columns, self.num_channels
+        depth = 1 if self.tile_size > 4096 else 2
+        kernel = target.kernel(
+            "rms_norm_eps",
+            [tile_ty, tile_ty, np.int32, np.float32],
+            source=target.kernel_source("rms_norm"),
+        )
+        of_ins = [
+            ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        counts = [target.rtp(_I32, name=f"count_{k}") for k in range(cols * chans)]
+        barriers = [target.barrier() for _ in range(cols * chans)]
+        per_tile, epsilon = self.per_tile, self.epsilon
+
+        def core_body(of_in, of_out, rms_norm, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                rms_norm(elem_in, elem_out, per_tile, epsilon)
+                of_in.release(1)
+                of_out.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [of_ins[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
             )
-        total_shimdma_channels = self.num_aie_columns * self.num_channels
-        if total_shimdma_channels > shim_dma_limit:
-            raise ValueError(
-                f"num_aie_columns * num_channels ({total_shimdma_channels}) "
-                f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
-            )
-        MLIROperator.__init__(self, context=self.context)
+            for k in range(cols * chans)
+        ]
+        for k in range(cols * chans):
+            self.x[k].bind(of_ins[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        self.count.bind(counts)
+        return workers
+
+
+@operator
+class WeightedRMSNormOverlay(RMSNormOverlay):
+    """RMS normalization followed by an elementwise multiply with a weight row.
+
+    Two cores per (column, channel), pipelined: one normalizes, the next
+    multiplies by the weight. The weight fifo is one per channel, shared by
+    every column in that channel, and each receives the whole weight row.
+    """
+
+    w = StreamIn(
+        RMSNormOverlay.per_tile, per=RMSNormOverlay.num_channels, replicate=True
+    )
+
+    def tuning(self, dev) -> "WeightedRMSNormOverlay":
+        if dev is not None:
+            limit = get_shim_dma_limit(dev)
+            # (cols * chans) in-fills + chans weight-fills must fit the shim's
+            # host->array channels.
+            usage = self.num_channels * (self.num_aie_columns + 1)
+            if usage > limit:
+                raise Untunable(
+                    f"weighted RMSNorm with num_aie_columns={self.num_aie_columns}, "
+                    f"num_channels={self.num_channels} requires {usage} ShimDMA "
+                    f"output channels but device only has {limit}"
+                )
+        # The weight is one tile, so the tile is the whole row.
+        return dataclasses.replace(self, per_tile=self.tile_size)
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
+
+        tile_ty = self.x.tile
+        weights_ty = self.w.tile
+        cols, chans = self.num_aie_columns, self.num_channels
+        depth = 1 if self.tile_size > 4096 else 2
+        rms_norm = target.kernel(
+            "rms_norm_eps",
+            [tile_ty, tile_ty, np.int32, np.float32],
+            source=target.kernel_source("rms_norm"),
+        )
+        eltwise_mul = target.kernel(
+            "eltwise_mul_bf16_vector_size",
+            [tile_ty, weights_ty, tile_ty, np.int32],
+            source=target.kernel_source("mul"),
+        )
+        of_ins = [
+            ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_ws = [
+            ObjectFifo(weights_ty, name=f"in2_weights_{j}", depth=depth)
+            for j in range(chans)
+        ]
+        of_mid = [
+            ObjectFifo(tile_ty, name=f"out1_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(tile_ty, name=f"out2_{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        n_cores = cols * chans
+        counts = [target.rtp(_I32, name=f"count_{k}") for k in range(2 * n_cores)]
+        barriers = [target.barrier() for _ in range(2 * n_cores)]
+        per_tile, epsilon = self.per_tile, self.epsilon
+
+        def core_norm(of_in, of_out, rms, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                rms(elem_in, elem_out, per_tile, epsilon)
+                of_in.release(1)
+                of_out.release(1)
+
+        def core_mul(of_in, of_w, of_out, mul, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            elem_w = of_w.acquire(1)
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                mul(elem_in, elem_w, elem_out, per_tile)
+                of_in.release(1)
+                of_out.release(1)
+            of_w.release(1)
+
+        workers = []
+        for i in range(cols):
+            for j in range(chans):
+                k = i * chans + j
+                workers.append(
+                    Worker(
+                        core_norm,
+                        [
+                            of_ins[k].cons(),
+                            of_mid[k].prod(),
+                            rms_norm,
+                            counts[k],
+                            barriers[k],
+                        ],
+                    )
+                )
+        for i in range(cols):
+            for j in range(chans):
+                k = i * chans + j
+                workers.append(
+                    Worker(
+                        core_mul,
+                        [
+                            of_mid[k].cons(),
+                            of_ws[j].cons(),
+                            of_outs[k].prod(),
+                            eltwise_mul,
+                            counts[n_cores + k],
+                            barriers[n_cores + k],
+                        ],
+                    )
+                )
+        for k in range(n_cores):
+            self.x[k].bind(of_ins[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        for j in range(chans):
+            self.w[j].bind(of_ws[j].prod())
+        self.count.bind(counts)
+        return workers
+
+
+@operator
+class RMSNorm(Operator[RMSNormOverlay]):
+    """AIE-accelerated RMS Normalization layer (unweighted).
+
+    ``RMSNorm(..., weighted=True)`` constructs a :class:`WeightedRMSNorm`; the
+    legacy ``size=`` spelling is ``rows * tile_size``.
+    """
+
+    rows: int = dim()
+
+    x = In(rows, RMSNormOverlay.tile_size, to=RMSNormOverlay.x)
+    y = Out(rows, RMSNormOverlay.tile_size, from_=RMSNormOverlay.y)
+
+    def __new__(cls, *args, **kwargs):
+        if cls is RMSNorm and kwargs.pop("weighted", False):
+            return WeightedRMSNorm(*args, **kwargs)
+        return super().__new__(cls)
+
+    @classmethod
+    def _classic(cls, kwargs):
+        kwargs.pop("weighted", None)
+        if "size" in kwargs:
+            size = kwargs.pop("size")
+            tile = kwargs.get("tile_size")
+            if tile is None or size % tile:
+                raise ValueError(
+                    f"size ({size}) must be a multiple of tile_size ({tile})"
+                )
+            kwargs["rows"] = size // tile
+        return super()._classic(kwargs)
 
     @property
-    def weight_length(self) -> int:
-        """Length of the weight vector, which here is one tile."""
-        return self.tile_size
+    def size(self) -> int:
+        return self.rows * self.ov.tile_size
 
-    def get_mlir_artifact(self):
-        # Two designs, chosen by a field rather than by a file path now that
-        # both live in this module.
-        design = my_weighted_rms_norm if self.weighted else my_rms_norm
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(fn=design, bind_from=self),
-        )
+    @property
+    def weighted(self) -> bool:
+        return False
 
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                source_path,
-                callback_fn,
-                (
-                    aie_utils.get_current_device(),
-                    self.size,
-                    self.num_aie_columns,
-                    self.num_channels,
-                    self.tile_size,
-                    0,  # trace_size
-                    self.epsilon,
-                ),
-            ),
-        )
+    @property
+    def epsilon(self) -> float:
+        return self.ov.epsilon
 
-    @staticmethod
-    def arg_spec(size, tile_size, weighted=False):
-        # The optional weight sits between input and output, so this is not a
-        # same-shape unary even though the two ends match.
-        rows = (size // tile_size, tile_size)
-        specs = [AIERuntimeArgSpec("in", rows)]
-        if weighted:
-            specs.append(AIERuntimeArgSpec("in", (tile_size,)))
-        specs.append(AIERuntimeArgSpec("out", rows))
-        return specs
+    def compatible(self) -> None:
+        ov = self.ov
+        unit = ov.num_aie_columns * ov.num_channels * ov.tile_size
+        if self.size % unit:
+            raise Incompatible(
+                f"size ({self.size}) must be a multiple of "
+                f"num_aie_columns * num_channels * tile_size ({unit})"
+            )
+
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        return {
+            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.per_tile
+        }
 
     def reference(self, x, w=None):
         """CPU reference: row-wise RMS normalization, optionally weighted."""
         return reference(x, w=w, weighted=self.weighted, eps=self.epsilon)
 
 
-# --------------------------------------------------------------------------
-# The MLIR this operator generates (unweighted).
-# --------------------------------------------------------------------------
+@operator
+class WeightedRMSNorm(RMSNorm, Operator[WeightedRMSNormOverlay]):
+    """AIE-accelerated RMS Normalization layer with a learned weight row."""
 
+    x = In(RMSNorm.rows, RMSNormOverlay.tile_size, to=RMSNormOverlay.x)
+    w = In(RMSNormOverlay.tile_size, to=WeightedRMSNormOverlay.w)
+    y = Out(RMSNorm.rows, RMSNormOverlay.tile_size, from_=RMSNormOverlay.y)
 
-def my_rms_norm(
-    dev,
-    size,
-    num_aie_columns,
-    num_channels,
-    tile_size,
-    trace_size,
-    epsilon=1e-5,
-    kernels_dir=None,
-):
-    per_tile_elements = 8192 if tile_size > 8192 else tile_size
-    total_cores = num_aie_columns * num_channels
-    per_core_elements = size // total_cores
-    if size % total_cores != 0:
-        raise ValueError(
-            f"Number of elements ({size}) must be a multiple of {total_cores}."
-        )
-    N_div_n = per_core_elements // per_tile_elements
-    chunk = size // num_aie_columns // num_channels  # For offset calculation
-    dtype = bfloat16
+    @property
+    def weighted(self) -> bool:
+        return True
 
-    # Define tensor types
-    tensor_ty = np.ndarray[(size,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
-
-    fifodepth = 1 if tile_size > 4096 else 2
-
-    # AIE-array data movement with object fifos
-    of_in1s = [
-        ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_outs = [
-        ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE Core Function declaration
-    rms_norm_kernel = declare_kernel(
-        "rms_norm_eps",
-        [tile_ty, tile_ty, np.int32, np.float32],
-        source=Path(kernels_dir) / get_kernel_dir(dev) / "rms_norm.cc",
-    )
-
-    # Define a task that will run on a compute tile
-    def core_body(of_in1, of_out, rms_norm_kernel):
-        # Number of sub-vector "tile" iterations
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out.acquire(1)
-            rms_norm_kernel(elem_in1, elem_out, per_tile_elements, epsilon)
-            of_in1.release(1)
-            of_out.release(1)
-
-    # Create a worker to run the task on a compute tile
-    my_workers = [
-        Worker(
-            core_body,
-            [
-                of_in1s[i * num_channels + j].cons(),
-                of_outs[i * num_channels + j].prod(),
-                rms_norm_kernel,
-            ],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Create a TensorAccessPattern for each channel
-    # to describe the data movement
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels.
-    taps = [
-        TensorAccessPattern(
-            (1, size),
-            chunk * i * num_channels + chunk * j,
-            [1, 1, 1, chunk],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, C, of_in1s_prods, of_outs_conss):
-
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = TaskGroup()
-
-        # Fill the input objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                of_in1s_prods[i * num_channels + j].fill(
-                    A,
-                    taps[i * num_channels + j],
-                    group=tg,
-                )
-        # Drain the output objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                of_outs_conss[i * num_channels + j].drain(
-                    C,
-                    taps[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    group=tg,
-                )
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            tensor_ty,
-            tensor_ty,
-            [of.prod() for of in of_in1s],
-            [of.cons() for of in of_outs],
-        ],
-    )
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt, workers=my_workers).resolve_program()
-
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates (weighted).
-# --------------------------------------------------------------------------
-
-
-def my_weighted_rms_norm(
-    dev,
-    size,
-    num_aie_columns,
-    num_channels,
-    weight_length,
-    trace_size,
-    epsilon=1e-5,
-    func_prefix="",
-    kernels_dir=None,
-):
-    per_tile_elements = weight_length
-    total_cores = num_aie_columns * num_channels
-    n = per_tile_elements * total_cores
-    if size % n != 0:
-        raise ValueError(f"Number of elements ({size}) must be a multiple of {n}.")
-    N_div_n = size // n
-    chunk = size // total_cores
-    dtype = bfloat16
-    # Define tensor types
-    tensor_ty = np.ndarray[(size,), np.dtype[dtype]]
-    weights_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
-
-    # Set fifodepth based on weight_length
-    fifodepth = 1 if weight_length > 4096 else 2
-
-    # AIE-array data movement with object fifos
-    of_in1s = [
-        ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    # One weight ObjectFifo per channel, shared across columns in that channel
-    of_in2s = [
-        ObjectFifo(weights_ty, name=f"in2_weights_{j}", depth=fifodepth)
-        for j in range(num_channels)
-    ]
-    of_out1s = [
-        ObjectFifo(tile_ty, name=f"out1_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_out2s = [
-        ObjectFifo(tile_ty, name=f"out2_{i}_{j}", depth=fifodepth)
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE Core Function declaration
-    arch_dir = get_kernel_dir(dev)
-    rms_norm_kernel = declare_kernel(
-        "rms_norm_eps",
-        [tile_ty, tile_ty, np.int32, np.float32],
-        source=Path(kernels_dir) / arch_dir / "rms_norm.cc",
-        func_prefix=func_prefix,
-    )
-    eltwise_mul_kernel = declare_kernel(
-        "eltwise_mul_bf16_vector_size",
-        [tile_ty, weights_ty, tile_ty, np.int32],
-        source=Path(kernels_dir) / arch_dir / "mul.cc",
-        func_prefix=func_prefix,
-    )
-
-    # Define a task that will run on a compute tile
-    def core_body_norm(of_in1, of_out1, rms_norm):
-        # Number of sub-vector "tile" iterations
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out1.acquire(1)
-            rms_norm(elem_in1, elem_out, per_tile_elements, epsilon)
-            of_in1.release(1)
-            of_out1.release(1)
-
-    def core_body_mul(of_in1, of_in2, of_out2, eltwise_mul):
-        # Number of sub-vector "tile" iterations
-        elem_in2 = of_in2.acquire(1)
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out2.acquire(1)
-            eltwise_mul(elem_in1, elem_in2, elem_out, per_tile_elements)
-            of_in1.release(1)
-            of_out2.release(1)
-        of_in2.release(1)
-
-    # Create workers to run the task on compute tiles,
-    # one core for rms norm and another pipelined to do eltwise mul
-    my_workers = []
-    for i in range(num_aie_columns):
-        for j in range(num_channels):
-            idx = i * num_channels + j
-            my_workers.append(
-                Worker(
-                    core_body_norm,
-                    [
-                        of_in1s[idx].cons(),
-                        of_out1s[idx].prod(),
-                        rms_norm_kernel,
-                    ],
-                )
-            )
-    for i in range(num_aie_columns):
-        for j in range(num_channels):
-            idx = i * num_channels + j
-            my_workers.append(
-                Worker(
-                    core_body_mul,
-                    [
-                        of_out1s[idx].cons(),
-                        of_in2s[j].cons(),
-                        of_out2s[idx].prod(),
-                        eltwise_mul_kernel,
-                    ],
-                )
-            )
-
-    # Create a TensorAccessPattern for each core
-    # to describe the data movement.
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across columns and channels.
-    taps = [
-        TensorAccessPattern(
-            (1, size),
-            chunk * i * num_channels + chunk * j,
-            [1, 1, 1, chunk],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, B, C, of_in1s_prods, of_in2s_prods, of_out2s_conss):
-
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = TaskGroup()
-
-        # Fill the input objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                idx = i * num_channels + j
-                of_in1s_prods[idx].fill(
-                    A,
-                    taps[idx],
-                    group=tg,
-                )
-        # Fill weights (one per channel)
-        for j in range(num_channels):
-            of_in2s_prods[j].fill(
-                B,
-                group=tg,
-            )
-        # Drain the output objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                idx = i * num_channels + j
-                of_out2s_conss[idx].drain(
-                    C,
-                    taps[idx],
-                    wait=True,
-                    group=tg,
-                )
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            tensor_ty,
-            weights_ty,
-            tensor_ty,
-            [of.prod() for of in of_in1s],
-            [of.prod() for of in of_in2s],
-            [of.cons() for of in of_out2s],
-        ],
-    )
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    return Program(dev, rt, workers=my_workers).resolve_program()
+    @property
+    def weight_length(self) -> int:
+        """Length of the weight vector, which here is one tile."""
+        return self.ov.tile_size
 
 
 # --------------------------------------------------------------------------

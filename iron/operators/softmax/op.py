@@ -1,300 +1,225 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
+from typing import ClassVar, Dict
 
-from dataclasses import dataclass, field
-
-import aie.utils as aie_utils
-
-from iron.common.device_utils import get_kernel_dir
-from iron.common import (
-    MLIROperator,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-    same_shape_unary,
-)
 import numpy as np
-from aie.iron import (
-    Kernel,
-    ObjectFifo,
-    ScratchpadParameter,
-    Program,
-    Runtime,
-    TaskGroup,
-    Worker,
-    Buffer,
-    WorkerRuntimeBarrier,
-    sync_parameters,
-)
-from aie.iron.device import NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.helpers.dialects.scf import _for as range_
-from ml_dtypes import bfloat16
-from iron.common.device_utils import lut_sources
-from iron.operators._kernels import declare_kernel
-from iron.operators._trace import maybe_enable_trace
 import torch
+from ml_dtypes import bfloat16
+
+from iron.common.declare import (
+    BoundValue,
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    Scratchpad,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    tunable,
+)
+from iron.common.device_utils import lut_sources
 from iron.common.test_utils import torch_dtype_map
 
 
-@dataclass
-class Softmax(MLIROperator):
-    """AIE-accelerated Softmax operation"""
+@operator
+class SoftmaxOverlay(Overlay):
+    """The array for row-wise softmax: one core per (column, channel), one row per tile.
 
-    rows: int
-    cols: int
-    num_aie_columns: int = 1
-    num_channels: int = 1
+    Each row is masked to ``vector_size`` valid elements before the softmax;
+    here that is a resident the sequence writes once per build
+    (``rtp_vector_size``, default the full row).
+    """
+
+    cols: int = dim()
+    num_aie_columns: int = tunable(1)
+    num_channels: int = tunable(1)
     rtp_vector_size: int | None = None
-    vector_size_parameter: str | None = None
-    context: object = field(default=None, repr=False)
 
-    @property
-    def size(self):
-        return self.rows * self.cols
+    x = StreamIn(cols, per=(num_aie_columns, num_channels))
+    y = StreamOut(cols, per=(num_aie_columns, num_channels))
+    count = Resident(np.int32)
+    vector_size = Resident(np.int32)
 
-    def __post_init__(self):
-        if self.rows % 16 != 0:
-            raise ValueError(f"rows ({self.rows}) must be a multiple of 16")
+    def validate(self) -> None:
         if self.cols % 16 != 0:
             raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
-        if self.rows % self.num_aie_columns != 0:
-            raise ValueError(
-                f"rows ({self.rows}) must be a multiple of num_aie_columns ({self.num_aie_columns})"
+
+    def _kernels(self, target, tile_ty):
+        # Both live in softmax.cc, so they name one object: declared separately
+        # they would compile that translation unit twice and each copy would
+        # define both symbols.
+        source = target.kernel_source("softmax")
+        bundle = lut_sources(target.dev)
+        softmax_k = target.kernel(
+            "softmax_bf16",
+            [tile_ty, tile_ty, np.int32],
+            source=source,
+            bundled_sources=bundle,
+            object_file_name="softmax.o",
+        )
+        mask_k = target.kernel(
+            "mask_bf16",
+            [tile_ty, np.int32, np.int32],
+            source=source,
+            bundled_sources=bundle,
+            object_file_name="softmax.o",
+        )
+        return softmax_k, mask_k
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
+
+        tile_ty = self.x.tile
+        cols, chans = self.num_aie_columns, self.num_channels
+        n_cores = cols * chans
+        softmax_k, mask_k = self._kernels(target, tile_ty)
+        of_ins = [
+            ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(tile_ty, name=f"out_{i}_{j}")
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        # [count, vector_size] per core, or [count] when vector_size is a scratchpad value
+        dynamic = isinstance(self.vector_size, BoundValue)
+        rtp_ty = np.ndarray[(1 if dynamic else 2,), np.dtype[np.int32]]
+        rtps = [target.rtp(rtp_ty, name=f"rtp_{k}") for k in range(n_cores)]
+        barriers = [target.barrier() for _ in range(n_cores)]
+        per_tile = self.cols
+        param = self.vector_size.param if dynamic else None
+
+        def core_body(
+            of_in,
+            of_out,
+            softmax_kernel,
+            mask_kernel,
+            rtp,
+            barrier,
+            vector_size_src=None,
+        ):
+            barrier.wait_for_value(1)
+            n = rtp[0]
+            # `dynamic` is a compile-time constant, so only one of these is
+            # emitted: a scratchpad parameter read or a write-RTP buffer load.
+            vector_size = vector_size_src.read() if dynamic else rtp[1]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                mask_kernel(elem_in, vector_size, per_tile)
+                softmax_kernel(elem_in, elem_out, per_tile)
+                of_in.release(1)
+                of_out.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [
+                    of_ins[k].cons(),
+                    of_outs[k].prod(),
+                    softmax_k,
+                    mask_k,
+                    rtps[k],
+                    barriers[k],
+                ]
+                + ([param] if dynamic else []),
             )
-        MLIROperator.__init__(self, context=self.context)
+            for k in range(n_cores)
+        ]
+        for k in range(n_cores):
+            self.x[k].bind(of_ins[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        self.count.bind(rtps, 0)
+        if not dynamic:
+            self.vector_size.bind(rtps, 1)
+        return workers
+
+
+@operator
+class DynamicSoftmaxOverlay(SoftmaxOverlay):
+    """Softmax whose valid row length is a per-call value (llama's decode mask).
+
+    ``vector_size_symbol`` names the device symbol the host writes, for the
+    call sites that still address it by string.
+    """
+
+    vector_size_symbol: str | None = None
+
+    vector_size = Scratchpad(np.int32)
+
+    def value_symbol(self, value):
+        return self.vector_size_symbol if value.name == "vector_size" else None
+
+
+@operator
+class Softmax(Operator[SoftmaxOverlay]):
+    """AIE-accelerated Softmax operation"""
+
+    rows: int = dim()
+
+    x = In(rows, SoftmaxOverlay.cols, to=SoftmaxOverlay.x)
+    y = Out(rows, SoftmaxOverlay.cols, from_=SoftmaxOverlay.y)
+
+    @classmethod
+    def _classic(cls, kwargs):
+        # The legacy spelling picks the dynamic overlay by naming its symbol.
+        symbol = kwargs.pop("vector_size_parameter", None)
+        if symbol is not None:
+            names = {
+                f.name for f in SoftmaxOverlay.__dataclass_fields__.values() if f.init
+            }
+            ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
+            return DynamicSoftmaxOverlay(vector_size_symbol=symbol, **ov_kwargs), kwargs
+        return super()._classic(kwargs)
 
     @property
-    def bundled_sources(self) -> tuple:
-        """Translation units softmax.cc links but never calls through MLIR."""
-        return lut_sources()
+    def cols(self) -> int:
+        return self.ov.cols
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            # The design is declared below in this file, so hand the function
-            # over rather than importing this module a second time by path.
-            DesignGenerator(fn=softmax, bind_from=self),
-        )
+    @property
+    def size(self) -> int:
+        return self.rows * self.ov.cols
 
-    @staticmethod
-    def arg_spec(rows, cols):
-        return same_shape_unary(rows * cols)
+    def validate(self) -> None:
+        if self.rows % 16 != 0:
+            raise ValueError(f"rows ({self.rows}) must be a multiple of 16")
+
+    def compatible(self) -> None:
+        ov = self.ov
+        if self.rows % ov.num_aie_columns:
+            raise Incompatible(
+                f"rows ({self.rows}) must be a multiple of num_aie_columns ({ov.num_aie_columns})"
+            )
+        total = ov.num_aie_columns * ov.num_channels
+        if self.rows % total:
+            raise Incompatible(
+                f"rows ({self.rows}) must be a multiple of the {total} cores"
+            )
+
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        out = {"count": self.rows // (ov.num_aie_columns * ov.num_channels)}
+        if not isinstance(ov.vector_size, BoundValue):
+            out["vector_size"] = (
+                ov.rtp_vector_size if ov.rtp_vector_size is not None else ov.cols
+            )
+        return out
 
     def reference(self, x):
         """CPU reference: row-wise softmax over ``cols``.
 
-        Note: ignores the runtime ``vector_size_parameter`` (if any); the
-        reference always softmaxes over the full ``cols``. For decode-style
-        usage with a masked tail, the trailing positions will not match the
-        NPU output."""
+        Note: ignores a per-call ``vector_size`` (if any); the reference
+        always softmaxes over the full ``cols``. For decode-style usage with
+        a masked tail, the trailing positions will not match the NPU output."""
         return reference(x.reshape(self.rows, self.cols))
-
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
-
-
-def softmax(
-    dev,
-    size,
-    num_aie_columns,
-    num_channels,
-    trace_size,
-    cols,
-    rtp_vector_size=None,
-    vector_size_parameter=None,
-    func_prefix="",
-    bundled_sources=(),
-    kernels_dir=None,
-):
-    per_tile_elements = cols
-    if rtp_vector_size is None:
-        rtp_vector_size = per_tile_elements
-    total_cores = num_aie_columns * num_channels
-    per_core_elements = size // total_cores
-    if size % total_cores != 0:
-        raise ValueError(
-            f"Number of elements ({size}) must be a multiple of {total_cores}."
-        )
-    N_div_n = per_core_elements // per_tile_elements
-    chunk = size // num_aie_columns // num_channels  # For offset calculation
-    dtype = bfloat16
-
-    # Define tensor types
-    tensor_ty = np.ndarray[(size,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(per_tile_elements,), np.dtype[dtype]]
-
-    # AIE-array data movement with object fifos
-    of_in1s = [
-        ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-    of_outs = [
-        ObjectFifo(tile_ty, name=f"out_{i}_{j}")
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # AIE Core Function declaration
-    # Both live in softmax.cc, so they name one object: declared separately
-    # they would compile that translation unit twice and each copy would
-    # define both symbols.
-    softmax_source = Path(kernels_dir) / get_kernel_dir(dev) / "softmax.cc"
-    softmax_kernel = declare_kernel(
-        "softmax_bf16",
-        [tile_ty, tile_ty, np.int32],
-        source=softmax_source,
-        bundled_sources=bundled_sources,
-        object_file_name="softmax.o",
-        func_prefix=func_prefix,
-    )
-    mask_kernel = declare_kernel(
-        "mask_bf16",
-        [tile_ty, np.int32, np.int32],
-        source=softmax_source,
-        bundled_sources=bundled_sources,
-        object_file_name="softmax.o",
-        func_prefix=func_prefix,
-    )
-
-    # Vector size source: either a scratchpad Parameter (synced from host each
-    # dispatch) or a write-RTP buffer set via rt.inline_ops at compile time.
-    use_scratchpad = vector_size_parameter is not None
-    vector_size_param = (
-        ScratchpadParameter(vector_size_parameter, np.int32) if use_scratchpad else None
-    )
-
-    def core_body(
-        of_in1, of_out, softmax_kernel, mask_kernel, vector_size_src, barrier
-    ):
-        barrier.wait_for_value(1)
-        # `use_scratchpad` is a compile-time constant, so only one of these
-        # branches is emitted into the core: a scratchpad Parameter read or a
-        # write-RTP buffer load.
-        if use_scratchpad:
-            vector_size = vector_size_src.read()
-        else:
-            vector_size = vector_size_src[0]
-        for _ in range_(N_div_n):
-            elem_in1 = of_in1.acquire(1)
-            elem_out = of_out.acquire(1)
-            mask_kernel(elem_in1, vector_size, per_tile_elements)
-            softmax_kernel(elem_in1, elem_out, per_tile_elements)
-            of_in1.release(1)
-            of_out.release(1)
-
-    rtps = (
-        []
-        if use_scratchpad
-        else [
-            Buffer(
-                np.ndarray[(1,), np.dtype[np.int32]],
-                name=f"rtp_{i}_{j}",
-                use_write_rtp=True,
-            )
-            for i in range(num_aie_columns)
-            for j in range(num_channels)
-        ]
-    )
-
-    barriers = [
-        WorkerRuntimeBarrier()
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Create a worker to run the task on a compute tile
-    def worker_args(i, j):
-        idx = i * num_channels + j
-        per_core_runtime = vector_size_param if use_scratchpad else rtps[idx]
-        return [
-            of_in1s[idx].cons(),
-            of_outs[idx].prod(),
-            softmax_kernel,
-            mask_kernel,
-            per_core_runtime,
-            barriers[idx],
-        ]
-
-    my_workers = [
-        Worker(core_body, worker_args(i, j))
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Create a TensorAccessPattern for each channel
-    # to describe the data movement
-    # The pattern chops the data in equal chunks
-    # and moves them in parallel across the columns
-    # and channels.
-    taps = [
-        TensorAccessPattern(
-            (1, size),
-            chunk * i * num_channels + chunk * j,
-            [1, 1, 1, chunk],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_aie_columns)
-        for j in range(num_channels)
-    ]
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(A, C, in1_prods, out_conses):
-        if use_scratchpad:
-            # The host writes vector_size into the scratchpad via
-            # ParameterScratchpad before each dispatch; sync delivers it to the
-            # per-core parameter buffer.
-            sync_parameters()
-        else:
-            # Set the static (compile-time) run-time parameter controlling how
-            # many elements each core processes.
-            for rtp in rtps:
-                rtp[0] = rtp_vector_size
-
-        for i in range(num_aie_columns * num_channels):
-            barriers[i].set(1)
-
-        # Initialize a group for parallel drain tasks, with fill resources free'd when drains complete.
-        tg = TaskGroup()
-
-        # Fill the input objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                in1_prods[i * num_channels + j].fill(
-                    A,
-                    taps[i * num_channels + j],
-                    group=tg,
-                )
-        # Drain the output objectFIFOs with data
-        for i in range(num_aie_columns):
-            for j in range(num_channels):
-                out_conses[i * num_channels + j].drain(
-                    C,
-                    taps[i * num_channels + j],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    group=tg,
-                )
-        tg.finish()
-
-    rt = Runtime(
-        sequence,
-        [
-            tensor_ty,
-            tensor_ty,
-            [of.prod() for of in of_in1s],
-            [of.cons() for of in of_outs],
-        ],
-    )
-
-    # Place program components (assign them resources on the device) and generate an MLIR module
-    prog = Program(dev, rt, workers=my_workers)
-    maybe_enable_trace(prog, trace_size, my_workers)
-    return prog.resolve_program()
 
 
 # --------------------------------------------------------------------------
