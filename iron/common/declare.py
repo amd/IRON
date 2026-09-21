@@ -513,6 +513,7 @@ class BoundBuffer:
 
     def __init__(self, member: _Buffer, op: "Operator") -> None:
         self.member = member
+        self._op = op
         self.name = member.name
         self.direction = member.direction
         self.shape = _resolve_shape(member.dims, op)
@@ -540,8 +541,27 @@ class BoundBuffer:
             return None
         return getattr(overlay, member.name)
 
+    @property
+    def batch_axes(self) -> int:
+        """Leading ``optional()`` dimensions that are present on this instance."""
+        n = 0
+        for d in self.member.dims:
+            if not isinstance(d, _Optional):
+                break
+            if _resolve_dim(d.ref, self._op) > 1:
+                n += 1
+        return n
+
     def arg_spec(self) -> AIERuntimeArgSpec:
         return AIERuntimeArgSpec(self.direction, tuple(self.shape), self.dtype)
+
+    def __getitem__(self, index) -> "BufferView":
+        """A basic slice of this buffer, for ``rt.fill``/``rt.drain`` in an override.
+
+        A slice start may be a :class:`Scratchpad` value, in which case the
+        transfer's base address is patched per call.
+        """
+        return BufferView(self, index)
 
     def __repr__(self) -> str:
         return (
@@ -549,26 +569,76 @@ class BoundBuffer:
         )
 
 
-class BoundValue:
-    """A per-call value on an operator instance."""
+class BufferView:
+    """``buffer[index]``: a slice of a bound buffer, resolved to a transfer by the build."""
 
-    def __init__(self, member: _Value, op: "Operator") -> None:
+    def __init__(self, buffer: BoundBuffer, index) -> None:
+        self.buffer = buffer
+        self.index = index if isinstance(index, tuple) else (index,)
+        self.offset_by: BoundValue | None = None
+        static = []
+        for idx in self.index:
+            if isinstance(idx, slice) and isinstance(idx.start, BoundValue):
+                if idx.stop is not None or idx.step is not None:
+                    raise ValueError(
+                        f"{buffer.name}[{idx}]: a per-call start takes the whole axis"
+                    )
+                if self.offset_by is not None:
+                    raise ValueError(
+                        f"{buffer.name}: only one axis may start at a per-call value"
+                    )
+                if idx.start.kind != "scratchpad":
+                    raise ValueError(
+                        f"{buffer.name}: {idx.start.name} is {idx.start.kind}; only a "
+                        f"Scratchpad value can move a transfer's base address"
+                    )
+                self.offset_by = idx.start
+                static.append(slice(None))
+            else:
+                static.append(idx)
+        self.static_index = tuple(static)
+
+    def pattern(self) -> tuple[int, list[int], list[int]]:
+        """``(offset, sizes, strides)`` of the static part of the slice."""
+        from .tiling import view
+
+        return view(self.buffer.shape, self.static_index)
+
+    def __repr__(self) -> str:
+        return f"{self.buffer.name}[{self.index}]"
+
+
+class BoundValue:
+    """A per-call value on an operator (or, for a core-read Scratchpad, an overlay)."""
+
+    def __init__(self, member: _Value, owner) -> None:
         self.member = member
         self.name = member.name
         self.kind = member.kind
         self.dtype = member.dtype
+        self.param = None  # the upstream ScratchpadParameter, set by the build
+        self.symbol: str | None = None
 
     def __repr__(self) -> str:
         return f"<{self.kind} {self.name} {np.dtype(self.dtype).name}>"
 
 
 class BoundResident:
+    """A resident on an overlay instance; ``bind()`` names what the preamble writes."""
+
     def __init__(self, member: Resident, overlay: "Overlay") -> None:
         self.member = member
         self.name = member.name
         self.dtype = member.dtype
         self.address = member.address
         self.lock = member.lock
+        self.targets: list[tuple[Any, int]] = []
+
+    def bind(self, buffers, index: int = 0) -> None:
+        """Bind to one runtime-parameter buffer, or one per worker; the preamble writes ``[index]``."""
+        if not isinstance(buffers, (list, tuple)):
+            buffers = [buffers]
+        self.targets.extend((b, index) for b in buffers)
 
     def __repr__(self) -> str:
         return f"<resident {self.name} {np.dtype(self.dtype).name}>"
@@ -776,10 +846,11 @@ def operator(cls: type) -> type:
 
 def _finish_overlay(cls: type) -> None:
     for m in cls._members:  # type: ignore[attr-defined]
-        if isinstance(m, (_Buffer, _Value)):
+        if isinstance(m, (_Buffer, DispatchTime)):
             raise DeclarationError(
-                f"{cls.__name__}.{m.name}: an Overlay declares streams and residents; "
-                f"buffers and per-call values belong on the Operator"
+                f"{cls.__name__}.{m.name}: an Overlay declares streams, residents and "
+                f"core-read Scratchpad values; buffers and DispatchTime values belong "
+                f"on the Operator"
             )
 
 
@@ -900,11 +971,15 @@ class Overlay:
         """
         return self
 
-    def design(self, dev) -> list:
-        """Build the array for ``dev`` and return its workers.
+    def design(self, target) -> list:
+        """Build the array for ``target`` and return its workers.
 
-        Must call ``.bind(handle)`` on every declared stream (or on every slot
-        of a ``per=`` stream) with the shim end of the fifo that carries it.
+        ``target`` (:class:`iron.common.build.Target`) carries the device,
+        the kernel tree, and ``kernel()``/``barrier()`` helpers that apply
+        the fusion prefix so the overlay never sees it. Must call
+        ``.bind(handle)`` on every declared stream (or on every slot of a
+        ``per=`` stream) with the shim end of the fifo that carries it, and
+        ``.bind(buffers)`` on every declared resident.
         """
         raise NotImplementedError(f"{type(self).__name__}.design() is not implemented")
 
@@ -973,6 +1048,11 @@ class Overlay:
             if isinstance(m, Resident)
         }
 
+    @property
+    def values(self) -> list[BoundValue]:
+        """Core-read per-call values this overlay declares."""
+        return [self._bound[m.name] for m in self._members if isinstance(m, _Value)]
+
     def _bind(self) -> None:
         bound: dict[str, Any] = {}
         for m in self._members:
@@ -980,6 +1060,8 @@ class Overlay:
                 bound[m.name] = BoundStream(m, self)
             elif isinstance(m, Resident):
                 bound[m.name] = BoundResident(m, self)
+            elif isinstance(m, _Value):
+                bound[m.name] = BoundValue(m, self)
         self._bound = bound
 
     def name_parts(self) -> list[str]:
@@ -1044,8 +1126,17 @@ class Operator(MLIROperator, Generic[O]):
         )
 
     def design(self, rt) -> None:
-        """Override to write the runtime sequence by hand; otherwise it is derived."""
+        """Override to write the runtime sequence by hand; otherwise it is derived.
+
+        ``rt`` is an :class:`iron.common.build.Sequence`: ``rt.fill(stream,
+        view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
+        (residents, barriers, parameter sync) has already run.
+        """
         raise NotImplementedError
+
+    def residents(self) -> dict[str, int]:
+        """Values for the overlay's residents (trip counts, RTPs), from the extents."""
+        return {}
 
     @classmethod
     def has_design_override(cls) -> bool:
