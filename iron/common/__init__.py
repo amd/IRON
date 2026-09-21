@@ -34,6 +34,7 @@ from .declare import (
     DispatchTime,
     Resident,
     Shim,
+    Xclbin,
     Untunable,
     Incompatible,
     DeclarationError,

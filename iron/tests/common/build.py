@@ -479,3 +479,93 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
     assert (filled, drained) == (256, 256)
     assert {name for _, name, *_ in log} == {"s3", "d3"}
     assert log[0] == ("fill", "s3", 0, (32, 1, 1, 4), True)
+
+
+# --------------------------------------------------------------------------
+# mm_prebuilt: a foreign overlay's sequence, device-free
+# --------------------------------------------------------------------------
+
+
+class _ForeignRecorder:
+    def __init__(self):
+        self.log, self.n = [], 0
+
+    def write32(self, address, value, col, row):
+        self.log.append(("w", address, value, col, row))
+
+    def start(self, key, buffer, offset, sizes, strides):
+        self.n += 1
+        self.log.append(("start", key, buffer, offset, tuple(sizes), tuple(strides)))
+        return (key, self.n)
+
+    def await_(self, task):
+        self.log.append(("await", task))
+
+
+def test_foreign_overlay_declares_its_pins_and_parameter_block():
+    from iron.common.declare import DeclarationError, Xclbin
+    from iron.operators.flm.mm_prebuilt.op import MMPrebuiltOverlay
+
+    ov = MMPrebuiltOverlay()
+    assert ov.foreign.filename == "flm_mm_f81eba71.xclbin"
+    assert [(p.col, p.channel) for p in (ov.a.pin(r) for r in range(4))] == [
+        (0, 0),
+        (2, 0),
+        (4, 0),
+        (6, 0),
+    ]
+    assert (ov.b.pin(3).col, ov.b.pin(3).channel) == (3, 1)
+    assert (ov.rtp.address, ov.rtp.lock) == (4096, 10)
+
+    with pytest.raises(DeclarationError, match="pinned with via="):
+
+        @operator
+        class Unpinned(Overlay):
+            image = Xclbin(url="u", sha256="s", filename="f")
+            s = StreamIn(64)
+
+
+def test_mm_prebuilt_sequence_writes_every_core_then_streams_in_consume_order():
+    from iron.common.foreign import LOCK_ADDRESS_BASE, run_sequence
+    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt, MMPrebuiltOverlay
+
+    ov = MMPrebuiltOverlay()
+    op = MMPrebuilt(ov, M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
+    assert op.residents() == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
+    rec = _ForeignRecorder()
+    cores = [(c, r) for r in range(2, 6) for c in range(8)]
+    run_sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"}, cores, rec)
+    writes = [e for e in rec.log if e[0] == "w"]
+    # 8 words on 32 cores, then one lock release per core, before any DMA.
+    assert len(writes) == 32 * 8 + 32
+    assert writes[0] == ("w", 4096, 2, 0, 2) and writes[7] == (
+        "w",
+        4124,
+        1073741824,
+        0,
+        2,
+    )
+    assert writes[-1] == ("w", LOCK_ADDRESS_BASE + 16 * 10, 1, 7, 5)
+    assert rec.log.index(writes[-1]) < rec.log.index(
+        next(e for e in rec.log if e[0] == "start")
+    )
+    starts = [e for e in rec.log if e[0] == "start"]
+    # N = 9 column-blocks: one full sweep (4 A + 8 B + 8 C) and a trailing
+    # block on column 0 alone, which still receives A on every row.
+    assert len(starts) == 20 + 6
+    assert starts[:3] == [
+        ("start", ("a", 0), "dA", 0, (1, 2, 64, 512), (0, 512, 1024, 1)),
+        ("start", ("b", 0), "dB", 0, (1, 1, 1, 131072), (0, 0, 0, 1)),
+        ("start", ("c", 0), "dC", 0, (1, 1, 256, 128), (0, 0, 1152, 1)),
+    ]
+    assert starts[5] == (
+        "start",
+        ("a", 1),
+        "dA",
+        64 * 1024,
+        (1, 2, 64, 512),
+        (0, 512, 1024, 1),
+    )
+    # Every task is awaited exactly once, the last ones by the trailing finish.
+    awaited = [e[1] for e in rec.log if e[0] == "await"]
+    assert sorted(awaited) == sorted((k, n) for n, (_, k, *_) in enumerate(starts, 1))

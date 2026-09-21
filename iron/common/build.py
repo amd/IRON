@@ -374,6 +374,12 @@ def build_design(
 
     op = op.tuned(dev)
     ov = op.ov
+    if ov.foreign is not None:
+        # A downloaded image: no array to build, only the sequence against
+        # its declared pins (iron.common.foreign).
+        from .foreign import build_foreign
+
+        return build_foreign(dev, op)
     target = Target(dev, kernels_dir, func_prefix, verbose, trace_size)
     target.base_dir = getattr(op.context, "base_dir", None)
 

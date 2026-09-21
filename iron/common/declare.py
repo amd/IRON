@@ -236,6 +236,27 @@ class Shim:
         return f"Shim(col={self.col}, channel={self.channel})"
 
 
+class Xclbin:
+    """An overlay someone else built: a downloaded xclbin, pinned by digest.
+
+    Declared as a class attribute of an :class:`Overlay` that has no
+    ``design()``. Every stream of such an overlay is pinned with ``via=`` and
+    every resident has an ``address``, because nothing else says where its
+    endpoints are; the library emits the sequence against those pins.
+    """
+
+    def __init__(
+        self, *, url: str, sha256: str, filename: str, kernel_name: str = "MLIR_AIE"
+    ) -> None:
+        self.url = url
+        self.sha256 = sha256
+        self.filename = filename
+        self.kernel_name = kernel_name
+
+    def __repr__(self) -> str:
+        return f"Xclbin({self.filename})"
+
+
 class _Member:
     """Base of everything declared unannotated in an ``@operator`` class body.
 
@@ -521,6 +542,15 @@ class BoundStream:
     def handles(self) -> list[Any]:
         return [self._require(i) for i in range(self.count)]
 
+    def pin(self, index: int = 0) -> Shim | None:
+        """The declared shim endpoint of slot ``index``, if pinned."""
+        via = self.via
+        if via is None:
+            return None
+        if isinstance(via, Shim):
+            return via if self.count == 1 else None
+        return via[index]
+
     def _require(self, index: int):
         h = self._handles[index]
         if h is None:
@@ -551,6 +581,10 @@ class _StreamSlot:
     @property
     def name(self) -> str:
         return f"{self.stream.name}{self.index}"
+
+    @property
+    def shim(self) -> Shim | None:
+        return self.stream.pin(self.index)
 
 
 class BoundBuffer:
@@ -935,12 +969,27 @@ def operator(cls: type) -> type:
 
 
 def _finish_overlay(cls: type) -> None:
+    images = [v for v in vars(cls).values() if isinstance(v, Xclbin)]
+    if len(images) > 1:
+        raise DeclarationError(f"{cls.__name__} declares more than one Xclbin")
+    if images:
+        cls._foreign = images[0]  # type: ignore[attr-defined]
     for m in cls._members:  # type: ignore[attr-defined]
         if isinstance(m, (_Buffer, DispatchTime)):
             raise DeclarationError(
                 f"{cls.__name__}.{m.name}: an Overlay declares streams, residents and "
                 f"core-read Scratchpad values; buffers and DispatchTime values belong "
                 f"on the Operator"
+            )
+        if images and isinstance(m, _Stream) and m.via is None:
+            raise DeclarationError(
+                f"{cls.__name__}.{m.name}: a stream of a foreign overlay must be "
+                f"pinned with via=; nothing else says which shim it uses"
+            )
+        if images and isinstance(m, Resident) and m.address is None:
+            raise DeclarationError(
+                f"{cls.__name__}.{m.name}: a resident of a foreign overlay needs "
+                f"an address; the sequence writes it there"
             )
 
 
@@ -1044,6 +1093,12 @@ class Overlay:
     _dim_fields: ClassVar[tuple[str, ...]] = ()
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
     _name_aliases: ClassVar[dict[str, str]] = {}
+    _foreign: ClassVar[Xclbin | None] = None
+
+    @property
+    def foreign(self) -> Xclbin | None:
+        """The downloaded image this overlay is, if IRON did not build it."""
+        return type(self)._foreign
 
     def __post_init__(self) -> None:
         self._tuned = False
