@@ -1,79 +1,41 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
+"""Memory copy, in the declared form.
 
-from dataclasses import dataclass, field
-from typing import ClassVar, Dict
+Memcpy is designed to use every column's shimDMA in-out pairs to fully
+saturate DDR bandwidth. It is a superset of passthrough_kernel and
+passthrough_dmas, so it serves as a microbenchmark and as a template for
+multi-core unary operations.
 
-from iron.common import (
-    MLIROperator,
-    same_shape_unary,
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-import aie.utils as aie_utils
-from ml_dtypes import bfloat16
-from dataclasses import dataclass
-from typing import List
-import numpy as np
+:class:`MemCopyOverlay` is ``num_cores`` cores (or, with ``bypass``, memtile
+forwards) each streaming ``line_size``-element lines; the cores loop
+forever, so no trip count reaches the array. :class:`MemCopy` copies a flat
+``size`` buffer through it: whole partitions split evenly across the cores,
+and a remainder handled by re-reading already-copied data to pad a full
+line, which is the hand-written sequence kept as an override.
+"""
+
+import dataclasses
 import math
-from aie.iron import (
-    TaskGroup,
-    ObjectFifo,
-    Program,
-    Runtime,
-    Worker,
-)
-from iron.operators._kernels import declare_kernel
-from aie.iron.device import Tile, NPU1, NPU2
-from aie.helpers.taplib.tap import TensorAccessPattern
-from aie.iron.controlflow import range_
-from aie.iron.runtime.endpoint import RuntimeEndpoint
-from aie.iron.device import AnyShimTile
-from iron.operators._trace import maybe_enable_trace
+from dataclasses import dataclass
+from typing import ClassVar, Dict, List
+
+import numpy as np
 import torch
 
-
-@dataclass
-class MemCopy(MLIROperator):
-    """AIE-accelerated memory copy operator."""
-
-    size: int
-    num_cores: int
-    num_channels: int
-    bypass: bool
-    tile_size: int
-    context: object = field(default=None, repr=False)
-
-    _name_aliases: ClassVar[Dict[str, str]] = {
-        **MLIROperator._name_aliases,
-        "num_cores": "cores",
-        "num_channels": "chans",
-        "tile_size": "tile",
-    }
-
-    def __post_init__(self):
-        MLIROperator.__init__(self, context=self.context)
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                fn=my_mem_copy,
-                bind_from=self,
-            ),
-        )
-
-    @staticmethod
-    def arg_spec(size):
-        return same_shape_unary(size)
-
-
-# --------------------------------------------------------------------------
-# The MLIR this operator generates.
-# --------------------------------------------------------------------------
+from iron.common.declare import (
+    In,
+    Operator,
+    Out,
+    Overlay,
+    StreamIn,
+    StreamOut,
+    dim,
+    operator,
+    tunable,
+)
+from iron.common.tiling import Access
 
 # The maximum value the 4th dimension of DMA BD can be set
 TAP_REPEAT_MAX = 64
@@ -81,44 +43,119 @@ TAP_REPEAT_MAX = 64
 TASK_GROUP_SIZE = 4
 
 
+# --------------------------------------------------------------------------
+# The overlay: cores (or forwards) over fixed lines.
+# --------------------------------------------------------------------------
+
+
+@operator
+class MemCopyOverlay(Overlay):
+    """``num_cores`` copy paths, at most ``num_channels`` per column."""
+
+    num_cores: int = tunable()
+    num_channels: int = tunable()
+    tile_size: int = tunable()
+    bypass: bool = False
+    # min(tile_size, 8192): one 16 KB line at most; filled by tuning.
+    line_size: int | None = tunable(None, repr=False)
+
+    s = StreamIn(line_size, per=num_cores)
+    d = StreamOut(line_size, per=num_cores)
+
+    _name_aliases: ClassVar[Dict[str, str]] = {
+        "num_cores": "cores",
+        "num_channels": "chans",
+        "tile_size": "tile",
+    }
+
+    def tuning(self, dev) -> "MemCopyOverlay":
+        return dataclasses.replace(self, line_size=min(self.tile_size, 8192))
+
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
+        from aie.iron.device import Tile
+
+        line_type = self.s.tile
+        line_size, num_cores, num_channels = (
+            self.line_size,
+            self.num_cores,
+            self.num_channels,
+        )
+        fifodepth = 1 if line_size > 4096 else 2
+
+        of_ins = [
+            ObjectFifo(line_type, name=f"in{i}", depth=fifodepth)
+            for i in range(num_cores)
+        ]
+        # Bypass path is a special case where we don't need to create a
+        # Worker: the ObjectFifo is forwarded through a MemTile.
+        if self.bypass:
+            of_outs = [of_ins[i].cons().forward() for i in range(num_cores)]
+            workers = []
+        else:
+            of_outs = [
+                ObjectFifo(line_type, name=f"out{i}", depth=fifodepth)
+                for i in range(num_cores)
+            ]
+            mem_copy_fcn = target.kernel(
+                "passThroughLine",
+                [line_type, line_type, np.int32],
+                source=target.kernels_dir / "generic" / "passThrough.cc",
+                compile_flags=["-DBIT_WIDTH=16"],
+            )
+            num_lines = self.tile_size // line_size
+
+            def core_fn(of_in, of_out, mem_copy_line):
+                for _ in range_(num_lines):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    mem_copy_line(elem_in, elem_out, line_size)
+                    of_in.release(1)
+                    of_out.release(1)
+
+            # Place at most ``num_channels`` workers per column.
+            workers = [
+                Worker(
+                    core_fn,
+                    [of_ins[i].cons(), of_outs[i].prod(), mem_copy_fcn],
+                    tile=Tile(i // num_channels, 2 + (i % num_channels)),
+                )
+                for i in range(num_cores)
+            ]
+        for i in range(num_cores):
+            self.s[i].bind(of_ins[i].prod())
+            self.d[i].bind(of_outs[i].cons())
+        return workers
+
+
+# --------------------------------------------------------------------------
+# The operator: a flat buffer through it.
+# --------------------------------------------------------------------------
+
+
 @dataclass
 class PartialWorkloadConfig:
     """Configuration for partial workload processing."""
 
-    full_taps: List[TensorAccessPattern]
+    full_taps: List[Access]
     num_cores_with_no_tiles: int
     num_cores_with_full_tiles: int
     padding_tap_repeats: List[int] | None = None
-    padding_taps: List[TensorAccessPattern] | None = None
-    partial_tap: TensorAccessPattern | None = None
+    padding_taps: List[Access] | None = None
+    partial_tap: Access | None = None
+
+
+def _linear(size, offset, run, repeat=1) -> Access:
+    return Access(size, offset, (repeat, 1, 1, run), (0, 0, 0, 1))
 
 
 def create_whole_workload_taps(
     size: int, num_cores: int, line_size: int, whole_partition_size: int
-) -> List[TensorAccessPattern]:
-    """
-    Create TensorAccessPatterns for whole workload processing.
-
-    Args:
-        size: Total size of the workload
-        num_cores: Number of cores to distribute work across
-        line_size: Size of each line/tile
-        whole_partition_size: Size of the evenly divisible partition
-
-    Returns:
-        taps: Lists of TensorAccessPatterns
-    """
+) -> List[Access]:
+    """One contiguous chunk of the evenly divisible partition per core."""
     chunk_size = whole_partition_size // num_cores
-    taps = [
-        TensorAccessPattern(
-            (1, size),
-            chunk_size * i,
-            [1, 1, 1, chunk_size],
-            [0, 0, 0, 1],
-        )
-        for i in range(num_cores)
-    ]
-    return taps
+    return [_linear(size, chunk_size * i, chunk_size) for i in range(num_cores)]
 
 
 def create_partial_workload_config(
@@ -129,57 +166,37 @@ def create_partial_workload_config(
     whole_partition_size: int,
     partial_work_size: int,
 ) -> PartialWorkloadConfig:
-    """
-    Create configuration for partial workload processing.
+    """How the remainder after the whole partitions is spread over the cores.
 
-    Args:
-        size: Total size of the workload
-        num_cores: Number of cores to distribute work across
-        line_size: Size of each line/tile
-        minimum_work_size: Size of the minimum workload that the NPU is configured to process
-        whole_partition_size: Size of the evenly divisible partition
-        partial_work_size: Size of the remaining partial workload
-
-    Returns:
-        PartialWorkloadConfig: Configuration object containing all partial workload parameters
+    ``minimum_work_size`` is what the array is configured to process at once
+    (one line per core). A remainder is padded to that by re-reading data
+    already copied, so the fill/drain calls are not repeated per line.
     """
-    # If the workload is larger than the minimum, use part of the input data that's already been
-    # processed for filling the objectfifos to reduce the number of times to repeat fill/drain calls
     if size > minimum_work_size:
         partial_work_size = minimum_work_size
         start_offset = size - minimum_work_size
     else:
         start_offset = whole_partition_size
 
-    # Calculate core distribution
     num_cores_with_full_tiles = partial_work_size // line_size
     partial_tile_size = partial_work_size % line_size
     num_cores_with_no_tiles = (
         num_cores - num_cores_with_full_tiles - (1 if partial_tile_size > 0 else 0)
     )
-
-    # Create TAPs for cores with full tiles
     full_taps = [
-        TensorAccessPattern(
-            (1, size),
-            line_size * i + start_offset,
-            [1, 1, 1, line_size],
-            [0, 0, 0, 1],
-        )
+        _linear(size, line_size * i + start_offset, line_size)
         for i in range(num_cores_with_full_tiles)
     ]
-
-    # Handle partial tile if present
     config = PartialWorkloadConfig(
         full_taps=full_taps,
         num_cores_with_no_tiles=num_cores_with_no_tiles,
         num_cores_with_full_tiles=num_cores_with_full_tiles,
     )
-
     if partial_tile_size > 0:
         config.padding_tap_repeats = []
         config.padding_taps = []
-        # Calculations for padding add processing partial tile
+        # The partial tile is padded to a full line with repeats of a common
+        # factor of the two sizes, largest repeat count first.
         partial_tile_offset = line_size * num_cores_with_full_tiles + start_offset
         padding_needed = line_size - partial_tile_size
         highest_common_factor_pad = math.gcd(partial_tile_size, padding_needed)
@@ -190,278 +207,134 @@ def create_partial_workload_config(
             padding_tap_repeat = math.floor(padding_needed / padding_size)
             config.padding_tap_repeats.append(padding_tap_repeat)
             config.padding_taps.append(
-                TensorAccessPattern(
-                    (1, size),
+                _linear(
+                    size,
                     partial_tile_offset,
-                    [2**tap_repeat_exp, 1, 1, highest_common_factor_pad],
-                    [0, 0, 0, 1],
+                    highest_common_factor_pad,
+                    repeat=2**tap_repeat_exp,
                 )
             )
             padding_needed = padding_needed - (padding_size * padding_tap_repeat)
-        config.partial_tap = TensorAccessPattern(
-            (1, size),
-            partial_tile_offset,
-            [1, 1, 1, partial_tile_size],
-            [0, 0, 0, 1],
-        )
-
+        config.partial_tap = _linear(size, partial_tile_offset, partial_tile_size)
     return config
 
 
-#
-# Memcpy is designed to use every column's shimDMA in-out pairs
-# to fully saturate DDR bandwidth. It is a superset of passthrough_kernel
-# and passthrough_dmas. As such, it can be used as a microbenchmark or as
-# a template for multi-core unary operations.
-#
+@operator
+class MemCopy(Operator[MemCopyOverlay]):
+    """AIE-accelerated memory copy operator."""
 
+    size: int = dim()
 
-def my_mem_copy(
-    dev,
-    size,
-    num_cores,
-    num_channels,
-    bypass,
-    tile_size,
-    trace_size,
-    func_prefix="",
-    kernels_dir=None,
-):
-    # --------------------------------------------------------------------------
-    # Configuration
-    # --------------------------------------------------------------------------
-    xfr_dtype = bfloat16
-    line_size = 8192 if tile_size > 8192 else tile_size
-    fifodepth = 1 if line_size > 4096 else 2
-    line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
-    transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
+    x = In(size, to=MemCopyOverlay.s)
+    y = Out(size, from_=MemCopyOverlay.d)
 
-    # --------------------------------------------------------------------------
-    # In-Array Data Movement
-    # --------------------------------------------------------------------------
+    # -- legacy accessors ------------------------------------------------------
 
-    # Dataflow with ObjectFifos
-    of_ins = [
-        ObjectFifo(line_type, name=f"in{i}", depth=fifodepth) for i in range(num_cores)
-    ]
-    # Bypass path is a special case where we don't need to create a Worker
-    # and we can use the ObjectFifo directly to read and write the data with
-    # a `forward` through a MemTile.
-    if bypass:
-        of_outs = [of_ins[i].cons().forward() for i in range(num_cores)]
-    else:
-        of_outs = [
-            ObjectFifo(line_type, name=f"out{i}", depth=fifodepth)
-            for i in range(num_cores)
-        ]
+    @property
+    def num_cores(self) -> int:
+        return self.ov.num_cores
 
-        # --------------------------------------------------------------------------
-        # Task core will run
-        # --------------------------------------------------------------------------
+    @property
+    def num_channels(self) -> int:
+        return self.ov.num_channels
 
-        # External, binary kernel definition
-        mem_copy_fcn = declare_kernel(
-            "passThroughLine",
-            [line_type, line_type, np.int32],
-            source=Path(kernels_dir) / "generic" / "passThrough.cc",
-            compile_flags=["-DBIT_WIDTH=16"],
-            func_prefix=func_prefix,
-        )
+    @property
+    def bypass(self) -> bool:
+        return self.ov.bypass
 
-        # Task for the core to perform
-        num_lines = tile_size // line_size
+    @property
+    def tile_size(self) -> int:
+        return self.ov.tile_size
 
-        def core_fn(of_in, of_out, mem_copy_line):
-            for _ in range_(num_lines):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                mem_copy_line(elem_in, elem_out, line_size)
-                of_in.release(1)
-                of_out.release(1)
+    # -- the runtime sequence --------------------------------------------------
 
-        # Create a worker to perform the task.
-        # Place at most ``num_channels`` workers per column.
-        my_workers = [
-            Worker(
-                core_fn,
-                [
-                    of_ins[i].cons(),
-                    of_outs[i].prod(),
-                    mem_copy_fcn,
-                ],
-                tile=Tile(i // num_channels, 2 + (i % num_channels)),
-            )
-            for i in range(num_cores)
-        ]
+    def design(self, rt):
+        ov = self.ov
+        size, num_cores, line_size = self.size, ov.num_cores, ov.line_size
+        s, d = ov.s, ov.d
+        x, y = self.x, self.y
 
-    # --------------------------------------------------------------------------
-    # DRAM-NPU data movement and work dispatch
-    # --------------------------------------------------------------------------
-
-    # Runtime operations to move data to/from the AIE-array
-    def sequence(a_in, b_out, of_ins_prods, of_outs_conss):
-        # Calculate how much of workload can be partitioned evenly and what's remaining
-        minimum_work_size = (
-            line_size * num_cores
-        )  # Workload size the NPU is configured for
+        # How much of the workload partitions evenly, and what remains.
+        minimum_work_size = line_size * num_cores  # what the array is configured for
         num_whole_partitions = math.floor(size / minimum_work_size)
         whole_partition_size = minimum_work_size * num_whole_partitions
         partial_work_size = size - whole_partition_size
 
-        # Runtime for the part of the workload partitionable to all cores utilized
         if num_whole_partitions > 0:
             taps = create_whole_workload_taps(
                 size, num_cores, line_size, whole_partition_size
             )
+            with rt.group():
+                for i in range(num_cores):
+                    rt.fill(s[i], (x, taps[i]))
+                for i in range(num_cores):
+                    rt.drain(d[i], (y, taps[i]), wait=True)
 
-            tg_out = TaskGroup()  # Use taskgroup for parallel drain tasks
-            # Fill the input objectFIFOs with data
-            for i in range(num_cores):
-                of_ins_prods[i].fill(a_in, taps[i], group=tg_out)
-            # Drain the output objectFIFOs with data
-            for i in range(num_cores):
-                of_outs_conss[i].drain(
-                    b_out,
-                    taps[i],
-                    wait=True,  # wait for the transfer to complete and data to be available
-                    group=tg_out,
-                )
-            tg_out.finish()
+        if partial_work_size == 0:
+            return
+        partial = create_partial_workload_config(
+            size,
+            num_cores,
+            line_size,
+            minimum_work_size,
+            whole_partition_size,
+            partial_work_size,
+        )
 
-        # Runtime for the part of the workload partially partitionable to the cores utilized
-        if partial_work_size > 0:
-            partial_config = create_partial_workload_config(
-                size,
-                num_cores,
-                line_size,
-                minimum_work_size,
-                whole_partition_size,
-                partial_work_size,
-            )
-
-            # Use a while loop below so that the tasks for sending full tiles can
-            # be grouped together in a for-loop
-            objfifo_idx = 0
-            while objfifo_idx < num_cores:
-                if objfifo_idx < partial_config.num_cores_with_no_tiles:
-                    if num_whole_partitions == 0:
-                        # Resolving the IRON program requires all objectfifos to have
-                        # a defined connection
-                        for j in range(partial_config.num_cores_with_no_tiles):
-                            ofh = of_ins[objfifo_idx + j].prod()
-                            ofh.endpoint = RuntimeEndpoint(AnyShimTile)
-                            rt._fifos.add(ofh)
-                            ofh = of_outs[objfifo_idx + j].cons()
-                            ofh.endpoint = RuntimeEndpoint(AnyShimTile)
-                            rt._fifos.add(ofh)
-                    objfifo_idx += partial_config.num_cores_with_no_tiles
-                elif (
-                    objfifo_idx == num_cores - 1
-                    and partial_config.partial_tap is not None
-                ):
-                    # Fill the last objfifo with padding+real data
-                    tg_out = TaskGroup()
-                    tg_count = 0
-                    for padding_tap_repeat, padding_tap in zip(
-                        partial_config.padding_tap_repeats, partial_config.padding_taps
-                    ):
-                        for _ in range(padding_tap_repeat):
-                            if tg_count % TASK_GROUP_SIZE == 0:
-                                of_ins_prods[objfifo_idx].fill(
-                                    a_in,
-                                    padding_tap,
-                                    wait=True,
-                                    group=tg_out,
-                                )
-                                tg_out.finish()
-                                tg_out = TaskGroup()
-                            else:
-                                of_ins_prods[objfifo_idx].fill(
-                                    a_in,
-                                    padding_tap,
-                                    group=tg_out,
-                                )
-                            tg_count += 1
-                    if tg_count % TASK_GROUP_SIZE == 0:
-                        of_ins_prods[objfifo_idx].fill(
-                            a_in,
-                            partial_config.partial_tap,
-                            wait=True,
-                            group=tg_out,
-                        )
-                        tg_out.finish()
-                        tg_out = TaskGroup()
+        def padded(verb, slot, buf):
+            """The padding repeats then the partial tile on one fifo, in
+            groups of TASK_GROUP_SIZE transfers, each group awaited."""
+            tg = rt.new_group()
+            count = 0
+            for repeats, tap in zip(partial.padding_tap_repeats, partial.padding_taps):
+                for _ in range(repeats):
+                    if count % TASK_GROUP_SIZE == 0:
+                        verb(slot, (buf, tap), wait=True, group=tg)
+                        tg.finish()
+                        tg = rt.new_group()
                     else:
-                        of_ins_prods[objfifo_idx].fill(
-                            a_in,
-                            partial_config.partial_tap,
-                            group=tg_out,
-                        )
-                    tg_count += 1
-                    # Drain the last objfifo with padding+real data
-                    for padding_tap_repeat, padding_tap in zip(
-                        partial_config.padding_tap_repeats, partial_config.padding_taps
-                    ):
-                        for _ in range(padding_tap_repeat):
-                            if tg_count % TASK_GROUP_SIZE == 0:
-                                of_outs_conss[objfifo_idx].drain(
-                                    b_out,
-                                    padding_tap,
-                                    wait=True,
-                                    group=tg_out,
-                                )
-                                tg_out.finish()
-                                tg_out = TaskGroup()
-                            else:
-                                of_outs_conss[objfifo_idx].drain(
-                                    b_out,
-                                    padding_tap,
-                                    group=tg_out,
-                                )
-                            tg_count += 1
-                    of_outs_conss[objfifo_idx].drain(
-                        b_out,
-                        partial_config.partial_tap,
-                        wait=True,
-                        group=tg_out,
-                    )
-                    tg_out.finish()
-                    objfifo_idx += 1
-                else:
-                    tg_out = TaskGroup()  # Use taskgroup for parallel drain tasks
-                    for j in range(partial_config.num_cores_with_full_tiles):
-                        # Fill the input objectFIFOs with valid data
-                        of_ins_prods[objfifo_idx + j].fill(
-                            a_in,
-                            partial_config.full_taps[j],
-                            group=tg_out,
-                        )
-                    for j in range(partial_config.num_cores_with_full_tiles):
-                        # Drain the output objectFIFOs with valid data
-                        of_outs_conss[objfifo_idx + j].drain(
-                            b_out,
-                            partial_config.full_taps[j],
-                            wait=True,
-                            group=tg_out,
-                        )
-                    tg_out.finish()
-                    objfifo_idx += partial_config.num_cores_with_full_tiles
+                        verb(slot, (buf, tap), wait=False, group=tg)
+                    count += 1
+            return tg, count
 
-    rt = Runtime(
-        sequence,
-        [
-            transfer_type,
-            transfer_type,
-            [of.prod() for of in of_ins],
-            [of.cons() for of in of_outs],
-        ],
-    )
-    # Place components (assign them resources on the device) and generate an MLIR module
-    # bypass means the DMAs run without any compute worker
-    prog = Program(dev, rt, workers=None if bypass else my_workers)
-    if not bypass:
-        maybe_enable_trace(prog, trace_size, my_workers)
-    return prog.resolve_program()
+        # A while loop, so the cores with full lines are grouped together.
+        idx = 0
+        while idx < num_cores:
+            if idx < partial.num_cores_with_no_tiles:
+                # Cores with no work: their fifos are placed by the build.
+                idx += partial.num_cores_with_no_tiles
+            elif idx == num_cores - 1 and partial.partial_tap is not None:
+                # Fill the last fifo with padding + real data
+                tg, count = padded(rt.fill, s[idx], x)
+                if count % TASK_GROUP_SIZE == 0:
+                    rt.fill(s[idx], (x, partial.partial_tap), wait=True, group=tg)
+                    tg.finish()
+                    tg = rt.new_group()
+                else:
+                    rt.fill(s[idx], (x, partial.partial_tap), wait=False, group=tg)
+                count += 1
+                # Drain it the same way, continuing the same count.
+                for repeats, tap in zip(
+                    partial.padding_tap_repeats, partial.padding_taps
+                ):
+                    for _ in range(repeats):
+                        if count % TASK_GROUP_SIZE == 0:
+                            rt.drain(d[idx], (y, tap), wait=True, group=tg)
+                            tg.finish()
+                            tg = rt.new_group()
+                        else:
+                            rt.drain(d[idx], (y, tap), wait=False, group=tg)
+                        count += 1
+                rt.drain(d[idx], (y, partial.partial_tap), wait=True, group=tg)
+                tg.finish()
+                idx += 1
+            else:
+                with rt.group():
+                    for j in range(partial.num_cores_with_full_tiles):
+                        rt.fill(s[idx + j], (x, partial.full_taps[j]))
+                    for j in range(partial.num_cores_with_full_tiles):
+                        rt.drain(d[idx + j], (y, partial.full_taps[j]), wait=True)
+                idx += partial.num_cores_with_full_tiles
 
 
 # --------------------------------------------------------------------------

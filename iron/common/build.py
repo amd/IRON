@@ -150,6 +150,9 @@ class Sequence:
         self.ov = ov
         self._rt_data = rt_data
         self._group = None
+        # The shim handles this sequence issued a transfer on; the build
+        # places the declared ones it did not touch (see build_design).
+        self.used: set = set()
 
     # -- transfers ---------------------------------------------------------
 
@@ -161,6 +164,7 @@ class Sequence:
 
     def _transfer(self, verb: str, stream, what, group, wait: bool, offset_by=None):
         handle = self._handle(stream)
+        self.used.add(id(handle))
         buffer, accesses, sliced_by = self._resolve(what)
         offset_by = offset_by or sliced_by
         if offset_by is not None and offset_by.param is None:
@@ -401,12 +405,23 @@ def build_design(
 
     def sequence(*args):
         rt_data = {b.name: a for b, a in zip(buffers, args)}
-        rt = Sequence(op, ov, rt_data)
-        _preamble(rt, op, ov, target)
+        seq = Sequence(op, ov, rt_data)
+        _preamble(seq, op, ov, target)
         if op.has_design_override():
-            op.design(rt)
+            op.design(seq)
         else:
-            _derived(rt, op, ov)
+            _derived(seq, op, ov)
+        # A declared stream slot this extent never transfers on (mem_copy's
+        # idle cores at a small size) still needs a shim endpoint, or the
+        # program cannot be resolved. Place it on any shim tile.
+        idle = [h for h in handles if id(h) not in seq.used]
+        if idle:
+            from aie.iron.device import AnyShimTile
+            from aie.iron.runtime.endpoint import RuntimeEndpoint
+
+            for h in idle:
+                h.endpoint = RuntimeEndpoint(AnyShimTile)
+                rt._fifos.add(h)
 
     rt = Runtime(sequence, fn_args + params)
     prog = Program(ov.device(target), rt, workers=workers)

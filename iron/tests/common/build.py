@@ -437,3 +437,45 @@ def test_flm_gemm_split_sequence_drains_one_row_block_at_a_time(flm):
     drains = [e for e in log if e[0] == "drain"]
     assert len(drains) == 20 * 8 * 2  # blocks x columns x row-blocks
     assert all(sizes == (1, 1, 256, 64) for _, _, _, sizes, _ in drains)
+
+
+def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
+    # mem_copy/op.py: whole partitions split evenly; the remainder is padded
+    # to one line per core by re-reading copied data, in awaited groups of
+    # four transfers on the last fifo.
+    from iron.operators.mem_copy.op import MemCopy
+
+    monkeypatch.setattr(Access, "tap", lambda self: self)
+
+    class Dev:
+        def resolve(self):
+            class R:
+                name = "npu2"
+
+            return R()
+
+    def run(size):
+        op = MemCopy(
+            size=size, num_cores=4, num_channels=1, bypass=False, tile_size=256
+        ).tuned(Dev())
+        log = _record(op.ov)
+        op.design(Sequence(op, op.ov, {"x": "dx", "y": "dy"}))
+        moved = lambda verb: sum(
+            s[0] * s[3] for v, _, _, s, _ in log if v == verb
+        )  # noqa: E731
+        return log, moved("fill"), moved("drain")
+
+    log, filled, drained = run(1024)
+    assert (filled, drained) == (1024, 1024)
+    assert log[0] == ("fill", "s0", 0, (1, 1, 1, 256), False)
+    assert log[-1] == ("drain", "d3", 768, (1, 1, 1, 256), True)
+    # 1000: one whole partition, then a 232-element tail re-reading 8 from
+    # the copied prefix so the last core still consumes a full line.
+    log, filled, drained = run(1000)
+    assert (filled, drained) == (1024, 1024)
+    assert log[-1] == ("drain", "d3", 768, (1, 1, 1, 232), True)
+    # 100: no whole partition, three idle cores, a 156-element pad.
+    log, filled, drained = run(100)
+    assert (filled, drained) == (256, 256)
+    assert {name for _, name, *_ in log} == {"s3", "d3"}
+    assert log[0] == ("fill", "s3", 0, (32, 1, 1, 4), True)
