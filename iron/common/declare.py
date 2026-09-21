@@ -128,17 +128,23 @@ class DimRef:
     non-data descriptor: instance attributes take precedence.
     """
 
-    __slots__ = ("owner", "name", "tier")
+    __slots__ = ("owner", "name", "tier", "default")
 
-    def __init__(self, owner: type, name: str, tier: str | None) -> None:
+    def __init__(
+        self, owner: type, name: str, tier: str | None, default=MISSING
+    ) -> None:
         self.owner = owner
         self.name = name
         self.tier = tier
+        self.default = default
 
     def __get__(self, instance, owner=None):
         if instance is None:
             return self
-        # Reached only if the instance has no such attribute yet (mid-__init__).
+        # An init=False field is read from the class attribute, which is now
+        # this object: serve its default. Anything else has no value yet.
+        if self.default is not MISSING:
+            return self.default
         raise AttributeError(self.name)
 
     def __eq__(self, other) -> bool:
@@ -809,7 +815,7 @@ def operator(cls: type) -> type:
 
     # Re-attach every field as a DimRef on the class.
     for f in fields.values():
-        setattr(cls, f.name, DimRef(cls, f.name, _tier_of(f)))
+        setattr(cls, f.name, DimRef(cls, f.name, _tier_of(f), f.default))
 
     members = _members_of(cls)
     for m in members:
@@ -1021,10 +1027,24 @@ class Overlay:
         return bool(self._specialised)
 
     def design_key(self) -> tuple:
-        """Identity for sharing: the class and every field value."""
+        """Identity for sharing: the class and every compared field value."""
         return (type(self).__qualname__,) + tuple(
-            (f.name, getattr(self, f.name)) for f in dataclasses.fields(self)
+            (f.name, getattr(self, f.name))
+            for f in dataclasses.fields(self)
+            if f.compare
         )
+
+    def copy(self) -> "Overlay":
+        """A fresh instance with the same fields and tuning state.
+
+        A build works on a copy, so anything ``compatible()`` records on the
+        overlay for one operator never reaches another that shares it.
+        """
+        new = dataclasses.replace(self)
+        new._tuned = self._tuned
+        new._specialised = dict(self._specialised)
+        new._bind()
+        return new
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, Overlay):
@@ -1145,9 +1165,9 @@ class Operator(MLIROperator, Generic[O]):
     # -- library surface ---------------------------------------------------
 
     def tuned(self, dev) -> "Operator":
-        """A copy bound to a tuned overlay, with :meth:`compatible` checked."""
-        ov = self.ov.tuned(dev)
-        new = self if ov is self.ov else dataclasses.replace(self, ov=ov)
+        """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""
+        ov = self.ov.tuned(dev).copy()
+        new = dataclasses.replace(self, ov=ov)
         new.compatible()
         return new
 
