@@ -44,7 +44,7 @@ import pytest
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
-from iron.common.capture import capture
+import iron
 from iron.common.context import AIEContext
 from iron.operators import ElementwiseAdd
 
@@ -82,11 +82,15 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     one reading what the fused build left behind. Doing it the other way round
     passes whatever happens.
     """
-    with capture() as graph:
-        x = graph.input("x")
-        w = graph.input("w")
-        graph(_operator(), x, w)
-    graph.build("poisoning_probe", dispatch="fused").compile()
+    add = _operator()
+
+    @iron.graph
+    def probe(x, w):
+        return add(x, w)
+
+    probe.trace(x=(SIZE,), w=(SIZE,)).sequence(
+        "poisoning_probe", dispatch="fused"
+    ).compile()
 
     linked = _linked_objects(_operator())
     assert not any(name.startswith("op") for name in linked), (

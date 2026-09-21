@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compiling a captured graph through CompilableDesign produces a real ELF.
+"""Compiling a graph function through CompilableDesign produces a real ELF.
 
 This is the step the artifact-graph retirement rests on, so it is checked on
 hardware rather than argued about: a graph recorded from dataflow, through the
@@ -20,7 +20,7 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
-from iron.common.capture import capture
+import iron
 from iron.common.context import AIEContext
 from iron.common.jit_compile import (
     _compile_if_changed,
@@ -41,14 +41,17 @@ def device():
     aie_utils.set_current_device(previous)
 
 
-def _captured(name):
+def _captured(name, trace_size=0):
+    """x + w + w as a graph function, lowered to a fused sequence and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
-    with capture() as graph:
-        x = graph.input("x")
-        w = graph.input("w")
-        value = graph(add, x, w)
-        value = graph(add, value, w)
-    sequence = graph.build(name, dispatch="fused")
+
+    @iron.graph
+    def f(x, w):
+        return add(add(x, w), w)
+
+    sequence = f.trace(x=(1024,), w=(1024,)).sequence(
+        name, dispatch="fused", trace_size=trace_size
+    )
     sequence.compile()
     return sequence
 
@@ -91,15 +94,7 @@ def test_two_graphs_get_distinct_cache_keys():
 
 
 def _captured_traced(name, trace_size):
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
-    with capture() as graph:
-        x = graph.input("x")
-        w = graph.input("w")
-        value = graph(add, x, w)
-        value = graph(add, value, w)
-    sequence = graph.build(name, dispatch="fused", trace_size=trace_size)
-    sequence.compile()
-    return sequence
+    return _captured(name, trace_size)
 
 
 def test_tracing_does_not_reuse_an_untraced_cache_entry():

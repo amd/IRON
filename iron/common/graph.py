@@ -225,6 +225,20 @@ class TracedGraph:
     def output_args(self) -> list:
         return [h.name for h in self.outputs]
 
+    def sequence(self, name=None, **kwargs):
+        """The :class:`OperatorSequence` this graph lowers to (the image builder)."""
+        from .sequence import OperatorSequence
+
+        kwargs.setdefault("buffer_sizes", dict(self.pinned))
+        kwargs.setdefault("share_designs", True)
+        return OperatorSequence(
+            name or self.name,
+            self.runlist,
+            self.input_args,
+            self.output_args,
+            **kwargs,
+        )
+
     @property
     def operators(self) -> list:
         seen = {}
@@ -667,7 +681,6 @@ class CompiledGraph:
 
     def __init__(self, traced: TracedGraph, context=None, dispatch="auto"):
         from .build import value_symbol
-        from .sequence import OperatorSequence
 
         self.traced = traced
         for _, name, value in traced.bindings:
@@ -682,17 +695,8 @@ class CompiledGraph:
             if bound is None or not hasattr(bound, "kind"):
                 bound = next(v for v in op.ov.values if v.name == name)
             self.symbols.append((value.name, value_symbol(op, bound), value.dtype))
-        self.sequence = OperatorSequence(
-            traced.name,
-            traced.runlist,
-            traced.input_args,
-            traced.output_args,
-            buffer_sizes=dict(traced.pinned),
-            dispatch=dispatch,
-            # Equal design keys are one build (two projections on one array).
-            share_designs=True,
-            context=context,
-        ).compile()
+        # Equal design keys are one build (two projections on one array).
+        self.sequence = traced.sequence(dispatch=dispatch, context=context).compile()
         self.callable = self.sequence.get_callable()
         self._uploaded = False
 

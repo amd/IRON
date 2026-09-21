@@ -83,11 +83,6 @@ class StridedCopy(Operator[StridedCopyOverlay]):
     output_sizes: tuple = ()
     output_strides: tuple = ()
     output_offset: int = 0
-    # Legacy: the device symbols of the two per-call offsets. Naming one is what
-    # enables it (see uses_value); a graph handle replaces this in step 6.
-    input_offset_parameter: str | None = field(default=None)
-    output_offset_parameter: str | None = field(default=None)
-
     x = In(input_buffer_size, dtype=StridedCopyOverlay.dtype, to=StridedCopyOverlay.s)
     y = Out(
         output_buffer_size, dtype=StridedCopyOverlay.dtype, from_=StridedCopyOverlay.d
@@ -103,8 +98,6 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         "output_sizes": "osz",
         "output_strides": "ost",
         "output_offset": "ooff",
-        "input_offset_parameter": "ipar",
-        "output_offset_parameter": "opar",
     }
 
     @classmethod
@@ -117,17 +110,8 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         return super()._classic(kwargs)
 
     def uses_value(self, name: str) -> bool:
-        legacy = {
-            "in_offset": self.input_offset_parameter,
-            "out_offset": self.output_offset_parameter,
-        }[name]
-        return legacy is not None or name in self.used_values
-
-    def value_symbol(self, value):
-        return {
-            "in_offset": self.input_offset_parameter,
-            "out_offset": self.output_offset_parameter,
-        }[value.name]
+        # An offset is patched only when a graph binds a handle to it.
+        return name in self.used_values
 
     @property
     def transfer_size(self) -> int:

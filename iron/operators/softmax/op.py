@@ -145,18 +145,9 @@ class SoftmaxOverlay(Overlay):
 
 @operator
 class DynamicSoftmaxOverlay(SoftmaxOverlay):
-    """Softmax whose valid row length is a per-call value (llama's decode mask).
-
-    ``vector_size_symbol`` names the device symbol the host writes, for the
-    call sites that still address it by string.
-    """
-
-    vector_size_symbol: str | None = None
+    """Softmax whose valid row length is a per-call value (llama's decode mask)."""
 
     vector_size = Scratchpad(np.int32)
-
-    def value_symbol(self, value):
-        return self.vector_size_symbol if value.name == "vector_size" else None
 
 
 @operator
@@ -170,23 +161,16 @@ class Softmax(Operator[SoftmaxOverlay]):
 
     @classmethod
     def _classic(cls, kwargs):
-        # A graph binding a per-call vector_size picks the dynamic overlay; the
-        # legacy spelling does the same by naming its symbol.
-        symbol = kwargs.pop("vector_size_parameter", None)
+        # A graph binding a per-call vector_size picks the dynamic overlay.
         if kwargs.get("vector_size") is not None and not isinstance(
             kwargs["vector_size"], int
         ):
             kwargs.pop("vector_size")
-            symbol = symbol or ""
-        if symbol is not None:
             names = {
                 f.name for f in SoftmaxOverlay.__dataclass_fields__.values() if f.init
             }
             ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
-            return (
-                DynamicSoftmaxOverlay(vector_size_symbol=symbol or None, **ov_kwargs),
-                kwargs,
-            )
+            return DynamicSoftmaxOverlay(**ov_kwargs), kwargs
         return super()._classic(kwargs)
 
     @property
