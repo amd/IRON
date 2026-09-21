@@ -285,6 +285,24 @@ def test_arg_spec_compat_view_matches_todays_shapes():
     assert specs[0].dtype is bfloat16
 
 
+def test_arg_spec_carries_the_declared_dtype_and_answers_reads_writes():
+    """The sizing contract: every buffer-sizing caller (sequence layout,
+    XRTTensor allocation) trusts ``spec.dtype`` and ``spec.nbytes()``; the
+    liveness analysis trusts ``reads``/``writes``, where ``inout`` is both."""
+    from iron.common import AIERuntimeArgSpec
+    from iron.operators.repeat.op import Repeat
+
+    in_spec, out_spec = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).get_arg_spec()
+    assert in_spec.dtype == np.int32 and out_spec.dtype == np.int32
+    assert out_spec.nbytes() == 8 * 64 * 4 * 4
+    assert (in_spec.reads, in_spec.writes) == (True, False)
+    assert (out_spec.reads, out_spec.writes) == (False, True)
+    both = AIERuntimeArgSpec("inout", ())
+    assert both.reads and both.writes and both.nbytes() == 2
+    with pytest.raises(ValueError, match="Invalid direction"):
+        AIERuntimeArgSpec("sideways", (16,))
+
+
 def test_instance_values_shadow_dim_refs():
     ov = MVOverlay(K=256, num_aie_columns=2)
     assert ov.K == 256 and ov.num_aie_columns == 2
