@@ -1,18 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The decode graph's reference against the model's own CPU reference.
+"""The graphs' references against the model's own CPU reference.
 
 ``llama_cpu.py`` is the reference the NPU application is judged against: a
-plain torch forward pass with a growing KV cache. ``DecodeGraph`` is the
-same computation as a graph function, and ``GraphFunction.reference`` runs
-it operator by operator through each operator's ``reference()`` on host
-tensors, with the per-call values modelled (the cache offset moves the
-copy, the vector size masks the softmax) and the caches as state. So the
-two can be compared without a device, token by token, from the same
-prompt: that checks the graph's wiring (layouts, reshapes, the scale, the
-repeat, the transposes, the cache handoff) against the model, leaving only
-the kernels' arithmetic for hardware.
+plain torch forward pass with a growing KV cache. ``PrefillGraph`` and
+``DecodeGraph`` are the same computation as graph functions, and
+``GraphFunction.reference`` runs each operator by operator through its
+``reference()`` on host tensors, with the per-call values modelled (the
+last prompt row selects the logits, the cache offset moves the copy, the
+vector size masks the softmax) and the caches as state. So the two can be
+compared without a device, from the same prompt: that checks the graphs'
+wiring (layouts, reshapes, the scale, the repeat, the transposes, the
+cache handoff between the phases) against the model, leaving only the
+kernels' arithmetic for hardware.
 
 Both sides compute in bfloat16 with different operation orders, so the
 logits agree to bf16 tolerance and the argmax exactly.
@@ -28,7 +29,7 @@ APP = Path(__file__).resolve().parents[2] / "applications" / "llama_3.2_1b"
 sys.path.insert(0, str(APP))
 
 import llama_cpu  # noqa: E402
-from llama_graphs import DecodeGraph  # noqa: E402
+from llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
 from llama_inference_harness import LlamaModelState  # noqa: E402
 
 from iron.tests.common.llama_model import Config as _Config  # noqa: E402
@@ -56,22 +57,47 @@ def cpu_decode(config, prompt, n_tokens):
     return out, prefill_caches
 
 
-def graph_decode(
-    config, prompt, n_tokens, first_logits_from_cpu, caches, *, vector_size
-):
-    """Seed the caches from the CPU prefill and decode the same tokens through the graph's reference."""
+def decode_graph(config):
+    """The decode graph at the test's context length, four columns wide so the
+    prefill graph's tiles divide the scaled model."""
+    return DecodeGraph(
+        config,
+        config.context_length,
+        num_aie_columns=4,
+        tensor=lambda a: torch.as_tensor(a).to(torch.bfloat16),
+    )
+
+
+def seed_caches(config, graph, caches):
+    """Write the CPU prefill's caches into the graph's states, in its layout."""
     L, D = config.context_length, config.head_dim
     keys, values = caches
-    graph = DecodeGraph(
-        config, L, tensor=lambda a: torch.as_tensor(a).to(torch.bfloat16)
-    )
     for i in range(config.n_layers):
         for state, cache in ((graph.keys[i], keys[i]), (graph.values[i], values[i])):
             host = torch.zeros(state.shape, dtype=torch.bfloat16)
             P = cache.shape[2]
             host.view(config.n_kv_groups, L, D)[:, :P, :] = cache[0]
             state.host = host
-    out, token = [], first_logits_from_cpu.argmax()
+
+
+def graph_prefill(config, graph, prompt):
+    """Run the prompt through the prefill graph's reference; the logits of its last token.
+
+    The graph runs at the context length: the prompt fills the first rows
+    of ``x`` and the rest are zero; ``last`` picks the last prompt row."""
+    L, E = config.context_length, config.emb_dim
+    n = prompt.shape[1]
+    x = torch.zeros(L, E, dtype=torch.bfloat16)
+    x[:n] = _embed(config, prompt).reshape(n, E)
+    pre = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
+    logits = pre.graph.reference(x, config.angles[:L], last=(n - 1) * E)
+    return logits.reshape(-1).float()
+
+
+def graph_decode(config, graph, prompt, n_tokens, first_logits, *, vector_size):
+    """Decode ``n_tokens`` through the graph's reference from its seeded caches."""
+    D = config.head_dim
+    out, token = [], first_logits.argmax()
     pos = prompt.shape[1]
     for step in range(n_tokens):
         x = _embed(config, token.reshape(1, 1)).reshape(1, config.emb_dim)
@@ -103,26 +129,53 @@ def _first_logits(config, prompt):
     return logits[0, -1]
 
 
-def test_the_graph_reference_matches_the_cpu_reference_token_by_token(cpu):
-    config, prompt, n_tokens, expected, caches = cpu
-    got = graph_decode(
-        config,
-        prompt,
-        n_tokens,
-        _first_logits(config, prompt),
-        caches,
-        vector_size=lambda step, pos: pos
-        + 1,  # the context length: prompt + tokens so far
-    )
+def _context_length(step, pos):
+    return pos + 1  # prompt + tokens so far
+
+
+def _assert_close(got, expected):
     for step, (a, b) in enumerate(zip(got, expected)):
         scale = b.abs().max()
         err = (a - b).abs().max()
-        assert (
-            err <= 0.05 * scale
-        ), f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
-        assert (
-            a.argmax() == b.argmax()
-        ), f"step {step}: argmax {a.argmax()} != {b.argmax()}"
+        assert err <= 0.05 * scale, (
+            f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
+        )
+        assert a.argmax() == b.argmax(), (
+            f"step {step}: argmax {a.argmax()} != {b.argmax()}"
+        )
+
+
+def test_the_decode_reference_matches_the_cpu_reference_token_by_token(cpu):
+    config, prompt, n_tokens, expected, caches = cpu
+    graph = decode_graph(config)
+    seed_caches(config, graph, caches)
+    first = _first_logits(config, prompt)
+    got = graph_decode(
+        config, graph, prompt, n_tokens, first, vector_size=_context_length
+    )
+    _assert_close(got, expected)
+
+
+def test_the_prefill_reference_matches_the_cpu_prefill_and_hands_decode_its_caches(
+    cpu,
+):
+    config, prompt, n_tokens, expected, caches = cpu
+    graph = decode_graph(config)
+    first = graph_prefill(config, graph, prompt)
+    _assert_close([first], [_first_logits(config, prompt).float()])
+    # The caches hold the prompt's keys and values in decode's layout.
+    L, D, n = config.context_length, config.head_dim, prompt.shape[1]
+    keys, values = caches
+    for i in range(config.n_layers):
+        for state, cache in ((graph.keys[i], keys[i]), (graph.values[i], values[i])):
+            got = state.host.view(config.n_kv_groups, L, D)[:, :n, :].float()
+            want = cache[0].float()
+            assert (got - want).abs().max() <= 0.05 * want.abs().max(), (i, state)
+    # Decode continues from them, without the CPU's caches.
+    got = graph_decode(
+        config, graph, prompt, n_tokens, first, vector_size=_context_length
+    )
+    _assert_close(got, expected)
 
 
 def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
@@ -138,12 +191,14 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
         cum["total"] += pos + 1
         return min(cum["total"], config.context_length)
 
+    graph = decode_graph(config)
+    seed_caches(config, graph, caches)
     got = graph_decode(
         config,
+        graph,
         prompt,
         n_tokens,
         _first_logits(config, prompt),
-        caches,
         vector_size=cumulative,
     )
     # The first token is right (a sum of one term), later ones are not.
