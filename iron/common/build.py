@@ -73,6 +73,7 @@ class Target:
         self.func_prefix = func_prefix
         self.verbose = verbose
         self.trace_size = trace_size
+        self.base_dir = None  # the IRON checkout; set by build_design from the context
         self.barriers: list[Any] = []
 
     def kernel_source(self, name: str):
@@ -174,7 +175,7 @@ class Sequence:
             tasks.append(
                 fn(
                     data,
-                    acc.tap(),
+                    acc.tap() if isinstance(acc, Access) else acc,
                     wait=wait and last,
                     group=group if group is not None else self._group,
                     offset_parameter=offset_parameter,
@@ -208,9 +209,14 @@ class Sequence:
             and isinstance(what[0], BoundBuffer)
         ):
             buffer, acc = what
-            if not isinstance(acc, Access):
-                raise TypeError("(buffer, Access) expected")
-            return buffer, [acc], None
+            if isinstance(acc, Access):
+                return buffer, [acc], None
+            if hasattr(acc, "sizes") and hasattr(acc, "strides"):
+                # an upstream TensorAccessPattern (or a TensorTiler2D entry): pass it through
+                return buffer, [acc], None
+            raise TypeError(
+                "(buffer, Access) or (buffer, TensorAccessPattern) expected"
+            )
         raise TypeError(
             f"fill/drain take a buffer, a slice of one, or (buffer, Access); got {what!r}"
         )
@@ -229,6 +235,12 @@ class Sequence:
         finally:
             self._group = previous
             tg.finish()
+
+    def new_group(self):
+        """A task group the caller finishes itself (for hand-rolled pipelines)."""
+        from aie.iron import TaskGroup
+
+        return TaskGroup()
 
     def sync_parameters(self) -> None:
         from aie.iron import sync_parameters
@@ -355,6 +367,7 @@ def build_design(
     op = op.tuned(dev)
     ov = op.ov
     target = Target(dev, kernels_dir, func_prefix, verbose, trace_size)
+    target.base_dir = getattr(op.context, "base_dir", None)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
@@ -392,7 +405,7 @@ def build_design(
             _derived(rt, op, ov)
 
     rt = Runtime(sequence, fn_args + params)
-    prog = Program(dev, rt, workers=workers)
+    prog = Program(ov.device(target), rt, workers=workers)
     if trace_size:
         from iron.operators._trace import maybe_enable_trace
 

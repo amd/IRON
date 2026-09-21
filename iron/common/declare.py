@@ -184,6 +184,30 @@ def optional(ref) -> _Optional:
     return _Optional(ref)
 
 
+class _Select:
+    """A shape chosen by a flag: ``select(b_col_maj, (N, K), (K, N))``.
+
+    The flag is a field with a default or one the caller passes explicitly;
+    it is never inferred. The only conditional shapes in the tree are GEMM's
+    layout flags, which transpose a declared shape rather than resize it.
+    """
+
+    __slots__ = ("flag", "when_true", "when_false")
+
+    def __init__(self, flag, when_true, when_false) -> None:
+        self.flag = flag
+        self.when_true = tuple(when_true)
+        self.when_false = tuple(when_false)
+
+    def __repr__(self) -> str:
+        return f"select({self.flag!r}, {self.when_true!r}, {self.when_false!r})"
+
+
+def select(flag, when_true, when_false) -> _Select:
+    """A conditional shape. See :class:`_Select`."""
+    return _Select(flag, when_true, when_false)
+
+
 _DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | _Optional
 
 
@@ -695,6 +719,14 @@ def _resolve_dim(spec, instance) -> int:
     raise DeclarationError(f"cannot resolve {spec!r} as a dimension")
 
 
+def _flag_value(flag, instance) -> bool:
+    if isinstance(flag, DimRef):
+        return bool(_lookup_ref(flag, instance))
+    if isinstance(flag, Field):
+        return bool(getattr(instance, flag.name))
+    return bool(flag)
+
+
 def _resolve_shape(dims, instance) -> tuple[int, ...]:
     out: list[int] = []
     for d in dims:
@@ -702,6 +734,10 @@ def _resolve_shape(dims, instance) -> tuple[int, ...]:
             n = _resolve_dim(d.ref, instance)
             if n > 1:
                 out.append(n)
+            continue
+        if isinstance(d, _Select):
+            branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
+            out.extend(_resolve_shape(branch, instance))
             continue
         out.append(_resolve_dim(d, instance))
     return tuple(out)
@@ -742,6 +778,14 @@ def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> t
     for spec in specs:
         if isinstance(spec, _Optional):
             out.append(_Optional(_rewrite_refs((spec.ref,), cls, fields_by_obj)[0]))
+        elif isinstance(spec, _Select):
+            out.append(
+                _Select(
+                    _rewrite_refs((spec.flag,), cls, fields_by_obj)[0],
+                    _rewrite_refs(spec.when_true, cls, fields_by_obj),
+                    _rewrite_refs(spec.when_false, cls, fields_by_obj),
+                )
+            )
         elif isinstance(spec, Field):
             f = fields_by_obj.get(id(spec))
             if f is None:
@@ -767,6 +811,10 @@ def _check_dim_ref(
     """
     if isinstance(spec, _Optional):
         _check_dim_ref(cls, member, spec.ref, what, allow_tunable=allow_tunable)
+        return
+    if isinstance(spec, _Select):
+        for d in spec.when_true + spec.when_false:
+            _check_dim_ref(cls, member, d, what, allow_tunable=allow_tunable)
         return
     if isinstance(spec, bool):
         raise DeclarationError(
@@ -994,6 +1042,14 @@ class Overlay:
         extent. The default fills nothing.
         """
         return self
+
+    def device(self, target):
+        """The device the Program is built for; the current device by default.
+
+        An overlay that builds for a column subset (gemm's NPU1Col1/NPU1Col2)
+        returns that variant.
+        """
+        return target.dev
 
     def design(self, target) -> list:
         """Build the array for ``target`` and return its workers.
@@ -1300,6 +1356,31 @@ class Operator(MLIROperator, Generic[O]):
                         f"declared {m!r}"
                     )
                 dims = dims[1:]
+            expanded: list = []
+            for d in dims:
+                if isinstance(d, _Select):
+                    flag = d.flag
+                    if flag.name in bound:
+                        value = bound[flag.name]
+                    else:
+                        fld = next(
+                            (
+                                f
+                                for f in dataclasses.fields(flag.owner)
+                                if f.name == flag.name
+                            ),
+                            None,
+                        )
+                        if fld is None or fld.default is MISSING:
+                            raise ValueError(
+                                f"{cls.__name__}: {flag!r} selects {m.name}'s shape and "
+                                f"has no default; pass it explicitly"
+                            )
+                        value = fld.default
+                    expanded.extend(d.when_true if value else d.when_false)
+                else:
+                    expanded.append(d)
+            dims = expanded
             if len(shape) != len(dims):
                 raise ValueError(
                     f"{cls.__name__}: operand {m.name} has rank {len(shape)} {shape}, "

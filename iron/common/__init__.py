@@ -24,6 +24,7 @@ from .declare import (
     dim,
     tunable,
     optional,
+    select,
     In,
     Out,
     InOut,
