@@ -54,11 +54,20 @@ class _TargetModel:
 
 
 class ProbeRuntime:
-    """Calls the sequence at construction, as resolve_program would later."""
+    """Holds the sequence; ProbeProgram runs it, as resolve_program does upstream."""
 
     def __init__(self, fn, args):
         self._fifos = set()
-        fn(*[f"arg{i}" for i in range(len(args))])
+        self.fn, self.n_args = fn, len(args)
+
+
+class ProbeProgram:
+    def __init__(self, dev, rt, workers=None):
+        self.rt = rt
+
+    def resolve_program(self):
+        self.rt.fn(*[f"arg{i}" for i in range(self.rt.n_args)])
+        return "module"
 
 
 DEVICES = {
@@ -82,6 +91,7 @@ def device(request, monkeypatch):
 
     dev, limit = DEVICES[request.param]
     monkeypatch.setattr(aie.iron, "Runtime", ProbeRuntime, raising=False)
+    monkeypatch.setattr(aie.iron, "Program", ProbeProgram, raising=False)
     monkeypatch.setattr(aie_utils, "get_current_device", lambda: dev, raising=False)
     monkeypatch.setattr(du, "resolve_target_arch", lambda d: d.arch)
     monkeypatch.setattr(aie.utils.config, "root_path", lambda: "/aie", raising=False)
@@ -148,3 +158,44 @@ def test_llama_decode_operators_build_with_their_values(device):
             tuned = op.tuned(device)
             assert list(tuned.values) + list(tuned.ov.values), op
     assert built == len(traced.operators)
+
+
+@pytest.mark.parametrize(
+    "M,K,N",
+    [(512, 1024, 1024), (512, 1024, 10240), (256, 512, 512)],
+    ids=["unsplit", "c_split", "tn128"],
+)
+def test_flm_gemm_design_and_sequence_run(device, monkeypatch, M, K, N):
+    """The configuration's array and the shape's sequence, on both paths."""
+    import iron.operators.flm.gemm.op as flm
+
+    if device.resolve().name != "npu2":
+        pytest.skip("flm/gemm's L1 budget is faked for the aie2p B layout")
+
+    class _Arch:
+        AIE2p = "aie2p"
+        AIE2 = "aie2"
+
+    monkeypatch.setattr(flm, "AIEArch", _Arch)
+    monkeypatch.setattr(flm, "get_target_model", lambda d: _TargetModel(device.cols))
+    monkeypatch.setattr(
+        flm.dsg, "get_target_model", lambda d: _TargetModel(device.cols)
+    )
+    op = flm.GEMM(M=M, K=K, N=N)
+    build_design(device, Path("/kernels"), op)
+    # The configuration-only module the xclbin is built from, at the
+    # reference shape, builds too.
+    tuned = op.tuned(device)
+    rM, rK, rN = tuned._reference_shape
+    import dataclasses
+
+    reference = dataclasses.replace(
+        tuned,
+        M=rM,
+        K=rK,
+        N=rN,
+        epilogue=flm.Epilogue.NONE,
+        clamp=None,
+        packed_bytes=None,
+    )
+    build_design(device, Path("/kernels"), reference)
