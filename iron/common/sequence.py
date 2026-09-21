@@ -113,15 +113,11 @@ class SequenceDispatch:
         raise NotImplementedError
 
 
-class AutoDispatch(SequenceDispatch):
-    """Selects the platform default: full-ELF on NPU2, chained-xclbin elsewhere."""
-
-    name = "auto"
-
-    def resolve(self, device):
-        if isinstance(device, NPU2):
-            return FusedDispatch()
-        return SeparateDispatch()
+def platform_default(device) -> "SequenceDispatch":
+    """The image a hand-written sequence gets when it names none: the full ELF
+    on NPU2, the per-step xclbin chain elsewhere. A graph goes through
+    ``packaging.plan`` instead, which also weighs its values and boundaries."""
+    return FusedDispatch() if isinstance(device, NPU2) else SeparateDispatch()
 
 
 def _trace_tag(seq):
@@ -434,8 +430,11 @@ class ReferenceDispatch(SequenceDispatch):
         return SequenceReferenceCallable(seq)
 
 
+# The image builders (fused, separate, chunked) and the two harness modes
+# (reference, compare) a hand-written OperatorSequence can name. A graph does
+# not name one: packaging.plan derives it from the device, the values and the
+# boundaries, and hands the instance in.
 _DISPATCH_ALIASES = {
-    "auto": AutoDispatch,
     "fused": FusedDispatch,
     "separate": SeparateDispatch,
     "compare": CompareDispatch,
@@ -521,11 +520,16 @@ class OperatorSequence(AIEOperatorBase):
     @staticmethod
     def _coerce_dispatch(dispatch):
         """Normalise the ``dispatch`` argument to a :class:`SequenceDispatch`."""
+        if dispatch == "auto" or dispatch is None:
+            return None  # the platform default, resolved when the device is known
         if isinstance(dispatch, SequenceDispatch):
             return dispatch
         elif isinstance(dispatch, str) and dispatch in _DISPATCH_ALIASES:
             return _DISPATCH_ALIASES[dispatch]()
-        raise TypeError("selected dispatch mode not supported")
+        raise TypeError(
+            f"dispatch {dispatch!r} is not one of {sorted(_DISPATCH_ALIASES)}, "
+            f"'auto', or a SequenceDispatch"
+        )
 
     def unique_operators(self):
         """Operators in runlist order, de-duplicated by identity."""
@@ -718,7 +722,10 @@ class OperatorSequence(AIEOperatorBase):
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
-        self._dispatch = self._dispatch.resolve(aie_utils.get_current_device())
+        device = aie_utils.get_current_device()
+        if self._dispatch is None:
+            self._dispatch = platform_default(device)
+        self._dispatch = self._dispatch.resolve(device)
         self._dispatch.set_up_artifacts(self)
 
     def compile(self, dry_run: bool = False):
