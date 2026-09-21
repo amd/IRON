@@ -30,6 +30,20 @@ from iron.common.declare import (
 from iron.common.tiling import Access
 
 
+class FakeGroup:
+    """Upstream's TaskGroup refuses to exist outside a Runtime function."""
+
+    def finish(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fake_task_group(monkeypatch):
+    import aie.iron
+
+    monkeypatch.setattr(aie.iron, "TaskGroup", FakeGroup, raising=False)
+
+
 class FakeHandle:
     def __init__(self, name, log):
         self.name, self.log = name, log

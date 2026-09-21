@@ -49,7 +49,17 @@ CASES = [
             # reason a shape function has to stay ordinary Python.
             dict(M=256, K=64, N=512, b_col_maj=True),
             dict(M=256, K=64, N=512, c_col_maj=True),
-            dict(M=512, K=256, N=512, dtype_in="bf16", dtype_out="f32"),
+            # f32 output at the default 64-tile overflows a core's memory; smaller tiles.
+            dict(
+                M=512,
+                K=256,
+                N=512,
+                dtype_in="bf16",
+                dtype_out="f32",
+                tile_m=32,
+                tile_k=32,
+                tile_n=32,
+            ),
         ],
     ),
     (
@@ -186,11 +196,11 @@ CASES = [
         "transpose",
         "Transpose",
         [
-            dict(M=64, N=64, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
+            dict(M=64, N=64, num_aie_columns=1, num_channels=1, m=32, n=32, s=8),
             # Non-square, to pin that the output carries the transposed shape
             # (N, M) while the input keeps (M, N). A square-only case cannot
             # tell the two apart.
-            dict(M=64, N=128, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
+            dict(M=64, N=128, num_aie_columns=1, num_channels=1, m=32, n=32, s=8),
         ],
     ),
 ]

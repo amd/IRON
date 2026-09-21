@@ -94,6 +94,8 @@ class ChanneledUnaryOverlay(Overlay):
 
     kernel_name: ClassVar[str]
     kernel_fn_name: ClassVar[str]
+    # The object the kernel is compiled to; None names it after the symbol.
+    kernel_object: ClassVar[str | None] = None
     needs_lut_ops: ClassVar[bool] = False
     tile_cap: ClassVar[int] = 4096
 
@@ -142,6 +144,7 @@ class ChanneledUnaryOverlay(Overlay):
             self.kernel_arg_types(line_type),
             source=target.kernel_source(self.kernel_name),
             bundled_sources=lut_sources(target.dev) if self.needs_lut_ops else (),
+            object_file_name=self.kernel_object,
         )
 
         of_ins = [

@@ -19,6 +19,7 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
 
     kernel_name: ClassVar[str] = "leaky_relu"
     kernel_fn_name: ClassVar[str] = "leaky_relu_bf16"
+    kernel_object: ClassVar[str] = "leaky_relu.o"  # as the old design named it
 
     _name_aliases: ClassVar[Dict[str, str]] = {"alpha": "a"}
 

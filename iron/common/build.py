@@ -295,6 +295,7 @@ def plan(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Acces
 def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
     """Residents, then barriers, then the parameter sync, before any DMA."""
     values = op.residents()
+    writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
     for name, res in ov.residents.items():
         if res.optional and not res.targets:
             continue  # this configuration does not allocate it
@@ -308,7 +309,12 @@ def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
                 f"{type(ov).__name__}.{name}: design() never bound this Resident"
             )
         for buf, index in res.targets:
-            buf[index] = values[name]
+            writes.setdefault(id(buf), (buf, {}))[1][index] = values[name]
+    # One buffer at a time, its words in order: the order the hand-written
+    # sequences wrote, so a converted operator's instruction stream matches.
+    for buf, words in writes.values():
+        for index in sorted(words):
+            buf[index] = words[index]
     unknown = set(values) - set(ov.residents)
     if unknown:
         raise ValueError(

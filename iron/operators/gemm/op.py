@@ -351,7 +351,11 @@ class GEMMOverlay(Overlay):
         # Runtime parameters: [K_div_k, n_tiles_per_core] per core
         rtps = [
             [
-                target.rtp(np.ndarray[(2,), np.dtype[np.int32]], name=f"rtp{row}_{col}")
+                target.rtp(
+                    np.ndarray[(2,), np.dtype[np.int32]],
+                    name=f"rtp{row}_{col}",
+                    initial_value=np.zeros(2, dtype=np.int32),
+                )
                 for col in range(n_aie_cols)
             ]
             for row in range(n_aie_rows)
