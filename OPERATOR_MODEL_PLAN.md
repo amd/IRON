@@ -853,12 +853,19 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | unary and binary bases, ten operators (§14 step 2, part) | `iron/common/operator_bases.py`, ten `op.py` | classic construction, arg specs, resident counts, transfers per core | **needs a run**: resident-driven core loops are new code; C11 byte-identity now expected to pass |
 | dequant, rms_norm (two pairs), rope, softmax (two overlays) (§14 step 2, rest) | four `op.py` | legacy spellings, arg specs, tuning, resident values, transfers per slot, rejections | **needs a run**; softmax's snapshot entry is now `rows x cols` and was re-pinned by hand |
 | repeat, strided_copy, transpose, gemm (§14 step 3, part) | four `op.py` | construction, arg specs, tuning geometry, residents, transfers issued, rejections | **needs a run**; gemm's sequence body needs the real tiler |
+| mha (§14 step 3, part) | `iron/operators/mha/op.py` | eight-pipeline sequence checked transfer by transfer (two shims, K/V per head, waited drains); inference from shapes | **needs a run**; Q/O descriptors are now linear runs rather than `(rows, d)` tiles, same bytes in the same order |
 
-Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose and
-gemm are declared overrides (`design(rt)` over the same `Sequence`), with
-their access patterns kept as explicit descriptors and their RTP values as
-residents; `select()` carries gemm's layout transposes and `Overlay.device()`
-its NPU1 column variants. Remaining in step 3: mha, flm/gemm, mm_prebuilt
+Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
+and mha are declared overrides (`design(rt)` over the same `Sequence`), with
+their access patterns kept as explicit descriptors (mha's as buffer slices)
+and their RTP values as residents; `select()` carries gemm's layout
+transposes and `Overlay.device()` its NPU1 column variants. mha's four
+per-worker RTP words are four residents bound at an index into the same
+buffers, and its `legalize_tas` hack is `tiling.legalize` through a slice.
+The snapshot test, run under the stub for the first time, caught two
+losses: SiLU's fixed single channel (`tunable(1, init=False)` now) and a
+StridedCopy case the old design would have asserted on (now a real
+gather). Remaining in step 3: flm/gemm, mm_prebuilt
 (`Overlay.from_xclbin`), swiglu_prefill_stream (`from_spec`), and the two
 swiglu composites as graph functions (which wait on step 6). The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
