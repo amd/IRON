@@ -12,27 +12,20 @@ placeable and routable, every descriptor a sequence issues is legal, the
 resident writes and barrier sets lower. What it cannot check is the
 kernels, which need Peano, and the numbers, which need hardware.
 
-The case table is the one the device-free probe uses, so a case that
-executes under the stub also lowers for real here.
+The case table is ``iron/tests/common/cases.py``, one construction per
+shape and dtype decision each operator makes.
 """
 
 import importlib
 import subprocess
-from pathlib import Path
 
 import pytest
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2, from_name  # noqa: E402
+from iron.common.declare import Incompatible, Untunable
+from iron.tests.common.cases import CASES
+from iron.tests.toolchain.tools import AIECC, requires
 
-from iron.common.declare import Incompatible, Untunable  # noqa: E402
-from iron.tests.common.cases import CASES  # noqa: E402
-
-AIECC = Path(aie.__file__).resolve().parents[2] / "bin" / "aiecc"
-pytestmark = pytest.mark.skipif(not AIECC.exists(), reason=f"no aiecc at {AIECC}")
-
-DEVICES = {"npu2": lambda: NPU2(), "npu1": lambda: from_name("npu1", n_cols=4)}
+pytestmark = requires("aiecc")
 
 
 def lower(op, tmp_path, name=None):
@@ -64,15 +57,6 @@ def lower(op, tmp_path, name=None):
     insts = out / f"{name}.bin"
     assert insts.exists() and insts.stat().st_size > 0
     return src, insts
-
-
-@pytest.fixture(params=sorted(DEVICES))
-def device(request):
-    previous = aie_utils.get_current_device()
-    dev = DEVICES[request.param]()
-    aie_utils.set_current_device(dev)
-    yield dev
-    aie_utils.set_current_device(previous)
 
 
 def _cases():

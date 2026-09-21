@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import DispatchTime, Scratchpad
-from iron.common.graph import Handle, State, TracedGraph
+from iron.common.graph import Handle, TracedGraph
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.elementwise_mul.op import ElementwiseMul
 from iron.operators.gemv.op import GEMV, GEMVOverlay
@@ -303,64 +303,10 @@ def test_swiglu_prefill_traces_over_a_sequence(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-class _Param:
-    def __init__(self, shape):
-        self.weight = z(*shape)
-
-
-class _Block:
-    def __init__(self, E, H, G, D, F):
-        self.norm1, self.norm2 = _Param((E,)), _Param((E,))
-        self.attn = type("attn", (), {})()
-        self.attn.q, self.attn.k = _Param((H * D, E)), _Param((G * D, E))
-        self.attn.v, self.attn.o = _Param((G * D, E)), _Param((E, H * D))
-        self.ffn = type("ffn", (), {})()
-        self.ffn.gate, self.ffn.up = _Param((F, E)), _Param((F, E))
-        self.ffn.down = _Param((E, F))
-
-
-class _Model:
-    def __init__(self, cfg):
-        self.layers = [
-            _Block(
-                cfg.emb_dim, cfg.n_heads, cfg.n_kv_groups, cfg.head_dim, cfg.hidden_dim
-            )
-            for _ in range(cfg.n_layers)
-        ]
-        self.norm = _Param((cfg.emb_dim,))
-        self.out_head = _Param((cfg.vocab_size, cfg.emb_dim))
-
-    def named_parameters(self):
-        for i, blk in enumerate(self.layers):
-            for path in (
-                "norm1",
-                "norm2",
-                "attn.q",
-                "attn.k",
-                "attn.v",
-                "attn.o",
-                "ffn.gate",
-                "ffn.up",
-                "ffn.down",
-            ):
-                obj = blk
-                for part in path.split("."):
-                    obj = getattr(obj, part)
-                yield f"layers.{i}.{path}.weight", obj.weight
-        yield "norm.weight", self.norm.weight
-        yield "out_head.weight", self.out_head.weight
-
-
-class _Config:
-    n_layers, n_heads, n_kv_groups, head_dim = 2, 16, 4, 64
-    emb_dim, hidden_dim, vocab_size = 256, 512, 1024
-
-    def __init__(self):
-        self.model = _Model(self)
-
-
 def test_llama_decode_traces_and_tunes(monkeypatch):
     import sys
+
+    from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, "iron/applications/llama_3.2_1b")
     from decode_graph import DecodeGraph

@@ -21,61 +21,21 @@ Needs Peano and ``xclbinutil`` on the PATH (mlir-aie vendors a Boost-free
 one under ``tools/hrx-xclbinutil``); no device.
 """
 
-import shutil
 import urllib.error
 from pathlib import Path
 
-import numpy as np
 import pytest
-from ml_dtypes import bfloat16
+import aie.utils as aie_utils
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2, from_name  # noqa: E402
+import iron
+from iron.common.context import AIEContext
+from iron.tests.toolchain.tools import DEVICES, requires, swiglu_decode
 
-import iron  # noqa: E402
-from iron.common.context import AIEContext  # noqa: E402
-from iron.tests.toolchain.full_elf import PEANO  # noqa: E402
-
-XCLBINUTIL = shutil.which("xclbinutil")
-
-pytestmark = [
-    pytest.mark.skipif(XCLBINUTIL is None, reason="no xclbinutil on the PATH"),
-    pytest.mark.skipif(
-        PEANO is None or not PEANO.exists(), reason="no Peano (llvm-aie) installed"
-    ),
-]
-
-DEVICES = {"npu2": lambda: NPU2(), "npu1": lambda: from_name("npu1", n_cols=4)}
-
-
-@pytest.fixture(params=sorted(DEVICES))
-def device(request):
-    previous = aie_utils.get_current_device()
-    dev = DEVICES[request.param]()
-    aie_utils.set_current_device(dev)
-    yield dev
-    aie_utils.set_current_device(previous)
-
-
-@pytest.fixture
-def npu2():
-    previous = aie_utils.get_current_device()
-    aie_utils.set_current_device(NPU2())
-    yield
-    aie_utils.set_current_device(previous)
-
-
-def _swiglu_decode():
-    from iron.operators.swiglu_decode.op import swiglu_decode
-
-    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-    E, H = 2048, 8192
-    return swiglu_decode(z(H, E), z(H, E), z(E, H)), E
+pytestmark = requires("xclbinutil", "peano")
 
 
 def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device, tmp_path):
-    fn, E = _swiglu_decode()
+    fn, E = swiglu_decode()
     net = fn.compile(
         device,
         boundaries=iron.each_step,
@@ -87,7 +47,7 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device, tmp_path):
     assert Path(net.image).suffix == ".xclbin" and Path(net.image).stat().st_size > 0
     assert net._callable is None, "the runtime is made on first call, not at compile"
     seq = net.sequence
-    dispatch = seq._dispatch
+    dispatch = seq._image
     ops = list(seq.unique_operators())
     assert len(ops) == 5 and len(seq.runlist) == 5
     # Five operators, four designs: the gate and up projections share one,
@@ -121,7 +81,9 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
     # The shape's own compile is instructions-only: no second xclbin, no
     # second kernel build.
     assert not (tmp_path / f"{op.name}.xclbin").exists()
-    assert sorted(p.name for p in tmp_path.glob("*.xclbin")) == [f"{op.config_name}.xclbin"]
+    assert sorted(p.name for p in tmp_path.glob("*.xclbin")) == [
+        f"{op.config_name}.xclbin"
+    ]
 
 
 def test_mm_prebuilt_builds_its_instructions_for_the_foreign_image(npu2, tmp_path):

@@ -13,11 +13,8 @@ stubbed aie_utils.DefaultNPURuntime that raises if .device() is reached.
 """
 
 import importlib.util
-import sys
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
 
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 

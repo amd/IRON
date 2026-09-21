@@ -24,43 +24,18 @@ with the toolchain and no device compiles ahead of time and hands the
 image on.
 """
 
-import shutil
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
-from ml_dtypes import bfloat16
+from aie.iron.device import NPU2
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-import aie.utils.config as aie_config  # noqa: E402
-from aie.iron.device import NPU2  # noqa: E402
+import iron
+from iron.common.context import AIEContext
+from iron.common.jit_compile import compile_sequence, fused_work_dir
+from iron.tests.toolchain.tools import requires, swiglu_decode
 
-import iron  # noqa: E402
-from iron.common.context import AIEContext  # noqa: E402
-from iron.common.jit_compile import compile_sequence, fused_work_dir  # noqa: E402
-
-AIEBU = shutil.which("aiebu-asm")
-try:
-    PEANO = Path(aie_config.peano_install_dir())
-except Exception:  # noqa: BLE001 - any failure means no Peano
-    PEANO = None
-
-pytestmark = [
-    pytest.mark.skipif(AIEBU is None, reason="no aiebu-asm on the PATH"),
-    pytest.mark.skipif(
-        PEANO is None or not PEANO.exists(), reason="no Peano (llvm-aie) installed"
-    ),
-]
-
-
-@pytest.fixture(autouse=True)
-def npu2():
-    previous = aie_utils.get_current_device()
-    aie_utils.set_current_device(NPU2())
-    yield
-    aie_utils.set_current_device(previous)
+pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def build_elf(traced, name, tmp_path):
@@ -84,11 +59,7 @@ def _params(work_dir):
 
 
 def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
-    from iron.operators.swiglu_decode.op import swiglu_decode
-
-    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-    E, H = 2048, 8192
-    fn = swiglu_decode(z(H, E), z(H, E), z(E, H))
+    fn, E = swiglu_decode()
     net = fn.compile(
         NPU2(), image=iron.ELF, context=AIEContext(build_dir=str(tmp_path)), x=(1, E)
     )
@@ -105,7 +76,7 @@ def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
-    from iron.tests.common.graph import _Config
+    from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
     from decode_graph import DecodeGraph

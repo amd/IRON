@@ -15,21 +15,12 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2  # noqa: E402
+import aie.utils as aie_utils
 
-from iron.tests.toolchain.lowering import AIECC, lower  # noqa: E402
+from iron.tests.toolchain.lowering import lower
+from iron.tests.toolchain.tools import requires, swiglu_decode
 
-pytestmark = pytest.mark.skipif(not AIECC.exists(), reason=f"no aiecc at {AIECC}")
-
-
-@pytest.fixture(autouse=True)
-def npu2():
-    previous = aie_utils.get_current_device()
-    aie_utils.set_current_device(NPU2())
-    yield
-    aie_utils.set_current_device(previous)
+pytestmark = [*requires("aiecc"), pytest.mark.usefixtures("npu2")]
 
 
 def _lower_all(traced, tmp_path):
@@ -39,7 +30,7 @@ def _lower_all(traced, tmp_path):
 
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
-    from iron.tests.common.graph import _Config
+    from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
     from decode_graph import DecodeGraph
@@ -95,23 +86,27 @@ def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
     op.link_xclbin()
     insts = Path(op._insts_path)
     assert insts.stat().st_size > 0
-    assert not list(tmp_path.glob("*.xclbin")), "an instructions-only compile built an image"
+    assert not list(
+        tmp_path.glob("*.xclbin")
+    ), "an instructions-only compile built an image"
     first = insts.stat().st_mtime_ns
-    again = MMPrebuilt(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    again = MMPrebuilt(
+        M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path))
+    )
     again.link_xclbin()
-    assert Path(again._insts_path).stat().st_mtime_ns == first, "the same sequence recompiled"
+    assert (
+        Path(again._insts_path).stat().st_mtime_ns == first
+    ), "the same sequence recompiled"
 
 
 def test_swiglu_graphs_operators_lower(tmp_path):
-    from iron.operators.swiglu_decode.op import swiglu_decode
     from iron.operators.swiglu_prefill.op import swiglu_prefill
 
+    fn, E = swiglu_decode()
+    H = 8192
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-    E, H = 2048, 8192
     (tmp_path / "decode").mkdir()
-    _lower_all(
-        swiglu_decode(z(H, E), z(H, E), z(E, H)).trace(x=(1, E)), tmp_path / "decode"
-    )
+    _lower_all(fn.trace(x=(1, E)), tmp_path / "decode")
     (tmp_path / "prefill").mkdir()
     _lower_all(
         swiglu_prefill(z(E, H), z(E, H), z(H, E)).trace(x=(256, E)),

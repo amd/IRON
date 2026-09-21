@@ -27,7 +27,6 @@ from iron.common.context import AIEContext
 from iron.operators import (
     WeightedRMSNorm,
     GEMM,
-    GEMV,
     ElementwiseAdd,
     ElementwiseMul,
     SiLU,

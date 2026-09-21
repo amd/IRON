@@ -1045,7 +1045,7 @@ and the decode graph's parity against the token snapshot (§18).
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/full_elf.py`, `xclbin.py` (the swiglu graph goes through `compile()`), `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt; the S1 and S4 build tests went to the shelved branch with what was built on them | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
-| the dispatch hierarchy (step 5, acceptance 1) | `sequence.py` | — | `AutoDispatch` is gone: a graph never names a dispatch (`packaging.plan` derives the instance from device, values and boundaries), and a hand-written sequence that names none gets `platform_default`. What remains are the image builders (`fused`, `separate`, `chunked`) and the two harness modes (`reference`, `compare`) the operator and infrastructure tests drive by name; deleting those would remove the hand-written-runlist API those device tests stand on, so they stay as the plan's builders | **needs a device**: the infrastructure tests that name them |
+| the dispatch hierarchy (step 5, acceptance 1) | `sequence.py` | — | gone: a sequence has a `mode` (`fused`, `separate`, `reference`, `compare`; a graph's comes from `packaging.plan`, a hand-written sequence that names none gets the platform default), and `_MODES` maps each to its image builder (`FusedImage`, `XclbinChain`, or none) and its callable. `build_fused_mlir` is a function | **needs a device**: the infrastructure tests that run the modes |
 | dispatch-time values (§6 on an xclbin image) | `build.py` (`image`, `_plus`, the preamble's value writes), `jit_compile.py` (`_design_generator`'s dispatch parameters, `DispatchStream`), `sequence.py`, `graph.py`, `softmax/op.py` | packaging reports the lowering per value; the build tests' preamble | `iron/tests/toolchain/dispatch.py`: a softmax with a per-call row length and a copy at a per-call offset build as dispatch-time kernels with their bridge libraries at `each_step` on both devices; the scaled decode graph builds the same way for NPU1: 50 steps on 18 kernels, the copies and softmaxes dispatch-time, the graph's column count now following the device; at Llama 3.2 1B's real size it is 386 steps on 19 kernels, two of them dispatch-time, in under a minute | **needs a device**: the regenerated streams, S3's read |
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
@@ -1209,6 +1209,27 @@ MHA at a padded length differs in one element by one bf16 ulp. The
 toolchain gate builds the swiglu graph twice fewer: the ELF and the
 xclbin-chain tests go through `compile()` and carry the ahead-of-time
 assertions the separate `compile.py` made on their own builds.
+
+**Four more cuts, host-verified.** (1) `sequence.py` (1,090 → 914 lines)
+has no dispatch hierarchy: a sequence carries a `mode` name, `_MODES`
+maps it to an image builder (`FusedImage` for the ELF, `XclbinChain` for
+the chain, none for `reference`) and a callable, and the two builders
+have one method, `link`. Reference and compare are callables only; the
+compare tolerances are `SequenceCompareCallable`'s. The callables lost
+their extra base (`_PerBufferCallable` is the base's own buffer model;
+the full-ELF callable overrides it). (2) `MLIROperator` is gone:
+`Operator` inherits `AIEOperatorBase` (context, artifacts, the compile of
+what is not generated) and carries `name`, `compile`, `link_xclbin` and
+`get_callable` itself; the artifact-stem aliases are one table in
+`declare.py`. (3) The four "legacy accessors" sections (25 properties
+forwarding to the overlay) are gone; readers use `op.ov`. (4)
+`members_of`, `nearly_equal`, `chunks()` (refused by name until the
+shelved branch returns) and MHA's padding helpers are gone. The tests
+shed their duplicates too: the toolchain gates share `tools.py` (which
+tools are installed, the devices, the swiglu graph) and the `device` and
+`npu2` fixtures in their conftest, and the scaled-down Llama model the
+graph tests, the reference parity test and the toolchain gates trace is
+one `iron/tests/common/llama_model.py`.
 
 What to run first on a device, in order: `pytest iron/tests/toolchain`
 (it is what the lowering environment already passes; a device changes

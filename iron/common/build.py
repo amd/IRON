@@ -180,7 +180,9 @@ class Sequence:
             )
         data = self._rt_data[buffer.name]
         dynamic = offset_by is not None and offset_by.ssa is not None
-        offset_parameter = offset_by.param if offset_by is not None and not dynamic else None
+        offset_parameter = (
+            offset_by.param if offset_by is not None and not dynamic else None
+        )
         tasks = []
         for i, acc in enumerate(accesses):
             last = i == len(accesses) - 1

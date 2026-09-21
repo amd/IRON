@@ -16,25 +16,23 @@ three tools down.
 """
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
+from iron.tests.toolchain.tools import XCLBINUTIL, requires
 
-XCLBINUTIL = shutil.which("xclbinutil")
 PATCH = Path(__file__).with_name("patches") / "hrx-xclbinutil-empty-path.patch"
 
-pytestmark = pytest.mark.skipif(XCLBINUTIL is None, reason="no xclbinutil on the PATH")
+pytestmark = requires("xclbinutil")
 
 
 def _run(*args, cwd):
     result = subprocess.run(
         [XCLBINUTIL, *args], cwd=cwd, capture_output=True, text=True, timeout=120
     )
-    assert result.returncode == 0, (
-        f"xclbinutil {' '.join(args)} failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"xclbinutil {' '.join(args)} failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
     return result
 
 

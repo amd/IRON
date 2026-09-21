@@ -17,37 +17,14 @@ half of S3, and of the regenerated-stream path itself.
 from pathlib import Path
 
 import numpy as np
-import pytest
-from ml_dtypes import bfloat16
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2, from_name  # noqa: E402
+import iron
+from iron.common.context import AIEContext
+from iron.common.declare import Scratchpad
+from iron.common.jit_compile import DispatchStream
+from iron.tests.toolchain.tools import requires
 
-import iron  # noqa: E402
-from iron.common.context import AIEContext  # noqa: E402
-from iron.common.declare import Scratchpad  # noqa: E402
-from iron.common.jit_compile import DispatchStream  # noqa: E402
-from iron.tests.toolchain.full_elf import PEANO  # noqa: E402
-from iron.tests.toolchain.xclbin import XCLBINUTIL  # noqa: E402
-
-pytestmark = [
-    pytest.mark.skipif(XCLBINUTIL is None, reason="no xclbinutil on the PATH"),
-    pytest.mark.skipif(
-        PEANO is None or not PEANO.exists(), reason="no Peano (llvm-aie) installed"
-    ),
-]
-
-DEVICES = {"npu2": lambda: NPU2(), "npu1": lambda: from_name("npu1", n_cols=4)}
-
-
-@pytest.fixture(params=sorted(DEVICES))
-def device(request):
-    previous = aie_utils.get_current_device()
-    dev = DEVICES[request.param]()
-    aie_utils.set_current_device(dev)
-    yield dev
-    aie_utils.set_current_device(previous)
+pytestmark = requires("xclbinutil", "peano")
 
 
 def _graph():
@@ -90,10 +67,12 @@ def test_values_become_dispatch_time_kernels_at_each_step(device, tmp_path):
     )
     assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
     kinds = {name: text for name, _, text in net.plan.values}
-    assert "dispatch-time scalar" in kinds["n"] and "dispatch-time scalar" in kinds["pos"]
-    dispatch = net.sequence._dispatch
+    assert (
+        "dispatch-time scalar" in kinds["n"] and "dispatch-time scalar" in kinds["pos"]
+    )
+    chain = net.sequence._image
     streams = {
-        type(op).__name__: dispatch.op_insts_path_map[id(op)]
+        type(op).__name__: chain.op_insts_path_map[id(op)]
         for op in net.sequence.unique_operators()
     }
     assert set(streams) == {"DynamicSoftmax", "StridedCopy"}
