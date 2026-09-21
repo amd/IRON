@@ -851,9 +851,10 @@ run. How the toolchain was obtained without a device is worth a line,
 since the index pages that name the assets are what a sandbox cannot
 reach: the mlir-aie wheel and the Peano wheel are release assets whose
 download URLs resolve directly (Peano's name and version are spelled out
-in mlir-aie's `utils/update_peano_version.py`), and `aiebu-asm` builds
-from `Xilinx/aiebu` with its three submodules and Boost. `xclbinutil`
-(XRT) was not obtained, so the xclbin path is unverified past its MLIR.
+in mlir-aie's `utils/update_peano_version.py`), `aiebu-asm` builds from
+`Xilinx/aiebu` with its three submodules and Boost, and `xclbinutil` is
+the Boost-free one mlir-aie vendors under `tools/hrx-xclbinutil`, built
+standalone with one fix (below). No XRT is installed, so nothing loads.
 
 ### The lowering gate
 
@@ -892,6 +893,39 @@ key and value copies of every block are one design, so one
 `cache_offset` write reaches them all, and likewise the softmax's
 vector size. The test asserts each bound value's symbol is in the table.
 
+The same build at Llama 3.2 1B's real configuration (16 blocks, 386
+steps, 48 bindings, 19 distinct designs) takes about three minutes and
+produces a 13.3 MB ELF with the same two-row table. That is the image
+`llama_npu.py` would load; only the load and the token snapshot are
+left.
+
+### The xclbin gate
+
+`iron/tests/toolchain/xclbin.py` builds the other image, one xclbin per
+design, on each path that lowers that way: a graph's separate dispatch
+on npu2 and npu1 (the swiglu decode graph: five steps, four designs,
+the gate and up projections sharing one kernel instance and one
+instruction stream), flm/gemm's two compiles (the configuration's xclbin
+at the reference shape plus this shape's instructions), mm_prebuilt's
+instruction stream against its foreign overlay (and the download of the
+image itself, which this session's network allowed), and a plain
+operator's `compile()` on npu1. All pass.
+
+Two things were wrong on the way. `SeparateDispatch.link_xclbins`
+linked one xclbin per operator instance where the fused path built one
+per design, so a graph with shared designs paid a chained compile per
+step; it now iterates `unique_designs()` and maps every operator onto
+its design's artifacts. And the vendored `xclbinutil` could not link a
+chain at all: its property-tree shim split an empty path into one empty
+key, so the `put("", v)` every section uses for array elements dumped
+each element one level too deep (`"start_columns": [["0"]]`), and
+aiecc's `--xclbin-input` step, which re-adds the dumped partition,
+failed on the empty value. The fix (an empty path names the node
+itself, as in boost) and a round-trip step for the tool's smoke test
+are in `iron/tests/toolchain/patches/hrx-xclbinutil-empty-path.patch`,
+against mlir-aie's `third_party/hrx-xclbinutil`; the smoke test fails
+without it and passes with it. It belongs upstream.
+
 The GEMV object gate is satisfied by construction: no kernel source
 differs from the PR 215 tree and GEMV's MLIR is byte-identical, so the
 same aiecc run produces the same object.
@@ -903,9 +937,12 @@ refuses to enter outside a placed program, and the lowering gate runs the
 same cases for real). In `iron/tests/infrastructure`, `lazy_imports.py`
 needed its notion of a composite updated (a graph function's factory,
 not an `OperatorSequence` subclass) and passes; what fails there fails
-for want of hardware or of `xclbinutil`: `sequence.py` and
-`graph_dispatch.py` need `pyxrt` and a bound device, `jit_compile_path.py`
-builds an xclbin. Those are the on-device list below.
+for want of hardware: `sequence.py` and `graph_dispatch.py` need
+`pyxrt` and a bound device, and one test in `jit_compile_path.py`
+asserts that binding the device inside the cache stamp reproduces the
+hash a bound compile computes, which needs a device to bind (the rest
+of that file, the xclbin and ELF compiles included, passes). Those are
+the on-device list below.
 
 Against the PR 215 tree, generated MLIR for the same constructions:
 
@@ -943,12 +980,13 @@ and the decode graph's parity against the token snapshot (§18).
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
 | lowering gate (see above) | `iron/tests/toolchain/lowering.py`, `lowering_graph.py` | 116 + 12 lowerings to instruction streams; MLIR diffed against PR 215 per case | kernels compile (the full ELF, next row); **needs a device**: numbers |
-| full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values | **needs a device**: loading, `params.write`, numbers |
+| full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values; the real-size decode graph builds too (13.3 MB) | **needs a device**: loading, `params.write`, numbers |
+| xclbin (see above) | `iron/tests/toolchain/xclbin.py`, `patches/` | — | separate dispatch on both devices, one kernel per design; flm/gemm's two compiles; mm_prebuilt's instructions and image; a plain operator on npu1 | **needs a device**: running the chain |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
 | llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
-| graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF) verified by the full-ELF gate; **needs a device**: writing values through `params` and calling |
+| graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF, and → the chained xclbins) verified by the full-ELF and xclbin gates; **needs a device**: writing values through `params` and calling |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm

@@ -237,8 +237,13 @@ class SeparateDispatch(SequenceDispatch):
         name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
         build_dir = Path(seq.context.build_dir)
 
+        # One kernel instance per design, not per operator: with
+        # share_designs, operators reporting one design_key generate one
+        # module, so they link one xclbin and run one instruction stream.
+        designs, design_of = seq.unique_designs()
         prev_xclbin_path = None
-        for idx, op in enumerate(seq.unique_operators()):
+        built = []
+        for idx, op in enumerate(designs):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
             xclbin_path, insts_path = compile_xclbin_insts(
@@ -252,11 +257,14 @@ class SeparateDispatch(SequenceDispatch):
                     f"--xclbin-kernel-id={kernel_id}",
                 ],
             )
+            built.append((xclbin_path, insts_path, op_label))
+            prev_xclbin_path = xclbin_path
 
+        for op in seq.unique_operators():
+            xclbin_path, insts_path, op_label = built[design_of[id(op)]]
             self.op_xclbin_path_map[id(op)] = xclbin_path
             self.op_insts_path_map[id(op)] = insts_path
             self.op_kernel_name_map[id(op)] = op_label
-            prev_xclbin_path = xclbin_path
 
         # The last xclbin in the chain carries all the linked instances.
         self.combined_xclbin_path = prev_xclbin_path
