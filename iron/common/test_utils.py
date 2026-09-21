@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import torch
 import aie.utils as aie_utils
@@ -10,14 +12,69 @@ from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 
-torch_dtype_map = {
-    "bf16": torch.bfloat16,
-    "f32": torch.float32,
-    "i8": torch.int8,
-    "ui8": torch.uint8,
-    "i16": torch.int16,
-    "i32": torch.int32,
+_TORCH_DTYPES = {
+    bfloat16: torch.bfloat16,
+    np.float32: torch.float32,
+    np.int8: torch.int8,
+    np.uint8: torch.uint8,
+    np.int16: torch.int16,
+    np.int32: torch.int32,
 }
+
+
+def torch_dtype(dtype) -> torch.dtype:
+    """The torch dtype of a numpy scalar type (``ml_dtypes.bfloat16`` included)."""
+    key = np.dtype(dtype).type
+    if key not in _TORCH_DTYPES:
+        raise TypeError(f"no torch dtype for {dtype!r}")
+    return _TORCH_DTYPES[key]
+
+
+@dataclasses.dataclass
+class Golden:
+    """Test vectors for one operator, keyed by its declared buffer names."""
+
+    inputs: dict[str, torch.Tensor]
+    outputs: dict[str, torch.Tensor]
+
+    def __getitem__(self, name: str) -> torch.Tensor:
+        return self.inputs[name] if name in self.inputs else self.outputs[name]
+
+
+def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden:
+    """Random inputs for ``op``'s declared buffers, and its reference's outputs.
+
+    Each ``In`` buffer, in declaration order, is ``torch.rand`` of its declared
+    shape and dtype times ``scale`` (``torch.randn`` for the names in
+    ``normal``, shifted to centre on zero for those in ``centered``), or comes
+    from ``given``: a tensor as it is, or a shape to draw in place of the
+    declared one (an operand the sequence packs, such as flm GEMM's B). The
+    outputs are ``op.reference(*inputs)`` under the declared output names.
+    """
+    unknown = set(given) - {b.name for b in op.inputs}
+    if unknown:
+        raise ValueError(f"{type(op).__name__} has no input {sorted(unknown)}")
+    torch.manual_seed(seed)
+    inputs = {}
+    for b in op.inputs:
+        value = given.get(b.name)
+        if isinstance(value, torch.Tensor):
+            inputs[b.name] = value
+            continue
+        shape = tuple(b.shape) if value is None else tuple(value)
+        draw = torch.randn if b.name in normal else torch.rand
+        t = draw(shape, dtype=torch_dtype(b.dtype)) * scale
+        if b.name in centered:
+            t = t - scale / 2
+        inputs[b.name] = t
+    out = op.reference(*inputs.values())
+    outs = (out,) if isinstance(out, torch.Tensor) else tuple(out)
+    names = [b.name for b in op.outputs]
+    if len(outs) != len(names):
+        raise ValueError(
+            f"{type(op).__name__}.reference returned {len(outs)} outputs for {names}"
+        )
+    return Golden(inputs, dict(zip(names, outs)))
 
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 

@@ -637,15 +637,15 @@ class GEMM(Operator[FLMGEMMOverlay]):
 
     @property
     def tile_n(self) -> int:
-        return self.ov.tile_n
+        return self._tuned_ov.tile_n
 
     @property
     def tile_ma(self) -> int:
-        return self.ov.tile_ma
+        return self._tuned_ov.tile_ma
 
     @property
     def m_chunk(self) -> int:
-        return self.ov.m_chunk
+        return self._tuned_ov.m_chunk
 
     @property
     def rounding(self) -> Rounding:
@@ -660,9 +660,18 @@ class GEMM(Operator[FLMGEMMOverlay]):
         return bool(self.ov.bfp16_b)
 
     @property
+    def _tuned_ov(self) -> "FLMGEMMOverlay":
+        """The overlay tuned for the current device, when construction left it untuned.
+
+        The names and the packing read fields tuning fills (tile_n, tile_ma,
+        the B block depth), and both are wanted before the build tunes."""
+        ov = self.ov
+        return ov if ov._tuned else ov.tuned(aie_utils.get_current_device())
+
+    @property
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's."""
-        return self.ov.config_name(aie_utils.get_current_device().resolve().name)
+        return self._tuned_ov.config_name(aie_utils.get_current_device().resolve().name)
 
     @property
     def name(self) -> str:
@@ -1020,7 +1029,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
         consumption order is what makes both B hops linear descriptors. See
         :mod:`iron.operators.flm.packing`.
         """
-        ov = self.ov
+        ov = self._tuned_ov
         return pack_b(
             B,
             k_tile=K_TILE,
