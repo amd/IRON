@@ -936,7 +936,7 @@ instruction stream against its foreign overlay (and the download of the
 image itself, which this session's network allowed), and a plain
 operator's `compile()` on npu1. All pass.
 
-`iron/tests/toolchain/compile.py` then runs the packaging surface end
+`iron/tests/toolchain/full_elf.py` and `xclbin.py` then run the packaging surface end
 to end: `compile(dev, boundaries=, image=)` on the swiglu decode graph
 derives `elf`/fused on npu2 and `xclbin`/separate at `each_step` on
 npu1, builds the sequence and links the image, and stops there.
@@ -1043,7 +1043,7 @@ and the decode graph's parity against the token snapshot (§18).
 | full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values; the real-size decode graph builds too (13.3 MB) | **needs a device**: loading, `params.write`, numbers |
 | xclbin (see above) | `iron/tests/toolchain/xclbin.py`, `patches/` | — | separate dispatch on both devices, one kernel per design; flm/gemm's two compiles; mm_prebuilt's instructions and image; a plain operator on npu1 | **needs a device**: running the chain |
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
-| ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
+| ahead-of-time compile (see above) | `iron/tests/toolchain/full_elf.py`, `xclbin.py` (the swiglu graph goes through `compile()`), `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt; the S1 and S4 build tests went to the shelved branch with what was built on them | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
 | the dispatch hierarchy (step 5, acceptance 1) | `sequence.py` | — | `AutoDispatch` is gone: a graph never names a dispatch (`packaging.plan` derives the instance from device, values and boundaries), and a hand-written sequence that names none gets `platform_default`. What remains are the image builders (`fused`, `separate`, `chunked`) and the two harness modes (`reference`, `compare`) the operator and infrastructure tests drive by name; deleting those would remove the hand-written-runlist API those device tests stand on, so they stay as the plan's builders | **needs a device**: the infrastructure tests that name them |
 | dispatch-time values (§6 on an xclbin image) | `build.py` (`image`, `_plus`, the preamble's value writes), `jit_compile.py` (`_design_generator`'s dispatch parameters, `DispatchStream`), `sequence.py`, `graph.py`, `softmax/op.py` | packaging reports the lowering per value; the build tests' preamble | `iron/tests/toolchain/dispatch.py`: a softmax with a per-call row length and a copy at a per-call offset build as dispatch-time kernels with their bridge libraries at `each_step` on both devices; the scaled decode graph builds the same way for NPU1: 50 steps on 18 kernels, the copies and softmaxes dispatch-time, the graph's column count now following the device; at Llama 3.2 1B's real size it is 386 steps on 19 kernels, two of them dispatch-time, in under a minute | **needs a device**: the regenerated streams, S3's read |
@@ -1188,6 +1188,27 @@ site that wants it), and `m_chunk` is the table's value, checked against
 the extent by `compatible()` rather than silently reduced to 1. The
 llama prefill and the rms_norm operator test construct in the new
 spelling.
+
+**The tests were cut to what is checked.** The stubbed design probe
+(`designs_run.py`) never ran where the real package is installed, so it
+is gone; the two arg-spec modules are one test in `declare.py`; a file
+named on the command line collected twice (pytest collects an initial
+path itself, whatever its name) and now collects once. The 24
+`generate_golden_reference` functions are one `golden(op)` in
+`iron/common/test_utils.py`, drawing every declared input in declaration
+order and taking the outputs from `op.reference()`, which every operator
+now has (gelu and layer_norm had none beyond their generator; dequant's
+unpacks what the kernel unpacks; MHA's is causal attention with the
+padding rows zeroed; RoPE's reads the bf16 angle table for both methods).
+The host proof against a worktree of the previous commit: identical
+vectors for every operator at the tests' regular shapes, except that a
+column-major GEMM B is now drawn in its stored layout (the reference on
+the old matrix reproduces the old C exactly), RoPE's output differs from
+the f32 cos/sin one by at most 0.031 (the table the device reads), and
+MHA at a padded length differs in one element by one bf16 ulp. The
+toolchain gate builds the swiglu graph twice fewer: the ELF and the
+xclbin-chain tests go through `compile()` and carry the ahead-of-time
+assertions the separate `compile.py` made on their own builds.
 
 What to run first on a device, in order: `pytest iron/tests/toolchain`
 (it is what the lowering environment already passes; a device changes

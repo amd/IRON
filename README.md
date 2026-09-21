@@ -134,8 +134,8 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 All available operators can be found in `iron/operators`. These each contain:
 
 - `op.py`: The operator, declared as two classes (see `iron/common/declare.py` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
-- `reference.py`: A reference CPU implementation to validate the correctness of the NPU implementation.
-- `test.py`: An end-to-end test that instantiates and builds the operator, runs it and verifies its outputs against the reference.
+- The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
+- `test.py`: An end-to-end test that instantiates and builds the operator, runs it on random inputs for its declared buffers (`golden(op)` in `iron/common/test_utils`) and verifies its outputs against the reference.
 
 Operators compose into graph functions: a Python function called on handles, traced once for its shapes, compiled to one image and called per token (`iron.graph`, see `iron/common/graph.py`; `iron/applications/llama_3.2_1b/decode_graph.py` is the worked example).
 
@@ -195,7 +195,7 @@ See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/
 IRON uses a three-layer architecture:
 
 1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator has: `op.py` (the declared overlay and operator, with the array's design), `reference.py` (CPU reference), `test.py` (validation)
+   - Each operator has: `op.py` (the declared overlay and operator, with the array's design and the CPU reference), `test.py` (validation)
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): Low-level C++ compute kernels
    - Organized by architecture: `generic/`, `aie2/`, `aie2p/`

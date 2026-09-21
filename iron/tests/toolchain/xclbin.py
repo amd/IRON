@@ -8,8 +8,9 @@ compiled at ``each_step`` boundaries chains one operator at a time. This
 gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
 ``xclbinutil`` packaging) on each path the model lowers that way:
 
-* a graph's separate dispatch, one xclbin per unique operator linked onto
-  the previous one (``--xclbin-input``), on both device widths;
+* a graph compiled at ``each_step`` boundaries, one xclbin per unique
+  operator linked onto the previous one (``--xclbin-input``), on both
+  device widths, with no runtime made until the first call;
 * flm/gemm's two compiles, the configuration's xclbin at the reference
   shape and this shape's instruction stream;
 * mm_prebuilt's instruction stream against its foreign overlay (the xclbin
@@ -32,6 +33,7 @@ aie = pytest.importorskip("aie")
 import aie.utils as aie_utils  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
+import iron  # noqa: E402
 from iron.common.context import AIEContext  # noqa: E402
 from iron.tests.toolchain.full_elf import PEANO  # noqa: E402
 
@@ -69,16 +71,23 @@ def _swiglu_decode():
 
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
     E, H = 2048, 8192
-    return swiglu_decode(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    return swiglu_decode(z(H, E), z(H, E), z(E, H)), E
 
 
-def test_a_graph_chains_one_xclbin_per_operator(device, tmp_path):
-    traced = _swiglu_decode()
-    ctx = AIEContext(build_dir=str(tmp_path / "build"))
-    seq = traced.sequence("swiglu_decode_sep", dispatch="separate", context=ctx)
-    seq.compile()
+def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device, tmp_path):
+    fn, E = _swiglu_decode()
+    net = fn.compile(
+        device,
+        boundaries=iron.each_step,
+        image=iron.XCLBIN,
+        context=AIEContext(build_dir=str(tmp_path)),
+        x=(1, E),
+    )
+    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
+    assert Path(net.image).suffix == ".xclbin" and Path(net.image).stat().st_size > 0
+    assert net._callable is None, "the runtime is made on first call, not at compile"
+    seq = net.sequence
     dispatch = seq._dispatch
-    dispatch.link_xclbins(seq)
     ops = list(seq.unique_operators())
     assert len(ops) == 5 and len(seq.runlist) == 5
     # Five operators, four designs: the gate and up projections share one,
@@ -91,9 +100,11 @@ def test_a_graph_chains_one_xclbin_per_operator(device, tmp_path):
     for op in ops:
         assert Path(dispatch.op_xclbin_path_map[id(op)]).stat().st_size > 0
         assert Path(dispatch.op_insts_path_map[id(op)]).stat().st_size > 0
-    # The last link carries every instance: it is the largest of the chain.
+    # The last link carries every instance: it is the largest of the chain,
+    # and it is the image compile() handed back.
     sizes = [Path(dispatch.op_xclbin_path_map[id(op)]).stat().st_size for op in ops]
     assert Path(dispatch.combined_xclbin_path).stat().st_size == max(sizes)
+    assert Path(net.image) == Path(dispatch.combined_xclbin_path)
 
 
 def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(

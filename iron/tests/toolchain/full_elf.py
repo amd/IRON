@@ -15,6 +15,13 @@ What it adds to the lowering gate is the scratchpad parameter table:
 ``--get-scratchpad-parameters`` only emits it on the full-ELF path, and it
 is where a graph's bound per-call values become something the host writes
 through. The decode graph binds two, so its table must name both.
+
+The swiglu graph goes through ``GraphFunction.compile`` itself, so the one
+build also checks the packaging surface end to end: ``compile(dev,
+image=)`` derives the dispatch, traces, builds and links the ELF, and the
+runtime that would load it is not made until the first call. A build host
+with the toolchain and no device compiles ahead of time and hands the
+image on.
 """
 
 import shutil
@@ -30,6 +37,7 @@ import aie.utils as aie_utils  # noqa: E402
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2  # noqa: E402
 
+import iron  # noqa: E402
 from iron.common.context import AIEContext  # noqa: E402
 from iron.common.jit_compile import compile_sequence, fused_work_dir  # noqa: E402
 
@@ -75,13 +83,20 @@ def _params(work_dir):
     return {row.split()[0]: row for row in rows}
 
 
-def test_swiglu_decode_graph_builds_a_full_elf(tmp_path):
+def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
     from iron.operators.swiglu_decode.op import swiglu_decode
 
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
     E, H = 2048, 8192
-    traced = swiglu_decode(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
-    elf, work = build_elf(traced, "swiglu_decode", tmp_path)
+    fn = swiglu_decode(z(H, E), z(H, E), z(E, H))
+    net = fn.compile(
+        NPU2(), image=iron.ELF, context=AIEContext(build_dir=str(tmp_path)), x=(1, E)
+    )
+    assert net.plan.image == "elf" and net.plan.dispatch == "fused"
+    elf = Path(net.image)
+    assert elf.suffix == ".elf" and elf.stat().st_size > 0
+    assert net._callable is None, "the runtime is made on first call, not at compile"
+    work = fused_work_dir(elf)
     # Four designs (gate and up share one) and the dispatch sequence.
     pdis = sorted(p.name for p in work.glob("bif_op*.bif"))
     assert len(pdis) == 4, pdis

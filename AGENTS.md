@@ -136,8 +136,12 @@ reuse lint
        runtime sequence is not the derived one. Foreign overlays (a downloaded
        xclbin) declare an `Xclbin` attribute and pinned streams instead of
        `design()`.
-     - `reference.py`: CPU reference implementation for validation
-     - `test.py`: End-to-end test (build, run, verify against reference)
+     - The operator's `reference(*inputs)` is the CPU reference the tests
+       and the graph reference run; `golden(op)` in `iron/common/test_utils`
+       draws random inputs for its declared buffers and takes the outputs
+       from it.
+     - `test.py`: End-to-end test (build, run `golden(op)` through
+       `run_test`, verify)
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
@@ -288,10 +292,12 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
-5. Implement `reference.py` with CPU reference
+5. Give the operator a `reference(*inputs)` (torch, on the declared shapes)
 6. Implement `test.py` with pytest tests
    - Use `@pytest.mark.extensive` for slower/larger tests
-   - Use `verify_buffer()` from `iron.common.test_utils`
+   - `data = golden(op)` then `run_test(op, data.inputs, data.outputs, ...)`
+     from `iron.common.test_utils`; `normal=`, `centered=`, `scale=` and a
+     given tensor or shape per input cover operators that want other draws
 7. Register operator in `iron/operators/__init__.py`
 
 ## Graph Functions
