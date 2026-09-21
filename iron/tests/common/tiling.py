@@ -100,21 +100,23 @@ def test_gemv_batched_falls_back_to_per_batch_when_stride_too_wide():
 
 
 def test_split_run_matches_gemv_rules():
-    # lo <= 1023, lo a multiple of the granule, lo maximal.
+    # lo is at most 1023 granules (2046 bf16 elements), a multiple of the
+    # granule, and maximal; hi is at most 1023.
     assert split_run(512, gran=2) == (1, 512)
-    assert (
-        split_run(4096, gran=2) == (4, 1024)
-        or split_run(4096, gran=2)[0] * split_run(4096, gran=2)[1] == 4096
-    )
+    assert split_run(4096, gran=2) == (4, 1024)  # 2048 would exceed 2046
     hi, lo = split_run(4096, gran=2)
-    assert hi * lo == 4096 and lo <= DMA_BD_MAX_WRAP and lo % 2 == 0
+    assert hi * lo == 4096 and lo <= DMA_BD_MAX_WRAP * 2 and lo % 2 == 0
     # gemv case (1026, 64, 1, 1, 2, 2): an odd-looking run that needs an even split
     hi, lo = split_run(1026 * 64, gran=2)
     assert hi * lo == 1026 * 64 and lo % 2 == 0 and hi <= DMA_BD_MAX_WRAP
 
 
 def test_repeated_rejects_what_the_descriptor_cannot_hold():
-    assert repeated(1 << 24, 0, 1024, [(2000, 1024)], bfloat16) is None  # count > wrap
+    assert (
+        repeated(1 << 24, 0, 1024, [(2000, 1024)], bfloat16) is not None
+    )  # d2 is free
+    # two repeats plus a split run fill all four slots, so iter > 64 cannot fit
+    assert repeated(1 << 24, 0, 4096, [(65, 1 << 16), (2, 4096)], bfloat16) is None
     assert repeated(4096, 1, 16, [(2, 32)], bfloat16) is None  # odd bf16 offset
     assert repeated(4096, 0, 16, [(2, 33)], bfloat16) is None  # odd bf16 stride
     assert (
@@ -123,10 +125,15 @@ def test_repeated_rejects_what_the_descriptor_cannot_hold():
     assert repeated(4096, 0, 16, [(2, 32)], np.int32) is not None
 
 
-def test_repeated_zero_stride_rereads_the_run():
-    # repeat/op.py's input: the whole buffer re-read `repeat` times.
+def test_repeated_zero_stride_rereads_the_run_from_the_iteration_slot():
+    # repeat/op.py's input: the whole buffer re-read `repeat` times. Only the
+    # iteration slot may carry a zero stride, and it holds at most 64.
     acc = repeated(64, 0, 64, [(3, 0)], bfloat16)
-    assert acc.sizes == (1, 1, 3, 64) and acc.strides == (0, 0, 0, 1)
+    assert acc.sizes == (3, 1, 1, 64) and acc.strides == (0, 0, 0, 1)
+    assert repeated(64, 0, 64, [(65, 0)], bfloat16) is None  # past the iteration wrap
+    # a strided repeat goes in d2 instead, where there is no wrap limit
+    acc = repeated(64 * 100, 0, 64, [(100, 64)], bfloat16)
+    assert acc.sizes == (1, 100, 1, 64) and acc.strides == (0, 64, 0, 1)
 
 
 def test_split_validates_divisibility_and_axis():
@@ -149,22 +156,27 @@ def test_access_span_is_bounds_checked():
 
 
 def test_legalize_factors_an_oversize_outer_dim_when_a_slot_is_free():
-    # mha's K_tiles case: a (2048, 64) tile is [1,1,2048,64]/[0,0,64,1]; 2048 > 1023.
     from iron.common.tiling import legalize
 
+    # mha's K_tiles case: a (2048, 64) tile of a 64-wide buffer is contiguous,
+    # so it is one linear transfer: what mha's legalize_tap did by hand.
     (acc,) = legalize(2048 * 64, 0, [1, 1, 2048, 64], [0, 0, 64, 1], bfloat16)
-    # 1024 is past the 10-bit wrap, so the largest legal factor is 512.
-    assert acc.sizes == (1, 4, 512, 64) and acc.strides == (0, 512 * 64, 64, 1)
+    assert acc == contiguous(2048 * 64, 0, 2048 * 64)
+    # A non-contiguous tile with an oversize d1 is factored into the free d2;
+    # 1024 exceeds d1's 1023, so the factor is 512.
+    (acc,) = legalize(2048 * 128, 0, [1, 1, 2048, 64], [0, 0, 128, 1], bfloat16)
+    assert acc.sizes == (1, 4, 512, 64) and acc.strides == (0, 512 * 128, 128, 1)
     assert acc.count == 2048 * 64
 
 
 def test_legalize_unrolls_when_no_slot_is_free():
     from iron.common.tiling import legalize
 
-    accs = legalize(1 << 21, 0, [2, 2048, 2, 64], [1 << 20, 128, 64, 1], bfloat16)
-    assert len(accs) == 2
-    assert [a.offset for a in accs] == [0, 1 << 20]
-    assert all(a.sizes == (4, 512, 2, 64) for a in accs)
+    # All four slots used and the iteration count past 64: unroll it.
+    accs = legalize(1 << 22, 0, [100, 8, 2, 64], [1 << 15, 4096, 128, 1], bfloat16)
+    assert len(accs) == 100
+    assert [a.offset for a in accs][:3] == [0, 1 << 15, 2 << 15]
+    assert all(a.sizes == (1, 8, 2, 64) for a in accs)
 
 
 def test_legalize_drops_unit_dims_and_keeps_legal_patterns():
@@ -181,3 +193,47 @@ def test_legalize_rejects_granularity_violations():
         legalize(4096, 1, [1, 1, 4, 32], [0, 0, 64, 1], bfloat16)
     with pytest.raises(ValueError, match="granule"):
         legalize(4096, 0, [1, 1, 4, 32], [0, 0, 63, 1], bfloat16)
+
+
+def test_view_of_whole_rows_is_one_linear_run():
+    from iron.common.tiling import view
+
+    # GEMV's design(rt): self.A[:, col*rows:(col+1)*rows, :] over (nb, M, K)
+    nb, M, K, cols = 4, 256, 128, 8
+    rows = M // cols
+    off, sizes, strides = view(
+        (nb, M, K), (slice(None), slice(rows, 2 * rows), slice(None))
+    )
+    assert off == rows * K
+    assert sizes == [nb, rows * K] and strides == [M * K, 1]
+    # unbatched: the leading axis is gone and the run is linear
+    off, sizes, strides = view((M, K), (slice(rows, 2 * rows),))
+    assert (off, sizes, strides) == (rows * K, [rows * K], [1])
+
+
+def test_view_with_an_integer_index_drops_the_axis():
+    from iron.common.tiling import view
+
+    off, sizes, strides = view((3, 64, 8), (1, slice(16, 32)))
+    assert off == 64 * 8 + 16 * 8 and sizes == [16 * 8] and strides == [1]
+
+
+def test_view_rejects_steps_and_empty_slices():
+    from iron.common.tiling import view
+
+    with pytest.raises(ValueError, match="unit steps"):
+        view((64,), (slice(0, 64, 2),))
+    with pytest.raises(ValueError, match="empty"):
+        view((64,), (slice(10, 10),))
+    with pytest.raises(IndexError):
+        view((64,), (0, 0))
+
+
+def test_view_then_legalize_round_trips_a_batched_block():
+    from iron.common.tiling import legalize, view
+
+    nb, M, K = 100, 256, 128
+    off, sizes, strides = view((nb, M, K), (slice(None), slice(0, 32), slice(None)))
+    (acc,) = legalize(nb * M * K, off, sizes, strides, bfloat16)
+    hi, lo = split_run(32 * K, gran=2)
+    assert acc.sizes == (1, nb, hi, lo) and acc.strides == (0, M * K, lo, 1)

@@ -9,13 +9,20 @@ dimensions, which is what a shim buffer descriptor encodes. This module
 decides the transfers and encodes them; :mod:`iron.common.build` turns each
 ``Access`` into a ``TensorAccessPattern`` and issues it.
 
-Two hardware limits are applied here and nowhere else:
+The descriptor rules are applied here and nowhere else. They are read from
+``AIEX::verifyStridesWraps`` and the shim BD field widths in mlir-aie, and
+are stated in tap order (outermost first), ``sizes = [iter, d2, d1, d0]``:
 
-* the three outer size fields of a shim descriptor are 10-bit (``DMA_BD_MAX_WRAP``);
-  the innermost is the transfer length and is not wrap-limited;
-* shim addressing is 4-byte granular, so every offset and every non-unit
-  stride must be a whole number of 4-byte granules, and the 20-bit stride
-  field counts granules.
+* ``d0``, the innermost, is at most 1023 *granules* (2046 bf16 elements),
+  unless the whole transfer is linear or contiguous, when the 32-bit length
+  field applies and any run fits;
+* ``d1`` is at most 1023 elements; ``d2`` has no wrap field;
+* ``iter`` is at most 64 and is the only dimension whose stride may be 0
+  (a re-read); every other dimension with size above 1 needs a positive
+  stride;
+* addressing is 4-byte granular: the offset, the innermost size and every
+  non-unit stride are whole granules, and the 20-bit stride field counts
+  them.
 
 GEMV, repeat and mha each carried a private copy of the first rule. GEMV's
 copy stays in its ``design(rt)`` override until its object is proven
@@ -86,21 +93,73 @@ def contiguous(elements: int, offset: int, run: int) -> Access:
     return Access(elements, offset, (1, 1, 1, run), (0, 0, 0, 1))
 
 
+_ITER_MAX = 64  # 6-bit iteration wrap, biased by one
+
+
 def split_run(
     run: int, gran: int, lim: int = DMA_BD_MAX_WRAP
 ) -> tuple[int, int] | None:
-    """Factor a contiguous run into ``(hi, lo)`` for two descriptor dimensions.
+    """Factor a contiguous run into ``(hi, lo)`` for the ``d1``/``d0`` slots.
 
-    ``hi`` fills an outer (wrap-limited) size field, ``lo`` the innermost;
-    ``lo`` must be a whole number of granules. ``None`` if no split fits.
+    ``lo`` is at most ``lim`` granules and a whole number of them; ``hi`` is
+    at most ``lim``. ``None`` if no split fits.
     """
-    if run <= lim and run % gran == 0:
+    lo_max = lim * gran
+    if run <= lo_max and run % gran == 0:
         return (1, run)
-    lo_start = (lim // gran) * gran
+    lo_start = (lo_max // gran) * gran
     for lo in range(lo_start, 0, -gran):
         if run % lo == 0 and run // lo <= lim:
             return (run // lo, lo)
     return None
+
+
+def _is_contiguous(dims: Sequence[tuple[int, int]]) -> bool:
+    """Row-major nested with no gaps: each stride is the product of the inner extent."""
+    inner = 1
+    for n, s in reversed(dims):
+        if s != inner:
+            return False
+        inner *= n
+    return True
+
+
+def _pack(
+    elements: int, offset: int, dims: list[tuple[int, int]], gran: int
+) -> Access | None:
+    """Place ``dims`` (outermost first, unit dims removed) into the four slots.
+
+    Returns ``None`` if they do not fit the slot rules; callers then split or
+    unroll. A contiguous pattern packs as one linear transfer.
+    """
+    if not dims:
+        dims = [(1, 1)]
+    if _is_contiguous(dims):
+        total = prod(n for n, _ in dims)
+        if total % gran:
+            return None
+        return contiguous(elements, offset, total)
+    if len(dims) > 4:
+        return None
+    padded = [(1, 0)] * (4 - len(dims)) + list(dims)
+    (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = padded
+    if d0_s != 1 or d0 % gran:
+        return None
+    if d0 // gran > DMA_BD_MAX_WRAP or d1 > DMA_BD_MAX_WRAP or it > _ITER_MAX:
+        return None
+    for n, st in ((d2, d2_s), (d1, d1_s)):
+        if n > 1 and st < 1:
+            return None
+    if it > 1 and it_s < 0:
+        return None
+    max_stride = max_stride_elements(np.int8) // 4 * gran  # 20-bit field in granules
+    for n, st in ((it, it_s), (d2, d2_s), (d1, d1_s)):
+        if n > 1 and (st % gran or st > max_stride):
+            return None
+    span = offset + sum((n - 1) * st for n, st in padded) + 1
+    if span > elements:
+        raise ValueError(f"access spans {span} elements of a buffer of {elements}")
+    return Access(elements, offset, (it, d2, d1, d0), (it_s, d2_s, d1_s, d0_s))
 
 
 def repeated(
@@ -112,38 +171,55 @@ def repeated(
 ) -> Access | None:
     """``run`` contiguous elements, repeated over up to two outer (count, stride) dims.
 
-    ``repeats`` is outermost first. A stride of 0 re-reads the same run. Returns
-    ``None`` when the shape does not fit a four-dimensional descriptor within
-    the wrap, stride and granularity limits; the caller then unrolls.
+    ``repeats`` is outermost first. The run takes the ``d0``/``d1`` slots
+    (split if it exceeds ``d0``), one repeat takes ``d2`` (no wrap limit) and
+    a second takes the iteration slot. Returns ``None`` when that does not
+    fit; the caller then unrolls.
     """
     gran = granule_elements(dtype)
-    if len(repeats) > 2:
-        return None
     if offset % gran:
         return None
     outer = [(int(n), int(s)) for n, s in repeats if int(n) != 1]
-    max_stride = max_stride_elements(dtype)
-    for n, s in outer:
-        if n > DMA_BD_MAX_WRAP or s > max_stride or s % gran:
-            return None
     if not outer:
-        return contiguous(elements, offset, run)
+        return contiguous(elements, offset, run) if run % gran == 0 else None
+    if len(outer) > 2:
+        return None
     split = split_run(run, gran)
     if split is None:
         return None
     hi, lo = split
-    dims = outer + ([(hi, lo)] if hi != 1 else []) + [(lo, 1)]
-    if len(dims) > 4:
+    run_dims = ([(hi, lo)] if hi != 1 else [(1, 0)]) + [(lo, 1)]
+    if len(outer) == 1:
+        n, st = outer[0]
+        # A re-read (stride 0) is only legal in the iteration slot; a strided
+        # repeat goes in d2, which has no wrap limit.
+        dims = [(n, st), (1, 0)] if st == 0 else [(1, 0), (n, st)]
+        return _pack_exact(elements, offset, dims + run_dims, gran)
+    return _pack_exact(elements, offset, outer + run_dims, gran)
+
+
+def _pack_exact(
+    elements: int, offset: int, dims: list[tuple[int, int]], gran: int
+) -> Access | None:
+    """Like ``_pack`` but keeps the caller's slot assignment (no linearising)."""
+    if len(dims) != 4:
+        dims = [(1, 0)] * (4 - len(dims)) + list(dims)
+    (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = dims
+    if d0_s != 1 or d0 % gran or d0 // gran > DMA_BD_MAX_WRAP:
         return None
-    while len(dims) < 4:
-        dims.insert(0, (1, 0))
-    sizes = tuple(n for n, _ in dims)
-    strides = tuple(s for _, s in dims)
-    total = prod(sizes)
-    span = offset + sum((n - 1) * s for n, s in dims) + 1
+    if d1 > DMA_BD_MAX_WRAP or it > _ITER_MAX:
+        return None
+    for n, st in ((d2, d2_s), (d1, d1_s)):
+        if n > 1 and st < 1:
+            return None
+    max_stride = max_stride_elements(np.int8) // 4 * gran
+    for n, st in ((it, it_s), (d2, d2_s), (d1, d1_s)):
+        if n > 1 and (st % gran or st > max_stride):
+            return None
+    span = offset + sum((n - 1) * st for n, st in dims) + 1
     if span > elements:
         raise ValueError(f"access spans {span} elements of a buffer of {elements}")
-    return Access(elements, offset, sizes, strides)  # type: ignore[arg-type]
+    return Access(elements, offset, (it, d2, d1, d0), (it_s, d2_s, d1_s, d0_s))
 
 
 # --------------------------------------------------------------------------
@@ -227,10 +303,11 @@ def legalize(
 ) -> list[Access]:
     """Rewrite one pattern as descriptors the shim can hold, moving the same elements.
 
-    Unit dimensions are dropped. An outer size past the wrap limit is
-    factored into two dimensions when a slot is free; otherwise the outermost
-    dimension is unrolled into several descriptors. Order is preserved in
-    both cases. Granularity violations cannot be fixed and are errors.
+    Unit dimensions are dropped; a contiguous pattern becomes one linear
+    transfer; a size past its slot's limit is factored into a free slot when
+    one exists; otherwise the outermost dimension is unrolled into several
+    descriptors. Order is preserved throughout. Granularity violations
+    cannot be fixed and are errors.
 
     This is the general form of the ``legalize_tap`` mha carries, which only
     knew how to collapse a contiguous tile to a linear run.
@@ -241,42 +318,104 @@ def legalize(
             f"offset {offset} is not a multiple of the {gran}-element shim granule"
         )
     dims = [(int(n), int(s)) for n, s in zip(sizes, strides) if int(n) != 1]
-    if not dims:
-        dims = [(1, 1)]
-    max_stride = max_stride_elements(dtype)
     for n, s in dims[:-1]:
         if s % gran:
             raise ValueError(
                 f"stride {s} is not a multiple of the {gran}-element granule"
             )
-        if s > max_stride:
-            raise ValueError(f"stride {s} exceeds the {_STRIDE_BITS}-bit stride field")
-    return _legalize_dims(elements, offset, dims)
+    if dims and dims[-1][1] == 1 and dims[-1][0] % gran:
+        raise ValueError(
+            f"innermost size {dims[-1][0]} is not a multiple of the {gran}-element granule"
+        )
+    return _legalize_dims(elements, offset, dims, gran)
 
 
 def _legalize_dims(
-    elements: int, offset: int, dims: list[tuple[int, int]]
+    elements: int, offset: int, dims: list[tuple[int, int]], gran: int
 ) -> list[Access]:
-    outer = dims[:-1]
-    over = next((i for i, (n, _) in enumerate(outer) if n > DMA_BD_MAX_WRAP), None)
-    if over is None and len(dims) <= 4:
-        padded = list(dims)
-        while len(padded) < 4:
-            padded.insert(0, (1, 0))
-        sizes = tuple(n for n, _ in padded)
-        strides = tuple(s for _, s in padded)
-        return [Access(elements, offset, sizes, strides)]  # type: ignore[arg-type]
-    if over is not None and len(dims) < 4:
-        n, s = dims[over]
-        b = next((b for b in range(DMA_BD_MAX_WRAP, 0, -1) if n % b == 0), 1)
-        a = n // b
-        if a <= DMA_BD_MAX_WRAP:
-            return _legalize_dims(
-                elements, offset, dims[:over] + [(a, b * s), (b, s)] + dims[over + 1 :]
+    packed = _pack(elements, offset, dims, gran)
+    if packed is not None:
+        return [packed]
+    # Which slot overflowed? Try factoring it into a free slot, innermost first.
+    if len(dims) < 4:
+        padded = [(1, 0)] * (4 - len(dims)) + list(dims)
+        limits = (_ITER_MAX, None, DMA_BD_MAX_WRAP, DMA_BD_MAX_WRAP * gran)
+        for pos in (3, 2, 0):
+            n, st = padded[pos]
+            lim = limits[pos]
+            if lim is None or n <= lim:
+                continue
+            b = next(
+                (
+                    b
+                    for b in range(lim, 0, -1)
+                    if n % b == 0 and (pos != 3 or b % gran == 0)
+                ),
+                None,
             )
-    # No room to factor: unroll the outermost dimension.
+            if b is None or n // b > DMA_BD_MAX_WRAP:
+                continue
+            i = dims.index((n, st))
+            return _legalize_dims(
+                elements,
+                offset,
+                dims[:i] + [(n // b, b * st), (b, st)] + dims[i + 1 :],
+                gran,
+            )
+    if not dims:
+        raise ValueError("cannot legalize an empty pattern")
+    # No room: unroll the outermost dimension.
     n0, s0 = dims[0]
     out: list[Access] = []
     for i in range(n0):
-        out.extend(_legalize_dims(elements, offset + i * s0, dims[1:]))
+        out.extend(_legalize_dims(elements, offset + i * s0, dims[1:], gran))
     return out
+
+
+# --------------------------------------------------------------------------
+# Slicing a buffer: what ``buffer[:, r0:r1, :]`` means as a transfer
+# --------------------------------------------------------------------------
+
+
+def view(shape: Sequence[int], index) -> tuple[int, list[int], list[int]]:
+    """``(offset, sizes, strides)`` of a basic slice over a row-major buffer.
+
+    ``index`` is what ``__getitem__`` received: an int, a slice, or a tuple
+    of them; missing trailing axes are taken whole. Steps other than 1 are
+    rejected. Adjacent contiguous dimensions are merged, so a slice that
+    selects whole rows collapses to one linear run.
+    """
+    shape = tuple(int(s) for s in shape)
+    if not isinstance(index, tuple):
+        index = (index,)
+    if len(index) > len(shape):
+        raise IndexError(f"too many indices for shape {shape}")
+    index = index + (slice(None),) * (len(shape) - len(index))
+    row_strides = [prod(shape[i + 1 :]) for i in range(len(shape))]
+    offset = 0
+    dims: list[tuple[int, int]] = []
+    for axis, (idx, n, stride) in enumerate(zip(index, shape, row_strides)):
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(n)
+            if step != 1:
+                raise ValueError(f"axis {axis}: only unit steps are supported")
+            if stop <= start:
+                raise ValueError(f"axis {axis}: empty slice {idx}")
+            offset += start * stride
+            dims.append((stop - start, stride))
+        else:
+            i = int(idx)
+            if not -n <= i < n:
+                raise IndexError(f"axis {axis}: index {i} out of range for {n}")
+            offset += (i % n) * stride
+    # merge adjacent dims that are contiguous: (n1, s1), (n2, s2) with s1 == n2*s2
+    merged: list[tuple[int, int]] = []
+    for n, s in dims:
+        if merged and merged[-1][1] == n * s:
+            pn, _ = merged[-1]
+            merged[-1] = (pn * n, s)
+        else:
+            merged.append((n, s))
+    if not merged:
+        merged = [(1, 1)]
+    return offset, [n for n, _ in merged], [s for _, s in merged]
