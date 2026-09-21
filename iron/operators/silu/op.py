@@ -1,22 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
 from typing import ClassVar
 
-from iron.common import ChanneledUnaryOperator
+from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
-@dataclass
-class SiLU(ChanneledUnaryOperator):
-    """AIE-accelerated SiLU activation function"""
-
-    num_channels: int = field(default=1, init=False, repr=False)
+@operator
+class SiLUOverlay(ChanneledUnaryOverlay):
+    """The array for SiLU: the shared channeled-unary design over its kernel."""
 
     kernel_name: ClassVar[str] = "silu"
     kernel_fn_name: ClassVar[str] = "silu_bf16_size"
-    callback_fn: ClassVar[str] = "my_silu"
     needs_lut_ops: ClassVar[bool] = True
+
+
+@operator
+class SiLU(ChanneledUnaryOperator[SiLUOverlay]):
+    """AIE-accelerated SiLU activation function"""
 
     def reference(self, x):
         from iron.operators.silu.reference import reference

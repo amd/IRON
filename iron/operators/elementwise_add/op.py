@@ -1,21 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
 from typing import ClassVar
 
-from iron.common import BinaryElementwiseOperator
+from iron.common import BinaryElementwiseOperator, BinaryElementwiseOverlay, operator
 
 
-@dataclass
-class ElementwiseAdd(BinaryElementwiseOperator):
-    """AIE-accelerated element-wise addition"""
+@operator
+class ElementwiseAddOverlay(BinaryElementwiseOverlay):
+    """The array for ElementwiseAdd: the shared binary-elementwise design over its kernel."""
 
     kernel_name: ClassVar[str] = "add"
     kernel_fn_name: ClassVar[str] = "eltwise_add_bf16_vector_size"
-    kernel_subdir: ClassVar[str] = "generic"
-    callback_fn: ClassVar[str] = "my_eltwise_add"
-    kernels_from_mlir_aie: ClassVar[bool] = True
+
+
+@operator
+class ElementwiseAdd(BinaryElementwiseOperator[ElementwiseAddOverlay]):
+    """AIE-accelerated element-wise addition"""
 
     def reference(self, a, b):
         from iron.operators.elementwise_add.reference import reference

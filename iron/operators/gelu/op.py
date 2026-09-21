@@ -1,18 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
 from typing import ClassVar
 
-from iron.common import ChanneledUnaryOperator
+from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 
 
-@dataclass
-class GELU(ChanneledUnaryOperator):
-    """AIE-accelerated GELU activation function"""
+@operator
+class GELUOverlay(ChanneledUnaryOverlay):
+    """The array for GELU: the shared channeled-unary design over its kernel."""
 
     kernel_name: ClassVar[str] = "gelu"
     kernel_fn_name: ClassVar[str] = "gelu_bf16_size"
     needs_lut_ops: ClassVar[bool] = True
-    callback_fn: ClassVar[str] = "my_gelu"
     tile_cap: ClassVar[int] = 8192
+
+
+@operator
+class GELU(ChanneledUnaryOperator[GELUOverlay]):
+    """AIE-accelerated GELU activation function"""
+
+    pass

@@ -55,7 +55,14 @@ class Target:
     prefix inside :meth:`kernel`, so an overlay never handles it.
     """
 
-    def __init__(self, dev, kernels_dir, func_prefix: str = "", verbose: bool = False):
+    def __init__(
+        self,
+        dev,
+        kernels_dir,
+        func_prefix: str = "",
+        verbose: bool = False,
+        trace_size: int = 0,
+    ):
         from pathlib import Path
 
         from .device_utils import get_kernel_dir
@@ -65,7 +72,12 @@ class Target:
         self.arch = get_kernel_dir(dev)  # "aie2" | "aie2p"
         self.func_prefix = func_prefix
         self.verbose = verbose
+        self.trace_size = trace_size
         self.barriers: list[Any] = []
+
+    def kernel_source(self, name: str):
+        """``<kernels_dir>/<arch>/<name>.cc``: the per-architecture kernel tree."""
+        return self.kernels_dir / self.arch / f"{name}.cc"
 
     def kernel(
         self,
@@ -320,6 +332,7 @@ def build_design(
     op: Operator,
     func_prefix: str = "",
     verbose: bool = False,
+    trace_size: int = 0,
     code: str = "",
 ):
     """Generate the MLIR module for one declared operator.
@@ -332,7 +345,7 @@ def build_design(
 
     op = op.tuned(dev)
     ov = op.ov
-    target = Target(dev, kernels_dir, func_prefix, verbose)
+    target = Target(dev, kernels_dir, func_prefix, verbose, trace_size)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
@@ -370,7 +383,12 @@ def build_design(
             _derived(rt, op, ov)
 
     rt = Runtime(sequence, fn_args + params)
-    return Program(dev, rt, workers=workers).resolve_program()
+    prog = Program(dev, rt, workers=workers)
+    if trace_size:
+        from iron.operators._trace import maybe_enable_trace
+
+        maybe_enable_trace(prog, trace_size, workers)
+    return prog.resolve_program()
 
 
 def _design_code(op: Operator) -> str:

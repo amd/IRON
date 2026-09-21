@@ -1,206 +1,331 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""The two shared operator families: channeled unary and binary elementwise.
+
+Each is an overlay/operator pair in the declared form (see
+:mod:`iron.common.declare`). The overlay builds one core per column (and
+per channel, for the unary family), each streaming fixed-size lines in and
+out; the operator declares a flat buffer per stream, and its runtime
+sequence is derived: the buffer is split evenly across the cores' fifos and
+drained back the same way.
+
+The core's trip count is a :class:`~iron.common.declare.Resident` the
+sequence writes before the first transfer, so the array does not depend on
+the extent and one overlay serves every size (OPERATOR_MODEL_PLAN.md §3).
+Before this the count was a compile-time constant derived from ``size``.
+
+A concrete operator is two small subclasses, one per layer::
+
+    @operator
+    class ReLUOverlay(ChanneledUnaryOverlay):
+        kernel_name: ClassVar[str] = "relu"
+        kernel_fn_name: ClassVar[str] = "relu_bf16_size"
+
+    @operator
+    class ReLU(ChanneledUnaryOperator[ReLUOverlay]):
+        def reference(self, x): ...
+
+Overlays with an extra kernel argument (leaky_relu's alpha, axpy's scalar
+factor) add a field and override :meth:`kernel_arg_types` and
+:meth:`kernel_call`.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
+import dataclasses
 from typing import Any, ClassVar
 
-import aie.utils as aie_utils
+import numpy as np
+from ml_dtypes import bfloat16
 
-from .base import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    same_shape_unary,
-    same_shape_binary,
+from .declare import (
+    O,
+    Incompatible,
+    In,
+    Operator,
+    Out,
+    Overlay,
+    Resident,
+    StreamIn,
+    StreamOut,
+    Untunable,
+    dim,
+    operator,
+    tunable,
 )
-from .context import AIEContext
-from .compilation import (
-    SourceArtifact,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-from .device_utils import get_kernel_dir, lut_sources
+from .device_utils import lut_sources
 from .utils import get_shim_dma_limit
 
+_I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
-@dataclass
-class ChanneledUnaryOperator(MLIROperator):
-    """Base class for channeled unary AIE operators (single input, single output).
 
-    Assumes a single kernel source file and a standard design.py callback
-    with args [device, size, num_aie_columns, num_channels, tile_size, trace_size].
+# --------------------------------------------------------------------------
+# Channeled unary: one input, one output, one core per (column, channel)
+# --------------------------------------------------------------------------
 
-    Subclasses must define ClassVar attributes:
-        kernel_name:   name of the kernel object file (e.g. "gelu" → gelu.o / gelu.cc)
-        callback_fn:   design.py callback function name (e.g. "my_gelu")
-        needs_lut_ops: set True for operators that require lut_based_ops.o on aie2
 
-    Customization points:
-        - For operators with extra parameters (e.g. alpha, trace_size), add
-          dataclass fields and override _mlir_callback_args().
-        - For operators requiring multiple kernels, extra compile flags, or
-          external source files, declare them in the design with
-          iron.operators._kernels.declare_kernel.
-        - For non-standard arg specs, override get_arg_spec() directly.
-        - If none of these fit, subclass MLIROperator instead.
+@operator
+class ChanneledUnaryOverlay(Overlay):
+    """The array for a unary kernel over lines of ``line_size`` elements.
+
+    Subclasses set ``kernel_name`` (the ``.cc`` under the arch's kernel dir),
+    ``kernel_fn_name`` (the symbol), ``needs_lut_ops`` for aie2 kernels that
+    reach ``lut_based_ops.cpp``'s tables from C++, and ``tile_cap`` (the
+    largest line one core holds; lines above 4096 elements need a fifo depth
+    of one to fit local memory).
     """
 
-    size: int
-    num_aie_columns: int
-    num_channels: int
-    tile_size: int
-    context: AIEContext | None = field(default=None, repr=False)
+    num_aie_columns: int = tunable()
+    num_channels: int = tunable()
+    tile_size: int = tunable()
+    # min(tile_size, tile_cap); filled by tuning, never set by a caller.
+    line_size: int | None = tunable(None, repr=False)
+
+    x = StreamIn(line_size, per=(num_aie_columns, num_channels))
+    y = StreamOut(line_size, per=(num_aie_columns, num_channels))
+    count = Resident(np.int32)  # lines each core processes; written per sequence
 
     kernel_name: ClassVar[str]
     kernel_fn_name: ClassVar[str]
-    callback_fn: ClassVar[str]
     needs_lut_ops: ClassVar[bool] = False
     tile_cap: ClassVar[int] = 4096
 
-    def __post_init__(self) -> None:
-        max_multiple = self.num_aie_columns * self.tile_size
-        if self.size % max_multiple != 0:
-            raise ValueError(
-                f"size ({self.size}) must be a multiple of "
-                f"num_aie_columns * tile_size ({max_multiple})"
-            )
-        dev = aie_utils.get_current_device()
-        shim_dma_limit = get_shim_dma_limit(dev)
-        total_shimdma_channels = self.num_aie_columns * self.num_channels
-        if total_shimdma_channels > shim_dma_limit:
-            raise ValueError(
-                f"num_aie_columns * num_channels ({total_shimdma_channels}) "
-                f"exceeds ShimDMA limit of {shim_dma_limit} for this device"
-            )
-        super().__init__(context=self.context)
+    def tuning(self, dev) -> "ChanneledUnaryOverlay":
+        line_size = min(self.tile_size, self.tile_cap)
+        if dev is not None:
+            limit = get_shim_dma_limit(dev)
+            channels = self.num_aie_columns * self.num_channels
+            if channels > limit:
+                raise Untunable(
+                    f"num_aie_columns * num_channels ({channels}) exceeds ShimDMA "
+                    f"limit of {limit} for this device"
+                )
+        return dataclasses.replace(self, line_size=line_size)
 
-    @staticmethod
-    def arg_spec(size) -> list[AIERuntimeArgSpec]:
-        return same_shape_unary(size)
+    # -- hooks for kernels with extra arguments -----------------------------
 
-    def _mlir_callback_args(self) -> list[Any]:
-        """Return the callback_args list for PythonGeneratedMLIRArtifact.
+    def kernel_arg_types(self, line_type) -> list:
+        return [line_type, line_type, np.int32]
 
-        Retained for the operators that append an extra parameter and build
-        their own artifact (axpy's scalar_factor, leaky_relu's alpha). The
-        base itself binds by name instead.
-        """
-        return [
-            aie_utils.get_current_device(),
-            self.size,
-            self.num_aie_columns,
-            self.num_channels,
-            self.tile_size,
-            self.trace_size,
-        ]
+    def kernel_call(self, kernel, elem_in, elem_out) -> None:
+        kernel(elem_in, elem_out, self.line_size)
 
-    @property
-    def bundled_sources(self) -> tuple:
-        """Translation units the kernel links but never calls through MLIR."""
-        return lut_sources() if self.needs_lut_ops else ()
+    # -- the array ----------------------------------------------------------
 
-    @property
-    def kernel_source(self):
-        """The C++ source this operator's kernel is compiled from."""
-        return self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
 
-    def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        # Bound by name rather than passed by position. The old list matched
-        # the design's signature by order alone, so inserting a parameter into
-        # that signature shifted every argument after it silently.
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                self.operator_dir.parent / "channeled_unary_design.py",
-                "channeled_unary_design",
-                bind_from=self,
-            ),
+        line_type = self.x.tile
+        cols, chans = self.num_aie_columns, self.num_channels
+        # Lines above one 8 KB bank need a depth of one to fit local memory.
+        depth = 1 if self.line_size > 4096 else 2
+
+        kernel = target.kernel(
+            self.kernel_fn_name,
+            self.kernel_arg_types(line_type),
+            source=target.kernel_source(self.kernel_name),
+            bundled_sources=lut_sources(target.dev) if self.needs_lut_ops else (),
         )
 
+        of_ins = [
+            ObjectFifo(line_type, name=f"in{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        of_outs = [
+            ObjectFifo(line_type, name=f"out{i}_{j}", depth=depth)
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        counts = [
+            target.rtp(_I32, name=f"count{i}_{j}")
+            for i in range(cols)
+            for j in range(chans)
+        ]
+        barriers = [target.barrier() for _ in range(cols * chans)]
 
-@dataclass
-class BinaryElementwiseOperator(MLIROperator):
-    """Base class for binary element-wise AIE operators (two inputs, one output).
+        def core_fn(of_in, of_out, kernel_line, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            for _ in range_(n):
+                elem_in = of_in.acquire(1)
+                elem_out = of_out.acquire(1)
+                self.kernel_call(kernel_line, elem_in, elem_out)
+                of_in.release(1)
+                of_out.release(1)
 
-    Assumes a single kernel source file and a standard design.py callback
-    with args [device, size, num_aie_columns, tile_size, trace_size].
+        workers = [
+            Worker(
+                core_fn,
+                [of_ins[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
+            )
+            for k in range(cols * chans)
+        ]
+        for k in range(cols * chans):
+            self.x[k].bind(of_ins[k].prod())
+            self.y[k].bind(of_outs[k].cons())
+        self.count.bind(counts)
+        return workers
 
-    Unlike ChanneledUnaryOperator, binary operators have no explicit num_channels
-    parameter — each core uses 2 DMA channels (one per input), so the ShimDMA
-    limit is enforced as num_aie_columns * 2 <= 16.
 
-    Subclasses must define ClassVar attributes:
-        kernel_name:   name of the kernel object file (e.g. "add" → add.o / add.cc)
-        kernel_subdir: subdirectory under aie_kernels/ (e.g. "generic")
-        callback_fn:   design.py callback function name (e.g. "my_eltwise_add")
+@operator
+class ChanneledUnaryOperator(Operator[O]):
+    """A flat buffer in, a flat buffer of the same size out, split across the cores."""
+
+    size: int = dim()
+
+    x = In(size, to=ChanneledUnaryOverlay.x)
+    y = Out(size, from_=ChanneledUnaryOverlay.y)
+
+    def compatible(self) -> None:
+        ov = self.ov
+        unit = ov.num_aie_columns * ov.tile_size
+        if self.size % unit:
+            raise Incompatible(
+                f"size ({self.size}) must be a multiple of "
+                f"num_aie_columns * tile_size ({unit})"
+            )
+        per_core = self.size // (ov.num_aie_columns * ov.num_channels)
+        if per_core % ov.line_size:
+            raise Incompatible(
+                f"size ({self.size}) leaves each of the "
+                f"{ov.num_aie_columns * ov.num_channels} cores {per_core} elements, "
+                f"not a multiple of the {ov.line_size}-element line"
+            )
+
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        return {
+            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.line_size
+        }
+
+
+# --------------------------------------------------------------------------
+# Binary elementwise: two inputs, one output, one core per column
+# --------------------------------------------------------------------------
+
+
+@operator
+class BinaryElementwiseOverlay(Overlay):
+    """The array for a binary elementwise kernel over tiles of ``per_tile`` elements.
+
+    Each core uses two shim DMA channels (one per input), so the ShimDMA
+    limit is enforced as ``num_aie_columns * 2``.
     """
 
-    size: int
-    tile_size: int
-    num_aie_columns: int = 8
-    context: AIEContext | None = field(default=None, repr=False)
+    tile_size: int = tunable()
+    num_aie_columns: int = tunable(8)
+    # min(tile_size, 4096); filled by tuning, never set by a caller.
+    per_tile: int | None = tunable(None, repr=False)
+
+    a = StreamIn(per_tile, per=num_aie_columns)
+    b = StreamIn(per_tile, per=num_aie_columns)
+    y = StreamOut(per_tile, per=num_aie_columns)
+    count = Resident(np.int32)
 
     kernel_name: ClassVar[str]
     kernel_fn_name: ClassVar[str]
-    kernel_subdir: ClassVar[str]
-    callback_fn: ClassVar[str]
-    # Override parent's "c" alias with "col" so binary-elementwise operator names
-    # are unambiguous when num_aie_columns and num_channels both appear in the
-    # name (the parent ChanneledUnaryOperator uses "c" for num_aie_columns).
-    _name_aliases: ClassVar[dict[str, str]] = {
-        **MLIROperator._name_aliases,
-        "num_aie_columns": "col",  # intentionally overrides parent's "c" alias
-    }
+    # Name parts: "col" rather than the unary family's "c", so a name with
+    # both a column and a channel count stays unambiguous.
+    _name_aliases: ClassVar[dict[str, str]] = {"num_aie_columns": "col"}
 
-    def __post_init__(self) -> None:
-        if self.size % (self.num_aie_columns * self.tile_size) != 0:
-            raise ValueError(
-                f"size ({self.size}) must be a multiple of "
-                f"num_aie_columns * tile_size ({self.num_aie_columns * self.tile_size})"
-            )
-        dev = aie_utils.get_current_device()
-        shim_dma_limit = get_shim_dma_limit(dev)
-        # Binary operators use 2 ShimDMA channels per column (one per input).
-        total_shimdma_channels = self.num_aie_columns * 2
-        if total_shimdma_channels > shim_dma_limit:
-            raise ValueError(
-                f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit "
-                f"of {shim_dma_limit // 2} columns for this device"
-            )
-        super().__init__(context=self.context)
+    def tuning(self, dev) -> "BinaryElementwiseOverlay":
+        if dev is not None:
+            limit = get_shim_dma_limit(dev)
+            if self.num_aie_columns * 2 > limit:
+                raise Untunable(
+                    f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit "
+                    f"of {limit // 2} columns for this device"
+                )
+        return dataclasses.replace(self, per_tile=min(self.tile_size, 4096))
 
-    @staticmethod
-    def arg_spec(size) -> list[AIERuntimeArgSpec]:
-        return same_shape_binary(size)
+    def kernel_source(self, target):
+        return target.kernel_source(self.kernel_name)
 
-    def _mlir_callback_args(self) -> list[Any]:
-        """Return the callback_args list for PythonGeneratedMLIRArtifact.
+    def kernel_arg_types(self, tile_type) -> list:
+        return [tile_type, tile_type, tile_type, np.int32]
 
-        Retained for axpy, which appends scalar_factor and builds its own
-        artifact. The base itself binds by name instead.
-        """
-        return [
-            aie_utils.get_current_device(),
-            self.size,
-            self.num_aie_columns,
-            self.tile_size,
-            self.trace_size,
-        ]
+    def kernel_call(self, kernel, elem_a, elem_b, elem_out) -> None:
+        kernel(elem_a, elem_b, elem_out, self.per_tile)
 
-    @property
-    def kernel_source(self):
-        """The C++ source this operator's kernel is compiled from."""
-        return self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
+    def design(self, target) -> list:
+        from aie.iron import ObjectFifo, Worker
+        from aie.iron.controlflow import range_
 
-    def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        # Bound by name; see the note on the unary base about position.
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                self.operator_dir.parent / "binary_elementwise_design.py",
-                "binary_elementwise_design",
-                bind_from=self,
-            ),
+        tile_type = self.a.tile
+        cols = self.num_aie_columns
+
+        kernel = target.kernel(
+            self.kernel_fn_name,
+            self.kernel_arg_types(tile_type),
+            source=self.kernel_source(target),
         )
+        of_as = [ObjectFifo(tile_type, name=f"in1_{i}") for i in range(cols)]
+        of_bs = [ObjectFifo(tile_type, name=f"in2_{i}") for i in range(cols)]
+        of_ys = [ObjectFifo(tile_type, name=f"out_{i}") for i in range(cols)]
+        counts = [target.rtp(_I32, name=f"count_{i}") for i in range(cols)]
+        barriers = [target.barrier() for _ in range(cols)]
+
+        def core_body(of_a, of_b, of_y, kernel_fn, count, barrier):
+            barrier.wait_for_value(1)
+            n = count[0]
+            for _ in range_(n):
+                elem_a = of_a.acquire(1)
+                elem_b = of_b.acquire(1)
+                elem_y = of_y.acquire(1)
+                self.kernel_call(kernel_fn, elem_a, elem_b, elem_y)
+                of_a.release(1)
+                of_b.release(1)
+                of_y.release(1)
+
+        workers = [
+            Worker(
+                core_body,
+                [
+                    of_as[i].cons(),
+                    of_bs[i].cons(),
+                    of_ys[i].prod(),
+                    kernel,
+                    counts[i],
+                    barriers[i],
+                ],
+            )
+            for i in range(cols)
+        ]
+        for i in range(cols):
+            self.a[i].bind(of_as[i].prod())
+            self.b[i].bind(of_bs[i].prod())
+            self.y[i].bind(of_ys[i].cons())
+        self.count.bind(counts)
+        return workers
+
+
+@operator
+class BinaryElementwiseOperator(Operator[O]):
+    """Two flat buffers in, one of the same size out, split across the cores."""
+
+    size: int = dim()
+
+    a = In(size, to=BinaryElementwiseOverlay.a)
+    b = In(size, to=BinaryElementwiseOverlay.b)
+    y = Out(size, from_=BinaryElementwiseOverlay.y)
+
+    def compatible(self) -> None:
+        ov = self.ov
+        unit = ov.num_aie_columns * ov.tile_size
+        if self.size % unit:
+            raise Incompatible(
+                f"size ({self.size}) must be a multiple of "
+                f"num_aie_columns * tile_size ({unit})"
+            )
+        n = ov.per_tile * ov.num_aie_columns
+        if self.size % n:
+            raise Incompatible(
+                f"Number of elements ({self.size}) must be a multiple of {n}."
+            )
+
+    def residents(self) -> dict[str, int]:
+        ov = self.ov
+        return {"count": self.size // (ov.per_tile * ov.num_aie_columns)}

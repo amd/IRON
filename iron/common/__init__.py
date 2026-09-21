@@ -11,7 +11,12 @@ from .base import (
     same_shape_unary,
     same_shape_binary,
 )
-from .operator_bases import ChanneledUnaryOperator, BinaryElementwiseOperator
+from .operator_bases import (
+    ChanneledUnaryOperator,
+    ChanneledUnaryOverlay,
+    BinaryElementwiseOperator,
+    BinaryElementwiseOverlay,
+)
 from .declare import (
     Overlay,
     Operator,

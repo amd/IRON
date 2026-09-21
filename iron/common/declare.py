@@ -898,7 +898,7 @@ def _finish_operator(cls: type, fields: dict[str, Field]) -> None:
                 ref = d.ref if isinstance(d, _Optional) else d
                 if (
                     isinstance(ref, DimRef)
-                    and ref.owner is not cls
+                    and not issubclass(cls, ref.owner)
                     and overlay_cls is not None
                 ):
                     if not issubclass(overlay_cls, ref.owner):
