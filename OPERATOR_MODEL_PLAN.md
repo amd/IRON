@@ -851,10 +851,9 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | library-owned build (§5, §6) | `iron/common/build.py` | 6 tests: derived order and patterns, override slicing, preamble | **needs a run**: Runtime/Program construction, resident writes, barrier sets |
 | GEMV (§14 step 1) | `iron/operators/gemv/op.py` | classic construction, arg specs, tuning, compatibility, override transfers | **needs the gate**: byte-identical `matvec_vectorized_bf16_bf16.o` |
 | unary and binary bases, ten operators (§14 step 2, part) | `iron/common/operator_bases.py`, ten `op.py` | classic construction, arg specs, resident counts, transfers per core | **needs a run**: resident-driven core loops are new code; C11 byte-identity now expected to pass |
+| dequant, rms_norm (two pairs), rope, softmax (two overlays) (§14 step 2, rest) | four `op.py` | legacy spellings, arg specs, tuning, resident values, transfers per slot, rejections | **needs a run**; softmax's snapshot entry is now `rows x cols` and must be regenerated |
 
-Not started from step 2: dequant, rms_norm, rope, softmax (softmax needs
-the preamble's scratchpad sync, which the build issues when the operator
-declares values). Step 3 onward untouched. `arg_spec`, `bind()` and the
+Step 2 is complete. Step 3 onward untouched. `arg_spec`, `bind()` and the
 snapshot are still in the tree and still consumed by the unconverted
 operators; the converted ones serve `get_arg_spec()` from their buffers.
 
