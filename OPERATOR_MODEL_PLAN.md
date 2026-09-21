@@ -1050,7 +1050,8 @@ and the decode graph's parity against the token snapshot (§18).
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
-| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
+| llama prefill as a graph function (§20) | `llama_graphs.py` `PrefillGraph`, `llama_npu.py` | traced at the scaled config: 18 steps per block, one value (`last`), every projection a column-major GEMM over the checkpoint weight, MHA on the interleaved layout, caches as decode's states; the prefill reference matches the CPU prefill's last-token logits and caches, and decode continues from the graph's own caches; the application's forward pass runs both phases over the references | operators lower with the value; full ELF at the scaled config with `last` in the table; the real-size (2048 tokens, 16 layers) trace has 291 steps over 11 overlays | **needs a device**: the token stream and time to first token (§20 step 8) |
+| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/llama_graphs.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF, and → the chained xclbins) verified by the full-ELF and xclbin gates; **needs a device**: writing values through `params` and calling |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
@@ -1448,12 +1449,37 @@ stays a strided copy, because decode reads the cache as (G, L, D).
 Steps 1 to 3 are independent of each other; 4 needs 3; 5 needs 4; 6 and
 7 need 5. Everything through 6 runs on this host.
 
+### Status
+
+Steps 1 to 7 are done on the host. Step 4 needed one fix in the tracer:
+shape inference only received the dimension fields, so a `select()` flag
+passed at the call site (`b_col_maj`, `heads_interleaved`) fell back to
+its default and inference read the weight in the wrong orientation;
+`Operator.infer_kwargs` now names what `infer` takes, for the tracer and
+`from_operands` alike. Step 5 holds at the scaled configuration with the
+decode graph four columns wide, one MHA pipeline and a 16-row GEMM tile
+(the tile constraints: the length a multiple of four row tiles and of 64
+per pipeline, every width a multiple of 64 columns). Step 6: the scaled
+prefill ELF builds in about two minutes with `last` as the one row of
+the parameter table. Step 7: `llama_npu.py` went from 847 lines to 161;
+the prefill section is one call with the prompt padded to the maximum
+length, the angles table and `last = (n - 1) * emb_dim`, then the cache
+handoff by `read`/`write` on the shared states. The application's
+forward pass is tested on the host with both images stood in by the
+graphs' references. Step 8 waits for hardware.
+
+Each image uploads its own copy of the weights it reads (the prefill
+image the whole model, the decode image the same), as the hand-written
+prefill did with its K-major copies; sharing weight buffers across images
+is the module's job (§20's "what stays for later").
+
 ### Expected results
 
 - `llama_npu.py` loses about 380 lines (the prefill operators, buffers
   and forward functions, the padded vocabulary and its partitions) and
   gains a graph of about 90; the application keeps embedding, the
-  angles and the harness glue.
+  angles and the harness glue. (Measured: the application lost 686
+  lines, the graph is 125.)
 - The attention runs on the device end to end; no intermediate crosses
   to the host during prefill. Time to first token should fall, since
   today's prefill reads back q, k, v, the scores and the norms and
