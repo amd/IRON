@@ -1,0 +1,1196 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""The operator model's declaration layer: overlays, operators, and their members.
+
+An operator's fields sort by what a change rebuilds. Fields that configure the
+array (tile shapes, columns, dtypes, kernel flags) live on an :class:`Overlay`;
+fields that size the host buffers (extents, batch counts) live on an
+:class:`Operator` declared against that overlay; values that change per call
+are :class:`Scratchpad` or :class:`DispatchTime` members. Each layer has an
+ABI: the overlay's is its **streams** (in tile units), the operator's is its
+**buffers** (in extents), and a buffer names the stream it feeds or drains, so
+direction, dtype, tile shape and shim binding agree by construction.
+
+Declarations are class-level. A dimension is a dataclass field declared with
+:func:`dim`, a tuning knob is one declared with :func:`tunable`, and a shape is
+written in the class body using the field's bare name::
+
+    @operator
+    class GEMVOverlay(Overlay):
+        K: int = dim()
+        num_aie_columns: int = tunable(8)
+        tile_size_output: int = tunable(64)
+
+        a = StreamIn(tile_size_output, K, per=num_aie_columns)
+        b = StreamIn(K, broadcast=True)
+        c = StreamOut(tile_size_output, per=num_aie_columns)
+
+    @operator
+    class GEMV(Operator[GEMVOverlay]):
+        M: int = dim()
+        num_batches: int = dim(1)
+
+        A = In(optional(num_batches), M, GEMVOverlay.K, to=GEMVOverlay.a)
+        B = In(optional(num_batches), GEMVOverlay.K, to=GEMVOverlay.b)
+        C = Out(optional(num_batches), M, from_=GEMVOverlay.c)
+
+The shape rule: a host buffer's dimension is a ``dim()`` field or an integer
+literal, nothing else. Not a tunable, not a per-call value, not an
+expression. That is what makes inference a lookup (:meth:`Operator.infer`)
+and what lets the checks in this module run once, when the class is created.
+A stream's tile dimension may also be a tunable: choosing the tile is what
+tuning is for, and inference never reads a stream.
+
+Nothing in this module imports mlir-aie. Everything that generates MLIR lives
+in :mod:`iron.common.build`, which reads the declarations made here.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import inspect
+from dataclasses import MISSING, Field
+from typing import Any, Callable, ClassVar, Generic, Iterator, TypeVar
+
+import numpy as np
+from ml_dtypes import bfloat16
+
+from .base import AIERuntimeArgSpec, MLIROperator
+
+
+class Untunable(ValueError):
+    """No legal tuning exists for this overlay on this device.
+
+    An expected outcome, not a bug: raised by :meth:`Overlay.tuning` so the
+    caller learns at tune time rather than from a design that compiles and
+    then hangs.
+    """
+
+
+class Incompatible(ValueError):
+    """An operator's extents do not fit the overlay it was declared against."""
+
+
+class DeclarationError(TypeError):
+    """A class body violates the declaration rules; raised at class creation."""
+
+
+_TIER = "iron.tier"  # dataclass Field.metadata key: "dim" | "tunable"
+
+
+# --------------------------------------------------------------------------
+# Field specifiers
+# --------------------------------------------------------------------------
+
+
+def dim(default: Any = MISSING, *, repr: bool = True) -> Any:
+    """Declare a compile-time dimension field.
+
+    A ``dim()`` field may appear in a shape. On an overlay it is overlay-tier
+    (changing it rebuilds the array); on an operator it is sequence-tier
+    (changing it rebuilds the instruction stream only).
+    """
+    return _specifier("dim", default, repr)
+
+
+def tunable(default: Any = MISSING, *, repr: bool = True) -> Any:
+    """Declare a tuning knob: a field :meth:`Overlay.tuning` may set.
+
+    A tunable never appears in a shape. ``None`` as the default means "tuning
+    fills it from the device".
+    """
+    return _specifier("tunable", default, repr)
+
+
+def _specifier(tier: str, default: Any, repr_: bool) -> Field:
+    kwargs: dict[str, Any] = {"metadata": {_TIER: tier}, "repr": repr_}
+    if default is not MISSING:
+        kwargs["default"] = default
+    return dataclasses.field(**kwargs)
+
+
+def _tier_of(f: Field) -> str | None:
+    return f.metadata.get(_TIER) if f.metadata else None
+
+
+# --------------------------------------------------------------------------
+# Dimension references
+# --------------------------------------------------------------------------
+
+
+class DimRef:
+    """A reference to a ``dim()`` field of a declared class.
+
+    After ``@operator`` processes a class, each field is re-attached to the
+    class as a ``DimRef``, so ``GEMVOverlay.K`` names the dimension from
+    outside the class body while ``ov.K`` on an instance is the integer. A
+    non-data descriptor: instance attributes take precedence.
+    """
+
+    __slots__ = ("owner", "name", "tier")
+
+    def __init__(self, owner: type, name: str, tier: str | None) -> None:
+        self.owner = owner
+        self.name = name
+        self.tier = tier
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        # Reached only if the instance has no such attribute yet (mid-__init__).
+        raise AttributeError(self.name)
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, DimRef)
+            and other.owner is self.owner
+            and other.name == self.name
+        )
+
+    def __hash__(self) -> int:
+        return hash((id(self.owner), self.name))
+
+    def __repr__(self) -> str:
+        return f"{self.owner.__qualname__}.{self.name}"
+
+
+class _Optional:
+    """A leading dimension that is present only when greater than one.
+
+    ``In(optional(num_batches), M, K)`` declares ``(M, K)`` for a single batch
+    and ``(num_batches, M, K)`` otherwise, which is how batched operators
+    already spell their host shapes. Inference reads the rank to tell the two
+    apart.
+    """
+
+    __slots__ = ("ref",)
+
+    def __init__(self, ref) -> None:
+        self.ref = ref
+
+    def __repr__(self) -> str:
+        return f"optional({self.ref!r})"
+
+
+def optional(ref) -> _Optional:
+    """Mark a leading dimension as omitted when it equals one. See :class:`_Optional`."""
+    return _Optional(ref)
+
+
+_DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | _Optional
+
+
+def _describe(spec) -> str:
+    if isinstance(spec, Field):
+        return spec.name if spec.name else "<field>"
+    return repr(spec)
+
+
+# --------------------------------------------------------------------------
+# Members
+# --------------------------------------------------------------------------
+
+
+class Shim:
+    """A pinned shim endpoint: column and DMA channel on row 0."""
+
+    __slots__ = ("col", "channel")
+
+    def __init__(self, col: int, channel: int | None = None) -> None:
+        self.col = col
+        self.channel = channel
+
+    def __repr__(self) -> str:
+        return f"Shim(col={self.col}, channel={self.channel})"
+
+
+class _Member:
+    """Base of everything declared unannotated in an ``@operator`` class body.
+
+    ``__set_name__`` gives the member its name from the language, and the
+    class body gives it its order. On an instance, ``__get__`` returns the
+    bound form built by ``@operator`` (a :class:`BoundBuffer`,
+    :class:`BoundStream` or :class:`BoundValue`).
+    """
+
+    name: str = ""
+    owner: type | None = None
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+        self.owner = owner
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        try:
+            return instance._bound[self.name]
+        except (AttributeError, KeyError):
+            raise AttributeError(
+                f"{type(instance).__name__}.{self.name} is not bound yet"
+            ) from None
+
+
+class _Buffer(_Member):
+    """A host buffer: shape in extents, a dtype, and the stream it moves through."""
+
+    direction: ClassVar[str] = ""
+
+    def __init__(
+        self,
+        *dims: _DimSpec,
+        dtype: Any = bfloat16,
+        to: "StreamIn | None" = None,
+        from_: "StreamOut | None" = None,
+    ) -> None:
+        self.dims = tuple(dims)
+        self.dtype = dtype
+        self.to = to
+        self.from_ = from_
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({', '.join(_describe(d) for d in self.dims)})"
+
+
+class In(_Buffer):
+    """A buffer the host fills and the array reads."""
+
+    direction = "in"
+
+    def __init__(self, *dims, dtype=bfloat16, to=None) -> None:
+        super().__init__(*dims, dtype=dtype, to=to)
+
+
+class Out(_Buffer):
+    """A buffer the array writes and the host reads."""
+
+    direction = "out"
+
+    def __init__(self, *dims, dtype=bfloat16, from_=None) -> None:
+        super().__init__(*dims, dtype=dtype, from_=from_)
+
+
+class InOut(_Buffer):
+    """A buffer read and written in place."""
+
+    direction = "inout"
+
+
+class _Stream(_Member):
+    """A stream into or out of the array, in tile units.
+
+    ``per=`` names the overlay dimension the stream is replicated over (one
+    fifo per column, say); ``broadcast=True`` is one fifo every worker
+    consumes. ``via=`` pins the shim endpoint(s). ``depth`` is the fifo depth.
+    """
+
+    direction: ClassVar[str] = ""
+
+    def __init__(
+        self,
+        *dims: _DimSpec,
+        dtype: Any = bfloat16,
+        per: _DimSpec | None = None,
+        broadcast: bool = False,
+        via: Shim | list[Shim] | None = None,
+        depth: int = 2,
+    ) -> None:
+        if per is not None and broadcast:
+            raise DeclarationError(
+                "a stream is either per=<dim> or broadcast, not both"
+            )
+        self.dims = tuple(dims)
+        self.dtype = dtype
+        self.per = per
+        self.broadcast = broadcast
+        self.via = via
+        self.depth = depth
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({', '.join(_describe(d) for d in self.dims)})"
+
+
+class StreamIn(_Stream):
+    """A stream entering the array; its shim end is a producer (MM2S)."""
+
+    direction = "in"
+
+
+class StreamOut(_Stream):
+    """A stream leaving the array; its shim end is a consumer (S2MM)."""
+
+    direction = "out"
+
+
+class _Value(_Member):
+    """A per-call scalar. See :class:`Scratchpad` and :class:`DispatchTime`."""
+
+    kind: ClassVar[str] = ""
+
+    def __init__(self, dtype: Any = np.int32) -> None:
+        self.dtype = dtype
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({np.dtype(self.dtype).name})"
+
+
+class Scratchpad(_Value):
+    """A per-call value patched into a DMA descriptor or read by a core.
+
+    Free per call (a few words and a sync), works under full ELF, cannot
+    change a DMA size or stride. Values are limited to 30 bits; ``float32``
+    is unsupported by the scratchpad encoding.
+    """
+
+    kind = "scratchpad"
+
+    def __init__(self, dtype: Any = np.int32) -> None:
+        if np.dtype(dtype).kind == "f":
+            raise DeclarationError(
+                "Scratchpad values cannot be floating point: the scratchpad "
+                "encoding zeroes the top two bits of the value"
+            )
+        super().__init__(dtype)
+
+
+class DispatchTime(_Value):
+    """A per-call value the instruction stream is regenerated around.
+
+    Can change DMA sizes, strides and offsets; costs a stream regeneration
+    and a buffer allocation per call; cannot be packaged as a full ELF.
+    """
+
+    kind = "dispatch"
+
+
+class Resident(_Member):
+    """A value the sequence writes into the array before the first DMA.
+
+    Overlay-side: a runtime parameter (trip count, RTP) a core reads. The
+    sequence's preamble writes every resident the overlay declares.
+    """
+
+    def __init__(
+        self,
+        dtype: Any = np.int32,
+        *,
+        address: int | None = None,
+        lock: int | None = None,
+    ) -> None:
+        self.dtype = dtype
+        self.address = address
+        self.lock = lock
+
+    def __repr__(self) -> str:
+        return f"Resident({np.dtype(self.dtype).name})"
+
+
+# --------------------------------------------------------------------------
+# Bound members (what an instance's attribute returns)
+# --------------------------------------------------------------------------
+
+
+class BoundStream:
+    """A stream on an overlay instance: concrete tile, count, and fifo handles.
+
+    Resolved lazily, because a tile or a ``per=`` count may name a tunable
+    that is ``None`` until :meth:`Overlay.tuned` fills it.
+    """
+
+    def __init__(self, member: _Stream, overlay: "Overlay") -> None:
+        self.member = member
+        self.overlay = overlay
+        self.name = member.name
+        self.direction = member.direction
+        self.broadcast = member.broadcast
+        self.depth = member.depth
+        self.via = member.via
+        self._handle_slots: list[Any] | None = None
+
+    def _resolve(self, spec) -> int:
+        try:
+            return _resolve_dim(spec, self.overlay)
+        except Incompatible as e:
+            raise Incompatible(
+                f"stream {self.name!r}: {e}. Tune the overlay first (tuned(dev))"
+            ) from None
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(self._resolve(d) for d in self.member.dims)
+
+    @property
+    def dtype(self):
+        return _resolve_dtype(self.member.dtype, self.overlay)
+
+    @property
+    def count(self) -> int:
+        return 1 if self.member.per is None else int(self._resolve(self.member.per))
+
+    @property
+    def _handles(self) -> list[Any]:
+        if self._handle_slots is None:
+            self._handle_slots = [None] * self.count
+        return self._handle_slots
+
+    @property
+    def tile(self):
+        """The ObjectFifo element type: ``np.ndarray[shape, dtype]``."""
+        return np.ndarray[self.shape, np.dtype[self.dtype]]  # type: ignore[misc]
+
+    @property
+    def elements(self) -> int:
+        return int(np.prod(self.shape))
+
+    def bind(self, handle, index: int = 0) -> None:
+        """Bind the shim end of a fifo to this stream (or to one of its slots)."""
+        if self._handles[index] is not None:
+            raise ValueError(f"stream {self.name!r}[{index}] is already bound")
+        self._handles[index] = handle
+
+    def __getitem__(self, index: int) -> "_StreamSlot":
+        if not 0 <= index < self.count:
+            raise IndexError(f"stream {self.name!r} has {self.count} slots")
+        return _StreamSlot(self, index)
+
+    def __iter__(self) -> Iterator["_StreamSlot"]:
+        return (self[i] for i in range(self.count))
+
+    def __len__(self) -> int:
+        return self.count
+
+    @property
+    def handle(self):
+        if self.count != 1:
+            raise ValueError(f"stream {self.name!r} is per-{self.count}; index it")
+        return self._require(0)
+
+    @property
+    def handles(self) -> list[Any]:
+        return [self._require(i) for i in range(self.count)]
+
+    def _require(self, index: int):
+        h = self._handles[index]
+        if h is None:
+            raise ValueError(
+                f"stream {self.name!r}[{index}] was never bound: the overlay's "
+                f"design() must call .bind() on every declared stream"
+            )
+        return h
+
+    def __repr__(self) -> str:
+        return f"<{self.direction} stream {self.name} {self.shape} x{self.count}>"
+
+
+class _StreamSlot:
+    __slots__ = ("stream", "index")
+
+    def __init__(self, stream: BoundStream, index: int) -> None:
+        self.stream = stream
+        self.index = index
+
+    def bind(self, handle) -> None:
+        self.stream.bind(handle, self.index)
+
+    @property
+    def handle(self):
+        return self.stream._require(self.index)
+
+    @property
+    def name(self) -> str:
+        return f"{self.stream.name}{self.index}"
+
+
+class BoundBuffer:
+    """A buffer on an operator instance: concrete shape and dtype."""
+
+    def __init__(self, member: _Buffer, op: "Operator") -> None:
+        self.member = member
+        self.name = member.name
+        self.direction = member.direction
+        self.shape = _resolve_shape(member.dims, op)
+        self.dtype = _resolve_dtype(member.dtype, op)
+        self.to = member.to
+        self.from_ = member.from_
+
+    @property
+    def elements(self) -> int:
+        return int(np.prod(self.shape)) if self.shape else 1
+
+    @property
+    def nbytes(self) -> int:
+        return self.elements * np.dtype(self.dtype).itemsize
+
+    @property
+    def flat_type(self):
+        """The runtime-sequence argument type: the buffer flattened to 1-D."""
+        return np.ndarray[(self.elements,), np.dtype[self.dtype]]  # type: ignore[misc]
+
+    def stream(self, overlay: "Overlay") -> BoundStream | None:
+        """The bound stream this buffer feeds or drains on ``overlay``."""
+        member = self.to if self.direction == "in" else self.from_
+        if member is None:
+            return None
+        return getattr(overlay, member.name)
+
+    def arg_spec(self) -> AIERuntimeArgSpec:
+        return AIERuntimeArgSpec(self.direction, tuple(self.shape), self.dtype)
+
+    def __repr__(self) -> str:
+        return (
+            f"<{self.direction} {self.name} {self.shape} {np.dtype(self.dtype).name}>"
+        )
+
+
+class BoundValue:
+    """A per-call value on an operator instance."""
+
+    def __init__(self, member: _Value, op: "Operator") -> None:
+        self.member = member
+        self.name = member.name
+        self.kind = member.kind
+        self.dtype = member.dtype
+
+    def __repr__(self) -> str:
+        return f"<{self.kind} {self.name} {np.dtype(self.dtype).name}>"
+
+
+class BoundResident:
+    def __init__(self, member: Resident, overlay: "Overlay") -> None:
+        self.member = member
+        self.name = member.name
+        self.dtype = member.dtype
+        self.address = member.address
+        self.lock = member.lock
+
+    def __repr__(self) -> str:
+        return f"<resident {self.name} {np.dtype(self.dtype).name}>"
+
+
+# --------------------------------------------------------------------------
+# Resolution
+# --------------------------------------------------------------------------
+
+
+def _lookup_ref(ref: DimRef, instance) -> Any:
+    """Follow a DimRef from an instance: its own class, or its overlay's class."""
+    if isinstance(instance, ref.owner):
+        return getattr(instance, ref.name)
+    ov = getattr(instance, "ov", None)
+    if ov is not None and isinstance(ov, ref.owner):
+        return getattr(ov, ref.name)
+    raise DeclarationError(
+        f"{ref!r} is not reachable from {type(instance).__name__}: a shape may "
+        f"reference the class's own fields or its overlay's"
+    )
+
+
+def _resolve_dim(spec, instance) -> int:
+    if isinstance(spec, bool):
+        raise DeclarationError(f"{spec!r} is not a dimension")
+    if isinstance(spec, (int, np.integer)):
+        return int(spec)
+    if isinstance(spec, DimRef):
+        value = _lookup_ref(spec, instance)
+        if value is None:
+            raise Incompatible(
+                f"{spec!r} is None; it must be set before the shape can be resolved"
+            )
+        return int(value)
+    if isinstance(spec, Field):
+        # A same-class reference the decorator did not rewrite: resolve by name.
+        return int(getattr(instance, spec.name))
+    raise DeclarationError(f"cannot resolve {spec!r} as a dimension")
+
+
+def _resolve_shape(dims, instance) -> tuple[int, ...]:
+    out: list[int] = []
+    for d in dims:
+        if isinstance(d, _Optional):
+            n = _resolve_dim(d.ref, instance)
+            if n > 1:
+                out.append(n)
+            continue
+        out.append(_resolve_dim(d, instance))
+    return tuple(out)
+
+
+def _resolve_dtype(spec, instance):
+    if isinstance(spec, DimRef):
+        return _lookup_ref(spec, instance)
+    if isinstance(spec, Field):
+        return getattr(instance, spec.name)
+    return spec
+
+
+# --------------------------------------------------------------------------
+# The decorator
+# --------------------------------------------------------------------------
+
+
+def _members_of(cls: type) -> list[_Member]:
+    """Members declared in this class body and its ``@operator`` bases, in order."""
+    seen: dict[str, _Member] = {}
+    for klass in reversed(cls.__mro__):
+        for name, value in vars(klass).items():
+            if isinstance(value, _Member):
+                seen[name] = value
+    return list(seen.values())
+
+
+def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> tuple:
+    """Replace same-class Field objects in a member's dims with DimRefs."""
+    out = []
+    for spec in specs:
+        if isinstance(spec, _Optional):
+            out.append(_Optional(_rewrite_refs((spec.ref,), cls, fields_by_obj)[0]))
+        elif isinstance(spec, Field):
+            f = fields_by_obj.get(id(spec))
+            if f is None:
+                raise DeclarationError(
+                    f"{cls.__name__}: a shape references a field object that is "
+                    f"not one of this class's fields"
+                )
+            out.append(getattr(cls, f.name))  # the DimRef re-attached to the class
+        else:
+            out.append(spec)
+    return tuple(out)
+
+
+def _check_dim_ref(
+    cls: type, member: _Member, spec, what: str, *, allow_tunable: bool
+) -> None:
+    """The shape rule.
+
+    A host buffer's dimension is a ``dim()`` field or an integer: never a
+    tunable (inference would cycle through tuning) and never an expression.
+    A stream's tile dimension may also be a tunable, since choosing the tile
+    is what tuning is for; inference never reads a stream.
+    """
+    if isinstance(spec, _Optional):
+        _check_dim_ref(cls, member, spec.ref, what, allow_tunable=allow_tunable)
+        return
+    if isinstance(spec, bool):
+        raise DeclarationError(
+            f"{cls.__name__}.{member.name}: {spec!r} is not a {what}"
+        )
+    if isinstance(spec, (int, np.integer)):
+        return
+    if isinstance(spec, DimRef):
+        allowed = ("dim", "tunable") if allow_tunable else ("dim",)
+        if spec.tier not in allowed:
+            why = (
+                "a tunable; a host shape may not depend on tuning"
+                if spec.tier == "tunable"
+                else "not declared with dim()"
+            )
+            raise DeclarationError(
+                f"{cls.__name__}.{member.name}: {what} {spec!r} is {why}. A "
+                f"shape dimension is a dim() field or an integer literal"
+            )
+        return
+    raise DeclarationError(
+        f"{cls.__name__}.{member.name}: {what} {spec!r} is not a dim() field or an "
+        f"integer. Expressions are not allowed in shapes; declare the result as a field"
+    )
+
+
+def operator(cls: type) -> type:
+    """Process an :class:`Overlay` or :class:`Operator` subclass.
+
+    Applies ``dataclass`` (identity equality; the base supplies ``__eq__``),
+    resolves the field objects the class body captured in its shapes to
+    names, re-attaches every field as a :class:`DimRef`, checks the shape
+    rule, and records the members in declaration order.
+    """
+    if not (issubclass(cls, Overlay) or issubclass(cls, Operator)):
+        raise DeclarationError(
+            f"@operator applies to Overlay or Operator subclasses, not {cls}"
+        )
+
+    # Members must be unannotated, or dataclass would make them constructor args.
+    annotations = cls.__dict__.get("__annotations__", {})
+    for name, value in list(vars(cls).items()):
+        if isinstance(value, _Member) and name in annotations:
+            raise DeclarationError(
+                f"{cls.__name__}.{name}: members are declared without an "
+                f"annotation; annotating one turns it into a constructor argument"
+            )
+
+    # The Field objects the class body bound to bare names, before dataclass
+    # processing renames/replaces them.
+    pre_fields = {id(v): v for v in vars(cls).values() if isinstance(v, Field)}
+
+    # Overlays get the generated repr; Operators define their own on the base.
+    cls = dataclasses.dataclass(cls, eq=False, repr=issubclass(cls, Overlay))  # type: ignore[call-overload]
+
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    fields_by_obj = {i: f for i, f in pre_fields.items()}
+    # dataclass reuses the same Field object and sets .name, so identity holds.
+    for f in fields.values():
+        fields_by_obj.setdefault(id(f), f)
+
+    # Re-attach every field as a DimRef on the class.
+    for f in fields.values():
+        setattr(cls, f.name, DimRef(cls, f.name, _tier_of(f)))
+
+    members = _members_of(cls)
+    for m in members:
+        if m.owner is not cls:
+            continue  # inherited; already processed on its own class
+        if isinstance(m, (_Buffer, _Stream)):
+            m.dims = _rewrite_refs(m.dims, cls, fields_by_obj)
+            if isinstance(m.dtype, Field):
+                m.dtype = getattr(cls, fields_by_obj[id(m.dtype)].name)
+            for d in m.dims:
+                _check_dim_ref(
+                    cls, m, d, "dimension", allow_tunable=isinstance(m, _Stream)
+                )
+        if isinstance(m, _Stream) and m.per is not None:
+            m.per = _rewrite_refs((m.per,), cls, fields_by_obj)[0]
+            if isinstance(m.per, DimRef) and m.per.tier is None:
+                raise DeclarationError(
+                    f"{cls.__name__}.{m.name}: per={m.per!r} must be a dim() or tunable() field"
+                )
+
+    cls._members = tuple(members)  # type: ignore[attr-defined]
+    cls._dim_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "dim")  # type: ignore[attr-defined]
+    cls._tunable_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "tunable")  # type: ignore[attr-defined]
+
+    if issubclass(cls, Overlay):
+        _finish_overlay(cls)
+    else:
+        _finish_operator(cls, fields)
+    return cls
+
+
+def _finish_overlay(cls: type) -> None:
+    for m in cls._members:  # type: ignore[attr-defined]
+        if isinstance(m, (_Buffer, _Value)):
+            raise DeclarationError(
+                f"{cls.__name__}.{m.name}: an Overlay declares streams and residents; "
+                f"buffers and per-call values belong on the Operator"
+            )
+
+
+def _finish_operator(cls: type, fields: dict[str, Field]) -> None:
+    overlay_cls = _overlay_class_of(cls)
+    cls._overlay_class = overlay_cls  # type: ignore[attr-defined]
+    for m in cls._members:  # type: ignore[attr-defined]
+        if isinstance(m, (_Stream, Resident)):
+            raise DeclarationError(
+                f"{cls.__name__}.{m.name}: an Operator declares buffers and per-call "
+                f"values; streams and residents belong on the Overlay"
+            )
+        if isinstance(m, _Buffer):
+            target = m.to if m.direction == "in" else m.from_
+            if m.direction == "inout":
+                target = m.to or m.from_
+            if target is not None and not isinstance(target, _Stream):
+                raise DeclarationError(
+                    f"{cls.__name__}.{m.name}: to=/from_= must name a stream, got {target!r}"
+                )
+            if (
+                target is not None
+                and overlay_cls is not None
+                and not issubclass(overlay_cls, target.owner)  # type: ignore[arg-type]
+            ):
+                raise DeclarationError(
+                    f"{cls.__name__}.{m.name}: stream {target!r} belongs to "
+                    f"{target.owner.__name__}, not to {overlay_cls.__name__}"  # type: ignore[union-attr]
+                )
+            if m.to is not None and m.to.direction != "in":
+                raise DeclarationError(
+                    f"{cls.__name__}.{m.name}: to= must be a StreamIn"
+                )
+            if m.from_ is not None and m.from_.direction != "out":
+                raise DeclarationError(
+                    f"{cls.__name__}.{m.name}: from_= must be a StreamOut"
+                )
+            for d in m.dims:
+                ref = d.ref if isinstance(d, _Optional) else d
+                if (
+                    isinstance(ref, DimRef)
+                    and ref.owner is not cls
+                    and overlay_cls is not None
+                ):
+                    if not issubclass(overlay_cls, ref.owner):
+                        raise DeclarationError(
+                            f"{cls.__name__}.{m.name}: {ref!r} is neither a field of "
+                            f"{cls.__name__} nor of its overlay {overlay_cls.__name__}"
+                        )
+
+    # Classic construction: overlay fields as keyword arguments. The operator
+    # builds the overlay itself. Untyped, and goes away once every call site
+    # passes an overlay.
+    if overlay_cls is not None:
+        overlay_field_names = {f.name for f in dataclasses.fields(overlay_cls)}
+        generated_init = cls.__init__
+
+        def __init__(self, ov=None, *args, **kwargs):
+            if ov is None or not isinstance(ov, Overlay):
+                if ov is not None:
+                    args = (ov,) + args
+                ov_kwargs = {
+                    k: kwargs.pop(k) for k in list(kwargs) if k in overlay_field_names
+                }
+                ov = overlay_cls(**ov_kwargs)
+            generated_init(self, ov, *args, **kwargs)
+
+        __init__.__wrapped__ = generated_init  # type: ignore[attr-defined]
+        cls.__init__ = __init__  # type: ignore[misc]
+
+
+def _overlay_class_of(cls: type) -> type | None:
+    """The ``O`` in ``class X(Operator[O])``, searched up the bases."""
+    for klass in cls.__mro__:
+        for base in getattr(klass, "__orig_bases__", ()):
+            args = getattr(base, "__args__", ())
+            for a in args:
+                if isinstance(a, type) and issubclass(a, Overlay):
+                    return a
+    return None
+
+
+# --------------------------------------------------------------------------
+# Overlay
+# --------------------------------------------------------------------------
+
+
+class Overlay:
+    """What configures the array. Subclass, decorate with ``@operator``.
+
+    Declare ``dim()`` and ``tunable()`` fields, streams, and residents in the
+    class body; implement :meth:`tuning` to fill tunables from the device and
+    :meth:`design` to build the array and bind each stream to a fifo's shim
+    end. See the module docstring for the shape.
+    """
+
+    _members: ClassVar[tuple[_Member, ...]] = ()
+    _dim_fields: ClassVar[tuple[str, ...]] = ()
+    _tunable_fields: ClassVar[tuple[str, ...]] = ()
+    _name_aliases: ClassVar[dict[str, str]] = {}
+
+    def __post_init__(self) -> None:
+        self._tuned = False
+        self._specialised: dict[str, Any] = {}
+        self.validate()
+        self._bind()
+
+    # -- declared surface --------------------------------------------------
+
+    def validate(self) -> None:
+        """Check the compile-time fields. Runs at construction and after tuning."""
+
+    def tuning(self, dev) -> "Overlay":
+        """Return a copy with every tunable filled for ``dev``; raise :class:`Untunable`.
+
+        Sees the device and nothing else, so a tuned overlay serves every
+        extent. The default fills nothing.
+        """
+        return self
+
+    def design(self, dev) -> list:
+        """Build the array for ``dev`` and return its workers.
+
+        Must call ``.bind(handle)`` on every declared stream (or on every slot
+        of a ``per=`` stream) with the shim end of the fifo that carries it.
+        """
+        raise NotImplementedError(f"{type(self).__name__}.design() is not implemented")
+
+    # -- library surface ---------------------------------------------------
+
+    def tuned(self, dev) -> "Overlay":
+        if self._tuned:
+            return self
+        new = self.tuning(dev)
+        if not isinstance(new, type(self)):
+            raise TypeError(
+                f"{type(self).__name__}.tuning() must return a {type(self).__name__}, "
+                f"got {type(new).__name__}"
+            )
+        missing = [n for n in self._tunable_fields if getattr(new, n) is None]
+        if missing:
+            raise Untunable(
+                f"{type(self).__name__}.tuning() left {missing} unset for {dev}"
+            )
+        new.validate()
+        new._tuned = True
+        new._specialised = dict(self._specialised)
+        new._bind()
+        return new
+
+    def for_extent(self, **overrides) -> "Overlay":
+        """A specialised copy: tunables set for one extent, at the cost of sharing."""
+        bad = [k for k in overrides if k not in self._tunable_fields]
+        if bad:
+            raise TypeError(f"for_extent() sets non-tunable fields {bad}")
+        new = dataclasses.replace(self, **overrides)
+        new._specialised = {**self._specialised, **overrides}
+        new._tuned = self._tuned
+        new._bind()
+        return new
+
+    @property
+    def specialised(self) -> bool:
+        return bool(self._specialised)
+
+    def design_key(self) -> tuple:
+        """Identity for sharing: the class and every field value."""
+        return (type(self).__qualname__,) + tuple(
+            (f.name, getattr(self, f.name)) for f in dataclasses.fields(self)
+        )
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Overlay):
+            return NotImplemented
+        return self.design_key() == other.design_key()
+
+    def __hash__(self) -> int:
+        return hash(self.design_key())
+
+    @property
+    def streams(self) -> dict[str, BoundStream]:
+        return {
+            m.name: self._bound[m.name] for m in self._members if isinstance(m, _Stream)
+        }
+
+    @property
+    def residents(self) -> dict[str, BoundResident]:
+        return {
+            m.name: self._bound[m.name]
+            for m in self._members
+            if isinstance(m, Resident)
+        }
+
+    def _bind(self) -> None:
+        bound: dict[str, Any] = {}
+        for m in self._members:
+            if isinstance(m, _Stream):
+                bound[m.name] = BoundStream(m, self)
+            elif isinstance(m, Resident):
+                bound[m.name] = BoundResident(m, self)
+        self._bound = bound
+
+    def name_parts(self) -> list[str]:
+        aliases = {**MLIROperator._name_aliases, **type(self)._name_aliases}
+        from .base import _serialize_param
+
+        return [
+            f"{aliases.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            for f in dataclasses.fields(self)
+            if f.repr and getattr(self, f.name) is not None
+        ]
+
+
+# --------------------------------------------------------------------------
+# Operator
+# --------------------------------------------------------------------------
+
+O = TypeVar("O", bound=Overlay)
+
+
+@dataclasses.dataclass(eq=False, repr=True)
+class Operator(MLIROperator, Generic[O]):
+    """A host ABI declared against an overlay. Subclass, decorate with ``@operator``.
+
+    Declare ``dim()`` fields and buffers (``In``/``Out``/``InOut`` naming their
+    streams) in the class body. Implement :meth:`reference`; optionally
+    :meth:`compatible` and :meth:`design` (an override for a sequence the
+    library cannot derive).
+    """
+
+    ov: O
+    context: object = dataclasses.field(default=None, repr=False, kw_only=True)
+
+    _members: ClassVar[tuple[_Member, ...]] = ()
+    _dim_fields: ClassVar[tuple[str, ...]] = ()
+    _tunable_fields: ClassVar[tuple[str, ...]] = ()
+    _overlay_class: ClassVar[type | None] = None
+
+    def __post_init__(self) -> None:
+        if self._overlay_class is not None and not isinstance(
+            self.ov, self._overlay_class
+        ):
+            raise TypeError(
+                f"{type(self).__name__} is declared against {self._overlay_class.__name__}, "
+                f"got {type(self.ov).__name__}"
+            )
+        self.validate()
+        self._bind()
+        MLIROperator.__init__(self, context=self.context)
+
+    # -- declared surface --------------------------------------------------
+
+    def validate(self) -> None:
+        """Check the sequence-tier fields on their own. Runs at construction."""
+
+    def compatible(self) -> None:
+        """Check the extents against the tuned overlay; raise :class:`Incompatible`."""
+
+    def reference(self, *inputs):
+        raise NotImplementedError(
+            f"{type(self).__name__}.reference() is not implemented"
+        )
+
+    def design(self, rt) -> None:
+        """Override to write the runtime sequence by hand; otherwise it is derived."""
+        raise NotImplementedError
+
+    @classmethod
+    def has_design_override(cls) -> bool:
+        return cls.design is not Operator.design
+
+    # -- library surface ---------------------------------------------------
+
+    def tuned(self, dev) -> "Operator":
+        """A copy bound to a tuned overlay, with :meth:`compatible` checked."""
+        ov = self.ov.tuned(dev)
+        new = self if ov is self.ov else dataclasses.replace(self, ov=ov)
+        new.compatible()
+        return new
+
+    @property
+    def buffers(self) -> list[BoundBuffer]:
+        return [self._bound[m.name] for m in self._members if isinstance(m, _Buffer)]
+
+    @property
+    def inputs(self) -> list[BoundBuffer]:
+        return [b for b in self.buffers if b.direction in ("in", "inout")]
+
+    @property
+    def outputs(self) -> list[BoundBuffer]:
+        return [b for b in self.buffers if b.direction in ("out", "inout")]
+
+    @property
+    def values(self) -> list[BoundValue]:
+        return [self._bound[m.name] for m in self._members if isinstance(m, _Value)]
+
+    def _bind(self) -> None:
+        bound: dict[str, Any] = {}
+        for m in self._members:
+            if isinstance(m, _Buffer):
+                bound[m.name] = BoundBuffer(m, self)
+            elif isinstance(m, _Value):
+                bound[m.name] = BoundValue(m, self)
+        self._bound = bound
+
+    # -- inference ---------------------------------------------------------
+
+    @classmethod
+    def infer(cls, *operand_shapes, **given) -> dict[str, Any]:
+        """Bind dimension fields from operand shapes, in ``In`` declaration order.
+
+        A lookup, not a solver: each declared dimension is a field or a
+        literal. Returns ``{field: value}`` for both the operator's and the
+        overlay's fields; ``given`` pins values and is checked for agreement.
+        """
+        ins = [
+            m
+            for m in cls._members
+            if isinstance(m, _Buffer) and m.direction in ("in", "inout")
+        ]
+        if len(operand_shapes) != len(ins):
+            raise TypeError(
+                f"{cls.__name__} takes {len(ins)} operand(s) "
+                f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
+            )
+        bound: dict[str, Any] = dict(given)
+        origin: dict[str, str] = {k: "given" for k in given}
+
+        def bind(ref: DimRef, value: int, where: str) -> None:
+            key = ref.name
+            if key in bound and bound[key] != value:
+                raise ValueError(
+                    f"{cls.__name__}: {ref!r} is {value} from {where} but "
+                    f"{bound[key]} from {origin[key]}"
+                )
+            bound[key] = value
+            origin.setdefault(key, where)
+
+        for m, shape in zip(ins, operand_shapes):
+            shape = tuple(int(s) for s in shape)
+            dims = list(m.dims)
+            leading = dims[0] if dims and isinstance(dims[0], _Optional) else None
+            if leading is not None:
+                if len(shape) == len(dims):
+                    bind(leading.ref, shape[0], f"{m.name}.shape[0]")
+                    shape = shape[1:]
+                elif len(shape) == len(dims) - 1:
+                    bind(leading.ref, 1, f"{m.name} (rank {len(shape)})")
+                else:
+                    raise ValueError(
+                        f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
+                        f"declared {m!r}"
+                    )
+                dims = dims[1:]
+            if len(shape) != len(dims):
+                raise ValueError(
+                    f"{cls.__name__}: operand {m.name} has rank {len(shape)} {shape}, "
+                    f"declared rank {len(dims)} {m!r}"
+                )
+            for i, (d, n) in enumerate(zip(dims, shape)):
+                if isinstance(d, DimRef):
+                    bind(d, n, f"{m.name}.shape[{i}]")
+                elif int(d) != n:
+                    raise ValueError(
+                        f"{cls.__name__}: operand {m.name}.shape[{i}] is {n}, declared {d}"
+                    )
+        return bound
+
+    @classmethod
+    def from_operands(cls, *operand_shapes, **overrides) -> "Operator":
+        """Construct an operator (and its overlay) from operand shapes."""
+        values = cls.infer(
+            *operand_shapes,
+            **{
+                k: v
+                for k, v in overrides.items()
+                if k in cls._dim_fields
+                or (cls._overlay_class and k in cls._overlay_class._dim_fields)
+            },
+        )
+        kwargs = {**overrides, **values}
+        return cls(**kwargs)  # classic-construction path splits overlay fields
+
+    # -- MLIROperator integration ------------------------------------------
+
+    @property
+    def name(self) -> str:
+        from .base import _serialize_param
+        import aie.utils as aie_utils
+
+        aliases = {**MLIROperator._name_aliases, **type(self)._name_aliases}
+        own = [
+            f"{aliases.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            for f in dataclasses.fields(self)
+            if f.name != "ov" and f.repr and getattr(self, f.name) is not None
+        ]
+        base = type(self).__name__ + "_" + "_".join(own + self.ov.name_parts())
+        dev = aie_utils.get_current_device()
+        return f"{base}_{dev.resolve().name}"
+
+    def get_arg_spec(self) -> list[AIERuntimeArgSpec]:
+        return [b.arg_spec() for b in self.buffers]
+
+    def get_mlir_artifact(self):
+        from .build import mlir_artifact_for
+
+        return mlir_artifact_for(self)
+
+    def __repr__(self) -> str:
+        own = ", ".join(
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in dataclasses.fields(self)
+            if f.repr and f.name != "ov"
+        )
+        return f"{type(self).__name__}({self.ov!r}, {own})"
+
+
+def members_of(cls_or_instance) -> tuple[_Member, ...]:
+    """The declared members of an ``@operator`` class, in declaration order."""
+    cls = (
+        cls_or_instance if isinstance(cls_or_instance, type) else type(cls_or_instance)
+    )
+    return getattr(cls, "_members", ())

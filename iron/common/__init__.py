@@ -12,6 +12,26 @@ from .base import (
     same_shape_binary,
 )
 from .operator_bases import ChanneledUnaryOperator, BinaryElementwiseOperator
+from .declare import (
+    Overlay,
+    Operator,
+    operator,
+    dim,
+    tunable,
+    optional,
+    In,
+    Out,
+    InOut,
+    StreamIn,
+    StreamOut,
+    Scratchpad,
+    DispatchTime,
+    Resident,
+    Shim,
+    Untunable,
+    Incompatible,
+    DeclarationError,
+)
 from .context import AIEContext
 from .compilation import (
     SourceArtifact,
