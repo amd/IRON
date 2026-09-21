@@ -854,6 +854,9 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | dequant, rms_norm (two pairs), rope, softmax (two overlays) (§14 step 2, rest) | four `op.py` | legacy spellings, arg specs, tuning, resident values, transfers per slot, rejections | **needs a run**; softmax's snapshot entry is now `rows x cols` and was re-pinned by hand |
 | repeat, strided_copy, transpose, gemm (§14 step 3, part) | four `op.py` | construction, arg specs, tuning geometry, residents, transfers issued, rejections | **needs a run**; gemm's sequence body needs the real tiler |
 | mha (§14 step 3, part) | `iron/operators/mha/op.py` | eight-pipeline sequence checked transfer by transfer (two shims, K/V per head, waited drains); inference from shapes | **needs a run**; Q/O descriptors are now linear runs rather than `(rows, d)` tiles, same bytes in the same order |
+| flm/gemm (§14 step 3, part) | `iron/operators/flm/gemm/op.py`, `design.py` (constants only) | legacy defaults reproduced (tile_n by K, m_chunk fallback), config/name stems unchanged, B's packed spec, residents, unsplit and split sequences transfer by transfer | **needs a run**: the two-compile `link_xclbin` now builds the configuration module from a copy at the reference shape; `dev.arch`/target-model calls are faked here |
+| mem_copy (§14 step 3, part) | `iron/operators/mem_copy/op.py` | whole, partial and tiny sizes: elements filled equal elements drained, padding groups awaited | **needs a run**: idle-fifo placement moved from the design into `build_design` (`RuntimeEndpoint(AnyShimTile)`) |
+| mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
 and mha are declared overrides (`design(rt)` over the same `Sequence`), with
@@ -865,9 +868,23 @@ buffers, and its `legalize_tas` hack is `tiling.legalize` through a slice.
 The snapshot test, run under the stub for the first time, caught two
 losses: SiLU's fixed single channel (`tunable(1, init=False)` now) and a
 StridedCopy case the old design would have asserted on (now a real
-gather). Remaining in step 3: flm/gemm, mm_prebuilt
-(`Overlay.from_xclbin`), swiglu_prefill_stream (`from_spec`), and the two
-swiglu composites as graph functions (which wait on step 6). The snapshot
+gather).
+
+flm/gemm is the model's showcase: `FLMGEMMOverlay` is exactly what the
+xclbin depends on (its `config_name` is the stem), `GEMM` is the shape and
+activation as residents, and `tuning(dev)` no longer looks at K; the legacy
+constructor reproduces the old K-dependent `tile_n` default by passing it
+explicitly. mem_copy's array was already extent-free. mm_prebuilt is the
+foreign case: an `Xclbin` class attribute in place of `design()`, streams
+pinned with `via=Shim(col, channel)`, a `Resident(address=, lock=)` block,
+and `iron.common.foreign` emitting the raw-dialect sequence the old
+`design.py` hand-wrote; task groups are no-ops there and the per-slot
+queue bound comes from the stream's `depth`. The C12 read-back against
+`input_with_addresses.mlir` is not done: a downloaded xclbin has no such
+file, so the check is structural (every stream pinned, every resident
+addressed) at class creation. Remaining in step 3: swiglu_prefill_stream
+(`from_spec`) and the two swiglu composites as graph functions (which wait
+on step 6). The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. `arg_spec`, `bind()` and the
 snapshot are still in the tree and still consumed by the unconverted
