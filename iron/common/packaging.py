@@ -7,8 +7,6 @@ Two arguments, both optional, and everything else derived and reported
 (OPERATOR_MODEL_PLAN.md §8):
 
     net = decode.compile(dev)                          # full ELF on NPU2, per-step xclbin on NPU1
-    net = decode.compile(dev, image="xclbin")          # one fused sequence in an xclbin (spike S1)
-    net = decode.compile(dev, boundaries=chunks(8))    # dispatches of eight steps (spike S1)
     net = decode.compile(dev, boundaries=each_step)    # one dispatch per step
 
 The rules, in order: a ``DispatchTime`` value anywhere forces ``xclbin``
@@ -19,9 +17,9 @@ an error naming the member, the boundaries or the device.
 
 What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
 with ``each_step`` is the chained per-operator xclbin. A fused sequence
-in an xclbin and chunked boundaries wait on spike S1 and are refused by
-name rather than built wrong (their construction is shelved on the branch
-``claude/iron-pr215-step5-extras``). An xclbin run has no parameter
+in an xclbin (and dispatches of several steps on it) waits on spike S1
+and is refused rather than built wrong; its construction is shelved on
+the branch ``claude/iron-pr215-step5-extras``. An xclbin run has no parameter
 scratchpad (spike S2, from XRT's source), so on that image every per-call
 value is a dispatch-time scalar of its kernel (§6): an offset use
 regenerates the kernel's stream per call, a core-read use is written into
@@ -36,21 +34,6 @@ ELF = "elf"
 XCLBIN = "xclbin"
 
 each_step = "each_step"
-
-
-@dataclasses.dataclass(frozen=True)
-class Chunks:
-    """A boundary every ``n`` steps."""
-
-    n: int
-
-    def __post_init__(self):
-        if self.n < 1:
-            raise ValueError("chunks(n) needs n >= 1")
-
-
-def chunks(n: int) -> Chunks:
-    return Chunks(n)
 
 
 @dataclasses.dataclass
@@ -74,10 +57,8 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
     """Derive the image and the dispatch policy for ``traced`` on the device."""
     if image not in (None, ELF, XCLBIN):
         raise ValueError(f"image must be {ELF!r} or {XCLBIN!r}, got {image!r}")
-    if boundaries not in (None, each_step) and not isinstance(boundaries, Chunks):
-        raise ValueError(
-            f"boundaries must be None, each_step or chunks(n), got {boundaries!r}"
-        )
+    if boundaries not in (None, each_step):
+        raise ValueError(f"boundaries must be None or each_step, got {boundaries!r}")
 
     forced: list[str] = []
     dispatch_values = [v for v in traced.values if v.kind == "dispatch"]
@@ -89,7 +70,7 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
     if device_name == "npu1":
         forced.append("npu1 has no full-ELF dispatch")
     if boundaries is not None:
-        forced.append(f"boundaries={_spell(boundaries)}: more than one dispatch")
+        forced.append(f"boundaries={boundaries}: more than one dispatch")
 
     chosen = XCLBIN if forced else ELF
     if image == ELF and forced:
@@ -104,16 +85,11 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         dispatch = "fused"
     elif boundaries == each_step:
         dispatch = "separate"
-    elif boundaries is None:
+    else:
         raise NotImplementedError(
             f"{traced.name}: one fused sequence in an xclbin has no proven "
             f"construction yet (OPERATOR_MODEL_PLAN.md spike S1); pass "
             f"boundaries=each_step, or package for NPU2 as an ELF"
-        )
-    else:
-        raise NotImplementedError(
-            f"{traced.name}: chunks({boundaries.n}) needs a fused sequence in an "
-            f"xclbin (OPERATOR_MODEL_PLAN.md spike S1); each_step is what runs today"
         )
 
     values = []
@@ -130,7 +106,3 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
             lowering = "sizes, strides and offsets regenerated per call"
         values.append((v.name, v.kind, lowering))
     return Plan(chosen, dispatch, reasons, values)
-
-
-def _spell(boundaries) -> str:
-    return f"chunks({boundaries.n})" if isinstance(boundaries, Chunks) else boundaries

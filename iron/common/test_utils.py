@@ -87,32 +87,6 @@ def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 
 
-def nearly_equal(
-    a: float,
-    b: float,
-    rel_tol: float = 128 * np.finfo(np.float32).eps,
-    abs_tol: float = np.finfo(np.float32).tiny,
-) -> bool:
-    """
-    Compare two floating point numbers for approximate equality.
-
-    Adapted from Stack Overflow, License CC BY-SA 4.0
-    Original author: P-Gn
-    Source: https://stackoverflow.com/a/32334103
-    """
-    if np.finfo(np.float32).eps > rel_tol:
-        raise ValueError(f"rel_tol {rel_tol!r} must be >= machine epsilon")
-    if rel_tol >= 1.0:
-        raise ValueError(f"rel_tol {rel_tol!r} must be < 1.0")
-
-    if a == b:
-        return True
-
-    diff = abs(float(a) - float(b))
-    norm = min(abs(float(a)) + abs(float(b)), np.finfo(np.float32).max)
-    return diff < max(abs_tol, rel_tol * norm)
-
-
 def verify_buffer(
     output: np.ndarray | torch.Tensor,
     buf_name: str,

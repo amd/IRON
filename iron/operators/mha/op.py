@@ -614,39 +614,6 @@ class MHA(Operator[MHAOverlay]):
     V = In(num_KV_heads, seq_pad, MHAOverlay.d, to=MHAOverlay.v)
     O = Out(num_heads, seq_pad, MHAOverlay.d, from_=MHAOverlay.o)
 
-    # -- legacy accessors ------------------------------------------------------
-
-    @property
-    def d(self) -> int:
-        return self.ov.d
-
-    @property
-    def B_q(self) -> int:
-        return self.ov.B_q
-
-    @property
-    def B_kv(self) -> int:
-        return self.ov.B_kv
-
-    @property
-    def num_of_pipelines(self) -> int:
-        return self.ov.num_of_pipelines
-
-    @staticmethod
-    def _calculate_seq_padding(seq_len, num_pipeline=1):
-        return ((seq_len + 63 * num_pipeline) // (64 * num_pipeline)) * (
-            64 * num_pipeline
-        )
-
-    def _pad_to_multiple_of_64(self, tensor, seq_dim, num_pipeline=1):
-        seq_len = tensor.shape[seq_dim]
-        padded_seq_len = self._calculate_seq_padding(seq_len, num_pipeline)
-        if padded_seq_len == seq_len:
-            return tensor
-        pad_width = [(0, 0)] * tensor.ndim
-        pad_width[seq_dim] = (0, padded_seq_len - seq_len)
-        return np.pad(tensor, pad_width)
-
     # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:

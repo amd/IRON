@@ -17,9 +17,7 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 """
 
 import dataclasses
-from dataclasses import field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -28,7 +26,6 @@ import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import get_target_model
 
-from iron.common import AIERuntimeArgSpec
 from iron.common.declare import (
     Incompatible,
     In,
@@ -47,7 +44,6 @@ from iron.common.declare import (
 from iron.common.device_utils import lut_sources
 from iron.common.tiling import Access
 from iron.common.utils import split_run
-import iron.operators.flm.gemm.design as dsg
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_DEPTH,
@@ -631,32 +627,6 @@ class GEMM(Operator[FLMGEMMOverlay]):
 
     # -- construction ------------------------------------------------------------
 
-    # -- legacy accessors ------------------------------------------------------
-
-    @property
-    def tile_n(self) -> int:
-        return self._tuned_ov.tile_n
-
-    @property
-    def tile_ma(self) -> int:
-        return self._tuned_ov.tile_ma
-
-    @property
-    def m_chunk(self) -> int:
-        return self._tuned_ov.m_chunk
-
-    @property
-    def rounding(self) -> Rounding:
-        return self.ov.rounding
-
-    @property
-    def epilogue_modes(self) -> tuple:
-        return self.ov.epilogue_modes
-
-    @property
-    def _bfp16_b(self) -> bool:
-        return bool(self.ov.bfp16_b)
-
     @property
     def _tuned_ov(self) -> "FLMGEMMOverlay":
         """The overlay tuned for the current device, when construction left it untuned.
@@ -766,7 +736,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
     @property
     def _n_units(self) -> int:
         """Groups of m_chunk row-blocks; every leg is issued per unit."""
-        return self._m_row_blocks // self.ov.m_chunk
+        return self._m_row_blocks // self._tuned_ov.m_chunk
 
     @property
     def _a_split(self) -> bool:

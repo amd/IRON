@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from typing import List
 
 import numpy as np
-import torch
 
 from iron.common.declare import (
     In,
@@ -233,24 +232,6 @@ class MemCopy(Operator[MemCopyOverlay]):
 
     x = In(size, to=MemCopyOverlay.s)
     y = Out(size, from_=MemCopyOverlay.d)
-
-    # -- legacy accessors ------------------------------------------------------
-
-    @property
-    def num_cores(self) -> int:
-        return self.ov.num_cores
-
-    @property
-    def num_channels(self) -> int:
-        return self.ov.num_channels
-
-    @property
-    def bypass(self) -> bool:
-        return self.ov.bypass
-
-    @property
-    def tile_size(self) -> int:
-        return self.ov.tile_size
 
     def reference(self, x):
         """CPU reference: the copy."""

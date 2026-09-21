@@ -275,7 +275,7 @@ def tile_option_params():
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, context=aie_context)
-    assert operator.tile_n == tile_n and operator.tile_ma == tile_ma
+    assert (operator._tuned_ov.tile_n, operator._tuned_ov.tile_ma) == (tile_n, tile_ma)
     errors, _latency_us, _bandwidth_gbps = check_on_device(
         operator, vectors(operator, INPUT_SCALE)
     )
@@ -286,7 +286,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
 def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
     """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
 
-    Both classes are named ``GEMM`` and MLIROperator.name derives the stem from
+    Both classes are named ``GEMM`` and Operator.name derives the stem from
     the class name, so with the cache keyed on filename the two operators would
     silently satisfy each other's builds in one build dir.
     """

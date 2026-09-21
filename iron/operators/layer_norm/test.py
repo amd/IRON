@@ -28,9 +28,6 @@ def get_params():
 def test_layer_norm(
     input_length, num_aie_columns, num_channels, tile_size, aie_context
 ):
-
-    rows = input_length // tile_size
-    cols = tile_size
     operator = LayerNorm(
         size=input_length,
         num_aie_columns=num_aie_columns,

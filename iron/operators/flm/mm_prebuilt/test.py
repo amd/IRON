@@ -15,7 +15,6 @@ actually runs it.
 
 import numpy as np
 import pytest
-import torch
 
 import aie.utils as aie_utils
 

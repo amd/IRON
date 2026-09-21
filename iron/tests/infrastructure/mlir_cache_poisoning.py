@@ -4,7 +4,7 @@
 
 """A fused build must not leave its MLIR in the standalone operator's slot.
 
-``FusedDispatch.build_fused_mlir`` takes each operator's MLIR generator and
+``sequence.build_fused_mlir`` takes each operator's MLIR generator and
 mutates it::
 
     generator.kwargs["func_prefix"] = f"op{idx}_"
@@ -22,7 +22,7 @@ the compile cache key now carries func_prefix, so this is the
 end-to-end check that it does);
 fused MLIR generation is no longer an artifact at all -- ``fuse_mlir()`` is a
 plain function that calls each operator's generator in-memory and returns
-text; and standalone dispatch (``MLIROperator.link_xclbin()``) does the same
+text; and standalone dispatch (``Operator.link_xclbin()``) does the same
 -- it calls the generator directly rather than reading a compiled artifact
 off disk. Any one of the three would have prevented this; together there is
 nothing left to poison, on either side.

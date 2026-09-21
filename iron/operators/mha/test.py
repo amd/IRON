@@ -92,7 +92,7 @@ def test_arg_spec_matches_design_shapes(
     )
     q, k, v, o = (math.prod(spec.shape) for spec in op.get_arg_spec())
 
-    pad = op._calculate_seq_padding(seq_len, num_pipelines)
+    pad = op.ov.seq_padding(seq_len)
     kv_heads = num_kv_heads if num_kv_heads else num_heads
     assert q == num_heads * pad * dim
     assert o == num_heads * pad * dim

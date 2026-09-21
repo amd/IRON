@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 import aie.utils as aie_utils
 
 from iron.common import DesignGenerator, Operator, PythonGeneratedMLIRArtifact
@@ -29,7 +31,7 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
-                self.operator_dir / "stream_design.py",
+                Path(stream_design.__file__),
                 "load_group",
                 (),
                 {
@@ -66,8 +68,6 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
         },
         mlir=get_mlir_artifact,
     )
-    # The module this class is spelled in, for operator_dir.
-    cls.__module__ = __name__
     return cls(cls._overlay_class(), context=context)
 
 

@@ -23,9 +23,6 @@ share.
 """
 
 from enum import StrEnum
-from functools import partial
-
-import numpy as np
 
 
 from aie.dialects.aie import get_target_model

@@ -238,7 +238,7 @@ def test_mha_sequence_splits_q_over_two_shims_and_reuses_kv_per_head(monkeypatch
     # mha/op.py with eight pipelines: Q and O go through two shims, each
     # carrying four pipelines' (256-row) block; K and V are one head's whole
     # (seq_pad, d) slab, filled once per Q block; drains wait.
-    from iron.operators.mha.op import MHA, MHAOverlay
+    from iron.operators.mha.op import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
@@ -358,7 +358,9 @@ def flm(monkeypatch):
     monkeypatch.setattr(flm, "AIEArch", _Arch)
     monkeypatch.setattr(flm, "get_target_model", lambda dev: _TargetModel())
     monkeypatch.setattr(flm.aie_utils, "get_current_device", lambda: _NPU2())
-    monkeypatch.setattr(flm.dsg, "get_target_model", lambda dev: _TargetModel())
+    import iron.operators.flm.gemm.design as design
+
+    monkeypatch.setattr(design, "get_target_model", lambda dev: _TargetModel())
     monkeypatch.setattr(Access, "tap", lambda self: self)
     return flm
 
@@ -392,7 +394,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
     assert (ov.tile_n, ov.m_chunk, ov.rows, ov.cols, ov.bfp16_b) == (64, 1, 4, 8, True)
     assert ov.tile_ma == flm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
     # tile_n is tuning, not a function of K: the same on every shape.
-    assert flm.GEMM(M=256, K=512, N=1024).tuned(_NPU2()).tile_n == 64
+    assert flm.GEMM(M=256, K=512, N=1024).tuned(_NPU2()).ov.tile_n == 64
     assert (
         op.config_name == f"FLM_GEMM_tn64_ck128_ma{ov.tile_ma}_mc1_emf_conv_even_npu2"
     )
@@ -420,7 +422,7 @@ def test_flm_gemm_declared_overlay_tunes_from_the_device_only(flm):
     ov = flm.FLMGEMMOverlay().tuned(_NPU2())
     assert ov.tile_n == 64  # no K to look at: the general winner
     op = flm.GEMM(ov, M=256, K=512, N=512)
-    assert op.tile_n == 64
+    assert op.ov.tile_n == 64
     untuned = flm.GEMM(flm.FLMGEMMOverlay(), M=256, K=512, N=512)
     with pytest.raises(flm.Incompatible, match="tuned overlay"):
         untuned.get_arg_spec()  # B's layout follows the device

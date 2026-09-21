@@ -39,7 +39,6 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 import hashlib
 import os.path
-import shutil
 import urllib.request
 import logging
 import subprocess
@@ -49,13 +48,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
 import sys
-
-import aie.utils.config
-from aie.utils.compile.utils import (
-    compile_cxx_core_function,
-    compile_mlir_module,
-    prefix_symbols_in_object,
-)
 
 # Global Functions
 # ##########################################################################

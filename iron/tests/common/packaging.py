@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from iron.common.graph import TracedGraph, Value
-from iron.common.packaging import ELF, XCLBIN, chunks, each_step, plan
+from iron.common.packaging import ELF, XCLBIN, each_step, plan
 
 
 def _traced(*values):
@@ -47,8 +47,6 @@ def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
 
 def test_boundaries_force_xclbin_and_the_unbuilt_forms_are_named():
     with pytest.raises(NotImplementedError, match="spike S1"):
-        plan("npu2", _traced(), boundaries=chunks(8))
-    with pytest.raises(NotImplementedError, match="spike S1"):
         plan("npu2", _traced(), image=XCLBIN)  # one fused sequence in an xclbin
     with pytest.raises(NotImplementedError, match="spike S1"):
         plan("npu1", _traced())  # the NPU1 default needs a boundary choice today
@@ -62,8 +60,6 @@ def test_arguments_are_checked():
         plan("npu2", _traced(), image="pdi")
     with pytest.raises(ValueError, match="boundaries must be"):
         plan("npu2", _traced(), boundaries=8)
-    with pytest.raises(ValueError, match="n >= 1"):
-        chunks(0)
 
 
 def test_report_reads_as_one_block():

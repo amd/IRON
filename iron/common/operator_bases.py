@@ -34,10 +34,9 @@ factor) add a field and override :meth:`kernel_arg_types` and
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import numpy as np
-from ml_dtypes import bfloat16
 
 from .declare import (
     O,
@@ -247,6 +246,7 @@ class BinaryElementwiseOverlay(Overlay):
 
     kernel_name: ClassVar[str]
     kernel_fn_name: ClassVar[str]
+
     def tuning(self, dev) -> "BinaryElementwiseOverlay":
         tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
         cols = self.num_aie_columns

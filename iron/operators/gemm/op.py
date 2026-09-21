@@ -533,36 +533,6 @@ class GEMM(Operator[GEMMOverlay]):
         from_=GEMMOverlay.c,
     )
 
-    # -- legacy accessors ----------------------------------------------------
-
-    @property
-    def tile_m(self) -> int:
-        return self.ov.tile_m
-
-    @property
-    def tile_k(self) -> int:
-        return self.ov.tile_k
-
-    @property
-    def tile_n(self) -> int:
-        return self.ov.tile_n
-
-    @property
-    def num_aie_columns(self) -> int:
-        return self.ov.num_aie_columns
-
-    @property
-    def b_col_maj(self) -> bool:
-        return self.ov.b_col_maj
-
-    @property
-    def c_col_maj(self) -> bool:
-        return self.ov.c_col_maj
-
-    @property
-    def prio_accuracy(self) -> bool:
-        return self.ov.prio_accuracy
-
     # -- checks ----------------------------------------------------------------
 
     def compatible(self) -> None:
@@ -797,7 +767,7 @@ class GEMM(Operator[GEMMOverlay]):
 
     def reference(self, A, B):
         """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
-        return reference(A, B, self.b_col_maj, self.c_col_maj)
+        return reference(A, B, self.ov.b_col_maj, self.ov.c_col_maj)
 
     def pad_A(self, A_np):
         """Pad A matrix to match operator dimensions (M, K)"""
@@ -813,7 +783,7 @@ class GEMM(Operator[GEMMOverlay]):
 
     def pad_B(self, B_np):
         """Pad B matrix to match operator dimensions based on layout"""
-        if self.b_col_maj:
+        if self.ov.b_col_maj:
             N, K = B_np.shape
             if N > self.N or K > self.K:
                 raise ValueError(
@@ -842,7 +812,7 @@ class GEMM(Operator[GEMMOverlay]):
         for i in range(partition_N):
             col_start = i * self.N
             col_end = (i + 1) * self.N
-            if self.b_col_maj:
+            if self.ov.b_col_maj:
                 B_parts[i] = self.pad_B(B[col_start:col_end, :])
             else:
                 B_parts[i] = self.pad_B(B[:, col_start:col_end])

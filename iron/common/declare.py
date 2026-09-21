@@ -49,7 +49,6 @@ in :mod:`iron.common.build`, which reads the declarations made here.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 from dataclasses import MISSING, Field
 from typing import Any, Callable, ClassVar, Generic, Iterator, TypeVar
 
@@ -58,7 +57,18 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .base import AIERuntimeArgSpec, MLIROperator
+from .base import AIEOperatorBase, AIERuntimeArgSpec, _serialize_param
+
+# Short spellings in artifact stems, for the fields every family shares.
+_NAME_ALIASES = {
+    "num_aie_columns": "c",
+    "num_channels": "ch",
+    "tile_size": "t",
+    "size": "sz",
+    "scalar_factor": "sf",
+    "rows": "r",
+    "cols": "n",
+}
 
 
 class Untunable(ValueError):
@@ -1119,7 +1129,6 @@ class Overlay:
     _members: ClassVar[tuple[_Member, ...]] = ()
     _dim_fields: ClassVar[tuple[str, ...]] = ()
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
-    _name_aliases: ClassVar[dict[str, str]] = {}
     _foreign: ClassVar[Xclbin | None] = None
 
     @property
@@ -1266,11 +1275,8 @@ class Overlay:
         self._bound = bound
 
     def name_parts(self) -> list[str]:
-        aliases = {**MLIROperator._name_aliases, **type(self)._name_aliases}
-        from .base import _serialize_param
-
         return [
-            f"{aliases.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            f"{_NAME_ALIASES.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
             for f in dataclasses.fields(self)
             if f.repr and getattr(self, f.name) is not None
         ]
@@ -1301,7 +1307,7 @@ class _OperatorMeta(ABCMeta):
 
 
 @dataclasses.dataclass(eq=False, repr=True)
-class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
+class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
     """A host ABI declared against an overlay. Subclass, decorate with ``@operator``.
 
     Declare ``dim()`` fields and buffers (``In``/``Out``/``InOut`` naming their
@@ -1328,7 +1334,7 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
             )
         self.validate()
         self._bind()
-        MLIROperator.__init__(self, context=self.context)
+        AIEOperatorBase.__init__(self, context=self.context)
 
     # -- declared surface --------------------------------------------------
 
@@ -1659,16 +1665,15 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
         kwargs = {**overrides, **values}
         return cls(**kwargs)  # classic-construction path splits overlay fields
 
-    # -- MLIROperator integration ------------------------------------------
+    # -- artifacts, and the image of one operator on its own ---------------
 
     @property
     def name(self) -> str:
-        from .base import _serialize_param
+        """Artifact stem: the class, every shown field of both layers, the device."""
         import aie.utils as aie_utils
 
-        aliases = {**MLIROperator._name_aliases, **type(self)._name_aliases}
         own = [
-            f"{aliases.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            f"{_NAME_ALIASES.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
             for f in dataclasses.fields(self)
             if f.name != "ov" and f.repr and getattr(self, f.name) is not None
         ]
@@ -1684,6 +1689,57 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
 
         return mlir_artifact_for(self, image=image)
 
+    def set_up_artifacts(self) -> None:
+        # Nothing: the kernels are ExternalFunctions the design declares and
+        # CompilableDesign compiles; the xclbin and instructions are built by
+        # link_xclbin(). The artifact graph is for what is not compiled at
+        # all (flm.MMPrebuilt's downloaded xclbin).
+        return
+
+    def compile(self, dry_run: bool = False) -> "Operator":
+        """Build the artifact graph, then the xclbin and instructions.
+
+        link_xclbin() is lazy for get_callable()'s benefit; compile() is an
+        explicit request and honours it, so a configuration whose MLIR cannot
+        be generated fails here rather than on first call.
+        """
+        super().compile(dry_run=dry_run)
+        if not dry_run:
+            self.link_xclbin()
+        return self
+
+    def link_xclbin(self) -> None:
+        """Compile this operator's xclbin and instructions, once (idempotent)."""
+        if getattr(self, "_xclbin_path", None) is not None:
+            return
+        from pathlib import Path
+
+        from .jit_compile import compile_xclbin_insts
+
+        self._xclbin_path, self._insts_path = compile_xclbin_insts(
+            self.get_mlir_artifact().generator,
+            Path(self.context.build_dir) / f"{self.name}.xclbin",
+            Path(self.context.build_dir) / f"{self.name}.bin",
+            kernel_name="MLIR_AIE",
+        )
+
+    def get_callable(self):
+        import aie.utils as aie_utils
+        from aie.utils.npukernel import NPUKernel
+
+        self.link_xclbin()
+        npu_kernel = NPUKernel(
+            xclbin_path=str(self._xclbin_path),
+            kernel_name="MLIR_AIE",
+            insts_path=str(self._insts_path),
+        )
+        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
+
+        def call(*args):
+            return aie_utils.DefaultNPURuntime.run(handle, list(args))
+
+        return call
+
     def __repr__(self) -> str:
         own = ", ".join(
             f"{f.name}={getattr(self, f.name)!r}"
@@ -1691,11 +1747,3 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
             if f.repr and f.name != "ov"
         )
         return f"{type(self).__name__}({self.ov!r}, {own})"
-
-
-def members_of(cls_or_instance) -> tuple[_Member, ...]:
-    """The declared members of an ``@operator`` class, in declaration order."""
-    cls = (
-        cls_or_instance if isinstance(cls_or_instance, type) else type(cls_or_instance)
-    )
-    return getattr(cls, "_members", ())
