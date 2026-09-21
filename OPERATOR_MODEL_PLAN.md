@@ -859,6 +859,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
+| design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
 | llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | **needs a run**: the whole point; parity against the token snapshot (§18) is the gate |
@@ -958,6 +959,13 @@ graphs (S4); the §11 prototypes (instructions-only compile against a
 shared overlay, the callee-sequence pruning); and deleting the dispatch
 hierarchy, which the graph lowering still stands on. O6 is settled as
 free functions (`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
+
+The sandbox verification now reaches every `design()` body: the design
+probe runs each converted overlay's array construction and each
+operator's sequence with the upstream API stubbed to no-ops, on both
+device widths. That is the closest a device-free run gets; the remaining
+gap is whether the calls are what upstream accepts, which only the
+toolchain says.
 
 What to run first on the toolchain, in order, is unchanged (below); after
 it, the decode graph: `pytest iron/tests/common`, then the llama
