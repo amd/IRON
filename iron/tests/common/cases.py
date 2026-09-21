@@ -94,6 +94,10 @@ CASES = [
             # the two size the K/V buffers differently.
             dict(num_heads=8, seq_len=128, d=64, num_KV_heads=0),
             dict(num_heads=8, seq_len=128, d=64, num_KV_heads=2),
+            # The projections' layout, (seq, heads, d): a head is a strided slice.
+            dict(
+                num_heads=8, seq_len=128, d=64, num_KV_heads=2, heads_interleaved=True
+            ),
         ],
     ),
     (
@@ -168,20 +172,35 @@ CASES = [
                 dtype=np.float32,
             ),
             # Input and output buffer sizes are independent here, unlike every
-            # other (in, out) operator: a gather of every fourth element of a
-            # 1024-element buffer into a 256-element one. Equal-size cases
-            # alone would let a refactor that tied the output shape to the
-            # input pass unnoticed. (The copy itself moves the same element
-            # count both ways; the operator checks that at construction.)
+            # other (in, out) operator: a gather of every other pair of a
+            # 1024-element buffer into a 256-element one (a pair, because a
+            # bf16 element is half the shim's 4-byte granule). Equal-size
+            # cases alone would let a refactor that tied the output shape to
+            # the input pass unnoticed. (The copy itself moves the same
+            # element count both ways; the operator checks that at
+            # construction.)
             dict(
-                input_sizes=[256],
-                input_strides=[4],
+                input_sizes=[128, 2],
+                input_strides=[8, 1],
                 input_offset=0,
                 output_sizes=[256],
                 output_strides=[1],
                 output_offset=0,
                 input_buffer_size=1024,
                 output_buffer_size=256,
+            ),
+            # A reorder of (seq, groups, d) into (groups, seq, d), the KV-cache
+            # write of a prefill: a 3-D pattern the copy legalizes for the shim.
+            dict(
+                input_sizes=[4, 128, 64],
+                input_strides=[64, 256, 1],
+                input_offset=0,
+                output_sizes=[4, 128, 64],
+                output_strides=[8192, 64, 1],
+                output_offset=0,
+                input_buffer_size=4 * 128 * 64,
+                output_buffer_size=4 * 128 * 64,
+                transfer_size=1024,
             ),
         ],
     ),

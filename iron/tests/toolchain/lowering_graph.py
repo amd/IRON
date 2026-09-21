@@ -112,3 +112,73 @@ def test_swiglu_graphs_operators_lower(tmp_path):
         swiglu_prefill(z(E, H), z(E, H), z(H, E)).trace(x=(256, E)),
         tmp_path / "prefill",
     )
+
+
+PREFILL = dict(
+    S=2048, E=2048, F=8192, H=32, G=8, D=64
+)  # Llama 3.2 1B's prefill at the maximum length
+
+
+def _reorder(sizes, in_strides, out_strides, **kw):
+    from iron.operators.strided_copy.op import StridedCopy
+
+    n = int(np.prod(sizes))
+    return StridedCopy(
+        input_sizes=sizes,
+        input_strides=in_strides,
+        input_offset=0,
+        input_buffer_size=n,
+        output_sizes=sizes,
+        output_strides=out_strides,
+        output_offset=0,
+        output_buffer_size=n,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(
+            lambda p: __import__("iron.operators.gemm.op", fromlist=["GEMM"]).GEMM(
+                M=p["S"],
+                K=p["F"],
+                N=p["E"],
+                num_aie_columns=8,
+                tile_m=64,
+                tile_k=64,
+                tile_n=64,
+                b_col_maj=True,
+            ),
+            id="down_projection_checkpoint_layout",
+        ),
+        pytest.param(
+            lambda p: _reorder(
+                (p["G"], p["S"], p["D"]),
+                (p["D"], p["G"] * p["D"], 1),
+                (p["S"] * p["D"], p["D"], 1),
+                transfer_size=1024,
+            ),
+            id="kv_into_cache",
+        ),
+        pytest.param(
+            lambda p: __import__("iron.operators.mha.op", fromlist=["MHA"]).MHA(
+                num_heads=p["H"],
+                seq_len=p["S"],
+                d=p["D"],
+                num_KV_heads=p["G"],
+                num_of_pipelines=8,
+                heads_interleaved=True,
+            ),
+            id="mha_in_the_projections_layout",
+        ),
+    ],
+)
+def test_prefill_steps_lower_at_llama_size(make, tmp_path):
+    """The steps a prefill graph needs that a small case does not exercise: the
+    down projection's column-major weight (its column-block stride is past the
+    descriptor's 20-bit step, so B unrolls), the cache write's 2048-wide
+    reorder (legalized), and MHA reading (seq, heads, d)."""
+    op = make(PREFILL)
+    op.tuned(aie_utils.get_current_device())
+    lower(op, tmp_path)

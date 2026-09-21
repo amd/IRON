@@ -19,7 +19,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
-from iron.common.tiling import Access
+from iron.common.tiling import legalize
 
 
 @operator
@@ -148,17 +148,25 @@ class StridedCopy(Operator[StridedCopyOverlay]):
             )
 
     def _taps(self, buffer, sizes, strides, offset):
+        """Per channel, the descriptors of its share of the pattern.
+
+        The highest non-unit dimension is split across the channels; each
+        share is then legalized for the shim (a dimension past its slot's
+        wrap is factored or unrolled, order preserved), so a reorder as wide
+        as a sequence lowers rather than failing three tools down.
+        """
         sizes, strides = _pad4(sizes, strides)
         highest = max(i for i, sz in enumerate(sizes) if sz >= 1)
         channels = self.ov.num_aie_channels
         share = sizes[highest] // channels
         split = sizes[:highest] + [share] + sizes[highest + 1 :]
         return [
-            Access(
+            legalize(
                 buffer.elements,
                 offset + c * share * strides[highest],
-                tuple(split),
-                tuple(strides),
+                split,
+                strides,
+                buffer.dtype,
             )
             for c in range(channels)
         ]
@@ -198,14 +206,16 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         out_off = self.out_offset if self.uses_value("out_offset") else None
         with rt.group() as tg:
             for c in range(self.ov.num_aie_channels):
-                rt.fill(self.ov.s[c], (self.x, ins[c]), group=tg, offset_by=in_off)
-                rt.drain(
-                    self.ov.d[c],
-                    (self.y, outs[c]),
-                    group=tg,
-                    wait=True,
-                    offset_by=out_off,
-                )
+                for acc in ins[c]:
+                    rt.fill(self.ov.s[c], (self.x, acc), group=tg, offset_by=in_off)
+                for acc in outs[c]:
+                    rt.drain(
+                        self.ov.d[c],
+                        (self.y, acc),
+                        group=tg,
+                        wait=acc is outs[c][-1],
+                        offset_by=out_off,
+                    )
 
 
 # --------------------------------------------------------------------------

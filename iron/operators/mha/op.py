@@ -27,6 +27,7 @@ from ml_dtypes import bfloat16
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from iron.common.declare import (
+    select,
     Incompatible,
     In,
     Operator,
@@ -608,11 +609,43 @@ class MHA(Operator[MHAOverlay]):
     # seq_len rounded up to a multiple of B_q * num_of_pipelines; filled by
     # validate(), and checked against the value inference binds from a shape.
     seq_pad: int | None = dim(None, repr=False)
+    # The layout a projection GEMM produces, ``(seq, heads, d)`` with the
+    # heads interleaved per token, read and written as it is: a head's block
+    # is then a strided slice, and no copy reorders the heads to the front.
+    heads_interleaved: bool = field(default=False)
 
-    Q = In(num_heads, seq_pad, MHAOverlay.d, to=MHAOverlay.q)
-    K = In(num_KV_heads, seq_pad, MHAOverlay.d, to=MHAOverlay.k)
-    V = In(num_KV_heads, seq_pad, MHAOverlay.d, to=MHAOverlay.v)
-    O = Out(num_heads, seq_pad, MHAOverlay.d, from_=MHAOverlay.o)
+    Q = In(
+        select(
+            heads_interleaved,
+            (seq_pad, num_heads, MHAOverlay.d),
+            (num_heads, seq_pad, MHAOverlay.d),
+        ),
+        to=MHAOverlay.q,
+    )
+    K = In(
+        select(
+            heads_interleaved,
+            (seq_pad, num_KV_heads, MHAOverlay.d),
+            (num_KV_heads, seq_pad, MHAOverlay.d),
+        ),
+        to=MHAOverlay.k,
+    )
+    V = In(
+        select(
+            heads_interleaved,
+            (seq_pad, num_KV_heads, MHAOverlay.d),
+            (num_KV_heads, seq_pad, MHAOverlay.d),
+        ),
+        to=MHAOverlay.v,
+    )
+    O = Out(
+        select(
+            heads_interleaved,
+            (seq_pad, num_heads, MHAOverlay.d),
+            (num_heads, seq_pad, MHAOverlay.d),
+        ),
+        from_=MHAOverlay.o,
+    )
 
     # -- checks ----------------------------------------------------------------
 
@@ -666,7 +699,10 @@ class MHA(Operator[MHAOverlay]):
     def reference(self, Q, K, V):
         """CPU reference: causal attention per head, K and V repeated over each
         query group. Rows past ``seq_len`` (the padding) come out as zeros;
-        the real rows never attend to them, causality masks them."""
+        the real rows never attend to them, causality masks them. In the
+        interleaved layout the operands are ``(seq, heads, d)`` and so is O."""
+        if self.heads_interleaved:
+            Q, K, V = (t.transpose(0, 1) for t in (Q, K, V))
         groups = self.num_heads // self.num_KV_heads
         K = K.repeat_interleave(groups, dim=0)
         V = V.repeat_interleave(groups, dim=0)
@@ -682,7 +718,7 @@ class MHA(Operator[MHAOverlay]):
         if self.seq_len < self.seq_pad:
             O = O.clone()
             O[:, self.seq_len :] = 0
-        return O
+        return O.transpose(0, 1).contiguous() if self.heads_interleaved else O
 
     # -- the runtime sequence --------------------------------------------------
 
@@ -692,6 +728,13 @@ class MHA(Operator[MHAOverlay]):
         rows = ov.join_rows  # Q rows each shim carries per block
         blocks = self.seq_pad // (rows * ov.q_shims)  # per pipeline
 
+        interleaved = self.heads_interleaved
+
+        def head_rows(buffer, head, r0, r1):
+            # One head's rows [r0, r1): a contiguous block per head, or a
+            # strided one when the heads are interleaved per token.
+            return buffer[r0:r1, head, :] if interleaved else buffer[head, r0:r1, :]
+
         for head in range(heads):
             kv_head = head // (heads // kv_heads)
             for block in range(blocks):
@@ -699,13 +742,17 @@ class MHA(Operator[MHAOverlay]):
                 with rt.group():
                     for shim in range(ov.q_shims):
                         r0 = (block * ov.q_shims + shim) * rows
-                        rt.fill(ov.q[shim], self.Q[head, r0 : r0 + rows, :])
+                        rt.fill(ov.q[shim], head_rows(self.Q, head, r0, r0 + rows))
                     # The whole of this head's K and V, streamed in (d, B_kv) blocks.
-                    rt.fill(ov.k, self.K[kv_head])
-                    rt.fill(ov.v, self.V[kv_head])
+                    rt.fill(ov.k, head_rows(self.K, kv_head, 0, self.seq_pad))
+                    rt.fill(ov.v, head_rows(self.V, kv_head, 0, self.seq_pad))
                     for shim in range(ov.q_shims):
                         r0 = (block * ov.q_shims + shim) * rows
-                        rt.drain(ov.o[shim], self.O[head, r0 : r0 + rows, :], wait=True)
+                        rt.drain(
+                            ov.o[shim],
+                            head_rows(self.O, head, r0, r0 + rows),
+                            wait=True,
+                        )
 
 
 # --------------------------------------------------------------------------

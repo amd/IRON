@@ -583,6 +583,16 @@ class GEMM(Operator[GEMMOverlay]):
     def design(self, rt):
         from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 
+        from iron.common.tiling import legalize
+
+        def legal(buffer, tap):
+            """The tiler's pattern as descriptors the shim holds: one when it
+            fits, else the outermost dimension unrolled (a column-major B
+            whose column-block stride is past the 20-bit step)."""
+            return legalize(
+                buffer.elements, tap.offset, tap.sizes, tap.strides, buffer.dtype
+            )
+
         ov = self.ov
         M, K, N = self.M, self.K, self.N
         m, k, n = ov.tile_m, ov.tile_k, ov.tile_n
@@ -647,6 +657,14 @@ class GEMM(Operator[GEMMOverlay]):
                 tile_group_col_major=True,  # Send all tiles in column before moving on to next column
                 prune_step=False,
             )
+
+        A_fills = [legal(self.A, tap) for tap in A_tiles]
+        B_fills = [legal(self.B, tap) for tap in B_tiles]
+        # An unrolled B fill costs one descriptor per column block. The BD
+        # accounting below (12 of 16 with two transfer blocks in flight)
+        # assumes one; when B unrolls, the transfer blocks are not overlapped
+        # so that a shim never holds more than one block's descriptors.
+        b_unrolled = any(len(f) > 1 for f in B_fills)
 
         # Task groups will be used to determine when to sync/await/free DMA runtime ops
         tg = rt.new_group()
@@ -753,12 +771,14 @@ class GEMM(Operator[GEMMOverlay]):
                         ) % len(A_tiles)
                         # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
                         if col < n_aie_rows:
-                            rt.fill(ov.a[col], (self.A, A_tiles[tile_offset]), group=tg)
+                            for acc in A_fills[tile_offset]:
+                                rt.fill(ov.a[col], (self.A, acc), group=tg)
                         # B input transfer: the first (n)-wide block of columns
                         # of B, then the (n_aie_columns)-th such block, and so
                         # on; each shim starts at a different column offset.
-                        rt.fill(ov.b[col], (self.B, B_tiles[col]), group=tg)
-                if tb > 0 or (tb == 0 and pingpong > 0):
+                        for acc in B_fills[col]:
+                            rt.fill(ov.b[col], (self.B, acc), group=tg)
+                if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
                     tg.finish()
                     tg = rt.new_group()
         tg.finish()
