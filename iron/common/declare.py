@@ -1370,6 +1370,22 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
         """An explicit device symbol for a per-call value, or ``None`` for the default."""
         return None
 
+    def design_key(self):
+        """Identity for sharing a build: the class, the overlay's key, every compared field.
+
+        Two operators with equal keys generate byte-identical MLIR, so a
+        sequence builds, prefixes and configures the design once.
+        """
+        return (
+            type(self).__qualname__,
+            self.ov.design_key(),
+            tuple(
+                (f.name, getattr(self, f.name))
+                for f in dataclasses.fields(self)
+                if f.compare and f.name not in ("ov", "context")
+            ),
+        )
+
     def tuned(self, dev) -> "Operator":
         """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""
         ov = self.ov.tuned(dev).copy()

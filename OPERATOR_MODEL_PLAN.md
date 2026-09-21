@@ -858,6 +858,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | mem_copy (§14 step 3, part) | `iron/operators/mem_copy/op.py` | whole, partial and tiny sizes: elements filled equal elements drained, padding groups awaited | **needs a run**: idle-fifo placement moved from the design into `build_design` (`RuntimeEndpoint(AnyShimTile)`) |
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
+| swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | **needs a run**: `CompiledGraph` builds through `OperatorSequence` and writes values through `params`; untested against a toolchain |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
@@ -919,7 +920,15 @@ kwargs spelling (`GEMV(wk, x, num_aie_columns=8)`). O9 stands: the class
 tells the two calls apart by receiving handles. O10: state is zero at
 upload, read and written through `CompiledGraph.buffer(state)`, and sized
 by its declaration; a module with two graphs over one state is step 5.
-Remaining in step 3: the two swiglu composites as graph functions. The snapshot
+
+Step 3 is complete: `swiglu_decode(w_gate, w_up, w_down)` and
+`swiglu_prefill(...)` return graph functions closing over the weights;
+`CompositeOperator` and the two `OperatorSequence` composites are gone.
+Two more graph rules came with them: a flat-declared output (an
+elementwise operator) keeps the shape of the operand it is the size of,
+and `h.reshape(...)` is a free view. `Operator.design_key()` is now the
+class, the overlay's key and every compared field, so a sequence builds
+two identical projections once (`share_designs`). The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. Every operator now serves
 `get_arg_spec()` from its declared buffers.

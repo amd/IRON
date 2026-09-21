@@ -2,31 +2,42 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SwiGLUPrefill does not pad: it raises for a seq_len its inner GEMM cannot
-tile, and the *_aligned attributes just echo the input dims back.
+"""swiglu_prefill does not pad: a seq_len its inner GEMM cannot tile is an
+error at trace time, and an aligned one traces with the extents it was given.
 """
 
 import aie.utils as aie_utils
+import numpy as np
 import pytest
 from aie.iron.device import NPU2
+from ml_dtypes import bfloat16
 
-from iron.operators.swiglu_prefill.op import SwiGLUPrefill
+from iron.operators.gemm.op import GEMM
+from iron.operators.swiglu_prefill.op import swiglu_prefill
 
 
-def _construct(seq_len, embedding_dim=2048, hidden_dim=2048):
+def _trace(seq_len, embedding_dim=2048, hidden_dim=2048):
     aie_utils.set_current_device(NPU2())
-    return SwiGLUPrefill(
-        seq_len=seq_len, embedding_dim=embedding_dim, hidden_dim=hidden_dim
+    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
+    ffn = swiglu_prefill(
+        z(embedding_dim, hidden_dim),
+        z(embedding_dim, hidden_dim),
+        z(hidden_dim, embedding_dim),
     )
+    return ffn.trace(x=(seq_len, embedding_dim))
 
 
 def test_non_aligned_seq_len_raises_instead_of_being_padded():
     with pytest.raises(ValueError, match=r"M \(300\) must be a multiple of 256"):
-        _construct(seq_len=300)
+        _trace(seq_len=300)
 
 
-def test_aligned_seq_len_constructs_and_aligned_attrs_equal_the_input():
-    op = _construct(seq_len=512)
-    assert op.seq_len_aligned == 512 == op.seq_len
-    assert op.embedding_dim_aligned == 2048 == op.embedding_dim
-    assert op.hidden_dim_aligned == 2048 == op.hidden_dim
+def test_aligned_seq_len_traces_with_the_given_extents():
+    t = _trace(seq_len=512)
+    gemms = [s.op for s in t.steps if type(s.op) is GEMM]
+    assert [(g.M, g.K, g.N) for g in gemms] == [
+        (512, 2048, 2048),
+        (512, 2048, 2048),
+        (512, 2048, 2048),
+    ]
+    assert gemms[0].ov is gemms[1].ov  # gate and up share one array

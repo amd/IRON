@@ -249,13 +249,6 @@ class MLIROperator(AIEOperatorBase):
         return call
 
 
-class CompositeOperator(AIEOperatorBase):
-    """Base class for composite operators that chain multiple sub-operators"""
-
-    def __init__(self, context: AIEContext | None = None) -> None:
-        super().__init__(context)
-
-
 @dataclass(frozen=True)
 class AIERuntimeArgSpec:
     """Specification for a single runtime argument of an AIE operator."""

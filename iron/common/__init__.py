@@ -6,7 +6,6 @@
 from .base import (
     AIEOperatorBase,
     MLIROperator,
-    CompositeOperator,
     AIERuntimeArgSpec,
 )
 from .operator_bases import (

@@ -89,6 +89,14 @@ class Handle:
         item = np.dtype(self.dtype).itemsize
         return f"{self.parent.buffer_name}[{self.start * item}:{(self.start + self.elements) * item}]"
 
+    def reshape(self, *shape) -> "Handle":
+        """The same buffer seen with another shape (no data moves)."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        if prod(shape) != self.elements:
+            raise ValueError(f"cannot reshape {self!r} to {list(shape)}")
+        return Handle(shape, self.dtype, self.name, self.role, self.parent, self.start)
+
     def __getitem__(self, index) -> "Handle":
         if self.parent is not None:
             raise TypeError("slicing a slice is not supported; slice the parent")
@@ -390,8 +398,16 @@ class Tracer:
             elif given_outs:
                 slots.append(next(given))  # written where the caller said
             else:
+                shape = b.shape
+                # A flat-declared output (an elementwise operator) keeps the
+                # shape of the operand it is the size of, so a (rows, cols)
+                # activation stays (rows, cols) through SiLU.
+                if len(shape) == 1:
+                    like = next((h for h in operands if h.elements == b.elements), None)
+                    if like is not None:
+                        shape = like.shape
                 h = Handle(
-                    b.shape,
+                    shape,
                     b.dtype,
                     f"{type(op).__name__.lower()}{next(self._counter)}",
                     "intermediate",
@@ -620,6 +636,8 @@ class CompiledGraph:
             traced.output_args,
             buffer_sizes=dict(traced.pinned),
             dispatch=dispatch,
+            # Equal design keys are one build (two projections on one array).
+            share_designs=True,
             context=context,
         ).compile()
         self.callable = self.sequence.get_callable()

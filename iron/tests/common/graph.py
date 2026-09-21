@@ -165,6 +165,10 @@ def test_slices_are_views_into_the_parent_in_bytes():
         part[0]
     with pytest.raises(ValueError, match="unit steps"):
         h[::2]
+    assert h.reshape(512).shape == (512,) and h.reshape(512).buffer_name == "acts"
+    assert part.reshape(128).buffer_name == "acts[256:512]"
+    with pytest.raises(ValueError, match="cannot reshape"):
+        h.reshape(3, 3)
 
 
 def test_binding_two_handles_to_one_instance_is_an_error():
@@ -219,7 +223,7 @@ def test_shape_mismatch_and_rank_rules():
         return add(x, y)  # a flat operator takes any rank
 
     t = flat.trace(x=(4, 512), y=(4, 512))
-    assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (2048,)
+    assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
 
 
 def test_keyword_only_parameters_must_be_annotated_as_values():
@@ -251,3 +255,44 @@ def test_returning_an_input_or_a_slice_is_refused():
 
     with pytest.raises(TypeError, match="whole handles"):
         part.trace(x=(64,))
+
+
+# --------------------------------------------------------------------------
+# The two swiglu composites, as graph functions
+# --------------------------------------------------------------------------
+
+
+def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up(monkeypatch):
+    import iron.operators.swiglu_decode.op as m
+
+    monkeypatch.setattr(m, "get_shim_dma_limit", lambda dev: 16)
+    ffn = m.swiglu_decode(z(H, E), z(H, E), z(E, H))
+    t = ffn.trace(x=(1, E))
+    assert [type(op).__name__ for op, *_ in t.runlist] == [
+        "GEMV",
+        "GEMV",
+        "SiLU",
+        "ElementwiseMul",
+        "GEMV",
+    ]
+    gate, up, down = (s.op for s in t.steps if type(s.op) is GEMV)
+    assert gate.ov is up.ov and gate.design_key() == up.design_key()
+    assert down.design_key() != gate.design_key()
+    assert (gate.ov.num_aie_columns, gate.ov.tile_size_output) == (8, H // 8)
+    assert t.input_args == ["x"] and t.output_args == ["out"]
+    with pytest.raises(ValueError, match="do not agree"):
+        m.swiglu_decode(z(H, E), z(H, E), z(H, E))
+
+
+def test_swiglu_prefill_traces_over_a_sequence(monkeypatch):
+    import iron.operators.swiglu_prefill.op as m
+    from iron.operators.gemm.op import GEMM
+
+    monkeypatch.setattr(m, "get_shim_dma_limit", lambda dev: 16)
+    ffn = m.swiglu_prefill(z(E, H), z(E, H), z(H, E))
+    t = ffn.trace(x=(256, E))
+    gemms = [s.op for s in t.steps if type(s.op) is GEMM]
+    assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
+    assert gemms[0].ov is gemms[1].ov
+    silu = next(s.op for s in t.steps if type(s.op) is SiLU)
+    assert silu.size == 256 * H
