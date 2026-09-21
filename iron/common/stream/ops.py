@@ -13,7 +13,7 @@ declared with :func:`custom_op`, which gives them a schema in a private domain s
 the exporter emits them as a single node.
 
 Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
-the kernel source is IRON's existing ``aie_kernels/<dir>/<name>.cc``, exactly as the
+the kernel source is mlir-aie's ``aie_kernels/<dir>/<name>.cc``, exactly as the
 hand-written operators use it.
 """
 
@@ -115,7 +115,7 @@ def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
 class StreamKernel:
     """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
 
-    ``source``/``subdir`` name the file in IRON's ``aie_kernels`` library the same
+    ``source``/``subdir`` name the file in mlir-aie's ``aie_kernels`` library the same
     way the hand-written operators do (``subdir=None`` means the device directory,
     e.g. ``aie2p``). The object name must equal the kernel's ``linkwith_name`` in
     stream-dse, since the generated MLIR links against it.

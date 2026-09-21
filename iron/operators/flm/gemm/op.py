@@ -358,17 +358,9 @@ class GEMM(MLIROperator):
         kernels_dir = self.context.kernels_dir
         generic = kernels_dir / "generic"
 
-        # The last kernel IRON keeps in-tree, pending upstreaming to mlir-aie:
-        # its runtime epilogue (#200) is newer than the package copy. Its
-        # #included companions are unchanged, so they come from kernels_dir; the
-        # include path needs generic/ (activations.h, mm_fused_mmul.h,
-        # ../aie_kernel_utils.h) and the arch dir (zero.cc), since neither sits
-        # beside the in-tree source.
-        in_tree_generic = self.context.base_dir / "aie_kernels" / "generic"
-        arch_include = [
-            f"-I{generic}",
-            f"-I{kernels_dir / kernel_dir}",
-        ]
+        # zero.cc is included by name and lives in the arch dir, not beside
+        # mm_fused.cc.
+        arch_include = [f"-I{kernels_dir / kernel_dir}"]
 
         # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
         # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
@@ -405,7 +397,7 @@ class GEMM(MLIROperator):
         kernel_obj = KernelObjectArtifact(
             self._kernel_object,
             dependencies=[
-                SourceArtifact(in_tree_generic / "mm_fused.cc"),
+                SourceArtifact(generic / "mm_fused.cc"),
                 SourceArtifact(generic / "mm_fused_mmul.h"),
                 SourceArtifact(generic / "activations.h"),
                 SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
