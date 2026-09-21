@@ -36,7 +36,8 @@ class StridedCopyOverlay(Overlay):
     (ERT_CMD_STATE_TIMEOUT). An integer multiple is fine; it cycles the buffer.
     """
 
-    transfer_size: int = tunable()
+    # Derived from input_sizes by the constructor (per-channel share).
+    transfer_size: int | None = tunable(None)
     num_aie_channels: int = tunable(1)
     dtype: object = field(default=bfloat16, repr=False)
 
@@ -116,10 +117,11 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         return super()._classic(kwargs)
 
     def uses_value(self, name: str) -> bool:
-        return {
+        legacy = {
             "in_offset": self.input_offset_parameter,
             "out_offset": self.output_offset_parameter,
-        }[name] is not None
+        }[name]
+        return legacy is not None or name in self.used_values
 
     def value_symbol(self, value):
         return {

@@ -34,9 +34,10 @@ class DequantOverlay(Overlay):
     produces ``per_tile`` bf16 values.
     """
 
-    num_aie_columns: int = tunable()
-    num_channels: int = tunable()
-    tile_size: int = tunable()
+    # None: every column of the device, one channel each, 4096-value tiles.
+    num_aie_columns: int | None = tunable(None)
+    num_channels: int = tunable(1)
+    tile_size: int | None = tunable(None)
     group_size: int = field(default=32, repr=False)
     # Filled by tuning: the largest tile 64 KB of L1 holds, and its packed size.
     per_tile: int | None = tunable(None, repr=False)
@@ -47,12 +48,22 @@ class DequantOverlay(Overlay):
     count = Resident(np.int32)
 
     def tuning(self, dev) -> "DequantOverlay":
-        total_cores = self.num_aie_columns * self.num_channels
+        from iron.common.utils import device_columns
+
+        cols = self.num_aie_columns
+        if cols is None:
+            if dev is None:
+                raise Untunable("num_aie_columns defaults from the device; none given")
+            cols = min(device_columns(dev), 16 // self.num_channels)
+        tile_size = 4096 if self.tile_size is None else self.tile_size
+        total_cores = cols * self.num_channels
         if total_cores > 16:
             raise Untunable(f"total cores ({total_cores}) must be <= 16")
-        per_tile = min(self.tile_size, 16384)
+        per_tile = min(tile_size, 16384)
         return dataclasses.replace(
             self,
+            num_aie_columns=cols,
+            tile_size=tile_size,
             per_tile=per_tile,
             in_tile=(per_tile // 2) + (per_tile // self.group_size) * 2,
         )

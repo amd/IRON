@@ -858,6 +858,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | mem_copy (§14 step 3, part) | `iron/operators/mem_copy/op.py` | whole, partial and tiny sizes: elements filled equal elements drained, padding groups awaited | **needs a run**: idle-fifo placement moved from the design into `build_design` (`RuntimeEndpoint(AnyShimTile)`) |
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
+| graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | **needs a run**: `CompiledGraph` builds through `OperatorSequence` and writes values through `params`; untested against a toolchain |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
@@ -895,8 +896,30 @@ strided_copy's `*_offset_parameter` fields and softmax's
 They go with the llama rewrite. The snapshot test is gone with its
 purpose; the shape regression net is now the per-operator device-free
 tests in `iron/tests/common`, which pin shapes, tuning, residents and
-transfers rather than a recorded table. Remaining in step 3: the two
-swiglu composites as graph functions (which wait on step 6). The snapshot
+transfers rather than a recorded table.
+
+Step 6 is in: `@iron.graph` traces a function on handles, where a class
+call on handles (`GEMV(w, h)`) infers, deduplicates the overlay by
+`design_key()` and records, an instance call records against that
+instance, a bare tensor is a weight, `iron.state(...)` is a pinned buffer
+the graph writes into by passing it as an output, keyword-only parameters
+annotated `Scratchpad[T]`/`DispatchTime[T]` are per-call values bound to
+an operator's members (`use_value` enables them; two handles on one
+instance is an error), and `h[a:b]` is a byte-range view. Three rules the
+tracing forced: a flat declared buffer (`In(size)`) takes an operand of any
+rank; every overlay tunable has a device default (elementwise tiles of
+256, every column the shim budget allows, RMSNorm one core, transpose 64 x
+64 x 8) so inferred construction needs no tuning arguments, and a call site
+that knows its extent passes better ones; construction goes through each
+class's `_classic` translation so derived overlay fields (a transfer size)
+are filled the same way on both paths. Lowering targets `OperatorSequence`
+as it stands (a fused ELF on NPU2, per-step xclbins on NPU1); `compile(dev,
+boundaries=, image=)` and the image rules are step 5. O2 is settled as the
+kwargs spelling (`GEMV(wk, x, num_aie_columns=8)`). O9 stands: the class
+tells the two calls apart by receiving handles. O10: state is zero at
+upload, read and written through `CompiledGraph.buffer(state)`, and sized
+by its declaration; a module with two graphs over one state is step 5.
+Remaining in step 3: the two swiglu composites as graph functions. The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. Every operator now serves
 `get_arg_spec()` from its declared buffers.

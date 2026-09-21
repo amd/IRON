@@ -3,6 +3,8 @@
 
 from typing import ClassVar, Dict
 
+import dataclasses
+
 import numpy as np
 import torch
 from ml_dtypes import bfloat16
@@ -16,6 +18,7 @@ from iron.common.declare import (
     Resident,
     StreamIn,
     StreamOut,
+    Untunable,
     dim,
     operator,
     optional,
@@ -34,11 +37,12 @@ class TransposeOverlay(Overlay):
     per column, tiles per channel) are residents the sequence writes.
     """
 
-    m: int = tunable()
-    n: int = tunable()
-    s: int = tunable()
-    num_aie_columns: int = tunable()
-    num_channels: int = tunable()
+    # Defaults: 64 x 64 tiles of 8 x 8 sub-tiles, every column, one channel.
+    m: int = tunable(64)
+    n: int = tunable(64)
+    s: int = tunable(8)
+    num_aie_columns: int | None = tunable(None)
+    num_channels: int = tunable(1)
 
     x = StreamIn(m, n, per=(num_aie_columns, num_channels))
     y = StreamOut(m, n, per=(num_aie_columns, num_channels))
@@ -65,6 +69,18 @@ class TransposeOverlay(Overlay):
             raise ValueError(
                 f"Kernel tile {self.s} needs AIE tile rows > 16 and columns > 16."
             )
+
+    def tuning(self, dev) -> "TransposeOverlay":
+        from iron.common.utils import device_columns, get_shim_dma_limit
+
+        cols = self.num_aie_columns
+        if cols is None:
+            if dev is None:
+                raise Untunable("num_aie_columns defaults from the device; none given")
+            cols = min(
+                device_columns(dev), get_shim_dma_limit(dev) // self.num_channels
+            )
+        return dataclasses.replace(self, num_aie_columns=cols)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker

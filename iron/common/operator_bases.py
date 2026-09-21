@@ -55,7 +55,12 @@ from .declare import (
     tunable,
 )
 from .device_utils import lut_sources
-from .utils import get_shim_dma_limit
+from .utils import device_columns, get_shim_dma_limit
+
+# The line an elementwise core streams when nothing else is asked for: small
+# enough to divide any extent a model has, at some cost in DMA efficiency.
+# Call sites that know their extent pass tile_size for performance.
+DEFAULT_TILE = 256
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -76,9 +81,10 @@ class ChanneledUnaryOverlay(Overlay):
     of one to fit local memory).
     """
 
-    num_aie_columns: int = tunable()
-    num_channels: int = tunable()
-    tile_size: int = tunable()
+    # None: every column of the device, one channel each, DEFAULT_TILE lines.
+    num_aie_columns: int | None = tunable(None)
+    num_channels: int = tunable(1)
+    tile_size: int | None = tunable(None)
     # min(tile_size, tile_cap); filled by tuning, never set by a caller.
     line_size: int | None = tunable(None, repr=False)
 
@@ -92,16 +98,25 @@ class ChanneledUnaryOverlay(Overlay):
     tile_cap: ClassVar[int] = 4096
 
     def tuning(self, dev) -> "ChanneledUnaryOverlay":
-        line_size = min(self.tile_size, self.tile_cap)
+        tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
+        cols = self.num_aie_columns
         if dev is not None:
             limit = get_shim_dma_limit(dev)
-            channels = self.num_aie_columns * self.num_channels
-            if channels > limit:
+            if cols is None:
+                cols = min(device_columns(dev), limit // self.num_channels)
+            if cols * self.num_channels > limit:
                 raise Untunable(
-                    f"num_aie_columns * num_channels ({channels}) exceeds ShimDMA "
-                    f"limit of {limit} for this device"
+                    f"num_aie_columns * num_channels ({cols * self.num_channels}) "
+                    f"exceeds ShimDMA limit of {limit} for this device"
                 )
-        return dataclasses.replace(self, line_size=line_size)
+        elif cols is None:
+            raise Untunable("num_aie_columns defaults from the device; none given")
+        return dataclasses.replace(
+            self,
+            num_aie_columns=cols,
+            tile_size=tile_size,
+            line_size=min(tile_size, self.tile_cap),
+        )
 
     # -- hooks for kernels with extra arguments -----------------------------
 
@@ -215,8 +230,10 @@ class BinaryElementwiseOverlay(Overlay):
     limit is enforced as ``num_aie_columns * 2``.
     """
 
-    tile_size: int = tunable()
-    num_aie_columns: int = tunable(8)
+    # None: DEFAULT_TILE, and as many columns as the device's shim budget
+    # allows two channels each.
+    tile_size: int | None = tunable(None)
+    num_aie_columns: int | None = tunable(None)
     # min(tile_size, 4096); filled by tuning, never set by a caller.
     per_tile: int | None = tunable(None, repr=False)
 
@@ -232,14 +249,25 @@ class BinaryElementwiseOverlay(Overlay):
     _name_aliases: ClassVar[dict[str, str]] = {"num_aie_columns": "col"}
 
     def tuning(self, dev) -> "BinaryElementwiseOverlay":
+        tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
+        cols = self.num_aie_columns
         if dev is not None:
             limit = get_shim_dma_limit(dev)
-            if self.num_aie_columns * 2 > limit:
+            if cols is None:
+                cols = min(device_columns(dev), limit // 2)
+            if cols * 2 > limit:
                 raise Untunable(
-                    f"num_aie_columns ({self.num_aie_columns}) exceeds ShimDMA limit "
+                    f"num_aie_columns ({cols}) exceeds ShimDMA limit "
                     f"of {limit // 2} columns for this device"
                 )
-        return dataclasses.replace(self, per_tile=min(self.tile_size, 4096))
+        elif cols is None:
+            raise Untunable("num_aie_columns defaults from the device; none given")
+        return dataclasses.replace(
+            self,
+            num_aie_columns=cols,
+            tile_size=tile_size,
+            per_tile=min(tile_size, 4096),
+        )
 
     def kernel_source(self, target):
         return target.kernel_source(self.kernel_name)

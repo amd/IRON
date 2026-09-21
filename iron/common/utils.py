@@ -4,6 +4,14 @@
 from aie.dialects.aie import get_target_model, WireBundle
 
 
+def device_columns(dev) -> int:
+    """How many columns the device has: what an overlay defaults its width to."""
+    cols = getattr(dev, "cols", None)
+    if isinstance(cols, int):
+        return cols
+    return get_target_model(dev.resolve()).columns()
+
+
 def get_shim_dma_limit(dev) -> int:
     """Return the total number of ShimDMA output channels available on the device.
 

@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Graph functions, traced device-free.
+
+A graph function run on handles produces a runlist, buffer names and
+sizes, and value bindings; nothing here needs a toolchain. What is not
+checked here is the image: that is OperatorSequence's job and the
+hardware tests' job.
+"""
+
+import numpy as np
+import pytest
+from ml_dtypes import bfloat16
+
+import iron
+from iron.common.declare import DispatchTime, Scratchpad
+from iron.common.graph import Handle, State, TracedGraph
+from iron.operators.elementwise_add.op import ElementwiseAdd
+from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.gemv.op import GEMV, GEMVOverlay
+from iron.operators.rms_norm.op import RMSNorm, WeightedRMSNorm
+from iron.operators.silu.op import SiLU
+from iron.operators.strided_copy.op import StridedCopy
+
+E, H = 2048, 8192
+
+
+def z(*shape, dtype=bfloat16):
+    return np.zeros(shape, dtype=dtype)
+
+
+class Dev:
+    cols = 8
+
+    def resolve(self):
+        class R:
+            name = "npu2"
+
+        return R()
+
+
+@pytest.fixture(autouse=True)
+def shim_limit(monkeypatch):
+    import iron.common.operator_bases as bases
+    import iron.operators.rms_norm.op as rms
+
+    monkeypatch.setattr(bases, "get_shim_dma_limit", lambda dev: 16)
+    monkeypatch.setattr(rms, "get_shim_dma_limit", lambda dev: 16)
+
+
+def _ffn():
+    w_gate, w_up, w_down, norm_w = z(H, E), z(H, E), z(E, H), z(E)
+    cache = iron.state((4, 1024 * 64))
+
+    @iron.graph
+    def ffn(x, *, pos: Scratchpad[np.int32]):
+        h = RMSNorm(x, norm_w)  # a bare tensor is a weight
+        gate = GEMV(
+            w_gate, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
+        )
+        up = GEMV(
+            w_up, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
+        )
+        act = ElementwiseMul(SiLU(gate), up)
+        StridedCopy(  # writes state; returns nothing
+            act[: 4 * 64],
+            cache,
+            input_sizes=(4, 64),
+            input_strides=(64, 1),
+            input_offset=0,
+            output_sizes=(1, 4, 64),
+            output_strides=(0, 1024 * 64, 1),
+            output_offset=0,
+            out_offset=pos,
+        )
+        return GEMV(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
+
+    return ffn, dict(
+        w_gate=w_gate, w_up=w_up, w_down=w_down, norm_w=norm_w, cache=cache
+    )
+
+
+def test_tracing_records_the_runlist_with_names_from_roles():
+    ffn, refs = _ffn()
+    t = ffn.trace(x=(1, E))
+    assert isinstance(t, TracedGraph)
+    assert [(type(op).__name__, *names) for op, *names in t.runlist] == [
+        ("WeightedRMSNorm", "x", "w0", "weightedrmsnorm0"),
+        ("GEMV", "w1", "weightedrmsnorm0", "gemv1"),
+        ("GEMV", "w2", "weightedrmsnorm0", "gemv2"),
+        ("SiLU", "gemv1", "silu3"),
+        ("ElementwiseMul", "silu3", "gemv2", "elementwisemul4"),
+        ("StridedCopy", "elementwisemul4[0:512]", "state0"),
+        ("GEMV", "w3", "elementwisemul4", "out"),
+    ]
+    assert t.input_args == ["x"] and t.output_args == ["out"]
+    # Weights, the state and a sliced intermediate keep private addresses.
+    assert t.pinned == {
+        "w0": E * 2,
+        "w1": H * E * 2,
+        "w2": H * E * 2,
+        "w3": H * E * 2,
+        "state0": 4 * 1024 * 64 * 2,
+        "elementwisemul4": H * 2,
+    }
+
+
+def test_overlays_are_shared_by_design_key_and_extents_are_not():
+    ffn, _ = _ffn()
+    t = ffn.trace(x=(1, E))
+    gate, up, down = (s.op for s in t.steps if type(s.op) is GEMV)
+    assert gate.ov is up.ov and gate is not up  # one array, two operators
+    assert down.ov is not gate.ov  # a different K is a different array
+    assert [type(o).__name__ for o in t.overlays] == [
+        "WeightedRMSNormOverlay",
+        "GEMVOverlay",
+        "SiLUOverlay",
+        "ElementwiseMulOverlay",
+        "StridedCopyOverlay",
+        "GEMVOverlay",
+    ]
+    assert (gate.M, gate.ov.K, gate.num_batches) == (H, E, 1)
+
+
+def test_per_call_values_bind_to_the_operator_and_enable_it():
+    ffn, _ = _ffn()
+    t = ffn.trace(x=(1, E))
+    ((op, member, value),) = t.bindings
+    assert type(op) is StridedCopy and member == "out_offset"
+    assert value.name == "pos" and value.kind == "scratchpad"
+    assert op.uses_value("out_offset") and not op.uses_value("in_offset")
+    assert [v.name for v in op.values] == ["out_offset"]
+
+
+def test_every_traced_operator_tunes_from_the_device_alone():
+    ffn, _ = _ffn()
+    t = ffn.trace(x=(1, E))
+    for op in t.operators:
+        op.tuned(Dev())  # every default fills; every extent is compatible
+    silu = next(s.op for s in t.steps if type(s.op) is SiLU).tuned(Dev())
+    assert (silu.ov.num_aie_columns, silu.ov.num_channels, silu.ov.tile_size) == (
+        8,
+        1,
+        256,
+    )
+    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).tuned(Dev())
+    assert norm.ov.num_aie_columns == 1  # one row: one core
+
+
+def test_a_state_written_by_one_step_is_pinned_and_readable():
+    ffn, refs = _ffn()
+    t = ffn.trace(x=(1, E))
+    handle = t.states[id(refs["cache"])]
+    assert handle.role == "state" and handle.name == "state0"
+    assert refs["cache"].name == "state0"
+
+
+def test_slices_are_views_into_the_parent_in_bytes():
+    h = Handle((8, 64), bfloat16, "acts", "intermediate")
+    part = h[2:4]
+    assert part.shape == (2, 64) and part.buffer_name == "acts[256:512]"
+    assert h[3].shape == (64,) and h[3].buffer_name == "acts[384:512]"
+    with pytest.raises(TypeError, match="slicing a slice"):
+        part[0]
+    with pytest.raises(ValueError, match="unit steps"):
+        h[::2]
+
+
+def test_binding_two_handles_to_one_instance_is_an_error():
+    copy = StridedCopy(
+        input_sizes=(64,),
+        input_strides=(1,),
+        input_offset=0,
+        output_sizes=(64,),
+        output_strides=(1,),
+        output_offset=0,
+        input_buffer_size=64,
+        output_buffer_size=64,
+    )
+
+    @iron.graph
+    def two(x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
+        y = copy(x, out_offset=a)
+        return copy(y, out_offset=b)
+
+    with pytest.raises(ValueError, match="bound to Value\\('a'"):
+        two.trace(x=(64,))
+
+
+def test_an_explicit_instance_is_applied_like_the_class():
+    ov = GEMVOverlay(K=E, num_aie_columns=8, tile_size_input=4, tile_size_output=32)
+    q = GEMV(ov, M=256)
+    w = z(256, E)
+
+    @iron.graph
+    def step(x):
+        return q(w, x)
+
+    t = step.trace(x=(E,))
+    assert t.runlist[0][0] is q and t.output_args == ["out"]
+    with pytest.raises(TypeError, match="inside an @iron.graph function"):
+        q(w, z(E))
+
+
+def test_shape_mismatch_and_rank_rules():
+    w = z(256, E)
+
+    @iron.graph
+    def bad(x):
+        return GEMV(w, x)
+
+    with pytest.raises(ValueError, match=r"K is 1024 from B.shape\[0\] but 2048"):
+        bad.trace(x=(E // 2,))
+    add = ElementwiseAdd
+
+    @iron.graph
+    def flat(x, y):
+        return add(x, y)  # a flat operator takes any rank
+
+    t = flat.trace(x=(4, 512), y=(4, 512))
+    assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (2048,)
+
+
+def test_keyword_only_parameters_must_be_annotated_as_values():
+    with pytest.raises(TypeError, match="annotated Scratchpad"):
+
+        @iron.graph
+        def f(x, *, n):
+            return x
+
+    @iron.graph
+    def g(x, *, n: DispatchTime[np.int32]):
+        return SiLU(x)
+
+    t = g.trace(x=(1024,))
+    assert [(v.name, v.kind) for v in t.values] == [("n", "dispatch")]
+
+
+def test_returning_an_input_or_a_slice_is_refused():
+    @iron.graph
+    def ident(x):
+        return x
+
+    with pytest.raises(TypeError, match="returns its input"):
+        ident.trace(x=(64,))
+
+    @iron.graph
+    def part(x):
+        return SiLU(x)[:8]
+
+    with pytest.raises(TypeError, match="whole handles"):
+        part.trace(x=(64,))

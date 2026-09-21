@@ -350,9 +350,17 @@ def _derived(rt: Sequence, op: Operator, ov: Overlay) -> None:
 # --------------------------------------------------------------------------
 
 
-def _symbol(op: Operator, value: BoundValue) -> str:
-    """The device symbol of a per-call value: stable across processes, unique per instance."""
-    return f"{op.name}_{value.name}"
+def value_symbol(op: Operator, value: BoundValue) -> str:
+    """The device symbol of a per-call value: stable across processes, unique per instance.
+
+    What the host writes through the parameter scratchpad; the operator's
+    own ``value_symbol`` override (a legacy spelling) wins when it exists.
+    """
+    owner = op if value.name in {v.name for v in op.values} else op.ov
+    return owner.value_symbol(value) or f"{op.name}_{value.name}"
+
+
+_symbol = value_symbol
 
 
 def build_design(
@@ -386,7 +394,7 @@ def build_design(
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
     for value in ov.values:
-        value.symbol = ov.value_symbol(value) or _symbol(op, value)
+        value.symbol = value_symbol(op, value)
         value.param = ScratchpadParameter(value.symbol, value.dtype)
     for value in op.values:
         if value.kind == "dispatch":
@@ -394,7 +402,7 @@ def build_design(
                 f"{type(op).__name__}.{value.name} is a DispatchTime value; generated "
                 f"sequences arrive with the packaging step (OPERATOR_MODEL_PLAN.md §8)"
             )
-        value.symbol = op.value_symbol(value) or _symbol(op, value)
+        value.symbol = value_symbol(op, value)
         value.param = ScratchpadParameter(value.symbol, value.dtype)
 
     workers = ov.design(target)

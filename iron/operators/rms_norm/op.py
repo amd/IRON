@@ -22,7 +22,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
-from iron.common.utils import get_shim_dma_limit
+from iron.common.utils import device_columns, get_shim_dma_limit
 from iron.common.test_utils import torch_dtype_map
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
@@ -37,8 +37,10 @@ class RMSNormOverlay(Overlay):
     """
 
     tile_size: int = dim()
-    num_aie_columns: int = tunable()
-    num_channels: int = tunable()
+    # One core by default: a core normalizes whole rows, and how many rows
+    # there are is the extent. Call sites with many rows spread them.
+    num_aie_columns: int = tunable(1)
+    num_channels: int = tunable(1)
     epsilon: float = 1e-5  # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
     # The core's tile: min(tile_size, 8192). Filled by tuning.
     per_tile: int | None = tunable(None, repr=False)
@@ -50,15 +52,21 @@ class RMSNormOverlay(Overlay):
     _name_aliases: ClassVar[Dict[str, str]] = {"epsilon": "eps"}
 
     def tuning(self, dev) -> "RMSNormOverlay":
+        cols = self.num_aie_columns
         if dev is not None:
             limit = get_shim_dma_limit(dev)
-            channels = self.num_aie_columns * self.num_channels
-            if channels > limit:
+            if cols is None:
+                cols = min(device_columns(dev), limit // (2 * self.num_channels))
+            if cols * self.num_channels > limit:
                 raise Untunable(
-                    f"num_aie_columns * num_channels ({channels}) exceeds ShimDMA "
-                    f"limit of {limit} for this device"
+                    f"num_aie_columns * num_channels ({cols * self.num_channels}) "
+                    f"exceeds ShimDMA limit of {limit} for this device"
                 )
-        return dataclasses.replace(self, per_tile=min(self.tile_size, 8192))
+        elif cols is None:
+            raise Untunable("num_aie_columns defaults from the device; none given")
+        return dataclasses.replace(
+            self, num_aie_columns=cols, per_tile=min(self.tile_size, 8192)
+        )
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
@@ -124,19 +132,25 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
     )
 
     def tuning(self, dev) -> "WeightedRMSNormOverlay":
+        cols = self.num_aie_columns
         if dev is not None:
             limit = get_shim_dma_limit(dev)
+            if cols is None:
+                # Room for the weight fill beside the row fills.
+                cols = min(device_columns(dev), limit // self.num_channels - 1)
             # (cols * chans) in-fills + chans weight-fills must fit the shim's
             # host->array channels.
-            usage = self.num_channels * (self.num_aie_columns + 1)
+            usage = self.num_channels * (cols + 1)
             if usage > limit:
                 raise Untunable(
-                    f"weighted RMSNorm with num_aie_columns={self.num_aie_columns}, "
+                    f"weighted RMSNorm with num_aie_columns={cols}, "
                     f"num_channels={self.num_channels} requires {usage} ShimDMA "
                     f"output channels but device only has {limit}"
                 )
+        elif cols is None:
+            raise Untunable("num_aie_columns defaults from the device; none given")
         # The weight is one tile, so the tile is the whole row.
-        return dataclasses.replace(self, per_tile=self.tile_size)
+        return dataclasses.replace(self, num_aie_columns=cols, per_tile=self.tile_size)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
@@ -260,6 +274,13 @@ class RMSNorm(Operator[RMSNormOverlay]):
         if cls is RMSNorm and kwargs.pop("weighted", False):
             return WeightedRMSNorm(*args, **kwargs)
         return super().__new__(cls)
+
+    @classmethod
+    def resolve_class(cls, n_operands, kwargs):
+        # RMSNorm(x, w) in a graph: a bare weight tensor selects the weighted form.
+        if cls is RMSNorm and (n_operands == 2 or kwargs.pop("weighted", False)):
+            return WeightedRMSNorm
+        return cls
 
     @classmethod
     def _classic(cls, kwargs):

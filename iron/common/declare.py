@@ -56,6 +56,8 @@ from typing import Any, Callable, ClassVar, Generic, Iterator, TypeVar
 import numpy as np
 from ml_dtypes import bfloat16
 
+from abc import ABCMeta
+
 from .base import AIERuntimeArgSpec, MLIROperator
 
 
@@ -384,6 +386,18 @@ class StreamOut(_Stream):
     direction = "out"
 
 
+class ValueSpec:
+    """``Scratchpad[np.int32]``: the annotation of a graph function's per-call parameter."""
+
+    __slots__ = ("kind", "dtype")
+
+    def __init__(self, kind: str, dtype: Any) -> None:
+        self.kind, self.dtype = kind, dtype
+
+    def __repr__(self) -> str:
+        return f"{self.kind}[{np.dtype(self.dtype).name}]"
+
+
 class _Value(_Member):
     """A per-call scalar. See :class:`Scratchpad` and :class:`DispatchTime`."""
 
@@ -391,6 +405,9 @@ class _Value(_Member):
 
     def __init__(self, dtype: Any = np.int32) -> None:
         self.dtype = dtype
+
+    def __class_getitem__(cls, dtype) -> ValueSpec:
+        return ValueSpec(cls.kind, dtype)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({np.dtype(self.dtype).name})"
@@ -1256,8 +1273,25 @@ class Overlay:
 O = TypeVar("O", bound=Overlay)
 
 
+class _OperatorMeta(ABCMeta):
+    """``GEMV(w, h)`` inside a graph function records a step; anything else constructs.
+
+    The class tells the two apart by whether it received graph handles (or
+    host tensors, which a graph closes over as weights); see
+    :mod:`iron.common.graph`. Outside a graph the call constructs as usual.
+    """
+
+    def __call__(cls, *args, **kwargs):
+        from . import graph as _graph
+
+        tracer = _graph.current()
+        if tracer is not None and args and all(_graph.is_operand(a) for a in args):
+            return tracer.call(cls, args, kwargs)
+        return super().__call__(*args, **kwargs)
+
+
 @dataclasses.dataclass(eq=False, repr=True)
-class Operator(MLIROperator, Generic[O]):
+class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
     """A host ABI declared against an overlay. Subclass, decorate with ``@operator``.
 
     Declare ``dim()`` fields and buffers (``In``/``Out``/``InOut`` naming their
@@ -1370,9 +1404,44 @@ class Operator(MLIROperator, Generic[O]):
         A value an instance does not use gets no device parameter and no
         sync. The default is every declared value; an operator whose values
         are optional (a strided copy with or without a patched offset)
-        overrides this.
+        overrides this, and a graph binding one calls :meth:`use_value`.
         """
         return True
+
+    def use_value(self, name: str) -> None:
+        """Record that a graph binds the per-call value ``name`` on this instance."""
+        if not any(isinstance(m, _Value) and m.name == name for m in self._members):
+            raise TypeError(
+                f"{type(self).__name__} declares no per-call value {name!r}"
+            )
+        self.__dict__.setdefault("_used_values", set()).add(name)
+
+    @property
+    def used_values(self) -> frozenset:
+        return frozenset(self.__dict__.get("_used_values", ()))
+
+    # -- graph functions ---------------------------------------------------
+
+    @classmethod
+    def resolve_class(cls, n_operands: int, kwargs: dict) -> type:
+        """The class a graph call with ``n_operands`` operands constructs.
+
+        The default is the class itself; a family that picks a subclass from
+        its arguments (RMSNorm with a weight) overrides.
+        """
+        return cls
+
+    def __call__(self, *args, **kwargs):
+        """An explicit instance applied to graph handles records a step."""
+        from . import graph as _graph
+
+        tracer = _graph.current()
+        if tracer is None:
+            raise TypeError(
+                f"{type(self).__name__} instances are called on graph handles inside "
+                f"an @iron.graph function; outside one, compile() and get_callable()"
+            )
+        return tracer.call(self, args, kwargs)
 
     def _bind(self) -> None:
         bound: dict[str, Any] = {}
@@ -1438,12 +1507,14 @@ class Operator(MLIROperator, Generic[O]):
         )
 
     @classmethod
-    def infer(cls, *operand_shapes, **given) -> dict[str, Any]:
+    def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
         """Bind dimension fields from operand shapes, in ``In`` declaration order.
 
         A lookup, not a solver: each declared dimension is a field or a
         literal. Returns ``{field: value}`` for both the operator's and the
         overlay's fields; ``given`` pins values and is checked for agreement.
+        ``outputs`` are the shapes of caller-supplied ``Out`` buffers, in
+        declaration order, which bind the same way.
         """
         ins = [
             m
@@ -1455,6 +1526,15 @@ class Operator(MLIROperator, Generic[O]):
                 f"{cls.__name__} takes {len(ins)} operand(s) "
                 f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
             )
+        outs = [
+            m for m in cls._members if isinstance(m, _Buffer) and m.direction == "out"
+        ]
+        if outputs and len(outputs) != len(outs):
+            raise TypeError(
+                f"{cls.__name__} produces {len(outs)} output(s) "
+                f"({', '.join(m.name for m in outs)}), got {len(outputs)}"
+            )
+        pairs = list(zip(ins, operand_shapes)) + list(zip(outs, outputs))
         bound: dict[str, Any] = dict(given)
         origin: dict[str, str] = {k: "given" for k in given}
 
@@ -1468,7 +1548,7 @@ class Operator(MLIROperator, Generic[O]):
             bound[key] = value
             origin.setdefault(key, where)
 
-        for m, shape in zip(ins, operand_shapes):
+        for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
             dims = list(m.dims)
             leading = dims[0] if dims and isinstance(dims[0], _Optional) else None
@@ -1509,6 +1589,10 @@ class Operator(MLIROperator, Generic[O]):
                 else:
                     expanded.append(d)
             dims = expanded
+            if len(dims) == 1 and len(shape) != 1:
+                # A flat buffer takes an operand of any rank: its one
+                # dimension is the element count.
+                shape = (int(np.prod(shape)) if shape else 1,)
             if len(shape) != len(dims):
                 raise ValueError(
                     f"{cls.__name__}: operand {m.name} has rank {len(shape)} {shape}, "

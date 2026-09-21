@@ -31,6 +31,7 @@ from iron.common.declare import (
     Overlay,
     StreamIn,
     StreamOut,
+    Untunable,
     dim,
     operator,
     tunable,
@@ -52,9 +53,10 @@ TASK_GROUP_SIZE = 4
 class MemCopyOverlay(Overlay):
     """``num_cores`` copy paths, at most ``num_channels`` per column."""
 
-    num_cores: int = tunable()
-    num_channels: int = tunable()
-    tile_size: int = tunable()
+    # None: one core per column, one channel, 1024-element tiles.
+    num_cores: int | None = tunable(None)
+    num_channels: int = tunable(1)
+    tile_size: int | None = tunable(None)
     bypass: bool = False
     # min(tile_size, 8192): one 16 KB line at most; filled by tuning.
     line_size: int | None = tunable(None, repr=False)
@@ -69,7 +71,17 @@ class MemCopyOverlay(Overlay):
     }
 
     def tuning(self, dev) -> "MemCopyOverlay":
-        return dataclasses.replace(self, line_size=min(self.tile_size, 8192))
+        from iron.common.utils import device_columns
+
+        cores = self.num_cores
+        if cores is None:
+            if dev is None:
+                raise Untunable("num_cores defaults from the device; none given")
+            cores = device_columns(dev) * self.num_channels
+        tile_size = 1024 if self.tile_size is None else self.tile_size
+        return dataclasses.replace(
+            self, num_cores=cores, tile_size=tile_size, line_size=min(tile_size, 8192)
+        )
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
