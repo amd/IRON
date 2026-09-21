@@ -117,11 +117,13 @@ class Target:
         self.barriers.append(b)
         return b
 
-    def rtp(self, arr_type, name: str | None = None):
+    def rtp(self, arr_type, name: str | None = None, initial_value=None):
         """A runtime-parameter buffer a core reads and the preamble writes."""
         from aie.iron import Buffer
 
-        return Buffer(arr_type, name=name, use_write_rtp=True)
+        return Buffer(
+            arr_type, name=name, initial_value=initial_value, use_write_rtp=True
+        )
 
     def log(self, *args) -> None:
         if self.verbose:
@@ -290,6 +292,8 @@ def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
     """Residents, then barriers, then the parameter sync, before any DMA."""
     values = op.residents()
     for name, res in ov.residents.items():
+        if res.optional and not res.targets:
+            continue  # this configuration does not allocate it
         if name not in values:
             raise ValueError(
                 f"{type(ov).__name__}.{name} is a Resident but "
@@ -429,10 +433,16 @@ def _design_code(op: Operator) -> str:
     return h.hexdigest()[:24]
 
 
-def mlir_artifact_for(op: Operator) -> PythonGeneratedMLIRArtifact:
-    """The artifact the existing compile path expects, carrying ``build_design``."""
+def mlir_artifact_for(
+    op: Operator, filename: str | None = None
+) -> PythonGeneratedMLIRArtifact:
+    """The artifact the existing compile path expects, carrying ``build_design``.
+
+    ``filename`` names the module for an operator whose stem is not its own
+    name (flm/gemm's configuration-only build).
+    """
     return PythonGeneratedMLIRArtifact(
-        f"{op.name}.mlir",
+        filename or f"{op.name}.mlir",
         DesignGenerator(
             fn=build_design, bind_from=op, kwargs={"op": op, "code": _design_code(op)}
         ),

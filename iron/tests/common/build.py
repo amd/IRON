@@ -299,3 +299,141 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
     with pytest.raises(ValueError, match="seq_pad=100"):
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
+
+
+# --------------------------------------------------------------------------
+# flm/gemm: the configuration/shape split, device-free
+# --------------------------------------------------------------------------
+
+
+class _Arch:
+    AIE2p = "aie2p"
+    AIE2 = "aie2"
+
+
+class _NPU2:
+    cols = 8
+    arch = _Arch.AIE2p
+
+    def resolve(self):
+        class R:
+            name = "npu2"
+
+        return R()
+
+
+class _TargetModel:
+    def rows(self):
+        return 6
+
+    def get_num_mem_tile_rows(self):
+        return 1
+
+    def get_local_memory_size(self):
+        return 65536
+
+    def get_num_bds(self, col, row):
+        return 16
+
+
+@pytest.fixture
+def flm(monkeypatch):
+    import iron.operators.flm.gemm.op as flm
+
+    monkeypatch.setattr(flm, "AIEArch", _Arch)
+    monkeypatch.setattr(flm, "get_target_model", lambda dev: _TargetModel())
+    monkeypatch.setattr(flm.aie_utils, "get_current_device", lambda: _NPU2())
+    monkeypatch.setattr(flm.dsg, "get_target_model", lambda dev: _TargetModel())
+    monkeypatch.setattr(Access, "tap", lambda self: self)
+    return flm
+
+
+class _Recorder:
+    def __init__(self, name, log):
+        self.name, self.log = name, log
+
+    def fill(self, data, tap, wait, group, offset_parameter):
+        self.log.append(("fill", self.name, tap.offset, tap.sizes, wait))
+
+    def drain(self, data, tap, wait, group, offset_parameter):
+        self.log.append(("drain", self.name, tap.offset, tap.sizes, wait))
+
+
+def _record(ov):
+    log = []
+    for s in ov.streams.values():
+        for i in range(s.count):
+            s.bind(_Recorder(f"{s.name}{i}", log), i)
+    return log
+
+
+def test_flm_gemm_classic_construction_reproduces_the_old_defaults(flm):
+    op = flm.GEMM(M=512, K=1024, N=1024)
+    ov = op.ov
+    assert (ov.tile_n, ov.m_chunk, ov.rows, ov.cols, ov.bfp16_b) == (64, 1, 4, 8, True)
+    assert ov.tile_ma == flm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
+    # K = 512 on NPU2 picks the wider tile, as the old __post_init__ did.
+    assert flm.GEMM(M=256, K=512, N=1024).tile_n == 128
+    assert (
+        op.config_name == f"FLM_GEMM_tn64_ck128_ma{ov.tile_ma}_mc1_emf_conv_even_npu2"
+    )
+    assert op.name == op.config_name + "_M512_K1024_N1024"
+    a, b, c = op.get_arg_spec()
+    assert a.shape == (512, 1024) and c.shape == (512, 1024)
+    assert b.shape == (flm.packed_b_size(1024, 1024, True),) and b.dtype is np.uint8
+    assert op.residents() == {
+        "n_val": 1024,
+        "m_row_blocks": 2,
+        "k_iters": 2,
+        "epilogue": 0,
+        "clamp_min": int(np.float32(-np.inf).view(np.int32)),
+        "clamp_max": int(np.float32(np.inf).view(np.int32)),
+        "n_chunks": 2,
+        "n_units": 2,
+    }
+    with pytest.raises(ValueError, match="multiple of 256"):
+        flm.GEMM(M=100, K=1024, N=1024)
+    with pytest.raises(ValueError, match="not in epilogue_modes"):
+        flm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
+
+
+def test_flm_gemm_declared_overlay_tunes_from_the_device_only(flm):
+    ov = flm.FLMGEMMOverlay().tuned(_NPU2())
+    assert ov.tile_n == 64  # no K to look at: the general winner
+    op = flm.GEMM(ov, M=256, K=512, N=512)
+    assert op.tile_n == 64
+    untuned = flm.GEMM(flm.FLMGEMMOverlay(), M=256, K=512, N=512)
+    with pytest.raises(flm.Incompatible, match="tuned overlay"):
+        untuned.get_arg_spec()  # B's layout follows the device
+
+
+def test_flm_gemm_unsplit_sequence_issues_c_then_a_then_b_per_block(flm):
+    op = flm.GEMM(M=512, K=1024, N=1024)
+    ov = op.ov
+    log = _record(ov)
+    op.design(Sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"}))
+    verbs = [v for v, *_ in log]
+    # Two column-blocks (N = 2 * 8 * 64): each drains C on eight columns,
+    # then fills A on four rows and B on eight columns.
+    block = ["drain"] * 8 + ["fill"] * 4 + ["fill"] * 8
+    assert verbs == block * 2
+    drains = [e for e in log if e[0] == "drain"]
+    assert drains[1] == ("drain", "c1", 64, (1, 2, 256, 64), True)
+    assert drains[8] == ("drain", "c0", 8 * 64, (1, 2, 256, 64), True)
+    a_fills = [e for e in log if e[1].startswith("a")]
+    assert a_fills[1] == ("fill", "a1", 64 * 1024, (2, 2, 64, 512), False)
+    b_fills = [e for e in log if e[1].startswith("b")]
+    # B's offsets are in v8bfp16ebs8 elements: values // 8.
+    assert b_fills[1] == ("fill", "b1", 64 * 1024 // 8, (2, 2, 1, 512 * 64 // 8), False)
+
+
+def test_flm_gemm_split_sequence_drains_one_row_block_at_a_time(flm):
+    # N = 10240 puts C's row-block stride past the 20-bit step: c_split.
+    op = flm.GEMM(M=512, K=1024, N=10240)
+    assert op._c_split and not op._a_split
+    ov = op.ov
+    log = _record(ov)
+    op.design(Sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"}))
+    drains = [e for e in log if e[0] == "drain"]
+    assert len(drains) == 20 * 8 * 2  # blocks x columns x row-blocks
+    assert all(sizes == (1, 1, 256, 64) for _, _, _, sizes, _ in drains)

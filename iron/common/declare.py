@@ -417,10 +417,15 @@ class Resident(_Member):
         *,
         address: int | None = None,
         lock: int | None = None,
+        optional: bool = False,
     ) -> None:
         self.dtype = dtype
         self.address = address
         self.lock = lock
+        # A resident only some configurations of the overlay allocate (a
+        # parameter word omitted when its value is a compile-time constant).
+        # The preamble skips it when design() left it unbound.
+        self.optional = optional
 
     def __repr__(self) -> str:
         return f"Resident({np.dtype(self.dtype).name})"
@@ -556,10 +561,19 @@ class BoundBuffer:
         self._op = op
         self.name = member.name
         self.direction = member.direction
-        self.shape = _resolve_shape(member.dims, op)
-        self.dtype = _resolve_dtype(member.dtype, op)
         self.to = member.to
         self.from_ = member.from_
+
+    # Resolved on use, not at construction: a shape or dtype may follow a
+    # tunable the device fills (flm/gemm's B layout), and an operator on an
+    # untuned overlay is still a valid thing to hold.
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return _resolve_shape(self.member.dims, self._op)
+
+    @property
+    def dtype(self):
+        return _resolve_dtype(self.member.dtype, self._op)
 
     @property
     def elements(self) -> int:
@@ -672,6 +686,7 @@ class BoundResident:
         self.dtype = member.dtype
         self.address = member.address
         self.lock = member.lock
+        self.optional = member.optional
         self.targets: list[tuple[Any, int]] = []
 
     def bind(self, buffers, index: int = 0) -> None:
@@ -722,7 +737,12 @@ def _resolve_dim(spec, instance) -> int:
 
 def _flag_value(flag, instance) -> bool:
     if isinstance(flag, DimRef):
-        return bool(_lookup_ref(flag, instance))
+        value = _lookup_ref(flag, instance)
+        if value is None:
+            raise Incompatible(
+                f"{flag!r} is None; a select() on it needs a tuned overlay"
+            )
+        return bool(value)
     if isinstance(flag, Field):
         return bool(getattr(instance, flag.name))
     return bool(flag)
