@@ -1326,3 +1326,147 @@ parity"), and the application now writes the context length:
   device afterwards, so whether the first decode token saw the prompt
   depended on the coherence semantics of that call. The rewrite seeds the
   state through `CompiledGraph.write`, which pushes the buffer.
+
+---
+
+## 20. Prefill
+
+Prefill is the last hand-written phase: `llama_npu.py` builds fourteen
+operators by hand, keeps two weight layouts on the device, and runs the
+attention itself on the CPU (the causal mask, the softmax and the
+`P @ V` product) between per-operator dispatches, reading every
+intermediate back to the host. It is about 380 lines of the application
+(`AIEPrefillOperations`, `AIEPrefillBuffers`, three forward functions)
+against decode's 66 plus the 162-line graph. The plan is to make prefill
+a second graph function over the same weights and the same cache state,
+built by the same packaging, with the attention on the device.
+
+### What was measured first (host, this session)
+
+Each candidate step was constructed at Llama 3.2 1B's prefill size
+(sequence 2048, embedding 2048, hidden 8192, 32 heads over 8 groups of
+64) and lowered to an instruction stream through the toolchain gate:
+
+| step | result |
+|---|---|
+| GEMM, checkpoint layout (`b_col_maj=True`), K = 2048 (the q/k/v/gate/up projections) | lowers |
+| GEMM, checkpoint layout, K = 8192 (the down projection) | fails: B's outer stride (4,194,304) is past the descriptor's 2^20 |
+| GEMM, K-major weight, K = 2048 | lowers (today's path) |
+| MHA, 2048 tokens, 8 pipelines, 32 heads over 8 | lowers |
+| RoPE over 2048 x 32 rows with 2048 angle rows | lowers |
+| WeightedRMSNorm over 2048 rows | lowers |
+| StridedCopy reordering (S, H, D) to (H, S, D), and (S, G, D) into the cache's (G, S, D) | fails: the copy issues its taps as given, so a 2048-wide dimension lands in a slot that holds 1023, and the descriptor length no longer matches |
+
+So three operators need work before the graph does, and every one of
+them is host-verifiable by the probe that found it. Nothing needs a new
+kernel.
+
+### The graph
+
+```python
+@iron.graph(names_from=model)
+def prefill(x, angles, *, last: Scratchpad[np.int32]):
+    for i, blk in enumerate(model.layers):
+        h = RMSNorm(x, blk.norm1.weight)
+        q = GEMM(h, blk.attn.q.weight, b_col_maj=True)        # (S, H*D)
+        k = GEMM(h, blk.attn.k.weight, b_col_maj=True)        # (S, G*D)
+        v = GEMM(h, blk.attn.v.weight, b_col_maj=True)
+        q = RoPE(q.reshape(S * H, D), angles)                 # angle row per position, H rows each
+        k = RoPE(k.reshape(S * G, D), angles)
+        StridedCopy(k, keys[i], ...)                          # (S, G, D) -> the cache's (G, S, D)
+        StridedCopy(v, values[i], ...)
+        o = MHA(q, k, v, heads_interleaved=True)              # causal, scaled, on the device; O as (S, H*D)
+        x = ElementwiseAdd(x, GEMM(o, blk.attn.o.weight, b_col_maj=True))
+        h = RMSNorm(x, blk.norm2.weight)
+        act = ElementwiseMul(SiLU(GEMM(h, blk.ffn.gate.weight, ...)), GEMM(h, blk.ffn.up.weight, ...))
+        x = ElementwiseAdd(x, GEMM(act, blk.ffn.down.weight, ...))
+    x = RMSNorm(x, model.norm.weight)
+    x_last = StridedCopy(x, in_offset=last, ...)              # the last prompt row, (1, E)
+    return GEMV(model.out_head.weight, x_last, ...)           # decode's projection, same array
+```
+
+Four choices are built into that sketch, each with the alternative it
+was preferred to:
+
+1. **The length is the compile-time maximum; the prompt occupies a
+   prefix.** Exactly today's behaviour (every prefill operator is built
+   at `max_seq_len`, the prompt sits in the first rows). Rows past the
+   prompt compute on stale data and are never read: MHA is causal, so
+   real rows never attend past themselves, and decode's softmax masks
+   the cache tail by `vector_size`. No per-call value is needed for the
+   length. The alternative, a `Scratchpad` length feeding MHA's `s_q`/
+   `s_kv` residents (the softmax `vector_size` pattern), makes prefill
+   cost proportional to the prompt; it is a follow-up once the fixed
+   form runs, not a precondition.
+2. **The output head runs for the last token only.** The harness reads
+   `logits[:, -1]` and nothing else; today prefill computes the full
+   (2048 x 128512) product in four partitioned GEMMs into a 526 MB
+   buffer. A strided copy of the last row at a per-call offset (`last`,
+   the one per-call value) and decode's out-head GEMV, which is the same
+   array and the same weight, replace that. This drops the padded,
+   partitioned vocabulary from the application entirely.
+3. **One weight layout.** Every projection is read as the checkpoint
+   ships it, (out, in), by GEMM with `b_col_maj=True`, the way decode's
+   GEMV already reads it. Prefill and decode then close over the same
+   tensors, which is what a module needs later. The one obstacle is the
+   down projection (K = 8192), where GEMM's column-major B tap exceeds
+   the descriptor's stride range; that is a legalization of GEMM's B
+   fill (split the outer dimension), the same kind the tiler already
+   does for derived sequences.
+4. **Two images, caches handed over by copy.** Prefill and decode close
+   over the same `iron.state` objects but compile to two images, so each
+   holds its own allocation; after prefill the application reads the
+   caches out of one and writes them into the other (16 layers x 2 x
+   2 MB = 64 MB per prefill, once per prompt). Today's code does the
+   same copy through host tensors. The module (one image, two entry
+   points, state shared as the same bytes) is on the shelved branch and
+   waits on spike S4 running; it replaces the copy without changing the
+   graphs.
+
+The MHA layout flag is the one design change: MHA reads Q, K, V and
+writes O as the projections lay them out, (S, heads x D) with the heads
+interleaved per token, instead of (heads, S, D). Its override sequence
+already fills one head's rows per block from a slice; the interleaved
+form is the same slice with the row stride heads x D, two descriptor
+dimensions, no reordering copies (the probe shows those copies are the
+hard part anyway). `reference()` reshapes accordingly. The cache write
+stays a strided copy, because decode reads the cache as (G, L, D).
+
+### Steps
+
+| step | what | verified by |
+|---|---|---|
+| 1 | StridedCopy issues its taps through `tiling.legalize` | the (S, G, D) to (G, S, D) probe lowers; the existing strided_copy cases unchanged |
+| 2 | GEMM's column-major B fill legalized past the stride range | the K = 8192 probe lowers; gemm's lowering cases unchanged |
+| 3 | MHA `heads_interleaved` layout, with its reference | lowering at 2048 x 8 pipelines; reference against the (H, S, D) form on the same data |
+| 4 | `PrefillGraph` beside `DecodeGraph` (one module, `llama_graphs.py`), sharing weights and states | traces; the runlist and bindings pinned like decode's |
+| 5 | reference parity: prefill graph reference vs `llama_cpu.py` prefill (last-token logits, and the caches), then decode from the graph-seeded caches | `iron/tests/common/llama_reference.py`, host |
+| 6 | toolchain gates: prefill's operators lower with their values; the full ELF builds at the scaled and the real size | `iron/tests/toolchain` |
+| 7 | the application: the prefill section replaced by the graph, the cache handoff by `read`/`write`, `AIEPrefillOperations`/`AIEPrefillBuffers` and the CPU attention deleted | the application test; a token snapshot before and after |
+| 8 | device: run, compare the token stream, measure time to first token | hardware |
+
+Steps 1 to 3 are independent of each other; 4 needs 3; 5 needs 4; 6 and
+7 need 5. Everything through 6 runs on this host.
+
+### Expected results
+
+- `llama_npu.py` loses about 380 lines (the prefill operators, buffers
+  and forward functions, the padded vocabulary and its partitions) and
+  gains a graph of about 90; the application keeps embedding, the
+  angles and the harness glue.
+- The attention runs on the device end to end; no intermediate crosses
+  to the host during prefill. Time to first token should fall, since
+  today's prefill reads back q, k, v, the scores and the norms and
+  softmaxes on the CPU per layer; no figure is promised before step 8.
+- One weight upload, in the checkpoint's layout, for both phases.
+- Parity is established on the host before hardware: the graph's
+  reference against `llama_cpu.py`, the way decode's was (§19).
+- Three operator improvements that stand on their own: strided copies
+  legalize, column-major GEMM weights at any K, MHA in the projections'
+  layout.
+
+What stays for later, in order: the per-call prompt length (item 1), the
+module (item 4), and NPU1, where MHA is not available (its array is
+pinned to NPU2's memtile columns); prefill on NPU1 would need the
+attention written from GEMM, softmax and transpose as decode does it,
+and is not in this plan.
