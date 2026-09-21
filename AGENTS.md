@@ -323,8 +323,12 @@ logits = net(x_tok, ang_tok, pos=n * head_dim)
 Overlays with equal `design_key()` are one array; operators with equal keys
 are one build. `compile(dev, boundaries=, image=)` derives the image (a
 fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
-`verbose=True` prints why. `iron/applications/llama_3.2_1b/decode_graph.py`
-is the worked example; `iron/tests/common/graph.py` traces it device-free.
+`verbose=True` prints why. It links the image (`net.image`) and stops
+there: the runtime that loads it is made on the first call, so a host with
+the toolchain and no NPU can compile ahead of time.
+`iron/applications/llama_3.2_1b/decode_graph.py` is the worked example;
+`iron/tests/common/graph.py` traces it device-free and
+`iron/tests/toolchain/` builds it.
 
 ## Common Patterns
 

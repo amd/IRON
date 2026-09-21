@@ -696,9 +696,19 @@ class CompiledGraph:
                 bound = next(v for v in op.ov.values if v.name == name)
             self.symbols.append((value.name, value_symbol(op, bound), value.dtype))
         # Equal design keys are one build (two projections on one array).
+        # compile() builds the image; the runtime that loads it is made on
+        # first use, so a host without an NPU can still compile.
         self.sequence = traced.sequence(dispatch=dispatch, context=context).compile()
-        self.callable = self.sequence.get_callable()
+        self.image = self.sequence.image
+        self._callable = None
         self._uploaded = False
+
+    @property
+    def callable(self):
+        """The loaded image, made on first use (needs the XRT runtime)."""
+        if self._callable is None:
+            self._callable = self.sequence.get_callable()
+        return self._callable
 
     # -- buffers ---------------------------------------------------------------
 

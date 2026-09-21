@@ -911,6 +911,17 @@ instruction stream against its foreign overlay (and the download of the
 image itself, which this session's network allowed), and a plain
 operator's `compile()` on npu1. All pass.
 
+`iron/tests/toolchain/compile.py` then runs the packaging surface end
+to end: `compile(dev, boundaries=, image=)` on the swiglu decode graph
+derives `elf`/fused on npu2 and `xclbin`/separate at `each_step` on
+npu1, builds the sequence and links the image, and stops there.
+`OperatorSequence.compile()` now links the image (`link()`, idempotent;
+`get_callable()` still goes through it) and `CompiledGraph` makes the
+runtime on first use, so a build host with the toolchain and no NPU
+compiles ahead of time and hands `net.image` on. Before this the ELF
+was only linked on the way to a callable, and `compile()` on such a
+host stopped short of the one thing worth having.
+
 Two things were wrong on the way. `SeparateDispatch.link_xclbins`
 linked one xclbin per operator instance where the fused path built one
 per design, so a graph with shared designs paid a chained compile per
@@ -982,6 +993,7 @@ and the decode graph's parity against the token snapshot (§18).
 | lowering gate (see above) | `iron/tests/toolchain/lowering.py`, `lowering_graph.py` | 116 + 12 lowerings to instruction streams; MLIR diffed against PR 215 per case | kernels compile (the full ELF, next row); **needs a device**: numbers |
 | full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values; the real-size decode graph builds too (13.3 MB) | **needs a device**: loading, `params.write`, numbers |
 | xclbin (see above) | `iron/tests/toolchain/xclbin.py`, `patches/` | — | separate dispatch on both devices, one kernel per design; flm/gemm's two compiles; mm_prebuilt's instructions and image; a plain operator on npu1 | **needs a device**: running the chain |
+| ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |

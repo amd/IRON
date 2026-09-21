@@ -98,6 +98,15 @@ class SequenceDispatch:
         """Register the compile artifacts needed by this mode on ``seq``."""
         raise NotImplementedError
 
+    def link(self, seq):
+        """Build this mode's image and return its path; ``None`` if it has none.
+
+        The ahead-of-time half of ``make_callable``: everything up to, but
+        not including, the runtime that loads it, so a host without an NPU
+        can compile a sequence and hand the image on.
+        """
+        return None
+
     def make_callable(self, seq):
         """Return the runtime callable for this mode."""
         raise NotImplementedError
@@ -196,6 +205,9 @@ class FusedDispatch(SequenceDispatch):
             seq.slice_info,
         )
 
+    def link(self, seq):
+        return self.link_elf(seq)
+
     def make_callable(self, seq):
         self.link_elf(seq)
         return SequenceFullELFCallable(seq)
@@ -268,6 +280,10 @@ class SeparateDispatch(SequenceDispatch):
 
         # The last xclbin in the chain carries all the linked instances.
         self.combined_xclbin_path = prev_xclbin_path
+
+    def link(self, seq):
+        self.link_xclbins(seq)
+        return self.combined_xclbin_path
 
     def make_callable(self, seq):
         self.link_xclbins(seq)
@@ -596,6 +612,27 @@ class OperatorSequence(AIEOperatorBase):
         )
         self._dispatch = self._dispatch.resolve(aie_utils.get_current_device())
         self._dispatch.set_up_artifacts(self)
+
+    def compile(self, dry_run: bool = False):
+        """Build the artifacts and the image, ahead of time.
+
+        The base class builds the artifact graph (kernel objects and the
+        like); the image itself, the fused ELF or the chained xclbins, was
+        only linked on the way to a callable, so ``compile()`` on a host
+        without a runtime stopped short of the thing worth handing on.
+        ``link()`` is idempotent and ``get_callable()`` still goes through it.
+        """
+        super().compile(dry_run=dry_run)
+        if not dry_run:
+            self.link()
+        return self
+
+    def link(self):
+        """Build this sequence's image for its dispatch; sets ``self.image``."""
+        if not hasattr(self, "subbuffer_layout"):
+            AIEOperatorBase.compile(self)
+        self.image = self._dispatch.link(self)
+        return self.image
 
     def get_arg_spec(self):
         raise NotImplementedError(
