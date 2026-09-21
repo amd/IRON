@@ -32,18 +32,21 @@ from aie.iron.device import NPU2
 
 import iron
 from iron.common.context import AIEContext
-from iron.common.jit_compile import compile_sequence, fused_work_dir
+from iron.common.jit_compile import fused_work_dir
 from iron.tests.toolchain.tools import requires, swiglu_decode
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def build_elf(traced, name, tmp_path):
-    """Fuse a traced graph and build its full ELF; return the ELF and its work dir."""
+    """Fuse a traced graph and build its full ELF; return the ELF and its work dir.
+
+    The one build the application does: ``compile()`` links the image into
+    the context's build directory."""
     ctx = AIEContext(build_dir=str(tmp_path / "build"))
     seq = traced.sequence(name, dispatch="fused", context=ctx)
     seq.compile()
-    elf = compile_sequence(seq, tmp_path / f"{name}.elf")
+    elf = Path(seq.elf_path)
     assert elf.exists() and elf.stat().st_size > 0, f"no ELF at {elf}"
     return elf, fused_work_dir(elf)
 
@@ -97,6 +100,27 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
     _, work = build_elf(traced, "decode", tmp_path)
+    _assert_values_in_table(traced, work)
+
+
+@pytest.mark.extensive
+def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
+    """Every prefill design at Llama 3.2 1B's shape (2048 tokens, 32 heads
+    over 8, the 8192-wide FFN) compiles and links into one image. One layer:
+    the designs are the same for sixteen, and aiecc's lowering of the fused
+    sequence grows with its DMA tasks (about 1,800 per layer against decode's
+    430), past this gate's memory at the full depth."""
+    from iron.tests.common.llama_model import Llama1B
+
+    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
+    from llama_graphs import DecodeGraph, PrefillGraph
+
+    cfg = Llama1B()
+    cfg.n_layers, cfg.model.layers = 1, cfg.model.layers[:1]
+    decode = DecodeGraph(cfg, cfg.context_length)
+    traced = PrefillGraph(cfg, decode).trace(cfg)
+    assert len(traced.runlist) == 18 + 3
+    _, work = build_elf(traced, "prefill_1b", tmp_path)
     _assert_values_in_table(traced, work)
 
 
