@@ -836,6 +836,53 @@ For the record, so nobody re-derives them:
 
 ---
 
+## 19. Status
+
+What is on this branch, and how far each piece has been verified. Two
+environments are distinguished: **sandbox**, a session with no device and
+no mlir-aie package, where the pure-Python layers run under pytest against
+a stub of the upstream module names; and **toolchain**, a machine with the
+pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
+
+| piece | file | sandbox | toolchain |
+|---|---|---|---|
+| declaration layer (§4–§7) | `iron/common/declare.py` | 34 tests: rules, binding, tuning, inference | — |
+| access patterns and slicing (§5) | `iron/common/tiling.py` | 21 tests, reproducing today's unary, binary and GEMV taps; encoder follows the verifier's slot rules | — |
+| library-owned build (§5, §6) | `iron/common/build.py` | 6 tests: derived order and patterns, override slicing, preamble | **needs a run**: Runtime/Program construction, resident writes, barrier sets |
+| GEMV (§14 step 1) | `iron/operators/gemv/op.py` | classic construction, arg specs, tuning, compatibility, override transfers | **needs the gate**: byte-identical `matvec_vectorized_bf16_bf16.o` |
+| unary and binary bases, ten operators (§14 step 2, part) | `iron/common/operator_bases.py`, ten `op.py` | classic construction, arg specs, resident counts, transfers per core | **needs a run**: resident-driven core loops are new code; C11 byte-identity now expected to pass |
+
+Not started from step 2: dequant, rms_norm, rope, softmax (softmax needs
+the preamble's scratchpad sync, which the build issues when the operator
+declares values). Step 3 onward untouched. `arg_spec`, `bind()` and the
+snapshot are still in the tree and still consumed by the unconverted
+operators; the converted ones serve `get_arg_spec()` from their buffers.
+
+Two findings while building, both now stated in the code:
+
+- **The descriptor slot rules are not one wrap limit.** Read from
+  `AIEX::verifyStridesWraps`: the innermost size is 1023 *granules*
+  unless the transfer is linear or contiguous, the next is 1023 elements,
+  the third has no wrap field, and the outermost is the iteration count,
+  at most 64 and the only slot whose stride may be zero. GEMV's coalesced
+  descriptor and repeat's re-read follow from this; `tiling.py` encodes by
+  the rules rather than by example. Upstream also has an
+  `aie-decompose-large-dma-bd` pass now, so an oversize pattern may lower
+  without IRON splitting it; the encoder still emits legal descriptors so
+  the instruction stream does not depend on that.
+- **taplib is used for what it has.** `TensorAccessPattern` is the output,
+  `TensorTiler2D` describes 2-D tilings for overrides, and
+  `TensorAccessSequence` is the coverage check. It has no notion of
+  descriptor legality, so `tiling.legalize()` takes any tap and returns
+  legal ones; it is the general form of mha's `legalize_tap` and a natural
+  upstream contribution.
+
+What to run first on the toolchain, in order: `pytest iron/tests/common`
+(the device-free modules, now without the stub); the GEMV object gate;
+`pytest iron/operators/gemv iron/operators/relu`; then the rest of the ten.
+
+---
+
 ## 18. Carried risk, unrelated to this work
 
 **NPU decode output degrades after a few tokens** versus `llama_cpu.py` on the
