@@ -183,7 +183,7 @@ class FusedDispatch(SequenceDispatch):
         return SequenceFullELFCallable(seq)
 
 
-def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:  # noqa: C901
+def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:
     """The fused module for ``runlist`` (default: all of ``seq``'s steps).
 
     For an ``"xclbin"`` image each design's per-call values are dispatch-time
@@ -194,7 +194,6 @@ def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:  # no
     """
     from .build import dispatch_parameters, mlir_artifact_for
 
-    entries = getattr(seq, "entries", None)  # a module: name -> that graph's runlist
     if runlist is None:
         runlist = seq.runlist
     operator_generators = {}
@@ -240,12 +239,6 @@ def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:  # no
                 if name not in scalars:
                     scalars.append(name)
 
-    sequences = None
-    if entries is not None and runlist is seq.runlist:
-        sequences = {
-            name: [(design_names[design_of[id(op)]], *bufs) for op, *bufs in steps]
-            for name, steps in entries.items()
-        }
     return comp.fuse_mlir(
         operator_generators,
         comp_runlist,
@@ -253,7 +246,6 @@ def build_fused_mlir(seq, runlist=None, image="elf", scalars=None) -> str:  # no
         seq.buffer_sizes,
         seq.slice_info,
         child_scalars=child_scalars,
-        sequences=sequences,
     )
 
 
@@ -956,53 +948,24 @@ class SequenceFullELFCallable(_ArenaCallable):
         self.sequence_name = sequence_name
 
         xrt_elf = pyxrt.elf(str(full_elf_path(op)))
-        self.xrt_context = pyxrt.hw_context(
-            aie_utils.DefaultNPURuntime._device, xrt_elf
+        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
+        self.xrt_kernel = pyxrt.ext.kernel(
+            xrt_context, f"{self.device_name}:{self.sequence_name}"
         )
-        # A module's ELF carries one sequence per entry point (spike S4);
-        # a graph's carries the one named "sequence".
-        names = list(getattr(op, "entries", {}) or [sequence_name])
-        self.xrt_kernels = {
-            name: pyxrt.ext.kernel(self.xrt_context, f"{self.device_name}:{name}")
-            for name in names
-        }
-        self.xrt_kernel = self.xrt_kernels[names[0]]
 
         super().__init__(op)
 
-        # Persistent run handles: reused across dispatches so that the
+        # Persistent run handle: reused across dispatches so that the
         # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
-        # built on top of it) stays valid across calls. Every entry point
-        # runs over the same three arenas.
-        self.run_handles = {}
-        for name, kernel in self.xrt_kernels.items():
-            run = pyxrt.run(kernel)
-            run.set_arg(0, self.input_buffer.buffer_object())
-            run.set_arg(1, self.output_buffer.buffer_object())
-            run.set_arg(2, self.scratch_buffer.buffer_object())
-            if self.trace_buffer is not None:
-                run.set_arg(3, self.trace_buffer.buffer_object())
-            self.run_handles[name] = run
-        self.run_handle = self.run_handles[names[0]]
+        # built on top of it) stays valid across calls.
+        self.run_handle = pyxrt.run(self.xrt_kernel)
+        self.run_handle.set_arg(0, self.input_buffer.buffer_object())
+        self.run_handle.set_arg(1, self.output_buffer.buffer_object())
+        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
-        self._entry_params = {}
-
-    def entry_params(self, name):
-        """The parameter scratchpad of one entry point's run (a module)."""
-        if name not in self._entry_params:
-            self._entry_params[name] = self._make_params(self.run_handles[name])
-        return self._entry_params[name]
-
-    def run_entry(self, name, steps=None):
-        """Run one entry point of the module, syncing as a call does."""
-        self._sync_inputs()
-        run = self.run_handles[name]
-        run.start()
-        ret_code = run.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"{name}: kernel execution failed with return code {ret_code}")
-        self._sync_outputs()
 
     @property
     def params(self):
@@ -1018,10 +981,6 @@ class SequenceFullELFCallable(_ArenaCallable):
         """
         if self._params is not None:
             return self._params
-        self._params = self._make_params(self.run_handle)
-        return self._params
-
-    def _make_params(self, run_handle):
         from .jit_compile import fused_work_dir
 
         params_path = fused_work_dir(full_elf_path(self.op)) / "params.txt"
@@ -1033,7 +992,8 @@ class SequenceFullELFCallable(_ArenaCallable):
             ParameterScratchpad,
         )
 
-        return ParameterScratchpad(run_handle, str(params_path))
+        self._params = ParameterScratchpad(self.run_handle, str(params_path))
+        return self._params
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
@@ -1160,20 +1120,6 @@ class SequenceXclbinCallable(_PerBufferCallable):
     def _run_step(self, step_idx, kernel, args, step):
         scalars = {name: self.dispatch_values[name] for name in kernel.dispatch_params}
         kernel(*args, **scalars)
-
-    def entry_params(self, name):
-        return None  # no scratchpad on an xclbin (spike S2)
-
-    def run_entry(self, name, steps):
-        """Run one entry point of a module: its own range of steps, syncing as a call does."""
-        start, stop = steps
-        self._sync_inputs()
-        for step_idx, ((kernel, args), step) in enumerate(
-            zip(self._execution_plan, self._iter_steps())
-        ):
-            if start <= step_idx < stop:
-                self._run_step(step_idx, kernel, args, step)
-        self._sync_outputs()
 
 
 def _reshape_for_spec(flat_tensor, spec):

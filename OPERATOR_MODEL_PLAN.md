@@ -677,10 +677,9 @@ rewriting MLIR text today). Multiple runtime sequences per device turned
 out to exist already: `aiecc --sequence-name` defaults to all, a device
 with two `aie.runtime_sequence` ops builds to one full ELF carrying both
 (S4 below), and `SequenceFullELFCallable` already names its kernel
-`device:sequence`. A module with several entry points is built now: the fusion emits one
-named runtime sequence per graph over the same arenas (`fuse_mlir`'s
-`sequences`), and `iron.compile(dev, name=(graph, shapes), ...)` joins the
-graphs over one buffer plan (§19). Neither blocks the decode-only PR.
+`device:sequence`. What remains for a module with two entry points is
+IRON emitting the second sequence, by the same text rewriting the fusion
+pass already does. Neither blocks the decode-only PR.
 
 ---
 
@@ -1046,7 +1045,6 @@ and the decode graph's parity against the token snapshot (§18).
 | xclbinutil round trip | `iron/tests/toolchain/xclbinutil.py` | the installed tool dumps an AIE partition flat and re-adds it; names the unpatched hrx bug and points at the patch | — | — |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
 | step 5, device-free halves | `iron/common/jit_compile.py` `compile_insts`, `iron/tests/toolchain/spikes.py`, §11, §12 | — | S1 builds (fused sequence as xclbin + expanded stream), S4 builds (two sequences in one ELF), S2 answered from XRT's source (no scratchpad off the ELF path); the instructions-only compile in use for flm/gemm and mm_prebuilt | **needs a device**: S1's and S4's runs, S3, the dispatch bridge on a fused graph once `DispatchTime` reaches graphs |
-| modules over several graphs (§8, S4's construction) | `iron/common/module.py`, `graph.py` `_EntryCallable`, `compilation/sequence.py` `sequences`, `sequence.py` entry runs | 6 tests: private buffers prefixed per graph, a weight one buffer across graphs, a state its own, values one namespace, the joined runlist and its ranges, the image rule | `iron/tests/toolchain/module.py`: two graphs sharing a weight build to one ELF whose symbol table names both sequences on NPU2, and to the per-step chain on NPU1 with each entry point's step range | **needs a device**: loading a sequence by name (S4), the shared arenas across runs |
 | the dispatch hierarchy (step 5, acceptance 1) | `sequence.py` | — | `AutoDispatch` is gone: a graph never names a dispatch (`packaging.plan` derives the instance from device, values and boundaries), and a hand-written sequence that names none gets `platform_default`. What remains are the image builders (`fused`, `separate`, `chunked`) and the two harness modes (`reference`, `compare`) the operator and infrastructure tests drive by name; deleting those would remove the hand-written-runlist API those device tests stand on, so they stay as the plan's builders | **needs a device**: the infrastructure tests that name them |
 | values on a chunked image | `compilation/sequence.py` `fuse_mlir` (scalar block arguments forwarded per step), `jit_compile.py` `compile_fused_xclbin` | packaging refuses by name | the chunk builds its xclbin and a lowered module with one sequence taking the scalars; the bridge refuses its PDI preloads, surfaced by name (`iron/tests/toolchain/dispatch.py`) | **needs a native host**: not a device question |
 | dispatch-time values (§6 on an xclbin image) | `build.py` (`image`, `_plus`, the preamble's value writes), `jit_compile.py` (`_design_generator`'s dispatch parameters, `DispatchStream`), `sequence.py`, `graph.py`, `softmax/op.py` | packaging reports the lowering per value; the build tests' preamble | `iron/tests/toolchain/dispatch.py`: a softmax with a per-call row length and a copy at a per-call offset build as dispatch-time kernels with their bridge libraries at `each_step` on both devices; the scaled decode graph builds the same way for NPU1: 50 steps on 18 kernels, the copies and softmaxes dispatch-time, the graph's column count now following the device; at Llama 3.2 1B's real size it is 386 steps on 19 kernels, two of them dispatch-time, in under a minute | **needs a device**: the regenerated streams, S3's read |
@@ -1170,14 +1168,11 @@ and forwards its steps' scalars and the chunk builds, but upstream's
 Python dispatch bridge refuses the PDI preloads every multi-configuration
 stream carries, so that combination is refused by name, and acceptance
 item 5 (`chunks(n)` on the llama graph, which has values) needs a native
-dispatch host or the values fixed per compile. Modules over several graphs are built on S4's
-construction: `iron.compile(dev, name=(graph, shapes), ...)` joins the
-graphs over one buffer plan, the fused ELF carries one sequence per graph
-and the chain runs each graph's steps. What still needs a device: running
-S1's image (and so every chunked build); loading S4's sequences by name
-and the arenas shared across them; S3's read and the regenerated streams;
-and the infrastructure tests that drive the remaining dispatch builders by
-name. O6 is settled as free functions
+dispatch host or the values fixed per compile. What still needs a device:
+running S1's image (and so every chunked build); loading S4's two
+sequences by name, which is what modules over several graphs stand on;
+S3's read and the regenerated streams; and deleting the dispatch
+hierarchy, whose callables are the XRT path and cannot be exercised here. O6 is settled as free functions
 (`iron.chunks`, `iron.each_step`); O7 by `Plan.report`.
 
 The sandbox verification now reaches every `design()` body: the design

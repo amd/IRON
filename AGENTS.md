@@ -330,11 +330,6 @@ the toolchain and no NPU can compile ahead of time.
 `iron/tests/common/graph.py` traces it device-free and
 `iron/tests/toolchain/` builds it.
 
-Several graphs over one buffer plan are a module: `iron.compile(dev,
-prefill=(prefill, shapes), decode=(decode, shapes))` returns an object with
-one compiled graph per name, weights and states shared by identity, one
-image with an entry point per graph (`iron/common/module.py`).
-
 ## Common Patterns
 
 ### Multi-Column Parallelism
