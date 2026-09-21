@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import pytest
 
 from iron.operators.mha.op import MHA
@@ -103,7 +105,7 @@ def test_arg_spec_matches_design_shapes(
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
     )
-    q, k, v, o = (spec.shape[0] for spec in op.get_arg_spec())
+    q, k, v, o = (math.prod(spec.shape) for spec in op.get_arg_spec())
 
     pad = op._calculate_seq_padding(seq_len, num_pipelines)
     kv_heads = num_kv_heads if num_kv_heads else num_heads

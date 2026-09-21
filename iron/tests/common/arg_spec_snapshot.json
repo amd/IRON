@@ -292,28 +292,36 @@
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "out",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ]
@@ -322,28 +330,36 @@
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          16384
+          2,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          16384
+          2,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "out",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ]
@@ -568,7 +584,7 @@
         "bfloat16"
       ]
     ],
-    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [1024], \"input_strides\": [1], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
+    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [256], \"input_strides\": [4], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
       [
         "in",
         [
@@ -955,28 +971,36 @@
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "out",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ]
@@ -985,28 +1009,36 @@
       [
         "in",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          16384
+          2,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "in",
         [
-          16384
+          2,
+          128,
+          64
         ],
         "bfloat16"
       ],
       [
         "out",
         [
-          65536
+          8,
+          128,
+          64
         ],
         "bfloat16"
       ]
@@ -1231,7 +1263,7 @@
         "bfloat16"
       ]
     ],
-    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [1024], \"input_strides\": [1], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
+    "StridedCopy({\"input_buffer_size\": 1024, \"input_offset\": 0, \"input_sizes\": [256], \"input_strides\": [4], \"output_buffer_size\": 256, \"output_offset\": 0, \"output_sizes\": [256], \"output_strides\": [1]})": [
       [
         "in",
         [

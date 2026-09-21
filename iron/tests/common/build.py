@@ -217,3 +217,85 @@ def test_preamble_writes_residents_and_rejects_missing_ones():
 
     with pytest.raises(ValueError, match="does not supply it"):
         _preamble(Sequence(op, ov, {}), Forgetful(ov, n=64), ov, FakeTarget())
+
+
+def test_mha_sequence_splits_q_over_two_shims_and_reuses_kv_per_head(monkeypatch):
+    # mha/op.py with eight pipelines: Q and O go through two shims, each
+    # carrying four pipelines' (256-row) block; K and V are one head's whole
+    # (seq_pad, d) slab, filled once per Q block; drains wait.
+    from iron.operators.mha.op import MHA, MHAOverlay
+
+    monkeypatch.setattr(Access, "tap", lambda self: self)
+
+    class Dev:
+        def resolve(self):
+            class R:
+                name = "npu2"
+
+            return R()
+
+    class Handle:
+        def __init__(self, name, log):
+            self.name, self.log = name, log
+
+        def fill(self, data, tap, wait, group, offset_parameter):
+            self.log.append(("fill", self.name, data, tap.offset, tap.count, wait))
+
+        def drain(self, data, tap, wait, group, offset_parameter):
+            self.log.append(("drain", self.name, data, tap.offset, tap.count, wait))
+
+    op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_of_pipelines=8)
+    op = op.tuned(Dev())
+    ov = op.ov
+    assert op.seq_pad == 1024 and ov.q_shims == 2 and ov.join_rows == 256
+    assert op.residents() == {
+        "q_blocks_per_pipeline": 2,
+        "kv_blocks": 16,
+        "s_q": 1000,
+        "s_kv": 1000,
+    }
+    log = []
+    for s in ov.streams.values():
+        for i in range(s.count):
+            s.bind(Handle(f"{s.name}{i}", log), i)
+    op.design(Sequence(op, ov, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
+
+    head = 1024 * 64
+    block = 256 * 64
+    expected = []
+    for h in range(2):
+        for b in range(2):
+            for s in range(2):
+                expected.append(
+                    (
+                        "fill",
+                        f"q{s}",
+                        "dQ",
+                        h * head + (2 * b + s) * block,
+                        block,
+                        False,
+                    )
+                )
+            expected.append(("fill", "k0", "dK", 0, head, False))
+            expected.append(("fill", "v0", "dV", 0, head, False))
+            for s in range(2):
+                expected.append(
+                    (
+                        "drain",
+                        f"o{s}",
+                        "dO",
+                        h * head + (2 * b + s) * block,
+                        block,
+                        True,
+                    )
+                )
+    assert log == expected
+
+
+def test_mha_infers_the_padded_length_and_the_kv_head_count():
+    from iron.operators.mha.op import MHA
+
+    op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))
+    assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
+    with pytest.raises(ValueError, match="seq_pad=100"):
+        MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)

@@ -105,5 +105,7 @@ def test_transfer_size_not_dividing_per_channel_share_is_rejected(aie_context):
     operator = StridedCopy(
         **_flat(1024, num_aie_channels=4, transfer_size=512), context=aie_context
     )
-    with pytest.raises((AssertionError, ValueError), match="must divide the per-channel transfer"):
+    with pytest.raises(
+        (AssertionError, ValueError), match="must divide the per-channel transfer"
+    ):
         operator.compile()

@@ -189,7 +189,9 @@ def test_annotated_member_is_rejected():
 
 
 def test_buffers_on_an_overlay_are_rejected():
-    with pytest.raises(DeclarationError, match="buffers and DispatchTime values belong"):
+    with pytest.raises(
+        DeclarationError, match="buffers and DispatchTime values belong"
+    ):
 
         @operator
         class Bad(Overlay):

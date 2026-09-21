@@ -84,27 +84,28 @@ _TIER = "iron.tier"  # dataclass Field.metadata key: "dim" | "tunable"
 # --------------------------------------------------------------------------
 
 
-def dim(default: Any = MISSING, *, repr: bool = True) -> Any:
+def dim(default: Any = MISSING, *, repr: bool = True, init: bool = True) -> Any:
     """Declare a compile-time dimension field.
 
     A ``dim()`` field may appear in a shape. On an overlay it is overlay-tier
     (changing it rebuilds the array); on an operator it is sequence-tier
     (changing it rebuilds the instruction stream only).
     """
-    return _specifier("dim", default, repr)
+    return _specifier("dim", default, repr, init)
 
 
-def tunable(default: Any = MISSING, *, repr: bool = True) -> Any:
+def tunable(default: Any = MISSING, *, repr: bool = True, init: bool = True) -> Any:
     """Declare a tuning knob: a field :meth:`Overlay.tuning` may set.
 
     A tunable never appears in a shape. ``None`` as the default means "tuning
-    fills it from the device".
+    fills it from the device". ``init=False`` fixes a subclass's value of an
+    inherited field (a kernel that only works with one channel per column).
     """
-    return _specifier("tunable", default, repr)
+    return _specifier("tunable", default, repr, init)
 
 
-def _specifier(tier: str, default: Any, repr_: bool) -> Field:
-    kwargs: dict[str, Any] = {"metadata": {_TIER: tier}, "repr": repr_}
+def _specifier(tier: str, default: Any, repr_: bool, init: bool = True) -> Field:
+    kwargs: dict[str, Any] = {"metadata": {_TIER: tier}, "repr": repr_, "init": init}
     if default is not MISSING:
         kwargs["default"] = default
     return dataclasses.field(**kwargs)

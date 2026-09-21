@@ -177,12 +177,15 @@ CASES = [
                 output_buffer_size=1024,
                 dtype=np.float32,
             ),
-            # Input and output sizes are independent here, unlike every other
-            # (in, out) operator. Equal-size cases alone would let a refactor
-            # that tied the output shape to the input pass unnoticed.
+            # Input and output buffer sizes are independent here, unlike every
+            # other (in, out) operator: a gather of every fourth element of a
+            # 1024-element buffer into a 256-element one. Equal-size cases
+            # alone would let a refactor that tied the output shape to the
+            # input pass unnoticed. (The copy itself moves the same element
+            # count both ways; the operator checks that at construction.)
             dict(
-                input_sizes=[1024],
-                input_strides=[1],
+                input_sizes=[256],
+                input_strides=[4],
                 input_offset=0,
                 output_sizes=[256],
                 output_strides=[1],

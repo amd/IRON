@@ -3,12 +3,15 @@
 
 from typing import ClassVar
 
-from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
+from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator, tunable
 
 
 @operator
 class SiLUOverlay(ChanneledUnaryOverlay):
     """The array for SiLU: the shared channeled-unary design over its kernel."""
+
+    # One channel per column, as before: the LUT-based kernel is sized for it.
+    num_channels: int = tunable(1, repr=False, init=False)
 
     kernel_name: ClassVar[str] = "silu"
     kernel_fn_name: ClassVar[str] = "silu_bf16_size"
