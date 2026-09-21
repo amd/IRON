@@ -838,11 +838,51 @@ For the record, so nobody re-derives them:
 
 ## 19. Status
 
-What is on this branch, and how far each piece has been verified. Two
-environments are distinguished: **sandbox**, a session with no device and
-no mlir-aie package, where the pure-Python layers run under pytest against
-a stub of the upstream module names; and **toolchain**, a machine with the
-pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
+What is on this branch, and how far each piece has been verified. Three
+environments are distinguished: **sandbox**, a session with no device,
+where the pure-Python layers run under pytest against a stub of the
+upstream module names; **lowering**, the same session with the pinned
+mlir-aie wheel installed (its release asset downloads even though its
+index page does not) but no Peano and no device, where every design
+generates real MLIR and `aiecc --get-npu-insts` places, routes, assigns
+addresses, lowers the DMAs and emits the instruction stream; and
+**device**, a machine with Peano and hardware, where nothing here has run.
+
+### The lowering gate
+
+`iron/tests/toolchain/lowering.py` lowers every case of the construction
+table on npu2 and npu1 shapes (116 runs, 12 skipped as incompatible with
+the narrow device), and `lowering_graph.py` lowers what the table does
+not cover: every operator the decode graph traces, with its bound
+per-call values as scratchpad parameters; flm/gemm's three sequence
+shapes and its configuration-only module at the reference shape; the
+foreign mm_prebuilt sequence (raw-dialect emission, no cores); and the
+swiglu graphs' operators. All lower. The fused module `swiglu_decode`
+builds through `OperatorSequence` (five devices: four configurations and
+the dispatch sequence with `aiex.configure`) places and routes and emits
+one instruction stream per device, the main one included; only
+`--expand-load-pdis` (which forces core compilation) and the ELF itself
+need Peano.
+
+Against the PR 215 tree, generated MLIR for the same constructions:
+
+| operators | result |
+|---|---|
+| GEMV (plain and batched), GEMM (all four cases), MemCopy, StridedCopy (all three) | **byte-identical** |
+| the elementwise families (ReLU, GELU, SiLU, Sigmoid, Tanh, LayerNorm, LeakyReLU, AXPY, ElementwiseAdd/Mul), Dequant, Transpose, Softmax | differ only by the resident count read behind a barrier (a buffer, a lock, `rtp_write` + `set_lock` in the sequence, `memref.load` in the core) and the SSA renumbering that follows |
+| Repeat, RoPE | that, plus flat host argument types (`memref<512xbf16>` for `memref<8x64xbf16>`); descriptors identical |
+| MHA | flat host argument types and linear Q/K/V/O descriptors (`[1,1,1,4096]` for `[1,1,64,64]`): same offsets, lengths and order |
+| WeightedRMSNorm | no old counterpart with these keywords |
+
+Three things were made identical along the way: residents are written
+one buffer at a time in word order (the old sequences' order), GEMM's
+parameter buffers keep their zero initializer, and leaky_relu's object
+keeps its old name. Two case-table entries turned out to be invalid in
+the old tree as well (a stride-1 transpose the hardware refuses, an f32
+GEMM that overflows a core's memory) and are now valid configurations.
+
+What the gate cannot check: the kernels (Peano), the numbers (hardware),
+and the decode graph's parity against the token snapshot (§18).
 
 | piece | file | sandbox | toolchain |
 |---|---|---|---|
@@ -859,6 +899,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
+| lowering gate (see above) | `iron/tests/toolchain/lowering.py`, `lowering_graph.py` | 116 + 12 lowerings to instruction streams; MLIR diffed against PR 215 per case | **needs Peano and a device**: kernels and numbers |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
