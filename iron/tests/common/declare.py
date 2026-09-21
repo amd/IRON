@@ -426,3 +426,26 @@ def test_inout_and_shim_pins_declare():
     assert ov.s.via.col == 1 and len(ov.d.via) == 2 and ov.d.count == 2
     op = Inplace(ov, n=2)
     assert op.x.direction == "inout" and op.inputs == op.outputs
+
+
+def test_from_spec_builds_an_operator_from_literal_shapes():
+    # swiglu_prefill_stream's escape: shapes from an exported graph, a
+    # design that is not derived, an identity for sharing.
+    Group = Operator.from_spec(
+        "Group",
+        inputs={"input": (64, 128), "w_gate": (128, 256)},
+        outputs={"left": (64, 256)},
+        key="abc123",
+        params={"seq_len": 64, "k": 2},
+        mlir=lambda self: "artifact",
+    )
+    op = Group(Group._overlay_class())
+    assert [b.name for b in op.buffers] == ["input", "w_gate", "left"]
+    assert [s.shape for s in op.get_arg_spec()] == [(64, 128), (128, 256), (64, 256)]
+    assert (op.seq_len, op.k) == (64, 2)
+    assert op.design_key() == "abc123"
+    assert op.get_mlir_artifact() == "artifact"
+    # Literal shapes bind no field; inference only checks them.
+    assert Group.infer((64, 128), (128, 256)) == {}
+    with pytest.raises(ValueError):
+        Group.infer((64, 128), (128, 512))

@@ -1386,6 +1386,58 @@ class Operator(MLIROperator, Generic[O]):
     # -- inference ---------------------------------------------------------
 
     @classmethod
+    def from_spec(
+        cls,
+        name: str,
+        *,
+        inputs: dict[str, tuple[int, ...]],
+        outputs: dict[str, tuple[int, ...]],
+        dtype: Any = bfloat16,
+        key: str = "",
+        params: dict[str, Any] | None = None,
+        mlir: Callable | None = None,
+    ) -> type:
+        """An operator class from an exported description, at run time.
+
+        The dynamic escape for a design whose shapes come from a file rather
+        than a formula (swiglu_prefill_stream's stream-dse export). ``inputs``
+        and ``outputs`` are literal shapes in argument order; ``params`` are
+        the numbers that identify the instance (they become ``dim()`` fields
+        with those defaults and reach the name); ``key`` identifies the
+        generated design, for sharing; ``mlir`` replaces
+        :meth:`get_mlir_artifact`, since the sequence is not derived. The
+        overlay is a stand-in carrying only ``key``.
+        """
+        import types
+
+        def overlay_ns(ns):
+            ns["__module__"] = cls.__module__
+            ns["__annotations__"] = {"key": str}
+            ns["key"] = dim(key, repr=False)
+
+        overlay_cls = operator(
+            types.new_class(f"{name}Overlay", (Overlay,), {}, overlay_ns)
+        )
+
+        def operator_ns(ns):
+            ns["__module__"] = cls.__module__
+            ns["__annotations__"] = {}
+            for pname, value in (params or {}).items():
+                ns["__annotations__"][pname] = type(value)
+                ns[pname] = dim(value)
+            for bname, shape in inputs.items():
+                ns[bname] = In(*shape, dtype=dtype)
+            for bname, shape in outputs.items():
+                ns[bname] = Out(*shape, dtype=dtype)
+            ns["design_key"] = lambda self: self.ov.key or None
+            if mlir is not None:
+                ns["get_mlir_artifact"] = mlir
+
+        return operator(
+            types.new_class(name, (cls[overlay_cls],), {}, operator_ns)  # type: ignore[index]
+        )
+
+    @classmethod
     def infer(cls, *operand_shapes, **given) -> dict[str, Any]:
         """Bind dimension fields from operand shapes, in ``In`` declaration order.
 
