@@ -106,36 +106,3 @@ def test_values_become_dispatch_time_kernels_at_each_step(device, tmp_path):
     assert symbols == {s.params[0] for s in streams.values()}
     assert Path(net.image).stat().st_size > 0
     assert net._callable is None
-
-
-def test_values_on_a_chunked_image_stop_at_the_python_bridge(device, tmp_path):
-    """The fused sequence takes the scalars its steps use (one ``i32`` per
-    symbol after the arenas, forwarded to each step) and builds to an xclbin
-    with a lowered module the bridge's single-sequence check accepts; what
-    stops it is the PDI preload at every configuration switch, which
-    upstream's Python dispatch bridge cannot supply. Named at both levels."""
-    import re
-
-    from iron.common.sequence import ChunkedDispatch
-
-    g, shape = _graph()
-    with pytest.raises(NotImplementedError, match="chunked image.*PDI loads"):
-        g.compile(device, boundaries=iron.chunks(2), x=shape)
-    traced = g.trace(x=shape)
-    seq = traced.sequence(
-        "values_chunked",
-        dispatch=ChunkedDispatch(2),
-        context=AIEContext(build_dir=str(tmp_path)),
-    )
-    from iron.common.base import AIEOperatorBase
-
-    AIEOperatorBase.compile(seq)  # the artifacts, not the image: link() below
-    with pytest.raises(NotImplementedError, match="cannot be dispatched from Python"):
-        seq.link()
-    work = next(tmp_path.glob("f*_chunk0.prj"))
-    lowered = (work / "npu_lowered.mlir").read_text()
-    signatures = re.findall(r"aie\.runtime_sequence\(([^)]*)\)", lowered)
-    assert len(signatures) == 1, signatures
-    assert signatures[0].count(": i32") == 2, signatures[0]
-    assert "aiex.npu.load_pdi" in lowered
-    assert next(tmp_path.glob("f*_chunk0_main.xclbin")).stat().st_size > 0

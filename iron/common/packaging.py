@@ -25,12 +25,9 @@ spike S1's construction: it builds, and whether it runs is S1's question.
 An xclbin run has no parameter scratchpad (spike S2, from XRT's source),
 so on that image every per-call value is a dispatch-time scalar of its
 kernel (§6): an offset use regenerates the kernel's stream per call, a
-core-read use is written into the array by the sequence (spike S3). On a
-chunked image the fused sequence takes the scalars its chunk uses and
-forwards them to each step, but its stream preloads a PDI at every
-configuration switch and upstream's Python dispatch bridge cannot supply
-PDI loads, so that combination is refused by name (a native host could
-run it).
+core-read use is written into the array by the sequence (spike S3). Built
+for ``each_step``; a chunked image with values waits on the fused
+sequence forwarding its chunks' scalars.
 """
 
 from __future__ import annotations
@@ -131,13 +128,10 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
             lowering = "sizes, strides and offsets regenerated per call"
         values.append((v.name, v.kind, lowering))
     if values and chosen == XCLBIN and boundaries != each_step:
-        names = ", ".join(v.name for v in traced.values)
         raise NotImplementedError(
-            f"{traced.name}: per-call values ({names}) on a chunked image cannot be "
-            f"dispatched from Python: a fused sequence's stream preloads a PDI at "
-            f"every configuration switch and upstream's Python dispatch bridge "
-            f"cannot supply PDI loads (a native host can, via aiecc --get-npu-cpp). "
-            f"Pass boundaries=each_step, or package for NPU2 as an ELF."
+            f"{traced.name}: per-call values on a chunked image are not built "
+            f"yet (the fused sequence must forward its chunks' dispatch scalars); "
+            f"pass boundaries=each_step"
         )
     return Plan(chosen, dispatch, reasons, values)
 

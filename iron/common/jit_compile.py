@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 import aie.utils as aie_utils
-import numpy as np
 from aie.ir import Module
 from aie.utils.compile.jit._hash import _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
@@ -351,24 +350,9 @@ def compile_sequence(seq, elf_path) -> Path:
 
 
 def compile_fused_xclbin(
-    build_mlir,
-    build_dir,
-    label,
-    *,
-    kernel_id,
-    xclbin_input=None,
-    extra_flags=(),
-    scalars=(),
+    build_mlir, build_dir, label, *, kernel_id, xclbin_input=None, extra_flags=()
 ):
     """Compile a fused sequence as one xclbin kernel; return (xclbin, insts).
-
-    With ``scalars`` (the dispatch-time scalars the fused sequence takes,
-    filled in by ``build_mlir``) there is no static stream: the second
-    element would be a :class:`DispatchStream` over the bridge library, built
-    as ``CompilableDesign`` builds it, after the callee sequences are pruned
-    from the lowered module. Today that ends in a named refusal: the stream's
-    PDI preloads are beyond upstream's Python dispatch bridge (see below), so
-    the xclbin and the lowered module are built and the library is not.
 
     The chunked image (OPERATOR_MODEL_PLAN.md §8, spike S1): the fused
     module's dispatch device becomes a kernel named ``label`` whose
@@ -388,9 +372,7 @@ def compile_fused_xclbin(
     insts_path = build_dir / f"{label}_main_sequence.bin"
     ExternalFunction._instances.clear()
     text = _fuse_as_children(build_mlir)
-    scalars = list(scalars)
-    flags = [f for f in FUSED_XCLBIN_FLAGS if not (scalars and f == "--get-npu-insts")]
-    flags += [
+    flags = list(FUSED_XCLBIN_FLAGS) + [
         f"--xclbin-kernel-name={label}",
         f"--xclbin-instance-name={label}",
         f"--xclbin-kernel-id={kernel_id}",
@@ -399,23 +381,10 @@ def compile_fused_xclbin(
     ]
     if xclbin_input is not None:
         flags.append(f"--xclbin-input={Path(xclbin_input).resolve()}")
-    if scalars:
-        flags.append("--get=npu_lowered.mlir")
     flags += list(extra_flags)
     current = _digest(text + "\n".join(flags))
     stamp = xclbin_path.with_suffix(xclbin_path.suffix + ".cache_hash")
-    if scalars:
-        from aie.utils.compile.jit import _manifest
-
-        lib = _manifest.resolve_dispatch_library(work_dir)
-        if (
-            xclbin_path.exists()
-            and lib is not None
-            and stamp.exists()
-            and stamp.read_text() == current
-        ):
-            return xclbin_path, DispatchStream(Path(lib), tuple(scalars))
-    elif (
+    if (
         xclbin_path.exists()
         and insts_path.exists()
         and stamp.exists()
@@ -424,86 +393,13 @@ def compile_fused_xclbin(
         return xclbin_path, insts_path
     work_dir.mkdir(parents=True, exist_ok=True)
     compile_mlir_module(
-        text,
-        work_dir=work_dir,
-        options=flags,
-        device=aie_utils.get_current_device(),
-        npu_cpp_path=work_dir / "dispatch_gen.cpp" if scalars else None,
-        npu_cpp_emit_dispatch_shim=bool(scalars),
+        text, work_dir=work_dir, options=flags, device=aie_utils.get_current_device()
     )
-    if not xclbin_path.exists():
-        raise RuntimeError(f"aiecc produced no {xclbin_path.name} in {build_dir}")
-    if scalars:
-        from aie.utils.compile.jit._dispatch_compile import (
-            DispatchCompileError,
-            compile_dispatch_bridge,
-        )
-
-        # The materialisation inlines each step's sequence into the dispatch
-        # device's but leaves the callees in theirs, and the bridge accepts
-        # exactly one; prune them (§11). What the bridge then refuses is the
-        # stream itself: expanding the PDI loads preloads an empty PDI before
-        # each configuration's writes (AIEExpandLoadPdi), so a multi-
-        # configuration stream always carries load_pdi ops, and the Python
-        # dispatch runtime cannot supply their resources. A native host can
-        # (aiecc --get-npu-cpp); here it is a named limit.
-        _prune_callee_sequences(work_dir / "npu_lowered.mlir")
-        try:
-            lib = compile_dispatch_bridge(work_dir, scalars, [np.int32] * len(scalars))
-        except DispatchCompileError as e:
-            if "load_pdi" not in str(e):
-                raise
-            raise NotImplementedError(
-                f"{label}: a fused sequence with per-call values ({', '.join(scalars)}) "
-                f"cannot be dispatched from Python: its stream preloads a PDI at every "
-                f"configuration switch and upstream's Python dispatch bridge cannot "
-                f"supply PDI loads (aiecc: use --get-npu-cpp with a native host). "
-                f"Package at each_step, or fix the values at compile time."
-            ) from e
-        stamp.write_text(current)
-        return xclbin_path, DispatchStream(Path(lib), tuple(scalars))
-    if not insts_path.exists():
-        raise RuntimeError(f"aiecc produced no {insts_path.name} in {build_dir}")
+    for path in (xclbin_path, insts_path):
+        if not path.exists():
+            raise RuntimeError(f"aiecc produced no {path.name} in {build_dir}")
     stamp.write_text(current)
     return xclbin_path, insts_path
-
-
-def _prune_callee_sequences(lowered: Path) -> None:
-    """Keep only the dispatch device's runtime sequence in aiecc's lowered module.
-
-    ``aie-materialize-runtime-sequences`` inlines every ``aiex.run`` callee
-    into the dispatch device's sequence but leaves the callees' own
-    ``aie.runtime_sequence`` ops in their devices, and the dispatch bridge
-    refuses a module with more than one (OPERATOR_MODEL_PLAN.md §11). The
-    dispatch device is the fusion's ``main``; every other device's sequence
-    is a callee.
-    """
-    import aie.dialects.aie  # noqa: F401  registers the dialect for parsing
-    import aie.dialects.aiex  # noqa: F401
-    from aie.ir import Context, Module, StringAttr
-
-    with Context() as ctx:
-        ctx.allow_unregistered_dialects = True
-        module = Module.parse(lowered.read_text())
-        kept = 0
-        for device in list(module.body.operations):
-            if device.operation.name != "aie.device":
-                continue
-            attrs = device.operation.attributes
-            name = StringAttr(attrs["sym_name"]).value if "sym_name" in attrs else ""
-            for op in list(device.operation.regions[0].blocks[0].operations):
-                if op.operation.name != "aie.runtime_sequence":
-                    continue
-                if name == "main":
-                    kept += 1
-                else:
-                    op.operation.erase()
-        if kept != 1:
-            raise RuntimeError(
-                f"{lowered}: expected the dispatch device's one runtime sequence, "
-                f"found {kept}"
-            )
-        lowered.write_text(str(module))
 
 
 def compile_insts(generator, insts_path, extra_flags=()) -> Path:
