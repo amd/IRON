@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama decode as a graph function.
+"""Llama's two phases as graph functions over one set of weights and caches.
 
-One token through every transformer block, the final norm and the output
-head, with the KV caches as device-resident state and the weights closed
-over from the module tree. The cache position and the softmax's valid row
-length are per-call scratchpad values. Traced here on handles; compiled
-by ``llama_npu.py`` against a device, or by a test against nothing.
+:class:`DecodeGraph` runs one token through every transformer block, the
+final norm and the output head, with the KV caches as device-resident
+state and the weights closed over from the module tree; the cache position
+and the softmax's valid row length are per-call scratchpad values.
+:class:`PrefillGraph` runs the prompt, at the compile-time maximum length
+with the prompt in a prefix, writes the caches and returns the last
+prompt token's logits. Both are traced here on handles; compiled by
+``llama_npu.py`` against a device, or by a test against nothing.
 """
 
 import math
@@ -18,7 +21,9 @@ import iron
 from iron.common.declare import Scratchpad
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
+from iron.operators.mha.op import MHA
 from iron.operators.repeat.op import Repeat
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rope.op import RoPE
@@ -52,6 +57,7 @@ class DecodeGraph:
             num_aie_columns = device_columns(dev) if dev is not None else 8
         L, cols = max_seq_len, num_aie_columns
         self.max_seq_len = L
+        self.num_aie_columns = cols
         self.keys = [
             iron.state((G, L * D), name=f"keys_cache_{i}")
             for i in range(config.n_layers)
@@ -154,6 +160,131 @@ class DecodeGraph:
         return self.graph.compile(
             x=(1, config.emb_dim), angles=(1, config.head_dim), **kwargs
         )
+
+
+class PrefillGraph:
+    """The prefill graph function, over a decode graph's weights and caches.
+
+    The length is the decode graph's maximum: the prompt occupies the first
+    rows of ``x`` and ``angles``, and the rows past it compute on whatever
+    is there and are never read (MHA is causal; decode masks the cache's
+    tail by its ``vector_size``). One per-call value, ``last``, is the
+    element offset of the last prompt row, ``(n - 1) * emb_dim``: the final
+    norm and the output head run for that row alone, which is all the
+    harness reads. The caches are written in full, in the layout decode
+    reads them.
+
+    ``num_of_pipelines`` is MHA's; the sequence must be a multiple of 64
+    times it. ``tile_m`` is the GEMMs' row tile; the length must be a
+    multiple of four times it.
+    """
+
+    def __init__(self, config, decode, *, num_of_pipelines=8, tile_m=64):
+        model = config.model
+        H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
+        E, F = config.emb_dim, config.hidden_dim
+        L, cols = decode.max_seq_len, decode.num_aie_columns
+        keys, values = decode.keys, decode.values
+        self.max_seq_len = L
+
+        def proj(x, weight):
+            # Every projection is read as the checkpoint ships it, (out, in):
+            # GEMM's column-major B, the layout decode's GEMV reads too.
+            return GEMM(
+                x,
+                weight,
+                b_col_maj=True,
+                num_aie_columns=cols,
+                tile_m=tile_m,
+                tile_k=64,
+                tile_n=64,
+            )
+
+        def norm(x, weight):
+            return RMSNorm(x, weight, num_aie_columns=cols, num_channels=1)
+
+        # (L, G, D), the heads interleaved per token as the projection wrote
+        # them, into the cache's (G, L, D).
+        into_cache = dict(
+            input_sizes=(G, L, D),
+            input_strides=(D, G * D, 1),
+            input_offset=0,
+            output_sizes=(G, L, D),
+            output_strides=(L * D, D, 1),
+            output_offset=0,
+            transfer_size=1024,
+            num_aie_channels=1,
+        )
+        last_row = dict(
+            input_sizes=(1, E),
+            input_strides=(E, 1),
+            input_offset=0,  # base; the per-call addend is `last`
+            output_sizes=(1, E),
+            output_strides=(E, 1),
+            output_offset=0,
+            output_buffer_size=E,
+            num_aie_channels=1,
+        )
+
+        @iron.graph(names_from=model)
+        def prefill(x, angles, *, last: Scratchpad[np.int32]):
+            for i, blk in enumerate(model.layers):
+                # <transformer block>
+                h = norm(x, blk.norm1.weight)
+                # <grouped query attention>
+                q = proj(h, blk.attn.q.weight)  # (L, H*D)
+                k = proj(h, blk.attn.k.weight)  # (L, G*D)
+                v = proj(h, blk.attn.v.weight)
+                # One angle row per position, applied to that position's heads.
+                q = RoPE(q.reshape(L * H, D), angles, num_aie_columns=cols)
+                k = RoPE(k.reshape(L * G, D), angles, num_aie_columns=cols)
+                StridedCopy(k, keys[i], **into_cache)
+                StridedCopy(v, values[i], **into_cache)
+                o = MHA(
+                    q.reshape(L, H, D),
+                    k.reshape(L, G, D),
+                    v.reshape(L, G, D),
+                    heads_interleaved=True,
+                    num_of_pipelines=num_of_pipelines,
+                )
+                o = proj(o.reshape(L, H * D), blk.attn.o.weight)
+                # </grouped query attention>
+                x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E)
+                h = norm(x, blk.norm2.weight)
+                gate = proj(h, blk.ffn.gate.weight)
+                up = proj(h, blk.ffn.up.weight)
+                act = ElementwiseMul(
+                    SiLU(gate, num_aie_columns=cols, tile_size=F),
+                    up,
+                    num_aie_columns=cols,
+                    tile_size=F,
+                )
+                down = proj(act, blk.ffn.down.weight)
+                x = ElementwiseAdd(x, down, num_aie_columns=cols, tile_size=E)
+                # </transformer block>
+            x_last = StridedCopy(x, in_offset=last, **last_row).reshape(1, E)
+            h = RMSNorm(x_last, model.norm.weight)
+            return GEMV(
+                model.out_head.weight,
+                h,
+                num_aie_columns=cols,
+                tile_size_input=4,
+                tile_size_output=32,
+            )
+
+        self.graph = prefill
+
+    def shapes(self, config):
+        return dict(
+            x=(self.max_seq_len, config.emb_dim),
+            angles=(self.max_seq_len, config.head_dim),
+        )
+
+    def trace(self, config):
+        return self.graph.trace(**self.shapes(config))
+
+    def compile(self, config, **kwargs):
+        return self.graph.compile(**self.shapes(config), **kwargs)
 
 
 def _numpy_bf16(array):

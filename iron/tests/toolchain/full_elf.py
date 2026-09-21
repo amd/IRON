@@ -79,7 +79,7 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from decode_graph import DecodeGraph
+    from llama_graphs import DecodeGraph
     from iron.common.build import value_symbol
 
     cfg = _Config()

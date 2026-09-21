@@ -33,7 +33,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from decode_graph import DecodeGraph
+    from llama_graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)

@@ -347,17 +347,10 @@ class Tracer:
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
-        overlay_cls = cls._overlay_class
-        dim_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k in cls._dim_fields
-            or (overlay_cls is not None and k in overlay_cls._dim_fields)
-        }
         inferred = cls.infer(
             *[h.shape for h in inputs],
             outputs=[h.shape for h in outputs],
-            **dim_kwargs,
+            **cls.infer_kwargs(kwargs),
         )
         # The class's own translation splits overlay fields from the
         # operator's and fills what it derives (a transfer size, a dtype

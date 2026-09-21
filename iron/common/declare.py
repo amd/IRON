@@ -1648,17 +1648,21 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         return bound
 
     @classmethod
+    def infer_kwargs(cls, kwargs) -> dict[str, Any]:
+        """The part of ``kwargs`` that :meth:`infer` takes: both layers' dimension
+        fields and the flags that select a buffer's shape."""
+        names = set(cls._dim_fields)
+        if cls._overlay_class:
+            names.update(cls._overlay_class._dim_fields)
+        for m in cls._members:
+            if isinstance(m, _Buffer):
+                names.update(d.flag.name for d in m.dims if isinstance(d, _Select))
+        return {k: v for k, v in kwargs.items() if k in names}
+
+    @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> "Operator":
         """Construct an operator (and its overlay) from operand shapes."""
-        values = cls.infer(
-            *operand_shapes,
-            **{
-                k: v
-                for k, v in overrides.items()
-                if k in cls._dim_fields
-                or (cls._overlay_class and k in cls._overlay_class._dim_fields)
-            },
-        )
+        values = cls.infer(*operand_shapes, **cls.infer_kwargs(overrides))
         kwargs = {**overrides, **values}
         return cls(**kwargs)  # classic-construction path splits overlay fields
 

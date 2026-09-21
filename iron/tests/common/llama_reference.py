@@ -28,7 +28,7 @@ APP = Path(__file__).resolve().parents[2] / "applications" / "llama_3.2_1b"
 sys.path.insert(0, str(APP))
 
 import llama_cpu  # noqa: E402
-from decode_graph import DecodeGraph  # noqa: E402
+from llama_graphs import DecodeGraph  # noqa: E402
 from llama_inference_harness import LlamaModelState  # noqa: E402
 
 from iron.tests.common.llama_model import Config as _Config  # noqa: E402

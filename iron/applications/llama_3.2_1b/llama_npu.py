@@ -32,7 +32,7 @@ from iron.operators import (
     SiLU,
     RoPE,
 )
-from decode_graph import DecodeGraph
+from llama_graphs import DecodeGraph
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 max_seq_len = 2048

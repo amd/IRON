@@ -309,7 +309,7 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
     from iron.tests.common.llama_model import Config as _Config
 
     sys.path.insert(0, "iron/applications/llama_3.2_1b")
-    from decode_graph import DecodeGraph
+    from llama_graphs import DecodeGraph
 
     cfg = _Config()
     L = 256
@@ -365,6 +365,60 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
     }
     assert len(q_ovs) == 1
     # Every operator tunes and is compatible on an 8-column device.
+    for op in t.operators:
+        op.tuned(Dev())
+
+
+def test_llama_prefill_traces_over_the_decode_caches():
+    import sys
+
+    from iron.tests.common.llama_model import Config as _Config
+
+    sys.path.insert(0, "iron/applications/llama_3.2_1b")
+    from llama_graphs import DecodeGraph, PrefillGraph
+
+    cfg = _Config()
+    L = cfg.context_length
+    dg = DecodeGraph(cfg, L, num_aie_columns=4)
+    pg = PrefillGraph(cfg, dg, num_of_pipelines=1, tile_m=16)
+    t = pg.trace(cfg)
+    kinds = [type(op).__name__ for op, *_ in t.runlist]
+    per_block = [
+        "WeightedRMSNorm",
+        "GEMM",
+        "GEMM",
+        "GEMM",
+        "RoPE",
+        "RoPE",
+        "StridedCopy",
+        "StridedCopy",
+        "MHA",
+        "GEMM",
+        "ElementwiseAdd",
+        "WeightedRMSNorm",
+        "GEMM",
+        "GEMM",
+        "SiLU",
+        "ElementwiseMul",
+        "GEMM",
+        "ElementwiseAdd",
+    ]
+    tail = ["StridedCopy", "WeightedRMSNorm", "GEMV"]
+    assert kinds == per_block * cfg.n_layers + tail
+    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
+    assert [v.name for v in t.values] == ["last"]
+    # The caches are decode's own states, so the handoff is by name.
+    assert t.pinned["keys_cache_0"] == dg.trace(cfg).pinned["keys_cache_0"]
+    # Every projection reads the (out, in) checkpoint layout through the
+    # column-major flag, which the trace carries into shape inference.
+    gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
+    assert all(op.ov.b_col_maj for op in gemms)
+    K = {op.K for op in gemms}
+    assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
+    # The last-row copy is the one operator bound to the per-call offset.
+    assert [(type(op).__name__, n) for op, n, _ in t.bindings] == [
+        ("StridedCopy", "in_offset")
+    ]
     for op in t.operators:
         op.tuned(Dev())
 
