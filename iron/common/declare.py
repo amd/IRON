@@ -281,7 +281,8 @@ class _Stream(_Member):
     """A stream into or out of the array, in tile units.
 
     ``per=`` names the overlay dimension the stream is replicated over (one
-    fifo per column, say); ``broadcast=True`` is one fifo every worker
+    fifo per column, say), or a tuple of dimensions whose product is the
+    count (columns x channels); ``broadcast=True`` is one fifo every worker
     consumes. ``via=`` pins the shim endpoint(s). ``depth`` is the fifo depth.
     """
 
@@ -426,7 +427,12 @@ class BoundStream:
 
     @property
     def count(self) -> int:
-        return 1 if self.member.per is None else int(self._resolve(self.member.per))
+        if self.member.per is None:
+            return 1
+        n = 1
+        for ref in self.member.per:
+            n *= int(self._resolve(ref))
+        return n
 
     @property
     def _handles(self) -> list[Any]:
@@ -748,11 +754,14 @@ def operator(cls: type) -> type:
                     cls, m, d, "dimension", allow_tunable=isinstance(m, _Stream)
                 )
         if isinstance(m, _Stream) and m.per is not None:
-            m.per = _rewrite_refs((m.per,), cls, fields_by_obj)[0]
-            if isinstance(m.per, DimRef) and m.per.tier is None:
-                raise DeclarationError(
-                    f"{cls.__name__}.{m.name}: per={m.per!r} must be a dim() or tunable() field"
-                )
+            per = m.per if isinstance(m.per, tuple) else (m.per,)
+            per = _rewrite_refs(per, cls, fields_by_obj)
+            for ref in per:
+                if not isinstance(ref, DimRef) or ref.tier is None:
+                    raise DeclarationError(
+                        f"{cls.__name__}.{m.name}: per={ref!r} must be a dim() or tunable() field"
+                    )
+            m.per = per
 
     cls._members = tuple(members)  # type: ignore[attr-defined]
     cls._dim_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "dim")  # type: ignore[attr-defined]
