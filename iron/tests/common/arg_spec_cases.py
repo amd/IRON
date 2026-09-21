@@ -110,6 +110,12 @@ CASES = [
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
+        "rms_norm",
+        "WeightedRMSNorm",
+        # The weight row sits between the input and the output.
+        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+    ),
+    (
         "rope",
         "RoPE",
         [
@@ -196,9 +202,9 @@ CASES = [
         "Transpose",
         [
             dict(M=64, N=64, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
-            # Non-square, to pin that both buffers stay flat (M*N,): a transpose
-            # changes layout, not size. A square-only case cannot tell the two
-            # apart, and would let a swapped (N, M) slip through.
+            # Non-square, to pin that the output carries the transposed shape
+            # (N, M) while the input keeps (M, N). A square-only case cannot
+            # tell the two apart.
             dict(M=64, N=128, num_aie_columns=1, num_channels=1, m=32, n=32, s=1),
         ],
     ),
