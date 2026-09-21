@@ -481,13 +481,13 @@ logging.basicConfig(level=logging.DEBUG)
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
   `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
 - Check `get_kernel_artifacts()` in `op.py` references correct kernel path
-- Ensure kernel function signature matches `Kernel()` declaration in `design.py`
+- Ensure the kernel's C++ signature matches the `target.kernel(...)` declaration in the overlay's `design()`
 
 **Compilation hangs or fails**
 
 - Check MLIR-AIE is installed: `python -c "import aie.iron"`
 - Verify `llvm-aie` is available: `which aie-opt`
-- Look for syntax errors in `design.py` (common: using `range` instead of `range_()`)
+- Look for errors in the overlay's `design()` (common: using `range` instead of `range_()`)
 
 **Test failures with numerical differences**
 
