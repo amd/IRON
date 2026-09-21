@@ -1390,6 +1390,11 @@ class Operator(MLIROperator, Generic[O], metaclass=_OperatorMeta):
         """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""
         ov = self.ov.tuned(dev).copy()
         new = dataclasses.replace(self, ov=ov)
+        # What a graph bound on this instance is part of it, not of a field:
+        # the build works on the copy, and a copy that forgot would silently
+        # drop the per-call value from the sequence.
+        if self.used_values:
+            new.__dict__["_used_values"] = set(self.used_values)
         new.compatible()
         return new
 

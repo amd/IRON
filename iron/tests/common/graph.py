@@ -421,3 +421,23 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
     # Every operator tunes and is compatible on an 8-column device.
     for op in t.operators:
         op.tuned(Dev())
+
+
+def test_a_bound_value_survives_tuning():
+    copy = StridedCopy(
+        input_sizes=(64,),
+        input_strides=(1,),
+        input_offset=0,
+        output_sizes=(64,),
+        output_strides=(1,),
+        output_offset=0,
+        input_buffer_size=64,
+        output_buffer_size=64,
+    )
+
+    @iron.graph
+    def f(x, *, a: Scratchpad[np.int32]):
+        return copy(x, out_offset=a)
+
+    f.trace(x=(64,))
+    assert [v.name for v in copy.tuned(Dev()).values] == ["out_offset"]

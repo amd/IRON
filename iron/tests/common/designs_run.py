@@ -119,3 +119,32 @@ def test_design_and_sequence_run(device, module, cls_name, kwargs):
         if isinstance(e, (Untunable, Incompatible)):
             pytest.skip(f"not for {device.resolve().name}: {e}")
         raise
+
+
+def test_llama_decode_operators_build_with_their_values(device):
+    """Every operator the decode graph traced builds: the batched GEMVs and
+    transpose, the strided copies with a bound offset, the dynamic softmax."""
+    import sys
+
+    from iron.common.declare import Incompatible, Untunable
+    from iron.tests.common.graph import _Config
+
+    if device.resolve().name != "npu2":
+        pytest.skip("the decode graph is tuned for the 8-column array")
+    sys.path.insert(0, "iron/applications/llama_3.2_1b")
+    from decode_graph import DecodeGraph
+
+    cfg = _Config()
+    traced = DecodeGraph(cfg, 256).trace(cfg)
+    bound = {id(op) for op, _, _ in traced.bindings}
+    built = 0
+    for op in traced.operators:
+        build_design(device, Path("/kernels"), op)
+        built += 1
+        if id(op) in bound:
+            # The build works on a tuned copy; the binding must survive it, or
+            # the sequence silently drops the value (build_design would have
+            # raised on an offset with no parameter otherwise).
+            tuned = op.tuned(device)
+            assert list(tuned.values) + list(tuned.ov.values), op
+    assert built == len(traced.operators)
