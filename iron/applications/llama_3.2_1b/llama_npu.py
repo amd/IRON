@@ -772,11 +772,11 @@ def llama_forward_pass_decode(config, state):
 
     context_len = state.num_preceding_tokens + 1
     cache_offset = state.num_preceding_tokens * config.head_dim
-    # As before: the softmax's valid length is written cumulatively. See
-    # OPERATOR_MODEL_PLAN.md §18 before changing this.
-    state.softmax_vector_size_cum = (
-        getattr(state, "softmax_vector_size_cum", 0) + context_len
-    )
+    # The softmax's valid row length is the context length: the kernel masks
+    # every column from there on before the softmax, so the cache's unwritten
+    # tail contributes nothing. It used to be written as a running sum of
+    # context lengths, which iron/tests/common/llama_reference.py shows
+    # drifting from the CPU reference from the second token on (§18).
 
     angles = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
@@ -789,7 +789,7 @@ def llama_forward_pass_decode(config, state):
             x.reshape(1, config.emb_dim),
             angles.reshape(1, config.head_dim),
             cache_offset=cache_offset,
-            vector_size=state.softmax_vector_size_cum,
+            vector_size=context_len,
         )
         .to_torch()
         .view(1, 1, config.vocab_size)

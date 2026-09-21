@@ -941,6 +941,30 @@ The GEMV object gate is satisfied by construction: no kernel source
 differs from the PR 215 tree and GEMV's MLIR is byte-identical, so the
 same aiecc run produces the same object.
 
+### Reference parity
+
+`GraphFunction.reference` runs a graph operator by operator through each
+operator's `reference()` on host tensors. It now models what the device
+would: a state passed as an output is written in place (the strided copy
+scatters into the cache and leaves the rest), and the per-call values a
+site binds reach the reference as numbers (the cache offset moves the
+copy, the vector size masks the softmax as the kernel does). With that,
+`iron/tests/common/llama_reference.py` compares the decode graph's
+reference against `llama_cpu.py`, the reference the application is
+judged against, on one prompt at a scaled configuration: the CPU side
+prefills and decodes with its growing cache, the graph side seeds its
+caches from the CPU prefill and decodes the same tokens. Per token, the
+largest logit difference is about 1% of the logit scale (both sides are
+bf16 with different operation orders) and the argmax agrees at every
+step. So the graph's wiring, the flat cache layout and its seeding, the
+reshapes, the scale, the repeat, the batched transposes and products,
+matches the model; what hardware adds is the kernels' arithmetic.
+
+The same comparison with the softmax's valid length written as the old
+running sum is what settled §18's first candidate (see there). Four
+references were made faithful for it: StridedCopy had none; Softmax
+ignored the vector size; GEMV's and Transpose's did not batch.
+
 The device-free suites were also run against the real package instead of
 the stub. `iron/tests/common` passes, with the design probe skipping
 itself (its fakes would have to stand in for a runtime the package
@@ -994,6 +1018,7 @@ and the decode graph's parity against the token snapshot (§18).
 | full ELF (see above) | `iron/tests/toolchain/full_elf.py` | — | swiglu decode and the scaled decode graph build to fused ELFs; the parameter table names both bound values; the real-size decode graph builds too (13.3 MB) | **needs a device**: loading, `params.write`, numbers |
 | xclbin (see above) | `iron/tests/toolchain/xclbin.py`, `patches/` | — | separate dispatch on both devices, one kernel per design; flm/gemm's two compiles; mm_prebuilt's instructions and image; a plain operator on npu1 | **needs a device**: running the chain |
 | ahead-of-time compile (see above) | `iron/tests/toolchain/compile.py`, `sequence.py` `link()`, `CompiledGraph.callable` | — | `compile(dev, boundaries=, image=)` links both images without a runtime | **needs a device**: the first call |
+| reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the decode graph's reference against `llama_cpu.py`: argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | design probe | `iron/tests/common/designs_run.py`, `cases.py` | every overlay's `design(target)` and every operator's sequence executed for 58 constructions on npu2 and npu1 shapes (116 runs, 2 skipped as incompatible), with upstream stubbed to no-ops: fifo and worker construction, every stream and resident bound, the preamble, the transfers | what it cannot check: that the calls are what upstream accepts |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
@@ -1153,16 +1178,25 @@ probe if revisited: compare NPU versus CPU *logits* for one decode step rather
 than sampled tokens.
 
 Two things the rewrite kept as they were, because they may be the drift
-and a rewrite is not the place to find out:
+and a rewrite is not the place to find out. The first has since been
+settled without a device, by the graph's own reference (§19, "Reference
+parity"), and the application now writes the context length:
 
-- **The softmax's valid length is written cumulatively.** The old decode
+- **The softmax's valid length was written cumulatively.** The old decode
   wrote `softmax_vector_size_cum += context_len` into the parameter each
-  token, so after k tokens the mask length is the sum of the context
-  lengths so far, not the context length; it passes `max_seq_len` within a
-  few tokens. If the scratchpad write is absolute (the overlay's core reads
-  the slot directly), that is the drift. `decode_graph.py` and
-  `llama_forward_pass_decode` reproduce it and say so; the one-line probe
-  is to write `context_len` instead.
+  token, so after k tokens the mask length was the sum of the context
+  lengths so far, not the context length; it passed `max_seq_len` within
+  a few tokens. The scratchpad write is a plain store (`ParameterScratchpad.write`
+  copies the value's bytes into the slot) and the softmax kernel masks
+  `[vector_size, cols)` to the lowest bf16 before the exponentials, so the
+  core reads the sum as a length. Modelled on the CPU with the same
+  semantics, against `llama_cpu.py` on one prompt: the context length
+  agrees at every token (largest logit difference about 1% of the logit
+  scale, the argmax equal), the running sum agrees at the first token only
+  and is off by 35% of the scale at the second and by more than the
+  scale from the third, with a different argmax each time. That is the
+  drift's signature. `llama_forward_pass_decode` now passes
+  `vector_size=context_len`; hardware confirms.
 - **The caches copied after prefill were never pushed.** The old handoff
   wrote the prompt's keys and values into the fused arena's host view and
   then called `scratch_buffer.to("cpu")`; nothing synced that arena to the

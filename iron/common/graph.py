@@ -41,7 +41,7 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
-from .declare import Operator, Overlay, ValueSpec, _Buffer as _Buffer_, _Value
+from .declare import Operator, Overlay, Resident, ValueSpec, _Buffer as _Buffer_, _Value
 
 _STACK: list = []
 
@@ -632,7 +632,15 @@ class GraphFunction:
 
 
 class _ReferenceTracer(Tracer):
-    """Runs each operator's CPU reference on host tensors as the graph is traced."""
+    """Runs each operator's CPU reference on host tensors as the graph is traced.
+
+    Each call becomes ``op.reference(*inputs, *outputs, **values)``: the
+    tensors the graph passed, a state passed as an output as its host tensor
+    (the reference writes it in place, as the device writes the buffer), and
+    the per-call values the site binds, by name, as plain numbers. So a
+    graph's reference models the values too: a cache offset moves the copy,
+    a vector size masks the softmax.
+    """
 
     def operand(self, x):
         return x
@@ -640,17 +648,31 @@ class _ReferenceTracer(Tracer):
     def call(self, target, args, kwargs):
         import torch
 
-        tensors = []
+        tensors, states = [], []
         for a in args:
+            state = None
             if isinstance(a, State):
                 if a.host is None:
                     a.host = torch.zeros(a.shape, dtype=torch.bfloat16)
-                a = a.host
+                state, a = a, a.host
             tensors.append(a)
+            states.append(state)
         kwargs = dict(kwargs)
         if isinstance(target, type):
             cls = target.resolve_class(len(tensors), kwargs)
-            self._split_values(cls, kwargs)  # per-call values are not modelled here
+            values = self._split_values(cls, kwargs)
+            # A value bound on the overlay is a core-read one: a scratchpad on
+            # the dynamic overlay, or the resident a class swaps for it when a
+            # site binds a handle (the softmax's vector_size). Either way the
+            # number goes to the reference, not to construction.
+            overlay_cls = cls._overlay_class
+            if overlay_cls is not None:
+                names = {
+                    m.name
+                    for m in overlay_cls._members
+                    if isinstance(m, (_Value, Resident))
+                }
+                values.update({k: kwargs.pop(k) for k in list(kwargs) if k in names})
             shapes = [Handle(t.shape, _tensor_dtype(t), "", "input") for t in tensors]
             n_in = sum(
                 1
@@ -658,10 +680,18 @@ class _ReferenceTracer(Tracer):
                 if isinstance(m, _Buffer_) and m.direction != "out"
             )
             op = self._construct(cls, shapes[:n_in], shapes[n_in:], kwargs)
-            tensors = tensors[:n_in]
         else:
             op = target
-        return op.reference(*tensors)
+            values = {}
+            n_in = sum(1 for b in op.buffers if b.direction != "out")
+        values = {k: v for k, v in values.items() if v is not None}
+        result = op.reference(*tensors, **values)
+        # A state written in place keeps its host tensor; a result returned
+        # for a given output lands in it.
+        for state, given in zip(states[n_in:], tensors[n_in:]):
+            if state is not None and result is not None and result is not given:
+                given.copy_(result.reshape(given.shape).to(given.dtype))
+        return result
 
 
 def graph(fn=None, *, names_from=None):

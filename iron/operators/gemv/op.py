@@ -428,8 +428,14 @@ class GEMV(Operator[GEMVOverlay]):
 
 
 def reference(A, B):
-    """CPU reference: matrix-vector product ``C = A @ B`` (ground truth)."""
-    return A @ B
+    """CPU reference: matrix-vector product ``C = A @ B`` (ground truth).
+
+    Batched when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``: one
+    product per batch, as the operator's ``num_batches`` runs them.
+    """
+    if A.dim() == 3:
+        return torch.einsum("bmk,bk->bm", A, B.reshape(A.shape[0], A.shape[2]))
+    return A @ B.reshape(A.shape[-1])
 
 
 def generate_golden_reference(

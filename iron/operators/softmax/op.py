@@ -206,13 +206,20 @@ class Softmax(Operator[SoftmaxOverlay]):
             )
         return out
 
-    def reference(self, x):
-        """CPU reference: row-wise softmax over ``cols``.
+    def reference(self, x, vector_size=None):
+        """CPU reference: row-wise softmax over the first ``vector_size`` of ``cols``.
 
-        Note: ignores a per-call ``vector_size`` (if any); the reference
-        always softmaxes over the full ``cols``. For decode-style usage with
-        a masked tail, the trailing positions will not match the NPU output."""
-        return reference(x.reshape(self.rows, self.cols))
+        The kernel fills ``[vector_size, cols)`` with the lowest bf16 before
+        the softmax, so the masked tail comes out as exact zeros. Without a
+        per-call value the resident one applies (``rtp_vector_size``, default
+        the full row).
+        """
+        if vector_size is None:
+            ov = self.ov
+            vector_size = (
+                ov.rtp_vector_size if getattr(ov, "rtp_vector_size", None) else ov.cols
+            )
+        return reference(x.reshape(self.rows, self.cols), int(vector_size))
 
 
 # --------------------------------------------------------------------------
@@ -222,8 +229,15 @@ class Softmax(Operator[SoftmaxOverlay]):
 """Golden reference generator for softmax operator."""
 
 
-def reference(x):
-    """CPU reference: row-wise softmax over the last dim (ground truth)."""
+def reference(x, vector_size=None):
+    """CPU reference: row-wise softmax over the last dim (ground truth).
+
+    ``vector_size`` masks every column from there on to the lowest value of
+    the dtype first, as the device kernel does, so those come out as zeros.
+    """
+    if vector_size is not None and vector_size < x.shape[-1]:
+        x = x.clone()
+        x[..., vector_size:] = torch.finfo(x.dtype).min
     return torch.softmax(x, dim=-1)
 
 

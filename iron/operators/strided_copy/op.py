@@ -181,6 +181,30 @@ class StridedCopy(Operator[StridedCopyOverlay]):
             for c in range(channels)
         ]
 
+    def reference(self, x, y=None, *, in_offset=0, out_offset=0):
+        """CPU reference: gather by the input tap, scatter by the output tap.
+
+        ``y`` is the output buffer to write into, in place, when given (a
+        cache the graph passes as an output keeps everything the copy does
+        not touch); otherwise a zeroed buffer of ``output_buffer_size``. The
+        offsets are the per-call values, in elements.
+        """
+        out = reference(
+            x.reshape(-1),
+            self.input_sizes,
+            self.input_strides,
+            self.input_offset,
+            self.output_buffer_size,
+            self.output_sizes,
+            self.output_strides,
+            self.output_offset,
+            self.ov.num_aie_channels,
+            input_offset_addend=int(in_offset),
+            output_offset_addend=int(out_offset),
+            into=None if y is None else y.reshape(-1),
+        )
+        return out if y is None else y
+
     def design(self, rt):
         ins = self._taps(
             self.x, self.input_sizes, self.input_strides, self.input_offset
@@ -248,12 +272,14 @@ def reference(
     num_aie_channels=1,
     input_offset_addend=0,
     output_offset_addend=0,
+    into=None,
 ):
     """Gather by the input tap, scatter by the output tap, one channel at a time.
 
     The addends are the *_offset_parameter values. They are element counts, not byte
     offsets: the firmware multiplies the scratchpad word by the element size before
-    adding it into the BD address register.
+    adding it into the BD address register. ``into`` is an existing flat output
+    buffer to scatter into in place; without it the output starts zeroed.
     """
     src = _channel_offsets(
         input_sizes, input_strides, input_offset + input_offset_addend, num_aie_channels
@@ -265,7 +291,11 @@ def reference(
         num_aie_channels,
     )
 
-    out = torch.zeros(int(output_buffer_size), dtype=input_flat.dtype)
+    out = (
+        torch.zeros(int(output_buffer_size), dtype=input_flat.dtype)
+        if into is None
+        else into
+    )
     for src_c, dst_c in zip(src, dst):
         if len(src_c) != len(dst_c):
             raise ValueError(

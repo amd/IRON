@@ -240,7 +240,9 @@ class Transpose(Operator[TransposeOverlay]):
                         rt.drain(ov.y[k], (self.y, tap_out), group=tg, wait=True)
 
     def reference(self, x):
-        """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""
+        """CPU reference: 2D transpose of each (M, N) matrix stored row-major."""
+        if self.num_batches > 1:
+            return reference(x.reshape(self.num_batches, self.M, self.N))
         return reference(x.reshape(self.M, self.N))
 
 
@@ -250,8 +252,9 @@ class Transpose(Operator[TransposeOverlay]):
 
 
 def reference(x):
-    """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth)."""
-    return torch.transpose(x, 0, 1)
+    """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth);
+    of each matrix when a batch dimension leads."""
+    return torch.transpose(x, -2, -1)
 
 
 def generate_golden_reference(
