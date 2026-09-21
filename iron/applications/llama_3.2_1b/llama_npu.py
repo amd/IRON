@@ -24,7 +24,6 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext
-from iron.common.sequence import OperatorSequence
 from iron.operators import (
     RMSNorm,
     GEMM,
@@ -33,11 +32,8 @@ from iron.operators import (
     ElementwiseMul,
     SiLU,
     RoPE,
-    StridedCopy,
-    Repeat,
-    Softmax,
-    Transpose,
 )
+from decode_graph import DecodeGraph
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 max_seq_len = 2048
@@ -283,335 +279,17 @@ class AIELlamaOperators:
             .get_callable()
         )
 
-        # Decode operator (everything temporally fused)
+        # Decode: one graph function, compiled to a fused image
         # ##################################################################
 
-        elf_ctx = AIEContext(build_dir="build_elf")
-
-        gemv_attn_query_op = GEMV(
-            M=config.n_heads * config.head_dim,
-            K=config.emb_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=config.head_dim // 2,
-            context=elf_ctx,
+        self.decode.graph = DecodeGraph(config, prompt_len, tensor=_bf16_tensor)
+        self.decode.net = self.decode.graph.compile(
+            config, context=AIEContext(build_dir="build_elf")
         )
 
-        gemv_attn_key_value_op = GEMV(
-            M=config.n_kv_groups * config.head_dim,
-            K=config.emb_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=config.head_dim // 2,
-            context=elf_ctx,
-        )
 
-        # decode processes 1 query token at a time
-        rope_queries_op = RoPE(
-            rows=config.n_heads, cols=config.head_dim, angle_rows=1, context=elf_ctx
-        )
-
-        rope_keys_op = RoPE(
-            rows=config.n_kv_groups,
-            cols=config.head_dim,
-            angle_rows=1,
-            context=elf_ctx,
-        )
-
-        strided_copy_cache_op = StridedCopy(
-            input_sizes=(config.n_kv_groups, config.head_dim),
-            input_strides=(config.head_dim, 1),
-            input_offset=0,
-            output_sizes=(1, config.n_kv_groups, config.head_dim),
-            output_strides=(0, prompt_len * config.head_dim, 1),
-            output_offset=0,  # base; runtime addend supplied via cache_offset parameter
-            input_buffer_size=1 * config.n_kv_groups * config.head_dim,
-            output_buffer_size=config.n_kv_groups * prompt_len * config.head_dim,
-            num_aie_channels=1,
-            output_offset_parameter="cache_offset",
-            context=elf_ctx,
-        )
-
-        # For decode: per head, (1, head_dim) @ (head_dim, max_context_len)
-        # Use GEMV: (max_context_len, head_dim) @ (head_dim,) = (max_context_len,)
-        gemv_attn_scores_op = GEMV(
-            M=prompt_len,  # max possible context length
-            K=config.head_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=prompt_len // 8,
-            num_batches=config.n_heads,
-            context=elf_ctx,
-        )
-
-        attn_scale_op = ElementwiseMul(
-            size=config.n_heads * prompt_len,
-            tile_size=prompt_len // 8,
-            num_aie_columns=8,
-            context=elf_ctx,
-        )
-
-        # Softmax operators for attention weights
-        softmax_op = Softmax(
-            rows=config.n_heads,
-            cols=prompt_len,
-            num_aie_columns=1,
-            num_channels=1,
-            rtp_vector_size=prompt_len,  # Compile with max size (used as fallback / sanity)
-            vector_size_parameter="softmax_vector_size",
-            context=elf_ctx,
-        )
-
-        # Fused transpose for all attention heads (decode)
-        transpose_values_op = Transpose(
-            M=prompt_len,
-            N=config.head_dim,
-            num_aie_columns=2,
-            num_channels=1,
-            m=256,
-            n=32,
-            s=8,
-            context=elf_ctx,
-        )
-
-        # GEMV for attention context: (head_dim, max_context_len) @ (max_context_len,) = (head_dim,) per head
-        gemv_attn_context_op = GEMV(
-            M=config.head_dim,
-            K=prompt_len,  # max possible context length
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=4,
-            num_batches=config.n_heads,
-            context=elf_ctx,
-        )
-
-        gemv_attn_output_op = GEMV(
-            M=config.emb_dim,
-            K=config.n_heads * config.head_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=config.emb_dim // 8,
-            context=elf_ctx,
-        )
-
-        rms_norm_op = RMSNorm(
-            size=config.emb_dim,
-            num_aie_columns=1,
-            num_channels=1,
-            tile_size=config.emb_dim,
-            weighted=True,
-            context=elf_ctx,
-        )
-
-        gemv_ffn_up_gate_op = GEMV(
-            M=config.hidden_dim,
-            K=config.emb_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=config.hidden_dim // 8,
-            context=elf_ctx,
-        )
-
-        gemv_ffn_down_op = GEMV(
-            M=config.emb_dim,
-            K=config.hidden_dim,
-            num_aie_columns=8,
-            tile_size_input=1,
-            tile_size_output=config.emb_dim // 8,
-            context=elf_ctx,
-        )
-
-        silu_ffn_op = SiLU(
-            size=config.hidden_dim,
-            tile_size=config.hidden_dim // 8,
-            num_aie_columns=8,
-            context=elf_ctx,
-        )
-
-        eltwise_mul_ffn_op = ElementwiseMul(
-            size=config.hidden_dim,
-            tile_size=config.hidden_dim // 8,
-            num_aie_columns=8,
-            context=elf_ctx,
-        )
-
-        residual_add_op = ElementwiseAdd(
-            size=config.emb_dim, tile_size=config.emb_dim // 8, context=elf_ctx
-        )
-
-        repeat_interleave_op = Repeat(
-            rows=config.n_kv_groups,
-            cols=prompt_len * config.head_dim,  # Max context length
-            repeat=config.n_heads // config.n_kv_groups,
-            transfer_size=config.head_dim,
-            context=elf_ctx,
-        )
-
-        gemv_out_head_op = GEMV(
-            M=config.vocab_size,
-            K=config.emb_dim,
-            num_aie_columns=8,
-            tile_size_input=4,
-            tile_size_output=32,
-            context=self.context,
-        )
-
-        # Create fused operator
-
-        cache_buffer_size = (
-            config.n_kv_groups * prompt_len * config.head_dim * 2
-        )  # * 2 for bfloat16
-        values_per_head_buffer_size = (
-            prompt_len * config.head_dim * 2
-        )  # * 2 for bfloat16
-        values_buffer_size = config.n_heads * values_per_head_buffer_size
-
-        runlist = []
-        for layer_idx in range(config.n_layers):
-            # <transformer block>
-            runlist.extend(
-                [
-                    (
-                        rms_norm_op,
-                        "x",
-                        f"layers.{layer_idx}.norm1.weight",
-                        "x_norm",
-                    )  # Step 1: RMS normalization
-                ]
-                + [
-                    # <grouped query attention>
-                    (
-                        gemv_attn_query_op,
-                        f"layers.{layer_idx}.attn.q.weight",
-                        "x_norm",
-                        "queries",
-                    ),
-                    (
-                        gemv_attn_key_value_op,
-                        f"layers.{layer_idx}.attn.k.weight",
-                        "x_norm",
-                        "keys",
-                    ),
-                    (
-                        gemv_attn_key_value_op,
-                        f"layers.{layer_idx}.attn.v.weight",
-                        "x_norm",
-                        "values",
-                    ),
-                    (rope_queries_op, "queries", "rope_angles", "queries"),
-                    (rope_keys_op, "keys", "rope_angles", "keys"),
-                    (strided_copy_cache_op, "keys", f"keys_cache_{layer_idx}"),
-                    (strided_copy_cache_op, "values", f"values_cache_{layer_idx}"),
-                    (
-                        repeat_interleave_op,
-                        f"keys_cache_{layer_idx}",
-                        "attn_scores_keys",
-                    ),
-                    (
-                        repeat_interleave_op,
-                        f"values_cache_{layer_idx}",
-                        "attn_scores_values",
-                    ),
-                    (gemv_attn_scores_op, "attn_scores_keys", "queries", "attn_scores"),
-                    (attn_scale_op, "attn_scores", "attn_scale_factor", "attn_scores"),
-                    (softmax_op, "attn_scores", "attn_weights"),
-                ]
-                + [
-                    (
-                        transpose_values_op,
-                        f"attn_scores_values[{h * values_per_head_buffer_size}:{(h + 1) * values_per_head_buffer_size}]",
-                        f"attn_scores_values_transposed[{h * values_per_head_buffer_size}:{(h + 1) * values_per_head_buffer_size}]",
-                    )
-                    for h in range(config.n_heads)
-                ]
-                + [
-                    (
-                        gemv_attn_context_op,
-                        "attn_scores_values_transposed",
-                        "attn_weights",
-                        "attn_context",
-                    ),
-                    (
-                        gemv_attn_output_op,
-                        f"layers.{layer_idx}.attn.o.weight",
-                        "attn_context",
-                        "attn_output",
-                    ),
-                    # </grouped query attention>
-                ]
-                + [
-                    (residual_add_op, "x", "attn_output", "x"),
-                    (rms_norm_op, "x", f"layers.{layer_idx}.norm2.weight", "x_norm"),
-                    (
-                        gemv_ffn_up_gate_op,
-                        f"layers.{layer_idx}.ffn.gate.weight",
-                        "x_norm",
-                        "ffn_gate",
-                    ),
-                    (
-                        gemv_ffn_up_gate_op,
-                        f"layers.{layer_idx}.ffn.up.weight",
-                        "x_norm",
-                        "ffn_up",
-                    ),
-                    (silu_ffn_op, "ffn_gate", "ffn_gate"),
-                    (eltwise_mul_ffn_op, "ffn_gate", "ffn_up", "ffn_hidden"),
-                    (
-                        gemv_ffn_down_op,
-                        f"layers.{layer_idx}.ffn.down.weight",
-                        "ffn_hidden",
-                        "ffn_output",
-                    ),
-                    (residual_add_op, "x", "ffn_output", "x"),
-                ]
-            )
-            # </transformer block>
-        runlist += [
-            (rms_norm_op, "x", "norm.weight", "x"),
-            (gemv_out_head_op, "out_head.weight", "x", "logits"),
-        ]
-
-        self.decode.fused_op = OperatorSequence(
-            "fused_op",
-            runlist,
-            input_args=[  # arguments that change between invocations of the fused kernel and therefore need to be synced on each token
-                "x",
-                "rope_angles",
-            ],
-            output_args=["logits"],
-            buffer_sizes={
-                **{
-                    f"keys_cache_{layer_idx}": cache_buffer_size
-                    for layer_idx in range(config.n_layers)
-                },
-                **{
-                    f"values_cache_{layer_idx}": cache_buffer_size
-                    for layer_idx in range(config.n_layers)
-                },
-                **{
-                    "attn_scores_values": values_buffer_size,
-                    "attn_scores_values_transposed": values_buffer_size,
-                },
-            },
-            context=elf_ctx,
-        ).compile()
-
-        self.decode.fused = self.decode.fused_op.get_callable()
-
-        # Operator static buffers (weights, LUTs)
-
-        # Decode's GEMV reads each projection exactly as the checkpoint ships
-        # it, so there is no layout to choose here and the parameter name is
-        # already the buffer name. flatten() adapts to the buffer's shape, not
-        # the weight's: get_buffer() hands back a 1-D view of the arena. A name
-        # only one side knows raises here rather than leaving a buffer zeroed.
-        for name, param in config.model.named_parameters():
-            self.decode.fused.get_buffer(name).torch_view()[:] = param.flatten()
-        scale_factor = 1.0 / math.sqrt(config.head_dim)
-        self.decode.fused.get_buffer("attn_scale_factor").fill_(scale_factor)
-        self.decode.fused.input_buffer.to("npu")
-        self.decode.fused.scratch_buffer.to("npu")
-        self.decode.fused.output_buffer.to("npu")
+def _bf16_tensor(array):
+    return torch.from_numpy(np.ascontiguousarray(array)).to(torch.bfloat16)
 
 
 # Allocate buffers shared with NPU
@@ -1094,39 +772,28 @@ def llama_forward_pass_decode(config, state):
 
     context_len = state.num_preceding_tokens + 1
     cache_offset = state.num_preceding_tokens * config.head_dim
+    # As before: the softmax's valid length is written cumulatively. See
+    # OPERATOR_MODEL_PLAN.md §18 before changing this.
     state.softmax_vector_size_cum = (
         getattr(state, "softmax_vector_size_cum", 0) + context_len
     )
 
-    params = aie_ops.decode.fused.params
-    params.write("cache_offset", np.int32(cache_offset))
-    params.write("softmax_vector_size", np.int32(state.softmax_vector_size_cum))
-    params.sync()
-
-    # Prefill RoPE angle look-up tables
-    angles_slice = config.angles[
+    angles = config.angles[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
-    aie_ops.decode.fused.get_buffer("rope_angles").torch_view()[
-        :
-    ] = angles_slice.flatten()
-
     # Token embedding (on CPU)
-    tok_emb_weight = config.model.out_head.weight
-    x = torch.nn.functional.embedding(state.token_ids, tok_emb_weight)
-    aie_ops.decode.fused.get_buffer("x").torch_view().view(-1, config.emb_dim)[
-        :seq_len, :
-    ] = x
+    x = torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
 
-    # Fused NPU operator for all of decode (16 transformer blocks + final norm + final linear layer)
-    aie_ops.decode.fused.input_buffer.to("cpu")
-    aie_ops.decode.fused()  # SequenceFullELFCallable.__call__() syncs output_buffer to cpu
     logits = (
-        aie_ops.decode.fused.get_buffer("logits")
+        aie_ops.decode.net(
+            x.reshape(1, config.emb_dim),
+            angles.reshape(1, config.head_dim),
+            cache_offset=cache_offset,
+            vector_size=state.softmax_vector_size_cum,
+        )
         .to_torch()
         .view(1, 1, config.vocab_size)
     )
-
     return logits, state
 
 
@@ -1140,15 +807,15 @@ def llama_forward_pass(config, state):
     if seq_len > 1:
         ret = llama_forward_pass_prefill(config, state)
         state.num_preceding_tokens = state.token_ids.shape[1]
-        # Pass KV cache data onto fused decode operator
+        # Seed the decode graph's state with the prompt's keys and values.
+        net, graph = aie_ops.decode.net, aie_ops.decode.graph
         for layer_idx in range(config.n_layers):
-            aie_ops.decode.fused.get_buffer(f"keys_cache_{layer_idx}").torch_view()[
-                :
-            ] = (aie_buffers.keys_cache[layer_idx].to_torch().flatten())
-            aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[
-                :
-            ] = (aie_buffers.values_cache[layer_idx].to_torch().flatten())
-        aie_ops.decode.fused.scratch_buffer.to("cpu")
+            net.write(
+                graph.keys[layer_idx], aie_buffers.keys_cache[layer_idx].to_torch()
+            )
+            net.write(
+                graph.values[layer_idx], aie_buffers.values_cache[layer_idx].to_torch()
+            )
         return ret
     else:
         ret = llama_forward_pass_decode(config, state)

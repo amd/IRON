@@ -170,14 +170,23 @@ class Softmax(Operator[SoftmaxOverlay]):
 
     @classmethod
     def _classic(cls, kwargs):
-        # The legacy spelling picks the dynamic overlay by naming its symbol.
+        # A graph binding a per-call vector_size picks the dynamic overlay; the
+        # legacy spelling does the same by naming its symbol.
         symbol = kwargs.pop("vector_size_parameter", None)
+        if kwargs.get("vector_size") is not None and not isinstance(
+            kwargs["vector_size"], int
+        ):
+            kwargs.pop("vector_size")
+            symbol = symbol or ""
         if symbol is not None:
             names = {
                 f.name for f in SoftmaxOverlay.__dataclass_fields__.values() if f.init
             }
             ov_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in names}
-            return DynamicSoftmaxOverlay(vector_size_symbol=symbol, **ov_kwargs), kwargs
+            return (
+                DynamicSoftmaxOverlay(vector_size_symbol=symbol or None, **ov_kwargs),
+                kwargs,
+            )
         return super()._classic(kwargs)
 
     @property

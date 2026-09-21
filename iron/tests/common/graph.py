@@ -296,3 +296,128 @@ def test_swiglu_prefill_traces_over_a_sequence(monkeypatch):
     assert gemms[0].ov is gemms[1].ov
     silu = next(s.op for s in t.steps if type(s.op) is SiLU)
     assert silu.size == 256 * H
+
+
+# --------------------------------------------------------------------------
+# llama decode, traced at a scaled-down configuration
+# --------------------------------------------------------------------------
+
+
+class _Param:
+    def __init__(self, shape):
+        self.weight = z(*shape)
+
+
+class _Block:
+    def __init__(self, E, H, G, D, F):
+        self.norm1, self.norm2 = _Param((E,)), _Param((E,))
+        self.attn = type("attn", (), {})()
+        self.attn.q, self.attn.k = _Param((H * D, E)), _Param((G * D, E))
+        self.attn.v, self.attn.o = _Param((G * D, E)), _Param((E, H * D))
+        self.ffn = type("ffn", (), {})()
+        self.ffn.gate, self.ffn.up = _Param((F, E)), _Param((F, E))
+        self.ffn.down = _Param((E, F))
+
+
+class _Model:
+    def __init__(self, cfg):
+        self.layers = [
+            _Block(
+                cfg.emb_dim, cfg.n_heads, cfg.n_kv_groups, cfg.head_dim, cfg.hidden_dim
+            )
+            for _ in range(cfg.n_layers)
+        ]
+        self.norm = _Param((cfg.emb_dim,))
+        self.out_head = _Param((cfg.vocab_size, cfg.emb_dim))
+
+    def named_parameters(self):
+        for i, blk in enumerate(self.layers):
+            for path in (
+                "norm1",
+                "norm2",
+                "attn.q",
+                "attn.k",
+                "attn.v",
+                "attn.o",
+                "ffn.gate",
+                "ffn.up",
+                "ffn.down",
+            ):
+                obj = blk
+                for part in path.split("."):
+                    obj = getattr(obj, part)
+                yield f"layers.{i}.{path}.weight", obj.weight
+        yield "norm.weight", self.norm.weight
+        yield "out_head.weight", self.out_head.weight
+
+
+class _Config:
+    n_layers, n_heads, n_kv_groups, head_dim = 2, 16, 4, 64
+    emb_dim, hidden_dim, vocab_size = 256, 512, 1024
+
+    def __init__(self):
+        self.model = _Model(self)
+
+
+def test_llama_decode_traces_and_tunes(monkeypatch):
+    import sys
+
+    sys.path.insert(0, "iron/applications/llama_3.2_1b")
+    from decode_graph import DecodeGraph
+
+    cfg = _Config()
+    L = 256
+    dg = DecodeGraph(cfg, L)
+    t = dg.trace(cfg)
+    kinds = [type(op).__name__ for op, *_ in t.runlist]
+    per_block = [
+        "WeightedRMSNorm",
+        "GEMV",
+        "GEMV",
+        "GEMV",
+        "RoPE",
+        "RoPE",
+        "StridedCopy",
+        "StridedCopy",
+        "Repeat",
+        "Repeat",
+        "GEMV",
+        "ElementwiseMul",
+        "Softmax",
+        "Transpose",
+        "GEMV",
+        "GEMV",
+        "ElementwiseAdd",
+        "WeightedRMSNorm",
+        "GEMV",
+        "GEMV",
+        "SiLU",
+        "ElementwiseMul",
+        "GEMV",
+        "ElementwiseAdd",
+    ]
+    assert kinds == per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
+    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
+    assert [v.name for v in t.values] == ["cache_offset", "vector_size"]
+    # The weights are named from the model; the caches are pinned state.
+    assert "layers.1.attn.q.weight" in t.pinned and "keys_cache_0" in t.pinned
+    assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
+    # One strided copy instance per layer is bound to cache_offset on both of
+    # its call sites; every softmax binds vector_size on its overlay.
+    copies = [(op, n) for op, n, v in t.bindings if v.name == "cache_offset"]
+    assert len(copies) == cfg.n_layers * 2 and all(n == "out_offset" for _, n in copies)
+    softmaxes = [op for op, n, v in t.bindings if v.name == "vector_size"]
+    assert len(softmaxes) == cfg.n_layers
+    assert type(softmaxes[0].ov).__name__ == "DynamicSoftmaxOverlay"
+    # The same array serves every layer's like projections.
+    q_ovs = {
+        id(s.op.ov)
+        for s in t.steps
+        if type(s.op) is GEMV
+        and s.op.M == cfg.n_heads * cfg.head_dim
+        and s.op.ov.K == cfg.emb_dim
+    }
+    assert len(q_ovs) == 1
+    # Every operator tunes and is compatible on an 8-column device.
+    for op in t.operators:
+        op.tuned(Dev())

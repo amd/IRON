@@ -859,6 +859,7 @@ pinned mlir-aie wheel, Peano and a device, where nothing here has run yet.
 | swiglu_prefill_stream (§9 `from_spec`) | `iron/common/declare.py`, `iron/operators/swiglu_prefill_stream/op.py` | a class from literal shapes, params, key and a custom artifact; the stream group built on it (import only: stream-dse is absent here) | **needs a run** with stream-dse |
 | step 4 deletions | `iron/common/base.py`, `compilation/base.py`, `build.py`, tests | `bind()`, `bind_from`, the `arg_spec` fallback, `same_shape_*`, the snapshot and its cases, the binding tests: gone; GEMM's layout flags and MHA's padding re-pinned on the declared classes | **needs a run**: `build_design` now receives `dev` and `kernels_dir` as explicit generator kwargs (they reach the cache key by identity and path) |
 | swiglu composites as graph functions (§14 step 3, last) | `swiglu_decode/op.py`, `swiglu_prefill/op.py` | traced: five steps, gate and up on one array with one design key, extents from the input shape; the no-padding rule at trace time | **needs a run**: the two hardware tests were rewritten onto `compile()`/call and read intermediates through `net.buffer(handle)` |
+| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3.2_1b/decode_graph.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | **needs a run**: the whole point; parity against the token snapshot (§18) is the gate |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | **needs a run**: `CompiledGraph` builds through `OperatorSequence` and writes values through `params`; untested against a toolchain |
 | mm_prebuilt, foreign overlays (§9) | `iron/common/foreign.py`, `iron/operators/flm/mm_prebuilt/op.py` | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
@@ -928,7 +929,19 @@ Two more graph rules came with them: a flat-declared output (an
 elementwise operator) keeps the shape of the operand it is the size of,
 and `h.reshape(...)` is a free view. `Operator.design_key()` is now the
 class, the overlay's key and every compared field, so a sequence builds
-two identical projections once (`share_designs`). The snapshot
+two identical projections once (`share_designs`).
+
+Step 7 is written: `DecodeGraph` (in the application, importable without
+a device) closes over the module tree, keeps the per-layer caches as
+`iron.state((n_kv_groups, max_seq_len * head_dim))`, and takes
+`cache_offset` and `vector_size` as `Scratchpad[np.int32]` parameters; the
+per-head transposes are one batched `Transpose`, and each value binds to
+the operator's own member or, for the softmax, to the dynamic overlay's
+core-read member (the tracer looks on both). `llama_npu.py` compiles it
+against `build_elf`, calls it per token, and seeds the caches after
+prefill through `CompiledGraph.write(state, tensor)`, which also pushes
+the bytes to the device. Prefill is unchanged (per-operator xclbins,
+O11). The snapshot
 entries for Softmax and Transpose were re-pinned to their 2-D shapes and
 WeightedRMSNorm added to the case matrix. Every operator now serves
 `get_arg_spec()` from its declared buffers.
@@ -971,3 +984,21 @@ Decision: snapshot the current token stream before step 7 and make parity
 against that snapshot the gate, not parity against the CPU. Cheapest real
 probe if revisited: compare NPU versus CPU *logits* for one decode step rather
 than sampled tokens.
+
+Two things the rewrite kept as they were, because they may be the drift
+and a rewrite is not the place to find out:
+
+- **The softmax's valid length is written cumulatively.** The old decode
+  wrote `softmax_vector_size_cum += context_len` into the parameter each
+  token, so after k tokens the mask length is the sum of the context
+  lengths so far, not the context length; it passes `max_seq_len` within a
+  few tokens. If the scratchpad write is absolute (the overlay's core reads
+  the slot directly), that is the drift. `decode_graph.py` and
+  `llama_forward_pass_decode` reproduce it and say so; the one-line probe
+  is to write `context_len` instead.
+- **The caches copied after prefill were never pushed.** The old handoff
+  wrote the prompt's keys and values into the fused arena's host view and
+  then called `scratch_buffer.to("cpu")`; nothing synced that arena to the
+  device afterwards, so whether the first decode token saw the prompt
+  depended on the coherence semantics of that call. The rewrite seeds the
+  state through `CompiledGraph.write`, which pushes the buffer.

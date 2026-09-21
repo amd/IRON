@@ -297,25 +297,35 @@ class Tracer:
         """
         operands = [self.operand(a) for a in args]
         kwargs = dict(kwargs)
+        # A keyword whose value is a per-call handle binds a value member: the
+        # operator's own, or one on the overlay a class picks for it (the
+        # dynamic softmax), which the class's translation sees first.
+        values = {
+            k: kwargs.pop(k) for k in list(kwargs) if isinstance(kwargs[k], Value)
+        }
         if isinstance(target, type):
             cls = target.resolve_class(len(operands), kwargs)
-            value_kwargs = self._split_values(cls, kwargs)
+            own = self._split_values(cls, values)
             n_in = sum(
                 1
                 for m in cls._members
                 if isinstance(m, _Buffer_) and m.direction != "out"
             )
-            op = self._construct(cls, operands[:n_in], operands[n_in:], kwargs)
+            op = self._construct(
+                cls, operands[:n_in], operands[n_in:], {**kwargs, **values}
+            )
         else:
             op = target
-            value_kwargs = self._split_values(type(op), kwargs)
-            if kwargs:
+            own = self._split_values(type(op), values)
+            if kwargs or values:
                 raise TypeError(
                     f"{type(op).__name__} instance called with unexpected keyword "
-                    f"arguments {sorted(kwargs)}"
+                    f"arguments {sorted(kwargs) + sorted(values)}"
                 )
-        for name, value in value_kwargs.items():
+        for name, value in own.items():
             self._bind(op, name, value)
+        for name, value in values.items():
+            self._bind_overlay(op, name, value)
         return self._record(op, operands)
 
     @staticmethod
@@ -359,6 +369,23 @@ class Tracer:
             )
         if name not in bound:
             op.use_value(name)
+            bound[name] = value
+            self.bindings.append((op, name, value))
+
+    def _bind_overlay(self, op, name, value) -> None:
+        """Bind a core-read value the operator's overlay declares."""
+        if name not in {v.name for v in op.ov.values}:
+            raise TypeError(
+                f"{type(op).__name__} has no per-call value {name!r}, on itself or "
+                f"on {type(op.ov).__name__}"
+            )
+        bound = self._bound.setdefault(id(op), {})
+        if name in bound and bound[name] is not value:
+            raise ValueError(
+                f"{type(op).__name__}.{name} is bound to {bound[name]!r} at an "
+                f"earlier call site and to {value!r} here"
+            )
+        if name not in bound:
             bound[name] = value
             self.bindings.append((op, name, value))
 
@@ -625,10 +652,12 @@ class CompiledGraph:
                     f"{value!r}: DispatchTime values arrive with the packaging "
                     f"step (OPERATOR_MODEL_PLAN.md §8)"
                 )
-        self.symbols = [
-            (value.name, value_symbol(op, getattr(op, name)), value.dtype)
-            for op, name, value in traced.bindings
-        ]
+        self.symbols = []
+        for op, name, value in traced.bindings:
+            bound = getattr(op, name, None)
+            if bound is None or not hasattr(bound, "kind"):
+                bound = next(v for v in op.ov.values if v.name == name)
+            self.symbols.append((value.name, value_symbol(op, bound), value.dtype))
         self.sequence = OperatorSequence(
             traced.name,
             traced.runlist,
@@ -656,6 +685,24 @@ class CompiledGraph:
         else:
             raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
         return self.callable.get_buffer(name)
+
+    def write(self, x, tensor) -> None:
+        """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
+        buf = self.buffer(x)
+        view = buf.torch_view()
+        import torch
+
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.as_tensor(np.asarray(tensor))
+        view[:] = tensor.reshape(-1).to(view.dtype)
+        buf.to("npu")
+
+    def read(self, x):
+        """A state's or weight's current contents, as a host tensor of its shape."""
+        buf = self.buffer(x)
+        buf.to("cpu")
+        shape = self.traced.states[id(x)].shape if isinstance(x, State) else x.shape
+        return buf.to_torch().reshape(tuple(shape))
 
     def _copy_in(self, name, tensor) -> None:
         import torch
