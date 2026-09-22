@@ -82,12 +82,15 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
     (design,) = artifacts.designs
     assert design.name == op.config_name
     assert design.entry.directory != artifacts.entry.directory
-    # The shape's own compile is instructions-only: no second xclbin, no
-    # second kernel build.
-    assert not (tmp_path / f"{op.name}.xclbin").exists()
-    assert sorted(p.name for p in tmp_path.glob("*.xclbin")) == [
-        f"{op.config_name}.xclbin"
-    ]
+    # The shape's own compile is instructions-only: its entry holds the
+    # stream and nothing else -- no second xclbin, no second kernel build.
+    own = artifacts.entry
+    assert own.xclbin is None and own.elf is None and own.objects == ()
+    assert own.insts is not None
+    # The configuration's entry is where the image and the kernels are.
+    assert design.entry.xclbin == artifacts.image and design.entry.objects
+    # Nothing is written to the build directory: the cache owns the paths.
+    assert list(tmp_path.glob("*.xclbin")) == []
 
 
 def _shipped(**kwargs):

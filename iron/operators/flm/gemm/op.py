@@ -1006,10 +1006,10 @@ class GEMM(Operator[FLMGEMMOverlay]):
                     0,
                     self.name,
                     self.config_name,
-                    tuple(b.name for b in self.buffers),
+                    tuple(b.name for b in self._members_io()),
                 ),
             ),
-            buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(self.buffers)},
+            buffers=self.buffer_map(),
         )
 
     # -- host-side helpers -------------------------------------------------------

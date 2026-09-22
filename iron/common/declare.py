@@ -1759,6 +1759,21 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         """The record of what :meth:`compile` produced (None before)."""
         return getattr(self, "_artifacts", None)
 
+    def _members_io(self):
+        """The declared buffers, without resolving a shape: their names alone."""
+        return [m for m in self._members if isinstance(m, _Buffer)]
+
+    def buffer_map(self) -> dict[str, tuple[str, int, int]]:
+        """Each buffer as ``(arena, position, nbytes)``, for an image's record.
+
+        From the tuned operator: a shape may follow a tunable the device
+        fills (flm/gemm's B layout), and the built image's buffers are the
+        tuned ones. A standalone operator has no arena plan -- its buffers
+        are the kernel's positional arguments.
+        """
+        tuned = self.ov._tuned and self or self.tuned(self.dev)
+        return {b.name: ("arg", i, b.nbytes) for i, b in enumerate(tuned.buffers)}
+
     def _build(self):
         """Compile to an xclbin and an instruction stream, or, on a foreign
         overlay, to the stream alone against the downloaded image."""
