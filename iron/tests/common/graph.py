@@ -22,6 +22,7 @@ from iron.operators.gemv.op import GEMV, GEMVOverlay
 from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.strided_copy import StridedCopy
+import aie.utils as aie_utils
 
 E, H = 2048, 8192
 
@@ -30,23 +31,22 @@ def z(*shape, dtype=bfloat16):
     return np.zeros(shape, dtype=dtype)
 
 
-class Dev:
-    cols = 8
-
-    def resolve(self):
-        class R:
-            name = "npu2"
-
-        return R()
-
-
 @pytest.fixture(autouse=True)
-def shim_limit(monkeypatch):
-    import iron.common.elementwise as bases
-    import iron.operators.rms_norm as rms
+def device():
+    """Trace against a real eight-column NPU2.
 
-    monkeypatch.setattr(bases, "get_shim_dma_limit", lambda dev: 16)
-    monkeypatch.setattr(rms, "get_shim_dma_limit", lambda dev: 16)
+    The shim budget these graphs size themselves from used to be faked at 16
+    here, which is what eight columns of NPU2 actually offers; binding the
+    device says the same thing without the stub, and an overlay that reads
+    ``dev.cols`` gets an answer.
+    """
+    import aie.utils as aie_utils
+    from aie.iron.device import from_name
+
+    previous = aie_utils.get_current_device()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    yield
+    aie_utils.set_current_device(previous)
 
 
 def _ffn():
@@ -137,14 +137,14 @@ def test_every_traced_operator_tunes_from_the_device_alone():
     ffn, _ = _ffn()
     t = ffn.trace(x=(1, E))
     for op in t.operators:
-        op.tuned(Dev())  # every default fills; every extent is compatible
-    silu = next(s.op for s in t.steps if type(s.op) is SiLU).tuned(Dev())
+        op.tuned(aie_utils.get_current_device())  # every default fills; every extent is compatible
+    silu = next(s.op for s in t.steps if type(s.op) is SiLU).tuned(aie_utils.get_current_device())
     assert (silu.ov.num_aie_columns, silu.ov.num_channels, silu.ov.tile_size) == (
         8,
         1,
         256,
     )
-    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).tuned(Dev())
+    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).tuned(aie_utils.get_current_device())
     assert norm.ov.num_aie_columns == 1  # one row: one core
 
 
@@ -262,10 +262,9 @@ def test_returning_an_input_or_a_slice_is_refused():
 # --------------------------------------------------------------------------
 
 
-def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up(monkeypatch):
+def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
     import iron.operators.swiglu_decode.op as m
 
-    monkeypatch.setattr(m, "get_shim_dma_limit", lambda dev: 16)
     ffn = m.swiglu_decode(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
     assert [type(op).__name__ for op, *_ in t.runlist] == [
@@ -284,11 +283,10 @@ def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up(monkeypatc
         m.swiglu_decode(z(H, E), z(H, E), z(H, E))
 
 
-def test_swiglu_prefill_traces_over_a_sequence(monkeypatch):
+def test_swiglu_prefill_traces_over_a_sequence():
     import iron.operators.swiglu_prefill.op as m
     from iron.operators.gemm.op import GEMM
 
-    monkeypatch.setattr(m, "get_shim_dma_limit", lambda dev: 16)
     ffn = m.swiglu_prefill(z(E, H), z(E, H), z(H, E))
     t = ffn.trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
@@ -363,7 +361,7 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
     assert len(q_ovs) == 1
     # Every operator tunes and is compatible on an 8-column device.
     for op in t.operators:
-        op.tuned(Dev())
+        op.tuned(aie_utils.get_current_device())
 
 
 def test_llama_prefill_traces_over_the_decode_caches():
@@ -414,7 +412,7 @@ def test_llama_prefill_traces_over_the_decode_caches():
         ("StridedCopy", "in_offset")
     ]
     for op in t.operators:
-        op.tuned(Dev())
+        op.tuned(aie_utils.get_current_device())
 
 
 def test_a_bound_value_survives_tuning():
@@ -434,4 +432,4 @@ def test_a_bound_value_survives_tuning():
         return copy(x, out_offset=a)
 
     f.trace(x=(64,))
-    assert [v.name for v in copy.tuned(Dev()).values] == ["out_offset"]
+    assert [v.name for v in copy.tuned(aie_utils.get_current_device()).values] == ["out_offset"]

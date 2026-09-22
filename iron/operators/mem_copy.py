@@ -36,6 +36,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
+from iron.common.utils import bank_elements
 from iron.common.tiling import Access
 
 # The maximum value the 4th dimension of DMA BD can be set
@@ -70,7 +71,7 @@ class MemCopyOverlay(Overlay):
         if cores is None:
             if dev is None:
                 raise Untunable("num_cores defaults from the device; none given")
-            cores = dev.cols * self.num_channels
+            cores = self.shim_columns(dev, self.num_channels) * self.num_channels
         tile_size = 1024 if self.tile_size is None else self.tile_size
         return dataclasses.replace(
             self, num_cores=cores, tile_size=tile_size, line_size=min(tile_size, 8192)
@@ -82,7 +83,9 @@ class MemCopyOverlay(Overlay):
 
         line_type = self.s.tile
         line_size, num_cores = self.line_size, self.num_cores
-        fifodepth = 1 if line_size > 4096 else 2
+        # A line spanning more than one bank cannot be double-buffered in
+        # what is left of local memory.
+        fifodepth = 1 if line_size > bank_elements(self.s.dtype) else 2
 
         of_ins = [
             ObjectFifo(line_type, name=f"in{i}", depth=fifodepth)

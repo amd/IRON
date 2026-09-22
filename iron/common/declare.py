@@ -58,7 +58,7 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .utils import serialize_param
+from .utils import get_shim_dma_limit, serialize_param
 
 # Short spellings in artifact stems, for the fields every family shares.
 _NAME_ALIASES = {
@@ -1153,6 +1153,37 @@ class Overlay:
     def external(self) -> Xclbin | None:
         """The downloaded image this overlay is, if IRON did not build it."""
         return type(self)._external
+
+    # -- placement ---------------------------------------------------------
+
+    @classmethod
+    def shim_columns(cls, dev, num_channels: int = 1) -> int:
+        """How many of ``dev``'s columns this overlay's shim budget allows.
+
+        One core per (column, channel) fills one fifo per input stream from
+        the shim and drains one per output, so a column costs
+        ``max(inputs, outputs) * num_channels`` channels in the busier
+        direction. A ``replicate`` stream is shared by every column of a
+        channel, so it is paid once per channel rather than per column.
+        """
+        streams = [m for m in cls._members if isinstance(m, _Stream)]
+        shared = [m for m in streams if m.replicate]
+        per_core = [m for m in streams if not m.replicate]
+        directions = [m.direction for m in per_core]
+        cost = max(directions.count("in"), directions.count("out")) * num_channels
+        fixed = len(shared) * num_channels
+        limit = get_shim_dma_limit(dev)
+        return max(1, min(dev.cols, (limit - fixed) // cost))
+
+    def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
+        """Raise :class:`Untunable` if ``cols`` exceeds the shim budget."""
+        allowed = type(self).shim_columns(dev, num_channels)
+        if cols > allowed:
+            raise Untunable(
+                f"{type(self).__name__} with {cols} columns x {num_channels} "
+                f"channels exceeds this device's shim DMA budget; "
+                f"{allowed} columns fit"
+            )
 
     # -- an overlay IRON does not design() ---------------------------------
 

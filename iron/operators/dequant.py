@@ -22,6 +22,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
+from iron.common.utils import bank_elements
 
 
 @operator
@@ -72,7 +73,8 @@ class DequantOverlay(Overlay):
 
         in_tile_ty, out_tile_ty = self.x.tile, self.y.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = 1 if self.tile_size > 8192 else 2
+        # The packed input is the wider of the two, so its bank is the bound.
+        depth = 1 if self.in_tile > bank_elements(self.x.dtype) else 2
 
         kernel = target.kernel(
             "expand_uint4_to_bfloat16",

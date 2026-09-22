@@ -3,11 +3,9 @@
 
 """How an iron/operators design declares the kernel it calls.
 
-One declaration, not two. A design used to name a function *and* the object
-file it lives in, while the operator separately described how to build that
-object -- with the file name spelled out independently in both places and
-nothing keeping them in step. ``ExternalFunction`` is both halves at once:
-upstream compiles the source and names the object from its content.
+One declaration, not two: ``ExternalFunction`` is the symbol and the object
+at once, and upstream compiles the source and names the object from its
+content, so no file name is spelled out twice.
 
 Constructing it here, inside the design, is required rather than stylistic.
 An ``ExternalFunction`` registers itself into a process-global set that
@@ -61,11 +59,6 @@ def runtime_dir(dev=None) -> Path:
     )
 
 
-def runtime_include_dirs(dev=None) -> list[str]:
-    """The aie_runtime_lib headers a kernel is compiled against."""
-    return [str(runtime_dir(dev))]
-
-
 def lut_sources(dev=None):
     """``lut_based_ops.cpp`` when this arch's kernels need it, else nothing.
 
@@ -97,10 +90,9 @@ def declare_kernel(
     ``bundled_sources`` names translation units the kernel needs linked but
     never calls through MLIR -- ``lut_based_ops.cpp``, whose exp/log tables
     aie2's kernels reach from C++ with no call site. ``aie-assign-core-link-files``
-    finds objects by tracing ``func.call`` edges, so it can never discover that
-    one, and it used to be stapled on with an ``llvm-ar`` archive. Compiling it
-    into the same translation unit instead removes the orphan object entirely:
-    one source, one object, nothing to discover.
+    finds objects by tracing ``func.call`` edges, so it can never discover
+    that one. Compiling it into the same translation unit removes the orphan
+    object entirely: one source, one object, nothing to discover.
 
     The bundle is a generated source rather than ``-include``: clang processes
     ``-include`` files before the arch macros are established, and aie_api
@@ -138,7 +130,8 @@ def declare_kernel(
         object_file_name = f"{func_prefix.rstrip('_')}_{object_file_name}"
 
     source = Path(source)
-    dirs = list(runtime_include_dirs() if include_dirs is None else include_dirs)
+    # The aie_runtime_lib headers a kernel is compiled against.
+    dirs = list([str(runtime_dir())] if include_dirs is None else include_dirs)
     if not bundled_sources:
         return ExternalFunction(
             name,

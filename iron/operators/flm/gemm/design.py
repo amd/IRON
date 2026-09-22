@@ -154,15 +154,6 @@ MIN_K = K_TILE  # 512
 BFP16_GROUP, BFP16_GROUP_BYTES = 8, 9
 
 
-def _b_bytes(elems, bfp16_b):
-    """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
-    plus one shared exponent; bf16 is a plain 2 bytes each."""
-    if not bfp16_b:
-        return elems * 2
-    assert elems % BFP16_GROUP == 0
-    return elems // BFP16_GROUP * BFP16_GROUP_BYTES
-
-
 # --- Shim DMA limits ------------------------------------------------------
 #
 # Hardware facts the Python bindings do not expose: getDmaBdStepBits and

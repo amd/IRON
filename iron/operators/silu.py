@@ -12,7 +12,7 @@ from iron.common.testing import Testing, channeled_unary_cases
 class SiLUOverlay(ChanneledUnaryOverlay):
     """The array for SiLU: the shared elementwise design over its kernel."""
 
-    # One channel per column, as before: the LUT-based kernel is sized for it.
+    # One channel per column: the LUT-based kernel is sized for it.
     num_channels: int = tunable(1, repr=False, init=False)
 
     def kernel(self, target):

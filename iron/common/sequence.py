@@ -71,11 +71,10 @@ def build_fused_mlir(seq) -> str:
     for idx, op in enumerate(designs):
         generator = op.generator()
         # Ask the design whether it takes a prefix, rather than inferring it
-        # from the operator having kernel artifacts: an operator whose
-        # design declares ExternalFunctions reports no artifacts at all, and
-        # under the old test silently went unprefixed -- every shape then
-        # defining the same symbols, kept apart only by each core linking
-        # its own object.
+        # from the operator having kernel artifacts: a design that declares
+        # ExternalFunctions reports no artifacts at all, so inferring leaves
+        # every shape defining the same symbols, kept apart only by each
+        # core linking its own object.
         design_fn, _, _ = generator.resolve()
         if "func_prefix" in inspect.signature(design_fn).parameters:
             generator.kwargs["func_prefix"] = f"op{idx}_"
@@ -398,7 +397,7 @@ class OperatorSequence:
                     return args[arg].nbytes
                 return None  # sliced buffers are handled separately
 
-            # Unplanned buffers first, packed back to back exactly as before.
+            # Unplanned buffers first, packed back to back.
             cursor = 0
             planned = []
             for arg in args_list:

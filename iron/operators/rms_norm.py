@@ -24,7 +24,7 @@ import aie.utils as aie_utils
 from aie.iron.kernels import eltwise, norm
 
 from iron.common.testing import Case, Testing
-from iron.common.utils import get_shim_dma_limit
+from iron.common.utils import bank_elements, get_shim_dma_limit
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -90,14 +90,9 @@ class RMSNormOverlay(Overlay):
     def tuning(self, dev) -> "RMSNormOverlay":
         cols = self.num_aie_columns
         if dev is not None:
-            limit = get_shim_dma_limit(dev)
             if cols is None:
-                cols = min(dev.cols, limit // (2 * self.num_channels))
-            if cols * self.num_channels > limit:
-                raise Untunable(
-                    f"num_aie_columns * num_channels ({cols * self.num_channels}) "
-                    f"exceeds ShimDMA limit of {limit} for this device"
-                )
+                cols = self.shim_columns(dev, self.num_channels)
+            self.check_shim_columns(dev, cols, self.num_channels)
         elif cols is None:
             raise Untunable("num_aie_columns defaults from the device; none given")
         return dataclasses.replace(
@@ -110,7 +105,7 @@ class RMSNormOverlay(Overlay):
 
         tile_ty = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = 1 if self.tile_size > 4096 else 2
+        depth = 1 if self.per_tile > bank_elements(self.x.dtype) else 2
         kernel = norm.rms_norm_eps(self.per_tile)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
@@ -166,19 +161,11 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
     def tuning(self, dev) -> "WeightedRMSNormOverlay":
         cols = self.num_aie_columns
         if dev is not None:
-            limit = get_shim_dma_limit(dev)
+            # The weight stream is declared replicate=, so the budget already
+            # leaves room for its one fill per channel beside the row fills.
             if cols is None:
-                # Room for the weight fill beside the row fills.
-                cols = min(dev.cols, limit // self.num_channels - 1)
-            # (cols * chans) in-fills + chans weight-fills must fit the shim's
-            # host->array channels.
-            usage = self.num_channels * (cols + 1)
-            if usage > limit:
-                raise Untunable(
-                    f"weighted RMSNorm with num_aie_columns={cols}, "
-                    f"num_channels={self.num_channels} requires {usage} ShimDMA "
-                    f"output channels but device only has {limit}"
-                )
+                cols = self.shim_columns(dev, self.num_channels)
+            self.check_shim_columns(dev, cols, self.num_channels)
         elif cols is None:
             raise Untunable("num_aie_columns defaults from the device; none given")
         # The weight is one tile, so the tile is the whole row.
@@ -191,7 +178,7 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
         tile_ty = self.x.tile
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = 1 if self.tile_size > 4096 else 2
+        depth = 1 if self.per_tile > bank_elements(self.x.dtype) else 2
         rms_norm = norm.rms_norm_eps(self.per_tile)
         eltwise_mul = eltwise.mul_sized(self.per_tile)
         of_ins = [

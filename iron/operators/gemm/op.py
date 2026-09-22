@@ -658,7 +658,7 @@ class GEMM(Operator[GEMMOverlay]):
         # so that a shim never holds more than one block's descriptors.
         b_unrolled = any(len(f) > 1 for f in B_fills)
 
-        # Task groups will be used to determine when to sync/await/free DMA runtime ops
+        # Task groups determine when to sync, await and free DMA runtime ops.
         tg = rt.new_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:

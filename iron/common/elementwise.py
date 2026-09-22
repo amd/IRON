@@ -65,7 +65,7 @@ from .declare import (
     tunable,
 )
 from .declare import _Stream
-from .utils import bank_elements, get_shim_dma_limit
+from .utils import bank_elements
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.
@@ -97,33 +97,13 @@ class ElementwiseOverlay(Overlay):
 
     tile_cap: ClassVar[int] = 4096
 
-    # -- placement ---------------------------------------------------------
-
-    @classmethod
-    def shim_slots_per_core(cls) -> int:
-        """Shim DMA channels one core occupies in the busier direction.
-
-        A binary kernel's core fills two input fifos from the shim and drains
-        one, so two columns' worth of cores cost four input channels: the
-        budget is set by whichever direction needs more.
-        """
-        directions = [m.direction for m in cls._members if isinstance(m, _Stream)]
-        return max(directions.count("in"), directions.count("out"))
-
     def tuning(self, dev) -> "ElementwiseOverlay":
         tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
         cols = self.num_aie_columns
-        per_core = self.shim_slots_per_core() * self.num_channels
         if dev is not None:
-            limit = get_shim_dma_limit(dev)
             if cols is None:
-                cols = min(dev.cols, limit // per_core)
-            if cols * per_core > limit:
-                raise Untunable(
-                    f"{cols} columns x {self.num_channels} channels of a "
-                    f"{self.shim_slots_per_core()}-channel core need "
-                    f"{cols * per_core} shim DMA channels; this device has {limit}"
-                )
+                cols = self.shim_columns(dev, self.num_channels)
+            self.check_shim_columns(dev, cols, self.num_channels)
         elif cols is None:
             raise Untunable("num_aie_columns defaults from the device; none given")
         return dataclasses.replace(

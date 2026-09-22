@@ -789,23 +789,3 @@ class MHA(Operator[MHAOverlay]):
                     for acc in accs:
                         rt.drain(ov.o[shim], (self.O, acc), wait=acc is accs[-1])
 
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def pad_to_multiple_of_64(tensor, seq_dim, num_pipeline=1):
-    """Pad tensor to multiple of 64 along specified dimension."""
-    seq_len = tensor.shape[seq_dim]
-    padded_seq_len = ((seq_len + 63 * num_pipeline) // (64 * num_pipeline)) * (
-        64 * num_pipeline
-    )
-    if padded_seq_len == seq_len:
-        return tensor
-
-    pad_size = padded_seq_len - seq_len
-    pad_dims = [0] * (2 * tensor.ndim)
-    pad_dims[2 * (tensor.ndim - 1 - seq_dim) + 1] = pad_size
-
-    return torch.nn.functional.pad(tensor, pad_dims)

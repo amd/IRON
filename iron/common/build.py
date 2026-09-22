@@ -90,9 +90,8 @@ class DesignGenerator:
 class Target:
     """What an overlay's ``design()`` is given besides the overlay itself.
 
-    Carries what a design used to receive as loose parameters (``dev``,
-    ``kernels_dir``, ``func_prefix``) and applies the fusion prefix inside
-    :meth:`kernel`, so an overlay never handles it.
+    Carries the device, the kernel tree and the fusion prefix, and applies
+    the prefix inside :meth:`kernel`, so an overlay never handles it.
     """
 
     def __init__(
