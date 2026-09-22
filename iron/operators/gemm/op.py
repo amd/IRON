@@ -9,7 +9,7 @@ from typing import ClassVar
 
 import numpy as np
 
-from aie.iron.kernels import mm_mac_dims
+from aie.iron import kernels
 from ml_dtypes import bfloat16
 
 from iron.common.kernels import target_arch
@@ -123,7 +123,7 @@ class GEMMOverlay(Overlay):
         belongs to the kernel mm.cc compiles, and upstream's table is the one
         its ``combos(X) X(..., r, s, t)`` macros are kept in step with.
         """
-        return mm_mac_dims(
+        return kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
             arch=target_arch(dev),
@@ -143,7 +143,7 @@ class GEMMOverlay(Overlay):
         # runs at construction, before tuning picks one. design() asks for
         # the geometry of the device it is actually building for, which on
         # npu1 is the looser (4, 8, 4).
-        r, s, t = mm_mac_dims(
+        r, s, t = kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
             arch="aie2p",
