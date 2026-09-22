@@ -13,22 +13,22 @@ same value as the difference between two identical buffers.
 
 import numpy as np
 import pytest
-import torch
+from ml_dtypes import bfloat16
 
 from iron.common.harness import verify_buffer
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [np.float32, bfloat16])
 def test_zero_tolerance_accepts_an_identical_buffer(dtype):
-    buf = (torch.arange(64, dtype=torch.float32) / 8).to(dtype)
+    buf = (np.arange(64, dtype=np.float32) / 8).astype(dtype)
 
-    assert verify_buffer(buf, "out", buf.clone(), rel_tol=0.0, abs_tol=0.0) == []
+    assert verify_buffer(buf, "out", buf.copy(), rel_tol=0.0, abs_tol=0.0) == []
 
 
 @pytest.mark.parametrize("rel_tol,abs_tol", [(0.0, 0.0), (0.04, 1e-6)])
 def test_a_single_wrong_element_is_reported_alone(rel_tol, abs_tol):
-    reference = torch.arange(64, dtype=torch.float32)
-    output = reference.clone()
+    reference = np.arange(64, dtype=np.float32)
+    output = reference.copy()
     output[17] += (
         10.0  # past the 4% relative tolerance at this magnitude, not just past 0
     )
@@ -38,8 +38,8 @@ def test_a_single_wrong_element_is_reported_alone(rel_tol, abs_tol):
 
 def test_zero_tolerance_still_rejects_a_one_ulp_error():
     """The point of the zero case is that it is exact, not that it is lenient."""
-    reference = torch.full((32,), 1.0, dtype=torch.float32)
-    output = reference.clone()
+    reference = np.full((32,), 1.0, dtype=np.float32)
+    output = reference.copy()
     output[5] = float(np.nextafter(np.float32(1.0), np.float32(2.0)))
 
     assert verify_buffer(output, "out", reference, rel_tol=0.0, abs_tol=0.0) == [5]

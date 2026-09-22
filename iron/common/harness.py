@@ -205,7 +205,9 @@ def run_test(
                 produced[name] = buf
             else:
                 name, data = next(ins)
-                buf = tensor_class(data)
+                # dtype explicitly: the constructor's default is uint32, so a
+                # typed array would otherwise be reinterpreted, not adopted.
+                buf = tensor_class(data, dtype=data.dtype)
                 if b.direction == "inout":
                     produced[name] = buf
         except StopIteration:

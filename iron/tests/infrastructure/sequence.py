@@ -21,7 +21,8 @@ The ``OperatorSequence`` dispatch modes covered here are:
 """
 
 import pytest
-import torch
+import numpy as np
+from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
@@ -36,12 +37,12 @@ def _set_input(run, name, data):
     """Write a host tensor into an input buffer and push it to the device.
 
     Mirrors the caller contract for the fused single-ELF callable: after
-    writing a get_buffer() sub-view via torch_view(), the caller is responsible
+    writing a get_buffer() sub-view via numpy_view(), the caller is responsible
     for calling .to("npu") so the write reaches the NPU (a no-op sync for the
     separate/reference callables, whose __call__ syncs inputs themselves).
     """
     buf = run.get_buffer(name)
-    buf.torch_view()[: data.numel()] = data.reshape(-1)
+    buf.numpy_view()[: data.size] = data.reshape(-1)
     buf.to("npu")
 
 
@@ -89,9 +90,9 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
     the separate-xclbin mode on Phoenix, and produce the correct result on
     whichever platform the test runs on."""
-    torch.manual_seed(0)
-    a = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
-    b = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
+    rng = np.random.default_rng(0)
+    a = rng.random(size).astype(bfloat16) * 4 - 2
+    b = rng.random(size).astype(bfloat16) * 4 - 2
 
     seq = _build_add_relu_sequence("auto", "infra_auto_add_relu")
     seq.compile()
@@ -108,9 +109,9 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    out = run.get_buffer("out").torch_view()[:size].clone()
+    out = run.get_buffer("out").numpy_view()[:size].copy()
 
-    expected = torch.nn.functional.relu(a + b)
+    expected = np.maximum(a + b, 0)
     errors = verify_buffer(out, "out", expected, rel_tol=0.04, abs_tol=1e-6)
     assert not errors, f"auto-dispatch sequence produced {len(errors)} mismatches"
 
@@ -166,7 +167,7 @@ def _run_add_relu(dispatch, a, b, name):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    return run.get_buffer("out").torch_view()[:_ADD_RELU_SIZE].clone()
+    return run.get_buffer("out").numpy_view()[:_ADD_RELU_SIZE].copy()
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
@@ -178,15 +179,15 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
         pytest.skip("fused (single-ELF) dispatch requires NPU2")
 
-    torch.manual_seed(0)
-    a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
-    b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    rng = np.random.default_rng(0)
+    a = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
+    b = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
 
     baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate"
     )
     out = _run_add_relu(dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
-    assert torch.equal(out, baseline), (
+    assert np.array_equal(out, baseline), (
         f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
     )
 
@@ -232,11 +233,11 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     """dispatch="reference" must resolve slice-notation buffers via
     subview() on the CPU backend, matching SequenceXclbinCallable's behaviour,
     and each slice's write must be visible through the parent buffer name."""
-    torch.manual_seed(0)
-    a0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    b0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    a1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    b1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+    rng = np.random.default_rng(0)
+    a0 = rng.random(_SLICE_SIZE).astype(bfloat16)
+    b0 = rng.random(_SLICE_SIZE).astype(bfloat16)
+    a1 = rng.random(_SLICE_SIZE).astype(bfloat16)
+    b1 = rng.random(_SLICE_SIZE).astype(bfloat16)
 
     seq = _build_packed_output_sequence(
         "reference", "infra_reference_sliced_packed"
@@ -248,9 +249,9 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     _set_input(run, "a1", a1)
     _set_input(run, "b1", b1)
     run()
-    packed = run.get_buffer("packed").torch_view()[: 2 * _SLICE_SIZE].clone()
+    packed = run.get_buffer("packed").numpy_view()[: 2 * _SLICE_SIZE].copy()
 
-    expected = torch.cat([a0 + b0, a1 + b1])
+    expected = np.concatenate([a0 + b0, a1 + b1])
     errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
     assert not errors, (
         f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
@@ -274,9 +275,9 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime)
     run cleanly (no flagged step); a wrong one must make compare mode raise on
     its own (``compare_raise_on_mismatch`` defaults to True)."""
     size = 256
-    torch.manual_seed(0)
-    a = torch.rand(size, dtype=torch.bfloat16)
-    b = torch.rand(size, dtype=torch.bfloat16)
+    rng = np.random.default_rng(0)
+    a = rng.random(size).astype(bfloat16)
+    b = rng.random(size).astype(bfloat16)
 
     op = ElementwiseAdd(
         size=size, tile_size=256, num_aie_columns=1

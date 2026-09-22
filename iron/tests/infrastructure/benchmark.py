@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-torch = pytest.importorskip("torch")
+import numpy as np
+from ml_dtypes import bfloat16
 
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 
@@ -49,7 +50,7 @@ def test_run_test_uses_upstream_npu_timing(monkeypatch, tuple_result):
     if tuple_result:
         results = [(None, result) for result in results]
     op = _Operator(results)
-    data = torch.ones(32, dtype=torch.bfloat16)
+    data = np.ones(32, dtype=bfloat16)
 
     errors, latency_us, bandwidth = harness.run_test(
         op, {"in": data}, {"out": data}, warmup_iters=1, timed_iters=2
@@ -64,7 +65,7 @@ def test_run_test_uses_upstream_npu_timing(monkeypatch, tuple_result):
 def test_missing_npu_timing_is_rejected(monkeypatch):
     monkeypatch.setattr(harness.aie_utils, "DEFAULT_TENSOR_CLASS", CPUOnlyTensor)
     op = _Operator([None])
-    data = torch.ones(32, dtype=torch.bfloat16)
+    data = np.ones(32, dtype=bfloat16)
     with pytest.raises(RuntimeError, match="NPU execution time"):
         harness.run_test(
             op, {"in": data}, {"out": data}, warmup_iters=0, timed_iters=1
