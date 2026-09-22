@@ -1481,8 +1481,21 @@ aiecc's lowering of the fused runtime sequence grows with its DMA tasks,
 and prefill expands to 28,381 (MHA 768 per call, the down projection 320,
 the other projections 128) against decode's 6,843; four layers peaked at
 5.6 GB, sixteen were killed past 11 GB of the container's 16. That is an
-aiecc scaling question, not a graph one; a host with more memory or a
-leaner sequence lowering builds it. Along the way the real-size build
+aiecc scaling question, not a graph one. Profiled on the one-layer module
+(aiecc's own process, sampled per stage): 0.1 GB until the per-core split,
+2.0 GB after it, 5.2 GB at the peak of the per-core compile stages, 3.3 GB
+at the per-sequence split and 3.6 GB at the end. The cause is structural:
+aiecc's artifact graph (`tools/aiecc/Actions.h`, `SplitIRAction`) clones
+the *whole module* once per split item and keeps the items, so the fused
+module is cloned 218 times per core before lowering and, once lowered
+with the main sequence materialized (28,381 tasks at sixteen layers), 17
+times per device and 17 times per sequence. Memory is clones times module
+size, and the module size is the expanded sequence. Two ways down: aiecc
+prunes each clone to what its consumer reads (the one sequence, the one
+device), which is a C++ change needing an mlir-aie build; or the
+operators issue fewer descriptors, MHA first (768 per call: it refills all
+of K and V for every head and every Q block, so each KV group's K and V
+cross the shim 16 times per layer), which also cuts device traffic. Along the way the real-size build
 exposed a race in mlir-aie's kernel compiler: entry points of one source
 that share an object file (a GEMM's matmul and zero) compiled on
 different threads, and with a symbol prefix one visit's compile could
