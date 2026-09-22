@@ -16,9 +16,9 @@ stream-dse needs two inputs, and IRON writes both from one source.
 
 | | Source | Built by |
 | --- | --- | --- |
-| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`iron/common/stream/workload.py`](../../common/stream/workload.py) |
-| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`iron/common/stream/mapping.py`](../../common/stream/mapping.py) |
-| Kernels (`.cc`) | IRON's `aie_kernels` library | the registry in [`iron/common/stream/ops.py`](../../common/stream/ops.py) |
+| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`stream/workload.py`](./stream/workload.py) |
+| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`stream/mapping.py`](./stream/mapping.py) |
+| Kernels (`.cc`) | IRON's `aie_kernels` library | the registry in [`stream/ops.py`](./stream/ops.py) |
 
 `reference.py` is the single source of truth. Running it produces the golden output the
 test compares against; exporting it produces the workload the design is generated from.
@@ -115,7 +115,7 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 
 ## Adding another operator
 
-One `StreamKernel` plus one `TORCH_OPS` entry in `iron/common/stream/ops.py`, pointing
+One `StreamKernel` plus one `TORCH_OPS` entry in `stream/ops.py`, pointing
 at IRON's `aie_kernels/<dir>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.

@@ -28,7 +28,7 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.operators.swiglu_prefill_stream.layout import TiledStridedLayout, tiled_2d
-from iron.operators._kernels import declare_kernel
+from iron.common.kernels import declare_kernel
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel

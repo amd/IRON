@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 
-from iron.operators import _tracing as tracing_utils
+from iron.common import tracing as tracing_utils
 
 
 @pytest.mark.parametrize("dtype", [np.int8, np.uint8])

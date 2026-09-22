@@ -454,7 +454,7 @@ def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
     The registry is the single place a kernel's source, compile flags and
     symbol names are declared, so the object and the generated design agree.
     """
-    from iron.operators._kernels import target_arch
+    from iron.common.kernels import target_arch
     from iron.operators.swiglu_prefill_stream.stream.ops import ELTWISE_MUL, GEMM, SILU
 
     tiles = gemm_tiles(k)

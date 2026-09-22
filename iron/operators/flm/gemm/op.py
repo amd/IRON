@@ -17,6 +17,7 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 """
 
 import dataclasses
+from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
@@ -41,7 +42,7 @@ from iron.common.declare import (
     select,
     tunable,
 )
-from iron.operators._kernels import lut_sources
+from iron.common.kernels import lut_sources
 from iron.common.tiling import Access
 from iron.common.utils import split_run
 from iron.operators.flm.gemm.design import (
@@ -275,12 +276,15 @@ class FLMGEMMOverlay(Overlay):
             f"_em{self.epilogue_mask:x}.o"
         )
 
-    def kernel_source(self, target):
-        # The last kernel IRON keeps in-tree, pending upstreaming to mlir-aie:
-        # its runtime epilogue (#200) is newer than the package copy.
-        from iron.operators._kernels import iron_kernels_dir
+    # mm_fused.cc is kept in this repository, pending upstreaming to
+    # mlir-aie: its runtime epilogue (#200) is newer than the package copy.
+    # iron/operators/flm/gemm/op.py -> gemm -> flm -> operators -> iron -> root.
+    IN_TREE_KERNELS: ClassVar[Path] = (
+        Path(__file__).resolve().parents[4] / "aie_kernels"
+    )
 
-        return iron_kernels_dir() / "generic" / "mm_fused.cc"
+    def kernel_source(self, target):
+        return self.IN_TREE_KERNELS / "generic" / "mm_fused.cc"
 
     def kernel_flags(self, target) -> list[str]:
         """The -D set mm_fused.cc is compiled with."""

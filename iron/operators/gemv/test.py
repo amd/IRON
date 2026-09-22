@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.gemv.op import GEMV, gelu_tanh_approx
-from iron.operators._kernels import target_arch
+from iron.common.kernels import target_arch
 import numpy as np
 import torch
 from iron.common.test_utils import golden, record_metric, run_test

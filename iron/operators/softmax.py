@@ -21,7 +21,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
-from iron.operators._kernels import lut_sources
+from iron.common.kernels import lut_sources
 
 
 @operator

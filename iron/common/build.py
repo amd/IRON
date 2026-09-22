@@ -32,6 +32,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .kernels import declare_kernel, kernels_dir, target_arch
+from .tracing import maybe_enable_trace
 from .declare import (
     BoundBuffer,
     BoundStream,
@@ -104,8 +106,6 @@ class Target:
     ):
         from pathlib import Path
 
-        from iron.operators._kernels import target_arch
-
         self.dev = dev
         self.kernels_dir = Path(kernels_dir)
         self.arch = target_arch(dev)  # "aie2" | "aie2p"
@@ -136,8 +136,6 @@ class Target:
         prebuilt=None,
     ):
         """Declare a kernel the array calls; the fusion prefix is applied here."""
-        from iron.operators._kernels import declare_kernel
-
         return declare_kernel(
             name,
             arg_types,
@@ -564,8 +562,6 @@ def build_design(
     rt = Runtime(sequence, fn_args + params)
     prog = Program(ov.device(target), rt, workers=workers)
     if trace_size:
-        from iron.operators._trace import maybe_enable_trace
-
         maybe_enable_trace(prog, trace_size, workers)
     return prog.resolve_program()
 
@@ -600,8 +596,6 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
     per-call values are the generator's dispatch-time parameters, so the two
     images are two modules and two cache keys.
     """
-    from iron.operators._kernels import kernels_dir
-
     return DesignGenerator(
         fn=build_design,
         kwargs={

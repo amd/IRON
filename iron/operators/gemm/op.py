@@ -4,6 +4,9 @@
 import dataclasses
 from dataclasses import field
 
+from pathlib import Path
+from typing import ClassVar
+
 import numpy as np
 import torch
 from ml_dtypes import bfloat16
@@ -212,12 +215,16 @@ class GEMMOverlay(Overlay):
             flags.append(f"-I{target.kernels_dir / 'aie2'}")
         return flags
 
+    # aie2's mm.cc is patched in this repository rather than taken from the
+    # package. iron/operators/gemm/op.py -> gemm -> operators -> iron -> root.
+    IN_TREE_KERNELS: ClassVar[Path] = (
+        Path(__file__).resolve().parents[3] / "aie_kernels"
+    )
+
     def kernel_source(self, target):
         """The mm.cc this overlay compiles; aie2's is patched in-tree."""
         if target.arch == "aie2":
-            from iron.operators._kernels import iron_kernels_dir
-
-            return iron_kernels_dir() / "aie2" / "mm.cc"
+            return self.IN_TREE_KERNELS / "aie2" / "mm.cc"
         return target.kernel_source("mm")
 
     def device(self, target):
