@@ -9,7 +9,7 @@ from iron.operators.gemv.op import GEMV, gelu_tanh_approx
 from iron.common.kernels import target_arch
 import numpy as np
 import torch
-from iron.common.test_utils import golden, record_metric, run_test
+from iron.common.harness import record_metric, run_test, vectors
 
 
 def get_params():
@@ -48,7 +48,7 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runt
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
     )
-    data = golden(operator, normal=("A", "B"))
+    data = vectors(operator, normal=("A", "B"))
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
@@ -94,7 +94,7 @@ def test_gemv_batched(
         tile_size_output=tile_size_output,
         num_batches=num_batches,
     )
-    data = golden(operator, normal=("A", "B"))
+    data = vectors(operator, normal=("A", "B"))
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
     )
@@ -128,7 +128,7 @@ def test_gemv_gelu(
         epilogue="gelu",
     )
     # The reference is the plain product; the epilogue is applied here.
-    data = golden(operator, normal=("A", "B"))
+    data = vectors(operator, normal=("A", "B"))
     c_ref = data["C"].to(torch.float32).numpy()
     c_gelu = torch.from_numpy(gelu_tanh_approx(c_ref).astype(np.float32)).to(
         torch.bfloat16

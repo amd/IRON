@@ -58,7 +58,6 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .utils import get_shim_dma_limit, serialize_param
 
 # Short spellings in artifact stems, for the fields every family shares.
 _NAME_ALIASES = {
@@ -1134,6 +1133,56 @@ def _overlay_class_of(cls: type) -> type | None:
                 if isinstance(a, type) and issubclass(a, Overlay):
                     return a
     return None
+
+
+# --------------------------------------------------------------------------
+# Facts about the device and the name a build is keyed on
+# --------------------------------------------------------------------------
+
+def get_shim_dma_limit(dev) -> int:
+    """Return the total number of ShimDMA output channels available on the device.
+
+    Each shim tile exposes a fixed number of DMA source connections; summing
+    across all shim tiles gives the device-wide ShimDMA budget.
+    """
+    from aie.dialects.aie import WireBundle, get_target_model
+
+    tm = get_target_model(dev.resolve())
+    return sum(
+        tm.get_num_source_shim_mux_connections(col, row, WireBundle.DMA)
+        for col in range(tm.columns())
+        for row in range(tm.rows())
+        if tm.is_shim_noc_or_pl_tile(col, row)
+    )
+
+
+def serialize_param(v: object) -> str:
+    """A parameter value as a short, filesystem-safe token for labels."""
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, float):
+        return float_to_name(v)
+    if isinstance(v, (list, tuple)):
+        return "x".join(str(x) for x in v)
+    return str(v)
+
+
+def float_to_name(v: float) -> str:
+    """Convert a float to a filesystem-safe string for use in operator names.
+
+    Uses repr() for the shortest exact round-trip representation, then sanitizes
+    characters that are problematic in filenames or shell scripts, for instance:
+      '.' -> 'p'  (decimal point)
+      '-' -> 'n'  (negative sign / negative exponent)
+      '+' -> ''   (positive exponent, redundant)
+
+    Examples:
+      3.0   -> '3p0'
+      0.01  -> '0p01'
+      -0.5  -> 'n0p5'
+      1e-10 -> '1en10'
+    """
+    return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
 
 
 # --------------------------------------------------------------------------

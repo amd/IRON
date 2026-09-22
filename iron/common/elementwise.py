@@ -65,7 +65,7 @@ from .declare import (
     tunable,
 )
 from .declare import _Stream
-from .utils import bank_elements
+from .tiling import bank_elements
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.

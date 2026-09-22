@@ -65,7 +65,7 @@ class Testing:
     ``cases`` is what to construct: :class:`Case` objects or plain keyword
     dicts, or a callable returning them, which is what an operator whose
     shapes follow the device's width declares. ``draw`` is extra
-    :func:`iron.common.test_utils.golden` arguments, or a callable of the
+    :func:`iron.common.harness.vectors` arguments, or a callable of the
     operator returning them (an input that must satisfy the kernel's
     preconditions: a packed quantization, an angle table). The tolerances
     are the gate: an operator that only moves data sets both to zero, since

@@ -44,7 +44,7 @@ from iron.common.declare import (
 )
 from iron.common.kernels import lut_sources
 from iron.common.tiling import Access
-from iron.common.utils import split_run
+from iron.common.tiling import run_dims
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_DEPTH,
@@ -402,7 +402,7 @@ class FLMGEMMOverlay(Overlay):
         a_send_dims = [
             (K_DIV_CT_K_MAX, R * CT_MAX_K),
             (M_CHUNK * M_TILE // R, R * K_TILE),
-        ] + split_run(R * CT_MAX_K)
+        ] + run_dims(R * CT_MAX_K)
 
         # C: one join per column; each of the ROWS cores drops its slice at
         # its own offset in a single memtile buffer.

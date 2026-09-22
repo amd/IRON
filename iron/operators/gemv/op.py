@@ -22,7 +22,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.tiling import Access
-from iron.common.utils import DMA_BD_MAX_WRAP
+from iron.common.tiling import DMA_BD_MAX_WRAP
 
 # --------------------------------------------------------------------------
 # The overlay: what configures the array.
@@ -340,7 +340,12 @@ class GEMV(Operator[GEMVOverlay]):
         GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
         MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
 
-        def split_run(run, lim=DMA_BD_MAX_WRAP, gran=GRAN_ELEMS):
+        def factor_run(run, lim=DMA_BD_MAX_WRAP, gran=GRAN_ELEMS):
+            """``(hi, lo)`` with both at most ``lim`` elements.
+
+            Stricter than :func:`iron.common.tiling.split_run`, whose ``lo``
+            may run to ``lim`` granules rather than ``lim`` elements.
+            """
             lo_start = (lim // gran) * gran
             for lo in range(lo_start, 0, -gran):
                 if run % lo == 0 and (run // lo) <= lim:
@@ -349,7 +354,7 @@ class GEMV(Operator[GEMVOverlay]):
 
         A_run, A_bstride = (M // cols) * K, M * K
         C_run, C_bstride = (M // cols), M
-        A_split, C_split = split_run(A_run), split_run(C_run)
+        A_split, C_split = factor_run(A_run), factor_run(C_run)
         coalesce = (
             nb > 1
             and A_bstride <= MAX_STRIDE

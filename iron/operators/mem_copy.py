@@ -36,7 +36,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
-from iron.common.utils import bank_elements
+from iron.common.tiling import bank_elements
 from iron.common.tiling import Access
 
 # The maximum value the 4th dimension of DMA BD can be set

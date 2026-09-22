@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.gemm.op import GEMM
-from iron.common.test_utils import golden, record_metric, run_test
+from iron.common.harness import record_metric, run_test, vectors
 
 
 def get_params():
@@ -116,7 +116,7 @@ def test_gemm(
         c_col_maj=c_col_maj,
     )
 
-    data = golden(operator, normal=("A",))
+    data = vectors(operator, normal=("A",))
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data.inputs, data.outputs, rel_tol=0.005, abs_tol=0.005
     )

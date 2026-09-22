@@ -52,7 +52,7 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
 from iron.operators.flm import Shipped
-from iron.common.test_utils import record_metric
+from iron.common.harness import record_metric
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
 # run. See the note in the module docstring.

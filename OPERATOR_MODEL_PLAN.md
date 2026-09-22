@@ -891,7 +891,7 @@ authoring layer, and the decode-drift snapshot (§18).
   the steps.
 - **O7. Verbose report format.** What `compile(dev, verbose=True)` prints: the
   image, each sequence's kind and boundaries, each per-call value's lowering.
-- **O8. The `MAX_WRAP` FIXME.** `iron/common/utils.py` already has
+- **O8. The `MAX_WRAP` FIXME.** `iron/common/tiling.py` already has
   `DMA_BD_MAX_WRAP` and a shared `split_run`, with a comment arguing the wrap
   is identical across every target model IRON builds for. The tiler uses the
   shared helper; the FIXME closes by deletion, not by `dev.max_wrap`.
@@ -1366,8 +1366,8 @@ spelling.
 is gone; the two arg-spec modules are one test in `declare.py`; a file
 named on the command line collected twice (pytest collects an initial
 path itself, whatever its name) and now collects once. The 24
-`generate_golden_reference` functions are one `golden(op)` in
-`iron/common/test_utils.py`, drawing every declared input in declaration
+`generate_golden_reference` functions are one `vectors(op)` in
+`iron/common/harness.py`, drawing every declared input in declaration
 order and taking the outputs from `op.reference()`, which every operator
 now has (gelu and layer_norm had none beyond their generator; dequant's
 unpacks what the kernel unpacks; MHA's is causal attention with the
@@ -1404,8 +1404,8 @@ graph tests, the reference parity test and the toolchain gates trace is
 one `iron/tests/common/llama_model.py`.
 
 **The operator tests are one function each.** `operator_test(cls, cases,
-rel_tol=, abs_tol=, draw=)` in `iron/common/test_utils.py` is the
-parametrized test: construct, `golden()`, `run_test()`, assert; the 18
+rel_tol=, abs_tol=, draw=)` in `iron/common/harness.py` is the
+parametrized test: construct, `vectors()`, `run_test()`, assert; the 18
 operators whose test was the same thirty lines around a parameter sweep
 are now a case list and that one call (`channeled_unary_cases` and
 `binary_elementwise_cases` build the elementwise families' sweeps). The

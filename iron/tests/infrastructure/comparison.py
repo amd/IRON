@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-from iron.common.test_utils import verify_buffer
+from iron.common.harness import verify_buffer
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

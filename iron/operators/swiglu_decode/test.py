@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from iron.common.test_utils import record_metric, verify_buffer
+from iron.common.harness import record_metric, verify_buffer
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.silu import SiLU
 from iron.operators.swiglu_decode.op import swiglu_decode

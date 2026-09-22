@@ -28,7 +28,7 @@ from iron.operators.flm.gemm.design import (
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.reference import apply_epilogue
 from iron.operators.flm.gemm.shipped import Shipped
-from iron.common.test_utils import golden, record_metric, run_test
+from iron.common.harness import record_metric, run_test, vectors
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -123,7 +123,7 @@ def get_params():
     return params
 
 
-def vectors(operator, scale=4.0):
+def flm_vectors(operator, scale=4.0):
     """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
 
     ``scale`` matters for the epilogue tests: the result grows like
@@ -133,11 +133,11 @@ def vectors(operator, scale=4.0):
     range where the curve is actually interesting. B is drawn row-major
     ``(K, N)``; the operator consumes it packed (see ``GEMM.pack_B``).
     """
-    return golden(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
+    return vectors(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
 
 
 def check_on_device(operator, data, rounding=CONV_EVEN):
-    """Run ``operator`` against its golden vectors and return run_test's result.
+    """Run ``operator`` against its drawn vectors and return run_test's result.
 
     Bounds the error absolutely, as a fraction of the accumulated mass
     K * mean|a| * mean|b|. A relative tolerance cannot work: with signed A the
@@ -176,7 +176,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
     )
 
     errors, latency_us, bandwidth_gbps = check_on_device(
-        operator, vectors(operator, scale), rounding
+        operator, flm_vectors(operator, scale), rounding
     )
 
     record_metric("Throughput", (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9)
@@ -215,7 +215,7 @@ def test_gemm_split_leg_bounds_runs(npu_runtime):
     M, K, N = 512, 10240, 10240
     operator = GEMM(M=M, K=K, N=N)
 
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, vectors(operator))
+    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
 
 
@@ -271,7 +271,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     assert (operator._tuned_ov.tile_n, operator._tuned_ov.tile_ma) == (tile_n, tile_ma)
     errors, _latency_us, _bandwidth_gbps = check_on_device(
-        operator, vectors(operator, INPUT_SCALE)
+        operator, flm_vectors(operator, INPUT_SCALE)
     )
     assert not errors, "Test failed"
 
@@ -310,7 +310,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
     xclbin = None
     for M, K, N, epilogue in shapes:
         operator = GEMM(M=M, K=K, N=N, epilogue=epilogue)
-        data = vectors(operator, 4.0 if epilogue == "none" else 0.5)
+        data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = K * data["A"].abs().float().mean() * data["B"].abs().float().mean()
         errors, _, _ = run_test(
             operator,
@@ -340,7 +340,7 @@ def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
     xclbin = None
     for clamp in bounds:
         operator = GEMM(M=M, K=K, N=N, clamp=clamp)
-        errors, _, _ = check_on_device(operator, vectors(operator, INPUT_SCALE))
+        errors, _, _ = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
         image = operator.artifacts.image
@@ -418,7 +418,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
         Shipped(), M=M, K=K, N=N, epilogue=epilogue, clamp=clamp
     )
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
-    data = golden(operator, normal=("A",), B=(K, N))
+    data = vectors(operator, normal=("A",), B=(K, N))
 
     input_buffers = {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])}
     output_buffers = {"C": data["C"].flatten()}
@@ -477,7 +477,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     # are actually curved; at the default scale the product lands around +-900,
     # where gelu and silu are indistinguishable from the identity.
     probe = GEMM(Shipped(), M=M, K=K, N=N)
-    data = golden(probe, normal=("A",), scale=0.5, B=(K, N))
+    data = vectors(probe, normal=("A",), scale=0.5, B=(K, N))
     A, B = data["A"], data["B"]
 
     def run(epi, clm):

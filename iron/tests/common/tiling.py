@@ -24,7 +24,7 @@ from iron.common.tiling import (
     split_run,
     whole,
 )
-from iron.common.utils import DMA_BD_MAX_WRAP
+from iron.common.tiling import DMA_BD_MAX_WRAP
 
 
 def test_granularity_per_dtype():

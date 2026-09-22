@@ -43,7 +43,6 @@ from typing import Iterator, Sequence
 
 import numpy as np
 
-from .utils import DMA_BD_MAX_WRAP
 
 _STRIDE_BITS = 20
 _ADDR_GRANULE_BYTES = 4
@@ -91,6 +90,55 @@ def contiguous(elements: int, offset: int, run: int) -> Access:
             f"transfer of {run} at {offset} runs past a buffer of {elements}"
         )
     return Access(elements, offset, (1, 1, 1, run), (0, 0, 0, 1))
+
+
+# Widest wrap a shim or mem tile DMA buffer descriptor's size field can encode.
+# Not exposed by the Python bindings (AIETargetModel::getDmaBdWrapBits is
+# unbound), so it is written down here rather than in each design; gemv,
+# repeat and mha all hardcoded the same 1023 independently.
+#
+# This is the same 10 bits on every target model this repo builds for --
+# BaseNPU1TargetModel and BaseNPU2TargetModel both inherit it unmodified from
+# AIE2TargetModel::getDmaBdWrapBits, which does not override it per device --
+# so callers do not need to look it up per-device. It is NOT the same for
+# every tile type, though: core tiles get an 8-bit wrap (max 255), not 10-bit.
+# This constant is only valid for shim/mem tile descriptors, which is what
+# every current caller (gemv, repeat, mha, flm.GEMM) uses it for.
+DMA_BD_MAX_WRAP = (1 << 10) - 1
+
+
+# One bank of a core's local memory. AIE2 and AIE2P both have eight 8 KB
+# banks, and a fifo object spanning more than one bank cannot be
+# double-buffered in what is left; the target model exposes the total
+# (get_local_memory_size) but not the banking, so the figure is named here
+# rather than spelled at each use.
+L1_BANK_BYTES = 8192
+
+
+def bank_elements(dtype) -> int:
+    """Elements of ``dtype`` in one local-memory bank: the largest line a core
+    holds at a fifo depth of two."""
+    import numpy as np
+
+    return L1_BANK_BYTES // np.dtype(dtype).itemsize
+
+
+def run_dims(run: int, max_wrap: int = DMA_BD_MAX_WRAP) -> list[tuple[int, int]]:
+    """Encode a contiguous run of ``run`` elements as BD (size, stride) dims.
+
+    One dimension suffices while the run fits the BD's size field; a longer run
+    splits into two at the cost of one of the four available dimensions.
+
+        >>> run_dims(512)
+        [(512, 1)]
+        >>> run_dims(2048)
+        [(2, 1024), (1024, 1)]
+    """
+    if run <= max_wrap:
+        return [(run, 1)]
+    if run % 2:
+        raise ValueError(f"cannot split an odd run ({run}) exceeding {max_wrap}")
+    return [(2, run // 2), (run // 2, 1)]
 
 
 _ITER_MAX = 64  # 6-bit iteration wrap, biased by one

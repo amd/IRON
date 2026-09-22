@@ -20,7 +20,7 @@ import pytest
 import aie.utils as aie_utils
 
 import iron.operators as catalog
-from iron.common.test_utils import golden, run_test
+from iron.common.harness import run_test, vectors
 from iron.common.testing import Testing
 
 if aie_utils.get_current_device() is None:
@@ -64,7 +64,7 @@ def test_operator(cls, declaration, case, npu_runtime):
     extra = draw(op) if callable(draw) else (draw or {})
     run = run_test(
         op,
-        golden(op, **extra),
+        vectors(op, **extra),
         rel_tol=declaration.rel_tol,
         abs_tol=declaration.abs_tol,
         max_error_rate=declaration.max_error_rate,

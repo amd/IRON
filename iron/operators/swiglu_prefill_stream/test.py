@@ -31,7 +31,7 @@ from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream
 # against come from swiglu_decode's reference, which it shares.
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.operators.swiglu_prefill_stream.reference import INPUT, OUTPUT, WEIGHTS
-from iron.common.test_utils import record_metric, verify_buffer
+from iron.common.harness import record_metric, verify_buffer
 
 # The MILP-feasible shape on the whole-array Strix (npu2) target.
 SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM = 256, 512, 2048

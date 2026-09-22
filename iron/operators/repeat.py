@@ -20,7 +20,7 @@ from iron.common.declare import (
 )
 from iron.common.tiling import Access, granule_elements
 from iron.common.testing import Case, Testing
-from iron.common.utils import DMA_BD_MAX_WRAP
+from iron.common.tiling import DMA_BD_MAX_WRAP
 
 
 @operator

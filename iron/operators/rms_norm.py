@@ -22,7 +22,8 @@ import aie.utils as aie_utils
 from aie.iron.kernels import eltwise, norm
 
 from iron.common.testing import Case, Testing
-from iron.common.utils import bank_elements, get_shim_dma_limit
+from iron.common.declare import get_shim_dma_limit
+from iron.common.tiling import bank_elements
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 

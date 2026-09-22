@@ -145,7 +145,7 @@ reuse lint
        xclbin) declare an `Xclbin` attribute and pinned streams instead of
        `design()`.
      - The operator's `reference(*inputs)` is the CPU reference the tests
-       and the graph reference run; `golden(op)` in `iron/common/test_utils`
+       and the graph reference run; `vectors(op)` in `iron/common/harness`
        draws random inputs for its declared buffers and takes the outputs
        from it.
      - `test = Testing(cases, ...)` on the operator class
@@ -177,8 +177,7 @@ reuse lint
    - `elementwise.py`: the shared elementwise template and its two stream shapes
    - `jit_compile.py`: the seam onto mlir-aie's `CompilableDesign`
    - `sequence.py`: the image builder a graph lowers onto (`OperatorSequence`)
-   - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: the operator test harness (`golden`, `run_test`, `verify_buffer`, `record_metric`)
+   -    - `harness.py`: the device test harness (`vectors`, `run_test`, `verify_buffer`, `record_metric`)
    - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
    - `artifacts.py`: the record of what a compiled image consists of
 
@@ -321,11 +320,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `channeled_unary_cases`/`binary_elementwise_cases` build the
      elementwise sweeps
    - `extensive=True` keeps a case out of the default suite
-   - `draw=` passes `golden()` its arguments (`normal=`, `centered=`, a given
+   - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
      tensor or shape per input), or a callable of the operator for an input
      with preconditions (a packed quantization, an angle table)
    - `iron/operators/test.py` runs it; a test with a body of its own goes
-     beside the operator and calls `run_test(op, golden(op), ...)`, with
+     beside the operator and calls `run_test(op, vectors(op), ...)`, with
      `record_metric()` for any figure beyond latency and bandwidth
    - a shape the operator must *refuse* goes in
      `iron/tests/operators/rejected_shapes.py`, which needs no device
@@ -425,7 +424,7 @@ void my_kernel(bfloat16* in, bfloat16* out, int32_t size) {
 ### Test Verification Pattern
 
 ```python
-from iron.common.test_utils import verify_buffer
+from iron.common.harness import verify_buffer
 
 # Compare NPU output against CPU reference
 errors = verify_buffer(

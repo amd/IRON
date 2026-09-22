@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from iron.common.test_utils import record_metric
+from iron.common.harness import record_metric
 
 repo_root = Path(__file__).resolve().parents[3]
 weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))

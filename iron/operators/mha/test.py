@@ -7,7 +7,7 @@ import math
 import pytest
 
 from iron.operators.mha.op import MHA
-from iron.common.test_utils import golden, run_test
+from iron.common.harness import run_test, vectors
 
 
 def get_params():
@@ -42,7 +42,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, npu_runtime):
         num_of_pipelines=num_pipelines,
     )
 
-    data = golden(operator)
+    data = vectors(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data.inputs, data.outputs, rel_tol=4.0e-2, abs_tol=1.5e-1

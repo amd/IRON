@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""The device test harness: draw vectors, run an operator, check and time it.
+
+Heavy by nature -- torch, and mlir-aie's runtime and benchmark helpers --
+so it is imported by tests, never by an operator module. The light half,
+how an operator *declares* the shapes it is tested at, is
+:mod:`iron.common.testing`, which imports neither torch nor pytest.
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -32,8 +40,8 @@ def torch_dtype(dtype) -> torch.dtype:
 
 
 @dataclasses.dataclass
-class Golden:
-    """Test vectors for one operator, keyed by its declared buffer names."""
+class Vectors:
+    """One operator's test vectors, keyed by its declared buffer names."""
 
     inputs: dict[str, torch.Tensor]
     outputs: dict[str, torch.Tensor]
@@ -42,8 +50,12 @@ class Golden:
         return self.inputs[name] if name in self.inputs else self.outputs[name]
 
 
-def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden:
+def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vectors:
     """Random inputs for ``op``'s declared buffers, and its reference's outputs.
+
+    Not a golden model: the expected outputs are ``op.reference()`` on the
+    inputs drawn here, so this pairs a draw with the operator's own
+    reference rather than with an independent oracle.
 
     Each ``In`` buffer, in declaration order, is ``torch.rand`` of its declared
     shape and dtype times ``scale`` (``torch.randn`` for the names in
@@ -82,7 +94,7 @@ def golden(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Golden
         raise ValueError(
             f"{type(op).__name__}.reference returned {len(outs)} outputs for {names}"
         )
-    return Golden(inputs, dict(zip(names, outs)))
+    return Vectors(inputs, dict(zip(names, outs)))
 
 
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
@@ -193,14 +205,14 @@ def run_test(
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
-    ``inputs`` is a :class:`Golden`, or the inputs by name with ``outputs``
+    ``inputs`` is a :class:`Vectors`, or the inputs by name with ``outputs``
     the expected outputs by name (an expected value of ``None`` is not
     checked); both are consumed in the order of the operator's declared
     buffers. An ``inout`` buffer is given as an input and checked under that
     name. Latency (the NPU's own time) and effective bandwidth are recorded
     for the CSV and returned.
     """
-    if isinstance(inputs, Golden):
+    if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
     if not hasattr(operator, "buffers"):
         raise ValueError("run_test runs one declared operator (see Operator.buffers)")

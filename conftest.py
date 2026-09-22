@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import statistics
 
-from iron.common import test_utils
+from iron.common import harness
 import aie.utils as aie_utils
 
 
@@ -142,10 +142,10 @@ def pytest_runtest_makereport(item, call):
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
-            # What the test reported through test_utils.record_metric (run_test
+            # What the test reported through harness.record_metric (run_test
             # records latency and bandwidth; a test adds its own, e.g. throughput).
             csv_reporter.add_result(
-                test_path, test_name, passed, test_utils.take_metrics()
+                test_path, test_name, passed, harness.take_metrics()
             )
 
 

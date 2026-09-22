@@ -11,7 +11,7 @@ torch = pytest.importorskip("torch")
 
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 
-from iron.common import test_utils
+from iron.common import harness
 
 
 class _Operator:
@@ -44,14 +44,14 @@ class _Operator:
 
 @pytest.mark.parametrize("tuple_result", [False, True])
 def test_run_test_uses_upstream_npu_timing(monkeypatch, tuple_result):
-    monkeypatch.setattr(test_utils.aie_utils, "DEFAULT_TENSOR_CLASS", CPUOnlyTensor)
+    monkeypatch.setattr(harness.aie_utils, "DEFAULT_TENSOR_CLASS", CPUOnlyTensor)
     results = [SimpleNamespace(npu_time=ns) for ns in (1000000, 2000, 4000)]
     if tuple_result:
         results = [(None, result) for result in results]
     op = _Operator(results)
     data = torch.ones(32, dtype=torch.bfloat16)
 
-    errors, latency_us, bandwidth = test_utils.run_test(
+    errors, latency_us, bandwidth = harness.run_test(
         op, {"in": data}, {"out": data}, warmup_iters=1, timed_iters=2
     )
 
@@ -62,10 +62,10 @@ def test_run_test_uses_upstream_npu_timing(monkeypatch, tuple_result):
 
 
 def test_missing_npu_timing_is_rejected(monkeypatch):
-    monkeypatch.setattr(test_utils.aie_utils, "DEFAULT_TENSOR_CLASS", CPUOnlyTensor)
+    monkeypatch.setattr(harness.aie_utils, "DEFAULT_TENSOR_CLASS", CPUOnlyTensor)
     op = _Operator([None])
     data = torch.ones(32, dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="NPU execution time"):
-        test_utils.run_test(
+        harness.run_test(
             op, {"in": data}, {"out": data}, warmup_iters=0, timed_iters=1
         )
