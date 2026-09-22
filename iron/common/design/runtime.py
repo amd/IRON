@@ -62,7 +62,7 @@ class Transfers:
                         f"{type(self.op).__name__}.{buf.name} names no stream (to=), so its "
                         f"sequence cannot be derived; add to= or override design(rt)"
                     )
-                for slot, accesses in plan(buf, stream):
+                for slot, accesses in transfers(buf, stream):
                     for acc in accesses:
                         self.fill(slot, (buf, acc), group=tg)
             for buf in self.op.outputs:
@@ -72,7 +72,7 @@ class Transfers:
                         f"{type(self.op).__name__}.{buf.name} names no stream (from_=), so its "
                         f"sequence cannot be derived; add from_= or override design(rt)"
                     )
-                for slot, accesses in plan(buf, stream):
+                for slot, accesses in transfers(buf, stream):
                     for acc in accesses:
                         self.drain(slot, (buf, acc), group=tg, wait=True)
 
@@ -211,9 +211,6 @@ class Sequence(Transfers):
         """A task group the caller finishes itself (for hand-rolled pipelines)."""
         return TaskGroup()
 
-    def sync_parameters(self) -> None:
-        sync_parameters()
-
     def data(self, buffer: BoundBuffer):
         """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""
         return self._rt_data[buffer.name]
@@ -261,10 +258,10 @@ class Sequence(Transfers):
         for b in target.barriers:
             b.set(1)
         if target.image == "elf" and (self.op.values or self.ov.values):
-            self.sync_parameters()
+            sync_parameters()
 
 
-def plan(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Access]]]:
+def transfers(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Access]]]:
     """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
 
     A single-slot or broadcast stream takes the whole buffer in one linear
