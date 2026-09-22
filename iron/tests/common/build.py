@@ -234,10 +234,12 @@ def test_preamble_writes_residents_and_rejects_missing_ones():
         _preamble(Sequence(op, ov, {}), Forgetful(ov, n=64), ov, FakeTarget())
 
 
-def test_mha_sequence_splits_q_over_two_shims_and_reuses_kv_per_head(monkeypatch):
+def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
     # mha/op.py with eight pipelines: Q and O go through two shims, each
-    # carrying four pipelines' (256-row) block; K and V are one head's whole
-    # (seq_pad, d) slab, filled once per Q block; drains wait.
+    # carrying four pipelines' (256-row) block. Per KV group, each shim's Q
+    # is one pattern over the group's heads and every block, K and V are the
+    # head's slab re-read once per (head, block) from the iteration slot, and
+    # the O drains mirror the Q fills and wait.
     from iron.operators.mha.op import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
@@ -254,10 +256,10 @@ def test_mha_sequence_splits_q_over_two_shims_and_reuses_kv_per_head(monkeypatch
             self.name, self.log = name, log
 
         def fill(self, data, tap, wait, group, offset_parameter):
-            self.log.append(("fill", self.name, data, tap.offset, tap.count, wait))
+            self.log.append(("fill", self.name, data, tap, wait))
 
         def drain(self, data, tap, wait, group, offset_parameter):
-            self.log.append(("drain", self.name, data, tap.offset, tap.count, wait))
+            self.log.append(("drain", self.name, data, tap, wait))
 
     op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_of_pipelines=8)
     op = op.tuned(Dev())
@@ -275,36 +277,72 @@ def test_mha_sequence_splits_q_over_two_shims_and_reuses_kv_per_head(monkeypatch
             s.bind(Handle(f"{s.name}{i}", log), i)
     op.design(Sequence(op, ov, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
 
-    head = 1024 * 64
-    block = 256 * 64
-    expected = []
-    for h in range(2):
-        for b in range(2):
-            for s in range(2):
-                expected.append(
-                    (
-                        "fill",
-                        f"q{s}",
-                        "dQ",
-                        h * head + (2 * b + s) * block,
-                        block,
-                        False,
-                    )
-                )
-            expected.append(("fill", "k0", "dK", 0, head, False))
-            expected.append(("fill", "v0", "dV", 0, head, False))
-            for s in range(2):
-                expected.append(
-                    (
-                        "drain",
-                        f"o{s}",
-                        "dO",
-                        h * head + (2 * b + s) * block,
-                        block,
-                        True,
-                    )
-                )
-    assert log == expected
+    head, block = 1024 * 64, 256 * 64
+    # (heads, blocks, rows x d): the two heads of the one group nest on the
+    # blocks (a head is two blocks), and the contiguous rows split for the
+    # d0 wrap, so each shim's Q is (4, 16, 1024) in three slots.
+    q = {
+        s: Access(2 * head, s * block, (1, 4, 16, 1024), (0, 2 * block, 1024, 1))
+        for s in range(2)
+    }
+    kv = Access(head, 0, (4, 1, 64, 1024), (0, 0, 1024, 1))
+    assert log == [
+        ("fill", "q0", "dQ", q[0], False),
+        ("fill", "q1", "dQ", q[1], False),
+        ("fill", "k0", "dK", kv, False),
+        ("fill", "v0", "dV", kv, False),
+        ("drain", "o0", "dO", q[0], True),
+        ("drain", "o1", "dO", q[1], True),
+    ]
+
+
+def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch):
+    # The (seq, heads, d) layout: a head's rows are strided by every head's
+    # d, and the group's heads are d apart; the descriptor count is the same.
+    from iron.operators.mha.op import MHA
+
+    monkeypatch.setattr(Access, "tap", lambda self: self)
+
+    class Dev:
+        def resolve(self):
+            class R:
+                name = "npu2"
+
+            return R()
+
+    class Handle:
+        def __init__(self, name, log):
+            self.name, self.log = name, log
+
+        def fill(self, data, tap, wait, group, offset_parameter):
+            self.log.append((self.name, tap))
+
+        def drain(self, data, tap, wait, group, offset_parameter):
+            self.log.append((self.name, tap))
+
+    op = MHA(
+        num_heads=4,
+        seq_len=1024,
+        d=64,
+        num_KV_heads=2,
+        num_of_pipelines=8,
+        heads_interleaved=True,
+    ).tuned(Dev())
+    ov = op.ov
+    log = []
+    for s in ov.streams.values():
+        for i in range(s.count):
+            s.bind(Handle(f"{s.name}{i}", log), i)
+    op.design(Sequence(op, ov, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
+    assert [name for name, _ in log] == ["q0", "q1", "k0", "v0", "o0", "o1"] * 2
+    q0, q1, k0, *_ = [tap for _, tap in log[:6]]
+    # Q: (heads 2 at stride d, blocks 2, rows 256 at stride 4d, d)
+    assert q0.sizes == (2, 2, 256, 64) and q0.strides == (64, 2 * 256 * 256, 256, 1)
+    assert q1.offset == q0.offset + 256 * 256
+    # K: the head's 1024 rows at stride 2d, re-read 4 times, rows factored for d1.
+    assert k0.sizes == (4, 2, 512, 64) and k0.strides == (0, 512 * 128, 128, 1)
+    # The second group starts at its heads.
+    assert log[6][1].offset == 2 * 64 and log[8][1].offset == 64
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
@@ -481,9 +519,7 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
         ).tuned(Dev())
         log = _record(op.ov)
         op.design(Sequence(op, op.ov, {"x": "dx", "y": "dy"}))
-        moved = lambda verb: sum(
-            s[0] * s[3] for v, _, _, s, _ in log if v == verb
-        )  # noqa: E731
+        moved = lambda verb: sum(s[0] * s[3] for v, _, _, s, _ in log if v == verb)  # noqa: E731
         return log, moved("fill"), moved("drain")
 
     log, filled, drained = run(1024)

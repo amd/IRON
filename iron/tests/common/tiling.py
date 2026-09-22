@@ -18,6 +18,7 @@ from iron.common.tiling import (
     contiguous,
     encode,
     granule_elements,
+    legalize,
     repeated,
     split,
     split_run,
@@ -136,6 +137,22 @@ def test_repeated_zero_stride_rereads_the_run_from_the_iteration_slot():
     assert acc.sizes == (1, 100, 1, 64) and acc.strides == (0, 64, 0, 1)
 
 
+def test_legalize_keeps_a_leading_zero_stride_in_the_iteration_slot():
+    # mha's K and V: one head's rows re-read once per (head, Q block) of its
+    # group. The re-read stays outermost whatever the rest needs: a contiguous
+    # head splits into d1/d0 under it, a strided one (heads interleaved per
+    # token) factors its rows into d2/d1.
+    (acc,) = legalize(8 * 2048 * 64, 0, (16, 2048 * 64), (0, 1), bfloat16)
+    assert acc.sizes == (16, 1, 128, 1024) and acc.strides == (0, 0, 1024, 1)
+    (acc,) = legalize(2048 * 8 * 64, 64, (16, 2048, 64), (0, 512, 1), bfloat16)
+    assert acc.sizes == (16, 4, 512, 64) and acc.strides == (0, 512 * 512, 512, 1)
+    # Past the iteration wrap the re-read factors (5 x 13, both re-reads) and
+    # the outer factor unrolls: five descriptors of thirteen re-reads each.
+    accs = legalize(8 * 2048 * 64, 0, (65, 2048 * 64), (0, 1), bfloat16)
+    assert len(accs) == 5 and all(a.sizes == (13, 1, 128, 1024) for a in accs)
+    assert all(a.offset == 0 for a in accs)
+
+
 def test_split_validates_divisibility_and_axis():
     with pytest.raises(ValueError, match="cannot split 100 rows"):
         split((100, 8), 8, axis=0)
@@ -172,10 +189,12 @@ def test_legalize_factors_an_oversize_outer_dim_when_a_slot_is_free():
 def test_legalize_unrolls_when_no_slot_is_free():
     from iron.common.tiling import legalize
 
-    # All four slots used and the iteration count past 64: unroll it.
-    accs = legalize(1 << 22, 0, [100, 8, 2, 64], [1 << 15, 4096, 128, 1], bfloat16)
+    # All four slots used and the iteration count past 64: unroll it. (The
+    # outer stride is not the next dimension's extent, or the two would
+    # merge into one slot.)
+    accs = legalize(1 << 22, 0, [100, 8, 2, 64], [40000, 4096, 128, 1], bfloat16)
     assert len(accs) == 100
-    assert [a.offset for a in accs][:3] == [0, 1 << 15, 2 << 15]
+    assert [a.offset for a in accs][:3] == [0, 40000, 80000]
     assert all(a.sizes == (1, 8, 2, 64) for a in accs)
 
 

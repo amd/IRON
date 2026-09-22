@@ -723,36 +723,68 @@ class MHA(Operator[MHAOverlay]):
     # -- the runtime sequence --------------------------------------------------
 
     def design(self, rt):
+        """One descriptor set per KV group.
+
+        The array consumes, per head and per Q block, the block's Q rows on
+        each shim and then all of that head's K and V; O comes back per
+        block. Issued as such, that is six descriptors per block, 768 a
+        call at Llama size, and the fused sequence's size follows. Instead
+        each shim's Q (and O) is one pattern over the group's heads and
+        every block, and K and V are one pattern each, the head's rows
+        re-read once per (head, block) from the descriptor's iteration
+        slot: the same bytes in the same order, six descriptors a group.
+        """
+        from iron.common.tiling import legalize
+
         ov = self.ov
         heads, kv_heads = self.num_heads, self.num_KV_heads
+        group = heads // kv_heads
         rows = ov.join_rows  # Q rows each shim carries per block
         blocks = self.seq_pad // (rows * ov.q_shims)  # per pipeline
+        S, d = self.seq_pad, ov.d
 
-        interleaved = self.heads_interleaved
+        def strides_of(buffer):
+            # (head, row) element strides of a (heads, seq, d) or, interleaved
+            # per token, (seq, heads, d) buffer.
+            n_heads = buffer.shape[1] if self.heads_interleaved else buffer.shape[0]
+            return (d, n_heads * d) if self.heads_interleaved else (S * d, d)
 
-        def head_rows(buffer, head, r0, r1):
-            # One head's rows [r0, r1): a contiguous block per head, or a
-            # strided one when the heads are interleaved per token.
-            return buffer[r0:r1, head, :] if interleaved else buffer[head, r0:r1, :]
+        def q_rows(buffer, head0, shim):
+            # The group's heads, each block's `rows` rows for this shim.
+            head_s, row_s = strides_of(buffer)
+            return legalize(
+                buffer.elements,
+                head0 * head_s + shim * rows * row_s,
+                (group, blocks, rows, d),
+                (head_s, ov.q_shims * rows * row_s, row_s, 1),
+                buffer.dtype,
+            )
 
-        for head in range(heads):
-            kv_head = head // (heads // kv_heads)
-            for block in range(blocks):
-                # One group per block: fills, then the drains that free them.
-                with rt.group():
-                    for shim in range(ov.q_shims):
-                        r0 = (block * ov.q_shims + shim) * rows
-                        rt.fill(ov.q[shim], head_rows(self.Q, head, r0, r0 + rows))
-                    # The whole of this head's K and V, streamed in (d, B_kv) blocks.
-                    rt.fill(ov.k, head_rows(self.K, kv_head, 0, self.seq_pad))
-                    rt.fill(ov.v, head_rows(self.V, kv_head, 0, self.seq_pad))
-                    for shim in range(ov.q_shims):
-                        r0 = (block * ov.q_shims + shim) * rows
-                        rt.drain(
-                            ov.o[shim],
-                            head_rows(self.O, head, r0, r0 + rows),
-                            wait=True,
-                        )
+        def kv_rows(buffer, kv_head):
+            # The head's rows, re-read once per (head, block) of the group.
+            head_s, row_s = strides_of(buffer)
+            return legalize(
+                buffer.elements,
+                kv_head * head_s,
+                (group * blocks, S, d),
+                (0, row_s, 1),
+                buffer.dtype,
+            )
+
+        for kv_head in range(kv_heads):
+            head0 = kv_head * group
+            with rt.group():
+                for shim in range(ov.q_shims):
+                    for acc in q_rows(self.Q, head0, shim):
+                        rt.fill(ov.q[shim], (self.Q, acc))
+                for acc in kv_rows(self.K, kv_head):
+                    rt.fill(ov.k, (self.K, acc))
+                for acc in kv_rows(self.V, kv_head):
+                    rt.fill(ov.v, (self.V, acc))
+                for shim in range(ov.q_shims):
+                    accs = q_rows(self.O, head0, shim)
+                    for acc in accs:
+                        rt.drain(ov.o[shim], (self.O, acc), wait=acc is accs[-1])
 
 
 # --------------------------------------------------------------------------

@@ -124,6 +124,19 @@ def _is_contiguous(dims: Sequence[tuple[int, int]]) -> bool:
     return True
 
 
+def _slots(dims: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``dims`` in the four slots, outermost first, unit slots padded in.
+
+    A leading zero-stride dimension (a re-read) is only legal in the
+    iteration slot, so it stays outermost and the padding goes after it;
+    every other pattern pads in front.
+    """
+    pad = [(1, 0)] * (4 - len(dims))
+    if dims and dims[0][1] == 0:
+        return [dims[0]] + pad + list(dims[1:])
+    return pad + list(dims)
+
+
 def _pack(
     elements: int, offset: int, dims: list[tuple[int, int]], gran: int
 ) -> Access | None:
@@ -141,7 +154,7 @@ def _pack(
         return contiguous(elements, offset, total)
     if len(dims) > 4:
         return None
-    padded = [(1, 0)] * (4 - len(dims)) + list(dims)
+    padded = _slots(dims)
     (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = padded
     if d0_s != 1 or d0 % gran:
         return None
@@ -317,7 +330,7 @@ def legalize(
         raise ValueError(
             f"offset {offset} is not a multiple of the {gran}-element shim granule"
         )
-    dims = [(int(n), int(s)) for n, s in zip(sizes, strides) if int(n) != 1]
+    dims = _merged([(int(n), int(s)) for n, s in zip(sizes, strides) if int(n) != 1])
     for n, s in dims[:-1]:
         if s % gran:
             raise ValueError(
@@ -330,6 +343,17 @@ def legalize(
     return _legalize_dims(elements, offset, dims, gran)
 
 
+def _merged(dims: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Adjacent dimensions that nest contiguously, as one: fewer slots used."""
+    out: list[tuple[int, int]] = []
+    for n, s in dims:
+        if out and out[-1][1] == n * s:
+            out[-1] = (out[-1][0] * n, s)
+        else:
+            out.append((n, s))
+    return out
+
+
 def _legalize_dims(
     elements: int, offset: int, dims: list[tuple[int, int]], gran: int
 ) -> list[Access]:
@@ -338,7 +362,7 @@ def _legalize_dims(
         return [packed]
     # Which slot overflowed? Try factoring it into a free slot, innermost first.
     if len(dims) < 4:
-        padded = [(1, 0)] * (4 - len(dims)) + list(dims)
+        padded = _slots(dims)
         limits = (_ITER_MAX, None, DMA_BD_MAX_WRAP, DMA_BD_MAX_WRAP * gran)
         for pos in (3, 2, 0):
             n, st = padded[pos]
