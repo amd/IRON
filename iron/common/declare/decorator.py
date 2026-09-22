@@ -341,7 +341,9 @@ def from_spec(
         ns["__annotations__"] = {"key": str}
         ns["key"] = dim(key, repr=False)
 
-    overlay_cls = operator(types.new_class(f"{name}Overlay", (Overlay,), {}, overlay_ns))
+    overlay_cls = operator(
+        types.new_class(f"{name}Overlay", (Overlay,), {}, overlay_ns)
+    )
 
     def operator_ns(ns):
         ns["__module__"] = module

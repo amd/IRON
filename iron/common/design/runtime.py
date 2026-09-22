@@ -261,7 +261,9 @@ class Sequence(Transfers):
             sync_parameters()
 
 
-def transfers(buffer: BoundBuffer, stream: BoundStream) -> list[tuple[Any, list[Access]]]:
+def transfers(
+    buffer: BoundBuffer, stream: BoundStream
+) -> list[tuple[Any, list[Access]]]:
     """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
 
     A single-slot or broadcast stream takes the whole buffer in one linear

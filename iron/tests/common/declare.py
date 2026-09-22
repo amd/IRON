@@ -385,7 +385,11 @@ def test_operator_tuned_runs_compatible():
 
 def test_infer_binds_both_layers_from_operands():
     assert infer(MV, (1024, 256), (256,)) == {"M": 1024, "K": 256, "num_batches": 1}
-    assert infer(MV, (3, 1024, 256), (3, 256)) == {"num_batches": 3, "M": 1024, "K": 256}
+    assert infer(MV, (3, 1024, 256), (3, 256)) == {
+        "num_batches": 3,
+        "M": 1024,
+        "K": 256,
+    }
 
 
 def test_infer_reports_conflicts_naming_both_operands():
