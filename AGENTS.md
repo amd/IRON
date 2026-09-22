@@ -74,6 +74,7 @@ pytest iron/applications/
 ### Run Specific Test Function
 
 ```bash
+pytest iron/operators/test.py -k relu
 pytest iron/operators/gemm/test.py::test_gemm
 ```
 
@@ -123,8 +124,11 @@ reuse lint
 ### Three-Layer Structure
 
 1. **Operators** (`iron/operators/`)
-   - Each operator directory contains:
-     - `op.py`: the operator, declared as two classes (`iron/common/declare.py`,
+   - One operator is one module: `relu.py` for a small one, a directory with
+     `op.py` for one that also has a design, a reference, a README or a
+     device test of its own (`gemm/`, `mha/`, `flm/gemm/`).
+   - An operator module holds:
+     - the operator, declared as two classes (`iron/common/declare.py`,
        `OPERATOR_MODEL_PLAN.md`). The **overlay** (`XOverlay(Overlay)`) is the
        array configuration: `tunable()` fields filled by `tuning(dev)` from the
        device alone, `StreamIn`/`StreamOut` members in tile units, `Resident`
@@ -140,8 +144,13 @@ reuse lint
        and the graph reference run; `golden(op)` in `iron/common/test_utils`
        draws random inputs for its declared buffers and takes the outputs
        from it.
-     - `test.py`: End-to-end test (build, run `golden(op)` through
-       `run_test`, verify)
+     - `test = Testing(cases, ...)` on the operator class
+       (`iron/common/testing.py`): the shapes it is checked at on a device,
+       with the tolerances and any `draw=` its inputs need. One module,
+       `iron/operators/test.py`, runs every declaration against
+       `reference()`. An operator whose device test is more than that (a
+       composite compared step by step, a shipped overlay against its own
+       accumulator) keeps a `test.py` beside it.
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
@@ -166,7 +175,9 @@ reuse lint
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: the operator test harness (`golden`, `run_test`, `operator_test`, `verify_buffer`, `record_metric`)
+   - `test_utils.py`: the operator test harness (`golden`, `run_test`, `verify_buffer`, `record_metric`)
+   - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
+   - `artifacts.py`: the record of what a compiled image consists of
 
 ### Key Concepts
 
@@ -269,8 +280,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 
 ## Adding a New Operator
 
-1. Create directory in `iron/operators/<operator_name>/`
-2. Declare the overlay in `op.py` (`@operator class XOverlay(Overlay)`):
+1. Create `iron/operators/<operator_name>.py` (a directory with `op.py` only
+   if it needs more than one module: a hand-written design, its own
+   reference, a README, a device test of its own)
+2. Declare the overlay (`@operator class XOverlay(Overlay)`):
    - `tunable()` fields with device defaults in `tuning(dev)`; `dim()` fields
      only for what a host shape names
    - `StreamIn`/`StreamOut` members in tile units (`per=` a column count)
@@ -293,16 +306,23 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
 5. Give the operator a `reference(*inputs)` (torch, on the declared shapes)
-6. Implement `test.py` with pytest tests
-   - Use `@pytest.mark.extensive` for slower/larger tests
-   - `test_x = operator_test(X, cases, rel_tol=, abs_tol=)` from
-     `iron.common.test_utils`, with the cases as dicts of constructor
-     arguments (`channeled_unary_cases`/`binary_elementwise_cases` for the
-     elementwise families); `draw=` passes `golden()` its arguments
-     (`normal=`, `centered=`, a given tensor or shape per input)
-   - a test with a body of its own calls `run_test(op, golden(op), ...)` and
+6. Declare how it is tested: `test = Testing(cases, rel_tol=, abs_tol=)` on
+   the operator class, from `iron.common.testing`
+   - the cases are `Case(kwargs, extensive=...)` or plain kwarg dicts, or a
+     callable returning them when they follow the device's width;
+     `channeled_unary_cases`/`binary_elementwise_cases` build the
+     elementwise sweeps
+   - `extensive=True` keeps a case out of the default suite
+   - `draw=` passes `golden()` its arguments (`normal=`, `centered=`, a given
+     tensor or shape per input), or a callable of the operator for an input
+     with preconditions (a packed quantization, an angle table)
+   - `iron/operators/test.py` runs it; a test with a body of its own goes
+     beside the operator and calls `run_test(op, golden(op), ...)`, with
      `record_metric()` for any figure beyond latency and bandwidth
-7. Register operator in `iron/operators/__init__.py`
+   - a shape the operator must *refuse* goes in
+     `iron/tests/operators/rejected_shapes.py`, which needs no device
+7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
+   the name, and the module that defines it)
 
 ## Graph Functions
 

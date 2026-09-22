@@ -13,9 +13,9 @@ import aie.utils as aie_utils
 
 import iron
 from iron.common.utils import get_shim_dma_limit
-from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm.op import GEMM
-from iron.operators.silu.op import SiLU
+from iron.operators.silu import SiLU
 
 
 def swiglu_prefill(w_gate, w_up, w_down, *, prio_accuracy=False, num_aie_columns=None):

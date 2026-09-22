@@ -7,8 +7,8 @@ import time
 import pytest
 
 from iron.common.test_utils import record_metric, verify_buffer
-from iron.operators.elementwise_mul.op import ElementwiseMul
-from iron.operators.silu.op import SiLU
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.silu import SiLU
 from iron.operators.swiglu_decode.op import swiglu_decode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
 

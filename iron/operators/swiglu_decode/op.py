@@ -12,9 +12,9 @@ import aie.utils as aie_utils
 
 import iron
 from iron.common.utils import get_shim_dma_limit
-from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV
-from iron.operators.silu.op import SiLU
+from iron.operators.silu import SiLU
 
 
 def swiglu_decode(w_gate, w_up, w_down, *, num_aie_columns=None):

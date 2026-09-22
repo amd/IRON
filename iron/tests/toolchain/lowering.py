@@ -67,7 +67,7 @@ def _cases():
 
 @pytest.mark.parametrize("module,cls_name,kwargs", list(_cases()))
 def test_operator_lowers_to_instructions(device, module, cls_name, kwargs, tmp_path):
-    cls = getattr(importlib.import_module(f"iron.operators.{module}.op"), cls_name)
+    cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     try:
         op = cls(**kwargs)
         op.tuned(device)

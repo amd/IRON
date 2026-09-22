@@ -288,7 +288,7 @@ def test_buffers_carry_direction_shape_and_dtype():
 def test_buffers_carry_the_declared_dtype_and_size():
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer."""
-    from iron.operators.repeat.op import Repeat
+    from iron.operators.repeat import Repeat
 
     x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32

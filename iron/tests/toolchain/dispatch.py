@@ -30,8 +30,8 @@ pytestmark = requires("xclbinutil", "peano")
 def _graph():
     """A softmax with a per-call row length, then a copy into a cache at a
     per-call offset: one core-read value and one offset value."""
-    from iron.operators.softmax.op import Softmax
-    from iron.operators.strided_copy.op import StridedCopy
+    from iron.operators.softmax import Softmax
+    from iron.operators.strided_copy import StridedCopy
 
     R, C, L = 16, 256, 4
     cache = iron.state((R, L * C), name="cache")

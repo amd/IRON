@@ -862,6 +862,39 @@ For the record, so nobody re-derives them:
 ---
 
 
+### The operator layout and its tests
+
+One operator is one module: `iron/operators/relu.py` for a small one, a
+directory with `op.py` for one that also carries a design, a reference, a
+README or a device test of its own (`gemm/`, `gemv/`, `mha/`, `rope/`,
+`swiglu_*/`, `flm/gemm/`). Seventeen directories became files.
+
+The per-operator `test.py` files are gone too, and with them the pattern
+they all repeated: 18 modules whose entire content was one
+`operator_test(cls, cases, ...)` call plus the case builder it needed.
+An operator now declares the shapes it is checked at as
+`test = Testing(cases, rel_tol=, abs_tol=, draw=)` on the class
+(`iron/common/testing.py`, data only, no pytest or torch import), and one
+module, `iron/operators/test.py`, runs every declaration: construct, draw
+with `golden`, dispatch, compare against `reference()`. The cases are
+`Case(kwargs, extensive=)` or plain dicts, or a callable returning them
+when they follow the device's width, which is what most operators need.
+
+The conversion was checked rather than argued: every declaration was
+resolved against an eight-column device and diffed, case by case, against
+what its deleted `test.py` generated -- same kwargs in the same order,
+same `extensive` marks, same tolerances, same presence of a `draw` hook.
+522 cases over 19 operator classes, all identical. What remains beside an
+operator is a device test with a body of its own (the composites compared
+step by step, flm's accumulator comparison), and a shape the operator must
+*refuse* now lives in `iron/tests/operators/rejected_shapes.py`, which
+needs no device.
+
+`iron/tests/common/cases.py` stays as it is: one small pinned construction
+case per shape decision, device-free, which the lowering gate runs. That
+is a different question from "what shapes stress the hardware", and
+merging the two would lose one of them.
+
 ### The compile path, after the artifact graph
 
 IRON no longer names build outputs. `CompilableDesign` owns building and

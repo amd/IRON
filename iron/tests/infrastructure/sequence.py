@@ -28,8 +28,8 @@ from aie.iron.device import NPU2
 
 from iron.common.sequence import OperatorSequence, build_fused_mlir
 from iron.common.test_utils import verify_buffer
-from iron.operators.elementwise_add.op import ElementwiseAdd
-from iron.operators.relu.op import ReLU
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.relu import ReLU
 
 
 def _set_input(run, name, data):

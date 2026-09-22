@@ -42,31 +42,31 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 
 | Section | Description | Datatype | AIE2 | AIE2P | Status | Design Example |
 |:--------|:------------|:---------|:-----|:------|:-------|:-------------|
-| [Element-wise Add](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add/](./iron/operators/elementwise_add/) |
-| [Element-wise Mul](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul/](./iron/operators/elementwise_mul/) |
+| [Element-wise Add](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/add.cc) | Element-wise addition kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_add.py](./iron/operators/elementwise_add.py) |
+| [Element-wise Mul](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mul.cc) | Element-wise multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/elementwise_mul.py](./iron/operators/elementwise_mul.py) |
 | [GEMM](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mm.cc) | General Matrix Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemm/](./iron/operators/gemm/) |
 | [GEMV](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/mv.cc) | General Matrix-Vector Multiplication kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gemv/](./iron/operators/gemv/) |
 | [GQA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mha.cc) | Grouped Query Attention kernel (Single pipeline) | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
 | [MHA](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/mha.cc) | Multi-Head Attention kernel & Grouped Query Attention | bfloat16 | | ✓ | 🟢 | [iron/operators/mha/](./iron/operators/mha/) |
-| [RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
+| [RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/rms_norm.cc) | RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
 | [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope/](./iron/operators/rope/) |
-| [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu/](./iron/operators/silu/) |
-| [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax/](./iron/operators/softmax/) |
-| [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm/](./iron/operators/rms_norm/) |
-| [Copy](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/mem_copy/](./iron/operators/mem_copy/) |
-| [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose/](./iron/operators/transpose/) |
-| [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy/](./iron/operators/axpy/) |
+| [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu.py](./iron/operators/silu.py) |
+| [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax.py](./iron/operators/softmax.py) |
+| [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2p/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
+| [Copy](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/passThrough.cc) | Copy | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/mem_copy.py](./iron/operators/mem_copy.py) |
+| [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |
+| [AXPY](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/axpy.cc) | AXPY | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/axpy.py](./iron/operators/axpy.py) |
 | [Reduction]() | Reduction | bfloat16 | | | 🟡 |  |
-| [Dequant](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant/](./iron/operators/dequant/) |
-| [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu/](./iron/operators/relu/) |
-| [Leaky RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu/](./iron/operators/leaky_relu/) |
-| [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu/](./iron/operators/gelu/) |
-| [LayerNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm/](./iron/operators/layer_norm/) |
+| [Dequant](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/generic/expand.cc) | Dequant Q4NX from [AWQ](https://github.com/mit-han-lab/llm-awq) to bfloat16 | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/dequant.py](./iron/operators/dequant.py) |
+| [RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/relu.cc) | RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/relu.py](./iron/operators/relu.py) |
+| [Leaky RELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/leaky_relu.cc) | Leaky RELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/leaky_relu.py](./iron/operators/leaky_relu.py) |
+| [GELU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/gelu.cc) | GELU | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/gelu.py](./iron/operators/gelu.py) |
+| [LayerNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/layer_norm.cc) | LayerNorm | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/layer_norm.py](./iron/operators/layer_norm.py) |
 | [Convolution]() | Convolution | bfloat16 | | | 🟡 |  |
 | [MaxPool]() | MaxPool | bfloat16 | | | ⚪ |  |
 | [AveragePool]() | AveragePool | bfloat16 | | | ⚪ |  |
-| [Tanh](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh/](./iron/operators/tanh/) |
-| [Sigmoid](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/sigmoid/](./iron/operators/sigmoid/) |
+| [Tanh](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/tanh.cc) | Tanh kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/tanh.py](./iron/operators/tanh.py) |
+| [Sigmoid](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/aie2/sigmoid.cc) | Sigmoid kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/sigmoid.py](./iron/operators/sigmoid.py) |
 
 > Use this dashboard to quickly check the status of each kernel and locate relevant setup, build, and usage information.
 
@@ -133,9 +133,9 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 All available operators can be found in `iron/operators`. These each contain:
 
-- `op.py`: The operator, declared as two classes (see `iron/common/declare.py` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
+- `op.py` (or `<name>.py` for a small operator): The operator, declared as two classes (see `iron/common/declare.py` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
-- `test.py`: An end-to-end test that instantiates and builds the operator, runs it on random inputs for its declared buffers (`golden(op)` in `iron/common/test_utils`) and verifies its outputs against the reference.
+- `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/operators/test.py` runs every operator's declaration, building it, running `golden(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
 Operators compose into graph functions: a Python function called on handles, traced once for its shapes, compiled to one image and called per token (`iron.graph`, see `iron/common/graph.py`; `iron/models/llama_graphs.py` is the worked example).
 

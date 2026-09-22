@@ -16,12 +16,12 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.declare import DispatchTime, Scratchpad
 from iron.common.graph import Handle, TracedGraph
-from iron.operators.elementwise_add.op import ElementwiseAdd
-from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV, GEMVOverlay
-from iron.operators.rms_norm.op import RMSNorm, WeightedRMSNorm
-from iron.operators.silu.op import SiLU
-from iron.operators.strided_copy.op import StridedCopy
+from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
+from iron.operators.silu import SiLU
+from iron.operators.strided_copy import StridedCopy
 
 E, H = 2048, 8192
 
@@ -43,7 +43,7 @@ class Dev:
 @pytest.fixture(autouse=True)
 def shim_limit(monkeypatch):
     import iron.common.operator_bases as bases
-    import iron.operators.rms_norm.op as rms
+    import iron.operators.rms_norm as rms
 
     monkeypatch.setattr(bases, "get_shim_dma_limit", lambda dev: 16)
     monkeypatch.setattr(rms, "get_shim_dma_limit", lambda dev: 16)

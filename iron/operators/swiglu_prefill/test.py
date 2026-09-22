@@ -7,8 +7,8 @@ import time
 import pytest
 
 from iron.common.test_utils import record_metric, verify_buffer
-from iron.operators.elementwise_mul.op import ElementwiseMul
-from iron.operators.silu.op import SiLU
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.silu import SiLU
 from iron.operators.swiglu_prefill.op import swiglu_prefill
 
 # swiglu_prefill shares the same reference implementation as swiglu_decode:

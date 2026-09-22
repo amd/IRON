@@ -18,6 +18,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
+from iron.common.testing import Case, Testing, device_columns
 
 
 @operator
@@ -106,9 +107,47 @@ class RoPEOverlay(Overlay):
         return workers
 
 
+def _cases():
+    out = []
+    for cols in [c for c in (1, 2, 4, 8) if c <= device_columns()]:
+        for rows in (32, 64):
+            for angle_rows in (8, 16, 32):
+                for width in (128, 512):
+                    for method_type in (0, 1):
+                        regular = (
+                            rows == 32
+                            and width == 512
+                            and angle_rows in (8, 32)
+                            and method_type == 0
+                        )
+                        if not regular and width != 128:
+                            continue
+                        out.append(
+                            Case(
+                                dict(
+                                    rows=rows,
+                                    cols=width,
+                                    num_aie_columns=cols,
+                                    angle_rows=angle_rows,
+                                    method_type=method_type,
+                                ),
+                                extensive=not regular,
+                            )
+                        )
+    return out
+
+
+def _angles(op):
+    # One angle row per position, applied to rows // angle_rows consecutive
+    # rows of x (the heads of one position, in the design's layout).
+    return dict(angles=angle_table(op.angle_rows, op.cols, op.method_type))
+
+
 @operator
 class RoPE(Operator[RoPEOverlay]):
     """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
+
+    test = Testing(_cases, rel_tol=0.05, abs_tol=0.5, draw=_angles)
 
     rows: int = dim()
     angle_rows: int | None = dim(None)

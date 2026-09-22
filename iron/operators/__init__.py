@@ -10,23 +10,35 @@ Operators are re-exported lazily (PEP 562):
 
 import importlib
 
+# Operator name -> the module that defines it, relative to this package. A
+# small operator is one file (``relu``); one with a design, a reference or a
+# test of its own keeps a directory (``gemm.op``).
 _OPERATOR_MODULES = {
+    "AXPY": "axpy",
+    "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",
-    "GEMM": "gemm",
-    "GEMV": "gemv",
-    "MHA": "mha",
+    "GELU": "gelu",
+    "GEMM": "gemm.op",
+    "GEMV": "gemv.op",
+    "LayerNorm": "layer_norm",
+    "LeakyReLU": "leaky_relu",
+    "MHA": "mha.op",
+    "MemCopy": "mem_copy",
+    "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "WeightedRMSNorm": "rms_norm",
-    "RoPE": "rope",
+    "Repeat": "repeat",
+    "RoPE": "rope.op",
+    "Sigmoid": "sigmoid",
     "SiLU": "silu",
     "Softmax": "softmax",
     "DynamicSoftmax": "softmax",
-    "SwiGLUDecode": "swiglu_decode",
-    "SwiGLUPrefill": "swiglu_prefill",
-    "Transpose": "transpose",
     "StridedCopy": "strided_copy",
-    "Repeat": "repeat",
+    "SwiGLUDecode": "swiglu_decode.op",
+    "SwiGLUPrefill": "swiglu_prefill.op",
+    "Tanh": "tanh",
+    "Transpose": "transpose",
 }
 
 # Sub-packages whose operator names would collide with the table above.
@@ -42,7 +54,7 @@ def __getattr__(name):
     module = _OPERATOR_MODULES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}.op", __name__), name)
+    return getattr(importlib.import_module(f".{module}", __name__), name)
 
 
 def __dir__():

@@ -23,18 +23,18 @@ import torch
 
 import iron
 from iron.common.declare import Scratchpad
-from iron.operators.elementwise_add.op import ElementwiseAdd
-from iron.operators.elementwise_mul.op import ElementwiseMul
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
 from iron.operators.mha.op import MHA
-from iron.operators.repeat.op import Repeat
-from iron.operators.rms_norm.op import RMSNorm
+from iron.operators.repeat import Repeat
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope.op import RoPE
-from iron.operators.silu.op import SiLU
-from iron.operators.softmax.op import Softmax
-from iron.operators.strided_copy.op import StridedCopy
-from iron.operators.transpose.op import Transpose
+from iron.operators.silu import SiLU
+from iron.operators.softmax import Softmax
+from iron.operators.strided_copy import StridedCopy
+from iron.operators.transpose import Transpose
 
 
 class DecodeGraph:

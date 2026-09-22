@@ -4,7 +4,8 @@
 """Importing one operator must not import the rest of the catalog.
 
 ``iron.operators`` re-exports lazily (PEP 562), so ``from iron.operators import
-GEMM`` should pull in ``iron.operators.gemm.op`` and nothing else. What that
+GEMM`` should pull in ``iron.operators.gemm.op`` (or, for a small operator,
+its single file) and nothing else. What that
 saves is importing all fourteen operator modules and their designs, not the
 cost of any one of them -- MHA, long named here as a witness, actually imports
 slightly faster than ReLU.
@@ -37,10 +38,12 @@ def _modules_after_importing(name):
         # snake_case one (swiglu_decode for SwiGLUDecode).
         f"assert getattr({name}, '__name__', '').replace('_', '').lower() "
         f"== {name!r}.lower(), {name}.__name__\n"
-        # Only the .op modules: importing an operator necessarily creates the
-        # namespace package around it, which says nothing about laziness.
-        "print('\\n'.join(sorted(m for m in sys.modules "
-        "if m.startswith('iron.operators.') and m.endswith('.op'))))\n"
+        # Only the operator modules, named as the catalog names them:
+        # importing one necessarily creates the package around it, which says
+        # nothing about laziness.
+        "from iron.operators import _OPERATOR_MODULES\n"
+        "known = {f'iron.operators.{m}' for m in _OPERATOR_MODULES.values()}\n"
+        "print('\\n'.join(sorted(known & set(sys.modules))))\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", program], capture_output=True, text=True
@@ -64,7 +67,7 @@ def _is_composite(name):
 
 @pytest.mark.parametrize("name", sorted(_OPERATOR_MODULES))
 def test_importing_one_operator_imports_no_unrelated_operator(name):
-    own = f"iron.operators.{_OPERATOR_MODULES[name]}.op"
+    own = f"iron.operators.{_OPERATOR_MODULES[name]}"
     imported = _modules_after_importing(name)
     others = sorted(imported - {own})
 
@@ -75,7 +78,7 @@ def test_importing_one_operator_imports_no_unrelated_operator(name):
     else:
         # A composite may import its parts, but never the whole catalog --
         # that is the regression this guards against.
-        catalog = {f"iron.operators.{m}.op" for m in _OPERATOR_MODULES.values()}
+        catalog = {f"iron.operators.{m}" for m in _OPERATOR_MODULES.values()}
         assert len(imported) < len(catalog), (
             f"importing {name} imported the entire catalog ({sorted(imported)}); "
             "a composite should pull in only the operators it is built from"

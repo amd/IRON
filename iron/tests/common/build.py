@@ -501,7 +501,7 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
     # mem_copy/op.py: whole partitions split evenly; the remainder is padded
     # to one line per core by re-reading copied data, in awaited groups of
     # four transfers on the last fifo.
-    from iron.operators.mem_copy.op import MemCopy
+    from iron.operators.mem_copy import MemCopy
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
 

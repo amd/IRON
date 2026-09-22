@@ -129,7 +129,7 @@ PREFILL = dict(
 
 
 def _reorder(sizes, in_strides, out_strides, **kw):
-    from iron.operators.strided_copy.op import StridedCopy
+    from iron.operators.strided_copy import StridedCopy
 
     n = int(np.prod(sizes))
     return StridedCopy(
