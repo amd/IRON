@@ -179,7 +179,10 @@ class ElementwiseOverlay(Overlay):
             ]
 
         of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
-        of_outs = [fifos(s, f"out{i}" if len(outs) > 1 else "out") for s in outs]
+        of_outs = [
+            fifos(s, f"out{i}" if len(outs) > 1 else "out")
+            for i, s in enumerate(outs)
+        ]
         counts = [target.rtp(_I32, name=f"count_{slot(k)}") for k in range(cores)]
         barriers = [target.barrier() for _ in range(cores)]
 
