@@ -9,7 +9,7 @@ rows before moving to the next, so row r uses angle row
 
 That convention and the interleaved one (`r % angle_rows`) agree whenever
 angle_rows is 1 or rows, so only 1 < angle_rows < rows tells them apart --
-the regime llama_npu.py's prefill RoPE shape sits in
+the regime the application's prefill RoPE shape sits in
 (rows=prompt_len*n_heads, angle_rows=prompt_len).
 """
 

@@ -7,7 +7,7 @@ A checkpoint is a ``state_dict``, so the thing that reads one is an
 ``nn.Module``. Declaring the tree once buys the whole surface for free:
 ``load_state_dict`` to fill it, ``named_parameters()`` to walk it, and a
 *name* for every weight that is the same string on the checkpoint, in the
-tree, and on the device buffer (the graphs in :mod:`iron.models.llama_graphs`
+tree, and on the device buffer (the graphs in :mod:`.graphs`
 close over the tree and name their weight buffers from it).
 
 :meth:`Llama.forward` is the model as torch computes it: a stateless causal

@@ -20,20 +20,13 @@ sides compute in bfloat16 with different operation orders, so the logits
 agree to bf16 tolerance and the argmax exactly.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
-APP = Path(__file__).resolve().parents[2] / "applications" / "llama_3.2_1b"
-sys.path.insert(0, str(APP))
-
-import llama_npu  # noqa: E402
-from llama_inference_harness import LlamaModelState  # noqa: E402
-
-from iron.models.llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
-from iron.tests.common.llama_model import Config as _Config  # noqa: E402
+from iron.applications.llama_3_2_1b import npu as llama_npu
+from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+from iron.applications.llama_3_2_1b.harness import LlamaModelState
+from iron.tests.common.llama_model import Config as _Config
 
 
 def oracle(config, tokens):
@@ -142,7 +135,7 @@ def test_prefill_matches_the_forward_and_hands_decode_its_caches(cpu):
 
 
 def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
-    """§18's first candidate. llama_npu.py used to write the softmax's valid
+    """§18's first candidate. npu.py used to write the softmax's valid
     length as a running sum of context lengths, so from the second token on
     the softmax saw stale zero columns beyond the context as real keys.
     Modelled here: it drifts from the forward where the correct context
@@ -182,7 +175,7 @@ class _Image:
 
 
 def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
-    """llama_npu.py's own forward pass, its two images stood in by the graph
+    """npu.py's own forward pass, its two images stood in by the graph
     references: the embedding, the prompt's padding and its last-row offset,
     the angles, the cache handoff and decode's values are the application's."""
     config, prompt, first, expected = cpu

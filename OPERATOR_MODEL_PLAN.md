@@ -1090,7 +1090,7 @@ vector size. The test asserts each bound value's symbol is in the table.
 The same build at Llama 3.2 1B's real configuration (16 blocks, 386
 steps, 48 bindings, 19 distinct designs) takes about three minutes and
 produces a 13.3 MB ELF with the same two-row table. That is the image
-`llama_npu.py` would load; only the load and the token snapshot are
+`npu.py` would load; only the load and the token snapshot are
 left.
 
 ### The xclbin gate
@@ -1221,8 +1221,8 @@ and the decode graph's parity against the token snapshot (§18).
 | reference parity (see above) | `iron/tests/common/llama_reference.py`, `graph.py` `_ReferenceTracer` | the graphs' references against `Llama.forward` (was `llama_cpu.py`): argmax equal at every token, logits within about 1%; the running-sum vector size shown to drift | — | **needs a device**: the kernels' arithmetic, the token snapshot |
 | recorder retired, legacy value spellings gone, declared-operators net | `iron/common/graph.py` (`TracedGraph.sequence`), `iron/tests/infrastructure/graph_dispatch.py`, `iron/tests/common/operators_declared.py` | the four recorder tests ported onto graph functions (three need a device); every exported operator checked to be declared | **needs a run**: `graph_dispatch.py`, `jit_compile_path.py`, `mlir_cache_poisoning.py` |
 | packaging surface (§14 step 5, part) | `iron/common/packaging.py` | 12 tests: the four rules, the named refusals (S1, S2), argument checks, the verbose report | **needs a run**: only `elf` (fused) and `xclbin` with `each_step` (separate) lower today; a fused sequence in an xclbin and `chunks(n)` wait on spike S1, modules on S4 |
-| llama prefill as a graph function (§20) | `llama_graphs.py` `PrefillGraph`, `llama_npu.py` | traced at the scaled config: 18 steps per block, one value (`last`), every projection a column-major GEMM over the checkpoint weight, MHA on the interleaved layout, caches as decode's states; the prefill reference matches the CPU prefill's last-token logits and caches, and decode continues from the graph's own caches; the application's forward pass runs both phases over the references | operators lower with the value; full ELF at the scaled config with `last` in the table; at Llama size the trace has 291 steps over 11 overlays and one layer builds to a full ELF (the sixteen-layer sequence lowering is past this host's memory, see §20) | **needs a device**: the token stream and time to first token (§20 step 8) |
-| llama decode as a graph function (§14 step 7) | `iron/models/llama_graphs.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
+| llama prefill as a graph function (§20) | `graphs.py` `PrefillGraph`, `npu.py` | traced at the scaled config: 18 steps per block, one value (`last`), every projection a column-major GEMM over the checkpoint weight, MHA on the interleaved layout, caches as decode's states; the prefill reference matches the CPU prefill's last-token logits and caches, and decode continues from the graph's own caches; the application's forward pass runs both phases over the references | operators lower with the value; full ELF at the scaled config with `last` in the table; at Llama size the trace has 291 steps over 11 overlays and one layer builds to a full ELF (the sixteen-layer sequence lowering is past this host's memory, see §20) | **needs a device**: the token stream and time to first token (§20 step 8) |
+| llama decode as a graph function (§14 step 7) | `iron/applications/llama_3_2_1b/graphs.py`, `npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF, and → the chained xclbins) verified by the full-ELF and xclbin gates; **needs a device**: writing values through `params` and calling |
 | the shipped flm image, external overlays (§9) | `iron/common/external.py`, `iron/operators/flm/gemm/shipped.py` (was `mm_prebuilt/`, a second operator; now a second overlay of `flm.GEMM`, its instruction stream byte-identical at four shapes) | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
@@ -1302,7 +1302,7 @@ a device) closes over the module tree, keeps the per-layer caches as
 `cache_offset` and `vector_size` as `Scratchpad[np.int32]` parameters; the
 per-head transposes are one batched `Transpose`, and each value binds to
 the operator's own member or, for the softmax, to the dynamic overlay's
-core-read member (the tracer looks on both). `llama_npu.py` compiles it
+core-read member (the tracer looks on both). `npu.py` compiles it
 against `build_elf`, calls it per token, and seeds the caches after
 prefill through `CompiledGraph.write(state, tensor)`, which also pushes
 the bytes to the device. Prefill is unchanged (per-operator xclbins,
@@ -1463,7 +1463,7 @@ iron/operators/gemv iron/operators/relu`, then the rest of the ten.
 **NPU decode output degrades after a few tokens** versus `llama_cpu.py` on the
 same prompt and seed. Prefill reproduces exactly and the first tokens agree,
 then the NPU drifts. Not the weight-naming refactor; uploaded bytes are
-`torch.equal` for all 146 parameters. `iron/applications/llama_3.2_1b/test.py`
+`torch.equal` for all 146 parameters. `iron/applications/llama_3_2_1b/test.py`
 asserts only `returncode == 0`, so it does not catch this, and **a rewritten
 llama will inherit it and look guilty.**
 
@@ -1503,7 +1503,7 @@ parity"), and the application now writes the context length:
 
 ## 20. Prefill
 
-Prefill is the last hand-written phase: `llama_npu.py` builds fourteen
+Prefill is the last hand-written phase: `npu.py` builds fourteen
 operators by hand, keeps two weight layouts on the device, and runs the
 attention itself on the CPU (the causal mask, the softmax and the
 `P @ V` product) between per-operator dispatches, reading every
@@ -1611,7 +1611,7 @@ stays a strided copy, because decode reads the cache as (G, L, D).
 | 1 | StridedCopy issues its taps through `tiling.legalize` | the (S, G, D) to (G, S, D) probe lowers; the existing strided_copy cases unchanged |
 | 2 | GEMM's column-major B fill legalized past the stride range | the K = 8192 probe lowers; gemm's lowering cases unchanged |
 | 3 | MHA `heads_interleaved` layout, with its reference | lowering at 2048 x 8 pipelines; reference against the (H, S, D) form on the same data |
-| 4 | `PrefillGraph` beside `DecodeGraph` (one module, `llama_graphs.py`), sharing weights and states | traces; the runlist and bindings pinned like decode's |
+| 4 | `PrefillGraph` beside `DecodeGraph` (one module, `graphs.py`), sharing weights and states | traces; the runlist and bindings pinned like decode's |
 | 5 | reference parity: prefill graph reference vs `llama_cpu.py` prefill (last-token logits, and the caches), then decode from the graph-seeded caches | `iron/tests/common/llama_reference.py`, host |
 | 6 | toolchain gates: prefill's operators lower with their values; the full ELF builds at the scaled and the real size | `iron/tests/toolchain` |
 | 7 | the application: the prefill section replaced by the graph, the cache handoff by `read`/`write`, `AIEPrefillOperations`/`AIEPrefillBuffers` and the CPU attention deleted | the application test; a token snapshot before and after |
@@ -1632,7 +1632,7 @@ decode graph four columns wide, one MHA pipeline and a 16-row GEMM tile
 (the tile constraints: the length a multiple of four row tiles and of 64
 per pipeline, every width a multiple of 64 columns). Step 6: the scaled
 prefill ELF builds in about two minutes with `last` as the one row of
-the parameter table. Step 7: `llama_npu.py` went from 847 lines to 161;
+the parameter table. Step 7: `npu.py` went from 847 lines to 161;
 the prefill section is one call with the prompt padded to the maximum
 length, the angles table and `last = (n - 1) * emb_dim`, then the cache
 handoff by `read`/`write` on the shared states. The application's
@@ -1640,9 +1640,16 @@ forward pass is tested on the host with both images stood in by the
 graphs' references. Step 8 waits for hardware.
 
 With prefill ported, the model's layout was cleaned up: the graphs moved
-next to the parameter tree (`iron/models/llama.py` holds the tree and the
-plain forward, `iron/models/llama_graphs.py` the two graphs), so the
-tests import the model rather than reaching into the application; the
+next to the parameter tree, and both then moved into the application, which
+is now a package. `iron/applications/llama_3_2_1b/` holds `model.py` (the
+tree and the plain forward), `graphs.py` (prefill and decode), `npu.py`
+(both graphs as one image) and `harness.py` (the checkpoint, the tokenizer
+and the generation loop). There is one model, so a level above it would
+have nothing in it; a second Llama size would earn one. The directory is
+spelled with underscores because `llama_3.2_1b` cannot be an import path,
+and the application runs as `python -m iron.applications.llama_3_2_1b.npu`,
+so neither it nor the tests that import it need the repository on
+`sys.path`. The tests import the model through the package; the
 scaled test model is the real tree at small dimensions (`Llama1B` is the
 tree at the real shape with unset storage); `llama_cpu.py` and the
 harness's CPU cache state are gone, the forward being the oracle; the
@@ -1698,7 +1705,7 @@ by name) with a unit test; the sandbox's wheel carries the same change.
 
 ### Expected results
 
-- `llama_npu.py` loses about 380 lines (the prefill operators, buffers
+- `npu.py` loses about 380 lines (the prefill operators, buffers
   and forward functions, the padded vocabulary and its partitions) and
   gains a graph of about 90; the application keeps embedding, the
   angles and the harness glue. (Measured: the application lost 686

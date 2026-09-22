@@ -1,22 +1,14 @@
-#!/usr/bin/env python3
-
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Llama 3.2 1B on the NPU: the prefill and decode graphs as two fused images."""
 
 import logging
-import sys
-from pathlib import Path
 
 import torch
 
-import llama_inference_harness as harness
-
-repo_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(repo_root))
-
-from iron.models.llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
+from . import harness
+from .graphs import DecodeGraph, PrefillGraph
 
 max_seq_len = 2048
 

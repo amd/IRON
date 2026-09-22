@@ -11,7 +11,7 @@ from pathlib import Path
 
 from iron.common.test_utils import record_metric
 
-test_dir = Path(__file__).parent
+repo_root = Path(__file__).resolve().parents[3]
 weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
 
 
@@ -47,11 +47,18 @@ FIGURES = {
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
 def test_llama_3_2_1b(prompt_len, num_tokens):
-    command = f"{sys.executable} {test_dir}/llama_npu.py {weights_dir}/llama3.2-1b/model.safetensors {weights_dir}/llama3.2-1b/tokenizer.model --num-tokens {num_tokens} --prompt-len {prompt_len}"
+    # As a module, so the package's relative imports resolve and nothing
+    # needs the repository on sys.path.
+    command = (
+        f"{sys.executable} -m iron.applications.llama_3_2_1b.npu "
+        f"{weights_dir}/llama3.2-1b/model.safetensors "
+        f"{weights_dir}/llama3.2-1b/tokenizer.model "
+        f"--num-tokens {num_tokens} --prompt-len {prompt_len}"
+    )
 
     result = subprocess.run(
         command,
-        cwd=test_dir,
+        cwd=repo_root,
         shell=True,
         capture_output=True,
         text=True,

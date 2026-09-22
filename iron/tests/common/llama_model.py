@@ -5,13 +5,13 @@
 
 import torch
 
-from iron.models.llama import Llama, rope_angles
+from iron.applications.llama_3_2_1b.model import Llama, rope_angles
 
 
 class Config:
     """Llama's shape, small, with the parameter tree drawn at a seed.
 
-    ``model`` is :class:`iron.models.llama.Llama` at these dimensions, so the
+    ``model`` is :class:`iron.applications.llama_3_2_1b.model.Llama` at these dimensions, so the
     graphs, the forward and the checkpoint loader all read one tree;
     ``angles`` is the RoPE table for ``context_length``.
     """

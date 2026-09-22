@@ -92,7 +92,7 @@ def _assert_values_in_table(traced, artifacts):
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.models.llama_graphs import DecodeGraph
+    from iron.applications.llama_3_2_1b.graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
@@ -109,7 +109,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     430), past this gate's memory at the full depth."""
     from iron.tests.common.llama_model import Llama1B
 
-    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
 
     cfg = Llama1B()
     cfg.n_layers, cfg.model.layers = 1, cfg.model.layers[:1]
@@ -123,7 +123,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
 
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)

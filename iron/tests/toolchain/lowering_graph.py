@@ -30,7 +30,7 @@ def _lower_all(traced, tmp_path):
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.models.llama_graphs import DecodeGraph
+    from iron.applications.llama_3_2_1b.graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
@@ -42,7 +42,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
 
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)

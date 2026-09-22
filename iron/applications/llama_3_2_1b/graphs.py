@@ -10,10 +10,10 @@ and the softmax's valid row length are per-call scratchpad values.
 :class:`PrefillGraph` runs the prompt, at the compile-time maximum length
 with the prompt in a prefix, writes the caches and returns the last
 prompt token's logits. Both are traced here on handles; compiled by
-``iron/applications/llama_3.2_1b/llama_npu.py`` against a device, or by a
+``npu.py`` against a device, or by a
 test against nothing. ``config`` is the model's shape (``n_layers``,
 ``n_heads``, ``n_kv_groups``, ``head_dim``, ``emb_dim``, ``hidden_dim``)
-with the parameter tree as ``config.model`` (:class:`iron.models.llama.Llama`).
+with the parameter tree as ``config.model`` (:class:`.model.Llama`).
 """
 
 import math

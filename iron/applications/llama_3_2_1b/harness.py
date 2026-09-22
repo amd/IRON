@@ -21,7 +21,7 @@ import safetensors.torch
 import tiktoken
 import tiktoken.load
 
-from iron.models.llama import Llama, rope_angles
+from .model import Llama, rope_angles
 
 # Configuration
 # ##########################################################################

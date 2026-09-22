@@ -364,7 +364,7 @@ fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
 `verbose=True` prints why. It links the image (`net.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/models/llama_graphs.py` is the worked example;
+`iron/applications/llama_3_2_1b/graphs.py` is the worked example;
 `iron/tests/common/graph.py` traces it device-free and
 `iron/tests/toolchain/` builds it.
 
@@ -553,12 +553,12 @@ logging.basicConfig(level=logging.DEBUG)
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama_3.2_1b/`:
+Full LLM inference example at `iron/applications/llama_3_2_1b/`:
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama_3.2_1b/`
+- **Run**: `pytest iron/applications/llama_3_2_1b/`
 
 ### AIE Kernel Reference
 

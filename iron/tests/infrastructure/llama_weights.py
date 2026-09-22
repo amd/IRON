@@ -23,7 +23,7 @@ import pytest
 import safetensors.torch
 import torch
 
-from iron.models.llama import FROM_HF, FROM_HF_TOP, Llama, translate_hf
+from iron.applications.llama_3_2_1b.model import FROM_HF, FROM_HF_TOP, Llama, translate_hf
 
 
 class Config:
