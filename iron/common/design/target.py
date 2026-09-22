@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,10 @@ from ..kernels import declare_kernel, target_arch
 class Target:
     """What an overlay's ``design()`` is given besides the overlay itself.
 
-    Carries the device, the kernel tree and the fusion prefix, and applies
-    the prefix inside :meth:`kernel`, so an overlay never handles it.
+    Carries the device, the kernel tree and the fusion prefix. ``kernel``
+    is :func:`~iron.common.kernels.declare_kernel` with the prefix already
+    bound, so an overlay never handles it and cannot forget it; ``rtp`` is
+    a runtime-parameter :class:`~aie.iron.Buffer` the same way.
     """
 
     def __init__(
@@ -38,45 +41,20 @@ class Target:
         # time scalars of the sequence, and a core-read value is a resident
         # the sequence writes (bind it to the runtime-parameter buffer).
         self.image = image
+        # Bound rather than re-declared: a method here would restate every
+        # declare_kernel parameter to add this one, and would have to track
+        # it. It did not -- it carried a `prebuilt` argument the factory has
+        # no notion of, and dropped it in silence.
+        self.kernel = partial(declare_kernel, func_prefix=func_prefix)
+        self.rtp = partial(Buffer, use_write_rtp=True)
         self.barriers: list[Any] = []
 
     def kernel_source(self, name: str):
         """``<kernels_dir>/<arch>/<name>.cc``: the per-architecture kernel tree."""
         return self.kernels_dir / self.arch / f"{name}.cc"
 
-    def kernel(
-        self,
-        name: str,
-        arg_types,
-        *,
-        source=None,
-        compile_flags=(),
-        bundled_sources=(),
-        include_dirs=None,
-        object_file_name=None,
-        symbol_prefix=None,
-    ):
-        """Declare a kernel the array calls; the fusion prefix is applied here."""
-        return declare_kernel(
-            name,
-            arg_types,
-            source=source,
-            func_prefix=self.func_prefix,
-            compile_flags=list(compile_flags),
-            include_dirs=include_dirs,
-            object_file_name=object_file_name,
-            bundled_sources=bundled_sources,
-            symbol_prefix=symbol_prefix,
-        )
-
     def barrier(self, initial_value: int = 0):
         """A worker/runtime barrier the preamble sets to 1 after writing residents."""
         b = WorkerRuntimeBarrier(initial_value)
         self.barriers.append(b)
         return b
-
-    def rtp(self, arr_type, name: str | None = None, initial_value=None):
-        """A runtime-parameter buffer a core reads and the preamble writes."""
-        return Buffer(
-            arr_type, name=name, initial_value=initial_value, use_write_rtp=True
-        )
