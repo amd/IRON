@@ -3,6 +3,13 @@
 
 """The sequence for an overlay IRON did not build.
 
+:class:`Foreign` is the mixin a prebuilt overlay adds to answer the two
+questions the library asks of an overlay it cannot design: where the image
+file is (:meth:`Overlay.prebuilt`) and what module drives it
+(:meth:`Overlay.build`). flm's shipped ``mm`` binary is the one such overlay
+there is; the machinery lives here rather than in :mod:`iron.common` for
+that reason.
+
 A foreign overlay (:class:`~iron.common.declare.Xclbin` on the class) has no
 ``design()``: every core program, memtile buffer and stream-switch route
 comes from the downloaded image. What the sequence must supply is the other
@@ -26,8 +33,14 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
-from .declare import BoundBuffer, BoundStream, Operator, Overlay, _StreamSlot
-from .tiling import Access
+from iron.common.declare import (
+    BoundBuffer,
+    BoundStream,
+    Operator,
+    Overlay,
+    _StreamSlot,
+)
+from iron.common.tiling import Access
 
 # Core-tile lock registers, 16 bytes apart from this base. A hardware fact
 # the Python bindings do not expose.
@@ -156,7 +169,7 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
 
 def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
     """Residents, then the operator's sequence, then the trailing awaits."""
-    from .build import run_design
+    from iron.common.build import run_design
 
     write_residents(op, ov, core_tiles, emit)
     seq = ForeignSequence(op, ov, rt_data, emit)
@@ -287,3 +300,18 @@ def build_foreign(dev, op: Operator):
                 run_sequence(op, ov, rt_data, core_tiles, _MLIREmitter(allocations))
 
         return ctx.module
+
+
+class Foreign:
+    """An overlay whose image is downloaded rather than built.
+
+    Mix in beside the operator's overlay base and declare an
+    :class:`~iron.common.declare.Xclbin`; the two hooks the library asks for
+    are answered here.
+    """
+
+    def prebuilt(self, directory) -> Path:
+        return fetch(self.foreign, directory)
+
+    def build(self, dev, op: Operator):
+        return build_foreign(dev, op)

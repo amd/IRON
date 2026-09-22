@@ -580,9 +580,18 @@ def test_foreign_overlay_declares_its_pins_and_parameter_block():
             image = Xclbin(url="u", sha256="s", filename="f")
             s = StreamIn(64)
 
+    # Nothing designs a prebuilt overlay's array, so the declaration has to
+    # say where the image is and what module drives it. flm's Foreign mixin
+    # answers both; an overlay without it is rejected at declaration.
+    with pytest.raises(DeclarationError, match="must supply prebuilt"):
+
+        @operator
+        class Unhooked(Overlay):
+            image = Xclbin(url="u", sha256="s", filename="f")
+
 
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
-    from iron.common.foreign import LOCK_ADDRESS_BASE, run_sequence
+    from iron.operators.flm.foreign import LOCK_ADDRESS_BASE, run_sequence
     from iron.operators.flm.gemm.op import GEMM
     from iron.operators.flm.gemm.shipped import Shipped
 

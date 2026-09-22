@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import MISSING, Field
+from pathlib import Path
 from typing import Any, Callable, ClassVar, Generic, Iterator, TypeVar
 
 import numpy as np
@@ -1044,6 +1045,16 @@ def _finish_overlay(cls: type) -> None:
                 f"an address; the sequence writes it there"
             )
 
+    if not images:
+        return
+    for hook in ("prebuilt", "build"):
+        if getattr(cls, hook) is getattr(Overlay, hook):
+            raise DeclarationError(
+                f"{cls.__name__} declares an Xclbin, so nothing builds its array: "
+                f"it must supply {hook}() (iron.operators.flm.foreign.Foreign "
+                f"does, for a downloaded image)"
+            )
+
 
 def _finish_operator(cls: type, fields: dict[str, Field]) -> None:
     overlay_cls = _overlay_class_of(cls)
@@ -1143,6 +1154,22 @@ class Overlay:
     def foreign(self) -> Xclbin | None:
         """The downloaded image this overlay is, if IRON did not build it."""
         return type(self)._foreign
+
+    # -- an overlay IRON does not design() ---------------------------------
+
+    def prebuilt(self, directory) -> Path:
+        """The file the declared :class:`Xclbin` names, fetched into
+        ``directory`` if it is not already there."""
+        raise NotImplementedError(
+            f"{type(self).__name__} declares an Xclbin but no prebuilt()"
+        )
+
+    def build(self, dev, op: "Operator"):
+        """The MLIR module for ``op`` on this overlay, when ``design()`` does
+        not build the array: a runtime sequence against the prebuilt image."""
+        raise NotImplementedError(
+            f"{type(self).__name__} declares an Xclbin but no build()"
+        )
 
     # -- the sequence, when the overlay owns it -----------------------------
 
@@ -1786,9 +1813,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             entry = design.get_cache_entry()
             picture, insts = entry.xclbin, entry.insts
         else:
-            from .foreign import fetch
-
-            picture = fetch(image, self.context.build_dir)
+            picture = self.ov.prebuilt(self.context.build_dir)
             design = insts_design(self.generator())
             entry = design.get_cache_entry()
             insts = entry.insts
