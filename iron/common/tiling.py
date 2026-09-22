@@ -42,6 +42,7 @@ from math import prod
 from typing import Iterator, Sequence
 
 import numpy as np
+from aie.helpers.taplib.tap import TensorAccessPattern
 
 
 _STRIDE_BITS = 20
@@ -64,8 +65,6 @@ class Access:
 
     def tap(self):
         """The upstream ``TensorAccessPattern`` for this access (needs mlir-aie)."""
-        from aie.helpers.taplib.tap import TensorAccessPattern
-
         return TensorAccessPattern(
             (self.elements,), self.offset, list(self.sizes), list(self.strides)
         )
@@ -118,8 +117,6 @@ L1_BANK_BYTES = 8192
 def bank_elements(dtype) -> int:
     """Elements of ``dtype`` in one local-memory bank: the largest line a core
     holds at a fifo depth of two."""
-    import numpy as np
-
     return L1_BANK_BYTES // np.dtype(dtype).itemsize
 
 

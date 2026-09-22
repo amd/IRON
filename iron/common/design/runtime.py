@@ -15,6 +15,10 @@ from typing import Any
 
 import numpy as np
 
+from aie.extras.dialects import arith
+from aie.helpers.util import np_dtype_to_mlir_type
+from aie.iron import TaskGroup, sync_parameters
+
 from ..declare import (
     BoundBuffer,
     BoundStream,
@@ -195,8 +199,6 @@ class Sequence(Transfers):
     @contextmanager
     def group(self):
         """Open a task group; transfers issued inside join it; finished on exit."""
-        from aie.iron import TaskGroup
-
         tg = TaskGroup()
         previous, self._group = self._group, tg
         try:
@@ -207,13 +209,9 @@ class Sequence(Transfers):
 
     def new_group(self):
         """A task group the caller finishes itself (for hand-rolled pipelines)."""
-        from aie.iron import TaskGroup
-
         return TaskGroup()
 
     def sync_parameters(self) -> None:
-        from aie.iron import sync_parameters
-
         sync_parameters()
 
     def data(self, buffer: BoundBuffer):
@@ -299,7 +297,4 @@ def _plus(ssa, constant: int):
     """``ssa + constant`` as a sequence value; the scalar alone when constant is 0."""
     if not constant:
         return ssa
-    from aie.extras.dialects import arith
-    from aie.helpers.util import np_dtype_to_mlir_type
-
     return ssa + arith.constant(int(constant), np_dtype_to_mlir_type(np.int32))

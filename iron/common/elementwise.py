@@ -49,6 +49,9 @@ from typing import ClassVar
 
 import numpy as np
 
+from aie.iron import ObjectFifo, Worker
+from aie.iron.controlflow import range_
+
 from .declare import (
     O,
     Incompatible,
@@ -139,9 +142,6 @@ class ElementwiseOverlay(Overlay):
     # -- the array ----------------------------------------------------------
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
         streams = [m for m in self._members if isinstance(m, _Stream)]
         ins = [getattr(self, m.name) for m in streams if m.direction == "in"]
         outs = [getattr(self, m.name) for m in streams if m.direction == "out"]

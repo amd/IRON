@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from aie.iron import Buffer, WorkerRuntimeBarrier
+
 from ..kernels import declare_kernel, target_arch
 
 
@@ -69,16 +71,12 @@ class Target:
 
     def barrier(self, initial_value: int = 0):
         """A worker/runtime barrier the preamble sets to 1 after writing residents."""
-        from aie.iron import WorkerRuntimeBarrier
-
         b = WorkerRuntimeBarrier(initial_value)
         self.barriers.append(b)
         return b
 
     def rtp(self, arr_type, name: str | None = None, initial_value=None):
         """A runtime-parameter buffer a core reads and the preamble writes."""
-        from aie.iron import Buffer
-
         return Buffer(
             arr_type, name=name, initial_value=initial_value, use_write_rtp=True
         )

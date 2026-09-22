@@ -43,6 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
+import aie.utils.trace as trace_utils
 from aie.utils.trace import parse_trace_slices, print_cycles_summary
 
 __all__ = [
@@ -68,8 +69,6 @@ def resolve_trace_size(trace_size=None):
 
 
 def _default_coretile_events():
-    import aie.utils.trace as trace_utils
-
     ev = trace_utils.events
     return [
         ev.PortEvent(ev.CoreEvent.PORT_RUNNING_0, ev.WireBundle.DMA, 0, True),

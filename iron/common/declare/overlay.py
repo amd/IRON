@@ -18,6 +18,8 @@ import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from aie.dialects.aie import WireBundle, get_target_model
+
 from .bound import BoundResident, BoundStream, BoundValue
 from .field import Untunable
 from .member import Resident, Xclbin, _Member, _Stream, _Value
@@ -33,8 +35,6 @@ def get_shim_dma_limit(dev) -> int:
     Each shim tile exposes a fixed number of DMA source connections; summing
     across all shim tiles gives the device-wide ShimDMA budget.
     """
-    from aie.dialects.aie import WireBundle, get_target_model
-
     tm = get_target_model(dev.resolve())
     return sum(
         tm.get_num_source_shim_mux_connections(col, row, WireBundle.DMA)

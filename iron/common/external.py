@@ -25,12 +25,20 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 
 from __future__ import annotations
 
+import hashlib
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from ml_dtypes import bfloat16
+
+from aie.dialects import aie, aiex
+from aie.dialects.aie import DMAChannelDir, get_target_model
+from aie.extras.context import mlir_mod_ctx
+from aie.ir import BF16Type, F32Type, IntegerType, MemRefType
+from aie.utils.compile import NPU_CACHE_HOME
 
 from .design import Transfers
 from .declare import BoundBuffer, BoundStream, Operator, Overlay
@@ -180,8 +188,6 @@ def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
 
 
 def _elem_type(dtype):
-    from aie.ir import BF16Type, F32Type, IntegerType
-
     dt = np.dtype(dtype)
     if dtype is bfloat16 or dt == np.dtype(bfloat16):
         return BF16Type.get()
@@ -197,13 +203,9 @@ class _MLIREmitter:
         self._allocs = allocations
 
     def write32(self, address, value, col, row) -> None:
-        from aie.dialects import aiex
-
         aiex.npu_write32(address, value, column=col, row=row)
 
     def start(self, key, buffer, offset, sizes, strides):
-        from aie.dialects import aiex
-
         task = aiex.shim_dma_single_bd_task(
             self._allocs[key],
             buffer,
@@ -216,8 +218,6 @@ class _MLIREmitter:
         return task
 
     def await_(self, task) -> None:
-        from aie.dialects import aiex
-
         aiex.dma_await_task(task)
 
 
@@ -229,13 +229,8 @@ def fetch(image, directory=None) -> Path:
     ``prebuilt/``), so an external image is found where every other built
     artifact is and no caller has to name a directory for it.
     """
-    import hashlib
-    import urllib.request
-
     if directory is None:
-        from aie.utils.compile import NPU_CACHE_HOME
-
-        directory = Path(NPU_CACHE_HOME) / "prebuilt"
+            directory = Path(NPU_CACHE_HOME) / "prebuilt"
     target = Path(directory) / image.filename
 
     def digest(path):
@@ -261,11 +256,6 @@ def fetch(image, directory=None) -> Path:
 
 def build_external(dev, op: Operator):
     """The module whose runtime sequence drives ``op.ov``'s downloaded image."""
-    from aie.dialects import aie, aiex
-    from aie.dialects.aie import DMAChannelDir, get_target_model
-    from aie.extras.context import mlir_mod_ctx
-    from aie.ir import MemRefType
-
     ov = op.ov
     tm = get_target_model(dev.resolve())
     core_tiles = [

@@ -9,7 +9,14 @@ import numpy as np
 import ml_dtypes
 from . import fusion
 from .declare import Operator
-from .jit_compile import DispatchStream
+from .allocator import live_ranges, plan
+from .artifacts import Artifacts, Design, Step
+from .jit_compile import (
+    DispatchStream,
+    dispatch_stream,
+    fused_design,
+    xclbin_design,
+)
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
@@ -17,6 +24,9 @@ from aie.utils.npukernel import NPUKernel
 
 try:
     import pyxrt
+    from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+        ParameterScratchpad,
+    )
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 except ImportError:
     # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The
@@ -25,6 +35,7 @@ except ImportError:
     # at construction. The reference mode and the whole compile path do not care,
     # and must keep importing.
     pyxrt = None
+    ParameterScratchpad = None
     XRTTensor = None
 
 logger = logging.getLogger(__name__)
@@ -107,8 +118,6 @@ class FusedImage:
         text's content, locks across processes and validates the kernels'
         depfiles, and the ELF lands in its entry.
         """
-        from .jit_compile import fused_design
-
         if not isinstance(aie_utils.get_current_device(), NPU2):
             raise RuntimeError(
                 "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
@@ -138,8 +147,6 @@ class XclbinChain:
         """Build the chain once (idempotent); returns the last link."""
         if self.combined_xclbin_path is not None:
             return self.combined_xclbin_path
-        from .jit_compile import dispatch_stream, xclbin_design
-
         # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
         name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
 
@@ -304,8 +311,6 @@ class OperatorSequence:
         and any buffer given an explicit size -- is pinned: its contents
         outlive the sequence, so it needs a private, stable address.
         """
-        from .allocator import live_ranges, plan
-
         sizes, steps = {}, []
         for op, *bufs in self.runlist:
             reads, writes = [], []
@@ -495,8 +500,6 @@ class OperatorSequence:
 
     def _record(self):
         """What this image consists of: its designs, its steps, its buffers."""
-        from .artifacts import Artifacts, Design, Step
-
         if self._image is None:
             return None
         designs, design_of = self.unique_designs()
@@ -724,10 +727,6 @@ class SequenceFullELFCallable(SequenceCallable):
             return None
         if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
-            ParameterScratchpad,
-        )
-
         self._params = ParameterScratchpad(self.run_handle, str(params_path))
         return self._params
 

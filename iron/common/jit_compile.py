@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import aie.utils as aie_utils
+from aie.iron import DispatchTime
 from aie.ir import Module
 from aie.utils.compile.jit._hash import _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
@@ -153,8 +154,6 @@ def _design_generator(call_kwargs: dict):
             kwargs[symbol] = kw[symbol]
         module = design(**kwargs)
         return Module.parse(module) if isinstance(module, str) else module
-
-    from aie.iron import DispatchTime
 
     P = inspect.Parameter
     parameters = [

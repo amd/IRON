@@ -42,8 +42,10 @@ and what lets the checks in :mod:`.decorator` run once, at class creation.
 A stream's tile dimension may also be a tunable: choosing the tile is what
 tuning is for, and inference never reads a stream.
 
-Nothing here imports mlir-aie. Everything that generates MLIR lives in
-:mod:`iron.common.design`, which reads the declarations made here.
+Generating MLIR is :mod:`iron.common.design`'s job, not this package's; it
+reads the declarations made here. What little mlir-aie reaches this far --
+the device a name is keyed on, the shim's DMA budget -- is a question about
+the target, not a design being built.
 
 The package reads bottom-up: :mod:`.field` is what a class body writes,
 :mod:`.member` what it declares alongside its fields, :mod:`.bound` what an

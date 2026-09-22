@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 
+from ..tiling import view
+
 from .field import DeclarationError, DimRef, Incompatible, _Optional, _Select
 from .member import Resident, Shim, _Buffer, _Stream, _Value
 
@@ -251,8 +253,6 @@ class BufferView:
 
     def pattern(self) -> tuple[int, list[int], list[int]]:
         """``(offset, sizes, strides)`` of the static part of the slice."""
-        from ..tiling import view
-
         return view(self.buffer.shape, self.static_index)
 
     def __repr__(self) -> str:

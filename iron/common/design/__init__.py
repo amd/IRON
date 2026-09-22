@@ -20,9 +20,6 @@ One module per participant: :mod:`.target` is what an overlay's ``design()``
 receives, :mod:`.runtime` what an operator's ``design(rt)`` receives,
 :mod:`.generator` the callable a compile runs, and :mod:`.build` the
 function that puts the three together.
-
-Everything that touches mlir-aie is imported inside the functions that need
-it, so the declaration layer stays importable without the toolchain.
 """
 
 from .build import (

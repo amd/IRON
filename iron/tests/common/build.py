@@ -39,9 +39,11 @@ class FakeGroup:
 
 @pytest.fixture(autouse=True)
 def fake_task_group(monkeypatch):
-    import aie.iron
+    # Patched where it is looked up, not where it is defined: runtime.py
+    # imports the name, so rebinding aie.iron's attribute would not reach it.
+    from iron.common.design import runtime
 
-    monkeypatch.setattr(aie.iron, "TaskGroup", FakeGroup, raising=False)
+    monkeypatch.setattr(runtime, "TaskGroup", FakeGroup)
 
 
 class FakeHandle:

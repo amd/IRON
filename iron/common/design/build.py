@@ -9,6 +9,11 @@ import hashlib
 import inspect
 from typing import Any
 
+from aie.iron import Program, Runtime, ScratchpadParameter
+from aie.iron.device import AnyShimTile
+from aie.iron.kernels._common import _EXTERN_CACHE
+from aie.iron.runtime.endpoint import RuntimeEndpoint
+
 from ..declare import BoundValue, Operator
 from ..kernels import kernels_dir
 from ..tracing import maybe_enable_trace
@@ -45,9 +50,6 @@ def build_design(
     operator's ``DesignGenerator``; ``code`` exists only to reach the cache
     key (see :func:`mlir_artifact_for`).
     """
-    from aie.iron import Program, Runtime, ScratchpadParameter
-    from aie.iron.kernels._common import _EXTERN_CACHE
-
     # aie.iron.kernels' factories memoize the ExternalFunction they return,
     # and a returned one holds MLIR operations from the context it was
     # resolved in. Every generation must start from an empty cache or a
@@ -118,9 +120,6 @@ def build_design(
         # program cannot be resolved. Place it on any shim tile.
         idle = [h for h in handles if id(h) not in seq.used]
         if idle:
-            from aie.iron.device import AnyShimTile
-            from aie.iron.runtime.endpoint import RuntimeEndpoint
-
             for h in idle:
                 h.endpoint = RuntimeEndpoint(AnyShimTile)
                 rt._fifos.add(h)

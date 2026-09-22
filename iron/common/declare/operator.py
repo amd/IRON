@@ -20,6 +20,12 @@ from typing import Any, Callable, ClassVar, Generic, TypeVar
 import numpy as np
 from ml_dtypes import bfloat16
 
+import aie.utils as aie_utils
+from aie.utils.npukernel import NPUKernel
+
+from ..artifacts import Artifacts, Design, Step
+from ..jit_compile import insts_design, xclbin_design
+
 from .bound import BoundBuffer, BoundValue
 from .field import DimRef, dim, _Optional, _Select
 from .member import In, Out, _Buffer, _Member, _Value
@@ -38,7 +44,7 @@ class _OperatorMeta(ABCMeta):
     """
 
     def __call__(cls, *args, **kwargs):
-        from .. import graph as _graph
+        from .. import graph as _graph  # imports this package: a cycle at module scope
 
         tracer = _graph.current()
         if tracer is not None and args and all(_graph.is_operand(a) for a in args):
@@ -214,7 +220,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
     def __call__(self, *args, **kwargs):
         """An explicit instance applied to graph handles records a step."""
-        from .. import graph as _graph
+        from .. import graph as _graph  # as above
 
         tracer = _graph.current()
         if tracer is None:
@@ -414,8 +420,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     @property
     def dev(self):
         """The device a design is generated for."""
-        import aie.utils as aie_utils
-
         return aie_utils.get_current_device()
 
     # Bytes of trace buffer to emit; 0 disables tracing. A plain attribute
@@ -428,8 +432,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         the device. It names the per-call value symbols a host writes through
         and the kernel instances a chained image carries; nothing on disk,
         which the compile cache keys by content."""
-        import aie.utils as aie_utils
-
         own = label_parts(self, skip=("ov",))
         base = type(self).__name__ + "_" + "_".join(own + self.ov.name_parts())
         dev = aie_utils.get_current_device()
@@ -437,7 +439,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
     def generator(self, image: str = "elf"):
         """The design generator :class:`CompilableDesign` runs for this operator."""
-        from ..design import generator_for
+        from ..design import generator_for  # reads this package: a cycle at module scope
 
         return generator_for(self, image=image)
 
@@ -476,9 +478,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     def _build(self):
         """Compile to an xclbin and an instruction stream, or, on an external
         overlay, to the stream alone against the downloaded image."""
-        from ..artifacts import Artifacts, Design, Step
-        from ..jit_compile import insts_design, xclbin_design
-
         image = self.ov.external
         if image is None:
             design = xclbin_design(self.generator(), kernel_name="MLIR_AIE")
@@ -510,9 +509,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
     def get_callable(self):
         """The loaded image, ready to call on device tensors."""
-        import aie.utils as aie_utils
-        from aie.utils.npukernel import NPUKernel
-
         self.compile()
         image = self.ov.external
         npu_kernel = NPUKernel(

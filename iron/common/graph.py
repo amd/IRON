@@ -38,7 +38,13 @@ import itertools
 from math import prod
 
 import numpy as np
+
+import aie.utils as aie_utils
 from ml_dtypes import bfloat16
+
+from .design import device_symbol
+from .packaging import plan
+from .sequence import OperatorSequence
 
 from .declare import Operator, Overlay, Resident, ValueSpec
 from .declare.member import _Buffer as _Buffer_, _Value
@@ -227,8 +233,6 @@ class TracedGraph:
 
     def sequence(self, name=None, **kwargs):
         """The :class:`OperatorSequence` this graph lowers to (the image builder)."""
-        from .sequence import OperatorSequence
-
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
         kwargs.setdefault("share_designs", True)
         return OperatorSequence(
@@ -591,10 +595,6 @@ class GraphFunction:
         ``verbose``, printed. ``record="disk"`` writes the image's
         :class:`~iron.common.artifacts.Artifacts` record beside it.
         """
-        import aie.utils as aie_utils
-
-        from .packaging import plan
-
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
@@ -702,8 +702,6 @@ class CompiledGraph:
     """A traced graph built into an image, ready to call."""
 
     def __init__(self, traced: TracedGraph, record="memory", dispatch="auto"):
-        from .design import device_symbol
-
         self.traced = traced
         self.symbols = []
         for op, name, value in traced.bindings:
