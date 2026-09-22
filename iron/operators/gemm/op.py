@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
+
+from aie.iron.kernels import mm_mac_dims
 from ml_dtypes import bfloat16
 
+from iron.common.kernels import target_arch
 from iron.common.declare import (
     Incompatible,
     In,
@@ -47,19 +50,6 @@ def _dtype_str(t) -> str:
 def ceildiv(a, b):
     return (a + b - 1) // b
 
-
-microkernel_mac_dim_map = {
-    "npu1": {
-        "bf16": (4, 8, 4),
-    },
-    "npu2": {
-        "bf16": {
-            # emulate_bf16_mmul_with_bfp16
-            True: (8, 8, 8),
-            False: (4, 8, 8),
-        },
-    },
-}
 
 N_AIE_ROWS = 4
 
@@ -126,19 +116,39 @@ class GEMMOverlay(Overlay):
     def mem_tile_n(self) -> int:
         return self.tile_n * self.num_aie_columns
 
-    def mac_dims(self, dev_name: str) -> tuple[int, int, int]:
-        """r, s, t: the aie::mmul tile dims the kernel is built from."""
-        dtype_in_str = _dtype_str(self.dtype_in)
-        mac = microkernel_mac_dim_map[dev_name][dtype_in_str]
-        if dev_name == "npu2" and dtype_in_str == "bf16":
-            return mac[self.emulate_bf16_mmul_with_bfp16]
-        return mac
+    def mac_dims(self, dev=None) -> tuple[int, int, int]:
+        """r, s, t: the aie::mmul tile dims the kernel is built from.
+
+        Read from the kernel factory rather than tabulated here: the geometry
+        belongs to the kernel mm.cc compiles, and upstream's table is the one
+        its ``combos(X) X(..., r, s, t)`` macros are kept in step with.
+        """
+        return mm_mac_dims(
+            self.dtype_in,
+            self.dtype_out,
+            arch=target_arch(dev),
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+        )
 
     # -- construction-time checks -------------------------------------------
 
     def validate(self) -> None:
-        # r, s, t of the bf16 kernel (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul)
-        r, s, t = (8, 8, 8) if self.emulate_bf16_mmul_with_bfp16 else (4, 8, 8)
+        # The kernel's own geometry rather than a second copy of it: mm.cc's
+        # matmul_vectorized_2x2_mmul works in r x s x t blocks, so a tile that
+        # does not divide into them cannot be compiled for.
+        #
+        # aie2p unconditionally, which is what these checks have always
+        # assumed and what their messages name, because the source is
+        # aie_kernels/aie2p/mm.cc. A device is not known here anyway: this
+        # runs at construction, before tuning picks one. design() asks for
+        # the geometry of the device it is actually building for, which on
+        # npu1 is the looser (4, 8, 4).
+        r, s, t = mm_mac_dims(
+            self.dtype_in,
+            self.dtype_out,
+            arch="aie2p",
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+        )
         min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
         if self.tile_m % min_tile_m != 0:
             raise ValueError(
@@ -249,13 +259,12 @@ class GEMMOverlay(Overlay):
         use_scalar = self.use_scalar
         dtype_in, dtype_out = self.dtype_in, self.dtype_out
         dtype_in_str, dtype_out_str = _dtype_str(dtype_in), _dtype_str(dtype_out)
-        dev_name = target.dev.resolve().name
         use_larger_internal_buffer = self.prio_accuracy
         if use_larger_internal_buffer:
             # bfloat16 accumulates in place in an f32 buffer, converted to bf16
             # after the reduction loop for the transfer to L2.
             dtype_out_internal = np.float32
-        r, s, t = self.mac_dims(dev_name)
+        r, s, t = self.mac_dims(target.dev)
         if not use_scalar:
             assert m % r == 0
             assert k % s == 0
