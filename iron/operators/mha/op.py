@@ -702,27 +702,26 @@ class MHA(Operator[MHAOverlay]):
         query group. Rows past ``seq_len`` (the padding) come out as zeros;
         the real rows never attend to them, causality masks them. In the
         interleaved layout the operands are ``(seq, heads, d)`` and so is O."""
-        import torch
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-
         if self.heads_interleaved:
-            Q, K, V = (t.transpose(0, 1) for t in (Q, K, V))
+            Q, K, V = (np.swapaxes(t, 0, 1) for t in (Q, K, V))
         groups = self.num_heads // self.num_KV_heads
-        K = K.repeat_interleave(groups, dim=0)
-        V = V.repeat_interleave(groups, dim=0)
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            O = torch.nn.functional.scaled_dot_product_attention(
-                Q.unsqueeze(0),
-                K.unsqueeze(0),
-                V.unsqueeze(0),
-                dropout_p=0.0,
-                is_causal=True,
-                scale=1 / np.sqrt(self.ov.d),
-            ).squeeze(0)
+        K = np.repeat(K, groups, axis=0)
+        V = np.repeat(V, groups, axis=0)
+        # Causal scaled-dot-product attention, in float32 and rounded once.
+        # Against torch's FLASH backend this differs by under 1e-6, which is
+        # less than torch's own FLASH and MATH backends differ from each other.
+        q, k, v = (t.astype(np.float32) for t in (Q, K, V))
+        scores = np.matmul(q, np.swapaxes(k, -2, -1)) / np.sqrt(
+            np.float32(self.ov.d)
+        )
+        seq = scores.shape[-1]
+        scores += np.triu(np.full((seq, seq), -np.inf, dtype=np.float32), 1)
+        e = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        O = np.matmul(e / e.sum(axis=-1, keepdims=True), v).astype(Q.dtype)
         if self.seq_len < self.seq_pad:
-            O = O.clone()
+            O = O.copy()
             O[:, self.seq_len :] = 0
-        return O.transpose(0, 1).contiguous() if self.heads_interleaved else O
+        return np.ascontiguousarray(np.swapaxes(O, 0, 1)) if self.heads_interleaved else O
 
     # -- the runtime sequence --------------------------------------------------
 

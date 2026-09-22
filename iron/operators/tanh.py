@@ -3,6 +3,8 @@
 
 from aie.iron.kernels import activation
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -22,6 +24,5 @@ class Tanh(ChanneledUnaryOperator[TanhOverlay]):
     test = Testing(channeled_unary_cases([1024, 2048, 4096, 8192], 4096))
 
     def reference(self, x):
-        import torch
-
-        return torch.tanh(x)
+        """CPU reference: ``tanh(x)``."""
+        return np.tanh(x.astype(np.float32)).astype(x.dtype)

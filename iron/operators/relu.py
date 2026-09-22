@@ -3,6 +3,8 @@
 
 from aie.iron.kernels import eltwise
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -25,6 +27,5 @@ class ReLU(ChanneledUnaryOperator[ReLUOverlay]):
     )
 
     def reference(self, x):
-        import torch
-
-        return torch.nn.functional.relu(x)
+        """CPU reference: ``max(x, 0)``."""
+        return np.maximum(x, 0)

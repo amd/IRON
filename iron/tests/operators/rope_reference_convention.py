@@ -13,7 +13,8 @@ the regime the application's prefill RoPE shape sits in
 (rows=prompt_len*n_heads, angle_rows=prompt_len).
 """
 
-import torch
+import numpy as np
+from ml_dtypes import bfloat16
 
 from iron.operators.rope.op import reference
 
@@ -24,24 +25,24 @@ def _block_major_expected(x, angles, rows, angle_rows):
     cols = x.shape[-1]
     half = cols // 2
     tensor_rows_per_angle_row = rows // angle_rows
-    out = torch.empty(rows, cols, dtype=torch.float32)
+    out = np.empty((rows, cols), dtype=np.float32)
     for r in range(rows):
         a = r // tensor_rows_per_angle_row
-        cos = angles[a, 0::2].to(torch.float32)
-        sin = angles[a, 1::2].to(torch.float32)
-        x1, x2 = x[r, :half].to(torch.float32), x[r, half:].to(torch.float32)
+        cos = angles[a, 0::2].astype(np.float32)
+        sin = angles[a, 1::2].astype(np.float32)
+        x1, x2 = x[r, :half].astype(np.float32), x[r, half:].astype(np.float32)
         out[r, :half] = x1 * cos - x2 * sin
         out[r, half:] = x2 * cos + x1 * sin
-    return out.to(torch.bfloat16)
+    return out.astype(bfloat16)
 
 
 def _make_inputs(rows, angle_rows, cols=4, seed=0):
-    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
     half = cols // 2
-    x = torch.randn(rows, cols).to(torch.bfloat16)
-    angles = torch.zeros(angle_rows, cols, dtype=torch.bfloat16)
-    angles[:, 0::2] = torch.rand(angle_rows, half).to(torch.bfloat16)
-    angles[:, 1::2] = torch.rand(angle_rows, half).to(torch.bfloat16)
+    x = rng.standard_normal((rows, cols)).astype(bfloat16)
+    angles = np.zeros((angle_rows, cols), dtype=bfloat16)
+    angles[:, 0::2] = rng.random((angle_rows, half)).astype(bfloat16)
+    angles[:, 1::2] = rng.random((angle_rows, half)).astype(bfloat16)
     return x, angles
 
 
@@ -51,7 +52,7 @@ def test_reference_matches_device_convention_for_batched_angle_rows():
     x, angles = _make_inputs(rows, angle_rows)
     expected = _block_major_expected(x, angles, rows, angle_rows)
     got = reference(x, angles, rows=rows, cols=x.shape[-1])
-    assert torch.equal(expected, got)
+    assert np.array_equal(expected, got)
 
 
 def test_reference_matches_device_convention_across_shapes():
@@ -59,6 +60,6 @@ def test_reference_matches_device_convention_across_shapes():
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)
         got = reference(x, angles, rows=rows, cols=x.shape[-1])
-        assert torch.equal(expected, got), (
+        assert np.array_equal(expected, got), (
             f"mismatch at rows={rows} angle_rows={angle_rows}"
         )

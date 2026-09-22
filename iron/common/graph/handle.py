@@ -126,7 +126,7 @@ def is_operand(x) -> bool:
 
 def _tensor_dtype(t):
     dt = getattr(t, "dtype", None)
-    name = str(dt).replace("torch.", "")
+    name = str(dt)
     return {
         "bfloat16": bfloat16,
         "float32": np.float32,

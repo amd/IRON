@@ -422,11 +422,14 @@ def reference(A, B):
     Batched when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``: one
     product per batch, as the operator's ``num_batches`` runs them.
     """
-    import torch
-
-    if A.dim() == 3:
-        return torch.einsum("bmk,bk->bm", A, B.reshape(A.shape[0], A.shape[2]))
-    return A @ B.reshape(A.shape[-1])
+    # In float32 and rounded once: numpy's matmul would otherwise accumulate
+    # in bfloat16, where the AIE kernel's accumulator is f32. einsum has no
+    # bfloat16 loop at all, so the batched case reshapes into a matmul.
+    a, b = A.astype(np.float32), B.astype(np.float32)
+    if A.ndim == 3:
+        b = b.reshape(A.shape[0], A.shape[2], 1)
+        return np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
+    return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
 
 def gelu_tanh_approx(x):

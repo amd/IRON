@@ -171,4 +171,4 @@ class Repeat(Operator[RepeatOverlay]):
 
 def reference(x, repeat):
     """CPU reference: repeat-interleave along the leading dimension (ground truth)."""
-    return x.repeat_interleave(repeat, dim=0)
+    return np.repeat(x, repeat, axis=0)

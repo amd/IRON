@@ -198,12 +198,8 @@ class CompiledGraph:
     def write(self, x, tensor) -> None:
         """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
         buf = self.buffer(x)
-        view = buf.torch_view()
-        import torch
-
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.as_tensor(np.asarray(tensor))
-        view[:] = tensor.reshape(-1).to(view.dtype)
+        view = buf.numpy_view()
+        view[:] = np.asarray(tensor).reshape(-1).astype(view.dtype)
         buf.to("npu")
 
     def read(self, x):
@@ -211,15 +207,11 @@ class CompiledGraph:
         buf = self.buffer(x)
         buf.to("cpu")
         shape = self.traced.states[id(x)].shape if isinstance(x, State) else x.shape
-        return buf.to_torch().reshape(tuple(shape))
+        return buf.numpy().reshape(tuple(shape))
 
     def _copy_in(self, name, tensor) -> None:
-        import torch
-
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.as_tensor(np.asarray(tensor))
-        view = self.callable.get_buffer(name).torch_view()
-        view[:] = tensor.reshape(-1).to(view.dtype)
+        view = self.callable.get_buffer(name).numpy_view()
+        view[:] = np.asarray(tensor).reshape(-1).astype(view.dtype)
 
     def upload(self) -> None:
         """Copy every closed-over weight into its buffer; once."""

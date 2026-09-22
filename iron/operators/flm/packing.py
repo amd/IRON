@@ -13,6 +13,7 @@ belongs here.
 """
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 
 def f32_to_bfp16ebs8(a, round_conv_even=True):
@@ -33,8 +34,6 @@ def f32_to_bfp16ebs8(a, round_conv_even=True):
 
     Layout per block: one shared-exponent byte then the 8 mantissa bytes.
     """
-    import torch
-
     flat = np.ascontiguousarray(a, dtype=np.float32).reshape(-1, 8)
     u = flat.view(np.uint32)
     sign = (u & 0x80000000) != 0
@@ -62,7 +61,7 @@ def f32_to_bfp16ebs8(a, round_conv_even=True):
     out = np.empty((flat.shape[0], 9), dtype=np.uint8)
     out[:, 0] = max_exp[:, 0].astype(np.uint8)
     out[:, 1:] = v8.astype(np.int8).view(np.uint8)
-    return torch.from_numpy(out.reshape(-1))
+    return out.reshape(-1)
 
 
 def pack_b(
@@ -98,8 +97,6 @@ def pack_b(
     ordering against the overlay via ``tile.reshape(...).transpose(2, 1, 0,
     3)``; incompatible with ``bfp16``, which only the IRON-built kernel uses.
     """
-    import torch
-
     if overlay_order and bfp16:
         raise ValueError("overlay_order is bf16-only; the overlay never takes bfp16 B")
     K, N = B.shape
@@ -113,17 +110,17 @@ def pack_b(
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(-1)
         else:
             #   -> (cb, kb, kslice, tb, i, s_in, t_in)
             # Row-major s x t within the block, which is what the plain mmul
             # loads.
-            out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(-1)
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
         # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning
         # whatever B.dtype was.
-        return out.to(torch.bfloat16)
+        return out.astype(bfloat16)
     #   -> (cb, kb, kslice, tb, i, t_in, s_in)
     # t-major within the block: the mixed mmul hands B straight to
     # mac_8x8_8x8T without the transpose the bf16 form applies, so the transpose
@@ -131,8 +128,10 @@ def pack_b(
     # exponent (8 consecutive k for one n) adjacent, which is what makes the
     # block grouping match the kernel's. Grouping over n instead measures
     # 1.95e-02 against this layout's 2.69e-04.
-    blocked = blocked.permute(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8).contiguous()
-    return f32_to_bfp16ebs8(blocked.float().numpy(), round_conv_even=round_conv_even)
+    blocked = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 6, 3)).reshape(-1, 8)
+    return f32_to_bfp16ebs8(
+        blocked.astype(np.float32), round_conv_even=round_conv_even
+    )
 
 
 def packed_b_size(K, N, bfp16):

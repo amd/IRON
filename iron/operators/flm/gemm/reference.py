@@ -1,8 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
+import numpy as np
+
 from iron.operators.flm.gemm.design import Epilogue
+
+
+def _sigmoid(x):
+    """``1 / (1 + exp(-x))`` in float32, rounded once back to ``x``'s dtype."""
+    f = x.astype(np.float32)
+    return (1 / (1 + np.exp(-f))).astype(x.dtype)
 
 
 def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
@@ -21,13 +28,13 @@ def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
         case Epilogue.NONE:
             pass
         case Epilogue.GELU:
-            C = C * torch.sigmoid(1.702 * C)
+            C = C * _sigmoid(np.float32(1.702) * C)
         case Epilogue.SILU:
-            C = C * torch.sigmoid(C)
+            C = C * _sigmoid(C)
         case Epilogue.SIGMOID:
-            C = torch.sigmoid(C)
+            C = _sigmoid(C)
     if clamp is not None:
-        C = torch.clamp(C, clamp[0], clamp[1])
+        C = np.clip(C, clamp[0], clamp[1])
     return C
 
 
@@ -53,5 +60,7 @@ def reference(input_a, input_b, epilogue=Epilogue.NONE, clamp=None):
     ``torch.sigmoid`` can reproduce. Tolerances have to absorb that part.
     """
     out_dtype = input_a.dtype
-    C = torch.matmul(input_a.float(), input_b.float()).to(out_dtype)
+    C = np.matmul(
+        input_a.astype(np.float32), input_b.astype(np.float32)
+    ).astype(out_dtype)
     return apply_epilogue(C, epilogue, clamp)

@@ -3,6 +3,8 @@
 
 from aie.iron.kernels import activation
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Case, Testing, channeled_unary_cases
 
@@ -49,6 +51,6 @@ class LeakyReLU(ChanneledUnaryOperator[LeakyReLUOverlay]):
     )
 
     def reference(self, x):
-        import torch
-
-        return torch.nn.functional.leaky_relu(x, negative_slope=self.ov.alpha)
+        """CPU reference: ``x`` where positive, ``alpha * x`` where not."""
+        f = x.astype(np.float32)
+        return np.where(f > 0, f, np.float32(self.ov.alpha) * f).astype(x.dtype)

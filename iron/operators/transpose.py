@@ -299,6 +299,4 @@ class Transpose(Operator[TransposeOverlay]):
 def reference(x):
     """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth);
     of each matrix when a batch dimension leads."""
-    import torch
-
-    return torch.transpose(x, -2, -1)
+    return np.swapaxes(x, -2, -1)

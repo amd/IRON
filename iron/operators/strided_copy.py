@@ -336,8 +336,6 @@ def reference(
     adding it into the BD address register. ``into`` is an existing flat output
     buffer to scatter into in place; without it the output starts zeroed.
     """
-    import torch
-
     src = _channel_offsets(
         input_sizes, input_strides, input_offset + input_offset_addend, num_aie_channels
     )
@@ -349,7 +347,7 @@ def reference(
     )
 
     out = (
-        torch.zeros(int(output_buffer_size), dtype=input_flat.dtype)
+        np.zeros(int(output_buffer_size), dtype=input_flat.dtype)
         if into is None
         else into
     )

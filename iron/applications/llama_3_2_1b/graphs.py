@@ -20,6 +20,7 @@ import math
 
 import numpy as np
 import torch
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import Scratchpad
@@ -37,6 +38,42 @@ from iron.operators.strided_copy import StridedCopy
 from iron.operators.transpose import Transpose
 
 
+def _np(t):
+    """A torch tensor as numpy, bf16 preserved."""
+    t = t.detach()
+    if t.dtype is torch.bfloat16:
+        return t.view(torch.uint16).numpy().view(bfloat16)
+    return t.numpy()
+
+
+class Weights:
+    """A module tree's parameters as numpy, each converted exactly once.
+
+    The graph layer and every operator reference are numpy; the tree these
+    come from is torch, because that is how the checkpoint ships and how
+    :mod:`.model` computes the CPU forward. This is the one boundary.
+
+    Converting once matters beyond the cost: the tracer pins a weight and
+    names it by the identity of the array the graph closed over, so a fresh
+    array per trace would leave every weight unnamed and unpinned.
+    """
+
+    def __init__(self, module):
+        self._by_id, self._named = {}, []
+        for name, p in module.named_parameters():
+            array = _np(p)
+            self._by_id[id(p)] = array
+            self._named.append((name, array))
+
+    def __call__(self, parameter):
+        """The numpy array standing for ``parameter``, the same one each time."""
+        return self._by_id[id(parameter)]
+
+    def named_parameters(self):
+        """What ``iron.graph(names_from=...)`` reads, over the numpy arrays."""
+        return iter(self._named)
+
+
 class DecodeGraph:
     """The decode graph function and the state it closes over.
 
@@ -48,6 +85,7 @@ class DecodeGraph:
 
     def __init__(self, config, max_seq_len, *, num_aie_columns=None):
         model = config.model
+        W = Weights(model)
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
         if num_aie_columns is None:
@@ -69,7 +107,7 @@ class DecodeGraph:
             for i in range(config.n_layers)
         ]
         # 1/sqrt(head_dim) over every score, as the elementwise multiply wants it.
-        self.scale = torch.full((H, L), 1.0 / math.sqrt(D), dtype=torch.bfloat16)
+        self.scale = np.full((H, L), 1.0 / math.sqrt(D), dtype=bfloat16)
         keys, values, scale = self.keys, self.values, self.scale
 
         # Matrices are read as the checkpoint ships them, (out, in): GEMV's
@@ -93,7 +131,7 @@ class DecodeGraph:
             num_aie_channels=1,
         )
 
-        @iron.graph(names_from=model)
+        @iron.graph(names_from=W)
         def decode(
             x,
             angles,
@@ -103,11 +141,11 @@ class DecodeGraph:
         ):
             for i, blk in enumerate(model.layers):
                 # <transformer block>
-                h = RMSNorm(x, blk.norm1.weight)
+                h = RMSNorm(x, W(blk.norm1.weight))
                 # <grouped query attention>
-                q = proj(blk.attn.q.weight, h, tile_out=D // 2)
-                k = proj(blk.attn.k.weight, h, tile_out=D // 2)
-                v = proj(blk.attn.v.weight, h, tile_out=D // 2)
+                q = proj(W(blk.attn.q.weight), h, tile_out=D // 2)
+                k = proj(W(blk.attn.k.weight), h, tile_out=D // 2)
+                v = proj(W(blk.attn.v.weight), h, tile_out=D // 2)
                 q = RoPE(q.reshape(H, D), angles)
                 k = RoPE(k.reshape(G, D), angles)
                 StridedCopy(k, keys[i], out_offset=cache_offset, **copy_into_cache)
@@ -134,23 +172,23 @@ class DecodeGraph:
                     s=8,
                 )
                 ctx = proj(v_t, weights, tile_out=4)
-                o = proj(blk.attn.o.weight, ctx.reshape(H * D), tile_out=E // cols)
+                o = proj(W(blk.attn.o.weight), ctx.reshape(H * D), tile_out=E // cols)
                 # </grouped query attention>
                 x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E // cols)
-                h = RMSNorm(x, blk.norm2.weight)
-                gate = proj(blk.ffn.gate.weight, h, tile_out=F // cols)
-                up = proj(blk.ffn.up.weight, h, tile_out=F // cols)
+                h = RMSNorm(x, W(blk.norm2.weight))
+                gate = proj(W(blk.ffn.gate.weight), h, tile_out=F // cols)
+                up = proj(W(blk.ffn.up.weight), h, tile_out=F // cols)
                 act = ElementwiseMul(
                     SiLU(gate, num_aie_columns=cols, tile_size=F // cols),
                     up,
                     num_aie_columns=cols,
                     tile_size=F // cols,
                 )
-                down = proj(blk.ffn.down.weight, act, tile_in=1, tile_out=E // cols)
+                down = proj(W(blk.ffn.down.weight), act, tile_in=1, tile_out=E // cols)
                 x = ElementwiseAdd(x, down, num_aie_columns=cols, tile_size=E // cols)
                 # </transformer block>
-            x = RMSNorm(x, model.norm.weight)
-            return proj(model.out_head.weight, x, tile_out=32)
+            x = RMSNorm(x, W(model.norm.weight))
+            return proj(W(model.out_head.weight), x, tile_out=32)
 
         self.graph = decode
 
@@ -182,6 +220,7 @@ class PrefillGraph:
 
     def __init__(self, config, decode, *, num_of_pipelines=8, tile_m=64):
         model = config.model
+        W = Weights(model)
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
         L, cols = decode.max_seq_len, decode.num_aie_columns
@@ -227,15 +266,15 @@ class PrefillGraph:
             num_aie_channels=1,
         )
 
-        @iron.graph(names_from=model)
+        @iron.graph(names_from=W)
         def prefill(x, angles, *, last: Scratchpad[np.int32]):
             for i, blk in enumerate(model.layers):
                 # <transformer block>
-                h = norm(x, blk.norm1.weight)
+                h = norm(x, W(blk.norm1.weight))
                 # <grouped query attention>
-                q = proj(h, blk.attn.q.weight)  # (L, H*D)
-                k = proj(h, blk.attn.k.weight)  # (L, G*D)
-                v = proj(h, blk.attn.v.weight)
+                q = proj(h, W(blk.attn.q.weight))  # (L, H*D)
+                k = proj(h, W(blk.attn.k.weight))  # (L, G*D)
+                v = proj(h, W(blk.attn.v.weight))
                 # One angle row per position, applied to that position's heads.
                 q = RoPE(q.reshape(L * H, D), angles, num_aie_columns=cols)
                 k = RoPE(k.reshape(L * G, D), angles, num_aie_columns=cols)
@@ -248,25 +287,25 @@ class PrefillGraph:
                     heads_interleaved=True,
                     num_of_pipelines=num_of_pipelines,
                 )
-                o = proj(o.reshape(L, H * D), blk.attn.o.weight)
+                o = proj(o.reshape(L, H * D), W(blk.attn.o.weight))
                 # </grouped query attention>
                 x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E)
-                h = norm(x, blk.norm2.weight)
-                gate = proj(h, blk.ffn.gate.weight)
-                up = proj(h, blk.ffn.up.weight)
+                h = norm(x, W(blk.norm2.weight))
+                gate = proj(h, W(blk.ffn.gate.weight))
+                up = proj(h, W(blk.ffn.up.weight))
                 act = ElementwiseMul(
                     SiLU(gate, num_aie_columns=cols, tile_size=F),
                     up,
                     num_aie_columns=cols,
                     tile_size=F,
                 )
-                down = proj(act, blk.ffn.down.weight)
+                down = proj(act, W(blk.ffn.down.weight))
                 x = ElementwiseAdd(x, down, num_aie_columns=cols, tile_size=E)
                 # </transformer block>
             x_last = StridedCopy(x, in_offset=last, **last_row).reshape(1, E)
-            h = RMSNorm(x_last, model.norm.weight)
+            h = RMSNorm(x_last, W(model.norm.weight))
             return GEMV(
-                model.out_head.weight,
+                W(model.out_head.weight),
                 h,
                 num_aie_columns=cols,
                 tile_size_input=4,

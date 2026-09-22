@@ -261,7 +261,7 @@ class MemCopy(Operator[MemCopyOverlay]):
 
     def reference(self, x):
         """CPU reference: the copy."""
-        return x.clone()
+        return x.copy()
 
     # -- the runtime sequence --------------------------------------------------
 

@@ -3,10 +3,10 @@
 
 """The device test harness: draw vectors, run an operator, check and time it.
 
-Heavy by nature -- torch, and mlir-aie's runtime and benchmark helpers --
-so it is imported by tests, never by an operator module. The light half,
-how an operator *declares* the shapes it is tested at, is
-:mod:`iron.common.testing`, which imports neither torch nor pytest.
+Everything is numpy, as an operator's ``reference`` is: a draw becomes the
+device buffer it is handed to, and mlir-aie's ``nearly_equal`` compares what
+comes back. The light half, how an operator *declares* the shapes it is
+tested at, is :mod:`iron.common.testing`, which imports no pytest.
 """
 
 from __future__ import annotations
@@ -15,38 +15,19 @@ import dataclasses
 from typing import NamedTuple
 
 import numpy as np
-import torch
 import aie.utils as aie_utils
 from aie.utils.benchmark import run_iters
 from aie.utils.verify import nearly_equal
 from ml_dtypes import bfloat16
 
-_TORCH_DTYPES = {
-    bfloat16: torch.bfloat16,
-    np.float32: torch.float32,
-    np.int8: torch.int8,
-    np.uint8: torch.uint8,
-    np.int16: torch.int16,
-    np.int32: torch.int32,
-}
-
-
-def torch_dtype(dtype) -> torch.dtype:
-    """The torch dtype of a numpy scalar type (``ml_dtypes.bfloat16`` included)."""
-    key = np.dtype(dtype).type
-    if key not in _TORCH_DTYPES:
-        raise TypeError(f"no torch dtype for {dtype!r}")
-    return _TORCH_DTYPES[key]
-
-
 @dataclasses.dataclass
 class Vectors:
     """One operator's test vectors, keyed by its declared buffer names."""
 
-    inputs: dict[str, torch.Tensor]
-    outputs: dict[str, torch.Tensor]
+    inputs: dict[str, np.ndarray]
+    outputs: dict[str, np.ndarray]
 
-    def __getitem__(self, name: str) -> torch.Tensor:
+    def __getitem__(self, name: str) -> np.ndarray:
         return self.inputs[name] if name in self.inputs else self.outputs[name]
 
 
@@ -57,38 +38,38 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
     inputs drawn here, so this pairs a draw with the operator's own
     reference rather than with an independent oracle.
 
-    Each ``In`` buffer, in declaration order, is ``torch.rand`` of its declared
-    shape and dtype times ``scale`` (``torch.randn`` for the names in
+    Each ``In`` buffer, in declaration order, is a uniform draw of its declared
+    shape and dtype times ``scale`` (a normal draw for the names in
     ``normal``, shifted to centre on zero for those in ``centered``; an
     integer buffer draws uniformly on ``[0, scale]``), or comes from
-    ``given``: a tensor as it is, or a shape to draw in place of the declared
+    ``given``: an array as it is, or a shape to draw in place of the declared
     one (an operand the sequence packs, such as flm GEMM's B). The outputs
     are ``op.reference(*inputs)`` under the declared output names.
     """
     unknown = set(given) - {b.name for b in op.inputs}
     if unknown:
         raise ValueError(f"{type(op).__name__} has no input {sorted(unknown)}")
-    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
     inputs = {}
     for b in op.inputs:
         value = given.get(b.name)
-        if isinstance(value, torch.Tensor):
+        if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
         shape = tuple(b.shape) if value is None else tuple(value)
         # A buffer whose dtype follows tuning (flm GEMM's packed B) has none
         # until tuned; the unpacked operand a shape override asks for is bf16.
-        dtype = torch.bfloat16 if b.dtype is None else torch_dtype(b.dtype)
-        if not dtype.is_floating_point:
-            t = torch.randint(0, int(scale) + 1, shape, dtype=dtype)
+        dtype = np.dtype(bfloat16 if b.dtype is None else b.dtype)
+        if dtype.kind not in "fc":
+            t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
-            draw = torch.randn if b.name in normal else torch.rand
-            t = draw(shape, dtype=dtype) * scale
+            draw = rng.standard_normal if b.name in normal else rng.random
+            t = (draw(shape) * scale).astype(dtype)
             if b.name in centered:
-                t = t - scale / 2
+                t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
     out = op.reference(*inputs.values())
-    outs = (out,) if isinstance(out, torch.Tensor) else tuple(out)
+    outs = (out,) if isinstance(out, np.ndarray) else tuple(out)
     names = [b.name for b in op.outputs]
     if len(outs) != len(names):
         raise ValueError(
@@ -100,19 +81,10 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
 # TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
 
 
-def _to_numpy(x):
-    if isinstance(x, torch.Tensor):
-        t = x.detach().cpu().contiguous()
-        if t.dtype == torch.bfloat16:
-            return t.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
-        return t.numpy()
-    return np.asarray(x)
-
-
 def verify_buffer(
-    output: np.ndarray | torch.Tensor,
+    output: np.ndarray,
     buf_name: str,
-    reference: np.ndarray | torch.Tensor,
+    reference: np.ndarray,
     rel_tol: float = 0.04,
     abs_tol: float = 1e-6,
     max_error_rate: float = 0.0,
@@ -125,8 +97,8 @@ def verify_buffer(
     ``max_error_rate`` lets that fraction of the elements miss; a shorter
     output than reference counts the missing elements as errors.
     """
-    expected = _to_numpy(reference).reshape(-1)
-    got = _to_numpy(output).reshape(-1)
+    expected = np.asarray(reference).reshape(-1)
+    got = np.asarray(output).reshape(-1)
     errors: list[int] = []
     if len(got) < len(expected):
         print(
@@ -233,7 +205,7 @@ def run_test(
                 produced[name] = buf
             else:
                 name, data = next(ins)
-                buf = tensor_class.from_torch(data)
+                buf = tensor_class(data)
                 if b.direction == "inout":
                     produced[name] = buf
         except StopIteration:
@@ -254,7 +226,7 @@ def run_test(
             print(f"Warning: Output buffer {name} not found in operator arguments")
             continue
         bad = verify_buffer(
-            produced[name].to_torch(), name, expected, rel_tol, abs_tol, max_error_rate
+            produced[name].numpy(), name, expected, rel_tol, abs_tol, max_error_rate
         )
         if bad:
             errors[name] = bad

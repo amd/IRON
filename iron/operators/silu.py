@@ -3,6 +3,8 @@
 
 from aie.iron.kernels import activation
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator, tunable
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -25,6 +27,6 @@ class SiLU(ChanneledUnaryOperator[SiLUOverlay]):
     test = Testing(channeled_unary_cases([1024, 2048, 4096, 8192], 4096, channels=None))
 
     def reference(self, x):
-        import torch
-
-        return torch.nn.functional.silu(x)
+        """CPU reference: ``x * sigmoid(x)``."""
+        f = x.astype(np.float32)
+        return (f / (1 + np.exp(-f))).astype(x.dtype)

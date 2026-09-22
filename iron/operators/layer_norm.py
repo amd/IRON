@@ -6,6 +6,8 @@ from typing import ClassVar
 
 from aie.iron.kernels import norm
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -35,12 +37,12 @@ class LayerNorm(ChanneledUnaryOperator[LayerNormOverlay]):
 
     def reference(self, x):
         """CPU reference: each ``tile_size`` row normalised on its own, no affine."""
-        import torch
-
         cols = self.ov.tile_size
         if cols is None:
             raise ValueError("LayerNorm.reference needs tile_size (tune the overlay)")
-        y = torch.nn.functional.layer_norm(
-            x.reshape(-1, cols), normalized_shape=(cols,)
-        )
-        return y.reshape(x.shape)
+        rows = x.reshape(-1, cols).astype(np.float32)
+        mean = rows.mean(axis=-1, keepdims=True)
+        # The biased variance, which is what torch normalises by.
+        var = ((rows - mean) ** 2).mean(axis=-1, keepdims=True)
+        y = (rows - mean) / np.sqrt(var + 1e-5)
+        return y.astype(x.dtype).reshape(x.shape)

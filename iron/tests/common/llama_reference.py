@@ -21,7 +21,9 @@ agree to bf16 tolerance and the argmax exactly.
 """
 
 import pytest
+import numpy as np
 import torch
+from ml_dtypes import bfloat16
 
 from iron.applications.llama_3_2_1b import npu as llama_npu
 from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
@@ -34,8 +36,16 @@ def oracle(config, tokens):
     return config.model(tokens, config.angles).float()
 
 
+def _np(t):
+    """A torch tensor as numpy, bf16 preserved: what a graph reference takes."""
+    t = t.detach()
+    if t.dtype is torch.bfloat16:
+        return t.view(torch.uint16).numpy().view(bfloat16)
+    return t.numpy()
+
+
 def _embed(config, tokens):
-    return torch.nn.functional.embedding(tokens, config.model.out_head.weight)
+    return _np(torch.nn.functional.embedding(tokens, config.model.out_head.weight))
 
 
 def decode_graph(config):
@@ -51,11 +61,11 @@ def graph_prefill(config, graph, prompt):
     of ``x`` and the rest are zero; ``last`` picks the last prompt row."""
     L, E = config.context_length, config.emb_dim
     n = prompt.shape[0]
-    x = torch.zeros(L, E, dtype=torch.bfloat16)
+    x = np.zeros((L, E), dtype=bfloat16)
     x[:n] = _embed(config, prompt)
     pre = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
-    logits = pre.graph.reference(x, config.angles[:L], last=(n - 1) * E)
-    return logits.reshape(-1).float()
+    logits = pre.graph.reference(x, _np(config.angles)[:L], last=(n - 1) * E)
+    return torch.from_numpy(logits.reshape(-1).astype(np.float32))
 
 
 def graph_decode(config, graph, tokens, pos, *, vector_size=None):
@@ -65,10 +75,10 @@ def graph_decode(config, graph, tokens, pos, *, vector_size=None):
     out = []
     for step, token in enumerate(tokens):
         x = _embed(config, token.reshape(1)).reshape(1, config.emb_dim)
-        angles = config.angles[pos : pos + 1]
+        angles = _np(config.angles)[pos : pos + 1]
         n = pos + 1 if vector_size is None else vector_size(step, pos)
         logits = graph.graph.reference(x, angles, cache_offset=pos * D, vector_size=n)
-        out.append(logits.reshape(-1).float())
+        out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
         pos += 1
     return out
 
@@ -165,13 +175,13 @@ class _Image:
 
     def __call__(self, *tensors, **values):
         out = self.graph.reference(*tensors, **values)
-        return type("Out", (), {"to_torch": lambda _: out})()
+        return type("Out", (), {"numpy": lambda _: out})()
 
     def read(self, state):
-        return state.host.clone()
+        return state.host.copy()
 
     def write(self, state, tensor):
-        state.host = tensor.reshape(state.shape).to(torch.bfloat16)
+        state.host = np.asarray(tensor).reshape(state.shape).astype(bfloat16)
 
 
 def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
@@ -191,11 +201,16 @@ def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
     state.token_ids = prompt.reshape(1, -1)
     logits, state = llama_npu.llama_forward_pass(config, state)
     assert logits.shape == (1, 1, config.vocab_size)
-    _assert_close([logits[0, -1].float()], [first])
-    got, token = [], logits[0, -1].argmax()
+    # llama_forward_pass returns numpy, as every image does; the oracle it is
+    # judged against is torch, so the comparison happens on that side.
+    def as_torch(row):
+        return torch.from_numpy(np.asarray(row).astype(np.float32))
+
+    _assert_close([as_torch(logits[0, -1])], [first])
+    got, token = [], int(logits[0, -1].argmax())
     for _ in range(len(expected)):
-        state.token_ids = token.reshape(1, 1)
+        state.token_ids = torch.tensor(token).reshape(1, 1)
         logits, state = llama_npu.llama_forward_pass(config, state)
-        got.append(logits[0, -1].float())
-        token = logits[0, -1].argmax()
+        got.append(as_torch(logits[0, -1]))
+        token = int(logits[0, -1].argmax())
     _assert_close(got, expected)

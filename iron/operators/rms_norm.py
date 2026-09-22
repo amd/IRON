@@ -284,10 +284,9 @@ def reference(x, w=None, weighted=False, eps=1e-5):
 
     Matches the AIE kernel: normalize by 1/sqrt(mean(x^2) + eps).
     """
-    import torch
-
-    rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps)
-    out = x / rms
+    f = x.astype(np.float32)
+    rms = np.sqrt(np.mean(f**2, axis=-1, keepdims=True) + eps)
+    out = (f / rms).astype(x.dtype)
     if weighted:
         out = out * w
     return out

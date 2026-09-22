@@ -40,18 +40,6 @@ BF16 = np.dtype(ml_dtypes.bfloat16)
 def _n_elements(nbytes):
     return max(nbytes, BF16.itemsize) // BF16.itemsize
 
-def _torch():
-    """Import torch for CPU reference/compare paths. Compile and NPU dispatch do not."""
-    try:
-        import torch
-    except ImportError as exc:
-        raise RuntimeError(
-            "OperatorSequence CPU reference/compare modes need torch. "
-            "Compile and NPU dispatch do not."
-        ) from exc
-    return torch
-
-
 def _require_xrt() -> None:
     """Fail with the reason, rather than an AttributeError on ``None.elf``."""
     if pyxrt is None:
@@ -223,7 +211,7 @@ class SequenceFullELFCallable(SequenceCallable):
 
     def _sync_inputs(self):
         # Sub-views handed out by get_buffer() share the parent's coherence map, so
-        # a write through one (e.g. torch_view()) marks its byte range host-dirty
+        # a write through one (e.g. numpy_view()) marks its byte range host-dirty
         # there too, and `to("npu")` here syncs every dirty range in one pass.
         self.input_buffer.to("npu")
 
@@ -318,16 +306,15 @@ class SequenceReferenceCallable(SequenceCallable):
         pass
 
     def _run(self):
-        torch = _torch()
         for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
             inputs = [
-                _reshape_for_spec(self._resolve_buffer(n).torch_view(), s).clone()
+                _reshape_for_spec(self._resolve_buffer(n).numpy_view(), s).copy()
                 for n, s in zip(in_names, in_specs)
             ]
             out = step_op.reference(*inputs)
-            out_flat = self._resolve_buffer(out_name).torch_view()
+            out_flat = self._resolve_buffer(out_name).numpy_view()
             n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
-            out_flat[:n_out].copy_(out.reshape(-1).to(torch.bfloat16))
+            out_flat[:n_out] = out.reshape(-1).astype(BF16)
 
 
 class SequenceCompareCallable(SequenceXclbinCallable):
@@ -349,7 +336,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         buf = self._resolve_buffer(name)
         buf.to("cpu")
         n = int(np.prod(spec.shape)) if spec.shape else 1
-        return buf.torch_view()[:n].clone().reshape(spec.shape)
+        return buf.numpy_view()[:n].copy().reshape(spec.shape)
 
     def _run(self):
         # Reset per-invocation stats, then reuse SequenceXclbinCallable._run's
@@ -366,8 +353,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
         kernel(*args)
 
-        torch = _torch()
-        npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
+        npu_out = self._read_to_cpu(out_name, out_spec).astype(np.float32)
         ref_out = step_op.reference(*cpu_inputs)
 
         stats = {
@@ -378,9 +364,9 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             "output": out_name,
         }
 
-        ref_flat = ref_out.reshape(out_spec.shape).to(torch.float32)
-        diff = (npu_out - ref_flat).abs()
-        ref_mag = ref_flat.abs()
+        ref_flat = ref_out.reshape(out_spec.shape).astype(np.float32)
+        diff = np.abs(npu_out - ref_flat)
+        ref_mag = np.abs(ref_flat)
         max_abs = float(diff.max())
         ref_max = float(ref_mag.max())
         rel = float((diff / (ref_mag + 1e-6)).max())

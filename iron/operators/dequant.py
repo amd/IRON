@@ -6,6 +6,7 @@ from dataclasses import field
 from typing import ClassVar
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
@@ -94,13 +95,11 @@ def _cases():
 def _packed(op):
     """Values in [0, 3.75) with scales in [1/3.75, 1) keep every quantized
     value inside int4's [0, 15]; the input is their packed form."""
-    import torch
-
-    torch.manual_seed(42)
-    values = torch.rand(op.size, dtype=torch.bfloat16) * 3.75
-    scales = 1 / 3.75 + (1 - 1 / 3.75) * torch.rand(
-        op.size // op.ov.group_size, dtype=torch.bfloat16
-    )
+    rng = np.random.default_rng(42)
+    values = (rng.random(op.size) * 3.75).astype(bfloat16)
+    scales = (
+        1 / 3.75 + (1 - 1 / 3.75) * rng.random(op.size // op.ov.group_size)
+    ).astype(bfloat16)
     return dict(x=op.pack(values, scales))
 
 
@@ -159,20 +158,21 @@ class Dequant(Operator[DequantOverlay]):
         """Quantize ``values`` (bf16, ``size``) by ``scales`` (bf16, one per
         ``group_size``, zero point 0) into the kernel's packed uint8 layout;
         the inverse of :meth:`reference`. Values are rounded half to even
-        and clipped to the int4 range, as ``torch.quantize_per_channel`` does.
+        and clipped to the int4 range.
         """
-        import torch
-
         tile, group = self.ov.tile_size, self.ov.group_size
         if tile is None:
             raise ValueError("Dequant.pack needs tile_size (tune the overlay)")
         n_tiles, groups = self.size // tile, tile // group
-        v = values.reshape(n_tiles, groups, group).to(torch.float32)
-        s = scales.reshape(n_tiles, groups, 1).to(torch.float32)
-        q = torch.round(v / s).clamp(0, 15).to(torch.uint8)
+        v = values.reshape(n_tiles, groups, group).astype(np.float32)
+        s = scales.reshape(n_tiles, groups, 1).astype(np.float32)
+        # np.round is round-half-to-even, as torch.round is.
+        q = np.clip(np.round(v / s), 0, 15).astype(np.uint8)
         nibbles = (q[..., 0::2] | (q[..., 1::2] << 4)).reshape(n_tiles, tile // 2)
-        scale_bytes = scales.reshape(n_tiles, groups).contiguous().view(torch.uint8)
-        return torch.cat([nibbles, scale_bytes.reshape(n_tiles, -1)], dim=1).reshape(-1)
+        scale_bytes = np.ascontiguousarray(scales.reshape(n_tiles, groups)).view(np.uint8)
+        return np.concatenate(
+            [nibbles, scale_bytes.reshape(n_tiles, -1)], axis=1
+        ).reshape(-1)
 
     def reference(self, x):
         """CPU reference: int4 values times their group's bf16 scale, in f32.
@@ -180,19 +180,17 @@ class Dequant(Operator[DequantOverlay]):
         The packed tile is ``tile_size // 2`` bytes of nibbles (element ``2k``
         in the low nibble of byte ``k``, ``2k + 1`` in the high) followed by
         one little-endian bf16 scale per ``group_size`` values; the zero point
-        is 0. Results are exact in f32, as ``torch.dequantize`` gives them.
+        is 0. Results are exact in f32.
         """
-        import torch
-
         tile, group = self.ov.tile_size, self.ov.group_size
         if tile is None:
             raise ValueError("Dequant.reference needs tile_size (tune the overlay)")
         n_tiles, groups = self.size // tile, tile // group
         packed = x.reshape(n_tiles, tile // 2 + groups * 2)
-        nibbles = packed[:, : tile // 2].to(torch.int32)
-        q = torch.stack([nibbles & 0xF, nibbles >> 4], dim=-1).reshape(
+        nibbles = packed[:, : tile // 2].astype(np.int32)
+        q = np.stack([nibbles & 0xF, nibbles >> 4], axis=-1).reshape(
             n_tiles, groups, group
         )
-        scales = packed[:, tile // 2 :].reshape(n_tiles, groups, 2).contiguous()
-        scales = scales.view(torch.bfloat16).to(torch.float32)  # (n_tiles, groups, 1)
-        return (q.to(torch.float32) * scales).reshape(self.size)
+        scales = np.ascontiguousarray(packed[:, tile // 2 :].reshape(n_tiles, groups, 2))
+        scales = scales.view(bfloat16).astype(np.float32)  # (n_tiles, groups, 1)
+        return (q.astype(np.float32) * scales).reshape(self.size)

@@ -5,6 +5,8 @@ from typing import ClassVar
 
 from aie.iron.kernels import activation
 
+import numpy as np
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -27,6 +29,6 @@ class GELU(ChanneledUnaryOperator[GELUOverlay]):
 
     def reference(self, x):
         """CPU reference: the tanh approximation the kernel computes."""
-        import torch
-
-        return torch.nn.functional.gelu(x, approximate="tanh")
+        f = x.astype(np.float32)
+        inner = np.sqrt(np.float32(2 / np.pi)) * (f + np.float32(0.044715) * f**3)
+        return (0.5 * f * (1 + np.tanh(inner))).astype(x.dtype)

@@ -775,10 +775,11 @@ def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
     ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
     transposed to ``(N, M)`` when ``c_col_maj`` is set.
     """
-    import torch
-
     B = input_b.T if b_col_maj else input_b
-    C = torch.matmul(input_a, B)
+    # float32 accumulate, rounded once, as the kernel's f32 accumulator does.
+    C = np.matmul(input_a.astype(np.float32), B.astype(np.float32)).astype(
+        input_a.dtype
+    )
     if c_col_maj:
         C = C.T
     return C

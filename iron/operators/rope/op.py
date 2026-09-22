@@ -3,6 +3,7 @@
 
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 from iron.common.declare import (
     Incompatible,
@@ -208,16 +209,14 @@ def compute_rope_params(
     dtype=None,
 ):
     """Compute RoPE parameters (cos and sin tables)."""
-    import torch
-
-    dtype = torch.float32 if dtype is None else dtype
+    dtype = np.float32 if dtype is None else dtype
     assert head_dim % 2 == 0, "Embedding dimension must be even"
 
     # Compute the inverse frequencies
     inv_freq = 1.0 / (
         theta_base
         ** (
-            torch.arange(0, head_dim, 2, dtype=dtype)[: (head_dim // 2)].float()
+            np.arange(0, head_dim, 2, dtype=dtype)[: (head_dim // 2)].astype(np.float32)
             / head_dim
         )
     )
@@ -231,9 +230,9 @@ def compute_rope_params(
             freq_config["original_context_length"] / freq_config["high_freq_factor"]
         )
 
-        wavelen = 2 * torch.pi / inv_freq
+        wavelen = 2 * np.pi / inv_freq
 
-        inv_freq_llama = torch.where(
+        inv_freq_llama = np.where(
             wavelen > low_freq_wavelen, inv_freq / freq_config["factor"], inv_freq
         )
 
@@ -247,20 +246,18 @@ def compute_rope_params(
         ) + smooth_factor * inv_freq
 
         is_medium_freq = (wavelen <= low_freq_wavelen) & (wavelen >= high_freq_wavelen)
-        inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+        inv_freq_llama = np.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
         inv_freq = inv_freq_llama
 
     # Generate position indices
-    positions = torch.arange(context_length, dtype=dtype)
+    positions = np.arange(context_length, dtype=dtype)
 
     # Compute the angles
-    angles = positions.unsqueeze(1) * inv_freq.unsqueeze(
-        0
-    )  # Shape: (context_length, head_dim / 2)
+    angles = positions[:, None] * inv_freq[None, :]  # Shape: (context_length, head_dim / 2)
 
     # Precompute sine and cosine
-    cos = torch.cos(angles)
-    sin = torch.sin(angles)
+    cos = np.cos(angles)
+    sin = np.sin(angles)
 
     return cos, sin
 
@@ -279,8 +276,6 @@ def angle_table(
     """The ``angles`` buffer for ``rows`` positions: bf16 ``[cos, sin, ...]``
     pairs along each row, the table the device kernel reads (Llama 3's
     frequency scaling by default)."""
-    import torch
-
     cos, sin = compute_rope_params(
         head_dim=cols,
         theta_base=theta_base,
@@ -288,7 +283,7 @@ def angle_table(
         method_type=method_type,
         freq_config=freq_config,
     )
-    table = torch.zeros((rows, cols), dtype=torch.bfloat16)
+    table = np.zeros((rows, cols), dtype=bfloat16)
     table[:, ::2] = cos[:, : cols // 2]
     table[:, 1::2] = sin[:, : cols // 2]
     return table
@@ -306,8 +301,6 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     ``core_body`` acquires one angle row and applies it to that many
     consecutive input rows before moving on).
     """
-    import torch
-
     if method_type not in (0, 1):
         raise ValueError(f"method_type must be 0 or 1, got {method_type}")
     if cols is None:
@@ -315,17 +308,17 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     if rows is None:
         rows = x.shape[0]
     half = cols // 2
-    cos = angles[..., 0::2].to(torch.float32)
-    sin = angles[..., 1::2].to(torch.float32)
+    cos = angles[..., 0::2].astype(np.float32)
+    sin = angles[..., 1::2].astype(np.float32)
     if cos.shape[0] != rows:
         if rows % cos.shape[0] == 0:
             rep = rows // cos.shape[0]
-            cos = cos.repeat_interleave(rep, dim=0)
-            sin = sin.repeat_interleave(rep, dim=0)
+            cos = np.repeat(cos, rep, axis=0)
+            sin = np.repeat(sin, rep, axis=0)
         else:
             cos = cos[:rows]
             sin = sin[:rows]
-    x32 = x.to(torch.float32)
+    x32 = x.astype(np.float32)
     if method_type == 1:
         x1, x2 = x32[..., 0::2], x32[..., 1::2]
     else:
@@ -333,7 +326,7 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
     if method_type == 1:
-        y = torch.stack([y1, y2], dim=-1).reshape(x.shape)
+        y = np.stack([y1, y2], axis=-1).reshape(x.shape)
     else:
-        y = torch.cat([y1, y2], dim=-1)
-    return y.to(torch.bfloat16)
+        y = np.concatenate([y1, y2], axis=-1)
+    return y.astype(bfloat16)

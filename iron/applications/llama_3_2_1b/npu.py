@@ -5,7 +5,11 @@
 
 import logging
 
+import numpy as np
 import torch
+from ml_dtypes import bfloat16
+
+from .graphs import _np
 
 from . import harness
 from .graphs import DecodeGraph, PrefillGraph
@@ -45,19 +49,19 @@ def llama_forward_pass_prefill(config, state):
     assert batch == 1 and 0 < seq_len <= max_seq_len
     # The prompt fills the first rows; the rest are never read (attention is
     # causal, and decode masks the cache's tail by its vector size).
-    x = torch.zeros(max_seq_len, config.emb_dim, dtype=torch.bfloat16)
-    x[:seq_len] = torch.nn.functional.embedding(
-        state.token_ids, config.model.out_head.weight
+    x = np.zeros((max_seq_len, config.emb_dim), dtype=bfloat16)
+    x[:seq_len] = _np(
+        torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
     ).reshape(seq_len, config.emb_dim)
     # The last prompt row's logits only, selected by its element offset.
     logits = (
         npu.prefill(
             x,
-            config.angles[:max_seq_len],
+            _np(config.angles)[:max_seq_len],
             last=(seq_len - 1) * config.emb_dim,
         )
-        .to_torch()
-        .view(1, 1, config.vocab_size)
+        .numpy()
+        .reshape(1, 1, config.vocab_size)
     )
     npu.prefill_to_decode(config)
     return logits, state
@@ -80,11 +84,13 @@ def llama_forward_pass_decode(config, state):
     # context lengths, which iron/tests/common/llama_reference.py shows
     # drifting from the CPU reference from the second token on (§18).
 
-    angles = config.angles[
+    angles = _np(config.angles)[
         state.num_preceding_tokens : state.num_preceding_tokens + seq_len
     ]
     # Token embedding (on CPU)
-    x = torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
+    x = _np(
+        torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
+    )
 
     logits = (
         npu.decode(
@@ -93,8 +99,8 @@ def llama_forward_pass_decode(config, state):
             cache_offset=cache_offset,
             vector_size=context_len,
         )
-        .to_torch()
-        .view(1, 1, config.vocab_size)
+        .numpy()
+        .reshape(1, 1, config.vocab_size)
     )
     return logits, state
 

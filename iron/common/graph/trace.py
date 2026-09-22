@@ -9,6 +9,7 @@ import dataclasses
 import itertools
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 from ..declare import Operator, Resident
 from ..declare.member import _Buffer as _Buffer_, _Value
@@ -330,14 +331,12 @@ class _ReferenceTracer(Tracer):
         return x
 
     def call(self, target, args, kwargs):
-        import torch
-
         tensors, states = [], []
         for a in args:
             state = None
             if isinstance(a, State):
                 if a.host is None:
-                    a.host = torch.zeros(a.shape, dtype=torch.bfloat16)
+                    a.host = np.zeros(a.shape, dtype=bfloat16)
                 state, a = a, a.host
             tensors.append(a)
             states.append(state)

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import ml_dtypes
 import numpy as np
 
 from iron.common.declare import (
@@ -264,9 +265,10 @@ def reference(x, vector_size=None):
     ``vector_size`` masks every column from there on to the lowest value of
     the dtype first, as the device kernel does, so those come out as zeros.
     """
-    import torch
-
     if vector_size is not None and vector_size < x.shape[-1]:
-        x = x.clone()
-        x[..., vector_size:] = torch.finfo(x.dtype).min
-    return torch.softmax(x, dim=-1)
+        x = x.copy()
+        x[..., vector_size:] = ml_dtypes.finfo(x.dtype).min
+    # In float32 and rounded once, as torch does internally for a bf16 input.
+    f = x.astype(np.float32)
+    e = np.exp(f - f.max(axis=-1, keepdims=True))
+    return (e / e.sum(axis=-1, keepdims=True)).astype(x.dtype)
