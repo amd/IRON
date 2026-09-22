@@ -574,8 +574,11 @@ class MHAOverlay(Overlay):
                 )
             )
 
-        # The shim ends: Q and O share a column per shim slot, K and V take
-        # their own.
+        # The shim ends. Every coordinate in this design is load-bearing:
+        # relaxed to AnyShimTile/AnyMemTile/AnyComputeTile the router reports
+        # "Unable to find a legal routing", so the map here is not a
+        # performance preference. Q enters on column 4 and O leaves on 7,
+        # both slots sharing the tile's two channels; K and V take 5 and 6.
         for shim in range(self.q_shims):
             self.q[shim].bind(inQ[shim].prod(tile=Tile(col=4, row=0)))
             self.o[shim].bind(memO[shim].cons(tile=Tile(col=7, row=0)))

@@ -79,14 +79,9 @@ class MemCopyOverlay(Overlay):
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
         from aie.iron.controlflow import range_
-        from aie.iron.device import Tile
 
         line_type = self.s.tile
-        line_size, num_cores, num_channels = (
-            self.line_size,
-            self.num_cores,
-            self.num_channels,
-        )
+        line_size, num_cores = self.line_size, self.num_cores
         fifodepth = 1 if line_size > 4096 else 2
 
         of_ins = [
@@ -119,13 +114,8 @@ class MemCopyOverlay(Overlay):
                     of_in.release(1)
                     of_out.release(1)
 
-            # Place at most ``num_channels`` workers per column.
             workers = [
-                Worker(
-                    core_fn,
-                    [of_ins[i].cons(), of_outs[i].prod(), mem_copy_fcn],
-                    tile=Tile(i // num_channels, 2 + (i % num_channels)),
-                )
+                Worker(core_fn, [of_ins[i].cons(), of_outs[i].prod(), mem_copy_fcn])
                 for i in range(num_cores)
             ]
         for i in range(num_cores):

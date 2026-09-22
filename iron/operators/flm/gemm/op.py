@@ -322,7 +322,6 @@ class FLMGEMMOverlay(Overlay):
         from aie.helpers.util import v8bfp16ebs8  # noqa: F401  (the array type)
         from aie.iron import Buffer, ObjectFifo, Worker
         from aie.iron.controlflow import range_
-        from aie.iron.device import Tile
 
         COLS, ROWS = self.cols, self.rows
         N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
@@ -432,16 +431,12 @@ class FLMGEMMOverlay(Overlay):
                 a_cons[(r, c)] = of_a.cons()
 
         # B: shim -> memtile -> broadcast down the compute column, one k-block
-        # per object and re-fetched per row-block. Placement has zero slack.
+        # per object and re-fetched per row-block.
         b_l3l2_fifos, b_cons = [], {}
         for c in range(COLS):
             of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
             b_l3l2_fifos.append(of_b_in)
             of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
-                # The one placement pin; without it the 20 logical memtiles
-                # merge onto the 8 physical ones in a way rejected with
-                # "number of input DMA channel exceeded".
-                tile=Tile(c, 1),
                 obj_type=ct_b_ty,
                 depth=L1_B_DEPTH,
                 name=f"B_L2L1_{c}",

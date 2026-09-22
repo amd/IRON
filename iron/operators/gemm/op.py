@@ -317,10 +317,6 @@ class GEMMOverlay(Overlay):
                 object_file_name=mm_object,
             )
 
-        # Tile declarations as tile[row][col]
-        tiles = [[(col, row) for col in range(0, n_aie_cols)] for row in range(0, 6)]
-        core_tiles = tiles[2:]
-
         # AIE-array data movement with object fifos
         A_l3l2_fifos = [None] * n_shim_mem_A
         A_l2l1_fifos = [None] * n_aie_rows
@@ -371,9 +367,6 @@ class GEMMOverlay(Overlay):
                     obj_types=[A_l1_ty] * (stop_row - start_row),
                     names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
                     dims_to_stream=dims_to_stream,
-                    tile=Tile(
-                        2 * i if n_aie_cols == 8 else i, 1
-                    ),  # alternate columns in full 4x8 NPU2 case
                 )
             )
             for j in range(stop_row - start_row):
@@ -395,7 +388,6 @@ class GEMMOverlay(Overlay):
                     obj_type=B_l1_ty,
                     name=f"B_L2L1_{col}",
                     dims_to_stream=dims_to_stream,
-                    tile=Tile(col, 1),
                 )
             )
             # Output C
@@ -419,7 +411,6 @@ class GEMMOverlay(Overlay):
                     obj_types=[C_l1_ty] * n_aie_rows,
                     names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
                     depths=[fifo_depth_out] * n_aie_rows,
-                    tile=Tile(col, 1),
                 )
             )
             for j in range(n_aie_rows):
@@ -466,7 +457,6 @@ class GEMMOverlay(Overlay):
         workers = []
         for row in range(n_aie_rows):
             for col in range(n_aie_cols):
-                tile_col, tile_row = core_tiles[row][col]
                 acc_buffer = None
                 if use_larger_internal_buffer:
                     acc_buffer = Buffer(
@@ -486,12 +476,16 @@ class GEMMOverlay(Overlay):
                             workerBarriers[row][col],
                             acc_buffer,
                         ],
-                        tile=Tile(tile_col, tile_row),
                         stack_size=0xD00,
                     )
                 )
 
-        # The shim ends, pinned as before: A on alternate columns in the 4x8 case.
+        # The shim ends stay pinned, and A on alternate columns in the 4x8
+        # case is the reason: the memtiles and the workers place themselves
+        # fine, but relaxing these three as well piles the descriptors of a
+        # real shape (2048x8192x2048, b_col_maj) onto one tile, and DMA
+        # lowering rejects it with "Too many simultaneously active buffer
+        # descriptors on tile (3,0), which supports up to 16".
         for c, f in enumerate(A_l3l2_fifos):
             self.a[c].bind(f.prod(tile=Tile(2 * c if n_aie_cols == 8 else c, 0)))
         for c, f in enumerate(B_l3l2_fifos):
