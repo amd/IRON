@@ -95,10 +95,14 @@ class ElementwiseOverlay(Overlay):
 
     count = Resident(np.int32)  # lines each core processes; written per sequence
 
+    # The line a core streams when nothing else is asked for, and the
+    # largest it will hold: a line spanning more than one local-memory bank
+    # drops the fifo depth to one.
+    default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
 
     def tuning(self, dev) -> "ElementwiseOverlay":
-        tile_size = DEFAULT_TILE if self.tile_size is None else self.tile_size
+        tile_size = self.default_tile if self.tile_size is None else self.tile_size
         cols = self.num_aie_columns
         if dev is not None:
             if cols is None:

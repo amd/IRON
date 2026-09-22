@@ -1,21 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 
 import numpy as np
 import torch
 
+from typing import ClassVar
+
+from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
     Incompatible,
     In,
     Operator,
     Out,
-    Overlay,
-    Resident,
     StreamIn,
-    StreamOut,
-    Untunable,
     dim,
     operator,
     tunable,
@@ -67,82 +65,27 @@ def _cases(weighted):
 
 
 @operator
-class RMSNormOverlay(Overlay):
-    """The array for row-wise RMS normalization: one core per (column, channel).
+class RMSNormOverlay(ChanneledUnaryOverlay):
+    """The array for row-wise RMS normalization: the shared elementwise design.
 
     ``tile_size`` is the row length and is shape-bearing (the host buffers are
-    ``rows x tile_size``), so it is a dimension of the overlay, not a tunable.
+    ``rows x tile_size``), so it is a dimension here rather than the tunable
+    the template declares.
     """
 
     tile_size: int = dim()
     # One core by default: a core normalizes whole rows, and how many rows
     # there are is the extent. Call sites with many rows spread them.
     num_aie_columns: int = tunable(1)
-    num_channels: int = tunable(1)
     epsilon: float = 1e-5  # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
-    # The core's tile: min(tile_size, 8192). Filled by tuning.
-    per_tile: int | None = tunable(None, repr=False)
 
-    x = StreamIn(per_tile, per=(num_aie_columns, num_channels))
-    y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
-    count = Resident(np.int32)
+    tile_cap: ClassVar[int] = 8192
 
-    def tuning(self, dev) -> "RMSNormOverlay":
-        cols = self.num_aie_columns
-        if dev is not None:
-            if cols is None:
-                cols = self.shim_columns(dev, self.num_channels)
-            self.check_shim_columns(dev, cols, self.num_channels)
-        elif cols is None:
-            raise Untunable("num_aie_columns defaults from the device; none given")
-        return dataclasses.replace(
-            self, num_aie_columns=cols, per_tile=min(self.tile_size, 8192)
-        )
+    def kernel(self, target):
+        return norm.rms_norm_eps(self.line_size)
 
-    def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
-        tile_ty = self.x.tile
-        cols, chans = self.num_aie_columns, self.num_channels
-        depth = 1 if self.per_tile > bank_elements(self.x.dtype) else 2
-        kernel = norm.rms_norm_eps(self.per_tile)
-        of_ins = [
-            ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
-        ]
-        of_outs = [
-            ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
-        ]
-        counts = [target.rtp(_I32, name=f"count_{k}") for k in range(cols * chans)]
-        barriers = [target.barrier() for _ in range(cols * chans)]
-        per_tile, epsilon = self.per_tile, self.epsilon
-
-        def core_body(of_in, of_out, rms_norm, count, barrier):
-            barrier.wait_for_value(1)
-            n = count[0]
-            for _ in range_(n):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                rms_norm(elem_in, elem_out, per_tile, epsilon)
-                of_in.release(1)
-                of_out.release(1)
-
-        workers = [
-            Worker(
-                core_body,
-                [of_ins[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
-            )
-            for k in range(cols * chans)
-        ]
-        for k in range(cols * chans):
-            self.x[k].bind(of_ins[k].prod())
-            self.y[k].bind(of_outs[k].cons())
-        self.count.bind(counts)
-        return workers
+    def kernel_call(self, kernel, elem_in, elem_out) -> None:
+        kernel(elem_in, elem_out, self.line_size, self.epsilon)
 
 
 @operator
@@ -154,22 +97,11 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
     every column in that channel, and each receives the whole weight row.
     """
 
+    # The weight row is one tile, shared by every column of a channel; the
+    # shim budget accounts for a replicate= stream once per channel.
     w = StreamIn(
-        RMSNormOverlay.per_tile, per=RMSNormOverlay.num_channels, replicate=True
+        RMSNormOverlay.line_size, per=RMSNormOverlay.num_channels, replicate=True
     )
-
-    def tuning(self, dev) -> "WeightedRMSNormOverlay":
-        cols = self.num_aie_columns
-        if dev is not None:
-            # The weight stream is declared replicate=, so the budget already
-            # leaves room for its one fill per channel beside the row fills.
-            if cols is None:
-                cols = self.shim_columns(dev, self.num_channels)
-            self.check_shim_columns(dev, cols, self.num_channels)
-        elif cols is None:
-            raise Untunable("num_aie_columns defaults from the device; none given")
-        # The weight is one tile, so the tile is the whole row.
-        return dataclasses.replace(self, num_aie_columns=cols, per_tile=self.tile_size)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
@@ -178,9 +110,9 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
         tile_ty = self.x.tile
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = 1 if self.per_tile > bank_elements(self.x.dtype) else 2
-        rms_norm = norm.rms_norm_eps(self.per_tile)
-        eltwise_mul = eltwise.mul_sized(self.per_tile)
+        depth = 1 if self.line_size > bank_elements(self.x.dtype) else 2
+        rms_norm = norm.rms_norm_eps(self.line_size)
+        eltwise_mul = eltwise.mul_sized(self.line_size)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
             for i in range(cols)
@@ -203,7 +135,7 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
         n_cores = cols * chans
         counts = [target.rtp(_I32, name=f"count_{k}") for k in range(2 * n_cores)]
         barriers = [target.barrier() for _ in range(2 * n_cores)]
-        per_tile, epsilon = self.per_tile, self.epsilon
+        line_size, epsilon = self.line_size, self.epsilon
 
         def core_norm(of_in, of_out, rms, count, barrier):
             barrier.wait_for_value(1)
@@ -211,7 +143,7 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                rms(elem_in, elem_out, per_tile, epsilon)
+                rms(elem_in, elem_out, line_size, epsilon)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -222,7 +154,7 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                mul(elem_in, elem_w, elem_out, per_tile)
+                mul(elem_in, elem_w, elem_out, line_size)
                 of_in.release(1)
                 of_out.release(1)
             of_w.release(1)
@@ -314,7 +246,7 @@ class RMSNorm(Operator[RMSNormOverlay]):
     def residents(self) -> dict[str, int]:
         ov = self.ov
         return {
-            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.per_tile
+            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.line_size
         }
 
     def reference(self, x, w=None):

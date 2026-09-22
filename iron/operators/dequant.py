@@ -3,124 +3,70 @@
 
 import dataclasses
 from dataclasses import field
+from typing import ClassVar
 
 import numpy as np
 import torch
 
+from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
     Incompatible,
     In,
     Operator,
     Out,
-    Overlay,
-    Resident,
     StreamIn,
-    StreamOut,
-    Untunable,
     dim,
     operator,
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
-from iron.common.utils import bank_elements
 
 
 @operator
-class DequantOverlay(Overlay):
-    """The array for int4 -> bf16 dequantization: one core per (column, channel).
+class DequantOverlay(ChanneledUnaryOverlay):
+    """The array for int4 -> bf16 dequantization: the shared elementwise design.
 
-    A core takes ``per_tile`` values as ``in_tile`` packed bytes (two 4-bit
+    A core takes ``line_size`` values as ``in_tile`` packed bytes (two 4-bit
     values per byte plus a bf16 scale and zero point per ``group_size``) and
-    produces ``per_tile`` bf16 values.
+    produces ``line_size`` bf16 values, so its two streams carry different
+    tile types.
     """
 
-    # None: every column of the device, one channel each, 4096-value tiles.
-    num_aie_columns: int | None = tunable(None)
-    num_channels: int = tunable(1)
-    tile_size: int | None = tunable(None)
     group_size: int = field(default=32, repr=False)
-    # Filled by tuning: the largest tile 64 KB of L1 holds, and its packed size.
-    per_tile: int | None = tunable(None, repr=False)
+    # The packed size of one tile; filled by tuning beside ``line_size``.
     in_tile: int | None = tunable(None, repr=False)
 
-    x = StreamIn(in_tile, dtype=np.uint8, per=(num_aie_columns, num_channels))
-    y = StreamOut(per_tile, per=(num_aie_columns, num_channels))
-    count = Resident(np.int32)
+    default_tile: ClassVar[int] = 4096
+    tile_cap: ClassVar[int] = 16384
+
+    x = StreamIn(
+        in_tile,
+        dtype=np.uint8,
+        per=(
+            ChanneledUnaryOverlay.num_aie_columns,
+            ChanneledUnaryOverlay.num_channels,
+        ),
+    )
 
     def tuning(self, dev) -> "DequantOverlay":
+        tuned = super().tuning(dev)
+        packed = (tuned.line_size // 2) + (tuned.line_size // self.group_size) * 2
+        return dataclasses.replace(tuned, in_tile=packed)
 
-        cols = self.num_aie_columns
-        if cols is None:
-            if dev is None:
-                raise Untunable("num_aie_columns defaults from the device; none given")
-            cols = min(dev.cols, 16 // self.num_channels)
-        tile_size = 4096 if self.tile_size is None else self.tile_size
-        total_cores = cols * self.num_channels
-        if total_cores > 16:
-            raise Untunable(f"total cores ({total_cores}) must be <= 16")
-        per_tile = min(tile_size, 16384)
-        return dataclasses.replace(
-            self,
-            num_aie_columns=cols,
-            tile_size=tile_size,
-            per_tile=per_tile,
-            in_tile=(per_tile // 2) + (per_tile // self.group_size) * 2,
-        )
-
-    def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
-        in_tile_ty, out_tile_ty = self.x.tile, self.y.tile
-        cols, chans = self.num_aie_columns, self.num_channels
-        # The packed input is the wider of the two, so its bank is the bound.
-        depth = 1 if self.in_tile > bank_elements(self.x.dtype) else 2
-
-        kernel = target.kernel(
+    def kernel(self, target):
+        return target.kernel(
             "expand_uint4_to_bfloat16",
-            [in_tile_ty, out_tile_ty],
+            [self.x.tile, self.y.tile],
             source=target.kernels_dir / "generic" / "expand.cc",
             compile_flags=[
                 f"-DTILE_SIZE={self.tile_size}",
                 f"-DGROUP_SIZE={self.group_size}",
             ],
         )
-        of_ins = [
-            ObjectFifo(in_tile_ty, name=f"in1_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
-        ]
-        of_outs = [
-            ObjectFifo(out_tile_ty, name=f"out_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
-        ]
-        i32 = np.ndarray[(1,), np.dtype[np.int32]]
-        counts = [target.rtp(i32, name=f"count_{k}") for k in range(cols * chans)]
-        barriers = [target.barrier() for _ in range(cols * chans)]
 
-        def core_body(of_in, of_out, dequant, count, barrier):
-            barrier.wait_for_value(1)
-            n = count[0]
-            for _ in range_(n):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                dequant(elem_in, elem_out)
-                of_in.release(1)
-                of_out.release(1)
-
-        workers = [
-            Worker(
-                core_body,
-                [of_ins[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
-            )
-            for k in range(cols * chans)
-        ]
-        for k in range(cols * chans):
-            self.x[k].bind(of_ins[k].prod())
-            self.y[k].bind(of_outs[k].cons())
-        self.count.bind(counts)
-        return workers
+    def kernel_call(self, kernel, elem_in, elem_out) -> None:
+        # The tile size is a compile flag, not an argument.
+        kernel(elem_in, elem_out)
 
 
 def _cases():
@@ -196,16 +142,16 @@ class Dequant(Operator[DequantOverlay]):
             raise Incompatible(
                 f"size ({self.size}) must be divisible by total cores ({total_cores})"
             )
-        if (self.size // total_cores) % ov.per_tile:
+        if (self.size // total_cores) % ov.line_size:
             raise Incompatible(
                 f"size ({self.size}) leaves each core {self.size // total_cores} "
-                f"elements, not a multiple of the {ov.per_tile}-element tile"
+                f"elements, not a multiple of the {ov.line_size}-element tile"
             )
 
     def residents(self) -> dict[str, int]:
         ov = self.ov
         return {
-            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.per_tile
+            "count": self.size // (ov.num_aie_columns * ov.num_channels) // ov.line_size
         }
 
     def pack(self, values, scales):
