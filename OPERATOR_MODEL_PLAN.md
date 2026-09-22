@@ -1495,7 +1495,18 @@ prunes each clone to what its consumer reads (the one sequence, the one
 device), which is a C++ change needing an mlir-aie build; or the
 operators issue fewer descriptors, MHA first (768 per call: it refills all
 of K and V for every head and every Q block, so each KV group's K and V
-cross the shim 16 times per layer), which also cuts device traffic. Along the way the real-size build
+cross the shim 16 times per layer), which also cuts device traffic.
+
+Done since: MHA issues one descriptor set per KV group (48 a call), and
+the sixteen-layer prefill sequence is 16,861 tasks, 13,312 of them the
+GEMMs' (128 a call, 320 for the unrolled down projection). That is not
+enough here: the sixteen-layer build still dies at the per-sequence
+split, at 11.2 GB of aiecc's own memory against the container's 16 GB
+shared with the 3 GB Python parent. The remaining levers are aiecc's
+clones (`AIECC_MODULE_CLONES.md`), a host with more memory (about 12 GB
+for aiecc alone, as measured), or reworking the GEMM runtime sequence's
+transfer blocks, which is upstream's proven whole-array design and not
+worth changing without a device to check it on. Along the way the real-size build
 exposed a race in mlir-aie's kernel compiler: entry points of one source
 that share an object file (a GEMM's matmul and zero) compiled on
 different threads, and with a symbol prefix one visit's compile could
