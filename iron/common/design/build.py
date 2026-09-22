@@ -45,7 +45,7 @@ def build_design(
 ):
     """Generate the MLIR module for one declared operator.
 
-    Called by :mod:`iron.common.jit_compile`'s compile functions and by
+    Called by :mod:`iron.common.image.jit_compile`'s compile functions and by
     ``fuse_mlir`` through the
     operator's ``DesignGenerator``; ``code`` exists only to reach the cache
     key (see :func:`mlir_artifact_for`).

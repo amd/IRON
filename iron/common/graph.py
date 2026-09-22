@@ -43,8 +43,8 @@ import aie.utils as aie_utils
 from ml_dtypes import bfloat16
 
 from .design import device_symbol
-from .packaging import plan
-from .sequence import OperatorSequence
+from .image.packaging import plan
+from .image.sequence import OperatorSequence
 
 from .declare import Operator, Overlay, Resident, ValueSpec
 from .declare.member import _Buffer as _Buffer_, _Value
@@ -591,9 +591,9 @@ class GraphFunction:
         """Compile for the given input shapes and return a :class:`CompiledGraph`.
 
         ``boundaries`` and ``image`` are the two packaging choices
-        (:mod:`iron.common.packaging`); everything else is derived and, under
+        (:mod:`iron.common.image.packaging`); everything else is derived and, under
         ``verbose``, printed. ``record="disk"`` writes the image's
-        :class:`~iron.common.artifacts.Artifacts` record beside it.
+        :class:`~iron.common.image.artifacts.Artifacts` record beside it.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from iron.common.graph import TracedGraph, Value
-from iron.common.packaging import ELF, XCLBIN, each_step, plan
+from iron.common.image.packaging import ELF, XCLBIN, each_step, plan
 
 
 def _traced(*values):

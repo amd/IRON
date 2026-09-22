@@ -22,7 +22,7 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
-from iron.common.jit_compile import (
+from iron.common.image.jit_compile import (
     _bind_device,
     _design_generator,
     _digest,

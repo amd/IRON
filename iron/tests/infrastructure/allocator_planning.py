@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Infrastructure tests for :mod:`iron.common.allocator`, the memory planner.
+"""Infrastructure tests for :mod:`iron.common.image.allocator`, the memory planner.
 
 Pure logic over synthetic runlists -- no operators, no toolchain, no hardware.
 The properties that matter are: a plan never lets two simultaneously-live
@@ -15,7 +15,7 @@ import pytest
 
 from types import SimpleNamespace
 
-from iron.common.allocator import LiveRange, live_ranges, peak_live_bytes, plan
+from iron.common.image.allocator import LiveRange, live_ranges, peak_live_bytes, plan
 
 
 def _buf(direction):
@@ -195,7 +195,7 @@ def device():
 
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    from iron.common.sequence import OperatorSequence
+    from iron.common.image.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)
@@ -247,7 +247,7 @@ def test_layout_is_unchanged_without_offsets():
 
 def _chain(n_intermediates, plan_scratch):
     """A chain where each intermediate dies as the next is produced."""
-    from iron.common.sequence import OperatorSequence
+    from iron.common.image.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)
@@ -281,7 +281,7 @@ def test_planned_buffers_never_share_bytes_while_both_live():
     This is the one failure mode in planning that does not announce itself:
     two buffers aliased while both are live produce wrong numbers, not a crash.
     """
-    from iron.common.allocator import LiveRange
+    from iron.common.image.allocator import LiveRange
 
     layout, _ = _chain(4, plan_scratch=True)
     scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
@@ -306,7 +306,7 @@ def test_slices_are_never_pooled():
     raises -- the slice simply reads the wrong memory. Found by probing the
     written-slice case, which the whole-buffer tests above cannot reach.
     """
-    from iron.common.sequence import OperatorSequence
+    from iron.common.image.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)

@@ -23,8 +23,8 @@ from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
 
-from ..artifacts import Artifacts, Design, Step
-from ..jit_compile import insts_design, xclbin_design
+from ..image.artifacts import Artifacts, Design, Step
+from ..image.jit_compile import insts_design, xclbin_design
 
 from .bound import BoundBuffer, BoundValue
 from .field import DimRef, dim, _Optional, _Select
@@ -446,7 +446,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     def compile(self, record: str = "memory") -> "Operator":
         """Build this operator's own image, once; sets :attr:`artifacts`.
 
-        ``record="disk"`` also writes the :class:`~iron.common.artifacts.Artifacts`
+        ``record="disk"`` also writes the :class:`~iron.common.image.artifacts.Artifacts`
         record beside the image; by default it is only kept in memory.
         """
         if getattr(self, "_artifacts", None) is None:

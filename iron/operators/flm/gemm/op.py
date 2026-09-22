@@ -974,8 +974,8 @@ class GEMM(Operator[FLMGEMMOverlay]):
         instructions-only compile with no kernel built twice. On the shipped
         overlay there is no image to build at all.
         """
-        from iron.common.artifacts import Artifacts, Design, Step
-        from iron.common.jit_compile import insts_design, xclbin_design
+        from iron.common.image.artifacts import Artifacts, Design, Step
+        from iron.common.image.jit_compile import insts_design, xclbin_design
 
         if self.ov.external is not None:
             return super()._build()  # the downloaded image, instructions only
