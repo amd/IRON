@@ -58,8 +58,8 @@ def _declared():
 
 
 @pytest.mark.parametrize("cls,declaration,case", _declared())
-def test_operator(cls, declaration, case, aie_context):
-    op = cls(**case.kwargs, context=aie_context)
+def test_operator(cls, declaration, case, npu_runtime):
+    op = cls(**case.kwargs)
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
     run = run_test(

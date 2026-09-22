@@ -22,7 +22,6 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
-from iron.common.context import AIEContext
 from iron.common.jit_compile import (
     _bind_device,
     _design_generator,
@@ -42,7 +41,7 @@ def device():
 
 def _captured(name, trace_size=0):
     """x + w + w as a graph function, fused and compiled."""
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add = ElementwiseAdd(size=1024, tile_size=128)
 
     @iron.graph
     def f(x, w):
@@ -119,7 +118,7 @@ def test_identical_operators_reuse_the_compiled_xclbin():
     """The same, for an operator on its own (the separate-dispatch path)."""
 
     def build():
-        op = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+        op = ElementwiseAdd(size=1024, tile_size=128)
         return op.compile().artifacts
 
     first = build()
@@ -139,7 +138,7 @@ def test_a_traced_build_carries_the_lowered_module():
 
 
 def _add_key():
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add = ElementwiseAdd(size=1024, tile_size=128)
     fn, _, kwargs = add.generator().resolve()
     return CompilableDesign(
         _design_generator(kwargs),

@@ -45,7 +45,6 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 
 import iron
-from iron.common.context import AIEContext
 from iron.operators import ElementwiseAdd
 
 SIZE = 1024
@@ -61,7 +60,7 @@ def device():
 
 
 def _operator():
-    return ElementwiseAdd(size=SIZE, tile_size=TILE, context=AIEContext())
+    return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
 def _linked_objects(operator):

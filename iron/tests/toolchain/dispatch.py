@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 
 import iron
-from iron.common.context import AIEContext
 from iron.common.declare import Scratchpad
 from iron.common.jit_compile import DispatchStream
 from iron.tests.toolchain.tools import requires
@@ -56,13 +55,12 @@ def _graph():
     return g, (R, C)
 
 
-def test_values_become_dispatch_time_kernels_at_each_step(device, tmp_path):
+def test_values_become_dispatch_time_kernels_at_each_step(device):
     g, shape = _graph()
     net = g.compile(
         device,
         boundaries=iron.each_step,
         image=iron.XCLBIN,
-        context=AIEContext(build_dir=str(tmp_path)),
         x=shape,
     )
     assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"

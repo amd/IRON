@@ -20,7 +20,6 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 
 import iron
-from iron.common.context import AIEContext
 from iron.common.sequence import OperatorSequence
 from iron.operators import ElementwiseAdd
 
@@ -37,7 +36,7 @@ def device():
 
 
 def _operator():
-    return ElementwiseAdd(size=SIZE, tile_size=TILE, context=AIEContext())
+    return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
 def _graph(name, **kwargs):

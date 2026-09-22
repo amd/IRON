@@ -171,7 +171,7 @@ class Candidate:
 
 
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
-def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
+def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime):
     A, B, expected, mass = make_inputs(M, K, N)
 
     # Build everything before timing anything. Comparing frozen binaries is the
@@ -179,36 +179,36 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
     candidates = [
         Candidate(
             "flm",
-            FLMGEMM(M=M, K=K, N=N, context=aie_context),
+            FLMGEMM(M=M, K=K, N=N),
             A,
             B,
             M,
             N,
             BUDGET_CONV_EVEN,
-            aie_context,
+            npu_runtime,
         ),
         Candidate(
             "gemm",
-            IronGEMM(M=M, K=K, N=N, context=aie_context),
+            IronGEMM(M=M, K=K, N=N),
             A,
             B,
             M,
             N,
             BUDGET_CONV_EVEN,
-            aie_context,
+            npu_runtime,
         ),
     ]
     if HAVE_PREBUILT:
         candidates.append(
             Candidate(
                 "prebuilt",
-                FLMGEMM(Shipped(), M=M, K=K, N=N, context=aie_context),
+                FLMGEMM(Shipped(), M=M, K=K, N=N),
                 A,
                 B,
                 M,
                 N,
                 BUDGET_FLOOR,
-                aie_context,
+                npu_runtime,
             )
         )
 

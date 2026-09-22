@@ -16,7 +16,6 @@ import llama_inference_harness as harness
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from iron.common.context import AIEContext  # noqa: E402
 from iron.models.llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
 
 max_seq_len = 2048
@@ -33,11 +32,10 @@ class AIELlama:
     """
 
     def __init__(self, config):
-        context = AIEContext(build_dir="build_elf")
         self.decode_graph = DecodeGraph(config, max_seq_len)
-        self.decode = self.decode_graph.compile(config, context=context)
+        self.decode = self.decode_graph.compile(config)
         self.prefill_graph = PrefillGraph(config, self.decode_graph)
-        self.prefill = self.prefill_graph.compile(config, context=context)
+        self.prefill = self.prefill_graph.compile(config)
 
     def prefill_to_decode(self, config):
         graph = self.decode_graph

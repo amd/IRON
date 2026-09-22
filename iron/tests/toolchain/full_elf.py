@@ -30,19 +30,17 @@ import pytest
 from aie.iron.device import NPU2
 
 import iron
-from iron.common.context import AIEContext
 from iron.tests.toolchain.tools import requires, swiglu_decode
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
-def build_elf(traced, name, tmp_path):
+def build_elf(traced, name):
     """Fuse a traced graph and build its full ELF; return its record.
 
     The one build the application does: ``compile()`` builds the image into
     the JIT cache and records what it consists of."""
-    ctx = AIEContext(build_dir=str(tmp_path / "build"))
-    seq = traced.sequence(name, dispatch="fused", context=ctx).compile()
+    seq = traced.sequence(name, dispatch="fused").compile()
     artifacts = seq.artifacts
     elf = Path(artifacts.image)
     assert elf.exists() and elf.stat().st_size > 0, f"no ELF at {elf}"
@@ -60,10 +58,10 @@ def _params(artifacts):
     return {row.split()[0]: row for row in rows}
 
 
-def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
+def test_swiglu_decode_graph_compiles_to_a_full_elf():
     fn, E = swiglu_decode()
     net = fn.compile(
-        NPU2(), image=iron.ELF, context=AIEContext(build_dir=str(tmp_path)), x=(1, E)
+        NPU2(), image=iron.ELF, x=(1, E)
     )
     assert net.plan.image == "elf" and net.plan.dispatch == "fused"
     elf = Path(net.image)
@@ -91,19 +89,19 @@ def _assert_values_in_table(traced, artifacts):
         assert symbol in table, f"{symbol} ({value.name}) missing from {sorted(table)}"
 
 
-def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
+def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
     from iron.models.llama_graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
-    artifacts = build_elf(traced, "decode", tmp_path)
+    artifacts = build_elf(traced, "decode")
     _assert_values_in_table(traced, artifacts)
 
 
 @pytest.mark.extensive
-def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
+def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     """Every prefill design at Llama 3.2 1B's shape (2048 tokens, 32 heads
     over 8, the 8192-wide FFN) compiles and links into one image. One layer:
     the designs are the same for sixteen, and aiecc's lowering of the fused
@@ -118,11 +116,11 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
     decode = DecodeGraph(cfg, cfg.context_length)
     traced = PrefillGraph(cfg, decode).trace(cfg)
     assert len(traced.runlist) == 18 + 3
-    artifacts = build_elf(traced, "prefill_1b", tmp_path)
+    artifacts = build_elf(traced, "prefill_1b")
     _assert_values_in_table(traced, artifacts)
 
 
-def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
+def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
     from iron.models.llama_graphs import DecodeGraph, PrefillGraph
@@ -130,5 +128,5 @@ def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
     traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
-    artifacts = build_elf(traced, "prefill", tmp_path)
+    artifacts = build_elf(traced, "prefill")
     _assert_values_in_table(traced, artifacts)

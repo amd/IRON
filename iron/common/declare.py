@@ -58,7 +58,6 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .context import AIEContext
 from .utils import serialize_param
 
 # Short spellings in artifact stems, for the fields every family shares.
@@ -1157,9 +1156,9 @@ class Overlay:
 
     # -- an overlay IRON does not design() ---------------------------------
 
-    def prebuilt(self, directory) -> Path:
-        """The file the declared :class:`Xclbin` names, fetched into
-        ``directory`` if it is not already there."""
+    def prebuilt(self) -> Path:
+        """The file the declared :class:`Xclbin` names, fetched if it is not
+        already in the cache."""
         raise NotImplementedError(
             f"{type(self).__name__} declares an Xclbin but no prebuilt()"
         )
@@ -1371,7 +1370,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     """
 
     ov: O
-    context: object = dataclasses.field(default=None, repr=False, kw_only=True)
 
     _members: ClassVar[tuple[_Member, ...]] = ()
     _dim_fields: ClassVar[tuple[str, ...]] = ()
@@ -1388,8 +1386,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             )
         self.validate()
         self._bind()
-        if self.context is None:
-            self.context = AIEContext.default()
 
     # -- declared surface --------------------------------------------------
 
@@ -1459,7 +1455,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             tuple(
                 (f.name, getattr(self, f.name))
                 for f in dataclasses.fields(self)
-                if f.compare and f.name not in ("ov", "context")
+                if f.compare and f.name != "ov"
             ),
         )
 
@@ -1733,19 +1729,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
         return aie_utils.get_current_device()
 
-    @property
-    def kernels_dir(self):
-        """Where a design finds the C++ its kernels are compiled from.
-
-        From the context, so IRON_AIE_KERNELS_DIR redirects it and pointing
-        IRON at another kernel tree changes the compile key.
-        """
-        return self.context.kernels_dir
-
-    @property
-    def verbose(self) -> bool:
-        return getattr(self.context, "mlir_verbose", False)
-
     # Bytes of trace buffer to emit; 0 disables tracing. A plain attribute
     # rather than a property: OperatorSequence and LayerNorm assign it.
     trace_size = 0
@@ -1773,11 +1756,15 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
         return generator_for(self, image=image)
 
-    def compile(self) -> "Operator":
-        """Build this operator's own image, once; sets :attr:`artifacts`."""
+    def compile(self, record: str = "memory") -> "Operator":
+        """Build this operator's own image, once; sets :attr:`artifacts`.
+
+        ``record="disk"`` also writes the :class:`~iron.common.artifacts.Artifacts`
+        record beside the image; by default it is only kept in memory.
+        """
         if getattr(self, "_artifacts", None) is None:
             self._artifacts = self._build()
-            if self.context.record == "disk":
+            if record == "disk":
                 self._artifacts.dump()
         return self
 
@@ -1813,7 +1800,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             entry = design.get_cache_entry()
             picture, insts = entry.xclbin, entry.insts
         else:
-            picture = self.ov.prebuilt(self.context.build_dir)
+            picture = self.ov.prebuilt()
             design = insts_design(self.generator())
             entry = design.get_cache_entry()
             insts = entry.insts

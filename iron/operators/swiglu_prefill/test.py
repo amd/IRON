@@ -27,7 +27,7 @@ def _step_output(net, op_type):
 
 
 @pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
-def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_context):
+def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, npu_runtime):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
     # GEMM takes its B operand in (K, N) layout, so the projections go in as
@@ -38,7 +38,7 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
         golden_ref["w_down"],
         prio_accuracy=bool(prio_accuracy),
     )
-    net = ffn.compile(context=aie_context, x=(seq_len, embedding_dim))
+    net = ffn.compile(x=(seq_len, embedding_dim))
     x = golden_ref["input"]
 
     net(x)  # warmup

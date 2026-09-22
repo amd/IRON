@@ -33,14 +33,13 @@ def get_params():
 @pytest.mark.parametrize(
     "seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params()
 )
-def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
+def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, npu_runtime):
     operator = MHA(
         num_heads=num_heads,
         seq_len=seq_len,
         d=dim,
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
-        context=aie_context,
     )
 
     data = golden(operator)

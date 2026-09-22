@@ -88,11 +88,11 @@ class DesignGenerator:
 
 
 class Target:
-    """The device and build context an overlay's ``design()`` is given.
+    """What an overlay's ``design()`` is given besides the overlay itself.
 
     Carries what a design used to receive as loose parameters (``dev``,
-    ``kernels_dir``, ``func_prefix``, ``verbose``) and applies the fusion
-    prefix inside :meth:`kernel`, so an overlay never handles it.
+    ``kernels_dir``, ``func_prefix``) and applies the fusion prefix inside
+    :meth:`kernel`, so an overlay never handles it.
     """
 
     def __init__(
@@ -100,7 +100,6 @@ class Target:
         dev,
         kernels_dir,
         func_prefix: str = "",
-        verbose: bool = False,
         trace_size: int = 0,
         image: str = "elf",
         use_chess: bool = False,
@@ -113,9 +112,8 @@ class Target:
         self.kernels_dir = Path(kernels_dir)
         self.arch = target_arch(dev)  # "aie2" | "aie2p"
         self.func_prefix = func_prefix
-        self.verbose = verbose
-        # xchesscc rather than Peano, from the context; every kernel of one
-        # design must agree, which upstream enforces when it compiles them.
+        # xchesscc rather than Peano; every kernel of one design must agree,
+        # which upstream enforces when it compiles them.
         self.use_chess = use_chess
         self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
@@ -123,7 +121,6 @@ class Target:
         # time scalars of the sequence, and a core-read value is a resident
         # the sequence writes (bind it to the runtime-parameter buffer).
         self.image = image
-        self.base_dir = None  # the IRON checkout; set by build_design from the context
         self.barriers: list[Any] = []
 
     def kernel_source(self, name: str):
@@ -175,9 +172,6 @@ class Target:
             arr_type, name=name, initial_value=initial_value, use_write_rtp=True
         )
 
-    def log(self, *args) -> None:
-        if self.verbose:
-            print(*args)
 
 
 # --------------------------------------------------------------------------
@@ -481,7 +475,6 @@ def build_design(
     kernels_dir,
     op: Operator,
     func_prefix: str = "",
-    verbose: bool = False,
     trace_size: int = 0,
     code: str = "",
     image: str = "elf",
@@ -513,10 +506,7 @@ def build_design(
         # A downloaded image: no array to build, only the sequence against
         # the pins the overlay declares, which the overlay itself emits.
         return ov.build(dev, op)
-    target = Target(
-        dev, kernels_dir, func_prefix, verbose, trace_size, image, use_chess
-    )
-    target.base_dir = getattr(op.context, "base_dir", None)
+    target = Target(dev, kernels_dir, func_prefix, trace_size, image, use_chess)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
@@ -617,6 +607,8 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
     per-call values are the generator's dispatch-time parameters, so the two
     images are two modules and two cache keys.
     """
+    from iron.operators._kernels import kernels_dir, use_chess
+
     return DesignGenerator(
         fn=build_design,
         kwargs={
@@ -624,11 +616,11 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
             "image": image,
             "dispatch": dispatch_parameters(op) if image != "elf" else [],
             "code": _design_code(op),
-            "use_chess": op.context.use_chess,
+            "use_chess": use_chess(),
             # Spelled here, not bound by name from the operator: the
             # device reaches the cache key by identity, the kernel tree
             # by path (pointing IRON at another tree changes the key).
             "dev": op.dev,
-            "kernels_dir": op.kernels_dir,
+            "kernels_dir": kernels_dir(),
         },
     )

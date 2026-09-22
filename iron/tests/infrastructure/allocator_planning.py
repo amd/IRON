@@ -195,11 +195,10 @@ def device():
 
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    from iron.common.context import AIEContext
     from iron.common.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add = ElementwiseAdd(size=1024, tile_size=128)
     runlist = [(add, "w", "x", "t0"), (add, "w", "t0", "out")]
     seq = OperatorSequence(
         "alloc_layout_probe",
@@ -248,11 +247,10 @@ def test_layout_is_unchanged_without_offsets():
 
 def _chain(n_intermediates, plan_scratch):
     """A chain where each intermediate dies as the next is produced."""
-    from iron.common.context import AIEContext
     from iron.common.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add = ElementwiseAdd(size=1024, tile_size=128)
     names = [f"t{i}" for i in range(n_intermediates)]
     runlist = [(add, "x", "w", names[0])]
     for prev, nxt in zip(names, names[1:]):
@@ -308,11 +306,10 @@ def test_slices_are_never_pooled():
     raises -- the slice simply reads the wrong memory. Found by probing the
     written-slice case, which the whole-buffer tests above cannot reach.
     """
-    from iron.common.context import AIEContext
     from iron.common.sequence import OperatorSequence
     from iron.operators import ElementwiseAdd
 
-    add = ElementwiseAdd(size=1024, tile_size=128, context=AIEContext())
+    add = ElementwiseAdd(size=1024, tile_size=128)
     seq = OperatorSequence(
         "slice_pooling_probe",
         [(add, "x", "w", "big[0:1024]"), (add, "big[0:1024]", "w", "out")],

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -9,19 +10,21 @@ from pathlib import Path
 import pytest
 import statistics
 
-from iron.common import AIEContext
 from iron.common import test_utils
 import aie.utils as aie_utils
 
 
 @pytest.fixture
-def aie_context(request):
-    """Create a fresh AIEContext for each test"""
-    verbose_mlir = request.config.option.verbose > 0
-    compiler = request.config.getoption("--compiler", default="peano")
-    ctx = AIEContext(mlir_verbose=verbose_mlir, compiler=compiler)
-    yield ctx
-    aie_utils.DefaultNPURuntime.cleanup()
+def npu_runtime():
+    """Release the loaded NPU runtime after a test that ran on hardware.
+
+    ``DefaultNPURuntime`` is None until something loads an image, so a test
+    that only compiled has nothing to release -- and must not be reported as
+    an error for it.
+    """
+    yield
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
 
 
 def pytest_addoption(parser):
@@ -42,6 +45,14 @@ def pytest_addoption(parser):
         choices=["peano", "chess"],
         help="Kernel compiler: 'peano' (default) or 'chess' (requires Vitis/aietools)",
     )
+
+
+def pytest_configure(config):
+    # Which front-end is available is a property of the machine, so the
+    # choice reaches the build through the environment rather than through
+    # every operator (iron.operators._kernels.use_chess).
+    if config.getoption("--compiler") == "chess":
+        os.environ["IRON_KERNEL_COMPILER"] = "chess"
 
 
 def get_git_commit():

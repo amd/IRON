@@ -142,12 +142,6 @@ class GEMVOverlay(Overlay):
         num_aie_columns = self.num_aie_columns
         tile_size_input = self.tile_size_input
         tile_size_output = self.tile_size_output
-        target.log(f"Device: {target.dev}")
-        target.log(
-            f"Tiling: tile_size_input={tile_size_input}, tile_size_output={tile_size_output}"
-        )
-        target.log(f"Columns: {num_aie_columns}")
-
         vectorized = True
         L1_A_ty = self.a.tile
         L1_B_ty = self.b.tile

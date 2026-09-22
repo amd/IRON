@@ -28,19 +28,17 @@ import pytest
 import aie.utils as aie_utils
 
 import iron
-from iron.common.context import AIEContext
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu_decode
 
 pytestmark = requires("xclbinutil", "peano")
 
 
-def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device, tmp_path):
+def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
     fn, E = swiglu_decode()
     net = fn.compile(
         device,
         boundaries=iron.each_step,
         image=iron.XCLBIN,
-        context=AIEContext(build_dir=str(tmp_path)),
         x=(1, E),
     )
     assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
@@ -67,12 +65,10 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device, tmp_path):
     assert Path(net.image) == Path(dispatch.combined_xclbin_path)
 
 
-def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
-    npu2, tmp_path
-):
+def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     import iron.operators.flm.gemm.op as flm
 
-    op = flm.GEMM(M=256, K=512, N=512, context=AIEContext(build_dir=str(tmp_path)))
+    op = flm.GEMM(M=256, K=512, N=512)
     op.compile()
     artifacts = op.artifacts
     assert artifacts.image.stat().st_size > 0
@@ -89,8 +85,11 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
     assert own.insts is not None
     # The configuration's entry is where the image and the kernels are.
     assert design.entry.xclbin == artifacts.image and design.entry.objects
-    # Nothing is written to the build directory: the cache owns the paths.
-    assert list(tmp_path.glob("*.xclbin")) == []
+    # Both entries are the cache's, which owns every path a build produces.
+    from aie.utils.compile import NPU_CACHE_HOME
+
+    for entry in (own, design.entry):
+        assert entry.directory.is_relative_to(NPU_CACHE_HOME)
 
 
 def _shipped(**kwargs):
@@ -100,21 +99,20 @@ def _shipped(**kwargs):
     return GEMM(Shipped(), **kwargs)
 
 
-def test_shipped_builds_its_instructions_for_the_external_image(npu2, tmp_path):
+def test_shipped_builds_its_instructions_for_the_external_image(npu2):
     op = _shipped(
         M=256,
         K=1024,
         N=1152,
         epilogue="gelu",
         clamp=(-2.0, 2.0),
-        context=AIEContext(build_dir=str(tmp_path)),
     )
     op.compile()
     assert op.artifacts.insts.stat().st_size > 0
 
 
-def test_shipped_fetches_its_image(npu2, tmp_path):
-    op = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+def test_shipped_fetches_its_image(npu2):
+    op = _shipped(M=256, K=1024, N=1152)
     try:
         op.compile()
     except (urllib.error.URLError, OSError) as e:  # no network here
@@ -123,13 +121,13 @@ def test_shipped_fetches_its_image(npu2, tmp_path):
     assert image.exists() and image.stat().st_size > 0
 
 
-def test_a_declared_operator_compiles_to_an_xclbin_on_npu1(tmp_path):
+def test_a_declared_operator_compiles_to_an_xclbin_on_npu1():
     from iron.operators.gemv.op import GEMV
 
     previous = aie_utils.get_current_device()
     aie_utils.set_current_device(DEVICES["npu1"]())
     try:
-        op = GEMV(M=512, K=1024, context=AIEContext(build_dir=str(tmp_path)))
+        op = GEMV(M=512, K=1024)
         op.compile()
         assert op.artifacts.image.stat().st_size > 0
         assert op.artifacts.insts.stat().st_size > 0

@@ -5,7 +5,6 @@
 
 from .artifacts import Artifacts, Design, Step
 from .build import DesignGenerator
-from .context import AIEContext
 from .declare import (
     DeclarationError,
     DispatchTime,
@@ -38,7 +37,6 @@ from .elementwise import (
 )
 
 __all__ = [
-    "AIEContext",
     "Artifacts",
     "BinaryElementwiseOperator",
     "BinaryElementwiseOverlay",

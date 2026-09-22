@@ -215,7 +215,9 @@ class GEMMOverlay(Overlay):
     def kernel_source(self, target):
         """The mm.cc this overlay compiles; aie2's is patched in-tree."""
         if target.arch == "aie2":
-            return target.base_dir / "aie_kernels" / "aie2" / "mm.cc"
+            from iron.operators._kernels import iron_kernels_dir
+
+            return iron_kernels_dir() / "aie2" / "mm.cc"
         return target.kernel_source("mm")
 
     def device(self, target):

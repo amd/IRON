@@ -54,20 +54,18 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(context, dispatch, name):
+def _build_add_relu_sequence(dispatch, name):
     """out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
         tile_size=_ADD_RELU_TILE,
         num_aie_columns=_ADD_RELU_COLS,
-        context=context,
     )
     relu = ReLU(
         size=_ADD_RELU_SIZE,
         num_aie_columns=_ADD_RELU_COLS,
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
-        context=context,
     )
     return OperatorSequence(
         name=name,
@@ -78,7 +76,6 @@ def _build_add_relu_sequence(context, dispatch, name):
         input_args=["a", "b"],
         output_args=["out"],
         dispatch=dispatch,
-        context=context,
     )
 
 
@@ -88,7 +85,7 @@ def _build_add_relu_sequence(context, dispatch, name):
 
 
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
-def test_auto_dispatch_selects_platform_default(size, aie_context):
+def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
     the separate-xclbin mode on Phoenix, and produce the correct result on
     whichever platform the test runs on."""
@@ -96,7 +93,7 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
     a = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
     b = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
 
-    seq = _build_add_relu_sequence(aie_context, "auto", "infra_auto_add_relu")
+    seq = _build_add_relu_sequence("auto", "infra_auto_add_relu")
     seq.compile()
 
     expected_mode = (
@@ -124,7 +121,7 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
-def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
+def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     """The single-dispatch (fused) path emits one ``aie.device`` per operator
     plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
@@ -133,7 +130,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
     so the check is device-agnostic and runs on all platforms even though the
     full fused dispatch itself requires NPU2.
     """
-    seq = _build_add_relu_sequence(aie_context, "fused", "infra_fused_mlir")
+    seq = _build_add_relu_sequence("fused", "infra_fused_mlir")
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
@@ -161,9 +158,9 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
 # ---------------------------------------------------------------------------
 
 
-def _run_add_relu(context, dispatch, a, b, name):
+def _run_add_relu(dispatch, a, b, name):
     """out = relu(a + b), returned as a host bf16 tensor."""
-    seq = _build_add_relu_sequence(context, dispatch, name)
+    seq = _build_add_relu_sequence(dispatch, name)
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a", a)
@@ -173,7 +170,7 @@ def _run_add_relu(context, dispatch, a, b, name):
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
-def test_dispatch_modes_bit_identical(dispatch, aie_context):
+def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     """add -> relu must yield byte-for-byte identical output across every NPU
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
@@ -185,10 +182,9 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
     a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
     b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
 
-    baseline = _run_add_relu(
-        aie_context, "separate", a, b, "infra_addrelu_parity_separate"
+    baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate"
     )
-    out = _run_add_relu(aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
+    out = _run_add_relu(dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
     assert torch.equal(out, baseline), (
         f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
@@ -208,16 +204,16 @@ _SLICE_SIZE = 1024
 _SLICE_BYTES = _SLICE_SIZE * 2  # bf16
 
 
-def _build_packed_output_sequence(context, dispatch, name):
+def _build_packed_output_sequence(dispatch, name):
     """Two independent adds writing into disjoint halves of one explicitly
     sized buffer via slice notation ("packed[start:end]"). Unlike
     _build_add_relu_sequence's "temp" hand-off (a whole-buffer alias), this
     exercises slice_info/explicit_buffer_sizes resolution directly."""
     add0 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
+        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1
     )
     add1 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
+        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1
     )
     return OperatorSequence(
         name=name,
@@ -229,11 +225,10 @@ def _build_packed_output_sequence(context, dispatch, name):
         output_args=["packed"],
         buffer_sizes={"packed": 2 * _SLICE_BYTES},
         dispatch=dispatch,
-        context=context,
     )
 
 
-def test_reference_dispatch_resolves_sliced_buffer(aie_context):
+def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     """dispatch="reference" must resolve slice-notation buffers via
     subview() on the CPU backend, matching SequenceXclbinCallable's behaviour,
     and each slice's write must be visible through the parent buffer name."""
@@ -244,7 +239,7 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
     b1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
 
     seq = _build_packed_output_sequence(
-        aie_context, "reference", "infra_reference_sliced_packed"
+        "reference", "infra_reference_sliced_packed"
     )
     seq.compile()
     run = seq.get_callable()
@@ -273,7 +268,7 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
 
 
 @pytest.mark.parametrize("reference_is_correct", [True, False])
-def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context):
+def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
     operator's ``reference()`` on the same NPU inputs. A correct reference must
     run cleanly (no flagged step); a wrong one must make compare mode raise on
@@ -284,7 +279,7 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
     b = torch.rand(size, dtype=torch.bfloat16)
 
     op = ElementwiseAdd(
-        size=size, tile_size=256, num_aie_columns=1, context=aie_context
+        size=size, tile_size=256, num_aie_columns=1
     )
     if not reference_is_correct:
         # Override the reference on this instance to disagree with the NPU
@@ -298,7 +293,6 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
         input_args=["a", "b"],
         output_args=["out"],
         dispatch="compare",
-        context=aie_context,
     )
     seq.compile()
     assert seq.mode == "compare"

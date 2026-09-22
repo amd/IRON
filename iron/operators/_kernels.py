@@ -15,12 +15,45 @@ An ``ExternalFunction`` registers itself into a process-global set that
 in the operator, say -- is discarded and its object never compiled.
 """
 
+import os
 from pathlib import Path
 
 import aie.utils as aie_utils
 import aie.utils.config
 from aie.iron import ExternalFunction
 from aie.utils.compile.utils import resolve_target_arch
+
+# The IRON checkout: iron/operators/../.. = two levels up from this file.
+_REPO = Path(__file__).parent.parent.parent
+
+
+def kernels_dir() -> Path:
+    """C++ kernel sources bundled with the installed mlir-aie package.
+
+    ``IRON_AIE_KERNELS_DIR`` points this at a local mlir-aie checkout for
+    kernel development. A fact about the install, not a per-build choice,
+    which is why it is a function here rather than a field somewhere.
+    """
+    override = os.environ.get("IRON_AIE_KERNELS_DIR")
+    if override:
+        return Path(override)
+    return Path(aie.utils.config.root_path()) / "include" / "aie_kernels"
+
+
+def iron_kernels_dir() -> Path:
+    """The kernels IRON still hosts: gemm's ``mm.cc``, flm's ``mm_fused.cc``."""
+    return _REPO / "aie_kernels"
+
+
+def use_chess() -> bool:
+    """Whether kernels build with xchesscc rather than Peano.
+
+    ``IRON_KERNEL_COMPILER=chess`` selects it, and needs Vitis on the
+    machine. Which front-end is available is a property of the machine, so
+    it is read here rather than carried through every operator; it reaches
+    the compile key as a ``build_design`` keyword all the same.
+    """
+    return os.environ.get("IRON_KERNEL_COMPILER", "peano").lower() == "chess"
 
 
 def target_arch(dev=None) -> str:

@@ -121,7 +121,7 @@ def test_shapes_captured_bare_names_resolve_to_refs():
 
 def test_dataclass_constructor_is_typed_by_real_fields():
     params = list(dataclasses.fields(MV))
-    assert [p.name for p in params] == ["ov", "context", "M", "num_batches"]
+    assert [p.name for p in params] == ["ov", "M", "num_batches"]
     assert dataclasses.fields(MVOverlay)[0].name == "K"
 
 

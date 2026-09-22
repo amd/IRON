@@ -88,13 +88,12 @@ def test_shipped_external_sequence_lowers(tmp_path):
     lower(_shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0)), tmp_path)
 
 
-def test_instructions_compile_alone_against_an_external_image(tmp_path):
+def test_instructions_compile_alone_against_an_external_image():
     """The §11 instructions-only compile: the shipped image is downloaded,
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit."""
-    from iron.common.context import AIEContext
 
-    op = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    op = _shipped(M=256, K=1024, N=1152)
     op.compile()
     insts = op.artifacts.insts
     assert insts.stat().st_size > 0
@@ -102,7 +101,7 @@ def test_instructions_compile_alone_against_an_external_image(tmp_path):
     assert op.artifacts.entry.xclbin is None
     assert op.artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
-    again = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    again = _shipped(M=256, K=1024, N=1152)
     again.compile()
     assert again.artifacts.insts == insts
     assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"

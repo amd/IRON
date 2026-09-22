@@ -278,7 +278,9 @@ class FLMGEMMOverlay(Overlay):
     def kernel_source(self, target):
         # The last kernel IRON keeps in-tree, pending upstreaming to mlir-aie:
         # its runtime epilogue (#200) is newer than the package copy.
-        return target.base_dir / "aie_kernels" / "generic" / "mm_fused.cc"
+        from iron.operators._kernels import iron_kernels_dir
+
+        return iron_kernels_dir() / "generic" / "mm_fused.cc"
 
     def kernel_flags(self, target) -> list[str]:
         """The -D set mm_fused.cc is compiled with."""

@@ -217,12 +217,21 @@ class _MLIREmitter:
         aiex.dma_await_task(task)
 
 
-def fetch(image, directory) -> Path:
-    """The downloaded image, by digest: fetched into ``directory`` unless a
-    file of the pinned content is already there."""
+def fetch(image, directory=None) -> Path:
+    """The downloaded image, by digest: fetched unless a file of the pinned
+    content is already there.
+
+    Into the JIT cache's own root by default (``NPU_CACHE_HOME``'s
+    ``prebuilt/``), so an external image is found where every other built
+    artifact is and no caller has to name a directory for it.
+    """
     import hashlib
     import urllib.request
 
+    if directory is None:
+        from aie.utils.compile import NPU_CACHE_HOME
+
+        directory = Path(NPU_CACHE_HOME) / "prebuilt"
     target = Path(directory) / image.filename
 
     def digest(path):
@@ -303,8 +312,8 @@ class External:
     are answered here.
     """
 
-    def prebuilt(self, directory) -> Path:
-        return fetch(self.external, directory)
+    def prebuilt(self) -> Path:
+        return fetch(self.external)
 
     def build(self, dev, op: Operator):
         return build_external(dev, op)

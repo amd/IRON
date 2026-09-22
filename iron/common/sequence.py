@@ -8,7 +8,6 @@ import time
 import numpy as np
 import ml_dtypes
 from . import fusion
-from .context import AIEContext
 from .declare import Operator
 from .jit_compile import DispatchStream
 import aie.utils as aie_utils
@@ -228,7 +227,6 @@ class OperatorSequence:
             raise TypeError(
                 f"OperatorSequence takes no positional extras, got {args!r}"
             )
-        self.context = kwargs.pop("context", None) or AIEContext.default()
         if kwargs:
             raise TypeError(f"unexpected keyword arguments {sorted(kwargs)}")
         self.runlist = runlist
@@ -462,16 +460,18 @@ class OperatorSequence:
         image, _ = _MODES[self.mode]
         self._image = image() if image is not None else None
 
-    def compile(self):
+    def compile(self, record: str = "memory"):
         """Build the image ahead of time, and record what it consists of.
 
         ``link()`` is idempotent and ``get_callable()`` still goes through
         it, so this is the ahead-of-time path: a host with the toolchain and
-        no runtime compiles and hands the image on.
+        no runtime compiles and hands the image on. ``record="disk"`` also
+        writes the :class:`~iron.common.artifacts.Artifacts` record beside
+        the image.
         """
         self.prepare()
         self.link()
-        if self.context.record == "disk" and self.artifacts is not None:
+        if record == "disk" and self.artifacts is not None:
             self.artifacts.dump()
         return self
 

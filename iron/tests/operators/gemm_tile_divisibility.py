@@ -26,7 +26,6 @@ def _construct(tile_m=64, tile_k=64, tile_n=64, emulate_bf16_mmul_with_bfp16=Tru
         tile_k=tile_k,
         tile_n=tile_n,
         emulate_bf16_mmul_with_bfp16=emulate_bf16_mmul_with_bfp16,
-        context=None,
     )
 
 

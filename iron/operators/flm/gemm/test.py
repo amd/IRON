@@ -164,7 +164,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
 
 
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
-def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
+def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
     operator = GEMM(
         M=M,
@@ -173,7 +173,6 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
         epilogue=epilogue,
         clamp=clamp,
         rounding=rounding,
-        context=aie_context,
     )
 
     errors, latency_us, bandwidth_gbps = check_on_device(
@@ -185,7 +184,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     assert not errors, "Test failed"
 
 
-def test_gemm_split_leg_bounds(aie_context):
+def test_gemm_split_leg_bounds(npu_runtime):
     """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so that leg
     goes out one transfer per mega_row. Two unmodelled shim resources bound how
     many may be live -- BD ids and the channel task queue -- and overrunning
@@ -203,10 +202,10 @@ def test_gemm_split_leg_bounds(aie_context):
     # The square case splits both legs, which the real Gemma shapes never do
     # (E4B's down overflows on K and its gate/up on N, never both), so it is
     # the only cover for the two-sided path.
-    GEMM(M=512, K=10240, N=10240, context=aie_context).compile()
+    GEMM(M=512, K=10240, N=10240).compile()
 
 
-def test_gemm_split_leg_bounds_runs(aie_context):
+def test_gemm_split_leg_bounds_runs(npu_runtime):
     """Execute the two-sided split path, not just compile it.
 
     The failure the sibling test guards against is a runtime hang or silent
@@ -214,7 +213,7 @@ def test_gemm_split_leg_bounds_runs(aie_context):
     despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
-    operator = GEMM(M=M, K=K, N=N, context=aie_context)
+    operator = GEMM(M=M, K=K, N=N)
 
     errors, _latency_us, _bandwidth_gbps = check_on_device(operator, vectors(operator))
     assert not errors, "Test failed"
@@ -267,9 +266,9 @@ def tile_option_params():
 
 
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
-def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
+def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
-    operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma, context=aie_context)
+    operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     assert (operator._tuned_ov.tile_n, operator._tuned_ov.tile_ma) == (tile_n, tile_ma)
     errors, _latency_us, _bandwidth_gbps = check_on_device(
         operator, vectors(operator, INPUT_SCALE)
@@ -278,7 +277,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, aie_context):
 
 
 @pytest.mark.parametrize("M,K,N", [(256, 512, 1024), (512, 1024, 2048)])
-def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
+def test_artifact_stem_differs_from_generic_gemm(M, K, N, npu_runtime):
     """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
 
     Both classes are named ``GEMM`` and Operator.name derives the stem from
@@ -286,12 +285,12 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, aie_context):
     silently satisfy each other's builds in one build dir.
     """
     assert (
-        GEMM(M=M, K=K, N=N, context=aie_context).name
-        != GenericGEMM(M=M, K=K, N=N, context=aie_context).name
+        GEMM(M=M, K=K, N=N).name
+        != GenericGEMM(M=M, K=K, N=N).name
     )
 
 
-def test_one_xclbin_serves_every_shape(aie_context):
+def test_one_xclbin_serves_every_shape(npu_runtime):
     """Several shapes back to back on one loaded xclbin.
 
     The parametrised tests cannot cover this: each gets a fresh context, so
@@ -310,7 +309,7 @@ def test_one_xclbin_serves_every_shape(aie_context):
     ]
     xclbin = None
     for M, K, N, epilogue in shapes:
-        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue, context=aie_context)
+        operator = GEMM(M=M, K=K, N=N, epilogue=epilogue)
         data = vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = K * data["A"].abs().float().mean() * data["B"].abs().float().mean()
         errors, _, _ = run_test(
@@ -329,7 +328,7 @@ def test_one_xclbin_serves_every_shape(aie_context):
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
 
 
-def test_one_xclbin_serves_every_clamp_bound(aie_context):
+def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
     """Different clamp bounds back to back on one loaded xclbin.
 
     The bounds are runtime parameters, so they must not rebuild anything.
@@ -340,7 +339,7 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
     bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
     xclbin = None
     for clamp in bounds:
-        operator = GEMM(M=M, K=K, N=N, clamp=clamp, context=aie_context)
+        operator = GEMM(M=M, K=K, N=N, clamp=clamp)
         errors, _, _ = check_on_device(operator, vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
@@ -354,14 +353,14 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
     # unclamped caller neutralises it with (-inf, +inf) rather than compiling
     # a second build. config_name rather than the image, which only exists
     # once compile() has run.
-    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
-    unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
+    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0])
+    unclamped = GEMM(M=M, K=K, N=N)
     assert unclamped.config_name == clamped.config_name
     # The bounds do reach the instruction stream, though, so they must reach
     # its stem or the build cache serves one caller's stream to another.
     assert unclamped.name != clamped.name
     assert (
-        clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1], context=aie_context).name
+        clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1]).name
     )
 
 
@@ -413,10 +412,10 @@ BUDGET_FLOOR = 2e-2
         pytest.param(256, 512, 1024, GELU, None, marks=SHIPPED),
     ],
 )
-def test_shipped_overlay(M, K, N, epilogue, clamp, aie_context):
+def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
     """The shipped binary through the same operator: the second reference."""
     operator = GEMM(
-        Shipped(), M=M, K=K, N=N, epilogue=epilogue, clamp=clamp, context=aie_context
+        Shipped(), M=M, K=K, N=N, epilogue=epilogue, clamp=clamp
     )
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
     data = golden(operator, normal=("A",), B=(K, N))
@@ -456,7 +455,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, aie_context):
         pytest.param(GELU, None, marks=SHIPPED),
     ],
 )
-def test_shipped_epilogue_matches_accumulator(epilogue, clamp, aie_context):
+def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     """The epilogue is the right function of the accumulator the device produced.
 
     Checking a bounded epilogue against the idealized CPU reference cannot work.
@@ -477,13 +476,13 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, aie_context):
     # A small input scale keeps the accumulator in the range where these curves
     # are actually curved; at the default scale the product lands around +-900,
     # where gelu and silu are indistinguishable from the identity.
-    probe = GEMM(Shipped(), M=M, K=K, N=N, context=aie_context)
+    probe = GEMM(Shipped(), M=M, K=K, N=N)
     data = golden(probe, normal=("A",), scale=0.5, B=(K, N))
     A, B = data["A"], data["B"]
 
     def run(epi, clm):
         op = GEMM(
-            Shipped(), M=M, K=K, N=N, epilogue=epi, clamp=clm, context=aie_context
+            Shipped(), M=M, K=K, N=N, epilogue=epi, clamp=clm
         )
         op.compile()
         tensor = aie_utils.DEFAULT_TENSOR_CLASS

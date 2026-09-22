@@ -991,10 +991,18 @@ where each buffer lands in the image's plan, and the entry that holds the
 image and its sidecars (`params.txt`, `input_with_addresses.mlir`). One
 shape for an operator compiled alone (one design, one step) and for a
 graph, so the trace parser, the parameter scratchpad and the tests all
-read it rather than re-deriving a directory layout. `AIEContext.record`
-says whether it is also written beside the image (`"disk"`) or kept in
-memory (`"memory"`, the default). `build_dir` is now only where a fetched
-image lands.
+read it rather than re-deriving a directory layout. `compile(record="disk")`
+also writes it beside the image; by default it is kept in memory.
+
+There is no build context left to carry either. `AIEContext` held six
+things, and only two were choices: `kernels_dir` and `base_dir` are facts
+about the install and the checkout (now `iron.operators._kernels`'
+`kernels_dir()` and `iron_kernels_dir()`), `compiler` is a property of the
+machine (`IRON_KERNEL_COMPILER=chess`, which `pytest --compiler` sets),
+`mlir_verbose` printed three lines from GEMV's design, `build_dir` named
+where a downloaded image landed (now the JIT cache's own `prebuilt/`), and
+`record` is a keyword on `compile()`. An operator takes the device that is
+current and nothing else.
 
 Alongside it, `iron/common` gave up what was not its own. The stream-dse
 path moved under the one operator that uses it

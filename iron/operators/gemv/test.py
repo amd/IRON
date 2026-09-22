@@ -40,14 +40,13 @@ def get_params():
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output", get_params()
 )
-def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
+def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runtime):
     operator = GEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
-        context=aie_context,
     )
     data = golden(operator, normal=("A", "B"))
 
@@ -85,7 +84,7 @@ def get_batched_params():
     get_batched_params(),
 )
 def test_gemv_batched(
-    M, K, num_aie_columns, tile_size_input, tile_size_output, num_batches, aie_context
+    M, K, num_aie_columns, tile_size_input, tile_size_output, num_batches, npu_runtime
 ):
     operator = GEMV(
         M=M,
@@ -94,7 +93,6 @@ def test_gemv_batched(
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
         num_batches=num_batches,
-        context=aie_context,
     )
     data = golden(operator, normal=("A", "B"))
     errors, latency_us, bandwidth_gbps = run_test(
@@ -115,7 +113,7 @@ def test_gemv_batched(
     ],
 )
 def test_gemv_gelu(
-    M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context
+    M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runtime
 ):
     """GEMV with the fused GELU epilogue (NPU2-only) vs a gelu(A @ B) golden."""
     if target_arch() != "aie2p":
@@ -128,7 +126,6 @@ def test_gemv_gelu(
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
         epilogue="gelu",
-        context=aie_context,
     )
     # The reference is the plain product; the epilogue is applied here.
     data = golden(operator, normal=("A", "B"))

@@ -28,7 +28,7 @@ def _step_output(net, op_type):
 
 
 @pytest.mark.parametrize("embedding_dim,hidden_dim", get_params())
-def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
+def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
     golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
 
     # GEMV takes its matrix in (M, K) layout, so the projections go in
@@ -38,7 +38,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
         golden_ref["w_up"].T.contiguous(),
         golden_ref["w_down"].T.contiguous(),
     )
-    net = ffn.compile(context=aie_context, x=(1, embedding_dim))
+    net = ffn.compile(x=(1, embedding_dim))
     x = golden_ref["input"]
 
     # Warmup

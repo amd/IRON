@@ -100,7 +100,7 @@ def test_gemm(
     k,
     n,
     trace_size,
-    aie_context,
+    npu_runtime,
 ):
     operator = GEMM(
         M=M,
@@ -114,7 +114,6 @@ def test_gemm(
         emulate_bf16_mmul_with_bfp16=False,
         b_col_maj=b_col_maj,
         c_col_maj=c_col_maj,
-        context=aie_context,
     )
 
     data = golden(operator, normal=("A",))

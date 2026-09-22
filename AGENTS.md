@@ -37,9 +37,13 @@ python3 -m pip install -r requirements.txt
 
 **Note:** XRT must be sourced before running any tests or operators.
 
-### Build Directory
+### Where build outputs go
 
-Compiled artifacts (`.xclbin`, `.bin`, `.o` files) are stored in `build/` directory by default. The build directory can be customized via `AIEContext(build_dir="path/to/build")`.
+Compiled artifacts (`.xclbin`, `.bin`, `.o`, the full ELF) live in
+mlir-aie's JIT cache, keyed on the content that produced them:
+`~/.npu/cache/<hash>/`, or wherever `NPU_CACHE_HOME` points. Nothing is
+written to the working directory, and `compile(record="disk")` writes the
+`Artifacts` record of an image beside it in the cache.
 
 ### Environment Variables
 
@@ -154,7 +158,8 @@ reuse lint
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`AIEContext.kernels_dir`), not from this repo:
+     mlir-aie package (`iron.operators._kernels.kernels_dir()`), not from
+     this repo:
      - `generic/`: Works on both AIE2 and AIE2P
      - `aie2/`: AIE2-specific (NPU1)
      - `aie2p/`: AIE2P-specific (NPU2)
@@ -169,11 +174,9 @@ reuse lint
      derived runtime sequence, legal DMA descriptors, the external-overlay path
    - `graph.py`, `packaging.py`: graph functions (`iron.graph`, `iron.state`)
      and `compile(dev, boundaries=, image=)`
-   - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`)
-   - `compilation/`: Compilation artifact system (MLIR → xclbin)
+   - `elementwise.py`: the shared elementwise template and its two stream shapes
+   - `jit_compile.py`: the seam onto mlir-aie's `CompilableDesign`
    - `sequence.py`: the image builder a graph lowers onto (`OperatorSequence`)
-   - `device_manager.py`: XRT device initialization and management (singleton pattern)
-   - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
    - `test_utils.py`: the operator test harness (`golden`, `run_test`, `verify_buffer`, `record_metric`)
    - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
@@ -225,18 +228,15 @@ MLIR (.mlir file)
 xclbin (NPU binary) + insts.bin (instruction sequence)
 ```
 
-**AIEContext**: Manages compilation and runtime state
+**No build context.** An operator takes the device that is current and
+nothing else. What used to sit on a context object is either a fact
+(`iron.operators._kernels.kernels_dir()`, `iron_kernels_dir()`), an
+environment choice (`IRON_AIE_KERNELS_DIR`, `IRON_KERNEL_COMPILER=chess`),
+or a keyword on the build itself (`compile(record="disk")`).
 
-- Default build directory: `build/` in current working directory
-- Compilation rules: Defines pipeline from Python → MLIR → xclbin
-- Device manager: Singleton for XRT resource sharing
-- Use `AIEContext(build_dir="...", mlir_verbose=True)` for custom settings
-
-**Device Manager**: Singleton that manages XRT resources
-
-- Automatically initializes `pyxrt.device(0)`
-- Caches contexts and kernels per xclbin path
-- Shared across all operators to avoid resource conflicts
+**Runtime**: `aie.utils.DefaultNPURuntime` loads an image and runs it,
+shared across operators. A test that ran on hardware takes the
+`npu_runtime` fixture, which releases it afterwards.
 
 ## Hardware Constraints
 
@@ -306,7 +306,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    whose compile flags carry the shape, or a source with two entry points
    the design calls. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
-   and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
+   and consume it through a factory; IRON hosts only gemm's `mm.cc` and
+   flm's `mm_fused.cc`, under `iron.operators._kernels.iron_kernels_dir()`
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
@@ -452,23 +453,16 @@ These utilities handle bfloat16 conversion correctly (avoiding float32 intermedi
 
 ## Debugging and Performance
 
-### Debug Mode
+### Building against a local kernel tree
 
-Disable XRT runlist for easier debugging (executes kernels individually):
-
-```python
-context = AIEContext(use_runlist=False)
+```bash
+IRON_AIE_KERNELS_DIR=/path/to/mlir-aie/aie_kernels pytest ...
 ```
 
-This sacrifices performance but makes it easier to identify which kernel fails.
-
-### Verbose MLIR Output
-
-Enable verbose MLIR compilation output:
-
-```python
-context = AIEContext(mlir_verbose=True)
-```
+The path reaches the compile key, so pointing IRON at another tree rebuilds
+rather than reusing the cache. `IRON_KERNEL_COMPILER=chess` (or
+`pytest --compiler=chess`) builds kernels with xchesscc instead of Peano,
+and needs Vitis.
 
 ### Performance Profiling
 
@@ -518,9 +512,10 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
-- Check `get_kernel_artifacts()` in `op.py` references correct kernel path
-- Ensure the kernel's C++ signature matches the `target.kernel(...)` declaration in the overlay's `design()`
+  `include/aie_kernels/<arch>/` (`iron.operators._kernels.kernels_dir()`)
+- Ensure the kernel's C++ signature matches the factory from
+  `aie.iron.kernels`, or the `target.kernel(...)` declaration, that the
+  overlay's `design()` names
 
 **Compilation hangs or fails**
 

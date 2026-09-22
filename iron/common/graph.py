@@ -580,14 +580,15 @@ class GraphFunction:
         boundaries=None,
         image=None,
         verbose=False,
-        context=None,
+        record="memory",
         **shapes,
     ):
         """Compile for the given input shapes and return a :class:`CompiledGraph`.
 
         ``boundaries`` and ``image`` are the two packaging choices
         (:mod:`iron.common.packaging`); everything else is derived and, under
-        ``verbose``, printed.
+        ``verbose``, printed. ``record="disk"`` writes the image's
+        :class:`~iron.common.artifacts.Artifacts` record beside it.
         """
         import aie.utils as aie_utils
 
@@ -601,9 +602,7 @@ class GraphFunction:
         )
         if verbose:
             print(chosen.report(self.__name__))
-        self._compiled = CompiledGraph(
-            traced, context=context, dispatch=chosen.dispatch
-        )
+        self._compiled = CompiledGraph(traced, record=record, dispatch=chosen.dispatch)
         self._compiled.plan = chosen
         return self._compiled
 
@@ -701,7 +700,7 @@ def graph(fn=None, *, names_from=None):
 class CompiledGraph:
     """A traced graph built into an image, ready to call."""
 
-    def __init__(self, traced: TracedGraph, context=None, dispatch="auto"):
+    def __init__(self, traced: TracedGraph, record="memory", dispatch="auto"):
         from .build import value_symbol
 
         self.traced = traced
@@ -714,7 +713,7 @@ class CompiledGraph:
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
-        self.sequence = traced.sequence(dispatch=dispatch, context=context).compile()
+        self.sequence = traced.sequence(dispatch=dispatch).compile(record=record)
         self.image = self.sequence.image
         # What the image consists of, by identity: its designs, which step
         # runs which, and where each buffer lands in its plan.
