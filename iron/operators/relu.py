@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from aie.iron.kernels import eltwise
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
@@ -26,4 +25,6 @@ class ReLU(ChanneledUnaryOperator[ReLUOverlay]):
     )
 
     def reference(self, x):
+        import torch
+
         return torch.nn.functional.relu(x)

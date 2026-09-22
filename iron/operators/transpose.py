@@ -5,7 +5,6 @@
 import dataclasses
 
 import numpy as np
-import torch
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
@@ -300,4 +299,6 @@ class Transpose(Operator[TransposeOverlay]):
 def reference(x):
     """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth);
     of each matrix when a batch dimension leads."""
+    import torch
+
     return torch.transpose(x, -2, -1)

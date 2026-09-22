@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import ClassVar
 
 import numpy as np
-import torch
 
 from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
@@ -95,6 +94,8 @@ def _cases():
 def _packed(op):
     """Values in [0, 3.75) with scales in [1/3.75, 1) keep every quantized
     value inside int4's [0, 15]; the input is their packed form."""
+    import torch
+
     torch.manual_seed(42)
     values = torch.rand(op.size, dtype=torch.bfloat16) * 3.75
     scales = 1 / 3.75 + (1 - 1 / 3.75) * torch.rand(
@@ -160,6 +161,8 @@ class Dequant(Operator[DequantOverlay]):
         the inverse of :meth:`reference`. Values are rounded half to even
         and clipped to the int4 range, as ``torch.quantize_per_channel`` does.
         """
+        import torch
+
         tile, group = self.ov.tile_size, self.ov.group_size
         if tile is None:
             raise ValueError("Dequant.pack needs tile_size (tune the overlay)")
@@ -179,6 +182,8 @@ class Dequant(Operator[DequantOverlay]):
         one little-endian bf16 scale per ``group_size`` values; the zero point
         is 0. Results are exact in f32, as ``torch.dequantize`` gives them.
         """
+        import torch
+
         tile, group = self.ov.tile_size, self.ov.group_size
         if tile is None:
             raise ValueError("Dequant.reference needs tile_size (tune the overlay)")

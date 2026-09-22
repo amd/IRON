@@ -13,7 +13,6 @@ belongs here.
 """
 
 import numpy as np
-import torch
 
 
 def f32_to_bfp16ebs8(a, round_conv_even=True):
@@ -34,6 +33,8 @@ def f32_to_bfp16ebs8(a, round_conv_even=True):
 
     Layout per block: one shared-exponent byte then the 8 mantissa bytes.
     """
+    import torch
+
     flat = np.ascontiguousarray(a, dtype=np.float32).reshape(-1, 8)
     u = flat.view(np.uint32)
     sign = (u & 0x80000000) != 0
@@ -97,6 +98,8 @@ def pack_b(
     ordering against the overlay via ``tile.reshape(...).transpose(2, 1, 0,
     3)``; incompatible with ``bfp16``, which only the IRON-built kernel uses.
     """
+    import torch
+
     if overlay_order and bfp16:
         raise ValueError("overlay_order is bf16-only; the overlay never takes bfp16 B")
     K, N = B.shape

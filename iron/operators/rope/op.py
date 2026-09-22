@@ -3,7 +3,6 @@
 
 
 import numpy as np
-import torch
 
 from iron.common.declare import (
     Incompatible,
@@ -206,9 +205,12 @@ def compute_rope_params(
     context_length=4096,
     method_type=0,
     freq_config=None,
-    dtype=torch.float32,
+    dtype=None,
 ):
     """Compute RoPE parameters (cos and sin tables)."""
+    import torch
+
+    dtype = torch.float32 if dtype is None else dtype
     assert head_dim % 2 == 0, "Embedding dimension must be even"
 
     # Compute the inverse frequencies
@@ -277,6 +279,8 @@ def angle_table(
     """The ``angles`` buffer for ``rows`` positions: bf16 ``[cos, sin, ...]``
     pairs along each row, the table the device kernel reads (Llama 3's
     frequency scaling by default)."""
+    import torch
+
     cos, sin = compute_rope_params(
         head_dim=cols,
         theta_base=theta_base,
@@ -302,6 +306,8 @@ def reference(x, angles, method_type=0, rows=None, cols=None):
     ``core_body`` acquires one angle row and applies it to that many
     consecutive input rows before moving on).
     """
+    import torch
+
     if method_type not in (0, 1):
         raise ValueError(f"method_type must be 0 or 1, got {method_type}")
     if cols is None:

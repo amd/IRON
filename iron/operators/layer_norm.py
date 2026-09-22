@@ -4,7 +4,6 @@
 from dataclasses import field
 from typing import ClassVar
 
-import torch
 from aie.iron.kernels import norm
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
@@ -36,6 +35,8 @@ class LayerNorm(ChanneledUnaryOperator[LayerNormOverlay]):
 
     def reference(self, x):
         """CPU reference: each ``tile_size`` row normalised on its own, no affine."""
+        import torch
+
         cols = self.ov.tile_size
         if cols is None:
             raise ValueError("LayerNorm.reference needs tile_size (tune the overlay)")

@@ -71,6 +71,33 @@ def test_the_harness_is_the_one_module_that_takes_torch(module):
     assert _pulls_torch(f"import {module}")
 
 
-def test_an_operator_with_no_torch_reference_stays_torch_free():
-    """Declaring and tuning MemCopy costs no more than importing the library."""
-    assert not _pulls_torch("import iron.operators as ops\nops.MemCopy")
+def test_no_operator_pulls_torch_when_it_is_declared():
+    """Touching an operator class must cost no more than importing the library.
+
+    Every operator's ``reference`` is written in torch, but only a caller that
+    runs the reference should pay for it: declaring, tuning, designing and
+    compiling never call it. The operator modules import torch inside those
+    functions for that reason, so this is the test that keeps them there.
+    """
+    assert not _pulls_torch(
+        "import iron.operators as ops\n"
+        "for name in sorted(ops._OPERATOR_MODULES): getattr(ops, name)\n"
+        "from iron.operators.flm import GEMM, Shipped"
+    )
+
+
+def test_a_reference_is_what_brings_torch_in():
+    """The other half of the rule: calling one does import torch, as it must.
+
+    The call itself is expected to fail, since the reference wants a tensor
+    and gets an array. What is being checked is that the attempt reached the
+    function's first line, which is the import -- otherwise this test would
+    pass just as well against a module that never deferred anything.
+    """
+    assert _pulls_torch(
+        "import numpy as np, iron.operators as ops\n"
+        "try:\n"
+        "    ops.ReLU.reference(None, np.zeros(8, dtype=np.float32))\n"
+        "except TypeError:\n"
+        "    pass"
+    )

@@ -3,7 +3,6 @@
 
 
 import numpy as np
-import torch
 
 from iron.common.declare import (
     BoundValue,
@@ -265,6 +264,8 @@ def reference(x, vector_size=None):
     ``vector_size`` masks every column from there on to the lowest value of
     the dtype first, as the device kernel does, so those come out as zeros.
     """
+    import torch
+
     if vector_size is not None and vector_size < x.shape[-1]:
         x = x.clone()
         x[..., vector_size:] = torch.finfo(x.dtype).min

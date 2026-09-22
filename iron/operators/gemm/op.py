@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
-import torch
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
@@ -776,6 +775,8 @@ def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
     ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
     transposed to ``(N, M)`` when ``c_col_maj`` is set.
     """
+    import torch
+
     B = input_b.T if b_col_maj else input_b
     C = torch.matmul(input_a, B)
     if c_col_maj:

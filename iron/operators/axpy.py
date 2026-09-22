@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from aie.iron.kernels import datamovement
 
 from iron.common import BinaryElementwiseOperator, BinaryElementwiseOverlay, operator
@@ -54,4 +53,6 @@ class AXPY(BinaryElementwiseOperator[AXPYOverlay]):
 
     def reference(self, a, b):
         """CPU reference: ``scalar_factor * a + b``."""
+        import torch
+
         return torch.tensor(self.ov.scalar_factor, dtype=a.dtype) * a + b

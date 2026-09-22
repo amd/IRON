@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from aie.iron.kernels import activation
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
@@ -50,4 +49,6 @@ class LeakyReLU(ChanneledUnaryOperator[LeakyReLUOverlay]):
     )
 
     def reference(self, x):
+        import torch
+
         return torch.nn.functional.leaky_relu(x, negative_slope=self.ov.alpha)

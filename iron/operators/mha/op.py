@@ -22,9 +22,7 @@ import dataclasses
 from dataclasses import field
 
 import numpy as np
-import torch
 from ml_dtypes import bfloat16
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from iron.common.declare import (
     select,
@@ -704,6 +702,9 @@ class MHA(Operator[MHAOverlay]):
         query group. Rows past ``seq_len`` (the padding) come out as zeros;
         the real rows never attend to them, causality masks them. In the
         interleaved layout the operands are ``(seq, heads, d)`` and so is O."""
+        import torch
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
         if self.heads_interleaved:
             Q, K, V = (t.transpose(0, 1) for t in (Q, K, V))
         groups = self.num_heads // self.num_KV_heads

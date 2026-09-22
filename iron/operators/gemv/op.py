@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import ClassVar
 
 import numpy as np
-import torch
 
 from iron.common.declare import (
     Incompatible,
@@ -423,6 +422,8 @@ def reference(A, B):
     Batched when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``: one
     product per batch, as the operator's ``num_batches`` runs them.
     """
+    import torch
+
     if A.dim() == 3:
         return torch.einsum("bmk,bk->bm", A, B.reshape(A.shape[0], A.shape[2]))
     return A @ B.reshape(A.shape[-1])
