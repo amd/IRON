@@ -11,7 +11,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
 from ..declare import Operator
-from .allocator import live_ranges, plan
+from .allocator import live_ranges, place
 from .artifacts import Artifacts, Design, Step
 from .callable import (
     SequenceCompareCallable,
@@ -168,7 +168,7 @@ class OperatorSequence:
         # is silent -- the slice simply reads the wrong memory.
         pinned |= {name for name in sizes if "[" in name}
         ranges = live_ranges(steps, pinned=pinned)
-        allocations, _ = plan(ranges, sizes)
+        allocations, _ = place(ranges, sizes)
         return {name: a.offset for name, a in allocations.items()}
 
     def calculate_buffer_layout(self):

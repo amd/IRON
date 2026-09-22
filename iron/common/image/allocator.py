@@ -13,7 +13,7 @@ Two passes over the runlist:
 
 1. :func:`live_ranges` -- one linear scan giving each buffer the half-open
    step interval ``[first_write, last_read]`` it must stay resident for.
-2. :func:`plan` -- assign each a byte offset in one pool, letting buffers
+2. :func:`place` -- assign each a byte offset in one pool, letting buffers
    whose lifetimes do not overlap share addresses.
 
 This is Dynamic Storage Allocation: rectangles of fixed width (lifetime) and
@@ -94,7 +94,7 @@ def live_ranges(steps, pinned=()):
     return ranges
 
 
-def plan(ranges, sizes, alignment=64):
+def place(ranges, sizes, alignment=64):
     """Assign pool offsets. Returns ``(allocations, pool_bytes)``.
 
     Greedy by size descending; each buffer takes the lowest offset that clears

@@ -24,7 +24,7 @@ def current():
     return _STACK[-1] if _STACK else None
 
 @dataclasses.dataclass
-class Step:
+class TracedStep:
     op: Operator
     slots: list  # the handle in each of the operator's buffers, in declaration order
     inputs: list  # handles consumed
@@ -94,7 +94,7 @@ class Tracer:
 
     def __init__(self, name: str, names_from=None):
         self.name = name
-        self.steps: list[Step] = []
+        self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple] = {}
         self.states: dict[int, Handle] = {}
         self.overlays: dict = {}
@@ -284,7 +284,7 @@ class Tracer:
                 slots.append(h)
                 outputs.append(h)
         self.steps.append(
-            Step(op, slots, operands[: len(ins)], outputs + list(given_outs))
+            TracedStep(op, slots, operands[: len(ins)], outputs + list(given_outs))
         )
         if not outputs:
             return None

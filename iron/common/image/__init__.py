@@ -13,7 +13,7 @@ places the buffers it needs, and :mod:`.artifacts` records what came out.
 a caller finally invokes.
 """
 
-from .allocator import LiveRange, live_ranges, peak_live_bytes, plan as plan_buffers
+from .allocator import LiveRange, live_ranges, peak_live_bytes, place
 from .artifacts import Artifacts, Design, Step
 from .callable import (
     SequenceCallable,
@@ -51,8 +51,8 @@ __all__ = [
     "insts_design",
     "live_ranges",
     "peak_live_bytes",
+    "place",
     "plan",
-    "plan_buffers",
     "trace_buffer_size",
     "xclbin_design",
 ]

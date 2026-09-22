@@ -29,7 +29,7 @@ from .build import (
     generator_for,
 )
 from .generator import DesignGenerator
-from .runtime import Sequence, Transfers, plan
+from .runtime import Sequence, Transfers, transfers
 from .target import Target
 
 __all__ = [
@@ -41,5 +41,5 @@ __all__ = [
     "device_symbol",
     "dispatch_parameters",
     "generator_for",
-    "plan",
+    "transfers",
 ]

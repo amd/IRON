@@ -15,7 +15,7 @@ import pytest
 
 from types import SimpleNamespace
 
-from iron.common.image.allocator import LiveRange, live_ranges, peak_live_bytes, plan
+from iron.common.image.allocator import LiveRange, live_ranges, peak_live_bytes, place
 
 
 def _buf(direction):
@@ -77,7 +77,7 @@ def test_sequential_chain_double_buffers():
     runlist = [(op, "x", "a"), (op, "a", "b"), (op, "b", "c"), (op, "c", "out")]
     ranges = live_ranges(steps_of(runlist))
     sizes = dict.fromkeys(ranges, 1024)
-    allocations, pool = plan(ranges, sizes)
+    allocations, pool = place(ranges, sizes)
     assert pool == 2048, f"a chain should ping-pong between two slots, got {pool}"
     assert allocations["a"].offset == allocations["c"].offset, "a and c should alias"
     assert pool == peak_live_bytes(ranges, sizes)
@@ -94,7 +94,7 @@ def test_simultaneously_live_buffers_do_not_share():
     ]
     ranges = live_ranges(steps_of(runlist))
     sizes = dict.fromkeys(ranges, 4096)
-    allocations, pool = plan(ranges, sizes)
+    allocations, pool = place(ranges, sizes)
     assert pool == 8192, f"two co-live buffers need both slots, got {pool}"
     assert_no_overlap(allocations, ranges)
 
@@ -134,7 +134,7 @@ def test_repeated_block_packs_to_one_block_worth():
 
     ranges = live_ranges(steps_of(runlist))
     sizes = {n: 1 << 20 for n in ranges}
-    allocations, pool = plan(ranges, sizes)
+    allocations, pool = place(ranges, sizes)
 
     naive = sum(sizes.values())
     assert pool == peak_live_bytes(ranges, sizes), "should hit the lower bound"
@@ -153,7 +153,7 @@ def test_mixed_sizes_reach_the_lower_bound():
     runlist.append((unary, prev, "out"))
     ranges = live_ranges(steps_of(runlist))
     sizes = {n: (1 + (i * 7) % 5) * 4096 for i, n in enumerate(sorted(ranges))}
-    allocations, pool = plan(ranges, sizes)
+    allocations, pool = place(ranges, sizes)
     assert pool == peak_live_bytes(ranges, sizes)
     assert_no_overlap(allocations, ranges)
 
@@ -163,13 +163,13 @@ def test_offsets_are_aligned():
     runlist = [(unary, "x", "a"), (unary, "x", "b"), (binary, "a", "b", "out")]
     ranges = live_ranges(steps_of(runlist))
     sizes = {n: 100 for n in ranges}  # deliberately not a multiple of 64
-    allocations, _ = plan(ranges, sizes, alignment=64)
+    allocations, _ = place(ranges, sizes, alignment=64)
     for a in allocations.values():
         assert a.offset % 64 == 0, f"{a.name} at unaligned offset {a.offset}"
 
 
 def test_empty_graph():
-    allocations, pool = plan({}, {})
+    allocations, pool = place({}, {})
     assert allocations == {} and pool == 0
 
 

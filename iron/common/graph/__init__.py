@@ -32,14 +32,14 @@ tensors compiles for their shapes, says so once, and dispatches.
 
 from .compiled import CompiledGraph, GraphFunction, graph
 from .handle import Handle, State, Value, is_operand, state
-from .trace import Step, TracedGraph, Tracer, current
+from .trace import TracedGraph, TracedStep, Tracer, current
 
 __all__ = [
     "CompiledGraph",
     "GraphFunction",
     "Handle",
     "State",
-    "Step",
+    "TracedStep",
     "TracedGraph",
     "Tracer",
     "Value",

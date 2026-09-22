@@ -13,7 +13,7 @@ is the toolchain's job and the operator tests' job.
 import numpy as np
 import pytest
 
-from iron.common.design import Sequence, plan
+from iron.common.design import Sequence, transfers
 from iron.common.declare import (
     In,
     Operator,
@@ -113,7 +113,7 @@ def test_plan_reproduces_the_channeled_unary_split():
     ov = UnaryOverlay().tuned(FakeDev())
     op = Unary(ov, size=8192)
     (x,) = [s for s in ov.streams.values() if s.name == "x"]
-    p = plan(op.A, x)
+    p = transfers(op.A, x)
     assert len(p) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
     for i, (slot, accesses) in enumerate(p):
@@ -124,12 +124,12 @@ def test_plan_reproduces_the_channeled_unary_split():
 def test_plan_batched_gemv_coalesces_and_broadcasts():
     ov = MVOverlay(K=128)
     op = MV(ov, M=256, num_batches=100)
-    a_plan = plan(op.A, ov.a)
-    assert [slot.index for slot, _ in a_plan] == [0, 1]
-    (acc,) = a_plan[1][1]
+    a_transfers = transfers(op.A, ov.a)
+    assert [slot.index for slot, _ in a_transfers] == [0, 1]
+    (acc,) = a_transfers[1][1]
     run = (256 // 2) * 128
     assert acc.offset == run and acc.sizes[1] == 100 and acc.strides[1] == 256 * 128
-    b_slot, b_accesses = plan(op.B, ov.b)[0]
+    b_slot, b_accesses = transfers(op.B, ov.b)[0]
     assert b_slot is ov.b and b_accesses == [
         Access(100 * 128, 0, (1, 1, 1, 100 * 128), (0, 0, 0, 1))
     ]
