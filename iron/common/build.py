@@ -107,11 +107,11 @@ class Target:
     ):
         from pathlib import Path
 
-        from .device_utils import get_kernel_dir
+        from iron.operators._kernels import target_arch
 
         self.dev = dev
         self.kernels_dir = Path(kernels_dir)
-        self.arch = get_kernel_dir(dev)  # "aie2" | "aie2p"
+        self.arch = target_arch(dev)  # "aie2" | "aie2p"
         self.func_prefix = func_prefix
         self.verbose = verbose
         # xchesscc rather than Peano, from the context; every kernel of one

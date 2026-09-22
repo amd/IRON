@@ -41,7 +41,7 @@ from iron.common.declare import (
     select,
     tunable,
 )
-from iron.common.device_utils import lut_sources
+from iron.operators._kernels import lut_sources
 from iron.common.tiling import Access
 from iron.common.utils import split_run
 from iron.operators.flm.gemm.design import (

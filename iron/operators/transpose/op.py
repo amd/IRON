@@ -69,15 +69,13 @@ class TransposeOverlay(Overlay):
             )
 
     def tuning(self, dev) -> "TransposeOverlay":
-        from iron.common.utils import device_columns, get_shim_dma_limit
+        from iron.common.utils import get_shim_dma_limit
 
         cols = self.num_aie_columns
         if cols is None:
             if dev is None:
                 raise Untunable("num_aie_columns defaults from the device; none given")
-            cols = min(
-                device_columns(dev), get_shim_dma_limit(dev) // self.num_channels
-            )
+            cols = min(dev.cols, get_shim_dma_limit(dev) // self.num_channels)
         return dataclasses.replace(self, num_aie_columns=cols)
 
     def design(self, target) -> list:

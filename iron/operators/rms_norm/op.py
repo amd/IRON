@@ -20,7 +20,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
-from iron.common.utils import device_columns, get_shim_dma_limit
+from iron.common.utils import get_shim_dma_limit
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -51,7 +51,7 @@ class RMSNormOverlay(Overlay):
         if dev is not None:
             limit = get_shim_dma_limit(dev)
             if cols is None:
-                cols = min(device_columns(dev), limit // (2 * self.num_channels))
+                cols = min(dev.cols, limit // (2 * self.num_channels))
             if cols * self.num_channels > limit:
                 raise Untunable(
                     f"num_aie_columns * num_channels ({cols * self.num_channels}) "
@@ -132,7 +132,7 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
             limit = get_shim_dma_limit(dev)
             if cols is None:
                 # Room for the weight fill beside the row fills.
-                cols = min(device_columns(dev), limit // self.num_channels - 1)
+                cols = min(dev.cols, limit // self.num_channels - 1)
             # (cols * chans) in-fills + chans weight-fills must fit the shim's
             # host->array channels.
             usage = self.num_channels * (cols + 1)

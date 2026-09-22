@@ -64,13 +64,12 @@ class MemCopyOverlay(Overlay):
     d = StreamOut(line_size, per=num_cores)
 
     def tuning(self, dev) -> "MemCopyOverlay":
-        from iron.common.utils import device_columns
 
         cores = self.num_cores
         if cores is None:
             if dev is None:
                 raise Untunable("num_cores defaults from the device; none given")
-            cores = device_columns(dev) * self.num_channels
+            cores = dev.cols * self.num_channels
         tile_size = 1024 if self.tile_size is None else self.tile_size
         return dataclasses.replace(
             self, num_cores=cores, tile_size=tile_size, line_size=min(tile_size, 8192)

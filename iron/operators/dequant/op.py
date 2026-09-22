@@ -46,13 +46,12 @@ class DequantOverlay(Overlay):
     count = Resident(np.int32)
 
     def tuning(self, dev) -> "DequantOverlay":
-        from iron.common.utils import device_columns
 
         cols = self.num_aie_columns
         if cols is None:
             if dev is None:
                 raise Untunable("num_aie_columns defaults from the device; none given")
-            cols = min(device_columns(dev), 16 // self.num_channels)
+            cols = min(dev.cols, 16 // self.num_channels)
         tile_size = 4096 if self.tile_size is None else self.tile_size
         total_cores = cols * self.num_channels
         if total_cores > 16:

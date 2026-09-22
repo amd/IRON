@@ -55,10 +55,8 @@ class DecodeGraph:
             # below divide by it, so it is fixed when the graph is written.
             import aie.utils as aie_utils
 
-            from iron.common.utils import device_columns
-
             dev = aie_utils.get_current_device()
-            num_aie_columns = device_columns(dev) if dev is not None else 8
+            num_aie_columns = dev.cols if dev is not None else 8
         L, cols = max_seq_len, num_aie_columns
         self.max_seq_len = L
         self.num_aie_columns = cols

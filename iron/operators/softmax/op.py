@@ -20,7 +20,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
-from iron.common.device_utils import lut_sources
+from iron.operators._kernels import lut_sources
 
 
 @operator

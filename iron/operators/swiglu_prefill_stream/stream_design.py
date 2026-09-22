@@ -28,14 +28,14 @@ import stream
 import torch
 from stream.api import optimize_allocation_co
 
-from iron.common.stream.hardware import ComputeArray
-from iron.common.stream.mapping import (
+from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray
+from iron.operators.swiglu_prefill_stream.stream.mapping import (
     FusedGroup,
     Placement,
     emit_mapping,
     group_boundaries,
 )
-from iron.common.stream.workload import export_workload
+from iron.operators.swiglu_prefill_stream.stream.workload import export_workload
 from iron.operators.swiglu_prefill_stream import reference
 from iron.operators.swiglu_prefill_stream.reference import swiglu_module
 
@@ -454,8 +454,8 @@ def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
     The registry is the single place a kernel's source, compile flags and
     symbol names are declared, so the object and the generated design agree.
     """
-    from iron.common.device_utils import get_kernel_dir
-    from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
+    from iron.operators._kernels import target_arch
+    from iron.operators.swiglu_prefill_stream.stream.ops import ELTWISE_MUL, GEMM, SILU
 
     tiles = gemm_tiles(k)
     per_layer = {
@@ -466,7 +466,7 @@ def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
         MUL: (ELTWISE_MUL, None),
     }
     kernels_dir = Path(kernels_dir)
-    kernel_dir = get_kernel_dir()
+    kernel_dir = target_arch()
     renames = {}
     layers = GROUP_LAYERS[k][group_index]
     for kernel, shape in dict.fromkeys(per_layer[layer] for layer in layers):

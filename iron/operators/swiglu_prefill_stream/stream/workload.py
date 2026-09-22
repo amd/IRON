@@ -4,7 +4,7 @@
 """Export a reference ``nn.Module`` into the ONNX workload stream-dse optimizes.
 
 :func:`torch.onnx.export` captures the module and lowers it through the
-translation table in :mod:`~iron.common.stream.ops`, so every operator is emitted
+translation table in :mod:`~iron.operators.swiglu_prefill_stream.stream.ops`, so every operator is emitted
 in the form stream-dse's parsers expect. Because the operator's reference module is
 the only description of the computation, the generated design cannot drift from the
 reference the operator is tested against.
@@ -19,7 +19,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from iron.common.stream.ops import op_for_onnx_type, translation_table
+from iron.operators.swiglu_prefill_stream.stream.ops import (
+    op_for_onnx_type,
+    translation_table,
+)
 
 _WEIGHT_DATA_FIELDS = (
     "float_data",

@@ -892,6 +892,25 @@ says whether it is also written beside the image (`"disk"`) or kept in
 memory (`"memory"`, the default). `build_dir` is now only where a fetched
 image lands.
 
+Alongside it, `iron/common` gave up what was not its own. The stream-dse
+path moved under the one operator that uses it
+(`iron/operators/swiglu_prefill_stream/stream/`, with `layout.py`, whose
+`TiledStridedLayout` is a stream-dse notion and not an access pattern),
+tracing moved to `iron/operators/_tracing.py`, and `device_utils.py` is
+gone: the architecture string is upstream's `resolve_target_arch`, the
+column count is `dev.cols`, and `lut_sources` belongs with the kernels it
+bundles (`iron/operators/_kernels.py`). The fifo-depth rule no longer
+spells 4096: `L1_BANK_BYTES` is named once, with the reason a line
+spanning two banks cannot be double-buffered, and the threshold follows
+from the stream's dtype. The banking is the one device fact the target
+model does not expose (it gives the total only), so an accessor for it is
+the next small upstream ask.
+
+`tile_size` was already tunable on both elementwise bases; what is fixed
+is the fallback (256) and each kernel's `tile_cap`. The cap is a kernel
+property, not a device one, so it stays declared; raising the fallback is
+a performance decision and needs hardware, so it is left alone.
+
 Two changes upstream made that possible, on mlir-aie's
 `claude/mlir-aie-iron-upstream` branch:
 `CompilableDesign.get_cache_entry()`, which names everything a compile

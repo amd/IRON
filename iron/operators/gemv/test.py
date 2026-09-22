@@ -6,7 +6,7 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.gemv.op import GEMV, gelu_tanh_approx
-from iron.common.device_utils import get_kernel_dir
+from iron.operators._kernels import target_arch
 import numpy as np
 import torch
 from iron.common.test_utils import golden, record_metric, run_test
@@ -118,7 +118,7 @@ def test_gemv_gelu(
     M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context
 ):
     """GEMV with the fused GELU epilogue (NPU2-only) vs a gelu(A @ B) golden."""
-    if get_kernel_dir() != "aie2p":
+    if target_arch() != "aie2p":
         pytest.skip("gemv gelu epilogue is only available on NPU2 (aie2p)")
 
     operator = GEMV(

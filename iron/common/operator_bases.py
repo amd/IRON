@@ -53,8 +53,8 @@ from .declare import (
     operator,
     tunable,
 )
-from .device_utils import lut_sources
-from .utils import device_columns, get_shim_dma_limit
+from iron.operators._kernels import lut_sources
+from .utils import bank_elements, get_shim_dma_limit
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.
@@ -76,8 +76,8 @@ class ChanneledUnaryOverlay(Overlay):
     Subclasses set ``kernel_name`` (the ``.cc`` under the arch's kernel dir),
     ``kernel_fn_name`` (the symbol), ``needs_lut_ops`` for aie2 kernels that
     reach ``lut_based_ops.cpp``'s tables from C++, and ``tile_cap`` (the
-    largest line one core holds; lines above 4096 elements need a fifo depth
-    of one to fit local memory).
+    largest line this kernel holds; a line spanning more than one
+    local-memory bank drops the fifo depth to one).
     """
 
     # None: every column of the device, one channel each, DEFAULT_TILE lines.
@@ -104,7 +104,7 @@ class ChanneledUnaryOverlay(Overlay):
         if dev is not None:
             limit = get_shim_dma_limit(dev)
             if cols is None:
-                cols = min(device_columns(dev), limit // self.num_channels)
+                cols = min(dev.cols, limit // self.num_channels)
             if cols * self.num_channels > limit:
                 raise Untunable(
                     f"num_aie_columns * num_channels ({cols * self.num_channels}) "
@@ -135,8 +135,9 @@ class ChanneledUnaryOverlay(Overlay):
 
         line_type = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        # Lines above one 8 KB bank need a depth of one to fit local memory.
-        depth = 1 if self.line_size > 4096 else 2
+        # A line spanning more than one bank cannot be double-buffered in
+        # what is left of local memory.
+        depth = 1 if self.line_size > bank_elements(self.x.dtype) else 2
 
         kernel = target.kernel(
             self.kernel_fn_name,
@@ -253,7 +254,7 @@ class BinaryElementwiseOverlay(Overlay):
         if dev is not None:
             limit = get_shim_dma_limit(dev)
             if cols is None:
-                cols = min(device_columns(dev), limit // 2)
+                cols = min(dev.cols, limit // 2)
             if cols * 2 > limit:
                 raise Untunable(
                     f"num_aie_columns ({cols}) exceeds ShimDMA limit "

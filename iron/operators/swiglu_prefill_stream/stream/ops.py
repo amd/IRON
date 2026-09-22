@@ -27,7 +27,7 @@ from onnx import defs
 from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
-from iron.common.layout import TiledStridedLayout, tiled_2d
+from iron.operators.swiglu_prefill_stream.layout import TiledStridedLayout, tiled_2d
 from iron.operators._kernels import declare_kernel
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
@@ -225,5 +225,5 @@ def op_for_onnx_type(onnx_type: str) -> StreamOp:
     except KeyError:
         raise NotImplementedError(
             f"ONNX operator '{onnx_type}' has no stream-dse mapping; "
-            f"add it to iron.common.stream.ops.TORCH_OPS"
+            f"add it to iron.operators.swiglu_prefill_stream.stream.ops.TORCH_OPS"
         ) from None

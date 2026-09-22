@@ -6,7 +6,7 @@
 An operator declares *where* each node runs (:class:`Placement`) and how nodes
 are fused (:class:`FusedGroup`); this module turns that into the mapping YAML
 stream-dse consumes. Node names are taken from the
-:class:`~iron.common.stream.workload.StreamWorkload` the ONNX was generated from,
+:class:`~iron.operators.swiglu_prefill_stream.stream.workload.StreamWorkload` the ONNX was generated from,
 and every placement is checked against it, so a mapping can never refer to a node
 the workload does not contain.
 
@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from iron.common.stream.hardware import ComputeArray
-from iron.common.stream.workload import StreamWorkload
+from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray
+from iron.operators.swiglu_prefill_stream.stream.workload import StreamWorkload
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class Placement:
     """Where one workload node runs.
 
     ``columns`` are the array columns it occupies, resolved to core ids against
-    the :class:`~iron.common.stream.hardware.ComputeArray`; ``rows`` narrows that
+    the :class:`~iron.operators.swiglu_prefill_stream.stream.hardware.ComputeArray`; ``rows`` narrows that
     to some rows of each column (all of them by default); ``splits`` is the
     inter-core tiling as ``(dim, split)`` pairs; ``kernel_kwargs`` are the
     arguments of the node's stream-dse kernel (e.g. a GEMM's tile shape).

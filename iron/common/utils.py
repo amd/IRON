@@ -4,12 +4,20 @@
 from aie.dialects.aie import get_target_model, WireBundle
 
 
-def device_columns(dev) -> int:
-    """How many columns the device has: what an overlay defaults its width to."""
-    cols = getattr(dev, "cols", None)
-    if isinstance(cols, int):
-        return cols
-    return get_target_model(dev.resolve()).columns()
+# One bank of a core's local memory. AIE2 and AIE2P both have eight 8 KB
+# banks, and a fifo object spanning more than one bank cannot be
+# double-buffered in what is left; the target model exposes the total
+# (get_local_memory_size) but not the banking, so the figure is named here
+# rather than spelled at each use.
+L1_BANK_BYTES = 8192
+
+
+def bank_elements(dtype) -> int:
+    """Elements of ``dtype`` in one local-memory bank: the largest line a core
+    holds at a fifo depth of two."""
+    import numpy as np
+
+    return L1_BANK_BYTES // np.dtype(dtype).itemsize
 
 
 def get_shim_dma_limit(dev) -> int:

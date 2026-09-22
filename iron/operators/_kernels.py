@@ -17,21 +17,45 @@ in the operator, say -- is discarded and its object never compiled.
 
 from pathlib import Path
 
+import aie.utils as aie_utils
 import aie.utils.config
 from aie.iron import ExternalFunction
+from aie.utils.compile.utils import resolve_target_arch
 
-from iron.common.device_utils import get_kernel_dir
+
+def target_arch(dev=None) -> str:
+    """``"aie2p"`` for NPU2 (Strix, Krackan), ``"aie2"`` for NPU1 (Phoenix)."""
+    return resolve_target_arch(
+        dev if dev is not None else aie_utils.get_current_device()
+    )
 
 
-def runtime_include_dirs() -> list[str]:
+def runtime_dir(dev=None) -> Path:
+    """This architecture's ``aie_runtime_lib``: its headers and its tables."""
+    return (
+        Path(aie.utils.config.root_path())
+        / "aie_runtime_lib"
+        / target_arch(dev).upper()
+    )
+
+
+def runtime_include_dirs(dev=None) -> list[str]:
     """The aie_runtime_lib headers a kernel is compiled against."""
-    return [
-        str(
-            Path(aie.utils.config.root_path())
-            / "aie_runtime_lib"
-            / get_kernel_dir().upper()
-        )
-    ]
+    return [str(runtime_dir(dev))]
+
+
+def lut_sources(dev=None):
+    """``lut_based_ops.cpp`` when this arch's kernels need it, else nothing.
+
+    aie2's exp/log kernels reference its tables; aie2p's do not. Returned as a
+    bundle for :func:`declare_kernel` rather than as an object to link: the
+    tables have no MLIR call site, so an object carrying them can never be
+    discovered by tracing calls, and compiling them into the kernel's own
+    translation unit is what removes the problem rather than working around it.
+    """
+    if target_arch(dev) != "aie2":
+        return ()
+    return (runtime_dir(dev) / "lut_based_ops.cpp",)
 
 
 def declare_kernel(
