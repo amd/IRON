@@ -34,15 +34,8 @@ import numpy as np
 
 from .kernels import declare_kernel, kernels_dir, target_arch
 from .tracing import maybe_enable_trace
-from .declare import (
-    BoundBuffer,
-    BoundStream,
-    BoundValue,
-    BufferView,
-    Operator,
-    Overlay,
-    _StreamSlot,
-)
+from .declare import BoundBuffer, BoundStream, BoundValue, BufferView, Operator, Overlay
+from .declare.bound import _StreamSlot
 from .tiling import Access, encode, legalize, split, whole
 
 # --------------------------------------------------------------------------

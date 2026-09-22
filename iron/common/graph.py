@@ -40,7 +40,8 @@ from math import prod
 import numpy as np
 from ml_dtypes import bfloat16
 
-from .declare import Operator, Overlay, Resident, ValueSpec, _Buffer as _Buffer_, _Value
+from .declare import Operator, Overlay, Resident, ValueSpec
+from .declare.member import _Buffer as _Buffer_, _Value
 
 _STACK: list = []
 

@@ -32,7 +32,8 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
-from .declare import BoundBuffer, BoundStream, Operator, Overlay, _StreamSlot
+from .declare import BoundBuffer, BoundStream, Operator, Overlay
+from .declare.bound import _StreamSlot
 from .tiling import Access
 
 # Core-tile lock registers, 16 bytes apart from this base. A hardware fact

@@ -64,7 +64,7 @@ from .declare import (
     operator,
     tunable,
 )
-from .declare import _Stream
+from .declare.member import _Stream
 from .tiling import bank_elements
 
 # The line an elementwise core streams when nothing else is asked for: small
