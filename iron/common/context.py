@@ -13,7 +13,7 @@ import aie.utils.config
 class AIEContext:
     """What a build is given besides the operator: where things go, how loud.
 
-    ``build_dir`` holds what is fetched rather than built (a foreign
+    ``build_dir`` holds what is fetched rather than built (an external
     overlay's image). Built artifacts live in mlir-aie's JIT cache, keyed on
     content; ``record`` says whether the :class:`~iron.common.artifacts.Artifacts`
     record of an image is also written beside it (``"disk"``) or only kept

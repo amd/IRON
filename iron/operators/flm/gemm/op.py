@@ -976,7 +976,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
         from iron.common.artifacts import Artifacts, Design, Step
         from iron.common.jit_compile import insts_design, xclbin_design
 
-        if self.ov.foreign is not None:
+        if self.ov.external is not None:
             return super()._build()  # the downloaded image, instructions only
         tuned = self.tuned(aie_utils.get_current_device())
         M, K, N = tuned._reference_shape

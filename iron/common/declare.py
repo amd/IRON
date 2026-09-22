@@ -871,7 +871,7 @@ def _members_of(cls: type) -> list[_Member]:
                 continue
             seen.add(name)
             # A subclass hides an inherited member by assigning it None: a
-            # foreign overlay of a built one keeps its fields and streams but
+            # external overlay of a built one keeps its fields and streams but
             # not its residents, whose block the image lays out differently.
             if isinstance(value, _Member):
                 ordered[name] = value
@@ -1026,7 +1026,7 @@ def _finish_overlay(cls: type) -> None:
     if len(images) > 1:
         raise DeclarationError(f"{cls.__name__} declares more than one Xclbin")
     if images:
-        cls._foreign = images[0]  # type: ignore[attr-defined]
+        cls._external = images[0]  # type: ignore[attr-defined]
     for m in cls._members:  # type: ignore[attr-defined]
         if isinstance(m, (_Buffer, DispatchTime)):
             raise DeclarationError(
@@ -1036,12 +1036,12 @@ def _finish_overlay(cls: type) -> None:
             )
         if images and isinstance(m, _Stream) and m.via is None:
             raise DeclarationError(
-                f"{cls.__name__}.{m.name}: a stream of a foreign overlay must be "
+                f"{cls.__name__}.{m.name}: a stream of an external overlay must be "
                 f"pinned with via=; nothing else says which shim it uses"
             )
         if images and isinstance(m, Resident) and m.address is None:
             raise DeclarationError(
-                f"{cls.__name__}.{m.name}: a resident of a foreign overlay needs "
+                f"{cls.__name__}.{m.name}: a resident of an external overlay needs "
                 f"an address; the sequence writes it there"
             )
 
@@ -1051,7 +1051,7 @@ def _finish_overlay(cls: type) -> None:
         if getattr(cls, hook) is getattr(Overlay, hook):
             raise DeclarationError(
                 f"{cls.__name__} declares an Xclbin, so nothing builds its array: "
-                f"it must supply {hook}() (iron.operators.flm.foreign.Foreign "
+                f"it must supply {hook}() (iron.common.external.External "
                 f"does, for a downloaded image)"
             )
 
@@ -1148,12 +1148,12 @@ class Overlay:
     _members: ClassVar[tuple[_Member, ...]] = ()
     _dim_fields: ClassVar[tuple[str, ...]] = ()
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
-    _foreign: ClassVar[Xclbin | None] = None
+    _external: ClassVar[Xclbin | None] = None
 
     @property
-    def foreign(self) -> Xclbin | None:
+    def external(self) -> Xclbin | None:
         """The downloaded image this overlay is, if IRON did not build it."""
-        return type(self)._foreign
+        return type(self)._external
 
     # -- an overlay IRON does not design() ---------------------------------
 
@@ -1175,7 +1175,7 @@ class Overlay:
 
     def sequence(self, op: "Operator", rt) -> None:
         """The runtime sequence for ``op`` on this overlay, when the overlay
-        rather than the operator knows it: a foreign image consumes its
+        rather than the operator knows it: a external image consumes its
         transfers in the order it was built for, whatever operator drives it.
         Takes precedence over the operator's ``design(rt)``."""
         raise NotImplementedError
@@ -1186,7 +1186,7 @@ class Overlay:
 
     def resident_values(self, op: "Operator") -> dict[str, Any]:
         """The words for this overlay's residents, from ``op``. By default the
-        operator's own ``residents()``; a foreign overlay lays the operator's
+        operator's own ``residents()``; an external overlay lays the operator's
         values out into the block its image reads."""
         return op.residents()
 
@@ -1802,12 +1802,12 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         return {b.name: ("arg", i, b.nbytes) for i, b in enumerate(tuned.buffers)}
 
     def _build(self):
-        """Compile to an xclbin and an instruction stream, or, on a foreign
+        """Compile to an xclbin and an instruction stream, or, on an external
         overlay, to the stream alone against the downloaded image."""
         from .artifacts import Artifacts, Design, Step
         from .jit_compile import insts_design, xclbin_design
 
-        image = self.ov.foreign
+        image = self.ov.external
         if image is None:
             design = xclbin_design(self.generator(), kernel_name="MLIR_AIE")
             entry = design.get_cache_entry()
@@ -1842,7 +1842,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         from aie.utils.npukernel import NPUKernel
 
         self.compile()
-        image = self.ov.foreign
+        image = self.ov.external
         npu_kernel = NPUKernel(
             xclbin_path=str(self.artifacts.image),
             kernel_name="MLIR_AIE" if image is None else image.kernel_name,

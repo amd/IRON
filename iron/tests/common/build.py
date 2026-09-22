@@ -538,7 +538,7 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# flm.gemm.Shipped: a foreign overlay's sequence, device-free
+# flm.gemm.Shipped: an external overlay's sequence, device-free
 # --------------------------------------------------------------------------
 
 
@@ -558,12 +558,12 @@ class _ForeignRecorder:
         self.log.append(("await", task))
 
 
-def test_foreign_overlay_declares_its_pins_and_parameter_block():
+def test_external_overlay_declares_its_pins_and_parameter_block():
     from iron.common.declare import DeclarationError, Xclbin
     from iron.operators.flm.gemm.shipped import Shipped
 
     ov = Shipped()
-    assert ov.foreign.filename == "flm_mm_f81eba71.xclbin"
+    assert ov.external.filename == "flm_mm_f81eba71.xclbin"
     assert [(p.col, p.channel) for p in (ov.a.pin(r) for r in range(4))] == [
         (0, 0),
         (2, 0),
@@ -581,7 +581,7 @@ def test_foreign_overlay_declares_its_pins_and_parameter_block():
             s = StreamIn(64)
 
     # Nothing designs a prebuilt overlay's array, so the declaration has to
-    # say where the image is and what module drives it. flm's Foreign mixin
+    # say where the image is and what module drives it. flm's External mixin
     # answers both; an overlay without it is rejected at declaration.
     with pytest.raises(DeclarationError, match="must supply prebuilt"):
 
@@ -591,7 +591,7 @@ def test_foreign_overlay_declares_its_pins_and_parameter_block():
 
 
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
-    from iron.operators.flm.foreign import LOCK_ADDRESS_BASE, run_sequence
+    from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
     from iron.operators.flm.gemm.op import GEMM
     from iron.operators.flm.gemm.shipped import Shipped
 

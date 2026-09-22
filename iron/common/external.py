@@ -3,14 +3,13 @@
 
 """The sequence for an overlay IRON did not build.
 
-:class:`Foreign` is the mixin a prebuilt overlay adds to answer the two
+:class:`External` is the mixin such an overlay adds to answer the two
 questions the library asks of an overlay it cannot design: where the image
 file is (:meth:`Overlay.prebuilt`) and what module drives it
-(:meth:`Overlay.build`). flm's shipped ``mm`` binary is the one such overlay
-there is; the machinery lives here rather than in :mod:`iron.common` for
-that reason.
+(:meth:`Overlay.build`). flm's shipped ``mm`` binary is the one that does
+today.
 
-A foreign overlay (:class:`~iron.common.declare.Xclbin` on the class) has no
+An external overlay (:class:`~iron.common.declare.Xclbin` on the class) has no
 ``design()``: every core program, memtile buffer and stream-switch route
 comes from the downloaded image. What the sequence must supply is the other
 half of a dispatch, and the declaration carries everything it needs: each
@@ -21,7 +20,7 @@ Transfers are emitted as shim DMA tasks on the pinned allocations, at most
 ``depth`` outstanding per slot (the image's memtiles hold that many
 objects, so a further transfer would overwrite one still in use). Task
 groups have no meaning here and are accepted as no-ops, so an operator's
-``design(rt)`` reads the same against a built or a foreign overlay.
+``design(rt)`` reads the same against a built or an external overlay.
 """
 
 from __future__ import annotations
@@ -33,14 +32,8 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.common.declare import (
-    BoundBuffer,
-    BoundStream,
-    Operator,
-    Overlay,
-    _StreamSlot,
-)
-from iron.common.tiling import Access
+from .declare import BoundBuffer, BoundStream, Operator, Overlay, _StreamSlot
+from .tiling import Access
 
 # Core-tile lock registers, 16 bytes apart from this base. A hardware fact
 # the Python bindings do not expose.
@@ -52,8 +45,8 @@ class _NoGroup:
         pass
 
 
-class ForeignSequence:
-    """What an operator's ``design(rt)`` receives against a foreign overlay."""
+class ExternalSequence:
+    """What an operator's ``design(rt)`` receives against an external overlay."""
 
     def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any], emit):
         self.op = op
@@ -73,7 +66,7 @@ class ForeignSequence:
     def _transfer(self, stream, what, offset_by) -> None:
         if offset_by is not None:
             raise NotImplementedError(
-                "per-call offsets are not supported on a foreign overlay"
+                "per-call offsets are not supported on an external overlay"
             )
         key = self._key(stream)
         depth = self._depth(stream)
@@ -110,7 +103,7 @@ class ForeignSequence:
         if isinstance(what, tuple) and len(what) == 2 and isinstance(what[1], Access):
             return what[0], [what[1]]
         raise TypeError(
-            f"a foreign sequence takes a buffer or (buffer, Access); got {what!r}"
+            f"an external sequence takes a buffer or (buffer, Access); got {what!r}"
         )
 
     def finish(self) -> None:
@@ -169,10 +162,10 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
 
 def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
     """Residents, then the operator's sequence, then the trailing awaits."""
-    from iron.common.build import run_design
+    from .build import run_design
 
     write_residents(op, ov, core_tiles, emit)
-    seq = ForeignSequence(op, ov, rt_data, emit)
+    seq = ExternalSequence(op, ov, rt_data, emit)
     run_design(op, ov, seq)
     seq.finish()
 
@@ -253,7 +246,7 @@ def fetch(image, directory) -> Path:
     return target
 
 
-def build_foreign(dev, op: Operator):
+def build_external(dev, op: Operator):
     """The module whose runtime sequence drives ``op.ov``'s downloaded image."""
     from aie.dialects import aie, aiex
     from aie.dialects.aie import DMAChannelDir, get_target_model
@@ -282,7 +275,7 @@ def build_foreign(dev, op: Operator):
                     if pin is None or pin.channel is None:
                         raise ValueError(
                             f"{type(ov).__name__}.{s.name}[{i}] has no (column, "
-                            f"channel) pin; a foreign overlay's streams need one"
+                            f"channel) pin; an external overlay's streams need one"
                         )
                     tile = shim.setdefault(pin.col, aie.tile(pin.col, 0))
                     name = f"{s.name}_{i}"
@@ -302,7 +295,7 @@ def build_foreign(dev, op: Operator):
         return ctx.module
 
 
-class Foreign:
+class External:
     """An overlay whose image is downloaded rather than built.
 
     Mix in beside the operator's overlay base and declare an
@@ -311,7 +304,7 @@ class Foreign:
     """
 
     def prebuilt(self, directory) -> Path:
-        return fetch(self.foreign, directory)
+        return fetch(self.external, directory)
 
     def build(self, dev, op: Operator):
-        return build_foreign(dev, op)
+        return build_external(dev, op)

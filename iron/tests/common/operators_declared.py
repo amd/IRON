@@ -33,4 +33,4 @@ def test_flm_declares_one_operator_and_its_shipped_overlay():
     module = importlib.import_module("iron.operators.flm")
     cls, shipped = module.GEMM, module.Shipped
     assert issubclass(cls, Operator) and issubclass(cls._overlay_class, Overlay)
-    assert issubclass(shipped, cls._overlay_class) and shipped._foreign is not None
+    assert issubclass(shipped, cls._overlay_class) and shipped._external is not None

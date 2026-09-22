@@ -18,7 +18,7 @@ visible nowhere in it: the shim channel map (A on MM2S channel 0 of columns
 0, 2, 4 and 6; B on MM2S channel 1 of every column; C out of S2MM channel
 0 of every column), the address and lock of the eight parameter words every
 core reads, and the order the memtiles consume transfers in. The library
-emits the sequence against those pins (:mod:`iron.operators.flm.foreign`).
+emits the sequence against those pins (:mod:`iron.common.external`).
 
 What differs from the port, and why the port is the default: the port
 selects its epilogue at build time (a branch-free inner loop, one build per
@@ -45,7 +45,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.tiling import Access
-from iron.operators.flm.foreign import Foreign
+from iron.common.external import External
 from iron.operators.flm.gemm.design import Epilogue, K_TILE, M_TILE
 from iron.operators.flm.gemm.op import FLMGEMMOverlay
 
@@ -79,7 +79,7 @@ MIN_K = K_TILE
 
 
 @operator
-class Shipped(Foreign, FLMGEMMOverlay):
+class Shipped(External, FLMGEMMOverlay):
     """The shipped 4x8 NPU2 ``mm`` binary: its pins and its parameter block."""
 
     image = Xclbin(

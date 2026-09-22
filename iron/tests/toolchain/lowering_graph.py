@@ -3,7 +3,7 @@
 
 """What the case table does not cover lowers too: graph-traced operators
 with bound per-call values, flm/gemm's configuration and shapes, the
-foreign shipped-overlay sequence, and the swiglu graph functions' operators.
+external shipped-overlay sequence, and the swiglu graph functions' operators.
 Same gate as ``lowering.py``: aiecc to an instruction stream, no Peano.
 """
 
@@ -84,11 +84,11 @@ def _shipped(**kwargs):
     return GEMM(Shipped(), **kwargs)
 
 
-def test_shipped_foreign_sequence_lowers(tmp_path):
+def test_shipped_external_sequence_lowers(tmp_path):
     lower(_shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0)), tmp_path)
 
 
-def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
+def test_instructions_compile_alone_against_an_external_image(tmp_path):
     """The §11 instructions-only compile: the shipped image is downloaded,
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit."""

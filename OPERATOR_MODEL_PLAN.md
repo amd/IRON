@@ -27,7 +27,7 @@ and why; the rest is the design as agreed.
 | the design restates the ABI (`L3_*_ty`, `Runtime(seq, fn_args=[...])`) and E7 checks identity | the **library owns `Runtime` and `Program`**; a buffer names its stream (`to=`/`from_=`) and the fill/drain sequence is **derived**; `design(rt)` is an override for irregular operators | deletes the second spelling and the checks that policed it. Most sequence designs in the tree are "tile this buffer over that stream across the columns" |
 | three runtime tiers named by what rebuilds (`HostResident`, `SequenceResident`, a plain field) | two author-named markers, **`Scratchpad`** and upstream's **`DispatchTime`** | the third tier is a plain field and needs no name; reusing upstream's name avoids two vocabularies for one mechanism |
 | four packaging constructors (`Overlay`, `StaticSequence`/`GeneratedSequence`, `Elf`/`Xclbin`) | **`compile(dev, boundaries=, image=)`**, everything else derived from the declaration and reported | with author-named markers the sequence kind is already declared, and the image follows from device, boundaries and markers. Only boundaries and an image override were ever the user's to choose |
-| `Overlay` ABI (bindings, residents, sizes) read back from files and compared (E23) | agreement **by construction** for overlays IRON builds; read-back kept only for a foreign xclbin (`Overlay.from_xclbin`) | the sequence is built from the overlay's typed stream declarations, so there is nothing to compare except divisibility |
+| `Overlay` ABI (bindings, residents, sizes) read back from files and compared (E23) | agreement **by construction** for overlays IRON builds; read-back kept only for an external xclbin (`Overlay.from_xclbin`) | the sequence is built from the overlay's typed stream declarations, so there is nothing to compare except divisibility |
 | llama four ways as the acceptance gate | **one configuration at parity**, NPU1 fallback contingent on a spike, the rest measured as experiments | the four-way matrix multiplied hardware test time for configurations two spikes may rule out |
 | 31 enforcement rows | the checks that trace to an observed failure or to a mechanism this design introduces (§10) | six of the 31 guarded the hook this design removes; the coverage rows guarded hand-written sequences this design derives |
 | a recorder: `g.input(shape)`, `g.param`, `g.state`, `g(Op, ...)`, outputs read by handle | a **graph function**: inputs are parameters, outputs are return values, weights are closed-over tensors, state is a closed-over `iron.state`; several graphs compile together as a **module** sharing one buffer plan | declaring inputs by shape and reading outputs by handle predates tracing; the function form is also upstream's `@iron.jit` convention, so IRON stops diverging from it |
@@ -611,7 +611,7 @@ mm_prebuilt mismatch that is currently a comment.
 `via=` pins a shim column and channel. `channel` is validated against the
 two-per-direction limit from the target model at class creation; nothing
 validates it today at any layer. Pinning constrains routing for everything
-else, so it is a tool for foreign overlays and not a default.
+else, so it is a tool for external overlays and not a default.
 
 **swiglu_prefill_stream does not fit.** Its shapes come from a graph that
 stream-dse exports at build time. It gets a dynamic escape, private to the
@@ -639,7 +639,7 @@ Each row names the failure or mechanism that justifies it. **T1** pyright,
 | C9 | no legal tuning for this `K` on this device | T3 | `Untunable`; the mem_copy 16-core hang compiled fine |
 | C10 | extent not a multiple of the overlay's tile unit | T3 | `compatible()` |
 | C11 | an overlay's core ELFs differ between two extents | test suite | the reuse discipline (§3), byte-identity; fails today for every design with a compile-time trip count |
-| C12 | a foreign overlay's declared bindings disagree with its file | T4 | the mm_prebuilt case (§9) |
+| C12 | an external overlay's declared bindings disagree with its file | T4 | the mm_prebuilt case (§9) |
 | C13 | a declared buffer never filled or drained in an overridden `design(rt)` | T4 | the derived sequence cannot make this mistake; an override can |
 | C14 | DMA addresses past the end of a buffer in an overridden `design(rt)` | T4 | bounds from the slice, cheap; the coverage checks beyond this are opt-in test utilities |
 | C15 | a `Scratchpad` never written before dispatch | T5 | sync-time check on the handle |
@@ -653,7 +653,7 @@ Retired from the previous draft: E1, E2, E6, E14 (guarded the `__setattr__`
 hook), E3, E7, E15 (guarded the design's restatement of the ABI), E16–E20 as
 every-build checks (the derived sequence covers by construction; kept as test
 utilities for overrides), E23 as a general check (agreement by construction;
-kept for foreign overlays as C12), E25, E27, E28 (packaging choices the user
+kept for external overlays as C12), E25, E27, E28 (packaging choices the user
 no longer makes).
 
 Access *order* is still not checkable without a test: coverage can be
@@ -866,7 +866,7 @@ authoring layer, and the decode-drift snapshot (§18).
   IRON builds this is reproducibility only, since the sequence binds to the
   fifo it got: the library names a per-column stream's fifos from declaration
   position and column, zero-padded, never from the attribute name. For
-  foreign overlays every stream is pinned and pinned endpoints place first.
+  external overlays every stream is pinned and pinned endpoints place first.
   A `per_column` stream does not guarantee column `c`'s shim is in physical
   column `c`; the placer picks by flow centroid and load. An author who needs
   a physical column pins it.
@@ -980,7 +980,7 @@ image built elsewhere), `dispatch_stream` (a dispatch-time design's bridge
 library). What went: the artifact graph (`compilation/base.py`,
 `compilation/sequence.py`, `common/base.py`: rules, commands, artifacts,
 staleness, ~920 lines) whose only remaining job was downloading the
-shipped xclbin -- now `foreign.fetch`, one function -- and IRON's own
+shipped xclbin -- now `external.fetch`, one function -- and IRON's own
 change detection (`_compile_if_changed` and its `.cache_hash` stamps),
 which duplicated what the cache does.
 
@@ -1051,7 +1051,7 @@ the narrow device), and `lowering_graph.py` lowers what the table does
 not cover: every operator the decode graph traces, with its bound
 per-call values as scratchpad parameters; flm/gemm's three sequence
 shapes and its configuration-only module at the reference shape; the
-foreign mm_prebuilt sequence (raw-dialect emission, no cores); and the
+external mm_prebuilt sequence (raw-dialect emission, no cores); and the
 swiglu graphs' operators. All lower. The fused module `swiglu_decode`
 builds through `OperatorSequence` (five devices: four configurations and
 the dispatch sequence with `aiex.configure`) places and routes and emits
@@ -1094,7 +1094,7 @@ on npu2 and npu1 (the swiglu decode graph: five steps, four designs,
 the gate and up projections sharing one kernel instance and one
 instruction stream), flm/gemm's two compiles (the configuration's xclbin
 at the reference shape plus this shape's instructions), mm_prebuilt's
-instruction stream against its foreign overlay (and the download of the
+instruction stream against its external overlay (and the download of the
 image itself, which this session's network allowed), and a plain
 operator's `compile()` on npu1. All pass.
 
@@ -1217,7 +1217,7 @@ and the decode graph's parity against the token snapshot (§18).
 | llama prefill as a graph function (§20) | `llama_graphs.py` `PrefillGraph`, `llama_npu.py` | traced at the scaled config: 18 steps per block, one value (`last`), every projection a column-major GEMM over the checkpoint weight, MHA on the interleaved layout, caches as decode's states; the prefill reference matches the CPU prefill's last-token logits and caches, and decode continues from the graph's own caches; the application's forward pass runs both phases over the references | operators lower with the value; full ELF at the scaled config with `last` in the table; at Llama size the trace has 291 steps over 11 overlays and one layer builds to a full ELF (the sixteen-layer sequence lowering is past this host's memory, see §20) | **needs a device**: the token stream and time to first token (§20 step 8) |
 | llama decode as a graph function (§14 step 7) | `iron/models/llama_graphs.py`, `llama_npu.py` | traced at a scaled-down config: 24 steps per block, weights named from the model, caches as state, both values bound (the softmax's on its overlay), like projections on one array, every operator tuned on an 8-column fake device | builds to a fused ELF at the scaled config, both values in the parameter table (full-ELF gate) | **needs a device**: parity against the token snapshot (§18) is the gate |
 | graph functions (§14 step 6) | `iron/common/graph.py`, `iron/__init__.py`, `declare.py` hooks | 22 tests: runlist and names from roles, overlays shared by key, values bound and enabling, states, byte slices, instance calls, rank and shape rules, refused returns; every traced operator tunes from a fake device | the build path (`TracedGraph.sequence` → `OperatorSequence` → the fused ELF, and → the chained xclbins) verified by the full-ELF and xclbin gates; **needs a device**: writing values through `params` and calling |
-| the shipped flm image, foreign overlays (§9) | `iron/operators/flm/foreign.py`, `iron/operators/flm/gemm/shipped.py` (was `mm_prebuilt/`, a second operator; now a second overlay of `flm.GEMM`, its instruction stream byte-identical at four shapes) | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
+| the shipped flm image, external overlays (§9) | `iron/common/external.py`, `iron/operators/flm/gemm/shipped.py` (was `mm_prebuilt/`, a second operator; now a second overlay of `flm.GEMM`, its instruction stream byte-identical at four shapes) | pins and parameter block declared; 32 cores' words then locks before any DMA; consume-order transfers and per-slot queue bound checked against the old emitter's arithmetic | **needs a run**: the raw-dialect emission (`aiex.runtime_sequence(*types)` with `*args`, `shim_dma_single_bd_task`) has only been exercised against a recorder |
 
 Step 2 is complete. Step 3 so far: repeat, strided_copy, transpose, gemm
 and mha are declared overrides (`design(rt)` over the same `Sequence`), with
@@ -1236,9 +1236,9 @@ xclbin depends on (its `config_name` is the stem), `GEMM` is the shape and
 activation as residents, and `tuning(dev)` no longer looks at K; the legacy
 constructor reproduces the old K-dependent `tile_n` default by passing it
 explicitly. mem_copy's array was already extent-free. mm_prebuilt is the
-foreign case: an `Xclbin` class attribute in place of `design()`, streams
+external case: an `Xclbin` class attribute in place of `design()`, streams
 pinned with `via=Shim(col, channel)`, a `Resident(address=, lock=)` block,
-and `iron.operators.flm.foreign` emitting the raw-dialect sequence the old
+and `iron.common.external` emitting the raw-dialect sequence the old
 `design.py` hand-wrote; task groups are no-ops there and the per-slot
 queue bound comes from the stream's `depth`. The C12 read-back against
 `input_with_addresses.mlir` is not done: a downloaded xclbin has no such

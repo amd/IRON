@@ -509,7 +509,7 @@ def build_design(
 
     op = op.tuned(dev)
     ov = op.ov
-    if ov.foreign is not None:
+    if ov.external is not None:
         # A downloaded image: no array to build, only the sequence against
         # the pins the overlay declares, which the overlay itself emits.
         return ov.build(dev, op)

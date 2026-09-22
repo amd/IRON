@@ -137,7 +137,7 @@ reuse lint
        **operator** (`X(Operator[XOverlay])`) is the host side: `dim()` fields,
        `In`/`Out` buffers declared by shape against the overlay's streams,
        `residents()` from the extents, and optionally `design(rt)` when the
-       runtime sequence is not the derived one. Foreign overlays (a downloaded
+       runtime sequence is not the derived one. External overlays (a downloaded
        xclbin) declare an `Xclbin` attribute and pinned streams instead of
        `design()`.
      - The operator's `reference(*inputs)` is the CPU reference the tests
@@ -165,8 +165,8 @@ reuse lint
    - `declare.py`: the declaration layer (`Overlay`, `Operator`, `@operator`,
      `dim`/`tunable`, streams, buffers, `Scratchpad`/`DispatchTime`, `Resident`,
      `Xclbin`, inference)
-   - `build.py`, `tiling.py`, `foreign.py`: the library-owned build: the
-     derived runtime sequence, legal DMA descriptors, the foreign-overlay path
+   - `build.py`, `tiling.py`, `external.py`: the library-owned build: the
+     derived runtime sequence, legal DMA descriptors, the external-overlay path
    - `graph.py`, `packaging.py`: graph functions (`iron.graph`, `iron.state`)
      and `compile(dev, boundaries=, image=)`
    - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`)
