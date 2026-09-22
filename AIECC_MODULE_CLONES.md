@@ -59,6 +59,10 @@ step), and the three splits over `npuLowered` multiply the lowered module
 
 ## Fix
 
+A draft of this is on mlir-aie's `claude/mlir-aie-iron-upstream` branch
+(`pruneSplitClone` in `tools/aiecc/Actions.h`), unbuilt here; the validation
+below is what to run once it builds.
+
 Prune each clone to what its consumer reads, keeping symbol resolution
 working. Concretely, give `SplitIRAction` an optional prune callback run
 on the clone after the matched op is found, and pass one at each call
