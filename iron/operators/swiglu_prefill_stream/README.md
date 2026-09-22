@@ -27,7 +27,7 @@ them, so workload and mapping cannot disagree. Both files are written into the
 experiment's output directory at build time; nothing is committed.
 
 stream-dse returns one MLIR design per fusion group. IRON takes it from there:
-`iron/common/sequence.py` fuses the designs into a single module and compiles it with
+`iron/common/image/` fuses the designs into a single module and compiles it with
 `aiecc` into one full ELF.
 
 Nothing crosses the boundary except those files, which is why stream-dse can be an

@@ -7,7 +7,7 @@ Everything here runs without a device and without generating MLIR: it checks
 what ``@operator`` records and rejects at class creation, how bound members
 resolve on instances, how inference binds fields from operand shapes, and how
 tuning and specialisation behave. The design-generating half is
-``iron/common/build.py`` and needs the toolchain.
+``iron/common/design/`` and needs the toolchain.
 """
 
 import dataclasses

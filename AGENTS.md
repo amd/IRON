@@ -132,7 +132,7 @@ reuse lint
      `op.py` for one that also has a design, a reference, a README or a
      device test of its own (`gemm/`, `mha/`, `flm/gemm/`).
    - An operator module holds:
-     - the operator, declared as two classes (`iron/common/declare.py`,
+     - the operator, declared as two classes (`iron/common/declare/`,
        `OPERATOR_MODEL_PLAN.md`). The **overlay** (`XOverlay(Overlay)`) is the
        array configuration: `tunable()` fields filled by `tuning(dev)` from the
        device alone, `StreamIn`/`StreamOut` members in tile units, `Resident`
@@ -437,20 +437,6 @@ errors = verify_buffer(
 )
 assert len(errors) == 0, f"Found {len(errors)} mismatches"
 ```
-
-### Datatype Conversion Helpers
-
-```python
-from iron.common.utils import torch_to_numpy, numpy_to_torch
-
-# Convert torch tensor to numpy (preserves bfloat16)
-np_array = torch_to_numpy(torch_tensor)
-
-# Convert numpy array to torch (preserves bfloat16)
-torch_tensor = numpy_to_torch(np_array)
-```
-
-These utilities handle bfloat16 conversion correctly (avoiding float32 intermediate).
 
 ## Debugging and Performance
 

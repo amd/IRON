@@ -23,8 +23,6 @@ from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
 
-from ..image.artifacts import Artifacts, Design, Step
-from ..image.jit_compile import insts_design, xclbin_design
 
 from .bound import BoundBuffer, BoundValue
 from .field import DimRef, dim, _Optional, _Select
@@ -478,6 +476,11 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     def _build(self):
         """Compile to an xclbin and an instruction stream, or, on an external
         overlay, to the stream alone against the downloaded image."""
+        # image/ reads this package, so naming it at module scope would make
+        # the two import each other.
+        from ..image.artifacts import Artifacts, Design, Step
+        from ..image.jit_compile import insts_design, xclbin_design
+
         image = self.ov.external
         if image is None:
             design = xclbin_design(self.generator(), kernel_name="MLIR_AIE")
