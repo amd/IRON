@@ -516,9 +516,6 @@ class GEMM(Operator[GEMMOverlay]):
     M: int = dim()
     K: int = dim()
     N: int = dim()
-    # C drained one (m x n) tile per descriptor rather than one (m*4 x n) block.
-    separate_c_tiles: bool = field(default=False, repr=False)
-
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
     A = In(M, K, dtype=GEMMOverlay.dtype_in, to=GEMMOverlay.a)
@@ -604,7 +601,6 @@ class GEMM(Operator[GEMMOverlay]):
             ov.mem_tile_n,
         )
         c_col_maj, b_col_maj = ov.c_col_maj, ov.b_col_maj
-        separate_c_tiles = self.separate_c_tiles
         dtype_out = ov.dtype_out
 
         # A shim BD's outermost descriptor dimension lands in the ITERATION field,
@@ -678,90 +674,65 @@ class GEMM(Operator[GEMMOverlay]):
                     # For small input sizes, we may not even need a "pong" iteration
                     break
                 for col in range(n_aie_cols):
-                    if not separate_c_tiles:
-                        # C Output Transfer for smaller N dimensions:
-                        # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
-                        # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
-                        # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
-                        # Each shim will start at a different column offset, transferring interleaved
-                        # columns.
-                        #
-                        # Normally one descriptor walks all current_tb_n_rows
-                        # row-blocks. When that outermost stride overflows the
-                        # shim's 20-bit iteration step (see _hw_stride_ok
-                        # above), issue one descriptor per row-block instead,
-                        # carrying the row jump in the OFFSET -- which has no
-                        # such limit -- and leaving the outer dimension
-                        # degenerate. Same bytes, same order, same number of
-                        # objects; only the descriptor is reshaped.
-                        #
-                        # These extra tasks are safe against the two shim
-                        # limits neither the toolchain nor the verifier models.
-                        # BD ids: all of a (tb, pingpong) iteration's tasks stay
-                        # live until tg.finish() below, so they stay distinct --
-                        # 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
-                        # task queue: the C channel goes from 2 outstanding to
-                        # current_tb_n_rows x 2 = 4, which is where A and B
-                        # already sit.
-                        C_rows = [(row_base, current_tb_n_rows)]
+                    # C Output Transfer for smaller N dimensions:
+                    # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
+                    # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
+                    # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
+                    # Each shim will start at a different column offset, transferring interleaved
+                    # columns.
+                    #
+                    # Normally one descriptor walks all current_tb_n_rows
+                    # row-blocks. When that outermost stride overflows the
+                    # shim's 20-bit iteration step (see _hw_stride_ok
+                    # above), issue one descriptor per row-block instead,
+                    # carrying the row jump in the OFFSET -- which has no
+                    # such limit -- and leaving the outer dimension
+                    # degenerate. Same bytes, same order, same number of
+                    # objects; only the descriptor is reshaped.
+                    #
+                    # These extra tasks are safe against the two shim
+                    # limits neither the toolchain nor the verifier models.
+                    # BD ids: all of a (tb, pingpong) iteration's tasks stay
+                    # live until tg.finish() below, so they stay distinct --
+                    # 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
+                    # task queue: the C channel goes from 2 outstanding to
+                    # current_tb_n_rows x 2 = 4, which is where A and B
+                    # already sit.
+                    C_rows = [(row_base, current_tb_n_rows)]
+                    if not c_col_maj:
+                        row_stride = mem_tile_m_C * N
+                        if current_tb_n_rows > 1 and not _hw_stride_ok(
+                            row_stride, np.dtype(dtype_out).itemsize
+                        ):
+                            C_rows = [
+                                (row_base + r, 1) for r in range(current_tb_n_rows)
+                            ]
+                    for c_row_base, c_n_rows in C_rows:
                         if not c_col_maj:
-                            row_stride = mem_tile_m_C * N
-                            if current_tb_n_rows > 1 and not _hw_stride_ok(
-                                row_stride, np.dtype(dtype_out).itemsize
-                            ):
-                                C_rows = [
-                                    (row_base + r, 1) for r in range(current_tb_n_rows)
-                                ]
-                        for c_row_base, c_n_rows in C_rows:
-                            if not c_col_maj:
-                                C_row_offset = c_row_base * mem_tile_m_C * N
-                                C_col_offset = col * n
-                                C_offset = C_col_offset + C_row_offset
-                                C_sizes = [c_n_rows, N // mem_tile_n, mem_tile_m_C, n]
-                                C_strides = [
-                                    mem_tile_m_C * N if c_n_rows > 1 else 0,
-                                    mem_tile_n,
-                                    N,
-                                    1,
-                                ]
-                            else:
-                                C_row_offset = c_row_base * mem_tile_m_C
-                                C_col_offset = col * n * M
-                                C_offset = C_col_offset + C_row_offset
-                                C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                                C_strides = [M * mem_tile_n, m, M, 1]
-                            C_tile = TensorAccessPattern(
-                                (N, M) if c_col_maj else (M, N),
-                                offset=C_offset,
-                                sizes=C_sizes,
-                                strides=C_strides,
-                            )
-                            rt.drain(ov.c[col], (self.C, C_tile), group=tg, wait=True)
+                            C_row_offset = c_row_base * mem_tile_m_C * N
+                            C_col_offset = col * n
+                            C_offset = C_col_offset + C_row_offset
+                            C_sizes = [c_n_rows, N // mem_tile_n, mem_tile_m_C, n]
+                            C_strides = [
+                                mem_tile_m_C * N if c_n_rows > 1 else 0,
+                                mem_tile_n,
+                                N,
+                                1,
+                            ]
+                        else:
+                            C_row_offset = c_row_base * mem_tile_m_C
+                            C_col_offset = col * n * M
+                            C_offset = C_col_offset + C_row_offset
+                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
+                            C_strides = [M * mem_tile_n, m, M, 1]
+                        C_tile = TensorAccessPattern(
+                            (N, M) if c_col_maj else (M, N),
+                            offset=C_offset,
+                            sizes=C_sizes,
+                            strides=C_strides,
+                        )
+                        rt.drain(ov.c[col], (self.C, C_tile), group=tg, wait=True)
                     for tile_row in range(current_tb_n_rows):
-                        if separate_c_tiles:
-                            # C Output Transfer for larger N dimensions: the
-                            # smallest transfer unit is an (m)-x-(n)-sized
-                            # sub-tile, one for every (n_aie_cols)-th column.
-                            C_col_offset = col * n if not c_col_maj else col * n * M
-                            if not c_col_maj:
-                                C_block_offset = (
-                                    (row_base + tile_row) * n_aie_rows * m * N
-                                )
-                                C_offset = C_col_offset + C_block_offset
-                                C_sizes = [1, n_c_col_tiles_per_core, mem_tile_m_C, n]
-                                C_strides = [0, mem_tile_n, N, 1]
-                            else:
-                                C_block_offset = (row_base + tile_row) * n_aie_rows * m
-                                C_offset = C_col_offset + C_block_offset
-                                C_sizes = [n_c_col_tiles_per_core, 1, n, m]
-                                C_strides = [M * mem_tile_n, 0, M, 1]
-                            C_tile = TensorAccessPattern(
-                                (N, M) if c_col_maj else (M, N),
-                                offset=C_offset,
-                                sizes=C_sizes,
-                                strides=C_strides,
-                            )
-                            rt.drain(ov.c[col], (self.C, C_tile), group=tg, wait=True)
                         # A input transfer: the smallest unit is a
                         # (m*n_A_tiles_per_shim)-sized sub-tile, one per column,
                         # repeated (N//n//n_aie_cols) times; each shim carries
@@ -788,55 +759,6 @@ class GEMM(Operator[GEMMOverlay]):
     def reference(self, A, B):
         """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
         return reference(A, B, self.ov.b_col_maj, self.ov.c_col_maj)
-
-    def pad_A(self, A_np):
-        """Pad A matrix to match operator dimensions (M, K)"""
-        M, K = A_np.shape
-        if M > self.M:
-            raise ValueError(f"A rows ({M}) exceeds operator M ({self.M})")
-        if M == self.M and K == self.K:
-            return A_np
-        M_padded = ((M + self.M - 1) // self.M) * self.M
-        A_padded = np.zeros((M_padded, self.K), dtype=A_np.dtype)
-        A_padded[:M, :K] = A_np
-        return A_padded
-
-    def pad_B(self, B_np):
-        """Pad B matrix to match operator dimensions based on layout"""
-        if self.ov.b_col_maj:
-            N, K = B_np.shape
-            if N > self.N or K > self.K:
-                raise ValueError(
-                    f"B (col-major) shape ({N}, {K}) exceeds operator N ({self.N}), K ({self.K})"
-                )
-            if N == self.N and K == self.K:
-                return B_np
-            B_padded = np.zeros((self.N, self.K), dtype=B_np.dtype)
-            B_padded[:N, :K] = B_np
-        else:
-            K, N = B_np.shape
-            if N > self.N or K > self.K:
-                raise ValueError(
-                    f"B (row-major) shape ({K}, {N}) exceeds operator K ({self.K}), N ({self.N})"
-                )
-            if K == self.K and N == self.N:
-                return B_np
-            B_padded = np.zeros((self.K, self.N), dtype=B_np.dtype)
-            B_padded[:K, :N] = B_np
-        return B_padded
-
-    def partition_B(self, B, partition_N):
-        B_parts = [None] * partition_N
-        if B is None:
-            return B_parts
-        for i in range(partition_N):
-            col_start = i * self.N
-            col_end = (i + 1) * self.N
-            if self.ov.b_col_maj:
-                B_parts[i] = self.pad_B(B[col_start:col_end, :])
-            else:
-                B_parts[i] = self.pad_B(B[:, col_start:col_end])
-        return B_parts
 
 
 # --------------------------------------------------------------------------

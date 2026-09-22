@@ -304,12 +304,9 @@ def test_swiglu_prefill_traces_over_a_sequence(monkeypatch):
 
 
 def test_llama_decode_traces_and_tunes(monkeypatch):
-    import sys
-
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, "iron/applications/llama_3.2_1b")
-    from llama_graphs import DecodeGraph
+    from iron.models.llama_graphs import DecodeGraph
 
     cfg = _Config()
     L = 256
@@ -370,12 +367,9 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
 
 
 def test_llama_prefill_traces_over_the_decode_caches():
-    import sys
-
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, "iron/applications/llama_3.2_1b")
-    from llama_graphs import DecodeGraph, PrefillGraph
+    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
 
     cfg = _Config()
     L = cfg.context_length

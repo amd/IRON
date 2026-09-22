@@ -8,7 +8,6 @@ Same gate as ``lowering.py``: aiecc to an instruction stream, no Peano.
 """
 
 import dataclasses
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +31,7 @@ def _lower_all(traced, tmp_path):
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph
+    from iron.models.llama_graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
@@ -45,8 +43,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph, PrefillGraph
+    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
 
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)

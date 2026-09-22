@@ -5,11 +5,10 @@
 
 """
 Inference harness -- all the necessary code _other_ than the actual model (forward pass).
-Exposes a 'harness' function that can be called with a 'forward_pass' function that implements the model.
-The 'harness' function does the following:
-1. Load and set up model weights, tokenizer, and RoPE angle look-up table.
-2. Tokenize the provided input prompt.
-3. Run the generation loop to produce new tokens; this calls the provided forward_pass function. Decode and print each generated token.
+``init`` loads the weights, the tokenizer and the RoPE table and tokenizes
+the prompt; ``generate`` runs the generation loop, calling the given
+``forward_pass(config, state)`` for the prompt and then per token, and
+decodes and prints each token.
 """
 
 import torch
@@ -19,9 +18,10 @@ import time
 import argparse
 
 import safetensors.torch
-import tiktoken, tiktoken.load
+import tiktoken
+import tiktoken.load
 
-from iron.models.llama import Llama
+from iron.models.llama import Llama, rope_angles
 
 # Configuration
 # ##########################################################################
@@ -69,63 +69,22 @@ class LlamaConfig:
         self.model = Llama.from_hf(self, self.weights)
         self.tokenizer = get_tokenizer(tokenizer_path, self.special_tokens)
 
-        # Compute RoPE angle look-up table
-        self.angles = compute_rope_angles(
-            self.head_dim, self.context_length, self.rope_base
-        )
+        # The RoPE angle look-up table
+        self.angles = rope_angles(self.head_dim, self.context_length, self.rope_base)
 
 
 class LlamaModelState:
-    def __init__(self, config):
-        # Current IDs of tokens being processed (most recent token for decode; all prompt tokens for prefill)
-        self.token_ids = torch.empty(0, dtype=torch.long)
-        self.reset_kv_cache(config)
+    """What a forward pass is given: the tokens to run (the whole prompt for
+    prefill, the latest token for decode) and how many came before them.
+    The KV cache itself lives on the device."""
 
-    def reset_kv_cache(self, config):
+    def __init__(self, config):
+        self.token_ids = torch.empty(0, dtype=torch.long)
         self.num_preceding_tokens = 0
-        # Set up KV cache -- initially empty
-        # This is what passes information from previous tokens to the current token during generation
-        self.attn_keys_caches = [
-            torch.empty(
-                1,
-                config.n_kv_groups,
-                0,
-                config.head_dim,
-                dtype=config.model.layers[0].attn.k.weight.dtype,
-            )  # (batch_size, n_kv_groups, seq_len, head_dim)
-            for _ in range(config.n_layers)
-        ]
-        self.attn_values_caches = [
-            torch.empty(
-                1,
-                config.n_kv_groups,
-                0,
-                config.head_dim,
-                dtype=config.model.layers[0].attn.v.weight.dtype,
-            )  # (batch_size, n_kv_groups, seq_len, head_dim)
-            for _ in range(config.n_layers)
-        ]
 
 
 # Utilities
 # ##########################################################################
-
-
-def compute_rope_angles(head_dim, context_length, rope_base=500000.0):
-    """Compute RoPE (Rotary Position Embedding) angles."""
-    # Precompute the frequency tensor
-    inv_freq = 1.0 / (rope_base ** (torch.arange(0, head_dim, 2).float() / head_dim))
-    position = torch.arange(context_length).float()
-    freqs = torch.outer(position, inv_freq)
-
-    cos = torch.cos(freqs)
-    sin = torch.sin(freqs)
-
-    # Interleave cos and sin - create angles buffer
-    angles = torch.empty(context_length, head_dim)
-    angles[:, ::2] = cos
-    angles[:, 1::2] = sin
-    return angles
 
 
 def get_tokenizer(tokenizer_path, special_tokens):
@@ -218,9 +177,9 @@ def init(
     # Tokenize prompt
     prompt_token_ids = [config.special_tokens["<|begin_of_text|>"]]
     prompt_token_ids += config.tokenizer.encode(prompt)
-    assert (
-        len(prompt_token_ids) <= config.context_length
-    ), f"Prompt length ({len(prompt_token_ids)} tokens) exceeds model context length ({config.context_length})"
+    assert len(prompt_token_ids) <= config.context_length, (
+        f"Prompt length ({len(prompt_token_ids)} tokens) exceeds model context length ({config.context_length})"
+    )
     prompt_token_ids = torch.tensor([prompt_token_ids], dtype=torch.long)
 
     state.token_ids = prompt_token_ids
@@ -228,7 +187,7 @@ def init(
     return config, state
 
 
-def generate(config, state, forward_pass, num_tokens=100, use_kv_cache=True):
+def generate(config, state, forward_pass, num_tokens=100):
     # Generate tokens
     # First token (prefill)
     n_tokens_generated = 0
@@ -240,26 +199,14 @@ def generate(config, state, forward_pass, num_tokens=100, use_kv_cache=True):
     t_prefill_stop = time.perf_counter()
 
     # Remaining tokens (decode)
-    if use_kv_cache:
-        state.token_ids = torch.tensor([[first_token]], dtype=torch.long)
-    else:
-        state.reset_kv_cache(config)
-        state.token_ids = torch.cat(
-            [state.token_ids, torch.tensor([[first_token]], dtype=torch.long)], dim=1
-        )
+    state.token_ids = torch.tensor([[first_token]], dtype=torch.long)
     t_decode_start = time.perf_counter()
     for _ in range(num_tokens - 1):
         next_token, state = generate_token(config, forward_pass, state)
         token_text = config.tokenizer.decode([next_token])
         n_tokens_generated += 1
         print(token_text, end="", flush=True)
-        if use_kv_cache:
-            state.token_ids = torch.tensor([[next_token]], dtype=torch.long)
-        else:
-            state.reset_kv_cache(config)
-            state.token_ids = torch.cat(
-                [state.token_ids, torch.tensor([[next_token]], dtype=torch.long)], dim=1
-            )
+        state.token_ids = torch.tensor([[next_token]], dtype=torch.long)
     t_decode_end = time.perf_counter()
 
     t_prefill = t_prefill_stop - t_prefill_start

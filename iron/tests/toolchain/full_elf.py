@@ -24,7 +24,6 @@ with the toolchain and no device compiles ahead of time and hands the
 image on.
 """
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -94,8 +93,7 @@ def _assert_values_in_table(traced, work):
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph
+    from iron.models.llama_graphs import DecodeGraph
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
@@ -112,8 +110,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
     430), past this gate's memory at the full depth."""
     from iron.tests.common.llama_model import Llama1B
 
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph, PrefillGraph
+    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
 
     cfg = Llama1B()
     cfg.n_layers, cfg.model.layers = 1, cfg.model.layers[:1]
@@ -127,8 +124,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
     from iron.tests.common.llama_model import Config as _Config
 
-    sys.path.insert(0, str(Path("iron/applications/llama_3.2_1b").resolve()))
-    from llama_graphs import DecodeGraph, PrefillGraph
+    from iron.models.llama_graphs import DecodeGraph, PrefillGraph
 
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)

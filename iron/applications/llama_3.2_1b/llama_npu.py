@@ -3,19 +3,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Next steps for decode performance:
-# [ ] All decode operators operate on 2048-padded buffers; instead, should bin into shorter sequence lengths and call smaller operators
-# [ ] Opportunity to fuse data layout transformations (e.g., transpose ops) onto end of other operations (e.g., transpose after RoPE)
-# [ ] Some kernels are not optimized; e.g., softmax masking is using scalar cores
-# [ ] Fine-tune parameters of operators (e.g., num AIE columns, tile sizes)
-# [ ] Patching of operators (instantiating new xrt::elf for each token) is slow; find quicker way of patching instruction sequence in-memory
-# [ ] Spatial fusion of operators
+"""Llama 3.2 1B on the NPU: the prefill and decode graphs as two fused images."""
 
 import logging
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 
 import llama_inference_harness as harness
@@ -24,7 +17,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from iron.common.context import AIEContext  # noqa: E402
-from llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
+from iron.models.llama_graphs import DecodeGraph, PrefillGraph  # noqa: E402
 
 max_seq_len = 2048
 
@@ -41,7 +34,7 @@ class AIELlama:
 
     def __init__(self, config):
         context = AIEContext(build_dir="build_elf")
-        self.decode_graph = DecodeGraph(config, max_seq_len, tensor=_bf16_tensor)
+        self.decode_graph = DecodeGraph(config, max_seq_len)
         self.decode = self.decode_graph.compile(config, context=context)
         self.prefill_graph = PrefillGraph(config, self.decode_graph)
         self.prefill = self.prefill_graph.compile(config, context=context)
@@ -51,10 +44,6 @@ class AIELlama:
         for i in range(config.n_layers):
             for cache in (graph.keys[i], graph.values[i]):
                 self.decode.write(cache, self.prefill.read(cache))
-
-
-def _bf16_tensor(array):
-    return torch.from_numpy(np.ascontiguousarray(array)).to(torch.bfloat16)
 
 
 # Prefill
@@ -152,9 +141,7 @@ def main():
     npu = AIELlama(config)
 
     print(prompt, end="", flush=True)
-    harness.generate(
-        config, state, llama_forward_pass, use_kv_cache=True, num_tokens=args.num_tokens
-    )
+    harness.generate(config, state, llama_forward_pass, num_tokens=args.num_tokens)
 
 
 if __name__ == "__main__":

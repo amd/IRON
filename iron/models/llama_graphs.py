@@ -10,12 +10,16 @@ and the softmax's valid row length are per-call scratchpad values.
 :class:`PrefillGraph` runs the prompt, at the compile-time maximum length
 with the prompt in a prefix, writes the caches and returns the last
 prompt token's logits. Both are traced here on handles; compiled by
-``llama_npu.py`` against a device, or by a test against nothing.
+``iron/applications/llama_3.2_1b/llama_npu.py`` against a device, or by a
+test against nothing. ``config`` is the model's shape (``n_layers``,
+``n_heads``, ``n_kv_groups``, ``head_dim``, ``emb_dim``, ``hidden_dim``)
+with the parameter tree as ``config.model`` (:class:`iron.models.llama.Llama`).
 """
 
 import math
 
 import numpy as np
+import torch
 
 import iron
 from iron.common.declare import Scratchpad
@@ -42,7 +46,7 @@ class DecodeGraph:
     tensor, since the elementwise multiply takes one.
     """
 
-    def __init__(self, config, max_seq_len, *, num_aie_columns=None, tensor=None):
+    def __init__(self, config, max_seq_len, *, num_aie_columns=None):
         model = config.model
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
@@ -67,8 +71,7 @@ class DecodeGraph:
             for i in range(config.n_layers)
         ]
         # 1/sqrt(head_dim) over every score, as the elementwise multiply wants it.
-        make = tensor or _numpy_bf16
-        self.scale = make(np.full((H, L), 1.0 / math.sqrt(D), dtype=np.float32))
+        self.scale = torch.full((H, L), 1.0 / math.sqrt(D), dtype=torch.bfloat16)
         keys, values, scale = self.keys, self.values, self.scale
 
         # Matrices are read as the checkpoint ships them, (out, in): GEMV's
@@ -285,9 +288,3 @@ class PrefillGraph:
 
     def compile(self, config, **kwargs):
         return self.graph.compile(**self.shapes(config), **kwargs)
-
-
-def _numpy_bf16(array):
-    from ml_dtypes import bfloat16
-
-    return np.asarray(array, dtype=bfloat16)

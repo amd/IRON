@@ -1,38 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2's parameters, as a module tree.
+"""Llama 3.2: its parameters as a module tree, and the plain forward pass.
 
-A checkpoint is a ``state_dict``, so the thing that reads one should be an
+A checkpoint is a ``state_dict``, so the thing that reads one is an
 ``nn.Module``. Declaring the tree once buys the whole surface for free:
-``load_state_dict`` to fill it, ``named_parameters()`` to walk it, ``__repr__``
-to print it -- and, most usefully here, a *name* for every weight that is the
-same string on the checkpoint, in the module tree, and on the device buffer.
+``load_state_dict`` to fill it, ``named_parameters()`` to walk it, and a
+*name* for every weight that is the same string on the checkpoint, in the
+tree, and on the device buffer (the graphs in :mod:`iron.models.llama_graphs`
+close over the tree and name their weight buffers from it).
 
-That last point is what this file is really for. Both llama backends used to
-spell out where each weight came from, one hand-typed key per weight per
-layer::
-
-    self.decode.fused.get_buffer(f"W_attn_query_{i}").torch_view()[:] = (
-        config.weights[f"model.layers.{i}.self_attn.q_proj.weight"].flatten())
-
-with a matching list on the prefill side. Nine of those per layer, in two
-places, with a ``.T`` on some and not others. Here the same fact is one row of
-:data:`FROM_HF`, and uploading is a loop over ``named_parameters()``.
-
-This tree holds parameters and nothing else -- no ``forward``. What llama
-*computes* lives in ``iron/applications/llama_3.2_1b/``: the NPU runlists in
-``llama_npu.py`` and the torch reference in ``llama_cpu.py``. Giving this class
-a third opinion on the same arithmetic would be the duplication the tree is
-meant to remove.
+:meth:`Llama.forward` is the model as torch computes it: a stateless causal
+pass over one token sequence. It is the second opinion the graphs are
+checked against on the host (``iron/tests/common/llama_reference.py``): the
+graph references define what the graphs compute, so only an independent
+forward can catch a wiring mistake, a transposed layout or a softmax over
+the wrong length. It needs no cache, because the logits at position ``t``
+of a causal pass over ``t + 1`` tokens are what a cached decode produces at
+step ``t``.
 """
 
 import torch
+import torch.nn.functional as F
 from torch import nn
-
-# Layout differs by phase and belongs to neither the checkpoint nor the model:
-# prefill's GEMM wants each projection K-major (hence ``.T``), decode's GEMV
-# wants it M-major. Both read the same parameter and transform on upload.
 
 
 class Attention(nn.Module):
@@ -74,11 +64,41 @@ class Llama(nn.Module):
 
     def __init__(self, cfg, dtype=torch.bfloat16):
         super().__init__()
+        self.n_heads, self.n_kv_groups, self.head_dim = (
+            cfg.n_heads,
+            cfg.n_kv_groups,
+            cfg.head_dim,
+        )
         self.layers = nn.ModuleList([Block(cfg, dtype) for _ in range(cfg.n_layers)])
         self.norm = _norm(cfg.emb_dim, dtype)
         # Llama 3.2 ties the output head to the token embedding, so this one
         # parameter is read both to embed a token and to produce logits.
         self.out_head = _proj(cfg.emb_dim, cfg.vocab_size, dtype)
+
+    def forward(self, tokens, angles):
+        """Logits at every position of one token sequence, causally.
+
+        ``tokens`` is ``(n,)``; ``angles`` the RoPE table, of which the first
+        ``n`` rows apply. Returns ``(n, vocab_size)``.
+        """
+        (n,), H, G, D = tokens.shape, self.n_heads, self.n_kv_groups, self.head_dim
+        x = F.embedding(tokens, self.out_head.weight)
+        for blk in self.layers:
+            h = blk.norm1(x)
+            q = _rope(blk.attn.q(h).view(n, H, D), angles[:n])
+            k = _rope(blk.attn.k(h).view(n, G, D), angles[:n])
+            v = blk.attn.v(h).view(n, G, D)
+            o = F.scaled_dot_product_attention(
+                q.transpose(0, 1),
+                k.transpose(0, 1),
+                v.transpose(0, 1),
+                is_causal=True,
+                enable_gqa=True,
+            )
+            x = x + blk.attn.o(o.transpose(0, 1).reshape(n, H * D))
+            h = blk.norm2(x)
+            x = x + blk.ffn.down(F.silu(blk.ffn.gate(h)) * blk.ffn.up(h))
+        return self.out_head(self.norm(x))
 
     @classmethod
     def from_hf(cls, cfg, weights, dtype=torch.bfloat16):
@@ -99,6 +119,26 @@ class Llama(nn.Module):
         # host ``F.linear``; grad tracking would only cost memory and surprise.
         model.requires_grad_(False)
         return model
+
+
+def rope_angles(head_dim, context_length, rope_base=500000.0):
+    """The RoPE table, ``(context_length, head_dim)``: cos and sin interleaved
+    per frequency, as the device kernel and :func:`_rope` read it."""
+    inv_freq = 1.0 / (rope_base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    freqs = torch.outer(torch.arange(context_length).float(), inv_freq)
+    angles = torch.empty(context_length, head_dim)
+    angles[:, ::2] = torch.cos(freqs)
+    angles[:, 1::2] = torch.sin(freqs)
+    return angles
+
+
+def _rope(x, angles):
+    """Rotate the two halves of each ``(n, heads, head_dim)`` row by its position."""
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    cos = angles[:, ::2].unsqueeze(1).to(x.dtype)
+    sin = angles[:, 1::2].unsqueeze(1).to(x.dtype)
+    return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
 
 
 # Hugging Face names, translated once

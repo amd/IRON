@@ -137,7 +137,7 @@ All available operators can be found in `iron/operators`. These each contain:
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
 - `test.py`: An end-to-end test that instantiates and builds the operator, runs it on random inputs for its declared buffers (`golden(op)` in `iron/common/test_utils`) and verifies its outputs against the reference.
 
-Operators compose into graph functions: a Python function called on handles, traced once for its shapes, compiled to one image and called per token (`iron.graph`, see `iron/common/graph.py`; `iron/applications/llama_3.2_1b/decode_graph.py` is the worked example).
+Operators compose into graph functions: a Python function called on handles, traced once for its shapes, compiled to one image and called per token (`iron.graph`, see `iron/common/graph.py`; `iron/models/llama_graphs.py` is the worked example).
 
 > NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`
