@@ -22,6 +22,7 @@ import subprocess
 import pytest
 
 from iron.common.declare import Incompatible, Untunable
+from iron.common.design import generator_for
 from iron.tests.common.cases import CASES
 from iron.tests.toolchain.tools import AIECC, requires
 
@@ -38,7 +39,7 @@ def lower(op, tmp_path, name=None):
     # generator() call in one process must do the same, or two designs
     # declaring one kernel with different flags collide.
     ExternalFunction._instances.clear()
-    src.write_text(str(op.generator()()))
+    src.write_text(str(generator_for(op)()))
     out = tmp_path / "out"
     result = subprocess.run(
         [
