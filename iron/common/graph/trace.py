@@ -11,7 +11,7 @@ import itertools
 import numpy as np
 from ml_dtypes import bfloat16
 
-from ..declare import Operator, Resident
+from ..declare import Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
 from ..image.sequence import OperatorSequence
 from .handle import Handle, State, Value, _tensor_dtype, is_operand
@@ -183,10 +183,11 @@ class Tracer:
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
-        inferred = cls.infer(
+        inferred = infer(
+            cls,
             *[h.shape for h in inputs],
             outputs=[h.shape for h in outputs],
-            **cls.infer_kwargs(kwargs),
+            **infer_kwargs(cls, kwargs),
         )
         # The class's own translation splits overlay fields from the
         # operator's and fills what it derives (a transfer size, a dtype

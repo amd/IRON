@@ -6,7 +6,7 @@
 An operator is declared against one overlay and adds the extents that size
 the host buffers. Changing an extent re-issues the runtime sequence; it does
 not rebuild the array, which is why the two layers are separate classes.
-Calling one binds it: :meth:`Operator.infer` turns operand shapes into the
+Calling one binds it: :func:`~iron.common.declare.infer` turns operand shapes into the
 extents, and the instance's buffer attributes answer in elements.
 """
 
@@ -14,19 +14,16 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABCMeta
-from dataclasses import MISSING
-from typing import Any, Callable, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
-import numpy as np
-from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
 
 
 from .bound import BoundBuffer, BoundValue
-from .field import DimRef, dim, _Optional, _Select
-from .member import In, Out, _Buffer, _Member, _Value
+from .infer import infer, infer_kwargs
+from .member import _Buffer, _Member, _Value
 from .naming import label_parts
 from .overlay import Overlay
 
@@ -237,179 +234,12 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
                 bound[m.name] = BoundValue(m, self)
         self._bound = bound
 
-    # -- inference ---------------------------------------------------------
-
-    @classmethod
-    def from_spec(
-        cls,
-        name: str,
-        *,
-        inputs: dict[str, tuple[int, ...]],
-        outputs: dict[str, tuple[int, ...]],
-        dtype: Any = bfloat16,
-        key: str = "",
-        params: dict[str, Any] | None = None,
-        generator: Callable | None = None,
-    ) -> type:
-        """An operator class from an exported description, at run time.
-
-        The dynamic escape for a design whose shapes come from a file rather
-        than a formula (swiglu_prefill_stream's stream-dse export). ``inputs``
-        and ``outputs`` are literal shapes in argument order; ``params`` are
-        the numbers that identify the instance (they become ``dim()`` fields
-        with those defaults and reach the name); ``key`` identifies the
-        generated design, for sharing; ``generator`` replaces
-        :meth:`generator`, since the sequence is not derived. The
-        overlay is a stand-in carrying only ``key``.
-        """
-        import types
-
-        from .decorator import operator  # a class made at run time still checks
-
-        def overlay_ns(ns):
-            ns["__module__"] = cls.__module__
-            ns["__annotations__"] = {"key": str}
-            ns["key"] = dim(key, repr=False)
-
-        overlay_cls = operator(
-            types.new_class(f"{name}Overlay", (Overlay,), {}, overlay_ns)
-        )
-
-        def operator_ns(ns):
-            ns["__module__"] = cls.__module__
-            ns["__annotations__"] = {}
-            for pname, value in (params or {}).items():
-                ns["__annotations__"][pname] = type(value)
-                ns[pname] = dim(value)
-            for bname, shape in inputs.items():
-                ns[bname] = In(*shape, dtype=dtype)
-            for bname, shape in outputs.items():
-                ns[bname] = Out(*shape, dtype=dtype)
-            ns["design_key"] = lambda self: self.ov.key or None
-            if generator is not None:
-                ns["generator"] = generator
-
-        return operator(
-            types.new_class(name, (cls[overlay_cls],), {}, operator_ns)  # type: ignore[index]
-        )
-
-    @classmethod
-    def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
-        """Bind dimension fields from operand shapes, in ``In`` declaration order.
-
-        A lookup, not a solver: each declared dimension is a field or a
-        literal. Returns ``{field: value}`` for both the operator's and the
-        overlay's fields; ``given`` pins values and is checked for agreement.
-        ``outputs`` are the shapes of caller-supplied ``Out`` buffers, in
-        declaration order, which bind the same way.
-        """
-        ins = [
-            m
-            for m in cls._members
-            if isinstance(m, _Buffer) and m.direction in ("in", "inout")
-        ]
-        if len(operand_shapes) != len(ins):
-            raise TypeError(
-                f"{cls.__name__} takes {len(ins)} operand(s) "
-                f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
-            )
-        outs = [
-            m for m in cls._members if isinstance(m, _Buffer) and m.direction == "out"
-        ]
-        if outputs and len(outputs) != len(outs):
-            raise TypeError(
-                f"{cls.__name__} produces {len(outs)} output(s) "
-                f"({', '.join(m.name for m in outs)}), got {len(outputs)}"
-            )
-        pairs = list(zip(ins, operand_shapes)) + list(zip(outs, outputs))
-        bound: dict[str, Any] = dict(given)
-        origin: dict[str, str] = {k: "given" for k in given}
-
-        def bind(ref: DimRef, value: int, where: str) -> None:
-            key = ref.name
-            if key in bound and bound[key] != value:
-                raise ValueError(
-                    f"{cls.__name__}: {ref!r} is {value} from {where} but "
-                    f"{bound[key]} from {origin[key]}"
-                )
-            bound[key] = value
-            origin.setdefault(key, where)
-
-        for m, shape in pairs:
-            shape = tuple(int(s) for s in shape)
-            dims = list(m.dims)
-            leading = dims[0] if dims and isinstance(dims[0], _Optional) else None
-            if leading is not None:
-                if len(shape) == len(dims):
-                    bind(leading.ref, shape[0], f"{m.name}.shape[0]")
-                    shape = shape[1:]
-                elif len(shape) == len(dims) - 1:
-                    bind(leading.ref, 1, f"{m.name} (rank {len(shape)})")
-                else:
-                    raise ValueError(
-                        f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
-                        f"declared {m!r}"
-                    )
-                dims = dims[1:]
-            expanded: list = []
-            for d in dims:
-                if isinstance(d, _Select):
-                    flag = d.flag
-                    if flag.name in bound:
-                        value = bound[flag.name]
-                    else:
-                        fld = next(
-                            (
-                                f
-                                for f in dataclasses.fields(flag.owner)
-                                if f.name == flag.name
-                            ),
-                            None,
-                        )
-                        if fld is None or fld.default is MISSING:
-                            raise ValueError(
-                                f"{cls.__name__}: {flag!r} selects {m.name}'s shape and "
-                                f"has no default; pass it explicitly"
-                            )
-                        value = fld.default
-                    expanded.extend(d.when_true if value else d.when_false)
-                else:
-                    expanded.append(d)
-            dims = expanded
-            if len(dims) == 1 and len(shape) != 1:
-                # A flat buffer takes an operand of any rank: its one
-                # dimension is the element count.
-                shape = (int(np.prod(shape)) if shape else 1,)
-            if len(shape) != len(dims):
-                raise ValueError(
-                    f"{cls.__name__}: operand {m.name} has rank {len(shape)} {shape}, "
-                    f"declared rank {len(dims)} {m!r}"
-                )
-            for i, (d, n) in enumerate(zip(dims, shape)):
-                if isinstance(d, DimRef):
-                    bind(d, n, f"{m.name}.shape[{i}]")
-                elif int(d) != n:
-                    raise ValueError(
-                        f"{cls.__name__}: operand {m.name}.shape[{i}] is {n}, declared {d}"
-                    )
-        return bound
-
-    @classmethod
-    def infer_kwargs(cls, kwargs) -> dict[str, Any]:
-        """The part of ``kwargs`` that :meth:`infer` takes: both layers' dimension
-        fields and the flags that select a buffer's shape."""
-        names = set(cls._dim_fields)
-        if cls._overlay_class:
-            names.update(cls._overlay_class._dim_fields)
-        for m in cls._members:
-            if isinstance(m, _Buffer):
-                names.update(d.flag.name for d in m.dims if isinstance(d, _Select))
-        return {k: v for k, v in kwargs.items() if k in names}
+    # -- construction from operand shapes ----------------------------------
 
     @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> "Operator":
         """Construct an operator (and its overlay) from operand shapes."""
-        values = cls.infer(*operand_shapes, **cls.infer_kwargs(overrides))
+        values = infer(cls, *operand_shapes, **infer_kwargs(cls, overrides))
         kwargs = {**overrides, **values}
         return cls(**kwargs)  # classic-construction path splits overlay fields
 
@@ -436,7 +266,14 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         return f"{base}_{dev.resolve().name}"
 
     def generator(self, image: str = "elf"):
-        """The design generator :class:`CompilableDesign` runs for this operator."""
+        """The design generator :class:`CompilableDesign` runs for this operator.
+
+        An override point, not a forwarder: an operator whose design is
+        exported text rather than derived from the declaration replaces this
+        (see :func:`from_spec`, and swiglu_prefill_stream, which loads its
+        group from the exported module). Everything else takes the default,
+        which is ``build_design`` over the declaration.
+        """
         from ..design import generator_for  # reads this package: a cycle at module scope
 
         return generator_for(self, image=image)

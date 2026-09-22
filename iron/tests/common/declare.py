@@ -33,6 +33,8 @@ from iron.common.declare import (
     StreamOut,
     Untunable,
     dim,
+    from_spec,
+    infer,
     operator,
     optional,
     tunable,
@@ -382,19 +384,19 @@ def test_operator_tuned_runs_compatible():
 
 
 def test_infer_binds_both_layers_from_operands():
-    assert MV.infer((1024, 256), (256,)) == {"M": 1024, "K": 256, "num_batches": 1}
-    assert MV.infer((3, 1024, 256), (3, 256)) == {"num_batches": 3, "M": 1024, "K": 256}
+    assert infer(MV, (1024, 256), (256,)) == {"M": 1024, "K": 256, "num_batches": 1}
+    assert infer(MV, (3, 1024, 256), (3, 256)) == {"num_batches": 3, "M": 1024, "K": 256}
 
 
 def test_infer_reports_conflicts_naming_both_operands():
     with pytest.raises(
         ValueError, match=r"K is 128 from B.shape\[0\] but 256 from A.shape\[1\]"
     ):
-        MV.infer((1024, 256), (128,))
+        infer(MV, (1024, 256), (128,))
     with pytest.raises(ValueError, match="rank"):
-        MV.infer((1, 2, 3, 4), (256,))
+        infer(MV, (1, 2, 3, 4), (256,))
     with pytest.raises(ValueError, match="K is 512 from A.shape"):
-        MV.infer((1024, 512), (512,), K=256)
+        infer(MV, (1024, 512), (512,), K=256)
 
 
 def test_from_operands_constructs_overlay_and_operator():
@@ -442,7 +444,7 @@ def test_inout_and_shim_pins_declare():
 def test_from_spec_builds_an_operator_from_literal_shapes():
     # swiglu_prefill_stream's escape: shapes from an exported graph, a
     # design that is not derived, an identity for sharing.
-    Group = Operator.from_spec(
+    Group = from_spec(
         "Group",
         inputs={"input": (64, 128), "w_gate": (128, 256)},
         outputs={"left": (64, 256)},
@@ -457,9 +459,9 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
     assert op.design_key() == "abc123"
     assert op.generator() == "generator"
     # Literal shapes bind no field; inference only checks them.
-    assert Group.infer((64, 128), (128, 256)) == {}
+    assert infer(Group, (64, 128), (128, 256)) == {}
     with pytest.raises(ValueError):
-        Group.infer((64, 128), (128, 512))
+        infer(Group, (64, 128), (128, 512))
 
 
 # --------------------------------------------------------------------------

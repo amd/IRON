@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 
-from iron.common import DesignGenerator, Operator
+from iron.common import DesignGenerator, from_spec
 from iron.common.kernels import kernels_dir
 from iron.common.image import OperatorSequence
 
@@ -19,7 +19,7 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
     lists them. The buffers' shapes and order come from the workload, which is
     also the order the generated design takes its arguments in; the design
     itself is the exported text, so the class is built at run time
-    (``Operator.from_spec``) rather than declared.
+    (:func:`~iron.common.declare.from_spec`) rather than declared.
     """
     from iron.operators.swiglu_prefill_stream import stream_design
 
@@ -44,7 +44,7 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
             },
         )
 
-    cls = Operator.from_spec(
+    cls = from_spec(
         "SwiGLUStreamGroup",
         inputs={name: shapes[name] for name in inputs},
         outputs={name: shapes[name] for name in outputs},

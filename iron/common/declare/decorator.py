@@ -5,18 +5,33 @@
 
 Everything here runs once, when a class body is executed. What it cannot
 prove then -- an operator's extents against a tuned overlay -- is left to
-:meth:`Operator.infer`.
+:func:`~iron.common.declare.infer`.
+
+:func:`from_spec` is the same checks reached the other way: a class built
+from an exported description at run time still goes through ``@operator``.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import types
 from dataclasses import Field
+from typing import Any, Callable
 
 import numpy as np
+from ml_dtypes import bfloat16
 
-from .field import DeclarationError, DimRef, _Optional, _Select, _tier_of
-from .member import DispatchTime, Resident, Xclbin, _Buffer, _Member, _Stream
+from .field import DeclarationError, DimRef, dim, _Optional, _Select, _tier_of
+from .member import (
+    DispatchTime,
+    In,
+    Out,
+    Resident,
+    Xclbin,
+    _Buffer,
+    _Member,
+    _Stream,
+)
 from .operator import Operator
 from .overlay import Overlay
 
@@ -296,3 +311,50 @@ def _overlay_class_of(cls: type) -> type | None:
                 if isinstance(a, type) and issubclass(a, Overlay):
                     return a
     return None
+
+
+def from_spec(
+    name: str,
+    *,
+    inputs: dict[str, tuple[int, ...]],
+    outputs: dict[str, tuple[int, ...]],
+    dtype: Any = bfloat16,
+    key: str = "",
+    params: dict[str, Any] | None = None,
+    generator: Callable | None = None,
+) -> type:
+    """An operator class from an exported description, at run time.
+
+    The dynamic escape for a design whose shapes come from a file rather
+    than a formula (swiglu_prefill_stream's stream-dse export). ``inputs``
+    and ``outputs`` are literal shapes in argument order; ``params`` are
+    the numbers that identify the instance (they become ``dim()`` fields
+    with those defaults and reach the name); ``key`` identifies the
+    generated design, for sharing; ``generator`` replaces
+    :meth:`Operator.generator`, since the sequence is not derived. The
+    overlay is a stand-in carrying only ``key``.
+    """
+    module = Operator.__module__
+
+    def overlay_ns(ns):
+        ns["__module__"] = module
+        ns["__annotations__"] = {"key": str}
+        ns["key"] = dim(key, repr=False)
+
+    overlay_cls = operator(types.new_class(f"{name}Overlay", (Overlay,), {}, overlay_ns))
+
+    def operator_ns(ns):
+        ns["__module__"] = module
+        ns["__annotations__"] = {}
+        for pname, value in (params or {}).items():
+            ns["__annotations__"][pname] = type(value)
+            ns[pname] = dim(value)
+        for bname, shape in inputs.items():
+            ns[bname] = In(*shape, dtype=dtype)
+        for bname, shape in outputs.items():
+            ns[bname] = Out(*shape, dtype=dtype)
+        ns["design_key"] = lambda self: self.ov.key or None
+        if generator is not None:
+            ns["generator"] = generator
+
+    return operator(types.new_class(name, (Operator[overlay_cls],), {}, operator_ns))

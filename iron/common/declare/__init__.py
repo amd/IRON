@@ -37,7 +37,7 @@ written in the class body using the field's bare name::
 
 The shape rule: a host buffer's dimension is a ``dim()`` field or an integer
 literal, nothing else. Not a tunable, not a per-call value, not an
-expression. That is what makes inference a lookup (:meth:`Operator.infer`)
+expression. That is what makes inference a lookup (:mod:`.infer`)
 and what lets the checks in :mod:`.decorator` run once, at class creation.
 A stream's tile dimension may also be a tunable: choosing the tile is what
 tuning is for, and inference never reads a stream.
@@ -49,7 +49,8 @@ the target, not a design being built.
 
 The package reads bottom-up: :mod:`.field` is what a class body writes,
 :mod:`.member` what it declares alongside its fields, :mod:`.bound` what an
-instance's attribute gives back, :mod:`.overlay` and :mod:`.operator` the two
+instance's attribute gives back, :mod:`.infer` how operand shapes reach a
+declaration's dimension fields, :mod:`.overlay` and :mod:`.operator` the two
 layers themselves, and :mod:`.decorator` the checks both go through at class
 creation. :mod:`.naming` is how either one spells its own label.
 """
@@ -61,7 +62,7 @@ from .bound import (
     BoundValue,
     BufferView,
 )
-from .decorator import operator
+from .decorator import from_spec, operator
 from .field import (
     DeclarationError,
     DimRef,
@@ -72,6 +73,7 @@ from .field import (
     select,
     tunable,
 )
+from .infer import infer, infer_kwargs
 from .member import (
     DispatchTime,
     In,
@@ -113,7 +115,10 @@ __all__ = [
     "ValueSpec",
     "Xclbin",
     "dim",
+    "from_spec",
     "get_shim_dma_limit",
+    "infer",
+    "infer_kwargs",
     "operator",
     "optional",
     "select",

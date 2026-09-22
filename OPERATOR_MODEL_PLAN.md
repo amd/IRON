@@ -615,7 +615,7 @@ else, so it is a tool for external overlays and not a default.
 
 **swiglu_prefill_stream does not fit.** Its shapes come from a graph that
 stream-dse exports at build time. It gets a dynamic escape, private to the
-stream package: `Operator.from_spec(...)` builds the members from the exported
+stream package: `from_spec(...)` builds the members from the exported
 description at class-creation time, and gives up pyright for that one
 operator, which already skips its tests when stream-dse is absent.
 
@@ -1251,7 +1251,7 @@ queue bound comes from the stream's `depth`. The C12 read-back against
 `input_with_addresses.mlir` is not done: a downloaded xclbin has no such
 file, so the check is structural (every stream pinned, every resident
 addressed) at class creation. swiglu_prefill_stream's group is
-`Operator.from_spec`: a class built at run time from the exported shapes,
+`from_spec`: a class built at run time from the exported shapes,
 with the group digest as its sharing key and the stream-dse loader as its
 artifact; the `OperatorSequence` composite around it stays until step 6.
 
