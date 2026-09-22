@@ -148,12 +148,12 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context):
     # Buffer sub-views handed to each operator's runtime sequence.
     assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
     # One inlined device per unique operator plus the top-level driver device.
-    assert (
-        "op0_ElementwiseAdd" in text and "op1_ReLU" in text
-    ), "operator devices not inlined into fused module"
-    assert (
-        text.count("aie.device") >= 3
-    ), "expected two operator devices plus a top-level device"
+    assert "op0_ElementwiseAdd" in text and "op1_ReLU" in text, (
+        "operator devices not inlined into fused module"
+    )
+    assert text.count("aie.device") >= 3, (
+        "expected two operator devices plus a top-level device"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +191,7 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
     out = _run_add_relu(aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
     assert torch.equal(out, baseline), (
-        f"dispatch={dispatch!r} output is not bit-identical to the separate "
-        f"baseline"
+        f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
     )
 
 
@@ -258,9 +257,9 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
 
     expected = torch.cat([a0 + b0, a1 + b1])
     errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
-    assert (
-        not errors
-    ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
+    assert not errors, (
+        f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
+    )
 
 
 # ---------------------------------------------------------------------------

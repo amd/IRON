@@ -5,11 +5,10 @@ import hashlib
 import inspect
 import logging
 import time
-from pathlib import Path
 import numpy as np
 import ml_dtypes
-from . import compilation as comp
-from .base import AIEOperatorBase
+from . import fusion
+from .context import AIEContext
 from .declare import Operator
 from .jit_compile import DispatchStream
 import aie.utils as aie_utils
@@ -59,12 +58,6 @@ def _require_xrt() -> None:
 # ##########################################################################
 
 
-def _trace_tag(seq):
-    """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
-    untraced one's ELF. Empty when untraced."""
-    return f"_traced{seq.trace_size}" if seq.trace_size else ""
-
-
 def build_fused_mlir(seq) -> str:
     """The fused MLIR text: every design inlined into one module.
 
@@ -77,7 +70,7 @@ def build_fused_mlir(seq) -> str:
     design_names = []
 
     for idx, op in enumerate(designs):
-        generator = op.get_mlir_artifact().generator
+        generator = op.generator()
         # Ask the design whether it takes a prefix, rather than inferring it
         # from the operator having kernel artifacts: an operator whose
         # design declares ExternalFunctions reports no artifacts at all, and
@@ -94,7 +87,7 @@ def build_fused_mlir(seq) -> str:
     for op, *bufs in seq.runlist:
         comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
-    return comp.fuse_mlir(
+    return fusion.fuse_mlir(
         operator_generators,
         comp_runlist,
         seq.subbuffer_layout,
@@ -106,35 +99,39 @@ def build_fused_mlir(seq) -> str:
 class FusedImage:
     """The full ELF: every design fused into one module (NPU2 only)."""
 
-    def link(self, seq):
-        """Link the ELF once (idempotent); returns its path.
+    def __init__(self):
+        self.design = None
 
-        Goes through CompilableDesign, which keys its cache on content, locks
-        across processes and validates depfiles.
+    def link(self, seq):
+        """Build the ELF once (idempotent); returns its path.
+
+        Through CompilableDesign, which owns the cache: it keys on the fused
+        text's content, locks across processes and validates the kernels'
+        depfiles, and the ELF lands in its entry.
         """
-        from .jit_compile import compile_fused_elf
+        from .jit_compile import fused_design
 
         if not isinstance(aie_utils.get_current_device(), NPU2):
             raise RuntimeError(
                 "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
             )
-        if getattr(seq, "elf_path", None) is None:
-            seq.elf_path = compile_fused_elf(
+        if self.design is None:
+            self.design = fused_design(
                 lambda: build_fused_mlir(seq),
-                Path(seq.context.build_dir) / f"{seq.name}{_trace_tag(seq)}.elf",
                 extra_flags=seq.extra_flags,
                 trace_size=seq.trace_size,
             )
-        return seq.elf_path
+        return self.design.get_cache_entry().elf
 
 
 class XclbinChain:
     """One xclbin and instruction stream per design, each linked onto the
     previous (``--xclbin-input``); the last link carries every kernel. Holds
-    the per-operator paths the xclbin callable dispatches with."""
+    the per-operator designs the xclbin callable dispatches with."""
 
     def __init__(self):
         self.combined_xclbin_path = None
+        self.op_design_map = {}  # id(op) -> CompilableDesign
         self.op_xclbin_path_map = {}  # id(op) -> xclbin path
         self.op_insts_path_map = {}  # id(op) -> insts path, or a DispatchStream
         self.op_kernel_name_map = {}  # id(op) -> kernel name
@@ -143,11 +140,10 @@ class XclbinChain:
         """Build the chain once (idempotent); returns the last link."""
         if self.combined_xclbin_path is not None:
             return self.combined_xclbin_path
-        from .jit_compile import compile_xclbin_insts
+        from .jit_compile import dispatch_stream, xclbin_design
 
         # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
         name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
-        build_dir = Path(seq.context.build_dir)
 
         # One kernel instance per design, not per operator: with
         # share_designs, operators reporting one design_key generate one
@@ -158,10 +154,8 @@ class XclbinChain:
         for idx, op in enumerate(designs):
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
-            xclbin_path, insts_path = compile_xclbin_insts(
-                op.get_mlir_artifact(image="xclbin").generator,
-                build_dir / f"{op_label}.xclbin",
-                build_dir / f"{op_label}.bin",
+            design = xclbin_design(
+                op.generator(image="xclbin"),
                 kernel_name=op_label,
                 xclbin_input=prev_xclbin_path,
                 extra_flags=[
@@ -169,13 +163,16 @@ class XclbinChain:
                     f"--xclbin-kernel-id={kernel_id}",
                 ],
             )
-            built.append((xclbin_path, insts_path, op_label))
-            prev_xclbin_path = xclbin_path
+            entry = design.get_cache_entry()
+            stream = dispatch_stream(design) or entry.insts
+            built.append((design, entry.xclbin, stream, op_label))
+            prev_xclbin_path = entry.xclbin
 
         for op in seq.unique_operators():
-            xclbin_path, insts_path, op_label = built[design_of[id(op)]]
+            design, xclbin_path, stream, op_label = built[design_of[id(op)]]
+            self.op_design_map[id(op)] = design
             self.op_xclbin_path_map[id(op)] = xclbin_path
-            self.op_insts_path_map[id(op)] = insts_path
+            self.op_insts_path_map[id(op)] = stream
             self.op_kernel_name_map[id(op)] = op_label
 
         # The last xclbin in the chain carries all the linked instances.
@@ -188,7 +185,7 @@ class XclbinChain:
 # ##########################################################################
 
 
-class OperatorSequence(AIEOperatorBase):
+class OperatorSequence:
     """Operator that concatenates a runlist of operators into a
     single dispatch.
 
@@ -227,10 +224,16 @@ class OperatorSequence(AIEOperatorBase):
                 "runlist entries must be (Operator, *str) tuples; "
                 "each operator must be an Operator and each buffer name must be a str"
             )
-        super().__init__(*args, **kwargs)
+        if args:
+            raise TypeError(
+                f"OperatorSequence takes no positional extras, got {args!r}"
+            )
+        self.context = kwargs.pop("context", None) or AIEContext.default()
+        if kwargs:
+            raise TypeError(f"unexpected keyword arguments {sorted(kwargs)}")
         self.runlist = runlist
-        # Sharing changes which designs are built, so it belongs in the name that
-        # keys the build artifacts.
+        # Sharing changes which designs are built, so it belongs in the label
+        # the chain's kernel instances are named from.
         self.name = name + "_shared" if share_designs else name
         self.input_args = input_args
         self.output_args = output_args
@@ -250,7 +253,7 @@ class OperatorSequence(AIEOperatorBase):
         # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
         self.trace_size = trace_size
         self.share_designs = share_designs
-        self.mode = mode  # None until the device is known (set_up_artifacts)
+        self.mode = mode  # None until the device is known (prepare)
         self._image = None  # the mode's image builder, once resolved
 
     @staticmethod
@@ -330,9 +333,7 @@ class OperatorSequence(AIEOperatorBase):
 
     def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> the declared buffer
-        sliced_buffers = (
-            {}
-        )  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
+        sliced_buffers = {}  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
 
         for op, *bufs in self.runlist:
             declared = op.buffers
@@ -448,9 +449,8 @@ class OperatorSequence(AIEOperatorBase):
         buffer_sizes = (input_buffer_size, output_buffer_size, scratch_buffer_size)
         return subbuffer_layout, buffer_sizes, slice_info
 
-    def set_up_artifacts(self):
-        """Lay the buffers out and settle the mode; nothing else is an artifact
-        (each design's kernels are compiled with its image)."""
+    def prepare(self):
+        """Lay the buffers out and settle the mode, before anything is built."""
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
@@ -462,27 +462,93 @@ class OperatorSequence(AIEOperatorBase):
         image, _ = _MODES[self.mode]
         self._image = image() if image is not None else None
 
-    def compile(self, dry_run: bool = False):
-        """Build the artifacts and the image, ahead of time.
+    def compile(self):
+        """Build the image ahead of time, and record what it consists of.
 
-        The base class builds the artifact graph (kernel objects and the
-        like); the image itself, the fused ELF or the chained xclbins, was
-        only linked on the way to a callable, so ``compile()`` on a host
-        without a runtime stopped short of the thing worth handing on.
-        ``link()`` is idempotent and ``get_callable()`` still goes through it.
+        ``link()`` is idempotent and ``get_callable()`` still goes through
+        it, so this is the ahead-of-time path: a host with the toolchain and
+        no runtime compiles and hands the image on.
         """
-        super().compile(dry_run=dry_run)
-        if not dry_run:
-            self.link()
+        self.prepare()
+        self.link()
+        if self.context.record == "disk" and self.artifacts is not None:
+            self.artifacts.dump()
         return self
 
     def link(self):
         """Build this sequence's image, once; sets ``self.image`` (``None`` for
-        the reference mode)."""
+        the reference mode) and :attr:`artifacts`."""
         if not hasattr(self, "subbuffer_layout"):
-            AIEOperatorBase.compile(self)
+            self.prepare()
         self.image = self._image.link(self) if self._image is not None else None
+        self._artifacts = self._record()
         return self.image
+
+    @property
+    def elf_path(self):
+        """The fused ELF, when that is this sequence's image."""
+        return self.image if isinstance(self._image, FusedImage) else None
+
+    @property
+    def artifacts(self):
+        """The record of what :meth:`link` produced (``None`` in reference mode)."""
+        return getattr(self, "_artifacts", None)
+
+    def _record(self):
+        """What this image consists of: its designs, its steps, its buffers."""
+        from .artifacts import Artifacts, Design, Step
+
+        if self._image is None:
+            return None
+        designs, design_of = self.unique_designs()
+        operators = list(self.unique_operators())
+        labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
+        sharing = [
+            tuple(op.name for op in operators if design_of[id(op)] == i)
+            for i in range(len(designs))
+        ]
+        if isinstance(self._image, FusedImage):
+            entry = self._image.design.get_cache_entry()
+            records = tuple(
+                Design(name=labels[i], operators=sharing[i])
+                for i in range(len(designs))
+            )
+            kind, image, insts = "elf", entry.elf, None
+        else:
+            chain = self._image
+            entry = None
+            records = []
+            for i, op in enumerate(designs):
+                design = chain.op_design_map[id(op)]
+                own = design.get_cache_entry()
+                entry = entry or own
+                records.append(
+                    Design(
+                        name=chain.op_kernel_name_map[id(op)],
+                        operators=sharing[i],
+                        entry=own,
+                        image=own.xclbin,
+                        insts=chain.op_insts_path_map[id(op)],
+                    )
+                )
+            records = tuple(records)
+            kind, image, insts = "xclbin", chain.combined_xclbin_path, None
+        by_design = {id(op): labels[design_of[id(op)]] for op in operators}
+        if kind == "xclbin":
+            by_design = {id(op): chain.op_kernel_name_map[id(op)] for op in operators}
+        steps = tuple(
+            Step(i, op.name, by_design[id(op)], tuple(names))
+            for i, (op, *names) in enumerate(self.runlist)
+        )
+        return Artifacts(
+            kind=kind,
+            image=image,
+            insts=insts,
+            entry=entry,
+            designs=records,
+            steps=steps,
+            buffers=dict(self.subbuffer_layout),
+        )
 
     def get_callable(self):
         """The runtime callable of this sequence's mode, compiling first if
@@ -621,7 +687,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.device_name = device_name
         self.sequence_name = sequence_name
 
-        xrt_elf = pyxrt.elf(str(seq.elf_path))
+        xrt_elf = pyxrt.elf(str(seq.image))
         xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
         self.xrt_kernel = pyxrt.ext.kernel(
             xrt_context, f"{self.device_name}:{self.sequence_name}"
@@ -645,20 +711,17 @@ class SequenceFullELFCallable(SequenceCallable):
     def params(self):
         """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
 
-        The ``params.txt`` describing the runtime parameters is requested from
-        aiecc via ``--get-scratchpad-parameters``; it is a graph output, so it
-        lands in aiecc's ``--output-dir``, which compile_mlir_module() points at
-        the work dir (see ``_aiecc_work_dir``) for the fused MLIR source.
-        Returns ``None`` if the sequence declared no runtime parameters: the
-        file is still written, but holds a count of zero and there is no ctrl
+        The ``params.txt`` describing the runtime parameters is requested
+        from aiecc via ``--get-scratchpad-parameters`` and lands in the
+        build's cache entry, which :attr:`Artifacts.params` names. Returns
+        ``None`` if the sequence declared no runtime parameters: the file
+        still exists, but holds a count of zero and there is no ctrl
         scratchpad buffer object to bind to.
         """
         if self._params is not None:
             return self._params
-        from .jit_compile import fused_work_dir
-
-        params_path = fused_work_dir(self.op.elf_path) / "params.txt"
-        if not params_path.exists():
+        params_path = self.op.artifacts.params
+        if params_path is None:
             return None
         if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
@@ -681,16 +744,13 @@ class SequenceFullELFCallable(SequenceCallable):
         # sub-designs claim a share, so read it from the lowered module.
         self.trace_buffer = None
         if self.op.trace_size:
-            total = comp.trace_buffer_size(self.lowered_mlir_text())
+            total = fusion.trace_buffer_size(self.lowered_mlir_text())
             if total:
                 self.trace_buffer = XRTTensor((total,), dtype=np.int8)
 
     def lowered_mlir_text(self) -> str:
         """aiecc's post-lowering module, which carries the trace buffer layout."""
-        from .jit_compile import fused_work_dir
-
-        path = fused_work_dir(self.op.elf_path) / "input_with_addresses.mlir"
-        return path.read_text()
+        return self.op.artifacts.lowered_mlir.read_text()
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:

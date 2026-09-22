@@ -378,9 +378,9 @@ class GEMV(Operator[GEMVOverlay]):
             # safe: a producer that gets ahead blocks on the buffer lock (worst
             # case a stall, never a corrupting overrun). depth>=2 only buys
             # overlap of fill with compute, so it is a performance guard here.
-            assert (
-                ov.a.depth >= 2 and ov.c.depth >= 2
-            ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
+            assert ov.a.depth >= 2 and ov.c.depth >= 2, (
+                "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
+            )
             A_coalesced = [
                 coalesced(A_elems, col * (M // cols) * K, A_split, A_bstride)
                 for col in range(cols)

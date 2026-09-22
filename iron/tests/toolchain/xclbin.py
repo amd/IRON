@@ -74,10 +74,14 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
 
     op = flm.GEMM(M=256, K=512, N=512, context=AIEContext(build_dir=str(tmp_path)))
     op.compile()
-    assert Path(op._xclbin_path).name == f"{op.config_name}.xclbin"
-    assert Path(op._insts_path).name == f"{op.name}.bin"
-    assert Path(op._xclbin_path).stat().st_size > 0
-    assert Path(op._insts_path).stat().st_size > 0
+    artifacts = op.artifacts
+    assert artifacts.image.stat().st_size > 0
+    assert artifacts.insts.stat().st_size > 0
+    # The configuration's image is its own entry, named for the configuration;
+    # the stream is this shape's, in another.
+    (design,) = artifacts.designs
+    assert design.name == op.config_name
+    assert design.entry.directory != artifacts.entry.directory
     # The shape's own compile is instructions-only: no second xclbin, no
     # second kernel build.
     assert not (tmp_path / f"{op.name}.xclbin").exists()
@@ -102,8 +106,8 @@ def test_shipped_builds_its_instructions_for_the_foreign_image(npu2, tmp_path):
         clamp=(-2.0, 2.0),
         context=AIEContext(build_dir=str(tmp_path)),
     )
-    op.link_xclbin()
-    assert Path(op._insts_path).stat().st_size > 0
+    op.compile()
+    assert op.artifacts.insts.stat().st_size > 0
 
 
 def test_shipped_fetches_its_image(npu2, tmp_path):
@@ -112,7 +116,7 @@ def test_shipped_fetches_its_image(npu2, tmp_path):
         op.compile()
     except (urllib.error.URLError, OSError) as e:  # no network here
         pytest.skip(f"the prebuilt xclbin could not be fetched: {e}")
-    image = Path(op.xclbin_artifact.filename)
+    image = Path(op.artifacts.image)
     assert image.exists() and image.stat().st_size > 0
 
 
@@ -124,7 +128,7 @@ def test_a_declared_operator_compiles_to_an_xclbin_on_npu1(tmp_path):
     try:
         op = GEMV(M=512, K=1024, context=AIEContext(build_dir=str(tmp_path)))
         op.compile()
-        assert Path(op._xclbin_path).stat().st_size > 0
-        assert Path(op._insts_path).stat().st_size > 0
+        assert op.artifacts.image.stat().st_size > 0
+        assert op.artifacts.insts.stat().st_size > 0
     finally:
         aie_utils.set_current_device(previous)

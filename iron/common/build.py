@@ -14,7 +14,7 @@ fill/drain sequence from the buffer-to-stream bindings or hands a
 
 ``build_design`` is also the one design function every declared operator
 compiles through, so the existing compile and fusion paths
-(``compile_xclbin_insts``, ``fuse_mlir``) see nothing new: they call it with
+(``xclbin_design``, ``fuse_mlir``) see nothing new: they call it with
 the operator bound by name, exactly as they call ``my_matvec`` today.
 
 Everything that touches mlir-aie is imported inside the functions that need
@@ -26,11 +26,12 @@ from __future__ import annotations
 import hashlib
 import inspect
 from contextlib import contextmanager
-from typing import Any
+import dataclasses
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 
-from .compilation import DesignGenerator, PythonGeneratedMLIRArtifact
 from .declare import (
     BoundBuffer,
     BoundStream,
@@ -41,6 +42,45 @@ from .declare import (
     _StreamSlot,
 )
 from .tiling import Access, encode, legalize, split, whole
+
+# --------------------------------------------------------------------------
+# A design and its arguments, as CompilableDesign runs it
+# --------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class DesignGenerator:
+    """A design function and the arguments it is generated with.
+
+    ``fn`` is the function (an operator's design is ``build_design`` over the
+    operator); a design loaded from a file names ``source_path`` and
+    ``fn_name`` instead (swiglu_prefill_stream's exported text). Called for
+    its MLIR text; ``resolve()`` hands ``CompilableDesign`` the function and
+    its keyword arguments to run inside ``compile()``.
+    """
+
+    fn: Callable | None = None
+    kwargs: dict = dataclasses.field(default_factory=dict)
+    source_path: Path | None = None
+    fn_name: str | None = None
+    args: tuple = ()
+
+    def resolve(self) -> tuple[Callable, tuple, dict]:
+        if self.fn is not None:
+            return self.fn, self.args, self.kwargs
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            self.source_path.name, self.source_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return getattr(module, self.fn_name), self.args, self.kwargs
+
+    def __call__(self) -> str:
+        fn, args, kwargs = self.resolve()
+        return str(fn(*args, **kwargs))
+
 
 # --------------------------------------------------------------------------
 # What an overlay's design() receives
@@ -63,6 +103,7 @@ class Target:
         verbose: bool = False,
         trace_size: int = 0,
         image: str = "elf",
+        use_chess: bool = False,
     ):
         from pathlib import Path
 
@@ -73,6 +114,9 @@ class Target:
         self.arch = get_kernel_dir(dev)  # "aie2" | "aie2p"
         self.func_prefix = func_prefix
         self.verbose = verbose
+        # xchesscc rather than Peano, from the context; every kernel of one
+        # design must agree, which upstream enforces when it compiles them.
+        self.use_chess = use_chess
         self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
         # scratchpad. "xclbin": there is none (spike S2); they are dispatch-
@@ -106,8 +150,8 @@ class Target:
             name,
             arg_types,
             source=source,
-            prebuilt=prebuilt,
             func_prefix=self.func_prefix,
+            use_chess=self.use_chess,
             compile_flags=list(compile_flags),
             include_dirs=include_dirs,
             object_file_name=object_file_name,
@@ -441,11 +485,13 @@ def build_design(
     trace_size: int = 0,
     code: str = "",
     image: str = "elf",
+    use_chess: bool = False,
     **dispatch,
 ):
     """Generate the MLIR module for one declared operator.
 
-    Called by ``compile_xclbin_insts`` and ``fuse_mlir`` through the
+    Called by :mod:`iron.common.jit_compile`'s compile functions and by
+    ``fuse_mlir`` through the
     operator's ``DesignGenerator``; ``code`` exists only to reach the cache
     key (see :func:`mlir_artifact_for`).
     """
@@ -459,7 +505,9 @@ def build_design(
         from .foreign import build_foreign
 
         return build_foreign(dev, op)
-    target = Target(dev, kernels_dir, func_prefix, verbose, trace_size, image)
+    target = Target(
+        dev, kernels_dir, func_prefix, verbose, trace_size, image, use_chess
+    )
     target.base_dir = getattr(op.context, "base_dir", None)
 
     # Per-call values get their device parameters before the array is built,
@@ -534,7 +582,7 @@ def build_design(
 def _design_code(op: Operator) -> str:
     """A digest of the overlay's and operator's class source, for the cache key.
 
-    ``compile_xclbin_insts`` hashes the design *function* by its code, and
+    ``CompilableDesign`` hashes the design *function* by its code, and
     that function is :func:`build_design` for every declared operator. The
     code that actually varies is the two classes', so it is spelled here.
     """
@@ -554,31 +602,25 @@ def dispatch_parameters(op: Operator) -> list[tuple[str, Any]]:
     ]
 
 
-def mlir_artifact_for(
-    op: Operator, filename: str | None = None, image: str = "elf"
-) -> PythonGeneratedMLIRArtifact:
-    """The artifact the existing compile path expects, carrying ``build_design``.
+def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
+    """The generator ``CompilableDesign`` runs for ``op``: ``build_design`` over it.
 
-    ``filename`` names the module for an operator whose stem is not its own
-    name (flm/gemm's configuration-only build). ``image`` is the image the
-    module is built for: on ``"xclbin"`` its per-call values are the
-    generator's dispatch-time parameters, so the two images are two modules
-    and two cache keys.
+    ``image`` is the image the module is built for: on ``"xclbin"`` its
+    per-call values are the generator's dispatch-time parameters, so the two
+    images are two modules and two cache keys.
     """
-    return PythonGeneratedMLIRArtifact(
-        filename or f"{op.name}.mlir",
-        DesignGenerator(
-            fn=build_design,
-            kwargs={
-                "op": op,
-                "image": image,
-                "dispatch": dispatch_parameters(op) if image != "elf" else [],
-                "code": _design_code(op),
-                # Spelled here, not bound by name from the operator: the
-                # device reaches the cache key by identity, the kernel tree
-                # by path (pointing IRON at another tree changes the key).
-                "dev": op.dev,
-                "kernels_dir": op.kernels_dir,
-            },
-        ),
+    return DesignGenerator(
+        fn=build_design,
+        kwargs={
+            "op": op,
+            "image": image,
+            "dispatch": dispatch_parameters(op) if image != "elf" else [],
+            "code": _design_code(op),
+            "use_chess": op.context.use_chess,
+            # Spelled here, not bound by name from the operator: the
+            # device reaches the cache key by identity, the kernel tree
+            # by path (pointing IRON at another tree changes the key).
+            "dev": op.dev,
+            "kernels_dir": op.kernels_dir,
+        },
     )

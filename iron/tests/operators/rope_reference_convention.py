@@ -59,6 +59,6 @@ def test_reference_matches_device_convention_across_shapes():
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)
         got = reference(x, angles, rows=rows, cols=x.shape[-1])
-        assert torch.equal(
-            expected, got
-        ), f"mismatch at rows={rows} angle_rows={angle_rows}"
+        assert torch.equal(expected, got), (
+            f"mismatch at rows={rows} angle_rows={angle_rows}"
+        )

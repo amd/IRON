@@ -322,10 +322,8 @@ def test_one_xclbin_serves_every_shape(aie_context):
         )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
-        stamp = (
-            str(operator._xclbin_path),
-            os.path.getmtime(operator._xclbin_path),
-        )
+        image = operator.artifacts.image
+        stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
@@ -346,18 +344,16 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
         errors, _, _ = check_on_device(operator, vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
-        stamp = (
-            str(operator._xclbin_path),
-            os.path.getmtime(operator._xclbin_path),
-        )
+        image = operator.artifacts.image
+        stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"clamp={clamp} rebuilt the xclbin"
 
     # ...and neither does dropping the clamp: the kernel always clamps, and an
     # unclamped caller neutralises it with (-inf, +inf) rather than compiling
-    # a second build. config_name rather than _xclbin_path, which only
-    # exists once compile() has run.
+    # a second build. config_name rather than the image, which only exists
+    # once compile() has run.
     clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0], context=aie_context)
     unclamped = GEMM(M=M, K=K, N=N, context=aie_context)
     assert unclamped.config_name == clamped.config_name

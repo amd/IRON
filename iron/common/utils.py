@@ -27,6 +27,17 @@ def get_shim_dma_limit(dev) -> int:
     )
 
 
+def serialize_param(v: object) -> str:
+    """A parameter value as a short, filesystem-safe token for labels."""
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, float):
+        return float_to_name(v)
+    if isinstance(v, (list, tuple)):
+        return "x".join(str(x) for x in v)
+    return str(v)
+
+
 def float_to_name(v: float) -> str:
     """Convert a float to a filesystem-safe string for use in operator names.
 

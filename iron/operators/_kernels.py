@@ -18,7 +18,7 @@ in the operator, say -- is discarded and its object never compiled.
 from pathlib import Path
 
 import aie.utils.config
-from aie.iron import ExternalFunction, Kernel
+from aie.iron import ExternalFunction
 
 from iron.common.device_utils import get_kernel_dir
 
@@ -39,15 +39,15 @@ def declare_kernel(
     arg_types,
     *,
     source=None,
-    prebuilt=None,
     func_prefix="",
+    use_chess=False,
     compile_flags=(),
     include_dirs=None,
     object_file_name=None,
     bundled_sources=(),
     symbol_prefix=None,
 ):
-    """Declare the kernel a design calls, building it unless it is prebuilt.
+    """Declare the kernel a design calls, and how it is built.
 
     ``bundled_sources`` names translation units the kernel needs linked but
     never calls through MLIR -- ``lut_based_ops.cpp``, whose exp/log tables
@@ -61,10 +61,6 @@ def declare_kernel(
     ``-include`` files before the arch macros are established, and aie_api
     rejects that with "'__AIE_ARCH__' macro is required".
 
-    ``prebuilt`` names an object or archive that already exists and is linked
-    by name. Nothing in tree needs it now that bundling exists; it stays for a
-    caller that has a binary it did not build.
-
     ``object_file_name`` is for a source that defines more than one entry point
     the design calls. Left to default, each declaration is named for its own
     symbol and so gets its own object -- two compiles of one translation unit,
@@ -72,6 +68,9 @@ def declare_kernel(
     Pointing them at one object name instead makes them share it: identical
     source and flags give an identical content digest, so upstream neither
     reports a collision nor compiles twice.
+
+    ``use_chess`` picks the xchesscc front-end for this kernel, from the
+    context's ``compiler``; every kernel of one design must agree on it.
 
     ``func_prefix`` is IRON's fusion prefix and arrives with its trailing
     underscore ("op0_"). ``ExternalFunction`` joins with an underscore of its
@@ -84,8 +83,6 @@ def declare_kernel(
     stream group gets "op0_mm128_64_64_matmul_bf16_bf16": both the group it
     belongs to and the shape it was built for.
     """
-    if prebuilt is not None:
-        return Kernel(f"{func_prefix}{name}", f"{func_prefix}{prebuilt}", arg_types)
     prefix = f"{func_prefix}{symbol_prefix or ''}".rstrip("_") or None
     if object_file_name is not None and func_prefix:
         # Upstream names a defaulted object after the prefixed symbol; an
@@ -107,6 +104,7 @@ def declare_kernel(
             source_file=str(source),
             arg_types=arg_types,
             include_dirs=dirs,
+            use_chess=use_chess,
             compile_flags=list(compile_flags),
             symbol_prefix=prefix,
         )

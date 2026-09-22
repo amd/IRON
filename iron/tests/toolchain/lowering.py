@@ -38,7 +38,7 @@ def lower(op, tmp_path, name=None):
     # generator() call in one process must do the same, or two designs
     # declaring one kernel with different flags collide.
     ExternalFunction._instances.clear()
-    src.write_text(str(op.get_mlir_artifact().generator()))
+    src.write_text(str(op.generator()()))
     out = tmp_path / "out"
     result = subprocess.run(
         [

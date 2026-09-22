@@ -10,7 +10,7 @@ rounding mode. Everything the xclbin depends on, and nothing else; its
 N, the activation and the clamp bounds are runtime parameters (residents)
 and reach only the instruction stream, so every shape sharing a
 configuration shares one xclbin. That split is what this operator exists
-for, and :meth:`GEMM.link_xclbin` builds the two halves separately.
+for, and :meth:`GEMM._build` compiles the two halves separately.
 
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
 per-choice breakdown against the shipped FastFlowLM overlay.
@@ -18,7 +18,6 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 
 import dataclasses
 from typing import ClassVar
-from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -964,35 +963,53 @@ class GEMM(Operator[FLMGEMMOverlay]):
         ov = self.ov
         return (M_TILE * ov.rows * ov.m_chunk, MIN_K, ov.tile_n * ov.cols)
 
-    def link_xclbin(self) -> None:
-        """Compile the configuration's xclbin and this shape's instructions.
+    def _build(self):
+        """The configuration's image plus this shape's instruction stream.
 
-        Two compiles rather than the base class's one. The xclbin is emitted
-        at a reference shape and activation so that every shape sharing the
-        configuration reuses it, and only the instruction stream is per
-        shape: an instructions-only compile, no kernel built twice.
+        Two compiles rather than one. The image is emitted at a reference
+        shape and activation, so every shape sharing the configuration reuses
+        it: the cache keys on content, and the reference shape is what that
+        content is. Only the instruction stream is per shape, which is an
+        instructions-only compile with no kernel built twice. On the shipped
+        overlay there is no image to build at all.
         """
-        if getattr(self, "_xclbin_path", None) is not None:
-            return
-        if self.ov.foreign is not None:
-            return super().link_xclbin()  # the downloaded image, instructions only
-        from iron.common.build import mlir_artifact_for
-        from iron.common.jit_compile import compile_insts, compile_xclbin_insts
+        from iron.common.artifacts import Artifacts, Design, Step
+        from iron.common.jit_compile import insts_design, xclbin_design
 
-        build_dir = Path(self.context.build_dir)
+        if self.ov.foreign is not None:
+            return super()._build()  # the downloaded image, instructions only
         tuned = self.tuned(aie_utils.get_current_device())
         M, K, N = tuned._reference_shape
         reference = dataclasses.replace(
             tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_bytes=None
         )
-        self._xclbin_path, _ = compile_xclbin_insts(
-            mlir_artifact_for(reference, f"{self.config_name}.mlir").generator,
-            build_dir / f"{self.config_name}.xclbin",
-            build_dir / f"{self.config_name}.bin",
-            kernel_name="MLIR_AIE",
-        )
-        self._insts_path = compile_insts(
-            self.get_mlir_artifact().generator, build_dir / f"{self.name}.bin"
+        image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
+        stream = insts_design(self.generator())
+        config, own = image.get_cache_entry(), stream.get_cache_entry()
+        self._design = stream
+        return Artifacts(
+            kind="xclbin",
+            image=config.xclbin,
+            insts=own.insts,
+            entry=own,
+            designs=(
+                Design(
+                    name=self.config_name,
+                    operators=(self.name,),
+                    entry=config,
+                    image=config.xclbin,
+                    insts=own.insts,
+                ),
+            ),
+            steps=(
+                Step(
+                    0,
+                    self.name,
+                    self.config_name,
+                    tuple(b.name for b in self.buffers),
+                ),
+            ),
+            buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(self.buffers)},
         )
 
     # -- host-side helpers -------------------------------------------------------

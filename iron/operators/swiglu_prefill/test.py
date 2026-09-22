@@ -52,8 +52,9 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, aie_c
     record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
 
     errors = {}
-    swished_buf, product_buf = _step_output(net, SiLU), _step_output(
-        net, ElementwiseMul
+    swished_buf, product_buf = (
+        _step_output(net, SiLU),
+        _step_output(net, ElementwiseMul),
     )
     up_buf = net.buffer(net.traced.steps[1].outputs[0])
     for buf in (swished_buf, product_buf, up_buf):

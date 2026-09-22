@@ -69,9 +69,9 @@ def test_importing_one_operator_imports_no_unrelated_operator(name):
     others = sorted(imported - {own})
 
     if not _is_composite(name):
-        assert (
-            not others
-        ), f"importing {name} also imported {others}; the catalog is not lazy"
+        assert not others, (
+            f"importing {name} also imported {others}; the catalog is not lazy"
+        )
     else:
         # A composite may import its parts, but never the whole catalog --
         # that is the regression this guards against.

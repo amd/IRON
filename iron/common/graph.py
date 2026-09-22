@@ -716,6 +716,9 @@ class CompiledGraph:
         # first use, so a host without an NPU can still compile.
         self.sequence = traced.sequence(dispatch=dispatch, context=context).compile()
         self.image = self.sequence.image
+        # What the image consists of, by identity: its designs, which step
+        # runs which, and where each buffer lands in its plan.
+        self.artifacts = self.sequence.artifacts
         self._callable = None
         self._uploaded = False
 

@@ -20,6 +20,7 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -208,6 +209,35 @@ class _MLIREmitter:
         from aie.dialects import aiex
 
         aiex.dma_await_task(task)
+
+
+def fetch(image, directory) -> Path:
+    """The downloaded image, by digest: fetched into ``directory`` unless a
+    file of the pinned content is already there."""
+    import hashlib
+    import urllib.request
+
+    target = Path(directory) / image.filename
+
+    def digest(path):
+        with open(path, "rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+
+    if target.exists() and digest(target) == image.sha256:
+        return target
+    if not image.url.startswith("https://"):
+        raise ValueError(f"refusing to download over {image.url!r}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Beside the target and renamed, so an interrupted fetch cannot leave a
+    # truncated file that a later run reports as a digest mismatch.
+    partial = target.with_suffix(target.suffix + ".part")
+    with urllib.request.urlopen(image.url, timeout=60) as response:
+        partial.write_bytes(response.read())
+    if (got := digest(partial)) != image.sha256:
+        partial.unlink()
+        raise RuntimeError(f"{image.url} has SHA-256 {got}, expected {image.sha256}")
+    partial.replace(target)
+    return target
 
 
 def build_foreign(dev, op: Operator):

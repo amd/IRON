@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compile a fused sequence through upstream's CompilableDesign.
+"""Compile designs through mlir-aie's CompilableDesign, which owns the cache.
 
-IRON's artifact graph and ``CompilableDesign`` do the same job -- source to
-kernel objects to MLIR to an ELF -- but the upstream one additionally keys its
-cache on content, locks across processes, and validates Peano depfiles, none of
-which the artifact graph does. This is the seam for moving onto it: it takes a
-sequence that has already produced its fused MLIR and compiles that half the
-new way, leaving everything else alone.
-
-Four things about the upstream API are not guessable from its signature, and
-each is load-bearing here:
+Every build lands in the JIT cache, keyed on the content it was built from;
+IRON names nothing on disk. What this module adds is the seam: how an
+IRON design function becomes the generator ``CompilableDesign`` runs inside
+``compile()`` (so the kernels a design declares are collected and built),
+and how a fused sequence, a chained xclbin and an instructions-only stream
+are each spelled as one design. Three things about the upstream API are
+not guessable from its signature, and each is load-bearing here:
 
 * ``compile_kwargs`` keys must appear in the generator's signature *and* carry
   a ``CompileTime[T]`` annotation.
@@ -35,6 +33,16 @@ from aie.ir import Module
 from aie.utils.compile.jit._hash import _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
 from aie.utils.compile.jit.markers import CompileTime
+
+# Flags the fused full-ELF build needs. --expand-load-pdis is what makes a
+# multi-device runlist switch PDIs between steps; --get-scratchpad-parameters
+# emits the parameter table the host writes through. Without them the ELF is
+# smaller and not the same program.
+FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
+
+# Only when tracing: the trace parser reads the lowered module for the buffer
+# layout and each design's traced tiles and events.
+TRACE_FLAG = "--get-input-with-addresses"
 
 
 def _digest(text: str) -> str:
@@ -175,9 +183,7 @@ def _fuse_as_children(build_mlir) -> str:
 
     Generated inside ``compile()`` without this, every child also emits a
     ``load_pdi`` and the two schemes fight: the build succeeds, the ELF links,
-    and the device hangs at dispatch with ERT_CMD_STATE_TIMEOUT. Shadowing the
-    flag for the children is what the old code got for free by generating
-    outside ``compile()`` altogether.
+    and the device hangs at dispatch with ERT_CMD_STATE_TIMEOUT.
     """
     with compile_context(_iron_full_elf=False):
         return build_mlir()
@@ -189,11 +195,6 @@ def _fused_generator(build_mlir):
     ``graph`` and ``trace`` are never read; they exist so the fused text's
     digest and the trace size have somewhere to live in ``compile_kwargs``,
     which is what the cache key hashes.
-
-    Staging happens here rather than before ``compile()``, because a cache miss
-    calls ``_cleanup_failed_compilation`` on the work directory first and wipes
-    anything already put there. The generator runs after that and before aiecc,
-    which is the only window where staged objects survive.
     """
 
     def generate(
@@ -209,105 +210,27 @@ def _fused_generator(build_mlir):
     return generate
 
 
-def _compile_if_changed(design, *output_paths: Path) -> tuple[bool, str, Path]:
-    """Whether ``design``'s current recipe already produced ``output_paths``.
-
-    ``CompilableDesign.compile()`` bypasses its own on-disk cache entirely
-    whenever explicit output paths are given -- its own docstring says the
-    caller "is presumed to manage their own dependency tracking". Without
-    this, an unchanged recipe recompiles through aiecc every time a fresh
-    ``CompilableDesign``/``OperatorSequence``/operator instance asks for it,
-    not just on an actual edit -- measured directly: two independently
-    constructed but identical fused sequences each rebuilt the ELF (mtime
-    changed both times).
-
-    Reuses ``CompilableDesign``'s own content hash (recipe + kernel object
-    content + device + flags) rather than inventing a second one -- already
-    relied on by ``iron/tests/infrastructure/compilable_design_contract.py``
-    -- and stamps it next to the first output.
-    """
-    # Bind the device before hashing. _compute_artifact_hash reads
-    # get_current_device(probe_runtime=False), which is None until something
-    # binds one -- and compile() binds it moments later, from inside. So the
-    # stamp for the first build in a process records a "no device" hash that
-    # the next identical build can never match, and every process silently
-    # rebuilds once. Binding here makes both sides agree.
-    #
-    # Guarded exactly as CompilableDesign._bind_generation_device guards it:
-    # binding probes the runtime, which a compile-only host without one cannot
-    # do. Failing to bind is not an error -- it leaves the device unset on both
-    # sides, which still agrees with itself.
+def _bind_device() -> None:
+    # _compute_cache_hash reads the current device, which compile() binds
+    # from inside; binding first makes a key computed before and after agree.
     try:
         aie_utils.ensure_current_device()
     except (ImportError, RuntimeError, AttributeError, ValueError, TypeError):
         pass
-    stamp = output_paths[0].with_suffix(output_paths[0].suffix + ".cache_hash")
-    current = design._compute_cache_hash()
-    hit = (
-        all(p.exists() for p in output_paths)
-        and stamp.exists()
-        and stamp.read_text() == current
-    )
-    return hit, current, stamp
 
 
-# Flags the artifact-graph rule passes for a full ELF, and which a fused
-# sequence does not work without. --expand-load-pdis is what makes a multi-
-# device runlist switch PDIs between steps; --get-scratchpad-parameters emits
-# the parameter table the host writes through. Compiling without them produces
-# a smaller ELF that is not the same program -- 70,936 bytes against 99,768 on
-# a two-step graph -- so they are not optional tuning.
-FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
+def fused_design(build_mlir, extra_flags=(), trace_size=0) -> CompilableDesign:
+    """A sequence's fused full ELF, compiled (or found) in the JIT cache.
 
-# Only when tracing. The trace parser reads the lowered module to find the
-# buffer layout and each design's traced tiles and events, so without this a
-# traced build compiles cleanly and then has nothing to parse.
-TRACE_FLAG = "--get-input-with-addresses"
-
-
-def fused_work_dir(elf_path) -> Path:
-    """Directory aiecc writes a fused ELF's build outputs into.
-
-    The fused MLIR stopped being an artifact when fuse_mlir() became a plain
-    generator, so there is no MLIR filename left to derive this from the way
-    ``comp._aiecc_work_dir`` does for the artifact-graph paths. The ELF path is
-    the only stable name, and callers that need aiecc's graph outputs
-    afterwards -- ``params.txt`` for the runtime-parameter scratchpad,
-    ``input_with_addresses.mlir`` for the trace layout -- must derive it from
-    here rather than re-deriving the convention.
-    """
-    elf_path = Path(elf_path)
-    return elf_path.parent / f"{elf_path.stem}.prj"
-
-
-def compile_fused_elf(build_mlir, elf_path, extra_flags=(), trace_size=0) -> Path:
-    """Compile a fused sequence to a full ELF, returning its path.
-
-    ``build_mlir`` is called, not passed text: fusing several designs into one
-    module runs each operator's design, and a design that declares
+    ``build_mlir`` is called, not passed text: fusing several designs into
+    one module runs each operator's design, and a design that declares
     ``ExternalFunction`` kernels only has them built if it runs inside
-    ``compile()``. Fusing outside and handing over the result registers those
-    kernels into a set ``compile()`` then clears, so the objects are never
-    built and the core fails to link.
-
-    It is called twice, and deliberately: once here for the cache key, which is
-    still the fused text's own digest -- the most precise identity available,
-    and a call this path already paid -- and once inside the generator, where
-    the kernels survive. Only the second is on the cache-miss path; generation
-    is Python building MLIR, against an aiecc run.
-
-    Both calls go through :func:`_fuse_as_children`, so both see the same
-    ``_iron_full_elf`` and the key describes the text that is actually
-    compiled. Keying under one value and building under the other produces a
-    cache entry for a different program -- which is not a build failure, so
-    nothing reports it.
-
+    ``compile()``. It is called twice, deliberately: once here for the key,
+    the fused text's own digest, and once inside the generator, where the
+    kernels survive. Both calls go through :func:`_fuse_as_children`, so the
+    key describes the text that is compiled.
     """
-    elf_path = Path(elf_path)
-    work_dir = fused_work_dir(elf_path)
-
     identity = _digest(_fuse_as_children(build_mlir))
-
     design = CompilableDesign(
         _fused_generator(build_mlir),
         full_elf=True,
@@ -316,71 +239,43 @@ def compile_fused_elf(build_mlir, elf_path, extra_flags=(), trace_size=0) -> Pat
         + list(extra_flags),
         compile_kwargs={"graph": identity, "trace": int(trace_size)},
     )
-    hit, current_hash, stamp = _compile_if_changed(design, elf_path)
-    if not hit:
-        design.compile(full_elf_path=elf_path)
-        stamp.write_text(current_hash)
-    return elf_path
+    _bind_device()
+    design.compile()
+    return design
 
 
-def compile_sequence(seq, elf_path) -> Path:
-    """Compile an already-set-up OperatorSequence's fused MLIR to an ELF.
-
-    The fused MLIR is generated fresh here: build_fused_mlir is a plain
-    function, not an on-disk artifact, and running it inside compile() is what
-    lets each child design's ExternalFunction kernels be collected and built.
-    """
-    from .sequence import build_fused_mlir
-
-    return compile_fused_elf(
-        lambda: build_fused_mlir(seq),
-        elf_path,
-        extra_flags=getattr(seq, "extra_flags", ()) or (),
-        trace_size=getattr(seq, "trace_size", 0) or 0,
-    )
-
-
-def compile_insts(generator, insts_path, extra_flags=()) -> Path:
-    """Compile one design's instruction stream only, against an image built elsewhere.
-
-    The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
-    whose array is already built (flm/gemm's configuration xclbin at the
-    reference shape, a foreign overlay's downloaded image, any operator sharing an
-    overlay) needs only its runtime sequence lowered. ``aiecc
-    --get-npu-insts`` does exactly that, without compiling a core, so no
-    kernel object and no Peano are involved. ``CompilableDesign.compile()``
-    refuses an instructions-only request (its xclbin and insts paths must be
-    set together), so this goes to ``compile_mlir_module`` directly, keyed on
-    the generated text like the fused path.
-    """
-    from aie.iron.kernel import ExternalFunction
-    from aie.utils.compile import compile_mlir_module
-
-    insts_path = Path(insts_path)
+def _resolved(generator):
     design_fn, args, kwargs = generator.resolve()
     if args:
         raise ValueError(
             f"design {design_fn.__qualname__} takes positional arguments "
             f"{args!r}; the cache key only spells keyword parameters."
         )
-    # No core is compiled, so the kernels a design declares are not built;
-    # clearing the registry keeps one process's designs from colliding on a
-    # kernel name, as CompilableDesign does before generating.
-    ExternalFunction._instances.clear()
-    module = design_fn(**kwargs)
-    text = module if isinstance(module, str) else str(module)
-    flags = list(extra_flags)
-    current = _digest(text + "\n".join(flags))
-    stamp = insts_path.with_suffix(insts_path.suffix + ".cache_hash")
-    if insts_path.exists() and stamp.exists() and stamp.read_text() == current:
-        return insts_path
-    work_dir = insts_path.parent / f"{insts_path.stem}.prj"
-    work_dir.mkdir(parents=True, exist_ok=True)  # aiecc's input is written into it
-    compile_mlir_module(text, insts_path=insts_path, work_dir=work_dir, options=flags)
-    if not insts_path.exists():
-        raise RuntimeError(f"aiecc produced no instruction stream at {insts_path}")
-    stamp.write_text(current)
-    return insts_path
+    return design_fn, kwargs
+
+
+def insts_design(generator, extra_flags=()) -> CompilableDesign:
+    """One design's instruction stream alone, against an image built elsewhere.
+
+    The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
+    whose array is already built (a configuration's image at the reference
+    shape, a foreign overlay's downloaded image) needs only its runtime
+    sequence lowered. No core is compiled, so no kernel and no Peano.
+    """
+    design_fn, kwargs = _resolved(generator)
+    design = CompilableDesign(
+        _design_generator(kwargs),
+        insts_only=True,
+        aiecc_flags=list(extra_flags),
+        compile_kwargs={
+            "design": design_fn,
+            "params": _params_key(kwargs),
+            "chain": "",
+        },
+    )
+    _bind_device()
+    design.compile()
+    return design
 
 
 @dataclasses.dataclass(frozen=True)
@@ -392,46 +287,24 @@ class DispatchStream:
     params: tuple
 
 
-def compile_xclbin_insts(
-    generator,
-    xclbin_path,
-    insts_path,
-    kernel_name: str,
-    xclbin_input=None,
-    extra_flags=(),
-):
-    """Compile one operator's design to an xclbin and its instruction stream.
+def xclbin_design(
+    generator, kernel_name: str, xclbin_input=None, extra_flags=()
+) -> CompilableDesign:
+    """One operator's design as an xclbin and its instruction stream.
 
-    A design with dispatch-time parameters has no static stream: the second
-    element is then a :class:`DispatchStream`, the bridge library aiecc's
-    ``--get-npu-cpp`` output compiles to, from which the runtime generates
-    each call's stream.
-
-    The separate-dispatch counterpart to :func:`compile_fused_elf`. Chaining
-    looks like it needs more than CompilableDesign offers -- each operator's
-    xclbin links onto the previous one's via ``--xclbin-input`` so a sequence
-    lands in one loadable image -- but that and the kernel name are both aiecc
-    flags, which it already forwards. No local subclass is needed.
-
-    ``generator`` is the operator's ``DesignGenerator``. It is resolved but not
-    called here: the design function runs inside ``compile()``, which is what
-    lets a design declare ``ExternalFunction`` kernels and have upstream build
-    them.
+    The separate-dispatch counterpart to :func:`fused_design`. Chaining --
+    each operator's xclbin linked onto the previous one's via
+    ``--xclbin-input`` so a sequence lands in one loadable image -- and the
+    kernel name are both aiecc flags, which CompilableDesign forwards. A
+    design with dispatch-time parameters has no static stream; its bridge
+    library is :meth:`CompilableDesign.get_dispatch_lib_path`, and
+    :func:`dispatch_stream` spells it for the runtime.
     """
-    xclbin_path, insts_path = Path(xclbin_path), Path(insts_path)
-
     flags = [f"--xclbin-kernel-name={kernel_name}"]
     if xclbin_input is not None:
         flags.append(f"--xclbin-input={Path(xclbin_input).resolve()}")
     flags += list(extra_flags)
-
-    design_fn, args, kwargs = generator.resolve()
-    if args:
-        raise ValueError(
-            f"design {design_fn.__qualname__} takes positional arguments "
-            f"{args!r}; the cache key only spells keyword parameters."
-        )
-
+    design_fn, kwargs = _resolved(generator)
     design = CompilableDesign(
         _design_generator(kwargs),
         aiecc_flags=flags,
@@ -443,19 +316,15 @@ def compile_xclbin_insts(
             "chain": str(xclbin_input or ""),
         },
     )
-    if design.dispatch_params:
-        from aie.utils.compile.jit import _manifest
+    _bind_device()
+    design.compile()
+    return design
 
-        hit, current_hash, stamp = _compile_if_changed(design, xclbin_path)
-        kernel_dir = xclbin_path.parent / f"{xclbin_path.stem}.prj"
-        lib = _manifest.resolve_dispatch_library(kernel_dir) if hit else None
-        if lib is None:
-            design.compile(xclbin_path=xclbin_path)
-            lib = design.get_dispatch_lib_path()
-            stamp.write_text(current_hash)
-        return xclbin_path, DispatchStream(Path(lib), tuple(design.dispatch_params))
-    hit, current_hash, stamp = _compile_if_changed(design, xclbin_path, insts_path)
-    if not hit:
-        design.compile(xclbin_path=xclbin_path, inst_path=insts_path)
-        stamp.write_text(current_hash)
-    return xclbin_path, insts_path
+
+def dispatch_stream(design: CompilableDesign) -> "DispatchStream | None":
+    """The per-call stream generator of a dispatch-time design, else ``None``."""
+    if not design.dispatch_params:
+        return None
+    return DispatchStream(
+        Path(design.get_dispatch_lib_path()), tuple(design.dispatch_params)
+    )

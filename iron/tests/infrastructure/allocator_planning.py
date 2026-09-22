@@ -289,14 +289,14 @@ def test_planned_buffers_never_share_bytes_while_both_live():
     scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
     # t_i is live from step i to step i+1, so consecutive ones overlap.
     for i in range(3):
-        a, b = scratch.get(f"t{i}"), scratch.get(f"t{i+1}")
+        a, b = scratch.get(f"t{i}"), scratch.get(f"t{i + 1}")
         if a is None or b is None:
             continue
         assert LiveRange(i, i + 1).overlaps(LiveRange(i + 1, i + 2))
         a_lo, a_hi = a[1], a[1] + a[2]
         b_lo, b_hi = b[1], b[1] + b[2]
         assert a_hi <= b_lo or b_hi <= a_lo, (
-            f"t{i}@[{a_lo},{a_hi}) and t{i+1}@[{b_lo},{b_hi}) overlap in bytes "
+            f"t{i}@[{a_lo},{a_hi}) and t{i + 1}@[{b_lo},{b_hi}) overlap in bytes "
             "while both are live"
         )
 

@@ -3,7 +3,7 @@
 
 """Reading back the trace buffer size the compiler recorded on the sequence."""
 
-from iron.common.compilation import trace_buffer_size
+from iron.common.fusion import trace_buffer_size
 
 LOWERED = """
 module {

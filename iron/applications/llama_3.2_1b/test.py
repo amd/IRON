@@ -65,6 +65,6 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
         if match:
             record_metric(name, float(match.group("value")))
 
-    assert (
-        result.returncode == 0
-    ), f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
+    assert result.returncode == 0, (
+        f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
+    )

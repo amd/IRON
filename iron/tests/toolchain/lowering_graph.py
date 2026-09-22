@@ -8,7 +8,6 @@ Same gate as ``lowering.py``: aiecc to an instruction stream, no Peano.
 """
 
 import dataclasses
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -96,18 +95,17 @@ def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
     from iron.common.context import AIEContext
 
     op = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
-    op.link_xclbin()
-    insts = Path(op._insts_path)
+    op.compile()
+    insts = op.artifacts.insts
     assert insts.stat().st_size > 0
-    assert not list(tmp_path.glob("*.xclbin")), (
-        "an instructions-only compile built an image"
-    )
+    # The image is the download, so nothing was built beside the stream.
+    assert op.artifacts.entry.xclbin is None
+    assert op.artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
     again = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
-    again.link_xclbin()
-    assert Path(again._insts_path).stat().st_mtime_ns == first, (
-        "the same sequence recompiled"
-    )
+    again.compile()
+    assert again.artifacts.insts == insts
+    assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
 
 
 def test_swiglu_graphs_operators_lower(tmp_path):

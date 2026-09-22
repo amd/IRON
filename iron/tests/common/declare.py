@@ -448,14 +448,14 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
         outputs={"left": (64, 256)},
         key="abc123",
         params={"seq_len": 64, "k": 2},
-        mlir=lambda self: "artifact",
+        generator=lambda self, image="elf": "generator",
     )
     op = Group(Group._overlay_class())
     assert [b.name for b in op.buffers] == ["input", "w_gate", "left"]
     assert [b.shape for b in op.buffers] == [(64, 128), (128, 256), (64, 256)]
     assert (op.seq_len, op.k) == (64, 2)
     assert op.design_key() == "abc123"
-    assert op.get_mlir_artifact() == "artifact"
+    assert op.generator() == "generator"
     # Literal shapes bind no field; inference only checks them.
     assert Group.infer((64, 128), (128, 256)) == {}
     with pytest.raises(ValueError):

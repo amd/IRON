@@ -31,28 +31,28 @@ from aie.iron.device import NPU2
 
 import iron
 from iron.common.context import AIEContext
-from iron.common.jit_compile import fused_work_dir
 from iron.tests.toolchain.tools import requires, swiglu_decode
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def build_elf(traced, name, tmp_path):
-    """Fuse a traced graph and build its full ELF; return the ELF and its work dir.
+    """Fuse a traced graph and build its full ELF; return its record.
 
-    The one build the application does: ``compile()`` links the image into
-    the context's build directory."""
+    The one build the application does: ``compile()`` builds the image into
+    the JIT cache and records what it consists of."""
     ctx = AIEContext(build_dir=str(tmp_path / "build"))
-    seq = traced.sequence(name, dispatch="fused", context=ctx)
-    seq.compile()
-    elf = Path(seq.elf_path)
+    seq = traced.sequence(name, dispatch="fused", context=ctx).compile()
+    artifacts = seq.artifacts
+    elf = Path(artifacts.image)
     assert elf.exists() and elf.stat().st_size > 0, f"no ELF at {elf}"
-    return elf, fused_work_dir(elf)
+    assert artifacts.kind == "elf"
+    return artifacts
 
 
-def _params(work_dir):
+def _params(artifacts):
     """The scratchpad parameter table aiecc emitted, as ``name -> line``."""
-    text = (work_dir / "params.txt").read_text().strip().splitlines()
+    text = artifacts.params.read_text().strip().splitlines()
     assert text, "params.txt is empty"
     count = int(text[0])
     rows = [line for line in text[1:] if line.strip()]
@@ -69,18 +69,19 @@ def test_swiglu_decode_graph_compiles_to_a_full_elf(tmp_path):
     elf = Path(net.image)
     assert elf.suffix == ".elf" and elf.stat().st_size > 0
     assert net._callable is None, "the runtime is made on first call, not at compile"
-    work = fused_work_dir(elf)
-    # Four designs (gate and up share one) and the dispatch sequence.
-    pdis = sorted(p.name for p in work.glob("bif_op*.bif"))
-    assert len(pdis) == 4, pdis
+    artifacts = net.artifacts
+    # Four designs, gate and up sharing one, and one step per runlist entry.
+    assert len(artifacts.designs) == 4, artifacts.report("swiglu")
+    assert sum(len(d.operators) for d in artifacts.designs) == 5
+    assert [s.index for s in artifacts.steps] == list(range(5))
     # No per-call values: an empty table, not a missing one.
-    assert (work / "params.txt").read_text().split("\n", 1)[0].strip() == "0"
+    assert artifacts.params.read_text().split("\n", 1)[0].strip() == "0"
 
 
-def _assert_values_in_table(traced, work):
+def _assert_values_in_table(traced, artifacts):
     from iron.common.build import value_symbol
 
-    table = _params(work)
+    table = _params(artifacts)
     # Every value the graph bound is a parameter the host can write.
     for op, name, value in traced.bindings:
         bound = getattr(op, name, None)
@@ -97,8 +98,8 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table(tmp_path):
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
-    _, work = build_elf(traced, "decode", tmp_path)
-    _assert_values_in_table(traced, work)
+    artifacts = build_elf(traced, "decode", tmp_path)
+    _assert_values_in_table(traced, artifacts)
 
 
 @pytest.mark.extensive
@@ -117,8 +118,8 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer(tmp_path):
     decode = DecodeGraph(cfg, cfg.context_length)
     traced = PrefillGraph(cfg, decode).trace(cfg)
     assert len(traced.runlist) == 18 + 3
-    _, work = build_elf(traced, "prefill_1b", tmp_path)
-    _assert_values_in_table(traced, work)
+    artifacts = build_elf(traced, "prefill_1b", tmp_path)
+    _assert_values_in_table(traced, artifacts)
 
 
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
@@ -129,5 +130,5 @@ def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table(tmp_path):
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
     traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
-    _, work = build_elf(traced, "prefill", tmp_path)
-    _assert_values_in_table(traced, work)
+    artifacts = build_elf(traced, "prefill", tmp_path)
+    _assert_values_in_table(traced, artifacts)

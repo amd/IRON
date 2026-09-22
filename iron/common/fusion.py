@@ -16,7 +16,7 @@ import ml_dtypes
 
 from typing import Any
 
-from . import DesignGenerator
+from .build import DesignGenerator
 
 RESET_DEVICE = "reset_device"
 
@@ -157,7 +157,6 @@ def fuse_mlir(
 
     # Build fused MLIR module
     with mlir_mod_ctx() as ctx:
-
         # Emit hoisted parameters first.
         with ir.InsertionPoint.at_block_begin(ctx.module.body):
             for sym_name, param_type in hoisted_params.items():
@@ -177,9 +176,9 @@ def fuse_mlir(
                 if isinstance(op, aie.DeviceOp):
                     dev_op = op
                     break
-            assert (
-                dev_op is not None
-            ), f"DeviceOp missing after re-parse for operator '{op_name}'"
+            assert dev_op is not None, (
+                f"DeviceOp missing after re-parse for operator '{op_name}'"
+            )
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 
@@ -232,7 +231,6 @@ def fuse_mlir(
                         last_op_name = op_name
 
                     with ir.InsertionPoint(configure_body):
-
                         # For each buffer, add subview and reinterpret_cast ops
                         buffer_ssa_values = []
                         for idx, buf_name in enumerate(buffer_names):
@@ -269,9 +267,9 @@ def fuse_mlir(
                                 for i in range(expected_memref.rank)
                             ]
                             expected_size = np.prod(target_shape)
-                            assert (
-                                expected_size == size_elements
-                            ), f"Size mismatch for buffer '{buf_name}': MLIR runtime sequence expected {expected_size}, Python fused operator provided {size_elements}"
+                            assert expected_size == size_elements, (
+                                f"Size mismatch for buffer '{buf_name}': MLIR runtime sequence expected {expected_size}, Python fused operator provided {size_elements}"
+                            )
                             strides = []
                             stride = 1
                             for dim in reversed(target_shape):

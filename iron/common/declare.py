@@ -57,7 +57,8 @@ from ml_dtypes import bfloat16
 
 from abc import ABCMeta
 
-from .base import AIEOperatorBase, _serialize_param
+from .context import AIEContext
+from .utils import serialize_param
 
 # Short spellings in artifact stems, for the fields every family shares.
 _NAME_ALIASES = {
@@ -1302,7 +1303,7 @@ class Overlay:
 
     def name_parts(self) -> list[str]:
         return [
-            f"{_NAME_ALIASES.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            f"{_NAME_ALIASES.get(f.name, f.name)}{serialize_param(getattr(self, f.name))}"
             for f in dataclasses.fields(self)
             if f.repr and getattr(self, f.name) is not None
         ]
@@ -1333,7 +1334,7 @@ class _OperatorMeta(ABCMeta):
 
 
 @dataclasses.dataclass(eq=False, repr=True)
-class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
+class Operator(Generic[O], metaclass=_OperatorMeta):
     """A host ABI declared against an overlay. Subclass, decorate with ``@operator``.
 
     Declare ``dim()`` fields and buffers (``In``/``Out``/``InOut`` naming their
@@ -1360,7 +1361,8 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
             )
         self.validate()
         self._bind()
-        AIEOperatorBase.__init__(self, context=self.context)
+        if self.context is None:
+            self.context = AIEContext.default()
 
     # -- declared surface --------------------------------------------------
 
@@ -1533,7 +1535,7 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         dtype: Any = bfloat16,
         key: str = "",
         params: dict[str, Any] | None = None,
-        mlir: Callable | None = None,
+        generator: Callable | None = None,
     ) -> type:
         """An operator class from an exported description, at run time.
 
@@ -1542,8 +1544,8 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         and ``outputs`` are literal shapes in argument order; ``params`` are
         the numbers that identify the instance (they become ``dim()`` fields
         with those defaults and reach the name); ``key`` identifies the
-        generated design, for sharing; ``mlir`` replaces
-        :meth:`get_mlir_artifact`, since the sequence is not derived. The
+        generated design, for sharing; ``generator`` replaces
+        :meth:`generator`, since the sequence is not derived. The
         overlay is a stand-in carrying only ``key``.
         """
         import types
@@ -1568,8 +1570,8 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
             for bname, shape in outputs.items():
                 ns[bname] = Out(*shape, dtype=dtype)
             ns["design_key"] = lambda self: self.ov.key or None
-            if mlir is not None:
-                ns["get_mlir_artifact"] = mlir
+            if generator is not None:
+                ns["generator"] = generator
 
         return operator(
             types.new_class(name, (cls[overlay_cls],), {}, operator_ns)  # type: ignore[index]
@@ -1695,15 +1697,42 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         kwargs = {**overrides, **values}
         return cls(**kwargs)  # classic-construction path splits overlay fields
 
-    # -- artifacts, and the image of one operator on its own ---------------
+    # -- the image of one operator on its own -------------------------------
+
+    @property
+    def dev(self):
+        """The device a design is generated for."""
+        import aie.utils as aie_utils
+
+        return aie_utils.get_current_device()
+
+    @property
+    def kernels_dir(self):
+        """Where a design finds the C++ its kernels are compiled from.
+
+        From the context, so IRON_AIE_KERNELS_DIR redirects it and pointing
+        IRON at another kernel tree changes the compile key.
+        """
+        return self.context.kernels_dir
+
+    @property
+    def verbose(self) -> bool:
+        return getattr(self.context, "mlir_verbose", False)
+
+    # Bytes of trace buffer to emit; 0 disables tracing. A plain attribute
+    # rather than a property: OperatorSequence and LayerNorm assign it.
+    trace_size = 0
 
     @property
     def name(self) -> str:
-        """Artifact stem: the class, every shown field of both layers, the device."""
+        """This instance's label: the class, every shown field of both layers,
+        the device. It names the per-call value symbols a host writes through
+        and the kernel instances a chained image carries; nothing on disk,
+        which the compile cache keys by content."""
         import aie.utils as aie_utils
 
         own = [
-            f"{_NAME_ALIASES.get(f.name, f.name)}{_serialize_param(getattr(self, f.name))}"
+            f"{_NAME_ALIASES.get(f.name, f.name)}{serialize_param(getattr(self, f.name))}"
             for f in dataclasses.fields(self)
             if f.name != "ov" and f.repr and getattr(self, f.name) is not None
         ]
@@ -1711,75 +1740,73 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
 
-    def get_mlir_artifact(self, image: str = "elf"):
-        from .build import mlir_artifact_for
+    def generator(self, image: str = "elf"):
+        """The design generator :class:`CompilableDesign` runs for this operator."""
+        from .build import generator_for
 
-        return mlir_artifact_for(self, image=image)
+        return generator_for(self, image=image)
 
-    def set_up_artifacts(self) -> None:
-        # The kernels are ExternalFunctions the design declares and
-        # CompilableDesign compiles; the xclbin and instructions are built by
-        # link_xclbin(). The artifact graph is for what is not compiled at
-        # all: a foreign overlay's downloaded image.
-        image = self.ov.foreign
-        if image is None:
-            return
-        from .compilation.base import RemoteFileArtifact
-
-        self.xclbin_artifact = RemoteFileArtifact(
-            image.filename, url=image.url, sha256=image.sha256
-        )
-        self.add_artifacts([self.xclbin_artifact])
-
-    def compile(self, dry_run: bool = False) -> "Operator":
-        """Build the artifact graph, then the xclbin and instructions.
-
-        link_xclbin() is lazy for get_callable()'s benefit; compile() is an
-        explicit request and honours it, so a configuration whose MLIR cannot
-        be generated fails here rather than on first call.
-        """
-        super().compile(dry_run=dry_run)
-        if not dry_run:
-            self.link_xclbin()
+    def compile(self) -> "Operator":
+        """Build this operator's own image, once; sets :attr:`artifacts`."""
+        if getattr(self, "_artifacts", None) is None:
+            self._artifacts = self._build()
+            if self.context.record == "disk":
+                self._artifacts.dump()
         return self
 
-    def link_xclbin(self) -> None:
-        """Compile this operator's xclbin and instructions, once (idempotent).
+    @property
+    def artifacts(self):
+        """The record of what :meth:`compile` produced (None before)."""
+        return getattr(self, "_artifacts", None)
 
-        On a foreign overlay the image is the downloaded one, so only this
-        shape's instruction stream is compiled."""
-        if getattr(self, "_xclbin_path", None) is not None:
-            return
-        from pathlib import Path
+    def _build(self):
+        """Compile to an xclbin and an instruction stream, or, on a foreign
+        overlay, to the stream alone against the downloaded image."""
+        from .artifacts import Artifacts, Design, Step
+        from .jit_compile import insts_design, xclbin_design
 
-        from .jit_compile import compile_insts, compile_xclbin_insts
+        image = self.ov.foreign
+        if image is None:
+            design = xclbin_design(self.generator(), kernel_name="MLIR_AIE")
+            entry = design.get_cache_entry()
+            picture, insts = entry.xclbin, entry.insts
+        else:
+            from .foreign import fetch
 
-        if self.ov.foreign is not None:
-            if not self.artifacts:
-                self.set_up_artifacts()
-            self._insts_path = compile_insts(
-                self.get_mlir_artifact().generator,
-                Path(self.context.build_dir) / f"{self.name}.bin",
-            )
-            self._xclbin_path = self.xclbin_artifact.filename
-            return
-        self._xclbin_path, self._insts_path = compile_xclbin_insts(
-            self.get_mlir_artifact().generator,
-            Path(self.context.build_dir) / f"{self.name}.xclbin",
-            Path(self.context.build_dir) / f"{self.name}.bin",
-            kernel_name="MLIR_AIE",
+            picture = fetch(image, self.context.build_dir)
+            design = insts_design(self.generator())
+            entry = design.get_cache_entry()
+            insts = entry.insts
+        self._design = design
+        return Artifacts(
+            kind="xclbin",
+            image=picture,
+            insts=insts,
+            entry=entry,
+            designs=(
+                Design(
+                    name=self.name,
+                    operators=(self.name,),
+                    entry=entry,
+                    image=picture,
+                    insts=insts,
+                ),
+            ),
+            steps=(Step(0, self.name, self.name, tuple(b.name for b in self.buffers)),),
+            buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(self.buffers)},
         )
 
     def get_callable(self):
+        """The loaded image, ready to call on device tensors."""
         import aie.utils as aie_utils
         from aie.utils.npukernel import NPUKernel
 
-        self.link_xclbin()
+        self.compile()
         image = self.ov.foreign
         npu_kernel = NPUKernel(
-            xclbin_path=str(self._xclbin_path),
+            xclbin_path=str(self.artifacts.image),
             kernel_name="MLIR_AIE" if image is None else image.kernel_name,
-            insts_path=str(self._insts_path),
+            insts_path=str(self.artifacts.insts),
         )
         handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
 

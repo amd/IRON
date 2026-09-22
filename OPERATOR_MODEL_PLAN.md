@@ -861,6 +861,45 @@ For the record, so nobody re-derives them:
 
 ---
 
+
+### The compile path, after the artifact graph
+
+IRON no longer names build outputs. `CompilableDesign` owns building and
+caching: every compile lands in an entry keyed on the content it was built
+from (`~/.npu/cache/<hash>/`), locked across processes and validated
+against the kernels' depfiles. `iron/common/jit_compile.py` is the seam,
+four functions over one idea -- how an IRON design becomes the generator
+upstream runs inside `compile()`, so the kernels a design declares are
+collected and built: `fused_design` (the full ELF), `xclbin_design` (one
+link of a chain), `insts_design` (the runtime sequence alone, against an
+image built elsewhere), `dispatch_stream` (a dispatch-time design's bridge
+library). What went: the artifact graph (`compilation/base.py`,
+`compilation/sequence.py`, `common/base.py`: rules, commands, artifacts,
+staleness, ~920 lines) whose only remaining job was downloading the
+shipped xclbin -- now `foreign.fetch`, one function -- and IRON's own
+change detection (`_compile_if_changed` and its `.cache_hash` stamps),
+which duplicated what the cache does.
+
+What replaced it is a record rather than a build system.
+`iron/common/artifacts.py` is what a compiled image *consists of*, by
+identity: its designs, which operators share each, which step runs which,
+where each buffer lands in the image's plan, and the entry that holds the
+image and its sidecars (`params.txt`, `input_with_addresses.mlir`). One
+shape for an operator compiled alone (one design, one step) and for a
+graph, so the trace parser, the parameter scratchpad and the tests all
+read it rather than re-deriving a directory layout. `AIEContext.record`
+says whether it is also written beside the image (`"disk"`) or kept in
+memory (`"memory"`, the default). `build_dir` is now only where a fetched
+image lands.
+
+Two changes upstream made that possible, on mlir-aie's
+`claude/mlir-aie-iron-upstream` branch:
+`CompilableDesign.get_cache_entry()`, which names everything a compile
+left in its directory, and `insts_only=True`, an instructions-only mode
+that used to be refused (its xclbin and instruction paths had to be set
+together), which is why IRON reached past `compile()` to
+`compile_mlir_module` with a cache of its own.
+
 ## 19. Status
 
 What is on this branch, and how far each piece has been verified. Three

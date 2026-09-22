@@ -11,17 +11,15 @@ torch = pytest.importorskip("torch")
 
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 
-from iron.common.base import AIEOperatorBase
 from iron.common import test_utils
 
 
-class _Operator(AIEOperatorBase):
+class _Operator:
+    """What run_test needs of an operator: buffers, compile, get_callable."""
+
     def __init__(self, results):
         self.results = iter(results)
         self.calls = 0
-
-    def set_up_artifacts(self):
-        pass
 
     def compile(self):
         return self

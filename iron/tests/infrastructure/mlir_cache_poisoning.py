@@ -22,7 +22,7 @@ the compile cache key now carries func_prefix, so this is the
 end-to-end check that it does);
 fused MLIR generation is no longer an artifact at all -- ``fuse_mlir()`` is a
 plain function that calls each operator's generator in-memory and returns
-text; and standalone dispatch (``Operator.link_xclbin()``) does the same
+text; and a standalone operator's own build does the same
 -- it calls the generator directly rather than reading a compiled artifact
 off disk. Any one of the three would have prevented this; together there is
 nothing left to poison, on either side.
@@ -71,7 +71,7 @@ def _linked_objects(operator):
     back: a standalone build no longer writes its MLIR to disk either (see
     the module docstring), so there is nothing to read.
     """
-    mlir = str(operator.get_mlir_artifact().generator())
+    mlir = str(operator.generator()())
     return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 

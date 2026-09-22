@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 
-from iron.common import DesignGenerator, Operator, PythonGeneratedMLIRArtifact
+from iron.common import DesignGenerator, Operator
 from iron.common.sequence import OperatorSequence
 
 
@@ -27,23 +27,20 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
     inputs, outputs = stream_design.group_ports(*dims, k=k)[group_index]
     npu = aie_utils.get_current_device().resolve().name
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                Path(stream_design.__file__),
-                "load_group",
-                (),
-                {
-                    "group_index": group_index,
-                    "k": k,
-                    "seq_len": seq_len,
-                    "embedding_dim": embedding_dim,
-                    "hidden_dim": hidden_dim,
-                    "npu": npu,
-                    "kernels_dir": self.kernels_dir,
-                },
-            ),
+    def generator(self, image="elf"):
+        """The exported design, loaded from its module rather than derived."""
+        return DesignGenerator(
+            source_path=Path(stream_design.__file__),
+            fn_name="load_group",
+            kwargs={
+                "group_index": group_index,
+                "k": k,
+                "seq_len": seq_len,
+                "embedding_dim": embedding_dim,
+                "hidden_dim": hidden_dim,
+                "npu": npu,
+                "kernels_dir": self.kernels_dir,
+            },
         )
 
     cls = Operator.from_spec(
@@ -66,7 +63,7 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
             "k": k,
             "group_index": group_index,
         },
-        mlir=get_mlir_artifact,
+        generator=generator,
     )
     return cls(cls._overlay_class(), context=context)
 
