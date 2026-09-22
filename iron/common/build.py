@@ -102,7 +102,6 @@ class Target:
         func_prefix: str = "",
         trace_size: int = 0,
         image: str = "elf",
-        use_chess: bool = False,
     ):
         from pathlib import Path
 
@@ -112,9 +111,6 @@ class Target:
         self.kernels_dir = Path(kernels_dir)
         self.arch = target_arch(dev)  # "aie2" | "aie2p"
         self.func_prefix = func_prefix
-        # xchesscc rather than Peano; every kernel of one design must agree,
-        # which upstream enforces when it compiles them.
-        self.use_chess = use_chess
         self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
         # scratchpad. "xclbin": there is none (spike S2); they are dispatch-
@@ -148,7 +144,6 @@ class Target:
             arg_types,
             source=source,
             func_prefix=self.func_prefix,
-            use_chess=self.use_chess,
             compile_flags=list(compile_flags),
             include_dirs=include_dirs,
             object_file_name=object_file_name,
@@ -478,7 +473,6 @@ def build_design(
     trace_size: int = 0,
     code: str = "",
     image: str = "elf",
-    use_chess: bool = False,
     **dispatch,
 ):
     """Generate the MLIR module for one declared operator.
@@ -506,7 +500,7 @@ def build_design(
         # A downloaded image: no array to build, only the sequence against
         # the pins the overlay declares, which the overlay itself emits.
         return ov.build(dev, op)
-    target = Target(dev, kernels_dir, func_prefix, trace_size, image, use_chess)
+    target = Target(dev, kernels_dir, func_prefix, trace_size, image)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
@@ -607,7 +601,7 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
     per-call values are the generator's dispatch-time parameters, so the two
     images are two modules and two cache keys.
     """
-    from iron.operators._kernels import kernels_dir, use_chess
+    from iron.operators._kernels import kernels_dir
 
     return DesignGenerator(
         fn=build_design,
@@ -616,7 +610,6 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
             "image": image,
             "dispatch": dispatch_parameters(op) if image != "elf" else [],
             "code": _design_code(op),
-            "use_chess": use_chess(),
             # Spelled here, not bound by name from the operator: the
             # device reaches the cache key by identity, the kernel tree
             # by path (pointing IRON at another tree changes the key).

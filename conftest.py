@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
-import os
 import re
 import subprocess
 from datetime import datetime
@@ -39,20 +38,6 @@ def pytest_addoption(parser):
         default=5,
         help="Number of iterations to run each test for statistics",
     )
-    parser.addoption(
-        "--compiler",
-        default="peano",
-        choices=["peano", "chess"],
-        help="Kernel compiler: 'peano' (default) or 'chess' (requires Vitis/aietools)",
-    )
-
-
-def pytest_configure(config):
-    # Which front-end is available is a property of the machine, so the
-    # choice reaches the build through the environment rather than through
-    # every operator (iron.operators._kernels.use_chess).
-    if config.getoption("--compiler") == "chess":
-        os.environ["IRON_KERNEL_COMPILER"] = "chess"
 
 
 def get_git_commit():

@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 import torch
+from aie.iron.kernels import activation
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
-from iron.operators._kernels import lut_sources
 
 
 @operator
@@ -14,16 +13,7 @@ class SigmoidOverlay(ChanneledUnaryOverlay):
     """The array for Sigmoid: the shared elementwise design over its kernel."""
 
     def kernel(self, target):
-        # ``aie.iron.kernels.activation.sigmoid`` is this kernel, but it accepts
-        # only 1024-element tiles although ``sigmoid_bf16`` reads the count at
-        # runtime. Declared here until that restriction is lifted upstream.
-        line = self.x.tile
-        return target.kernel(
-            "sigmoid_bf16",
-            [line, line, np.int32],
-            source=target.kernel_source("sigmoid"),
-            bundled_sources=lut_sources(target.dev),
-        )
+        return activation.sigmoid(self.line_size)
 
 
 @operator

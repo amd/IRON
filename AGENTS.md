@@ -231,8 +231,10 @@ xclbin (NPU binary) + insts.bin (instruction sequence)
 **No build context.** An operator takes the device that is current and
 nothing else. What used to sit on a context object is either a fact
 (`iron.operators._kernels.kernels_dir()`, `iron_kernels_dir()`), an
-environment choice (`IRON_AIE_KERNELS_DIR`, `IRON_KERNEL_COMPILER=chess`),
-or a keyword on the build itself (`compile(record="disk")`).
+environment choice (`IRON_AIE_KERNELS_DIR`), or a keyword on the build
+itself (`compile(record="disk")`). Kernels are built with Peano; IRON has
+no xchesscc path, and a kernel that needs one asks the `aie.iron.kernels`
+factory for it (`use_chess=True`) rather than IRON carrying a global flag.
 
 **Runtime**: `aie.utils.DefaultNPURuntime` loads an image and runs it,
 shared across operators. A test that ran on hardware takes the
@@ -460,9 +462,7 @@ IRON_AIE_KERNELS_DIR=/path/to/mlir-aie/aie_kernels pytest ...
 ```
 
 The path reaches the compile key, so pointing IRON at another tree rebuilds
-rather than reusing the cache. `IRON_KERNEL_COMPILER=chess` (or
-`pytest --compiler=chess`) builds kernels with xchesscc instead of Peano,
-and needs Vitis.
+rather than reusing the cache.
 
 ### Performance Profiling
 

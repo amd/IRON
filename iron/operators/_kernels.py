@@ -45,17 +45,6 @@ def iron_kernels_dir() -> Path:
     return _REPO / "aie_kernels"
 
 
-def use_chess() -> bool:
-    """Whether kernels build with xchesscc rather than Peano.
-
-    ``IRON_KERNEL_COMPILER=chess`` selects it, and needs Vitis on the
-    machine. Which front-end is available is a property of the machine, so
-    it is read here rather than carried through every operator; it reaches
-    the compile key as a ``build_design`` keyword all the same.
-    """
-    return os.environ.get("IRON_KERNEL_COMPILER", "peano").lower() == "chess"
-
-
 def target_arch(dev=None) -> str:
     """``"aie2p"`` for NPU2 (Strix, Krackan), ``"aie2"`` for NPU1 (Phoenix)."""
     return resolve_target_arch(
@@ -97,7 +86,6 @@ def declare_kernel(
     *,
     source=None,
     func_prefix="",
-    use_chess=False,
     compile_flags=(),
     include_dirs=None,
     object_file_name=None,
@@ -125,9 +113,6 @@ def declare_kernel(
     Pointing them at one object name instead makes them share it: identical
     source and flags give an identical content digest, so upstream neither
     reports a collision nor compiles twice.
-
-    ``use_chess`` picks the xchesscc front-end for this kernel, from the
-    context's ``compiler``; every kernel of one design must agree on it.
 
     ``func_prefix`` is IRON's fusion prefix and arrives with its trailing
     underscore ("op0_"). ``ExternalFunction`` joins with an underscore of its
@@ -161,7 +146,6 @@ def declare_kernel(
             source_file=str(source),
             arg_types=arg_types,
             include_dirs=dirs,
-            use_chess=use_chess,
             compile_flags=list(compile_flags),
             symbol_prefix=prefix,
         )

@@ -726,31 +726,30 @@ LUT bundling, so an overlay's `kernel()` is one line:
 | LayerNorm | `norm.layer_norm` |
 | RMSNorm, WeightedRMSNorm | `norm.rms_norm_eps`, `eltwise.mul_sized` |
 
-Three keep a local declaration through `target.kernel(...)`, and the reason
-is not an oversight upstream: `activation.tanh`, `activation.sigmoid` and
-`activation.leaky_relu` pin a 1024-element tile, and 1024 is what their
-C++ loops promise the pipeliner
-(`AIE_LOOP_MIN_ITERATION_COUNT(32)` at a stride of 32 for the first two,
-64 elements for leaky_relu). IRON runs these at lines from 64 elements up,
-which the promise allows only because IRON builds with Peano, where it is
-advisory; under xchesscc it is a contract. Adopting the factory would mean
-either giving up the small lines or teaching it the toolchain, so the
-declaration stays here with that note. `eltwise.passthrough` (mem_copy) is
-the other one: it ties the argument dtype to the bit width, and mem_copy
-moves bf16 lines through the 16-bit kernel.
+| Tanh, Sigmoid, LeakyReLU | `activation.tanh`, `activation.sigmoid`, `activation.leaky_relu` |
+
+`eltwise.passthrough` (mem_copy) is the one that does not fit: it ties the
+argument dtype to the bit width, and mem_copy moves bf16 lines through the
+16-bit kernel, so that declaration stays local.
 
 Anything whose compile flags carry the shape (dequant, transpose) or whose
 source holds two entry points the design calls (softmax's mask) has no
 factory to use and declares its own.
 
-One gap, and it is upstream's: the installed factories build with Peano and
-take no `use_chess`, so `pytest --compiler=chess` no longer reaches the
-elementwise kernels. Threading the flag through the eight factories IRON
-calls is on mlir-aie's `claude/mlir-aie-iron-upstream` branch with its test
-(`test/python/test_kernels_chess.py`); IRON picks it up as
-`kernels.relu_sized(line, use_chess=target.use_chess)` once it lands. Until
-then a chess run builds these kernels with Peano, which is what every run
-here uses anyway.
+Tanh, Sigmoid and LeakyReLU took a hand-written declaration for a while,
+because their factories pinned a 1024-element tile. That pin was wrong: all
+three take the element count as a runtime argument, and what their inner
+loops actually require is a whole number of vectors (32 elements, or 16 for
+leaky_relu on aie2). The 1024 is the trip count they promise the pipeliner,
+which Peano emits a guard for and xchesscc takes as a contract. The factories
+now check exactly that -- the width always, the trip count only under
+`use_chess` -- and the three overlays call them like the rest. The change is
+on mlir-aie's `claude/mlir-aie-iron-upstream` branch with its tests.
+
+IRON builds with Peano throughout. There is no xchesscc path here and no
+global compiler flag: a kernel that needs one asks its factory
+(`use_chess=True`), which is where the toolchain choice belongs, since it is
+per kernel and upstream enforces that a design's kernels agree.
 
 ---
 
@@ -995,14 +994,14 @@ read it rather than re-deriving a directory layout. `compile(record="disk")`
 also writes it beside the image; by default it is kept in memory.
 
 There is no build context left to carry either. `AIEContext` held six
-things, and only two were choices: `kernels_dir` and `base_dir` are facts
+things, and only one was a choice: `kernels_dir` and `base_dir` are facts
 about the install and the checkout (now `iron.operators._kernels`'
-`kernels_dir()` and `iron_kernels_dir()`), `compiler` is a property of the
-machine (`IRON_KERNEL_COMPILER=chess`, which `pytest --compiler` sets),
-`mlir_verbose` printed three lines from GEMV's design, `build_dir` named
-where a downloaded image landed (now the JIT cache's own `prebuilt/`), and
-`record` is a keyword on `compile()`. An operator takes the device that is
-current and nothing else.
+`kernels_dir()` and `iron_kernels_dir()`), `compiler` is gone with the
+xchesscc path (IRON builds with Peano; a kernel that needs chess asks its
+factory), `mlir_verbose` printed three lines from GEMV's design, `build_dir`
+named where a downloaded image landed (now the JIT cache's own `prebuilt/`),
+and `record` is a keyword on `compile()`. An operator takes the device that
+is current and nothing else.
 
 Alongside it, `iron/common` gave up what was not its own. The stream-dse
 path moved under the one operator that uses it
