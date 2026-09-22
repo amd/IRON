@@ -974,7 +974,6 @@ class GEMM(Operator[FLMGEMMOverlay]):
         instructions-only compile with no kernel built twice. On the shipped
         overlay there is no image to build at all.
         """
-        from iron.common.design import generator_for
         from iron.common.image.artifacts import Artifacts, Design, Step
         from iron.common.image.jit_compile import insts_design, xclbin_design
 
@@ -985,8 +984,8 @@ class GEMM(Operator[FLMGEMMOverlay]):
         reference = dataclasses.replace(
             tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_bytes=None
         )
-        image = xclbin_design(generator_for(reference), kernel_name="MLIR_AIE")
-        stream = insts_design(generator_for(self))
+        image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
+        stream = insts_design(self.generator())
         config, own = image.get_cache_entry(), stream.get_cache_entry()
         self._design = stream
         return Artifacts(

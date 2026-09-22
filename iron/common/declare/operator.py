@@ -435,6 +435,12 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
 
+    def generator(self, image: str = "elf"):
+        """The design generator :class:`CompilableDesign` runs for this operator."""
+        from ..design import generator_for  # reads this package: a cycle at module scope
+
+        return generator_for(self, image=image)
+
     def compile(self, record: str = "memory") -> "Operator":
         """Build this operator's own image, once; sets :attr:`artifacts`.
 
@@ -472,18 +478,17 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         overlay, to the stream alone against the downloaded image."""
         # image/ reads this package, so naming it at module scope would make
         # the two import each other.
-        from ..design import generator_for
         from ..image.artifacts import Artifacts, Design, Step
         from ..image.jit_compile import insts_design, xclbin_design
 
         image = self.ov.external
         if image is None:
-            design = xclbin_design(generator_for(self), kernel_name="MLIR_AIE")
+            design = xclbin_design(self.generator(), kernel_name="MLIR_AIE")
             entry = design.get_cache_entry()
             picture, insts = entry.xclbin, entry.insts
         else:
             picture = self.ov.prebuilt()
-            design = insts_design(generator_for(self))
+            design = insts_design(self.generator())
             entry = design.get_cache_entry()
             insts = entry.insts
         self._design = design

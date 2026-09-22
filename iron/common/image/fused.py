@@ -9,7 +9,6 @@ import inspect
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
-from ..design import generator_for
 from . import fusion
 from .jit_compile import dispatch_stream, fused_design, xclbin_design
 
@@ -25,7 +24,7 @@ def build_fused_mlir(seq) -> str:
     design_names = []
 
     for idx, op in enumerate(designs):
-        generator = generator_for(op)
+        generator = op.generator()
         # Ask the design whether it takes a prefix, rather than inferring it
         # from the operator having kernel artifacts: a design that declares
         # ExternalFunctions reports no artifacts at all, so inferring leaves
@@ -105,7 +104,7 @@ class XclbinChain:
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
             design = xclbin_design(
-                generator_for(op, image="xclbin"),
+                op.generator(image="xclbin"),
                 kernel_name=op_label,
                 xclbin_input=prev_xclbin_path,
                 extra_flags=[

@@ -22,7 +22,6 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
-from iron.common.design import generator_for
 from iron.common.image.jit_compile import (
     _bind_device,
     _design_generator,
@@ -140,7 +139,7 @@ def test_a_traced_build_carries_the_lowered_module():
 
 def _add_key():
     add = ElementwiseAdd(size=1024, tile_size=128)
-    fn, _, kwargs = generator_for(add).resolve()
+    fn, _, kwargs = add.generator().resolve()
     return CompilableDesign(
         _design_generator(kwargs),
         compile_kwargs={"design": fn, "params": _params_key(kwargs), "chain": ""},
