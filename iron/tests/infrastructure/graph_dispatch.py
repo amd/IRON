@@ -20,7 +20,7 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 
 import iron
-from iron.common.image.sequence import OperatorSequence
+from iron.common.image import OperatorSequence
 from iron.operators import ElementwiseAdd
 
 SIZE = 1024

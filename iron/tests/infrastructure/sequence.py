@@ -26,7 +26,7 @@ import torch
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
-from iron.common.image.sequence import OperatorSequence, build_fused_mlir
+from iron.common.image import OperatorSequence, build_fused_mlir
 from iron.common.harness import verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU

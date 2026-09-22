@@ -195,7 +195,7 @@ def device():
 
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    from iron.common.image.sequence import OperatorSequence
+    from iron.common.image import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)
@@ -247,7 +247,7 @@ def test_layout_is_unchanged_without_offsets():
 
 def _chain(n_intermediates, plan_scratch):
     """A chain where each intermediate dies as the next is produced."""
-    from iron.common.image.sequence import OperatorSequence
+    from iron.common.image import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)
@@ -306,7 +306,7 @@ def test_slices_are_never_pooled():
     raises -- the slice simply reads the wrong memory. Found by probing the
     written-slice case, which the whole-buffer tests above cannot reach.
     """
-    from iron.common.image.sequence import OperatorSequence
+    from iron.common.image import OperatorSequence
     from iron.operators import ElementwiseAdd
 
     add = ElementwiseAdd(size=1024, tile_size=128)

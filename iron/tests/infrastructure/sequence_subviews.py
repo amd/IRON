@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.common.image.sequence import SequenceReferenceCallable
+from iron.common.image import SequenceReferenceCallable
 
 
 @pytest.fixture
