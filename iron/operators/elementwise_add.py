@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar
+from aie.iron.kernels import eltwise
 
 from iron.common import BinaryElementwiseOperator, BinaryElementwiseOverlay, operator
 from iron.common.testing import Testing, binary_elementwise_cases
@@ -9,10 +9,10 @@ from iron.common.testing import Testing, binary_elementwise_cases
 
 @operator
 class ElementwiseAddOverlay(BinaryElementwiseOverlay):
-    """The array for ElementwiseAdd: the shared binary-elementwise design over its kernel."""
+    """The array for ElementwiseAdd: the shared elementwise design over its kernel."""
 
-    kernel_name: ClassVar[str] = "add"
-    kernel_fn_name: ClassVar[str] = "eltwise_add_bf16_vector_size"
+    def kernel(self, target):
+        return eltwise.add_sized(self.line_size)
 
 
 @operator

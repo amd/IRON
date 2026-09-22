@@ -9,17 +9,14 @@ from ml_dtypes import bfloat16
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Case, Testing, channeled_unary_cases
+from iron.operators._kernels import lut_sources
 
 
 @operator
 class LeakyReLUOverlay(ChanneledUnaryOverlay):
-    """The array for Leaky ReLU: the channeled-unary design with ``alpha`` as a kernel argument."""
+    """The array for Leaky ReLU: the elementwise design with ``alpha`` as a kernel argument."""
 
     alpha: float = 0.01
-
-    kernel_name: ClassVar[str] = "leaky_relu"
-    kernel_fn_name: ClassVar[str] = "leaky_relu_bf16"
-    kernel_object: ClassVar[str] = "leaky_relu.o"  # as the old design named it
 
     # Minimum per-core line length (in bfloat16 elements) required by the
     # vectorized kernels. They tell the pipeliner a minimum loop-trip count via
@@ -40,9 +37,18 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
                 f"loop-iteration promise"
             )
 
-    # Leaky ReLU's kernel takes: input, output, input_size, alpha
-    def kernel_arg_types(self, line_type) -> list:
-        return [line_type, line_type, np.int32, bfloat16]
+    def kernel(self, target):
+        # ``aie.iron.kernels.activation.leaky_relu`` is this kernel, but it
+        # accepts only 1024-element tiles although ``leaky_relu_bf16`` reads the
+        # count at runtime. Declared here until that is lifted upstream.
+        line = self.x.tile
+        return target.kernel(
+            "leaky_relu_bf16",
+            [line, line, np.int32, bfloat16],
+            source=target.kernel_source("leaky_relu"),
+            bundled_sources=lut_sources(target.dev),
+            object_file_name="leaky_relu.o",
+        )
 
     def kernel_call(self, kernel, elem_in, elem_out) -> None:
         kernel(elem_in, elem_out, self.line_size, self.alpha)

@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import field
 from typing import ClassVar
 
 import torch
-from dataclasses import field
+from aie.iron.kernels import norm
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
@@ -12,11 +13,12 @@ from iron.common.testing import Testing, channeled_unary_cases
 
 @operator
 class LayerNormOverlay(ChanneledUnaryOverlay):
-    """The array for LayerNorm: the shared channeled-unary design over its kernel."""
+    """The array for LayerNorm: the shared elementwise design over its kernel."""
 
-    kernel_name: ClassVar[str] = "layer_norm"
-    kernel_fn_name: ClassVar[str] = "layer_norm"
     tile_cap: ClassVar[int] = 8192
+
+    def kernel(self, target):
+        return norm.layer_norm(self.line_size)
 
 
 @operator

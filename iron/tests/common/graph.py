@@ -42,7 +42,7 @@ class Dev:
 
 @pytest.fixture(autouse=True)
 def shim_limit(monkeypatch):
-    import iron.common.operator_bases as bases
+    import iron.common.elementwise as bases
     import iron.operators.rms_norm as rms
 
     monkeypatch.setattr(bases, "get_shim_dma_limit", lambda dev: 16)

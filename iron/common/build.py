@@ -496,6 +496,16 @@ def build_design(
     key (see :func:`mlir_artifact_for`).
     """
     from aie.iron import Program, Runtime, ScratchpadParameter
+    from aie.iron.kernels._common import _EXTERN_CACHE
+
+    # aie.iron.kernels' factories memoize the ExternalFunction they return,
+    # and a returned one holds MLIR operations from the context it was
+    # resolved in. Every generation must start from an empty cache or a
+    # second design gets a kernel bound to a dead context. CompilableDesign
+    # clears it when it generates; this is the same entry point for the
+    # paths that call a design directly -- fusion's per-child generation
+    # and the lowering gates.
+    _EXTERN_CACHE.clear()
 
     op = op.tuned(dev)
     ov = op.ov

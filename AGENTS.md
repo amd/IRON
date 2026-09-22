@@ -297,9 +297,14 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - `compatible()` for divisibility against the tuned overlay, `residents()`
      for the counts
    - `design(rt)` only if the derived sequence is not the one you want
-   - see `iron/common/operator_bases.py` for the elementwise families, and
+   - see `iron/common/elementwise.py` for the elementwise families, and
      `gemm/op.py` or `mha/op.py` for hand-written sequences
-4. If a new C++ compute kernel is needed, add it to the
+4. Name the kernel with a factory from `aie.iron.kernels`
+   (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
+   the symbol, the source, the argument types and aie2's LUT tables.
+   `target.kernel(...)` declares one the factories do not cover -- a kernel
+   whose compile flags carry the shape, or a source with two entry points
+   the design calls. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
    and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`

@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar
-
 import torch
+from aie.iron.kernels import eltwise
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
@@ -11,10 +10,10 @@ from iron.common.testing import Testing, channeled_unary_cases
 
 @operator
 class ReLUOverlay(ChanneledUnaryOverlay):
-    """The array for ReLU: the shared channeled-unary design over its kernel."""
+    """The array for ReLU: the shared elementwise design over its kernel."""
 
-    kernel_name: ClassVar[str] = "relu"
-    kernel_fn_name: ClassVar[str] = "relu_bf16_size"
+    def kernel(self, target):
+        return eltwise.relu_sized(self.line_size)
 
 
 @operator

@@ -21,6 +21,7 @@ from iron.common.declare import (
     tunable,
 )
 import aie.utils as aie_utils
+from aie.iron.kernels import eltwise, norm
 
 from iron.common.testing import Case, Testing
 from iron.common.utils import get_shim_dma_limit
@@ -110,11 +111,7 @@ class RMSNormOverlay(Overlay):
         tile_ty = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
         depth = 1 if self.tile_size > 4096 else 2
-        kernel = target.kernel(
-            "rms_norm_eps",
-            [tile_ty, tile_ty, np.int32, np.float32],
-            source=target.kernel_source("rms_norm"),
-        )
+        kernel = norm.rms_norm_eps(self.per_tile)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
             for i in range(cols)
@@ -195,16 +192,8 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels
         depth = 1 if self.tile_size > 4096 else 2
-        rms_norm = target.kernel(
-            "rms_norm_eps",
-            [tile_ty, tile_ty, np.int32, np.float32],
-            source=target.kernel_source("rms_norm"),
-        )
-        eltwise_mul = target.kernel(
-            "eltwise_mul_bf16_vector_size",
-            [tile_ty, weights_ty, tile_ty, np.int32],
-            source=target.kernel_source("mul"),
-        )
+        rms_norm = norm.rms_norm_eps(self.per_tile)
+        eltwise_mul = eltwise.mul_sized(self.per_tile)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
             for i in range(cols)

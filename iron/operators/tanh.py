@@ -1,21 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import ClassVar
-
+import numpy as np
 import torch
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
+from iron.operators._kernels import lut_sources
 
 
 @operator
 class TanhOverlay(ChanneledUnaryOverlay):
-    """The array for Tanh: the shared channeled-unary design over its kernel."""
+    """The array for Tanh: the shared elementwise design over its kernel."""
 
-    kernel_name: ClassVar[str] = "tanh"
-    kernel_fn_name: ClassVar[str] = "tanh_bf16"
-    needs_lut_ops: ClassVar[bool] = True
+    def kernel(self, target):
+        # ``aie.iron.kernels.activation.tanh`` is this kernel, but it accepts
+        # only 1024-element tiles although ``tanh_bf16`` reads the count at
+        # runtime. Declared here until that restriction is lifted upstream.
+        line = self.x.tile
+        return target.kernel(
+            "tanh_bf16",
+            [line, line, np.int32],
+            source=target.kernel_source("tanh"),
+            bundled_sources=lut_sources(target.dev),
+        )
 
 
 @operator

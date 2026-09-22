@@ -683,6 +683,77 @@ pass already does. Neither blocks the decode-only PR.
 
 ---
 
+### 11a. The elementwise template against upstream's
+
+`iron/common/elementwise.py` is one overlay -- `ElementwiseOverlay` -- with
+two declared stream shapes over it (`ChanneledUnaryOverlay`,
+`BinaryElementwiseOverlay`); its `design()` reads whatever streams it was
+declared with, so a third input needs no new code. It is the same design as
+`aie.iron.algorithms.transform_parallel`: one core per (column, channel),
+one fifo per stream per core, the extent split evenly, and the same fifo
+names (`in0_<col>`, `out_<col>`, widened to `_<chan>` when there is more
+than one channel).
+
+What keeps them two functions, rather than one call:
+
+- **the trip count**. Upstream folds `num_elements // tile` into the core
+  program, so one build serves one extent. Here it is a `Resident` the
+  sequence writes (§3), so one build serves every extent -- which is what
+  makes an operator reusable across a graph's steps.
+- **who owns the sequence**. Upstream builds a whole `Program` and issues
+  the taps itself. An overlay here returns workers and leaves the sequence
+  to the library, which is what lets several operators fuse into one image.
+- **the column budget**. Upstream takes every column of the device.
+  `tuning()` here takes as many as the device's shim DMA budget allows for
+  the streams declared (`shim_slots_per_core()`), which is what lets a
+  binary kernel -- two input fifos per core -- place at all.
+
+A useful upstream change would split `_transform_parallel_gen` in two: a
+half that builds the workers and the fifo handles, and a half that wraps
+them in a `Program` and a `Runtime`. IRON's `design()` would then call the
+first half, and the three differences above become its arguments.
+
+The kernels are upstream's already. `aie.iron.kernels` factories return the
+`ExternalFunction` for a symbol, its source, its argument types and aie2's
+LUT bundling, so an overlay's `kernel()` is one line:
+
+| operator | factory |
+|---|---|
+| ReLU | `eltwise.relu_sized` |
+| GELU, SiLU | `activation.gelu_sized`, `activation.silu_sized` |
+| ElementwiseAdd, ElementwiseMul | `eltwise.add_sized`, `eltwise.mul_sized` |
+| AXPY | `datamovement.axpy` |
+| LayerNorm | `norm.layer_norm` |
+| RMSNorm, WeightedRMSNorm | `norm.rms_norm_eps`, `eltwise.mul_sized` |
+
+Three keep a local declaration through `target.kernel(...)`, and the reason
+is not an oversight upstream: `activation.tanh`, `activation.sigmoid` and
+`activation.leaky_relu` pin a 1024-element tile, and 1024 is what their
+C++ loops promise the pipeliner
+(`AIE_LOOP_MIN_ITERATION_COUNT(32)` at a stride of 32 for the first two,
+64 elements for leaky_relu). IRON runs these at lines from 64 elements up,
+which the promise allows only because IRON builds with Peano, where it is
+advisory; under xchesscc it is a contract. Adopting the factory would mean
+either giving up the small lines or teaching it the toolchain, so the
+declaration stays here with that note. `eltwise.passthrough` (mem_copy) is
+the other one: it ties the argument dtype to the bit width, and mem_copy
+moves bf16 lines through the 16-bit kernel.
+
+Anything whose compile flags carry the shape (dequant, transpose) or whose
+source holds two entry points the design calls (softmax's mask) has no
+factory to use and declares its own.
+
+One gap, and it is upstream's: the installed factories build with Peano and
+take no `use_chess`, so `pytest --compiler=chess` no longer reaches the
+elementwise kernels. Threading the flag through the eight factories IRON
+calls is on mlir-aie's `claude/mlir-aie-iron-upstream` branch with its test
+(`test/python/test_kernels_chess.py`); IRON picks it up as
+`kernels.relu_sized(line, use_chess=target.use_chess)` once it lands. Until
+then a chess run builds these kernels with Peano, which is what every run
+here uses anyway.
+
+---
+
 ## 12. Spikes, before any model code
 
 | id | question | how | if no |
@@ -1123,7 +1194,7 @@ and the decode graph's parity against the token snapshot (§18).
 | access patterns and slicing (§5) | `iron/common/tiling.py` | 21 tests, reproducing today's unary, binary and GEMV taps; encoder follows the verifier's slot rules | — |
 | library-owned build (§5, §6) | `iron/common/build.py` | 6 tests: derived order and patterns, override slicing, preamble | **needs a run**: Runtime/Program construction, resident writes, barrier sets |
 | GEMV (§14 step 1) | `iron/operators/gemv/op.py` | classic construction, arg specs, tuning, compatibility, override transfers | **needs the gate**: byte-identical `matvec_vectorized_bf16_bf16.o` |
-| unary and binary bases, ten operators (§14 step 2, part) | `iron/common/operator_bases.py`, ten `op.py` | classic construction, arg specs, resident counts, transfers per core | **needs a run**: resident-driven core loops are new code; C11 byte-identity now expected to pass |
+| unary and binary bases, ten operators (§14 step 2, part) | `iron/common/elementwise.py`, ten `op.py` | classic construction, arg specs, resident counts, transfers per core | **needs a run**: resident-driven core loops are new code; C11 byte-identity now expected to pass |
 | dequant, rms_norm (two pairs), rope, softmax (two overlays) (§14 step 2, rest) | four `op.py` | legacy spellings, arg specs, tuning, resident values, transfers per slot, rejections | **needs a run**; softmax's snapshot entry is now `rows x cols` and was re-pinned by hand |
 | repeat, strided_copy, transpose, gemm (§14 step 3, part) | four `op.py` | construction, arg specs, tuning geometry, residents, transfers issued, rejections | **needs a run**; gemm's sequence body needs the real tiler |
 | mha (§14 step 3, part) | `iron/operators/mha/op.py` | eight-pipeline sequence checked transfer by transfer (two shims, K/V per head, waited drains); inference from shapes | **needs a run**; Q/O descriptors are now linear runs rather than `(rows, d)` tiles, same bytes in the same order |

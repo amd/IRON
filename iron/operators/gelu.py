@@ -4,6 +4,7 @@
 from typing import ClassVar
 
 import torch
+from aie.iron.kernels import activation
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
@@ -11,12 +12,12 @@ from iron.common.testing import Testing, channeled_unary_cases
 
 @operator
 class GELUOverlay(ChanneledUnaryOverlay):
-    """The array for GELU: the shared channeled-unary design over its kernel."""
+    """The array for GELU: the shared elementwise design over its kernel."""
 
-    kernel_name: ClassVar[str] = "gelu"
-    kernel_fn_name: ClassVar[str] = "gelu_bf16_size"
-    needs_lut_ops: ClassVar[bool] = True
     tile_cap: ClassVar[int] = 8192
+
+    def kernel(self, target):
+        return activation.gelu_sized(self.line_size)
 
 
 @operator

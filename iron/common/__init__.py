@@ -28,11 +28,13 @@ from .declare import (
     select,
     tunable,
 )
-from .operator_bases import (
+from .elementwise import (
     BinaryElementwiseOperator,
     BinaryElementwiseOverlay,
     ChanneledUnaryOperator,
     ChanneledUnaryOverlay,
+    ElementwiseOperator,
+    ElementwiseOverlay,
 )
 
 __all__ = [
@@ -46,6 +48,8 @@ __all__ = [
     "Design",
     "DesignGenerator",
     "DispatchTime",
+    "ElementwiseOperator",
+    "ElementwiseOverlay",
     "In",
     "InOut",
     "Incompatible",
