@@ -330,7 +330,7 @@ def legalize(
         raise ValueError(
             f"offset {offset} is not a multiple of the {gran}-element shim granule"
         )
-    dims = _merged([(int(n), int(s)) for n, s in zip(sizes, strides) if int(n) != 1])
+    dims = [(int(n), int(s)) for n, s in zip(sizes, strides) if int(n) != 1]
     for n, s in dims[:-1]:
         if s % gran:
             raise ValueError(
@@ -340,7 +340,18 @@ def legalize(
         raise ValueError(
             f"innermost size {dims[-1][0]} is not a multiple of the {gran}-element granule"
         )
-    return _legalize_dims(elements, offset, dims, gran)
+    out = _legalize_dims(elements, offset, dims, gran)
+    if len(out) > 1:
+        # A pattern past the slots may fit once adjacent dimensions that nest
+        # contiguously are one (as a buffer slice already spells them). Only
+        # as a fallback: merging can also cost a slot's factoring room, and
+        # a pattern that fits as given keeps its shape.
+        merged = _merged(dims)
+        if merged != dims:
+            alt = _legalize_dims(elements, offset, merged, gran)
+            if len(alt) < len(out):
+                out = alt
+    return out
 
 
 def _merged(dims: list[tuple[int, int]]) -> list[tuple[int, int]]:

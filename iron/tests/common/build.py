@@ -278,14 +278,13 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
     op.design(Sequence(op, ov, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
 
     head, block = 1024 * 64, 256 * 64
-    # (heads, blocks, rows x d): the two heads of the one group nest on the
-    # blocks (a head is two blocks), and the contiguous rows split for the
-    # d0 wrap, so each shim's Q is (4, 16, 1024) in three slots.
+    # Q: (heads, blocks, rows, d), one per slot. K and V: the re-read in the
+    # iteration slot, the head's 1024 rows factored for the d1 wrap.
     q = {
-        s: Access(2 * head, s * block, (1, 4, 16, 1024), (0, 2 * block, 1024, 1))
+        s: Access(2 * head, s * block, (2, 2, 256, 64), (head, 2 * block, 64, 1))
         for s in range(2)
     }
-    kv = Access(head, 0, (4, 1, 64, 1024), (0, 0, 1024, 1))
+    kv = Access(head, 0, (4, 2, 512, 64), (0, 512 * 64, 64, 1))
     assert log == [
         ("fill", "q0", "dQ", q[0], False),
         ("fill", "q1", "dQ", q[1], False),

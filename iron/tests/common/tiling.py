@@ -153,6 +153,22 @@ def test_legalize_keeps_a_leading_zero_stride_in_the_iteration_slot():
     assert all(a.offset == 0 for a in accs)
 
 
+def test_legalize_merges_nesting_dimensions_only_when_that_helps():
+    # Five dimensions, the outer two nesting contiguously: as given they do
+    # not fit and would unroll; merged they are four and fit.
+    (acc,) = legalize(
+        1 << 22, 0, [2, 20, 8, 2, 64], [20 * 40000, 40000, 4096, 128, 1], bfloat16
+    )
+    assert acc.sizes == (40, 8, 2, 64) and acc.strides == (40000, 4096, 128, 1)
+    # gemm's column-major B: as given it fits one descriptor; merged, its
+    # middle dimensions grow past a wrap and factor onto a stride past the
+    # field, unrolling into hundreds. The pattern that fits keeps its shape.
+    (acc,) = legalize(
+        8192 * 2048, 0, [16, 32, 64, 64], [512, 524288, 8192, 1], bfloat16
+    )
+    assert acc.sizes == (16, 32, 64, 64)
+
+
 def test_split_validates_divisibility_and_axis():
     with pytest.raises(ValueError, match="cannot split 100 rows"):
         split((100, 8), 8, axis=0)
@@ -191,7 +207,7 @@ def test_legalize_unrolls_when_no_slot_is_free():
 
     # All four slots used and the iteration count past 64: unroll it. (The
     # outer stride is not the next dimension's extent, or the two would
-    # merge into one slot.)
+    # merge into one slot and the rest fit.)
     accs = legalize(1 << 22, 0, [100, 8, 2, 64], [40000, 4096, 128, 1], bfloat16)
     assert len(accs) == 100
     assert [a.offset for a in accs][:3] == [0, 40000, 80000]
