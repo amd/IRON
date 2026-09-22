@@ -126,7 +126,7 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
     consecutive addresses. All writes precede the first lock release, so no
     core reads a half-written buffer.
     """
-    values = op.residents()
+    values = ov.resident_values(op)
     residents = list(ov.residents.values())
     for res in residents:
         if res.name not in values:
@@ -155,14 +155,11 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
 
 def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
     """Residents, then the operator's sequence, then the trailing awaits."""
-    from .build import _derived
+    from .build import run_design
 
     write_residents(op, ov, core_tiles, emit)
     seq = ForeignSequence(op, ov, rt_data, emit)
-    if op.has_design_override():
-        op.design(seq)
-    else:
-        _derived(seq, op, ov)
+    run_design(op, ov, seq)
     seq.finish()
 
 

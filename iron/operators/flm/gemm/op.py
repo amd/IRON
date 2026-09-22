@@ -17,6 +17,7 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 """
 
 import dataclasses
+from typing import ClassVar
 from pathlib import Path
 
 import numpy as np
@@ -136,6 +137,10 @@ class FLMGEMMOverlay(Overlay):
     a_l2: int | None = tunable(None, repr=False)
     b_l2: int | None = tunable(None, repr=False)
     c_l2: int | None = tunable(None, repr=False)
+
+    # The k order pack_B writes within a block: the port's kernel's, or the
+    # shipped binary's own (see shipped.py).
+    b_overlay_order: ClassVar[bool] = False
 
     a = StreamIn(a_l2, per=rows, depth=A_DEPTH)
     b = StreamIn(b_l2, dtype=b_dtype, per=cols, depth=B_DEPTH)
@@ -969,6 +974,8 @@ class GEMM(Operator[FLMGEMMOverlay]):
         """
         if getattr(self, "_xclbin_path", None) is not None:
             return
+        if self.ov.foreign is not None:
+            return super().link_xclbin()  # the downloaded image, instructions only
         from iron.common.build import mlir_artifact_for
         from iron.common.jit_compile import compile_insts, compile_xclbin_insts
 
@@ -1007,6 +1014,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
             ct_k=ov.ct_max_k,
             bfp16=bool(ov.bfp16_b),
             round_conv_even=ov.rounding is Rounding.CONV_EVEN,
+            overlay_order=ov.b_overlay_order,
         )
 
     def packed_B_size(self, K, N):

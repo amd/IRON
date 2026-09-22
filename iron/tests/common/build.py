@@ -538,7 +538,7 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# mm_prebuilt: a foreign overlay's sequence, device-free
+# flm.gemm.Shipped: a foreign overlay's sequence, device-free
 # --------------------------------------------------------------------------
 
 
@@ -560,9 +560,9 @@ class _ForeignRecorder:
 
 def test_foreign_overlay_declares_its_pins_and_parameter_block():
     from iron.common.declare import DeclarationError, Xclbin
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuiltOverlay
+    from iron.operators.flm.gemm.shipped import Shipped
 
-    ov = MMPrebuiltOverlay()
+    ov = Shipped()
     assert ov.foreign.filename == "flm_mm_f81eba71.xclbin"
     assert [(p.col, p.channel) for p in (ov.a.pin(r) for r in range(4))] == [
         (0, 0),
@@ -581,13 +581,19 @@ def test_foreign_overlay_declares_its_pins_and_parameter_block():
             s = StreamIn(64)
 
 
-def test_mm_prebuilt_sequence_writes_every_core_then_streams_in_consume_order():
+def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
     from iron.common.foreign import LOCK_ADDRESS_BASE, run_sequence
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt, MMPrebuiltOverlay
+    from iron.operators.flm.gemm.op import GEMM
+    from iron.operators.flm.gemm.shipped import Shipped
 
-    ov = MMPrebuiltOverlay()
-    op = MMPrebuilt(ov, M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
-    assert op.residents() == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
+    ov = Shipped()
+    op = GEMM(ov, M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
+    # The port's residents are hidden; the image's block is laid out from
+    # the operator's values.
+    assert list(ov.residents) == ["rtp"]
+    assert ov.resident_values(op) == {
+        "rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]
+    }
     rec = _ForeignRecorder()
     cores = [(c, r) for r in range(2, 6) for c in range(8)]
     run_sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"}, cores, rec)

@@ -3,7 +3,7 @@
 
 """What the case table does not cover lowers too: graph-traced operators
 with bound per-call values, flm/gemm's configuration and shapes, the
-foreign mm_prebuilt sequence, and the swiglu graph functions' operators.
+foreign shipped-overlay sequence, and the swiglu graph functions' operators.
 Same gate as ``lowering.py``: aiecc to an instruction stream, no Peano.
 """
 
@@ -78,21 +78,24 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
     lower(reference, tmp_path / "config", name=op.config_name)
 
 
-def test_mm_prebuilt_foreign_sequence_lowers(tmp_path):
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
+def _shipped(**kwargs):
+    from iron.operators.flm.gemm.op import GEMM
+    from iron.operators.flm.gemm.shipped import Shipped
 
-    op = MMPrebuilt(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
-    lower(op, tmp_path)
+    return GEMM(Shipped(), **kwargs)
+
+
+def test_shipped_foreign_sequence_lowers(tmp_path):
+    lower(_shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0)), tmp_path)
 
 
 def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
-    """The §11 instructions-only compile: mm_prebuilt's image is downloaded,
+    """The §11 instructions-only compile: the shipped image is downloaded,
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit."""
     from iron.common.context import AIEContext
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
 
-    op = MMPrebuilt(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+    op = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
     op.link_xclbin()
     insts = Path(op._insts_path)
     assert insts.stat().st_size > 0
@@ -100,9 +103,7 @@ def test_instructions_compile_alone_against_a_foreign_image(tmp_path):
         "an instructions-only compile built an image"
     )
     first = insts.stat().st_mtime_ns
-    again = MMPrebuilt(
-        M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path))
-    )
+    again = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
     again.link_xclbin()
     assert Path(again._insts_path).stat().st_mtime_ns == first, (
         "the same sequence recompiled"

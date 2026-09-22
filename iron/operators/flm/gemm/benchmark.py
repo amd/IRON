@@ -10,7 +10,7 @@ Up to three implementations run per shape, on identical inputs:
   gemm     :class:`iron.operators.GEMM` at its defaults, which are the same
            emulated-bfp16 mmul and conv_even rounding, so the comparison is
            like-for-like rather than against a more accurate, slower build
-  prebuilt :class:`iron.operators.flm.MMPrebuilt`, FastFlowLM's shipped
+  prebuilt ``GEMM(Shipped(), ...)`` (:mod:`iron.operators.flm.gemm.shipped`), FastFlowLM's shipped
            ``mm.xclbin``, pinned by digest. NPU2 only, since that binary is a
            fixed 8-column overlay; elsewhere it is dropped and the flm-vs-gemm
            comparison still runs.
@@ -21,7 +21,7 @@ needs an external install or a host-specific path.
 
 pytest never collects this: ``pytest.ini`` sets ``python_files = test.py``. It
 is a timing comparison meant to be invoked directly, not a correctness gate;
-the correctness half lives in ``iron/operators/flm/mm_prebuilt/test.py``.
+the correctness half lives in ``iron/operators/flm/gemm/test.py``.
 
 Timing is the runtime's device-side ``npu_time`` rather than a host wall clock,
 so it compares the designs rather than the driver.
@@ -51,7 +51,7 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
-from iron.operators.flm import MMPrebuilt
+from iron.operators.flm import Shipped
 from iron.common.test_utils import record_metric
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
@@ -68,7 +68,7 @@ HAVE_PREBUILT = _dev is not None and _dev.resolve().name == "npu2" and _dev.cols
 # lengths. E2B is dim 1536 / ffn 6144; E4B is dim 2560 / ffn 10240. Both ship
 # the same mm.xclbin blob (checked at FastFlowLM f81eba71), so between them
 # they cover it. Gemma4-12B ships no mm.xclbin at all -- its projections go
-# through a quantized matmul -- so it cannot be compared against MMPrebuilt.
+# through a quantized matmul -- so it cannot be compared against the shipped image.
 #             proj,      K,      N
 E2B_PROJ = [
     ("q", 1536, 4096),
@@ -202,7 +202,7 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
         candidates.append(
             Candidate(
                 "prebuilt",
-                MMPrebuilt(M=M, K=K, N=N, context=aie_context),
+                FLMGEMM(Shipped(), M=M, K=K, N=N, context=aie_context),
                 A,
                 B,
                 M,

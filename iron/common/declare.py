@@ -858,12 +858,20 @@ def _members_of(cls: type) -> list[_Member]:
     The most derived class's body order wins for the members it declares;
     inherited members it does not redeclare follow, in their own order. So a
     subclass that inserts a buffer between two inherited ones (a weight
-    between an input and an output) gets the order it wrote.
+    between an input and an output) gets the order it wrote. A member the
+    subclass sets to ``None`` is hidden.
     """
     ordered: dict[str, _Member] = {}
+    seen: set[str] = set()
     for klass in cls.__mro__:
         for name, value in vars(klass).items():
-            if isinstance(value, _Member) and name not in ordered:
+            if name in seen:
+                continue
+            seen.add(name)
+            # A subclass hides an inherited member by assigning it None: a
+            # foreign overlay of a built one keeps its fields and streams but
+            # not its residents, whose block the image lays out differently.
+            if isinstance(value, _Member):
                 ordered[name] = value
     return list(ordered.values())
 
@@ -1000,7 +1008,9 @@ def operator(cls: type) -> type:
 
     cls._members = tuple(members)  # type: ignore[attr-defined]
     cls._dim_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "dim")  # type: ignore[attr-defined]
-    cls._tunable_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "tunable")  # type: ignore[attr-defined]
+    cls._tunable_fields = tuple(
+        f.name for f in fields.values() if _tier_of(f) == "tunable"
+    )  # type: ignore[attr-defined]
 
     if issubclass(cls, Overlay):
         _finish_overlay(cls)
@@ -1132,6 +1142,25 @@ class Overlay:
     def foreign(self) -> Xclbin | None:
         """The downloaded image this overlay is, if IRON did not build it."""
         return type(self)._foreign
+
+    # -- the sequence, when the overlay owns it -----------------------------
+
+    def sequence(self, op: "Operator", rt) -> None:
+        """The runtime sequence for ``op`` on this overlay, when the overlay
+        rather than the operator knows it: a foreign image consumes its
+        transfers in the order it was built for, whatever operator drives it.
+        Takes precedence over the operator's ``design(rt)``."""
+        raise NotImplementedError
+
+    @classmethod
+    def has_sequence(cls) -> bool:
+        return cls.sequence is not Overlay.sequence
+
+    def resident_values(self, op: "Operator") -> dict[str, Any]:
+        """The words for this overlay's residents, from ``op``. By default the
+        operator's own ``residents()``; a foreign overlay lays the operator's
+        values out into the block its image reads."""
+        return op.residents()
 
     def __post_init__(self) -> None:
         self._tuned = False
@@ -1688,11 +1717,19 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         return mlir_artifact_for(self, image=image)
 
     def set_up_artifacts(self) -> None:
-        # Nothing: the kernels are ExternalFunctions the design declares and
+        # The kernels are ExternalFunctions the design declares and
         # CompilableDesign compiles; the xclbin and instructions are built by
         # link_xclbin(). The artifact graph is for what is not compiled at
-        # all (flm.MMPrebuilt's downloaded xclbin).
-        return
+        # all: a foreign overlay's downloaded image.
+        image = self.ov.foreign
+        if image is None:
+            return
+        from .compilation.base import RemoteFileArtifact
+
+        self.xclbin_artifact = RemoteFileArtifact(
+            image.filename, url=image.url, sha256=image.sha256
+        )
+        self.add_artifacts([self.xclbin_artifact])
 
     def compile(self, dry_run: bool = False) -> "Operator":
         """Build the artifact graph, then the xclbin and instructions.
@@ -1707,13 +1744,25 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         return self
 
     def link_xclbin(self) -> None:
-        """Compile this operator's xclbin and instructions, once (idempotent)."""
+        """Compile this operator's xclbin and instructions, once (idempotent).
+
+        On a foreign overlay the image is the downloaded one, so only this
+        shape's instruction stream is compiled."""
         if getattr(self, "_xclbin_path", None) is not None:
             return
         from pathlib import Path
 
-        from .jit_compile import compile_xclbin_insts
+        from .jit_compile import compile_insts, compile_xclbin_insts
 
+        if self.ov.foreign is not None:
+            if not self.artifacts:
+                self.set_up_artifacts()
+            self._insts_path = compile_insts(
+                self.get_mlir_artifact().generator,
+                Path(self.context.build_dir) / f"{self.name}.bin",
+            )
+            self._xclbin_path = self.xclbin_artifact.filename
+            return
         self._xclbin_path, self._insts_path = compile_xclbin_insts(
             self.get_mlir_artifact().generator,
             Path(self.context.build_dir) / f"{self.name}.xclbin",
@@ -1726,9 +1775,10 @@ class Operator(AIEOperatorBase, Generic[O], metaclass=_OperatorMeta):
         from aie.utils.npukernel import NPUKernel
 
         self.link_xclbin()
+        image = self.ov.foreign
         npu_kernel = NPUKernel(
             xclbin_path=str(self._xclbin_path),
-            kernel_name="MLIR_AIE",
+            kernel_name="MLIR_AIE" if image is None else image.kernel_name,
             insts_path=str(self._insts_path),
         )
         handle = aie_utils.DefaultNPURuntime.load(npu_kernel)

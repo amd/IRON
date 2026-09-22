@@ -333,9 +333,20 @@ def _plus(ssa, constant: int):
     return ssa + arith.constant(int(constant), np_dtype_to_mlir_type(np.int32))
 
 
+def run_design(op: Operator, ov: Overlay, seq) -> None:
+    """The transfers: the overlay's sequence when it owns one, else the
+    operator's override, else the one derived from the declarations."""
+    if ov.has_sequence():
+        ov.sequence(op, seq)
+    elif op.has_design_override():
+        op.design(seq)
+    else:
+        _derived(seq, op, ov)
+
+
 def _preamble(rt: Sequence, op: Operator, ov: Overlay, target: Target) -> None:
     """Residents, then barriers, then the parameter sync, before any DMA."""
-    values = op.residents()
+    values = ov.resident_values(op)
     writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
     for name, res in ov.residents.items():
         if res.optional and not res.targets:
@@ -498,10 +509,7 @@ def build_design(
                 value.ssa = scalar
         seq = Sequence(op, ov, rt_data)
         _preamble(seq, op, ov, target)
-        if op.has_design_override():
-            op.design(seq)
-        else:
-            _derived(seq, op, ov)
+        run_design(op, ov, seq)
         # A declared stream slot this extent never transfers on (mem_copy's
         # idle cores at a small size) still needs a shim endpoint, or the
         # program cannot be resolved. Place it on any shim tile.

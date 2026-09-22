@@ -3,7 +3,7 @@
 
 """Weight packing shared by the FastFlowLM-derived operators.
 
-Both ``flm.GEMM`` and ``flm.MMPrebuilt`` consume B pre-packed into the order
+Both flm.GEMM overlays, the port and the shipped image, consume B pre-packed into the order
 the compute tiles read it, so their B transfers are plain linear descriptors.
 The reorder is deliberately the caller's job: expressing it as a strided
 descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so
@@ -89,7 +89,7 @@ def pack_b(
     already happened, and makes B 9 bytes per 8 values instead of 16.
 
     ``overlay_order`` swaps the two within-block k axes (``i`` and ``s_in``
-    below). It exists solely for :class:`iron.operators.flm.MMPrebuilt`, whose
+    below). It exists solely for the shipped image (:mod:`iron.operators.flm.gemm.shipped`), whose
     B stream is read by FastFlowLM's shipped ``mm.xclbin``, not by a kernel
     built here: that overlay's own loop nest sweeps ``s_in`` outer and ``i``
     inner, the reverse of ``mm_fused_mmul_2x2``'s ``i``-outer loop. The

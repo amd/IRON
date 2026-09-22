@@ -43,7 +43,7 @@ and can pack its weights once. Pick `iron.operators.GEMM` when you need tiling
 control or cannot pre-pack B.
 
 The shipped overlay itself is available as
-[`iron.operators.flm.MMPrebuilt`](../mm_prebuilt) for comparison; `benchmark.py`
+`GEMM(Shipped(), ...)` ([the shipped overlay](#the-shipped-overlay)) for comparison; `benchmark.py`
 measures the two against each other and against `iron.operators.GEMM`.
 
 ## Architectures
@@ -208,7 +208,7 @@ GEMM(M=M, K=K, N=N, context=ctx)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
-[`flm.MMPrebuilt`](../mm_prebuilt), which runs that xclbin unmodified: with
+`GEMM(Shipped(), ...)`, which runs that xclbin unmodified: with
 `floor` and no activation, output is **bit-identical across all 6291456
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).
@@ -302,7 +302,7 @@ M=1024 K=1536 N=6144, min of per-run medians:
 | | bytes moved | latency | err/mass |
 |---|---|---|---|
 | `flm.GEMM` (`tile_n=64`) | 47 MB | **1143 us** | 2.39e-04 |
-| `flm.MMPrebuilt` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
+| `GEMM(Shipped(), ...)` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
 | `iron.operators.GEMM` (same emulated mode) | 126 MB | 3353 us | 2.41e-04 |
 
 **1.90x the shipped overlay, and 41x more accurate than it** — the accuracy
@@ -418,3 +418,66 @@ take this path (E4B/gateup M1024), for no change in what is in flight.
 `m_chunk` takes this path too, since its only structural effect is to force the
 split on for A. It is off by default regardless — see `M_CHUNK_FOR_N` in
 design.py, which would fork the xclbin.
+
+## The shipped overlay
+
+```python
+from iron.operators.flm import GEMM, Shipped
+
+op = GEMM(Shipped(), M=1024, K=1536, N=6144, epilogue="silu", context=ctx)
+op.compile()
+op.get_callable()(A, op.pack_B(B), C_out)
+```
+
+`Shipped` (`shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
+second overlay for the same operator: the binary the port was ported from,
+driven by the same `GEMM`, its reference and its packing, so the two can be
+measured against each other on identical inputs through one host path.
+`benchmark.py` does exactly that, and `test.py` checks the shipped overlay's
+epilogues against its own accumulator.
+
+**NPU2 only** — the overlay is an 8-column NPU2 binary. Tuning it for
+anything else raises.
+
+### How it is obtained
+
+The xclbin is not checked in. It is a `RemoteFileArtifact`: downloaded on demand
+into the (gitignored) build directory and pinned by SHA-256 against an immutable
+FastFlowLM commit, so the fetch is reproducible and a substituted file is
+rejected.
+
+Because this is the only thing in the tree that touches the network, the
+benchmark that uses it is marked `extensive` and is not reached by the default
+`-m "not extensive"` run.
+
+### What the overlay supplies
+
+The overlay ships as a binary, so every core program, memtile buffer and
+stream-switch route comes from the xclbin. The overlay supplies only the
+host-side half of a dispatch, and `GEMM`'s own `pack_B`, `reference` and
+packaging serve it:
+
+* **The runtime parameters.** One overlay serves every projection in a model, so
+  the shape, the activation and the clamp arrive as words in each core's data
+  memory. A core blocks on a lock until the sequence releases it, so a dispatch
+  that writes no parameters hangs.
+* **The shim DMA transfers**, reproducing the overlay's fixed channel map.
+
+### Differences from the port
+
+| | `GEMM(Shipped(), ...)` | `GEMM(...)` |
+|---|---|---|
+| provenance | shipped binary, downloaded | built from source in this repo |
+| devices | NPU2 only | NPU2 and NPU1 |
+| `tile_n` | fixed at 128 | 64 or 128, chosen per shape and device |
+| epilogue selected | at runtime, by parameter | at compile time |
+| rounding | core power-up `floor` | `conv_even` by default |
+| B | pre-packed bf16 | pre-packed, bfp16 on NPU2 |
+
+The epilogue difference is the interesting one. Selecting at runtime means one
+build serves every activation; baking it in, as `flm.GEMM` does, costs a build
+per activation but leaves the inner loop branch-free. The rounding difference is
+why `flm.GEMM` is ~41x more accurate by default — see
+[Matching the shipped FastFlowLM overlay](#matching-the-shipped-fastflowlm-overlay),
+which also records that `GEMM(rounding="floor")` reproduces this overlay bit
+for bit.

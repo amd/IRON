@@ -29,8 +29,8 @@ def test_exported_operator_is_declared(name):
     assert [b.name for b in cls._members if hasattr(b, "direction")], name
 
 
-@pytest.mark.parametrize("name", ["GEMM", "MMPrebuilt"])
-def test_flm_operators_are_declared(name):
+def test_flm_declares_one_operator_and_its_shipped_overlay():
     module = importlib.import_module("iron.operators.flm")
-    cls = getattr(module, name)
+    cls, shipped = module.GEMM, module.Shipped
     assert issubclass(cls, Operator) and issubclass(cls._overlay_class, Overlay)
+    assert issubclass(shipped, cls._overlay_class) and shipped._foreign is not None

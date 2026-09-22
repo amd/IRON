@@ -10,7 +10,7 @@ def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
 
     Separate from ``reference`` because a test that wants to check the epilogue
     without the accumulation needs exactly this -- see
-    ``mm_prebuilt/test.py``'s accumulator comparison, where the device's own
+    ``test.py``'s accumulator comparison on the shipped image, where the device's own
     output is the input.
 
     ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, matching the

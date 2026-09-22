@@ -13,7 +13,7 @@ gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
   device widths, with no runtime made until the first call;
 * flm/gemm's two compiles, the configuration's xclbin at the reference
   shape and this shape's instruction stream;
-* mm_prebuilt's instruction stream against its foreign overlay (the xclbin
+* the shipped flm image's instruction stream against its foreign overlay (the xclbin
   itself is downloaded, not built, and is tried separately);
 * one plain declared operator's ``compile()`` on NPU1.
 
@@ -86,10 +86,15 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(
     ]
 
 
-def test_mm_prebuilt_builds_its_instructions_for_the_foreign_image(npu2, tmp_path):
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
+def _shipped(**kwargs):
+    from iron.operators.flm.gemm.op import GEMM
+    from iron.operators.flm.gemm.shipped import Shipped
 
-    op = MMPrebuilt(
+    return GEMM(Shipped(), **kwargs)
+
+
+def test_shipped_builds_its_instructions_for_the_foreign_image(npu2, tmp_path):
+    op = _shipped(
         M=256,
         K=1024,
         N=1152,
@@ -101,10 +106,8 @@ def test_mm_prebuilt_builds_its_instructions_for_the_foreign_image(npu2, tmp_pat
     assert Path(op._insts_path).stat().st_size > 0
 
 
-def test_mm_prebuilt_fetches_its_image(npu2, tmp_path):
-    from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
-
-    op = MMPrebuilt(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
+def test_shipped_fetches_its_image(npu2, tmp_path):
+    op = _shipped(M=256, K=1024, N=1152, context=AIEContext(build_dir=str(tmp_path)))
     try:
         op.compile()
     except (urllib.error.URLError, OSError) as e:  # no network here

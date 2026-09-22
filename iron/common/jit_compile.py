@@ -345,7 +345,7 @@ def compile_insts(generator, insts_path, extra_flags=()) -> Path:
 
     The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
     whose array is already built (flm/gemm's configuration xclbin at the
-    reference shape, mm_prebuilt's downloaded image, any operator sharing an
+    reference shape, a foreign overlay's downloaded image, any operator sharing an
     overlay) needs only its runtime sequence lowered. ``aiecc
     --get-npu-insts`` does exactly that, without compiling a core, so no
     kernel object and no Peano are involved. ``CompilableDesign.compile()``

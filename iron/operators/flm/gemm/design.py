@@ -18,7 +18,7 @@ the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
 
 The array itself is ``FLMGEMMOverlay.design`` and the runtime sequence is
 ``FLMGEMM.design`` in ``op.py``; this module keeps the geometry, the L1
-budget helpers and the parameter-buffer layout they and ``mm_prebuilt``
+budget helpers and the parameter-buffer layout they and ``shipped.py``
 share.
 """
 
