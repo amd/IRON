@@ -47,8 +47,6 @@ class _OperatorMeta(ABCMeta):
 
 
 @dataclasses.dataclass(eq=False, repr=True)
-
-
 class Operator(Generic[O], metaclass=_OperatorMeta):
     """A host ABI declared against an overlay. Subclass, decorate with ``@operator``.
 
@@ -92,7 +90,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     def design(self, rt) -> None:
         """Override to write the runtime sequence by hand; otherwise it is derived.
 
-        ``rt`` is an :class:`iron.common.build.Sequence`: ``rt.fill(stream,
+        ``rt`` is an :class:`iron.common.design.Sequence`: ``rt.fill(stream,
         view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
         (residents, barriers, parameter sync) has already run.
         """
@@ -439,7 +437,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
     def generator(self, image: str = "elf"):
         """The design generator :class:`CompilableDesign` runs for this operator."""
-        from ..build import generator_for
+        from ..design import generator_for
 
         return generator_for(self, image=image)
 

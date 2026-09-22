@@ -4,7 +4,7 @@
 """Common utilities and base classes for IRON operators."""
 
 from .artifacts import Artifacts, Design, Step
-from .build import DesignGenerator
+from .design import DesignGenerator
 from .declare import (
     DeclarationError,
     DispatchTime,

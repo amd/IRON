@@ -6,7 +6,7 @@
 A host buffer is moved through a stream as a set of DMA transfers, each an
 ``Access``: an offset into the flat buffer plus up to four (size, stride)
 dimensions, which is what a shim buffer descriptor encodes. This module
-decides the transfers and encodes them; :mod:`iron.common.build` turns each
+decides the transfers and encodes them; :mod:`iron.common.design` turns each
 ``Access`` into a ``TensorAccessPattern`` and issues it.
 
 The descriptor rules are applied here and nowhere else. They are read from

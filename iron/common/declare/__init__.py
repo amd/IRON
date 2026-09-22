@@ -43,7 +43,7 @@ A stream's tile dimension may also be a tunable: choosing the tile is what
 tuning is for, and inference never reads a stream.
 
 Nothing here imports mlir-aie. Everything that generates MLIR lives in
-:mod:`iron.common.build`, which reads the declarations made here.
+:mod:`iron.common.design`, which reads the declarations made here.
 
 The package reads bottom-up: :mod:`.field` is what a class body writes,
 :mod:`.member` what it declares alongside its fields, :mod:`.bound` what an

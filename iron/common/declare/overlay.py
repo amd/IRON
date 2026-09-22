@@ -159,7 +159,7 @@ class Overlay:
     def design(self, target) -> list:
         """Build the array for ``target`` and return its workers.
 
-        ``target`` (:class:`iron.common.build.Target`) carries the device,
+        ``target`` (:class:`iron.common.design.Target`) carries the device,
         the kernel tree, and ``kernel()``/``barrier()`` helpers that apply
         the fusion prefix so the overlay never sees it. Must call
         ``.bind(handle)`` on every declared stream (or on every slot of a

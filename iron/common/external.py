@@ -32,6 +32,7 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
+from .design import Transfers
 from .declare import BoundBuffer, BoundStream, Operator, Overlay
 from .declare.bound import _StreamSlot
 from .tiling import Access
@@ -46,8 +47,12 @@ class _NoGroup:
         pass
 
 
-class ExternalSequence:
-    """What an operator's ``design(rt)`` receives against an external overlay."""
+class ExternalSequence(Transfers):
+    """What an operator's ``design(rt)`` receives against an external overlay.
+
+    The same surface :class:`~iron.common.design.Sequence` offers, lowering a
+    transfer to words for a downloaded image instead of MLIR tasks.
+    """
 
     def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any], emit):
         self.op = op
@@ -163,11 +168,9 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
 
 def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
     """Residents, then the operator's sequence, then the trailing awaits."""
-    from .build import run_design
-
     write_residents(op, ov, core_tiles, emit)
     seq = ExternalSequence(op, ov, rt_data, emit)
-    run_design(op, ov, seq)
+    seq.run()
     seq.finish()
 
 

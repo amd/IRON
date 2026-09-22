@@ -16,7 +16,7 @@ import ml_dtypes
 
 from typing import Any
 
-from .build import DesignGenerator
+from .design import DesignGenerator
 
 RESET_DEVICE = "reset_device"
 

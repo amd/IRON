@@ -220,7 +220,7 @@ parameters.
 ```text
 op.py (XOverlay.design + X.design or the derived sequence)
     ↓
-iron.common.build.build_design (library-owned Runtime/Program)
+iron.common.design.build_design (library-owned Runtime/Program)
     ↓
 MLIR (.mlir file)
     ↓ (aie-opt + aie-translate via Peano toolchain)

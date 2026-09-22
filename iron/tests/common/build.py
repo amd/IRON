@@ -13,7 +13,7 @@ is the toolchain's job and the operator tests' job.
 import numpy as np
 import pytest
 
-from iron.common.build import Sequence, _derived, _preamble, plan
+from iron.common.design import Sequence, plan
 from iron.common.declare import (
     In,
     Operator,
@@ -139,7 +139,7 @@ def test_derived_sequence_issues_fills_then_waited_drains():
     _bind_all(ov, log)
     op = MV(ov, M=256)
     rt = Sequence(op, ov, {"A": "dA", "B": "dB", "C": "dC"})
-    _derived(rt, op, ov)
+    rt._derived()
     assert log == [
         ("fill", "a0", "dA", False),
         ("fill", "a1", "dA", False),
@@ -161,7 +161,7 @@ def test_derived_sequence_names_a_buffer_without_a_stream():
     _bind_all(ov, log)
     op = NoStream(ov, M=256)
     with pytest.raises(ValueError, match="NoStream.A names no stream"):
-        _derived(op and Sequence(op, ov, {"A": "dA", "C": "dC"}), op, ov)
+        Sequence(op, ov, {"A": "dA", "C": "dC"})._derived()
 
 
 def test_override_slices_and_issues_through_the_same_sequence():
@@ -222,7 +222,7 @@ def test_preamble_writes_residents_and_rejects_missing_ones():
         barriers = []
         image = "elf"
 
-    _preamble(Sequence(op, ov, {}), op, ov, FakeTarget())
+    Sequence(op, ov, {}).preamble(FakeTarget())
     assert rtps == [{0: 10}, {0: 10}]
 
     @operator
@@ -231,7 +231,7 @@ def test_preamble_writes_residents_and_rejects_missing_ones():
         A = In(n, to=Counted.s)
 
     with pytest.raises(ValueError, match="does not supply it"):
-        _preamble(Sequence(op, ov, {}), Forgetful(ov, n=64), ov, FakeTarget())
+        Sequence(Forgetful(ov, n=64), ov, {}).preamble(FakeTarget())
 
 
 def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):

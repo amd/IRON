@@ -702,7 +702,7 @@ class CompiledGraph:
     """A traced graph built into an image, ready to call."""
 
     def __init__(self, traced: TracedGraph, record="memory", dispatch="auto"):
-        from .build import value_symbol
+        from .design import device_symbol
 
         self.traced = traced
         self.symbols = []
@@ -710,7 +710,7 @@ class CompiledGraph:
             bound = getattr(op, name, None)
             if bound is None or not hasattr(bound, "kind"):
                 bound = next(v for v in op.ov.values if v.name == name)
-            self.symbols.append((value.name, value_symbol(op, bound), value.dtype))
+            self.symbols.append((value.name, device_symbol(op, bound), value.dtype))
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
