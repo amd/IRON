@@ -15,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from iron.common.operator_bases import zero_artifact, zero_object_name
 from aie.iron import str_to_dtype
 import aie.utils as aie_utils
 
@@ -92,6 +93,15 @@ class GEMM(MLIROperator):
         """Suffix encoding compile-time flags that affect the kernel binary."""
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
+    @property
+    def _zero_dtype(self):
+        """The dtype the zero kernel clears: the accumulator's, not always C's.
+
+        prio_accuracy accumulates in f32 in L1 and converts on the way out, so
+        the buffer that gets zeroed is f32 even when C is bf16.
+        """
+        return "f32" if self.prio_accuracy else self.dtype_out
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -118,6 +128,9 @@ class GEMM(MLIROperator):
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
                     "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                    "zero_object": zero_object_name(
+                        self._zero_dtype, self.tile_m * self.tile_n, self.use_scalar
+                    ),
                 },
             ),
         )
@@ -156,6 +169,12 @@ class GEMM(MLIROperator):
                         self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
                     )
                 ],
+            ),
+            zero_artifact(
+                self.context.kernels_dir,
+                self._zero_dtype,
+                self.tile_m * self.tile_n,
+                self.use_scalar,
             ),
         ]
 

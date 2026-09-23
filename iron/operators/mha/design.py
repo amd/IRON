@@ -24,6 +24,7 @@ from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
+from iron.common.operator_bases import zero_object_name
 from iron.operators._trace import maybe_enable_trace, resolve_trace_size
 
 dtype_map = {
@@ -213,7 +214,9 @@ def fused_mha(
 
     # AIE kernel declarations
     func_type = "" if vectorized else "_scalar"
-    zero_kernel = Kernel(f"zero_{dtype_str}", "mha.o", [qk_ty])
+    # mha.cc uses zero.cc's templates internally but no longer re-exports a
+    # zero_<dtype> entry point, so the zero kernel comes from its own object.
+    zero_kernel = Kernel("zero", zero_object_name(dtype_str, B_q * B_kv), [qk_ty])
 
     memcopy_kernel_scale = Kernel(
         f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]

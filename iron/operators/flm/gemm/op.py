@@ -358,10 +358,6 @@ class GEMM(MLIROperator):
         kernels_dir = self.context.kernels_dir
         generic = kernels_dir / "generic"
 
-        # zero.cc is included by name and lives in the arch dir, not beside
-        # mm_fused.cc.
-        arch_include = [f"-I{kernels_dir / kernel_dir}"]
-
         # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
         # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
         # MM_FUSED_BFP16_B rides along, since bfp16ebs8 storage needs the
@@ -382,7 +378,7 @@ class GEMM(MLIROperator):
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
             f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
-        ] + arch_include
+        ]
         if self._bfp16_b:
             flags += [
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
@@ -401,7 +397,7 @@ class GEMM(MLIROperator):
                 SourceArtifact(generic / "mm_fused_mmul.h"),
                 SourceArtifact(generic / "activations.h"),
                 SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
-                SourceArtifact(kernels_dir / kernel_dir / "zero.cc"),
+                SourceArtifact(generic / "zero.cc"),
             ],
             extra_flags=flags,
         )
