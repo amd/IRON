@@ -41,6 +41,7 @@ from iron.operators.flm.gemm.design import (
     T,
     _default_l1,
     _hw_stride_ok,
+    l1_budget,
 )
 
 
@@ -130,7 +131,7 @@ class GEMM(MLIROperator):
                 self.tile_n,
                 CT_MAX_K_FOR_N[self.tile_n],
                 self._b_elem_bytes,
-                get_target_model(dev.resolve()).get_local_memory_size(),
+                l1_budget(dev),
                 self.m_chunk,
             )[0]
         # N only needs to tile to N_TILE: a trailing group of fewer than
