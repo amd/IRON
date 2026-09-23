@@ -374,28 +374,74 @@ Two things, both in the runtime sequence rather than the kernel:
   block then costs 3 shim buffer descriptors instead of `1 + 2*k_iters`, so two
   can be in flight without exhausting the 16 available.
 
-### B is re-fetched per row-block
+### B is resident where it fits, programmed per shape
 
-DDR reads B `m_row_blocks` times rather than once. Holding a whole column-block
-in the memtile and replaying it would size that buffer from `k_iters` and set
-the replay from `m_row_blocks`, putting **both K and M into the device
-configuration** — and the configuration is what one xclbin has to share across
-every shape. That is the standing cost of M, K and N being runtime parameters,
-and it is why B is the dominant DDR leg here.
+Where a column-block of B fits in the memtile, DDR reads it **once** and the
+memtile replays it to every row-block, instead of DDR re-reading it
+`m_row_blocks` times. A fifo cannot do this under one xclbin per config: its
+memtile BDs are device configuration, so a resident fifo would put K (buffer
+size) and M (replay count) into the xclbin every shape shares.
 
-**M is the tractable half.** `aiex.npu.push_queue` takes both `bd_id` and
-`repeat_count` as SSA operands, and `aiex.dma_channel_reset_for(@fifo)` expands
-into the whole re-arm trio a resident fifo needs — channel reset, `aiex.set_lock`
-per bound lock, START_QUEUE re-push — inside the **runtime sequence**, which this
-operator regenerates per shape. So a per-shape replay count does not have to
-reach the xclbin. All of it is reachable from Python and has an npu2 device test
-(1000 dispatches on one hardware context).
+So B does not use an ObjectFifo. The **device** side is shape-independent:
 
-**K is the part still in the way.** Correct ordering needs one memtile object
-spanning every k-block, so the buffer is sized from `k_iters` and that sizing is
-device configuration. Selecting among several pre-programmed BD chains via
-`push_queue`'s runtime `bd_id` is the obvious line of attack and has not been
-tried.
+* per column, a memtile pool of `B_SLOTS` k-block slots with one producer and
+  one consumer lock per slot, and an L1 ring on each core fed by a static
+  looping `TileDma`;
+* explicit `Flow`s: shim MM2S 1 → memtile S2MM 5, and memtile MM2S 4
+  broadcast → every core's S2MM 1. The memtiles and cores are pinned, and
+  these channels sit above the ones A and C take.
+
+The **runtime sequence**, which is generated per shape, programs both memtile
+channels with `dma_configure_task` chains of one BD per slot, walked with
+`repeat_count`:
+
+| | resident (`k_iters <= B_SLOTS`, `n_units <= 63`) | streamed (otherwise) |
+|---|---|---|
+| slots used | `k_iters` | largest divisor of `n_units * k_iters` up to `B_SLOTS` |
+| fill: acquire prod ≥ `b_uses`, release cons by `b_uses` | once per column-block | once per unit |
+| drain: acquire cons ≥ 1, release prod by 1 | once per unit | once per unit |
+| `b_uses` | `n_units` | 1 |
+
+A resident slot is therefore not refilled until every unit has read it, and a
+streamed one turns over like a fifo object. Both end the dispatch with each
+producer lock back at their own `b_uses`, which is why the sequence
+`set_lock`s it at the start: the previous dispatch on the context may have
+been a different shape.
+
+On NPU2, `B_SLOTS` is 8 at `tile_n` ≤ 64 (K ≤ 4096) and 3 at `tile_n` = 128,
+which op.py only picks for K ≤ 512. The 63 is the 6-bit lock value, so
+residency also needs M ≤ 16128. **Down projections stay streamed**, K being
+6144 or 10240; for them B moves exactly as it did through the fifo.
+
+Constraints, all enforced in design.py:
+
+* **BD ids are pinned** — memtile S2MM 40+, MM2S 16+ — because the static
+  allocator knows nothing of runtime BDs. It reaches 11 (even half) and 35
+  (odd half) on every NPU2 config.
+* **One memtile channel queues at most 4 tasks of 256 passes** (`repeat_count`
+  is 8 bits). Memtile tasks are never awaited — C completing implies them — and
+  a shape needing more passes raises. None of the benchmark shapes comes near.
+* **Arm B after the first block's fills, not before.** `set_lock` is cheap
+  (~0.2 µs each), but putting it and the RTP writes ahead of the first A and B
+  fills cost up to +9% at M=256. Issued between the first block's fills and its
+  C, the setup hides under the fill latency. That reordering is independent of
+  residency and is part of the M=256 gain below.
+* **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
+  fill the memtile to the byte. Lowered and placed, but not run on hardware.
+
+No mlir-aie change was needed: `Flow(shim_symbol=...)`, tile `Buffer`/`Lock`,
+`TileDma`, `aiex.dma_configure_task` with `repeat_count`, `dma_bd(bd_id=...)`
+and `aiex.set_lock` are all in the 1.4.4 wheel.
+
+Measured on NPU2 (Strix, power mode `default`) against the fifo version over
+the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:
+median **-17.4%**, best -32.0% (E4B gateup M2048).
+
+| shapes | change |
+|---|---|
+| resident, M ≥ 1024 | -15% to -32% |
+| M = 256 (one row-block, nothing to replay) | -0.7% to -7.1%, from the setup ordering |
+| down projections (streamed), M ≥ 1024 | -1.4% to +0.3%, i.e. noise |
 
 ### Split legs retire rolling, not in windows
 
