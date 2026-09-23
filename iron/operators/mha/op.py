@@ -14,7 +14,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from iron.common.operator_bases import zero_artifact
+from iron.common.kernels import zero_artifact
 import aie.utils as aie_utils
 
 

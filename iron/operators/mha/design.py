@@ -24,7 +24,7 @@ from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
-from iron.common.operator_bases import zero_object_name
+from iron.common.kernels import zero_object_name
 from iron.operators._trace import maybe_enable_trace, resolve_trace_size
 
 dtype_map = {

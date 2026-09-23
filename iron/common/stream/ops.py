@@ -28,7 +28,7 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.common.layout import TiledStridedLayout, tiled_2d
-from iron.common.operator_bases import ZERO_CTYPES
+from iron.common.kernels import ZERO_CTYPES
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel

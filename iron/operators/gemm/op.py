@@ -15,7 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
-from iron.common.operator_bases import zero_artifact, zero_object_name
+from iron.common.kernels import zero_artifact, zero_object_name
 from aie.iron import str_to_dtype
 import aie.utils as aie_utils
 
