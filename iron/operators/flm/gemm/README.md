@@ -370,9 +370,8 @@ Two things, both in the runtime sequence rather than the kernel:
 * **Each of A, B and C goes out as one transfer per column-block**, not one per
   fifo object. A single fill or drain may span many objects; issuing per object
   means a host await per row-block, and a C await waits on the cores.
-  Collapsing them is also what makes overlapping column-blocks affordable — a
-  block then costs 3 shim buffer descriptors instead of `1 + 2*k_iters`, so two
-  can be in flight without exhausting the 16 available.
+  Collapsing them also keeps the sequence short: a block is 3 shim transfers
+  instead of `1 + 2*k_iters`.
 
 ### B is resident where it fits, programmed per shape
 
@@ -387,12 +386,13 @@ So B does not use an ObjectFifo. The **device** side is shape-independent:
 * per column, a memtile pool of `B_SLOTS` k-block slots with one producer and
   one consumer lock per slot, and an L1 ring on each core fed by a static
   looping `TileDma`;
-* explicit `Flow`s: shim MM2S 1 → memtile S2MM 5, and memtile MM2S 4
-  broadcast → every core's S2MM 1. The memtiles and cores are pinned, and
-  these channels sit above the ones A and C take.
+* explicit `Flow`s: shim → memtile, and a memtile broadcast → every core in
+  the column. They name no channel: the compiler assigns them around A and
+  C, and the DMA programs run on `flow.endpoint(tile)`. No tile is pinned;
+  the placer places them all.
 
 The **runtime sequence**, which is generated per shape, programs both memtile
-channels with `dma_configure_task` chains of one BD per slot, walked with
+channels with `tile_dma_chain`s of one BD per slot, walked with
 `repeat_count`:
 
 | | resident (`k_iters <= B_SLOTS`, `n_units <= 63`) | streamed (otherwise) |
@@ -405,7 +405,7 @@ channels with `dma_configure_task` chains of one BD per slot, walked with
 A resident slot is therefore not refilled until every unit has read it, and a
 streamed one turns over like a fifo object. Both end the dispatch with each
 producer lock back at their own `b_uses`, which is why the sequence
-`set_lock`s it at the start: the previous dispatch on the context may have
+sets it (`Lock.set`) at the start: the previous dispatch on the context may have
 been a different shape.
 
 On NPU2, `B_SLOTS` is 8 at `tile_n` ≤ 64 (K ≤ 4096) and 3 at `tile_n` = 128,
@@ -415,12 +415,13 @@ residency also needs M ≤ 16128. **Down projections stay streamed**, K being
 
 Constraints, all enforced in design.py:
 
-* **BD ids are pinned** — memtile S2MM 40+, MM2S 16+ — because the static
-  allocator knows nothing of runtime BDs. It reaches 11 (even half) and 35
-  (odd half) on every NPU2 config.
-* **One memtile channel queues at most 4 tasks of 256 passes** (`repeat_count`
-  is 8 bits). Memtile tasks are never awaited — C completing implies them — and
-  a shape needing more passes raises. None of the benchmark shapes comes near.
+* **A column-block's memtile pushes must fit one task queue**, 4 pushes of 256
+  passes (`repeat_count` is 8 bits). A chain is pushed at the first block it
+  covers, so every queue wait the compiler inserts is for an earlier block,
+  whose fills and C are already out; one past the queue would wait on its own
+  block's C, which goes out after it. M is cut into slabs where needed. Memtile
+  tasks are never awaited — C completing implies them. None of the benchmark
+  shapes comes near.
 * **Arm B after the first block's fills, not before.** `set_lock` is cheap
   (~0.2 µs each), but putting it and the RTP writes ahead of the first A and B
   fills cost up to +9% at M=256. Issued between the first block's fills and its
@@ -429,9 +430,10 @@ Constraints, all enforced in design.py:
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
   fill the memtile to the byte. Lowered and placed, but not run on hardware.
 
-No mlir-aie change was needed: `Flow(shim_symbol=...)`, tile `Buffer`/`Lock`,
-`TileDma`, `aiex.dma_configure_task` with `repeat_count`, `dma_bd(bd_id=...)`
-and `aiex.set_lock` are all in the 1.4.4 wheel.
+This needs mlir-aie's `tile_dma_chain`, `Task.start(repeat_count=...)`,
+`Lock.set`, repeat counts past one push, and compiler-side BD reclaim, which
+are not yet in a wheel. Every hardware limit the design uses comes from the
+target model.
 
 Measured on NPU2 (Strix, power mode `default`) against the fifo version over
 the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:
@@ -443,24 +445,27 @@ median **-17.4%**, best -32.0% (E4B gateup M2048).
 | M = 256 (one row-block, nothing to replay) | -0.7% to -7.1%, from the setup ordering |
 | down projections (streamed), M ≥ 1024 | -1.4% to +0.3%, i.e. noise |
 
-### Split legs retire rolling, not in windows
+### The compiler bounds what is outstanding
 
+The sequence issues one transfer per leg per column-block, whatever the shape.
 Where K or N is 10240, the row-block stride overflows the shim BD's 20-bit
-iteration step and that leg is issued as one transfer per row-block. Two shim
-resources bound how many may be outstanding, and neither is modelled by the
-toolchain: BD ids (16/tile, freed without a completion check) and the channel
-task queue (4 deep, pushed unconditionally).
+iteration step, and under `m_chunk` A's pattern has 5 dimensions. The compiler
+cuts such a leg into pieces a BD can take, one task each, and interleaves them
+with the other legs' transfers so that a wait on one leg is for transfers the
+other has already been given.
 
-The sequence retires the **oldest** transfer as it issues the next, which
-bounds both resources directly while keeping the channel full.
+Two shim resources bound how many transfers may be outstanding: BD ids
+(16/tile) and the channel task queue (4 deep). The compiler owns both. Every
+transfer is unmanaged: before a push that would overrun a queue it polls for a
+slot, and when a tile runs out of BD ids it takes one back from a transfer a
+status poll proves finished. Both waits are per transfer, so the channel stays
+full. Awaiting in windows instead — issue four, await all four — drains the
+channel at every boundary and measured up to 12.4% slower on the shapes that
+cut a leg (E4B/gateup M1024).
 
-**Do not "simplify" this into windowing** — issue four, await the whole window,
-issue the next four. That bounds the same two resources and reads more simply,
-but it drains the channel to *empty* at every window boundary and again at every
-column-block boundary, and on a DDR-rate-bound design those bubbles are the
-entire cost of the split path. Measured at up to **-12.4%** on the shapes that
-take this path (E4B/gateup M1024), for no change in what is in flight.
+The sequence's only share is order and one token. Only each column's last C of
+a slab carries a token: C drains in order, so it finishing means the slab is
+done.
 
-`m_chunk` takes this path too, since its only structural effect is to force the
-split on for A. It is off by default regardless — see `M_CHUNK_FOR_N` in
-design.py, which would fork the xclbin.
+`m_chunk` is off by default — see `M_CHUNK_FOR_N` in design.py, which would
+fork the xclbin.

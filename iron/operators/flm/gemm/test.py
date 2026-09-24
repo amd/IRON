@@ -20,7 +20,6 @@ from iron.operators.flm.gemm.design import (
     M_TILE,
     R,
     Rounding,
-    SHIM_TASK_QUEUE,
     _b_depth_for,
     _default_l1,
 )
@@ -189,32 +188,15 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, aie_context):
     assert not errors, "Test failed"
 
 
-def test_gemm_split_leg_bounds(aie_context):
-    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so that leg
-    goes out one transfer per mega_row. Two unmodelled shim resources bound how
-    many may be live -- BD ids and the channel task queue -- and overrunning
-    either hangs silently. The live set is 4 + 2 + 2 = 8 of 16 descriptors;
-    assert that here, since retuning SHIM_TASK_QUEUE could break it silently.
-    """
-    dev = aie_utils.get_current_device()
-    available = get_target_model(dev.resolve()).get_num_bds(0, 0)
-    worst = SHIM_TASK_QUEUE + 2 + 2
-    assert worst <= available, (
-        f"a fully split block needs {worst} shim BDs of {available}; "
-        "the split shapes will hang"
-    )
-
-    # The square case splits both legs, which the real Gemma shapes never do
-    # (E4B's down overflows on K and its gate/up on N, never both), so it is
-    # the only cover for the two-sided path.
-    GEMM(M=512, K=10240, N=10240, context=aie_context).compile()
-
-
 def test_gemm_split_leg_bounds_runs(aie_context):
-    """Execute the two-sided split path, not just compile it.
+    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
+    compiler cuts that leg into pieces, bounded by its queue polls and BD
+    reclaim. Overrunning either hangs or corrupts silently, which only running
+    can show.
 
-    The failure the sibling test guards against is a runtime hang or silent
-    corruption, which compiling cannot exercise. Regular rather than extensive
+    The square case splits both legs, which the real Gemma shapes never do
+    (E4B's down overflows on K and its gate/up on N, never both), so it is
+    the only cover for the two-sided path. Regular rather than extensive
     despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
