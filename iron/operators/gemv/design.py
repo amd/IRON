@@ -196,8 +196,10 @@ def my_matvec(
     # hard-coding them; they live in verifyStridesWraps in
     # https://github.com/Xilinx/mlir-aie/blob/main/lib/Dialect/AIEX/IR/AIEXDialect.cpp
     MAX_WRAP = 1023
-    MAX_STRIDE = (1 << 20) - 1  # conservative element-stride bound for the wrap dims
     GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
+    # The 20-bit shim BD step field counts address granules, not elements, so the
+    # bound converts: an element-unit bound is 2x too strict for bf16.
+    MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
 
     def split_run(run, lim=MAX_WRAP, gran=GRAN_ELEMS):
         """Factor a contiguous run into (hi, lo), both <= lim and lo a multiple of gran

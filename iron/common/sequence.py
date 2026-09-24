@@ -7,14 +7,24 @@ import time
 from pathlib import Path
 import numpy as np
 import ml_dtypes
-import pyxrt
 from . import compilation as comp
 from .base import AIEOperatorBase, MLIROperator
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+
+try:
+    import pyxrt
+    from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+except ImportError:
+    # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt. The two
+    # on-device dispatch policies below are XRT-native (pyxrt.elf / hw_context / run,
+    # plus XRTTensor views), so they cannot run there; _require_xrt() makes that
+    # explicit at construction. The CPU policy and the whole compile path do not care,
+    # and must keep importing.
+    pyxrt = None
+    XRTTensor = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,17 @@ def _torch():
             "Compile and NPU dispatch do not."
         ) from exc
     return torch
+
+
+def _require_xrt() -> None:
+    """Fail with the reason, rather than an AttributeError on ``None.elf``."""
+    if pyxrt is None:
+        raise RuntimeError(
+            "this OperatorSequence dispatch policy needs the XRT host runtime (pyxrt), "
+            "which is not installed. Use SequenceCPUCallable, or run a single operator "
+            "(AIEOperatorBase), which dispatches through aie.utils.DefaultNPURuntime and "
+            "works on any backend."
+        )
 
 
 # ##########################################################################
@@ -76,6 +97,12 @@ class AutoDispatch(SequenceDispatch):
         return SeparateDispatch()
 
 
+def _trace_tag(seq):
+    """Tracing adds a runtime-sequence argument, so a traced build cannot reuse an
+    untraced one's ELF. Empty when untraced."""
+    return f"_traced{seq.trace_size}" if seq.trace_size else ""
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -92,10 +119,11 @@ class FusedDispatch(SequenceDispatch):
         mlir_artifact = self.build_fused_mlir(seq)
         kernel_objects = self._collect_kernel_artifacts(seq)
         full_elf_artifact = comp.FullElfArtifact(
-            f"{seq.name}.elf",
+            f"{seq.name}{_trace_tag(seq)}.elf",
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
+            trace_size=seq.trace_size,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -123,12 +151,13 @@ class FusedDispatch(SequenceDispatch):
             comp_runlist.append((design_names[design_of[id(op)]], *bufs))
 
         return comp.SequenceMLIRArtifact(
-            seq.name + "_fused.mlir",
+            f"{seq.name}{_trace_tag(seq)}_fused.mlir",
             operator_mlir_map=operator_mlir_map,
             runlist=comp_runlist,
             subbuffer_layout=seq.subbuffer_layout,
             buffer_sizes=seq.buffer_sizes,
             slice_info=seq.slice_info,
+            trace_size=seq.trace_size,
         )
 
     def _collect_kernel_artifacts(self, seq):
@@ -275,6 +304,7 @@ class OperatorSequence(AIEOperatorBase):
         buffer_sizes=None,
         dispatch="auto",
         extra_flags=None,
+        trace_size=0,
         share_designs=False,
         *args,
         **kwargs,
@@ -300,6 +330,8 @@ class OperatorSequence(AIEOperatorBase):
         )  # Optional dict: buffer_name -> size_in_bytes
         # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
+        # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
+        self.trace_size = trace_size
         self.share_designs = share_designs
         self._dispatch = dispatch
 
@@ -553,6 +585,7 @@ class SequenceFullELFCallable(SequenceCallable):
     """
 
     def __init__(self, op, device_name="main", sequence_name="sequence"):
+        _require_xrt()
         self.device_name = device_name
         self.sequence_name = sequence_name
 
@@ -572,6 +605,8 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(0, self.input_buffer.buffer_object())
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        if self.trace_buffer is not None:
+            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -609,6 +644,20 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = XRTTensor(
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
+        # Trace lowering appends one buffer covering every configured design, after
+        # the consolidated three. Its size depends on how many channels and
+        # sub-designs claim a share, so read it from the lowered module.
+        self.trace_buffer = None
+        if self.op.trace_size:
+            total = comp.trace_buffer_size(self.lowered_mlir_text())
+            if total:
+                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+
+    def lowered_mlir_text(self) -> str:
+        """aiecc's post-lowering module, which carries the trace buffer layout."""
+        mlir_filename = self.op.artifacts[0].mlir_input.filename
+        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
+        return path.read_text()
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -636,6 +685,9 @@ class SequenceFullELFCallable(SequenceCallable):
         # range "cpu" (otherwise a looped dispatch would read stale output).
         self.output_buffer.device = "npu"
         self.output_buffer.to("cpu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.device = "npu"
+            self.trace_buffer.to("cpu")
 
     def _run(self):
         self.run_handle.start()
@@ -653,9 +705,6 @@ class _PerBufferCallable(SequenceCallable):
     def _make_buffer(self, n_elements):
         raise NotImplementedError
 
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        raise NotImplementedError
-
     def _allocate_buffers(self):
         self._buffers = {}
         for name, (_, _, length) in self.op.subbuffer_layout.items():
@@ -666,8 +715,9 @@ class _PerBufferCallable(SequenceCallable):
             return self._buffers[buf_name]
         if buf_name in self.op.slice_info:
             base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            sub = self._make_subbuffer(
-                self._buffers[base_name], start_bytes, end_bytes - start_bytes
+            size_bytes = end_bytes - start_bytes
+            sub = self._buffers[base_name].subview(
+                start_bytes, (size_bytes // BF16.itemsize,), BF16
             )
             self._buffers[buf_name] = sub
             return sub
@@ -697,16 +747,22 @@ class SequenceXclbinCallable(_PerBufferCallable):
     """
 
     def __init__(self, op, dispatch):
+        _require_xrt()
         self._dispatch = dispatch
         super().__init__(op)
 
+    def _sync_outputs(self):
+        # _run rewrote these on the device, which the coherence map does not observe.
+        # Assert device residency first so the pull fires even when a prior read left
+        # the range marked "cpu"; otherwise a second dispatch reads the first's output.
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                buf = self._buffers[name]
+                buf.device = "npu"
+                buf.to("cpu")
+
     def _make_buffer(self, n_elements):
         return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
-
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        return parent.subview(
-            offset_bytes, (size_bytes // BF16.itemsize,), ml_dtypes.bfloat16
-        )
 
     def _allocate_buffers(self):
         super()._allocate_buffers()
@@ -754,15 +810,9 @@ class SequenceReferenceCallable(_PerBufferCallable):
     def _make_buffer(self, n_elements):
         return CPUOnlyTensor((n_elements,), dtype=BF16)
 
-    def _make_subbuffer(self, parent, offset_bytes, size_bytes):
-        start = offset_bytes // BF16.itemsize
-        end = (offset_bytes + size_bytes) // BF16.itemsize
-        # Alias the parent's memory (numpy slice is zero-copy) so a write to
-        # this slice is visible when a later step reads the parent by name.
-        view = CPUOnlyTensor((end - start,), dtype=BF16)
-        view._data = parent.data[start:end]
-        view._shape = view._data.shape
-        return view
+    def _sync_inputs(self):
+        # CPU-only inputs must stay CPU-resident, including lazily created subviews.
+        pass
 
     def _run(self):
         torch = _torch()

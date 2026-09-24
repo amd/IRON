@@ -24,6 +24,7 @@ runs:
     - name: Test
       env:
         HOME: /workspace
+        AIECC_JOBS: "1"
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate

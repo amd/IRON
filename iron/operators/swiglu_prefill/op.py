@@ -17,19 +17,32 @@ class SwiGLUPrefill(OperatorSequence):
     tokens. Runtime buffers (via ``get_callable().get_buffer(name)``): input
     ``in``; persistent weight scratch ``w_gate`` / ``w_up`` / ``w_down``;
     output ``out``.
+
+    ``b_col_maj`` selects the layout all three weights are stored in: ``(K, N)``
+    when False, ``(N, K)`` when True. ``(N, K)`` is what the decode-side GEMV
+    reads, so a pipeline running prefill and decode against the same weight
+    buffers can set it instead of storing a transposed second copy of each.
     """
 
     def __init__(
-        self, seq_len, embedding_dim, hidden_dim, prio_accuracy=False, context=None
+        self,
+        seq_len,
+        embedding_dim,
+        hidden_dim,
+        prio_accuracy=False,
+        b_col_maj=False,
+        context=None,
     ):
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
         self.prio_accuracy = prio_accuracy
+        self.b_col_maj = b_col_maj
 
-        # All operators (GEMM, SiLU, ElementwiseMul) apply their own padding
-        # to meet hardware alignment requirements. We store the padded dimensions
-        # from GEMM and size SiLU/ElementwiseMul to match.
+        # GEMM, SiLU, ElementwiseMul require input shapes that meet hardware
+        # alignment requirements (e.g. GEMM needs M % (tile_m * 4) == 0). We
+        # read the dims back off gemm_1 only to size SiLU/ElementwiseMul
+        # from the same source GEMM validated, not because they differ.
         accuracy_flags = {}
         if self.prio_accuracy:
             accuracy_flags = {
@@ -46,27 +59,29 @@ class SwiGLUPrefill(OperatorSequence):
             K=self.embedding_dim,
             N=self.hidden_dim,
             num_aie_columns=n_cols,
+            b_col_maj=self.b_col_maj,
             **accuracy_flags,
         )
-        self.seq_len_padded = gemm_1.M
-        self.embedding_dim_padded = gemm_1.K
-        self.hidden_dim_padded = gemm_1.N
+        self.seq_len_aligned = gemm_1.M
+        self.embedding_dim_aligned = gemm_1.K
+        self.hidden_dim_aligned = gemm_1.N
 
         silu = SiLU(
-            size=self.seq_len_padded * self.hidden_dim_padded,
+            size=self.seq_len_aligned * self.hidden_dim_aligned,
             num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_padded // n_cols,
+            tile_size=self.hidden_dim_aligned // n_cols,
         )
         eltwise_mul = ElementwiseMul(
-            size=self.seq_len_padded * self.hidden_dim_padded,
+            size=self.seq_len_aligned * self.hidden_dim_aligned,
             num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_padded // n_cols,
+            tile_size=self.hidden_dim_aligned // n_cols,
         )
         gemm_2 = GEMM(
             M=self.seq_len,
             K=self.hidden_dim,
             N=self.embedding_dim,
             num_aie_columns=n_cols,
+            b_col_maj=self.b_col_maj,
             **accuracy_flags,
         )
 
@@ -81,7 +96,10 @@ class SwiGLUPrefill(OperatorSequence):
         ]
 
         super().__init__(
-            name=f"swiglu_prefill_s{seq_len}_e{embedding_dim}_h{hidden_dim}",
+            name=(
+                f"swiglu_prefill_s{seq_len}_e{embedding_dim}_h{hidden_dim}"
+                + ("_bc" if b_col_maj else "")
+            ),
             runlist=runlist,
             input_args=["in"],
             output_args=["out"],

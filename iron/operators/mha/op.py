@@ -50,7 +50,7 @@ class MHA(MLIROperator):
                 "fused_mha",
                 (),
                 {
-                    "dev": aie_utils.DefaultNPURuntime.device(),
+                    "dev": aie_utils.get_current_device(),
                     "heads": self.num_heads,
                     "S_q": self.seq_len,
                     "S_kv": self.seq_len,
@@ -67,13 +67,11 @@ class MHA(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        mm_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mm.cc")
-        softmax_source = str(
-            self.context.base_dir / "aie_kernels" / "aie2p" / "softmax.cc"
-        )
-        mha_source = str(self.context.base_dir / "aie_kernels" / "aie2p" / "mha.cc")
+        mm_source = str(self.context.kernels_dir / "aie2p" / "mm.cc")
+        softmax_source = str(self.context.kernels_dir / "aie2p" / "softmax.cc")
+        mha_source = str(self.context.kernels_dir / "aie2p" / "mha.cc")
         passthrough_source = str(
-            self.context.base_dir / "aie_kernels" / "generic" / "passThrough.cc"
+            self.context.kernels_dir / "generic" / "passThrough.cc"
         )
 
         mm_defines_rowmaj = [
@@ -108,12 +106,16 @@ class MHA(MLIROperator):
 
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
-        buffer_size = self.num_heads * self.d * seq_padding
+        # design.py declares Q/O as (heads, S_q_pad, d) and K/V as
+        # (num_KV_heads, S_kv_pad * d); num_KV_heads == 0 means plain MHA.
+        kv_heads = self.num_KV_heads if self.num_KV_heads else self.num_heads
+        q_size = self.num_heads * self.d * seq_padding
+        kv_size = kv_heads * self.d * seq_padding
         return [
-            AIERuntimeArgSpec("in", (buffer_size,)),  # Q
-            AIERuntimeArgSpec("in", (buffer_size,)),  # K
-            AIERuntimeArgSpec("in", (buffer_size,)),  # V
-            AIERuntimeArgSpec("out", (buffer_size,)),  # O
+            AIERuntimeArgSpec("in", (q_size,)),  # Q
+            AIERuntimeArgSpec("in", (kv_size,)),  # K
+            AIERuntimeArgSpec("in", (kv_size,)),  # V
+            AIERuntimeArgSpec("out", (q_size,)),  # O
         ]
 
     def _calculate_seq_padding(self, seq_len, num_pipeline=1):

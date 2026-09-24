@@ -73,9 +73,11 @@ def rope(
         ObjectFifo(tensor_tile_ty, name=f"out_{i}") for i in range(num_aie_columns)
     ]
 
-    # AIE Core Function declaration
+    # AIE Core Function declaration. method_type 0 = two-halves (HF), 1 =
+    # interleaved/Llama (the "rope" symbol).
+    rope_symbol = "rope_two_halves" if method_type == 0 else "rope"
     rope_kernel = Kernel(
-        f"{func_prefix}rope",
+        f"{func_prefix}{rope_symbol}",
         kernel_object,
         [tensor_tile_ty, angle_tile_ty, tensor_tile_ty, np.int32],
     )

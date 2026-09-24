@@ -144,10 +144,7 @@ class ChanneledUnaryOperator(MLIROperator):
             f"{self.kernel_name}.o",
             dependencies=[
                 SourceArtifact(
-                    self.context.base_dir
-                    / "aie_kernels"
-                    / kernel_dir
-                    / f"{self.kernel_name}.cc"
+                    self.context.kernels_dir / kernel_dir / f"{self.kernel_name}.cc"
                 )
             ],
         )
@@ -249,16 +246,10 @@ class BinaryElementwiseOperator(MLIROperator):
         )
 
     def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
+        source = self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
         return [
             KernelObjectArtifact(
                 f"{self.kernel_name}.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir
-                        / "aie_kernels"
-                        / self.kernel_subdir
-                        / f"{self.kernel_name}.cc"
-                    )
-                ],
+                dependencies=[SourceArtifact(source)],
             ),
         ]

@@ -110,3 +110,29 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_contex
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+# Shapes whose M*N is divisible by every factor while one per-dimension quotient floors
+# to zero. Without the guard these reach the transfer as sizes [8, 0, 256, 32].
+@pytest.mark.parametrize(
+    "M,N,aie_columns,channels,m,n,bad",
+    [
+        (2048, 128, 8, 1, 256, 32, "num_aie_columns"),
+        (256, 2048, 1, 2, 256, 32, "num_channels"),
+    ],
+)
+def test_a_dimension_that_floors_to_zero_is_refused_by_name(
+    M, N, aie_columns, channels, m, n, bad
+):
+    with pytest.raises(ValueError, match=bad):
+        Transpose(
+            M=M, N=N, num_aie_columns=aie_columns, num_channels=channels, m=m, n=n, s=8
+        )
+
+
+@pytest.mark.parametrize("aie_columns", [1, 2, 4])
+def test_a_tiling_that_fits_is_still_accepted(aie_columns):
+    """The guard must not narrow the accepted set: 1/2/4 columns all leave N/n >= 1 per column."""
+    Transpose(
+        M=2048, N=128, num_aie_columns=aie_columns, num_channels=1, m=256, n=32, s=8
+    )

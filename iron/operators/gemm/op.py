@@ -15,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from aie.iron import str_to_dtype
 import aie.utils as aie_utils
 
 
@@ -61,16 +62,28 @@ class GEMM(MLIROperator):
         if self.N % min_N != 0:
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
+        # r, s, t are the aie::mmul tile dims the bf16 kernel is built from
+        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul)
         if self.emulate_bf16_mmul_with_bfp16:
-            min_tile_m, min_tile_k, min_tile_n = 8, 8, 8
+            r, s, t = 8, 8, 8
         else:
-            min_tile_m, min_tile_k, min_tile_n = 4, 8, 8
-        if self.tile_m < min_tile_m:
-            raise ValueError(f"tile_m ({self.tile_m}) must be >= {min_tile_m}")
-        if self.tile_k < min_tile_k:
-            raise ValueError(f"tile_k ({self.tile_k}) must be >= {min_tile_k}")
-        if self.tile_n < min_tile_n:
-            raise ValueError(f"tile_n ({self.tile_n}) must be >= {min_tile_n}")
+            r, s, t = 4, 8, 8
+        min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
+        if self.tile_m % min_tile_m != 0:
+            raise ValueError(
+                f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
+                f"(aie_kernels/aie2p/mm.cc requires m % (2*r) == 0, r={r})"
+            )
+        if self.tile_k % min_tile_k != 0:
+            raise ValueError(
+                f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
+                f"(aie_kernels/aie2p/mm.cc requires k % s == 0, s={s})"
+            )
+        if self.tile_n % min_tile_n != 0:
+            raise ValueError(
+                f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
+                f"(aie_kernels/aie2p/mm.cc requires n % (2*t) == 0, t={t})"
+            )
 
         MLIROperator.__init__(self, context=self.context)
 
@@ -104,7 +117,6 @@ class GEMM(MLIROperator):
                     "prio_accuracy": self.prio_accuracy,
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
-                    "generate_taps": False,
                     "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 },
             ),
@@ -131,32 +143,45 @@ class GEMM(MLIROperator):
             kernel_flags.append("-DC_COL_MAJ")
 
         kernel_dir = get_kernel_dir()
+        # INTERIM: aie2 sources a patched mm.cc from the tree (see the rounding
+        # note in aie_kernels/aie2/mm.cc); aie2p is unaffected and sources from
+        # the package. The -I lets the in-tree file's zero.cc and
+        # ../aie_kernel_utils.h includes resolve from the unchanged package copies.
+        if kernel_dir == "aie2":
+            mm_source = base_dir / "aie_kernels" / kernel_dir / "mm.cc"
+            kernel_flags.append(f"-I{self.context.kernels_dir / kernel_dir}")
+        else:
+            mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
                 extra_flags=kernel_flags,
-                dependencies=[
-                    SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
-                ],
+                dependencies=[SourceArtifact(mm_source)],
             ),
             KernelObjectArtifact(
-                "convert_copy.o",
+                "cast_f32_bf16.o",
                 [
                     SourceArtifact(
-                        base_dir / "aie_kernels" / "generic" / "convert_copy.cc"
+                        self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
                     )
                 ],
             ),
         ]
 
     def get_arg_spec(self):
+        dtype_in = str_to_dtype(self.dtype_in)
+        dtype_out = str_to_dtype(self.dtype_out)
         return [
-            AIERuntimeArgSpec("in", (self.M, self.K)),  # input A
+            AIERuntimeArgSpec("in", (self.M, self.K), dtype=dtype_in),  # input A
             AIERuntimeArgSpec(
-                "in", (self.K, self.N) if not self.b_col_maj else (self.N, self.K)
+                "in",
+                (self.K, self.N) if not self.b_col_maj else (self.N, self.K),
+                dtype=dtype_in,
             ),  # input B (weights)
             AIERuntimeArgSpec(
-                "out", (self.M, self.N) if not self.c_col_maj else (self.N, self.M)
+                "out",
+                (self.M, self.N) if not self.c_col_maj else (self.N, self.M),
+                dtype=dtype_out,
             ),  # output C
         ]
 

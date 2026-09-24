@@ -37,9 +37,10 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+import hashlib
 import os.path
 import shutil
-import zlib
+import urllib.request
 import logging
 import subprocess
 import importlib.util
@@ -119,9 +120,12 @@ def compile(
     build_dir: str = "build",
     dry_run: bool = False,
 ) -> None:
-    if not Path(build_dir).exists() and not dry_run:
-        Path(build_dir).mkdir(parents=True, exist_ok=True)
     artifacts.move_artifacts(build_dir)
+    if not dry_run:
+        # move_artifacts() may place kernel objects under a per-arch
+        # subdirectory of build_dir, so mkdir per artifact rather than once.
+        for artifact in artifacts.bfs():
+            Path(artifact.filename).parent.mkdir(parents=True, exist_ok=True)
     artifacts.populate_availability_from_filesystem()
     plan_steps = plan(rules, artifacts)
     if not dry_run:
@@ -215,10 +219,22 @@ class CompilationArtifactGraph:
         ]
 
     def move_artifacts(self, new_root: str) -> None:
-        """Make all artifacts paths point into a build directory"""
+        """Make all artifact paths point into a build directory.
+
+        Kernel objects/archives get an extra get_kernel_dir() segment: their
+        filename (e.g. "mul.o") does not encode arch, but their compiled
+        content does, and is_available_in_filesystem() only compares mtimes --
+        so two arches sharing one path would silently reuse each other's object.
+        """
+        kernel_dir = None
         for artifact in self.bfs():
             if not Path(artifact.filename).is_absolute():
-                artifact.filename = str(Path(new_root) / Path(artifact.filename).name)
+                root = new_root
+                if isinstance(artifact, (KernelObjectArtifact, KernelArchiveArtifact)):
+                    if kernel_dir is None:
+                        kernel_dir = get_kernel_dir()
+                    root = Path(new_root) / kernel_dir
+                artifact.filename = str(Path(root) / Path(artifact.filename).name)
 
     def add(self, artifact: CompilationArtifact) -> None:
         self.artifacts.append(artifact)
@@ -320,11 +336,14 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         mlir_input: CompilationArtifact,
         dependencies: list[CompilationArtifact],
         extra_flags: list[str] | None = None,
+        trace_size: int = 0,
     ) -> None:
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
+        # Bytes of trace buffer per runlist step, 0 for an untraced build.
+        self.trace_size = trace_size
 
 
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
@@ -388,6 +407,30 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
     ) -> None:
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
+
+
+def _sha256_of(path: Path) -> str:
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+class RemoteFileArtifact(CompilationArtifact):
+    """A file downloaded from a URL and pinned by its SHA-256 digest.
+
+    The digest pins the content, so ``url`` must name an immutable revision of
+    the file -- a commit SHA rather than a branch.
+    """
+
+    def __init__(self, filename: str, url: str, sha256: str) -> None:
+        super().__init__(filename)
+        self.url = url
+        self.sha256 = sha256
+
+    def is_available_in_filesystem(self) -> bool:
+        # A stale file with a matching mtime is still the wrong file, so
+        # compare content rather than timestamps.
+        path = Path(self.filename)
+        return path.exists() and _sha256_of(path) == self.sha256
 
 
 # Compilation Command
@@ -467,6 +510,40 @@ class CompilationRule(ABC):
         pass
 
 
+class DownloadCompilationRule(CompilationRule):
+    """Fetch RemoteFileArtifacts over HTTPS and check their digest."""
+
+    def matches(self, graph):
+        return any(graph.get_worklist(RemoteFileArtifact))
+
+    def compile(self, graph):
+        commands = []
+        for artifact in graph.get_worklist(RemoteFileArtifact):
+            commands.append(
+                PythonCallbackCompilationCommand(partial(self.download, artifact))
+            )
+            artifact.available = True
+        return commands
+
+    @staticmethod
+    def download(artifact):
+        if not artifact.url.startswith("https://"):
+            raise ValueError(f"refusing to download over {artifact.url!r}")
+        # Download beside the target and rename, so an interrupted fetch cannot
+        # leave a truncated file that a later run reports as a digest mismatch.
+        target = Path(artifact.filename)
+        partial_path = target.with_suffix(target.suffix + ".part")
+        with urllib.request.urlopen(artifact.url, timeout=60) as response:
+            partial_path.write_bytes(response.read())
+        digest = _sha256_of(partial_path)
+        if digest != artifact.sha256:
+            partial_path.unlink()
+            raise RuntimeError(
+                f"{artifact.url} has SHA-256 {digest}, expected {artifact.sha256}"
+            )
+        partial_path.replace(target)
+
+
 class GenerateMLIRFromPythonCompilationRule(CompilationRule):
     def matches(self, graph):
         return any(graph.get_worklist(PythonGeneratedMLIRArtifact))
@@ -509,23 +586,45 @@ def _link_build_outputs_into(work_dir: Path, build_dir: Path) -> None:
 
     aiecc resolves an MLIR module's relative kernel-object references (e.g.
     ``link_with = "axpy.o"``, produced by KernelCompilationRule /
-    ArchiveCompilationRule into the flat build_dir) against work_dir, since
-    that's where compile_mlir_module() writes its own copy of the MLIR
-    source. Symlinking makes those lookups succeed without copying kernel
-    objects into every artifact's own work_dir.
+    ArchiveCompilationRule) against work_dir, since that's where
+    compile_mlir_module() writes its own copy of the MLIR source. Symlinking
+    makes those lookups succeed without copying kernel objects into every
+    artifact's own work_dir.
+
+    Kernel objects live under build_dir/<arch> (see move_artifacts), so they
+    are linked from there too, flattened -- the reference in the MLIR carries
+    no directory. Only the current arch's subdirectory is linked: walking all
+    of them would put both arches' "mul.o" in one work_dir and reinstate the
+    collision the per-arch scoping exists to prevent.
     """
-    for entry in build_dir.iterdir():
-        if entry.is_dir():
-            continue
-        link = work_dir / entry.name
-        if link.exists():
-            continue
-        target = entry.resolve()
-        try:
-            link.symlink_to(target)
-        except OSError:
-            # Windows without Developer Mode cannot create symlinks.
-            shutil.copy2(target, link)
+
+    def link_files_from(directory: Path) -> None:
+        if not directory.is_dir():
+            return
+        for entry in directory.iterdir():
+            if entry.is_dir():
+                continue
+            link = work_dir / entry.name
+            if link.exists():
+                continue
+            target = entry.resolve()
+            try:
+                link.symlink_to(target)
+            except OSError:
+                # Windows without Developer Mode cannot create symlinks.
+                shutil.copy2(target, link)
+
+    link_files_from(build_dir)
+    link_files_from(build_dir / get_kernel_dir())
+
+
+# aiecc's own default. "1" here made every design's per-core compiles serial: on
+# the encoder-MHA design (24 cores) aiecc costs 7.7 s at -j1 and 6.0 s at -j0, and
+# nothing above 8 helps. Safe because -j does not change what aiecc produces --
+# measured on that design, insts.bin and all 24 per-core ELFs are byte-identical
+# between -j1 and -j16, and input_with_addresses.mlir differs only in the work-dir
+# path it embeds, which two runs at the SAME -j also differ in.
+_AIECC_DEFAULT_JOBS = "0"
 
 
 class AieccCompilationRule(CompilationRule):
@@ -546,10 +645,14 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
             mlir_source = artifact.mlir_input
             work_dir = _aiecc_work_dir(mlir_source.filename)
             options = [
-                f"-j{os.environ.get('AIECC_JOBS', '1')}",
+                f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}",
                 "--expand-load-pdis",
                 "--get-scratchpad-parameters",
             ] + artifact.extra_flags
+            if artifact.trace_size:
+                # The trace parser reads the lowered module for the buffer layout
+                # and each design's traced tiles and events.
+                options.append("--get-input-with-addresses")
 
             def _compile(
                 artifact=artifact,
@@ -595,7 +698,7 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         commands = []
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
         for mlir_source in mlir_sources:
-            options = [f"-j{os.environ.get('AIECC_JOBS', '1')}"]
+            options = [f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}"]
             xclbin_path = None
             insts_path = None
             do_compile_xclbin = mlir_source in mlir_sources_to_xclbins

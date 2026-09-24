@@ -12,7 +12,7 @@ class GELU(ChanneledUnaryOperator):
     """AIE-accelerated GELU activation function"""
 
     kernel_name: ClassVar[str] = "gelu"
-    kernel_fn_name: ClassVar[str] = "gelu_bf16"
+    kernel_fn_name: ClassVar[str] = "gelu_bf16_size"
     needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_gelu"
     tile_cap: ClassVar[int] = 8192

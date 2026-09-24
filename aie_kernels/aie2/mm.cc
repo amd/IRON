@@ -1,5 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+//===- mm.cc ----------------------------------------------000---*- C++ -*-===//
+//
+// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
 
 #define NOCPP
 
@@ -89,9 +93,11 @@ matmul_vectorized_2x2_mmul(const T_in *__restrict pA, const T_in *__restrict pB,
 
     event0();
 
-    AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(4)
-    for (unsigned z = 0; z < rowA; z += 2) {
+    // Outer-loop body factored into a lambda so the same code can be wrapped
+    // by three differently-parameterised loops below. Per-instantiation iter
+    // count must match the actual count: the clang loop pragma takes a literal
+    // and silently misbehaves on template-dependent expressions.
+    auto outer_body = [&](unsigned z) [[gnu::always_inline]] {
         T_out *__restrict pC1;
         T_out *__restrict pC2;
         if constexpr (c_row_maj) {
@@ -203,6 +209,24 @@ matmul_vectorized_2x2_mmul(const T_in *__restrict pA, const T_in *__restrict pB,
                     pC2 += MMUL::size_C;
                 }
             }
+    };
+
+    constexpr unsigned outer_iters = rowA / 2;
+    if constexpr (outer_iters >= 4) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(4)
+        for (unsigned z = 0; z < rowA; z += 2)
+            outer_body(z);
+    } else if constexpr (outer_iters >= 2) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(2)
+        for (unsigned z = 0; z < rowA; z += 2)
+            outer_body(z);
+    } else {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(1)
+        for (unsigned z = 0; z < rowA; z += 2)
+            outer_body(z);
     }
 
     event1();
@@ -231,9 +255,7 @@ matmul_vectorized_4x2_mmul(const T_in *__restrict pA, const T_in *__restrict pB,
 
     event0();
 
-    AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(4)
-    for (unsigned z = 0; z < rowA; z += 4) {
+    auto outer_body = [&](unsigned z) [[gnu::always_inline]] {
         T_out *__restrict pC1;
         T_out *__restrict pC2;
         T_out *__restrict pC3;
@@ -387,6 +409,24 @@ matmul_vectorized_4x2_mmul(const T_in *__restrict pA, const T_in *__restrict pB,
                     pC2 += MMUL::size_C;
                 }
             }
+    };
+
+    constexpr unsigned outer_iters = rowA / 4;
+    if constexpr (outer_iters >= 4) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(4)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
+    } else if constexpr (outer_iters >= 2) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(2)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
+    } else {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(1)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
     }
 
     event1();
@@ -414,9 +454,7 @@ static inline void matmul_vectorized_4x4(const T_in *__restrict pA, const T_in *
 
     event0();
 
-    AIE_PREPARE_FOR_PIPELINING
-    AIE_LOOP_MIN_ITERATION_COUNT(2)
-    for (unsigned z = 0; z < rowA; z += 4) {
+    auto outer_body = [&](unsigned z) [[gnu::always_inline]] {
         T_out *__restrict pC1;
         T_out *__restrict pC2;
         T_out *__restrict pC3;
@@ -678,6 +716,24 @@ static inline void matmul_vectorized_4x4(const T_in *__restrict pA, const T_in *
                     pC4 += MMUL::size_C;
                 }
             }
+    };
+
+    constexpr unsigned outer_iters = rowA / 4;
+    if constexpr (outer_iters >= 4) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(4)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
+    } else if constexpr (outer_iters >= 2) {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(2)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
+    } else {
+        AIE_PREPARE_FOR_PIPELINING
+        AIE_LOOP_MIN_ITERATION_COUNT(1)
+        for (unsigned z = 0; z < rowA; z += 4)
+            outer_body(z);
     }
 
     event1();
@@ -693,13 +749,6 @@ constexpr bool is_b_row_maj = true;
 constexpr bool is_c_row_maj = false;
 #else
 constexpr bool is_c_row_maj = true;
-#endif
-
-// The rounding mode can be set for bfloat16 mmul to improve accuracy
-#ifdef ROUND_CONV_EVEN
-constexpr aie::rounding_mode round_mode = aie::rounding_mode::conv_even;
-#else
-constexpr aie::rounding_mode round_mode = aie::rounding_mode::floor; // default
 #endif
 
 // The following kernel definitions use mmul shapes and kernel expansions that
@@ -759,10 +808,18 @@ matmul_vectorized_4x8x4_bf16_bf16(const bfloat16 *__restrict pA, const bfloat16 
     static_assert(k % s == 0);
     static_assert(n % (4 * t) == 0);
 
-    ::aie::set_rounding(round_mode);
-
-    return matmul_vectorized_4x4<bfloat16, bfloat16, (m / r), (k / s), (n / t), r, s, t, is_b_row_maj, is_c_row_maj>(
+    // IRON interim patch: the core powers up in rounding_mode::floor, which biases
+    // every bf16 store toward negative infinity and accumulates over the K
+    // reduction. aie2p/mm.cc selects conv_even here; the upstream aie2 kernel does
+    // not, so IRON keeps this copy in-tree until the fix is upstreamed.
+#ifdef ROUND_CONV_EVEN
+    aie::rounding_mode saved_rounding = aie::swap_rounding(aie::rounding_mode::conv_even);
+#endif
+    matmul_vectorized_4x4<bfloat16, bfloat16, (m / r), (k / s), (n / t), r, s, t, is_b_row_maj, is_c_row_maj>(
         pA, pB, pC);
+#ifdef ROUND_CONV_EVEN
+    aie::set_rounding(saved_rounding);
+#endif
 }
 
 template <unsigned m, unsigned k, unsigned n>
@@ -777,10 +834,15 @@ matmul_vectorized_4x8x4_bf16_f32(const bfloat16 *__restrict pA, const bfloat16 *
     static_assert(k % s == 0);
     static_assert(n % (4 * t) == 0);
 
-    ::aie::set_rounding(round_mode);
-
-    return matmul_vectorized_4x4<bfloat16, float, (m / r), (k / s), (n / t), r, s, t, is_b_row_maj, is_c_row_maj>(
-        pA, pB, pC);
+    // IRON interim patch: see matmul_vectorized_4x8x4_bf16_bf16 above. Select
+    // conv_even for the bf16 -> f32 accumulate path too, matching aie2p/mm.cc.
+#ifdef ROUND_CONV_EVEN
+    aie::rounding_mode saved_rounding = aie::swap_rounding(aie::rounding_mode::conv_even);
+#endif
+    matmul_vectorized_4x4<bfloat16, float, (m / r), (k / s), (n / t), r, s, t, is_b_row_maj, is_c_row_maj>(pA, pB, pC);
+#ifdef ROUND_CONV_EVEN
+    aie::set_rounding(saved_rounding);
+#endif
 }
 
 template <unsigned m, unsigned k, unsigned n>

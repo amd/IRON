@@ -51,10 +51,17 @@ class GEMV(MLIROperator):
             and self.tile_size_output >= self.tile_size_input
         ):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
-        if not (
-            self.K >= self.kernel_vector_size and self.K % self.kernel_vector_size == 0
-        ):
-            raise ValueError("K must be multiple of kernel_vector_size")
+        # mv.cc pipelines the k loop on the assumption that it runs at least
+        # twice, so VEC_SIZE has to divide K at least twice over. Narrow the
+        # vector instead of refusing the shape: llama's attention-scores GEMV
+        # has K = head_dim = 64, which the 64-wide default cannot serve.
+        while self.kernel_vector_size > 16 and self.K < 2 * self.kernel_vector_size:
+            self.kernel_vector_size //= 2
+        if self.K % self.kernel_vector_size or self.K < 2 * self.kernel_vector_size:
+            raise ValueError(
+                f"K ({self.K}) must be a multiple of kernel_vector_size "
+                f"({self.kernel_vector_size}) and at least twice as large"
+            )
         if self.epilogue not in ("none", "gelu"):
             raise ValueError(
                 f"unknown epilogue {self.epilogue!r} (expected 'none' or 'gelu')"
@@ -114,9 +121,7 @@ class GEMV(MLIROperator):
         matvec_obj = KernelObjectArtifact(
             f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
             dependencies=[
-                SourceArtifact(
-                    self.context.base_dir / "aie_kernels" / "generic" / "mv.cc"
-                )
+                SourceArtifact(self.context.kernels_dir / "generic" / "mv.cc")
             ],
             extra_flags=[
                 f"-DDIM_K={self.K}",
@@ -133,9 +138,7 @@ class GEMV(MLIROperator):
             gelu_obj = KernelObjectArtifact(
                 "gelu.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "aie2p" / "gelu.cc"
-                    )
+                    SourceArtifact(self.context.kernels_dir / "aie2p" / "gelu.cc")
                 ],
             )
             return [

@@ -76,12 +76,7 @@ class RoPE(MLIROperator):
             KernelObjectArtifact(
                 f"rope_{self.method_type}.o",
                 dependencies=[
-                    SourceArtifact(
-                        self.context.base_dir / "aie_kernels" / "generic" / "rope.cc"
-                    )
-                ],
-                extra_flags=[
-                    "-DTWO_HALVES" if 0 == self.method_type else "-DINTERLEAVED"
+                    SourceArtifact(self.context.kernels_dir / "generic" / "rope.cc")
                 ],
             ),
         ]

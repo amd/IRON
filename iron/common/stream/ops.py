@@ -79,7 +79,7 @@ def elementwise_layouts(
     return (tiled_2d(*ELEMENTWISE_TILE, mac_rows(bfp16_mmul), T),) * nb_operands
 
 
-def _gemm_artifacts(base_dir, kernel_dir, m: int, k: int, n: int):
+def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
     """The ``mm.cc`` object specialized for one tile shape.
 
     stream-dse emits dimension-suffixed symbols so GEMMs of different tile shapes
@@ -92,9 +92,7 @@ def _gemm_artifacts(base_dir, kernel_dir, m: int, k: int, n: int):
     return [
         KernelObjectArtifact(
             f"mm_{suffix}.o",
-            dependencies=[
-                SourceArtifact(base_dir / "aie_kernels" / kernel_dir / "mm.cc")
-            ],
+            dependencies=[SourceArtifact(kernels_dir / kernel_dir / "mm.cc")],
             extra_flags=[
                 f"-DDIM_M={m}",
                 f"-DDIM_K={k}",
@@ -129,10 +127,10 @@ class StreamKernel:
     subdir: str | None = None
     artifacts: Callable | None = None  # overrides source/subdir when tile-specialized
 
-    def kernel_artifacts(self, base_dir, kernel_dir, **kwargs):
+    def kernel_artifacts(self, kernels_dir, kernel_dir, **kwargs):
         """Compilation artifacts building this kernel's object file."""
         if self.artifacts is not None:
-            return self.artifacts(base_dir, kernel_dir, **kwargs)
+            return self.artifacts(kernels_dir, kernel_dir, **kwargs)
         from iron.common.compilation import KernelObjectArtifact, SourceArtifact
 
         subdir = self.subdir or kernel_dir
@@ -140,9 +138,7 @@ class StreamKernel:
             KernelObjectArtifact(
                 f"{self.source}.o",
                 dependencies=[
-                    SourceArtifact(
-                        base_dir / "aie_kernels" / subdir / f"{self.source}.cc"
-                    )
+                    SourceArtifact(kernels_dir / subdir / f"{self.source}.cc")
                 ],
             )
         ]
@@ -154,7 +150,6 @@ ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
     layouts=lambda: elementwise_layouts(3),
     source="mul",
-    subdir="generic",
 )
 
 Silu = custom_op("Silu")

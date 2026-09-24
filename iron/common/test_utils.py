@@ -6,9 +6,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 import aie.utils as aie_utils
+from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 torch_dtype_map = {
     "bf16": torch.bfloat16,
@@ -126,6 +126,17 @@ def verify_buffer(
     return errors
 
 
+def _nbytes(buf) -> int:
+    """Bytes of tensor data moved, for the effective-bandwidth figure.
+
+    Reads the numpy view rather than the backend buffer handle: ``buffer_object()``
+    returns a ``pyxrt.bo`` under XRT but an opaque handle under HRX, so ``.size()`` is
+    not part of the Tensor interface. The view is also the more honest number -- it is
+    the payload, not the (page-rounded) allocation.
+    """
+    return buf.data.nbytes
+
+
 def run_test(
     operator: AIEOperatorBase,
     input_buffers: dict[str, torch.Tensor],
@@ -169,47 +180,47 @@ def run_test(
 
     total_bytes = 0
 
+    # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
+    # XRTTensor under XRT, HRXTensor under HRX. Both implement the Tensor interface
+    # this function uses, and the operator dispatches through DefaultNPURuntime, which
+    # is the matching runtime.
+    tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
+
     for spec in arg_spec:
         if spec.direction == "in":
             try:
                 name, data = next(input_iter)
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for arg spec")
-            buf = XRTTensor.from_torch(data)
+            buf = tensor_class.from_torch(data)
             args.append(buf)
-            total_bytes += buf.buffer_object().size()
+            total_bytes += _nbytes(buf)
         elif spec.direction == "out":
             try:
                 name, expected = next(output_iter)
             except StopIteration:
                 raise ValueError("Not enough output buffers provided for arg spec")
-            buf = XRTTensor(spec.shape, dtype=spec.dtype)
+            buf = tensor_class(spec.shape, dtype=spec.dtype)
             args.append(buf)
             output_map[name] = buf
-            total_bytes += buf.buffer_object().size()
+            total_bytes += _nbytes(buf)
         elif spec.direction == "inout":
             try:
                 name, data = next(input_iter)
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for inout arg spec")
-            buf = XRTTensor.from_torch(data)
+            buf = tensor_class.from_torch(data)
             args.append(buf)
             output_map[name] = buf
             inout_names.append(name)
-            total_bytes += buf.buffer_object().size()
+            total_bytes += _nbytes(buf)
         else:
             raise ValueError(f"Unsupported direction: {spec.direction}")
 
-    # Run warmup iterations
-    for _ in range(warmup_iters):
-        op_func(*args)
-
-    # Run timed iterations and measure NPU execution time
-    total_npu_ns = 0
-    for _ in range(timed_iters):
-        result = op_func(*args)
-        total_npu_ns += result.npu_time
-    latency_us = (total_npu_ns / timed_iters) / 1e3
+    benchmark = run_iters(op_func, *args, warmup=warmup_iters, iters=timed_iters)
+    if benchmark.npu is None:
+        raise RuntimeError("Operator callable did not report NPU execution time")
+    latency_us = benchmark.npu.avg_us
 
     # Verify outputs
     errors = {}
