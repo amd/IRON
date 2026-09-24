@@ -28,9 +28,11 @@ import torch
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
+from iron.common import compilation as comp
 from iron.common.sequence import OperatorSequence
 from iron.common.compilation.sequence import fuse_mlir
 from iron.common.test_utils import verify_buffer
+from iron.operators.dequant.op import Dequant
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
 
@@ -152,8 +154,10 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
     assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
-    # Buffer sub-views handed to each operator's runtime sequence.
-    assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
+    # Typed views of the byte arena handed to each operator's runtime sequence. memref.view,
+    # not reinterpret_cast: the arena is i8 and the element type changes here, which
+    # reinterpret_cast cannot express.
+    assert "memref.view" in text, "missing buffer view in fused MLIR"
     # One inlined device per unique operator plus the top-level driver device.
     assert (
         "op0_ElementwiseAdd" in text and "op1_ReLU" in text
@@ -161,6 +165,87 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
     assert (
         text.count("aie.device") >= 3
     ), "expected two operator devices plus a top-level device"
+
+
+# ---------------------------------------------------------------------------
+# 2b. Compilation-only: a non-bf16 operator builds correctly into the fused
+#     arena.
+# ---------------------------------------------------------------------------
+
+_DEQUANT_SIZE = 1024
+_DEQUANT_GROUP = 32
+
+
+def _build_dequant_sequence(context, dispatch, name):
+    """out = dequant(packed), a 1-step OperatorSequence with a non-bf16 input.
+
+    Dequant's runtime-sequence input is uint8 (packed int4 rows plus per-group
+    bf16 scales); its output is bfloat16. The fused arena used to type every
+    buffer bf16 unconditionally, which silently halved the element count it
+    computed for this uint8 input.
+    """
+    dequant = Dequant(
+        size=_DEQUANT_SIZE,
+        num_aie_columns=1,
+        num_channels=1,
+        tile_size=_DEQUANT_SIZE,
+        group_size=_DEQUANT_GROUP,
+        context=context,
+    )
+    return OperatorSequence(
+        name=name,
+        runlist=[(dequant, "packed", "out")],
+        input_args=["packed"],
+        output_args=["out"],
+        dispatch=dispatch,
+        context=context,
+    )
+
+
+@pytest.mark.parametrize("sequence", ["dequant"])
+def test_fused_mlir_handles_non_bf16_operator(sequence, aie_context, tmp_path):
+    """A fused sequence containing a non-bf16 operator must build without the
+    fused-arena size assertion firing.
+
+    Before the byte-addressed arena, ``fuse_mlir`` computed every buffer's
+    element count with a hardcoded bf16 itemsize. Dequant's uint8 input
+    buffer (576 bytes at size=1024, group_size=32) got its element count
+    halved against that rate, so this raised ``AssertionError: Size mismatch
+    for buffer 'packed'`` before ever reaching the ELF backend -- meaning no
+    operator with a non-bf16 argument could be placed in a fused sequence at
+    all, including this one already shipped in-tree.
+
+    Built as a :class:`~iron.common.compilation.SequenceMLIRArtifact` directly
+    rather than via ``FusedDispatch.build_fused_mlir`` (which unconditionally
+    passes a ``func_prefix`` kwarg to any operator with kernel artifacts;
+    Dequant's ``design.py`` does not accept one -- a separate, pre-existing
+    gap this PR does not touch). Only the generated MLIR is inspected (no ELF
+    backend invoked), matching ``test_fused_mlir_contains_reconfiguration``
+    above.
+    """
+    seq = _build_dequant_sequence(aie_context, "fused", "infra_fused_dequant_mlir")
+    dequant = seq.runlist[0][0]
+
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    op_name = f"op0_{dequant.__class__.__name__}"
+    mlir_artifact = comp.SequenceMLIRArtifact(
+        str(tmp_path / (seq.name + "_fused.mlir")),
+        operator_mlir_map={op_name: dequant.get_mlir_artifact()},
+        runlist=[(op_name, "packed", "out")],
+        subbuffer_layout=seq.subbuffer_layout,
+        buffer_sizes=seq.buffer_sizes,
+        slice_info=seq.slice_info,
+    )
+    fuse_mlir(mlir_artifact)  # must not raise
+
+    text = Path(mlir_artifact.filename).read_text()
+    assert "memref.view" in text, "missing buffer view in fused MLIR"
+    # Each buffer must keep the element type its own operator declared, not a
+    # shared hardcoded one.
+    assert "memref<576xi8>" in text, "uint8 input view lost its declared type"
+    assert "memref<1024xbf16>" in text, "bfloat16 output view lost its declared type"
 
 
 # ---------------------------------------------------------------------------
