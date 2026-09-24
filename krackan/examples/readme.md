@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_09_19_00_04_48` at commit `7b8fba7`.
+Tested on `2026_09_24_23_19_20` at commit `3c46008`.
 
 <details>
 <summary>iron/applications/llama_3.2_1b</summary>
@@ -11,10 +11,10 @@ Tested on `2026_09_19_00_04_48` at commit `7b8fba7`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_1]</td><td>✅ 5/5</td><td>2.07</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.08</td><td>7.79</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1]</td><td>✅ 5/5</td><td>2.02</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40]</td><td>✅ 5/5</td><td>2.02</td><td>7.60</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_1]</td><td>✅ 5/5</td><td>2.10</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.12</td><td>3.16</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1]</td><td>✅ 5/5</td><td>2.05</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40]</td><td>✅ 5/5</td><td>2.06</td><td>3.13</td></tr>
     </tbody>
 </table>
 
