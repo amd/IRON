@@ -41,6 +41,7 @@ from iron.operators.flm.gemm.design import (
     T,
     _default_l1,
     _hw_stride_ok,
+    l1_budget,
 )
 
 
@@ -130,7 +131,7 @@ class GEMM(MLIROperator):
                 self.tile_n,
                 CT_MAX_K_FOR_N[self.tile_n],
                 self._b_elem_bytes,
-                get_target_model(dev.resolve()).get_local_memory_size(),
+                l1_budget(dev),
                 self.m_chunk,
             )[0]
         # N only needs to tile to N_TILE: a trailing group of fewer than
@@ -358,18 +359,6 @@ class GEMM(MLIROperator):
         kernels_dir = self.context.kernels_dir
         generic = kernels_dir / "generic"
 
-        # The last kernel IRON keeps in-tree, pending upstreaming to mlir-aie:
-        # its runtime epilogue (#200) is newer than the package copy. Its
-        # #included companions are unchanged, so they come from kernels_dir; the
-        # include path needs generic/ (activations.h, mm_fused_mmul.h,
-        # ../aie_kernel_utils.h) and the arch dir (zero.cc), since neither sits
-        # beside the in-tree source.
-        in_tree_generic = self.context.base_dir / "aie_kernels" / "generic"
-        arch_include = [
-            f"-I{generic}",
-            f"-I{kernels_dir / kernel_dir}",
-        ]
-
         # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
         # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
         # MM_FUSED_BFP16_B rides along, since bfp16ebs8 storage needs the
@@ -390,7 +379,7 @@ class GEMM(MLIROperator):
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
             f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
-        ] + arch_include
+        ]
         if self._bfp16_b:
             flags += [
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
@@ -405,11 +394,11 @@ class GEMM(MLIROperator):
         kernel_obj = KernelObjectArtifact(
             self._kernel_object,
             dependencies=[
-                SourceArtifact(in_tree_generic / "mm_fused.cc"),
+                SourceArtifact(generic / "mm_fused.cc"),
                 SourceArtifact(generic / "mm_fused_mmul.h"),
                 SourceArtifact(generic / "activations.h"),
                 SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
-                SourceArtifact(kernels_dir / kernel_dir / "zero.cc"),
+                SourceArtifact(generic / "zero.cc"),
             ],
             extra_flags=flags,
         )

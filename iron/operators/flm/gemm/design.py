@@ -41,6 +41,7 @@ from aie.iron.controlflow import range_
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import NPU1, NPU2, Tile
+from iron.common.device_utils import get_kernel_dir
 from iron.common.utils import split_run
 from iron.operators._trace import maybe_enable_trace
 
@@ -81,6 +82,21 @@ A_DEPTH = 2
 # epilogue's clamp vectors, so the default fails the build outright. 2048
 # leaves headroom; aiecc names the exact requirement if a change outgrows it.
 STACK_SIZE = 2048
+# L1 bytes the activation LUT tables occupy, which the buffer budget must not
+# hand out either. On AIE2 the activations come from lut_based_ops, whose
+# tables are bank-pinned in local memory; AIE2P computes its activations and
+# links no tables, so it reserves nothing. The tables grew past the slack the
+# budget happened to leave when mlir-aie reorganized the kernel library, which
+# is why this is reserved explicitly rather than left to chance.
+LUT_STATIC_SIZE = 5248
+
+
+def l1_budget(dev):
+    """Local memory the buffer sizing may spend on this device."""
+    budget = get_target_model(dev.resolve()).get_local_memory_size()
+    return budget - (LUT_STATIC_SIZE if get_kernel_dir(dev) == "aie2" else 0)
+
+
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
 # at the cost of that many L1 accumulators and forcing a_split. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
@@ -292,7 +308,7 @@ def gemm(
     # C lives across the K reduction, so sizing both to M_TILE pays twice.
     if tile_ma is None:
         T_MA, L1_B_DEPTH = _default_l1(
-            N_TILE, CT_MAX_K, b_elem_bytes, tm.get_local_memory_size(), M_CHUNK
+            N_TILE, CT_MAX_K, b_elem_bytes, l1_budget(dev), M_CHUNK
         )
     else:
         T_MA = tile_ma
@@ -305,7 +321,7 @@ def gemm(
             N_TILE,
             CT_MAX_K,
             b_elem_bytes,
-            tm.get_local_memory_size(),
+            l1_budget(dev),
             M_CHUNK,
         )
     RHO = M_TILE // T_MA

@@ -14,6 +14,7 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
+from iron.common.kernels import zero_artifact
 import aie.utils as aie_utils
 
 
@@ -102,6 +103,8 @@ class MHA(MLIROperator):
                 extra_flags=["-DBIT_WIDTH=16"],
                 dependencies=[SourceArtifact(passthrough_source)],
             ),
+            # The design zeroes one B_q x B_kv scores tile.
+            zero_artifact(self.context.kernels_dir, "bf16", self.B_q * self.B_kv),
         ]
 
     def get_arg_spec(self):

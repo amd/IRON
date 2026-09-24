@@ -7,7 +7,7 @@ An operator supplies a reference ``nn.Module`` and a placement; these modules tu
 that into everything stream-dse needs:
 
 * :mod:`~iron.common.stream.ops` -- the registry binding a torch ATen op to its ONNX
-  form, its stream-dse kernel and IRON's ``aie_kernels`` source.
+  form, its stream-dse kernel and its ``aie_kernels`` source.
 * :mod:`~iron.common.stream.workload` -- ``torch.export`` of the module into the ONNX
   workload stream-dse optimizes.
 * :mod:`~iron.common.stream.mapping` -- the mapping YAML, named from that same graph.

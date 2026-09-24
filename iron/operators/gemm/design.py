@@ -22,6 +22,7 @@ from aie.iron import (
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
+from iron.common.kernels import zero_object_name
 from iron.operators._trace import maybe_enable_trace
 
 microkernel_mac_dim_map = {
@@ -103,8 +104,7 @@ def main():
         args.prio_accuracy,
         args.separate_c_tiles,
         args.trace_size,
-        args.archive,
-        "",
+        kernel_object=args.archive,
     )
 
     output_file_path = Path(args.output_file_path)
@@ -135,6 +135,7 @@ def my_matmul(
     separate_c_tiles,
     trace_size,
     kernel_object=None,
+    zero_object=None,
     func_prefix="",
 ):
     n_aie_rows = 4
@@ -279,6 +280,14 @@ def my_matmul(
         if kernel_object
         else f"{func_prefix}gemm_{m}x{k}x{n}.o"
     )
+    # zero.cc is its own translation unit in mlir-aie, exporting a single `zero`
+    # specialized by -DZERO_TYPE/-DTILE_SIZE, so the zero kernel names a
+    # different object than the matmuls do.
+    zero_dtype_str = "f32" if use_larger_internal_buffer else dtype_out_str
+    zero_object = func_prefix + (
+        zero_object or zero_object_name(zero_dtype_str, m * n, use_scalar)
+    )
+    zero_func_name = f"{func_prefix}zero"
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
@@ -292,11 +301,7 @@ def my_matmul(
             [C_l1_ty_internal, C_l1_ty, np.int32],
         )
         # Fix the kernels to use f32 outputs
-        zero_kernel = Kernel(
-            f"{func_prefix}zero{scalar_suffix}_f32",
-            gemm_object,
-            [C_l1_ty_internal],
-        )
+        zero_kernel = Kernel(zero_func_name, zero_object, [C_l1_ty_internal])
         matmul_func_name = f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_f32"
         matmul_kernel = Kernel(
             matmul_func_name,
@@ -307,11 +312,7 @@ def my_matmul(
         # No need to use separate buffers for accumulation and transfer to L2, so
         # we only need the zero and matmul kernels
         fifo_depth_out = fifo_depth
-        zero_kernel = Kernel(
-            f"{func_prefix}zero{scalar_suffix}_{dtype_out_str}",
-            gemm_object,
-            [C_l1_ty],
-        )
+        zero_kernel = Kernel(zero_func_name, zero_object, [C_l1_ty])
         matmul_func_name = (
             f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
         )

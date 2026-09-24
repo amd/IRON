@@ -13,7 +13,7 @@
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==1.4.4.dev18+gf5196d8
+mlir_aie==1.4.4.dev40+gd840cec
 llvm-aie==22.0.0.2026091701+773413fb
 
 black

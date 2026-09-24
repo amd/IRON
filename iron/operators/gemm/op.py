@@ -15,6 +15,7 @@ from iron.common import (
     DesignGenerator,
 )
 from iron.common.device_utils import get_kernel_dir
+from iron.common.kernels import zero_artifact, zero_object_name
 from aie.iron import str_to_dtype
 import aie.utils as aie_utils
 
@@ -92,6 +93,15 @@ class GEMM(MLIROperator):
         """Suffix encoding compile-time flags that affect the kernel binary."""
         return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
 
+    @property
+    def _zero_dtype(self):
+        """The dtype the zero kernel clears: the accumulator's, not always C's.
+
+        prio_accuracy accumulates in f32 in L1 and converts on the way out, so
+        the buffer that gets zeroed is f32 even when C is bf16.
+        """
+        return "f32" if self.prio_accuracy else self.dtype_out
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -118,12 +128,14 @@ class GEMM(MLIROperator):
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
                     "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
+                    "zero_object": zero_object_name(
+                        self._zero_dtype, self.tile_m * self.tile_n, self.use_scalar
+                    ),
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        base_dir = self.context.base_dir
         kernel_flags = [
             f"-DDIM_M={self.tile_m}",
             f"-DDIM_K={self.tile_k}",
@@ -143,15 +155,7 @@ class GEMM(MLIROperator):
             kernel_flags.append("-DC_COL_MAJ")
 
         kernel_dir = get_kernel_dir()
-        # INTERIM: aie2 sources a patched mm.cc from the tree (see the rounding
-        # note in aie_kernels/aie2/mm.cc); aie2p is unaffected and sources from
-        # the package. The -I lets the in-tree file's zero.cc and
-        # ../aie_kernel_utils.h includes resolve from the unchanged package copies.
-        if kernel_dir == "aie2":
-            mm_source = base_dir / "aie_kernels" / kernel_dir / "mm.cc"
-            kernel_flags.append(f"-I{self.context.kernels_dir / kernel_dir}")
-        else:
-            mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
+        mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
         return [
             KernelObjectArtifact(
                 f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
@@ -165,6 +169,12 @@ class GEMM(MLIROperator):
                         self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
                     )
                 ],
+            ),
+            zero_artifact(
+                self.context.kernels_dir,
+                self._zero_dtype,
+                self.tile_m * self.tile_n,
+                self.use_scalar,
             ),
         ]
 

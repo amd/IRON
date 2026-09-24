@@ -3,7 +3,6 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
 import os
 
 from . import compilation as comp
@@ -15,16 +14,12 @@ class AIEContext:
     """Context for managing AIE operator compilation state.
 
     Attributes:
-        base_dir: Repository root directory (three levels above this file).
         build_dir: Directory where compiled artifacts are written.
         mlir_verbose: Enable verbose MLIR output during compilation.
         compiler: Kernel compiler to use: "peano" (default) or "chess".
                   When "chess", all kernels and aiecc linking use xchesscc.
                   Requires Vitis/aietools in PATH.
     """
-
-    # Repo root: iron/common/../../.. = three levels up from this file.
-    base_dir: ClassVar[Path] = Path(__file__).parent.parent.parent
 
     build_dir: Path = field(default_factory=lambda: Path(os.getcwd()) / "build")
     mlir_verbose: bool = False
