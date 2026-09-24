@@ -39,7 +39,6 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
     _default_l1,
-    _hw_stride_ok,
     l1_budget,
 )
 
@@ -133,18 +132,13 @@ class GEMM(MLIROperator):
             raise ValueError(
                 f"tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
             )
-        # m_chunk falls back to 1 unless both hold: it divides m_row_blocks (a
-        # partial group is inexpressible, see design.py), and the group's
-        # row-blocks sit ROWS*M_TILE*K apart inside the A descriptor, a stride
-        # that must fit the shim BD's 20-bit step. K=10240 overflows it where
-        # m_chunk=1 would not.
+        # m_chunk falls back to 1 unless it divides m_row_blocks: a partial
+        # group is inexpressible, see design.py.
         if self.m_chunk is None:
             want = M_CHUNK_FOR_N[self.tile_n]
             rows = M_TILE * compute_rows(dev)
             m_row_blocks = self.M // rows if self.M % rows == 0 else 0
             fits = m_row_blocks and m_row_blocks % want == 0
-            if fits and not _hw_stride_ok(compute_rows(dev) * M_TILE * self.K):
-                fits = False
             self.m_chunk = want if fits else 1
         if self.tile_ma is None:
             self.tile_ma = _default_l1(

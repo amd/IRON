@@ -101,8 +101,8 @@ BUDGET_FLOOR = 2e-2
 def get_params():
     # No shape is skipped. The four E4B projections with a 10240-wide dimension
     # at M > 256 once overflowed the shim BD's 20-bit mega_row iteration step,
-    # but flm.GEMM and IRON's GEMM both split that leg into per-mega_row
-    # transfers now (design.py's a_split/c_split, test_gemm_split_leg_bounds).
+    # but IRON's GEMM splits that leg into per-mega_row transfers now, and for
+    # flm.GEMM the compiler does (test_gemm_split_leg_bounds).
     params = []
     for model, projections in (("E2B", E2B_PROJ), ("E4B", E4B_PROJ)):
         for M in PREFILL_LENGTHS:
