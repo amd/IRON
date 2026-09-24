@@ -20,6 +20,7 @@ the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
 import argparse
 from enum import StrEnum
 from functools import partial
+from typing import NamedTuple
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -28,18 +29,25 @@ from aie.helpers.util import v8bfp16ebs8
 
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
+    Acquire,
+    Bd,
     Buffer,
+    DmaChannel,
+    Flow,
     Kernel,
+    Lock,
     ObjectFifo,
     Program,
+    Release,
     Runtime,
-    TaskGroup,
+    TileDma,
     Worker,
     WorkerRuntimeBarrier,
+    tile_dma_chain,
 )
 from aie.iron.controlflow import range_
 from aie.dialects.aie import get_target_model
-from aie.dialects._aie_enum_gen import AIEArch
+from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.iron.device import NPU1, NPU2, Tile
 from iron.common.utils import split_run
 from iron.operators._trace import maybe_enable_trace
@@ -82,15 +90,34 @@ A_DEPTH = 2
 # leaves headroom; aiecc names the exact requirement if a change outgrows it.
 STACK_SIZE = 2048
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
-# at the cost of that many L1 accumulators and forcing a_split. Off everywhere
+# at the cost of that many L1 accumulators. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
 # the overlay this replaces takes any multiple of 256, so a shape that cannot
 # use it forks config_name. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
-# How many column-blocks the runtime sequence keeps in flight. A block costs 3
-# shim buffer descriptors on a column (A + B + C) of the 16 available, so the
-# ceiling is 5. 2 is enough to keep the fills ahead of the cores.
-OVERLAP_DEFAULT = 2
+
+# --- B's explicit memtile path ---------------------------------------------
+#
+# B does not go through an ObjectFifo. A fifo's memtile BDs are part of the
+# device configuration, so holding a column-block there would put K (the buffer
+# size) and M (the replay count) into the one xclbin every shape shares.
+# Instead the memtile holds a fixed pool of k-block slots and the runtime
+# sequence, which is per shape, programs both of its B channels.
+#
+# Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
+# parity half has left after the static objectfifo BDs, and, below that, by
+# what the memtile has left after A and C; see gemm().
+B_MAX_SLOTS = 8
+
+
+class _Slab(NamedTuple):
+    """A run of row-block units the sequence arms B for at once; see gemm()."""
+
+    first: int  # the first unit
+    units: int
+    b_resident: bool
+    b_slots: int  # memtile slots walked
+    b_uses: int  # units served per fill
 
 
 class Epilogue(StrEnum):
@@ -180,26 +207,6 @@ def _b_bytes(elems, bfp16_b):
     return elems // BFP16_GROUP * BFP16_GROUP_BYTES
 
 
-# --- Shim DMA limits ------------------------------------------------------
-#
-# Hardware facts the Python bindings do not expose: getDmaBdStepBits and
-# getDmaBdWrapSizeBits are unbound, and nothing models the channel task queue.
-# gemv/design.py and repeat/design.py hardcode the same fields. An IR-level
-# bf16 stride S is re-expressed as (S-1)*2 bytes / 4-byte granularity before
-# AIEXDialect.cpp checks it.
-_SHIM_STEP_BITS = 20
-_BF16_BYTES = 2
-_ADDR_GRANULARITY_BYTES = 4
-# Entries in a shim DMA channel's task queue. NpuPushQueueOp pushes
-# unconditionally, so overrunning this hangs silently. Measured: 4 run, 8 hang.
-SHIM_TASK_QUEUE = 4
-
-
-def _hw_stride_ok(stride_elems):
-    hw_stride = (stride_elems - 1) * _BF16_BYTES // _ADDR_GRANULARITY_BYTES
-    return hw_stride <= (1 << _SHIM_STEP_BITS) - 1
-
-
 def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     """Pick the largest working set that fits: (A-tile height, L1 B depth).
 
@@ -270,7 +277,13 @@ def gemm(
     tm = get_target_model(dev.resolve())
     COLS, ROWS = dev.cols, compute_rows(dev)
     MIN_M = M_TILE * ROWS
-    SHIM_BDS = tm.get_num_bds(0, 0)
+    # Entries in a DMA channel's task queue, shim or memtile.
+    DMA_TASK_QUEUE = tm.get_dma_task_queue_depth()
+    # A resident slot is released once per row-block unit, so the largest value
+    # a lock holds caps m_row_blocks for residency.
+    LOCK_MAX = tm.get_max_lock_value()
+    # Passes one queue push makes over a memtile chain.
+    MT_TASK_PASSES = tm.get_max_repeat_count() + 1
     N_TILE = tile_n
     CT_MAX_K = CT_MAX_K_FOR_N[N_TILE]
     if (N_TILE, CT_MAX_K) not in _VERIFIED_CT_K:
@@ -309,7 +322,6 @@ def gemm(
             M_CHUNK,
         )
     RHO = M_TILE // T_MA
-    OVERLAP = OVERLAP_DEFAULT
     K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
     CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
     CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
@@ -353,40 +365,6 @@ def gemm(
         )
     n_units = n_chunks
 
-    def unit_rows(u):
-        """(first row-block, how many) for unit ``u``; always a full group."""
-        return u * M_CHUNK, M_CHUNK
-
-    # A mega_row stride lands in the shim BD's 20-bit iteration step, so it
-    # overflows once K or N passes ~8191 elements; only E4B's 10240 does. Such
-    # a leg goes out as one transfer per mega_row, carrying the jump in its
-    # unbounded offset. M_CHUNK > 1 forces the same path for A.
-    #
-    # Those transfers must stay live in their TaskGroup until awaited: the
-    # BD-id allocator is compile-time and does not check that a transfer
-    # finished, so freeing one early lets the next task reprogram a live
-    # descriptor and corrupt silently.
-    a_split = n_units > 1 and (M_CHUNK > 1 or not _hw_stride_ok(ROWS * M_TILE * K))
-    c_split = m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N)
-    # Split legs share one channel, whose task queue is 4 deep and modelled
-    # nowhere; overrunning it hangs (4 outstanding run, 8 hang). emit_split()
-    # bounds it by retiring the oldest as it issues the next, which also keeps
-    # the channel full -- do not simplify that to awaiting a whole batch, which
-    # drains the channel at every boundary and costs up to 12.4%. The bound
-    # counts transfers, not units: under c_split a unit drains M_CHUNK of them.
-    _per_unit = M_CHUNK if c_split else 1
-    # Live descriptors on a shim tile: SHIM_TASK_QUEUE from the rolling window,
-    # plus B and the unsplit leg for each of the two blocks a boundary spans.
-    bds_per_block = SHIM_TASK_QUEUE + 2 + 2
-    if (a_split or c_split) and bds_per_block > SHIM_BDS:
-        raise ValueError(
-            f"M={M} K={K} N={N} needs {bds_per_block} shim buffer descriptors "
-            f"for the split path but a shim tile has only {SHIM_BDS}."
-        )
-    # The unsplit path pipelines whole column-blocks instead, at 3 descriptors
-    # each (A + B + C). The split path does its own bounding above and ignores
-    # this.
-    OVERLAP = max(1, min(OVERLAP, SHIM_BDS // 3))
     # Sweeps where all COLS columns have work, plus a trailing group of
     # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
     n_full = N // MIN_N
@@ -406,7 +384,6 @@ def gemm(
     # L2 (per memtile). M_CHUNK stacked row-block tiles, so the forward below
     # can interleave them on the way out; see a_send_dims.
     mt_a_ty = np.ndarray[(M_CHUNK * M_TILE * K_TILE,), bf16_ty]
-    mt_b_ty = np.ndarray[(K_TILE * N_TILE // B_GROUP,), b_elem_ty]
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
     # L3 (DDR), flat; the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
@@ -441,8 +418,6 @@ def gemm(
     gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
     # B needs no reblocking on either hop: pack_B emits it in consume order.
     # That frees the descriptor dimensions that let CT_MAX_K reach 128.
-    b_recv_dims = None
-    b_send_dims = None
     # A: same idea, r x s blocks. The outermost row-group dimension spans
     # M_CHUNK tiles. mc's stride is exactly this dimension's size*stride, so
     # the two merge and the walk stays within the memtile BD's four dims.
@@ -459,6 +434,17 @@ def gemm(
         (M_CHUNK * M_TILE // R, R * K_TILE),
     ] + split_run(R * CT_MAX_K)
 
+    # No tile is pinned: "column" c and "row" r name logical tiles, and the
+    # placer decides where each lands. One object per logical tile, since
+    # tiles are told apart by identity. Typed up front: Flow reads tile_type to
+    # find its shim end, and nothing else stamps these.
+    shim_tiles = [Tile(tile_type=AIETileType.ShimNOCTile) for _ in range(n_active_cols)]
+    mt_tiles = [Tile(tile_type=AIETileType.MemTile) for _ in range(n_active_cols)]
+    ct_tiles = [
+        [Tile(tile_type=AIETileType.CoreTile) for _ in range(n_active_cols)]
+        for _ in range(ROWS)
+    ]
+
     # C: one join per column. Each of the ROWS cores in the column drops its
     # slice at its own offset in a single memtile buffer, which then drains to
     # DDR as one contiguous (ROWS*M_TILE) x N_TILE block.
@@ -469,6 +455,7 @@ def gemm(
         c_l2l3_fifos.append(of_c)
         sub = of_c.prod().join(
             [C_SLICE_LEN * r for r in range(ROWS)],
+            tile=mt_tiles[c],
             obj_types=[ct_out_ty] * ROWS,
             names=[f"C_L1L2_{c}_{r}" for r in range(ROWS)],
             dims_from_stream=[gather_dims] * ROWS,
@@ -485,6 +472,7 @@ def gemm(
         of_a_in = ObjectFifo(mt_a_ty, name=f"A_L3L2_{r}", depth=A_DEPTH)
         a_l3l2_fifos.append(of_a_in)
         of_a = of_a_in.cons(dims_from_stream=a_recv_dims).forward(
+            tile=mt_tiles[r * n_active_cols // ROWS],
             obj_type=ct_a_obj_ty,
             depth=A_DEPTH,
             name=f"A_L2L1_{r}",
@@ -495,29 +483,98 @@ def gemm(
         for c in range(n_active_cols):
             a_cons[(r, c)] = of_a.cons()
 
-    # B: shim -> memtile -> broadcast down the compute column, one k-block per
-    # object and re-fetched per row-block. Holding a whole column-block would
-    # put both K and M in the device configuration (README.md). Placement has
-    # zero slack -- the memtiles pack to exactly 512 KB, one buffer spilled to
-    # a neighbour -- so re-verify after any A/B/C size change.
-    b_l3l2_fifos = []
-    b_cons = {}
-    for c in range(n_active_cols):
-        of_b_in = ObjectFifo(mt_b_ty, name=f"B_L3L2_{c}", depth=B_DEPTH)
-        b_l3l2_fifos.append(of_b_in)
-        of_b = of_b_in.cons(dims_from_stream=b_recv_dims).forward(
-            # The one placement pin; everything else is left to the placer.
-            # Without it the 20 logical memtiles merge onto the 8 physical
-            # ones in a way rejected with "number of input DMA channel
-            # exceeded". Reproduces at M=1024 K=2048 N=2048.
-            tile=Tile(c, 1),
-            obj_type=ct_b_ty,
-            depth=L1_B_DEPTH,
-            name=f"B_L2L1_{c}",
-            dims_to_stream=b_send_dims,
+    # B: shim -> memtile slot pool -> broadcast down the compute column, over
+    # explicit flows, buffers and locks. The flows name no channel: the
+    # compiler assigns them around A and C, and the DMA programs below run on
+    # each flow's endpoint rather than an index. Everything declared
+    # here is shape-independent, so it can live in the shared xclbin. What
+    # varies per shape -- how the slots are filled and replayed -- is BD
+    # programming in the runtime sequence below.
+    #
+    # The pool takes what the memtile has left once A and C are placed, capped
+    # at B_MAX_SLOTS. Budgeted as if every memtile held an A forward,
+    # though only every (COLS // ROWS)-th does, so a slot count is the same on
+    # every column.
+    b_slot_elems = K_TILE * N_TILE // B_GROUP
+    b_slot_bytes = _b_bytes(K_TILE * N_TILE, BFP16_B)
+    mt_free = (
+        tm.get_mem_tile_size()
+        - A_DEPTH * M_CHUNK * M_TILE * K_TILE * 2
+        - C_DEPTH * C_SLICE_LEN * ROWS * 2
+    )
+    B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
+    if B_SLOTS < 1:
+        raise ValueError(
+            f"no room for a {b_slot_bytes}-byte B slot in the memtile at "
+            f"tile_n={N_TILE}; {mt_free} bytes remain after A and C"
         )
-        for r in range(ROWS):
-            b_cons[(r, c)] = of_b.cons()
+    b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
+    b_mt_bufs = []
+    # One lock pair per slot, not per pool: a resident slot is consumed once
+    # per unit and refilled only when all of them have, independently of the
+    # other slots, so the next column-block's refill trails the replay by one
+    # slot instead of waiting for the whole block.
+    b_mt_prod = []
+    b_mt_cons = []
+    for c in range(n_active_cols):
+        b_mt_bufs.append(Buffer(b_mt_ty, name=f"b_mt_{c}", tile=mt_tiles[c]))
+        b_mt_prod.append(
+            [
+                Lock(mt_tiles[c], init=0, name=f"b_mt_prod_{c}_{i}")
+                for i in range(B_SLOTS)
+            ]
+        )
+        b_mt_cons.append(
+            [
+                Lock(mt_tiles[c], init=0, name=f"b_mt_cons_{c}_{i}")
+                for i in range(B_SLOTS)
+            ]
+        )
+    b_shim_flows = [
+        Flow(shim_tiles[c], mt_tiles[c], shim_symbol=f"B_L3L2_{c}")
+        for c in range(n_active_cols)
+    ]
+    # One source, ROWS destinations: a circuit-switched broadcast.
+    b_bcast_flows = [
+        Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)])
+        for c in range(n_active_cols)
+    ]
+
+    # The cores' end is static: a ring of L1_B_DEPTH buffers any shape uses the
+    # same way, filled by a looping BD chain and consumed under the same
+    # prod/cons lock pair an ObjectFifo would have generated.
+    b_l1 = {}
+    b_l1_dmas = []
+    for r in range(ROWS):
+        for c in range(n_active_cols):
+            tile = ct_tiles[r][c]
+            bufs = [
+                Buffer(ct_b_ty, name=f"b_l1_{r}_{c}_{d}", tile=tile)
+                for d in range(L1_B_DEPTH)
+            ]
+            prod = Lock(tile, init=L1_B_DEPTH, name=f"b_l1_prod_{r}_{c}")
+            cons = Lock(tile, init=0, name=f"b_l1_cons_{r}_{c}")
+            b_l1[(r, c)] = (bufs, prod, cons)
+            b_l1_dmas.append(
+                TileDma(
+                    tile,
+                    [
+                        DmaChannel(
+                            DMAChannelDir.S2MM,
+                            b_bcast_flows[c].endpoint(tile),
+                            [
+                                Bd(
+                                    buf,
+                                    acquires=[Acquire(prod)],
+                                    releases=[Release(cons)],
+                                    next=(d + 1) % L1_B_DEPTH,
+                                )
+                                for d, buf in enumerate(bufs)
+                            ],
+                        )
+                    ],
+                )
+            )
 
     # Data, not an immediate folded into the program: the core programs differ
     # only in symbol names, and baking this in as code would foreclose a
@@ -552,9 +609,23 @@ def gemm(
     ]
 
     # --- Compute ----------------------------------------------------------
-    def core_fn(accs, o_h, b_h, a_h, init_k, kstep_k, epi_k, my_rtp, my_col, barrier):
+    def core_fn(
+        accs,
+        o_h,
+        b_bufs,
+        b_prod,
+        b_cons,
+        a_h,
+        init_k,
+        kstep_k,
+        epi_k,
+        my_rtp,
+        my_col,
+        barrier,
+    ):
         """Core body. Every trip count and the activation come from the
-        runtime parameter buffer, so one core program serves every shape."""
+        runtime parameter buffer, so one core program serves every shape.
+        """
         # The nest is here, not in the kernel, so every level has an acquire.
         barrier.wait_for_value(1)
         # Derived rather than sent, saving an RTP word: column c has work in
@@ -585,21 +656,24 @@ def gemm(
         def sweep(group):
             """One k reduction feeding ``group`` accumulators off a shared B.
 
-            ``group`` is a Python list, so the mc loops unroll. b_h is acquired
+            ``group`` is a Python list, so the mc loops unroll. B is acquired
             outside them, so DDR reads B once per len(group) row-blocks.
             """
             for a_acc in group:
                 init_k(a_acc)
             for _ in range_(n_k_iters):
-                for _ in range_(B_ITERS // B_DEPTH):
-                    for _ in range(B_DEPTH):
-                        b = b_h.acquire(1)
+                # Unrolled by the ring depth, so each buffer is a fixed symbol.
+                # The DMA's ring and this walk stay in step because a k step
+                # consumes B_ITERS chunks, which the depth divides.
+                for _ in range_(B_ITERS // L1_B_DEPTH):
+                    for b in b_bufs:
+                        b_cons.acquire(1)
                         for a_acc in group:
                             for band in range(RHO):
                                 a = a_h.acquire(1)
                                 kstep_k(a, b, a_acc, band)
                                 a_h.release(1)
-                        b_h.release(1)
+                        b_prod.release(1)
             # Unrolled by C_DEPTH; a full O_CHUNKS unroll overflows program
             # memory.
             for a_acc in group:
@@ -629,8 +703,8 @@ def gemm(
             # so an idle column drains that much per unit.
             for _ in range_(n_units_rt):
                 for _ in range_(n_k_iters):
-                    for _ in range_(B_ITERS // B_DEPTH):
-                        for _ in range(B_DEPTH):
+                    for _ in range_(B_ITERS // L1_B_DEPTH):
+                        for _ in range(L1_B_DEPTH):
                             for _ in range(M_CHUNK * RHO):
                                 a_h.acquire(1)
                                 a_h.release(1)
@@ -644,13 +718,16 @@ def gemm(
                 Buffer(type=ct_acc_ty, name=f"c_acc_{r}_{c}_{mc}")
                 for mc in range(M_CHUNK)
             ]
+            b_bufs, b_prod, b_cons = b_l1[(r, c)]
             workers.append(
                 Worker(
                     core_fn,
                     [
                         accs,
                         c_prod[(r, c)].prod(),
-                        b_cons[(r, c)],
+                        b_bufs,
+                        b_prod,
+                        b_cons,
                         a_cons[(r, c)],
                         acc_init,
                         k_step,
@@ -659,6 +736,7 @@ def gemm(
                         my_cols[r][c],
                         barriers[r][c],
                     ],
+                    tile=ct_tiles[r][c],
                     stack_size=STACK_SIZE,
                 )
             )
@@ -668,95 +746,211 @@ def gemm(
     # One transfer per (column-block, leg), not one per object: a descriptor
     # walks many fifo objects in consume order, and per-object issue meant a
     # host await per sweep. Dimension order must match the core's nest.
-    def a_taps(mega_col, r, units):
-        # Every (row-block, k) block this row consumes for one column-block,
-        # k outermost. A does not depend on mega_col; it is re-fetched because
-        # the cores re-consume it.
-        if M_CHUNK == 1 and not a_split:
-            return [
-                TensorAccessPattern(
-                    tensor_dims=(M * K,),
-                    offset=r * M_TILE * K,
-                    sizes=[m_row_blocks, k_iters, M_TILE, K_TILE],
-                    strides=[ROWS * M_TILE * K, K_TILE, K, 1],
-                )
-            ]
-        taps = []
-        for u in units:
-            first, count = unit_rows(u)
-            taps.append(
-                TensorAccessPattern(
-                    tensor_dims=(M * K,),
-                    offset=first * ROWS * M_TILE * K + r * M_TILE * K,
-                    sizes=[k_iters, M_CHUNK, M_TILE, K_TILE],
-                    strides=[K_TILE, ROWS * M_TILE * K, K, 1],
-                )
-            )
-        return taps
+    def a_tap(r, slab):
+        # Every (row-block, k) block this row consumes for one column-block:
+        # per unit, k outermost, then the unit's row-blocks. A does not depend
+        # on the column-block; it is re-fetched because the cores re-consume
+        # it.
+        return TensorAccessPattern(
+            tensor_dims=(M * K,),
+            offset=slab.first * M_CHUNK * ROWS * M_TILE * K + r * M_TILE * K,
+            sizes=[slab.units, k_iters, M_CHUNK, M_TILE, K_TILE],
+            strides=[M_CHUNK * ROWS * M_TILE * K, K_TILE, ROWS * M_TILE * K, K, 1],
+        )
 
-    def b_tap(mega_col, c):
-        # Every (mega_row, k) chunk this column consumes. B does not depend on
-        # mega_row, hence the 0 stride. It must arrive pre-packed so each
-        # k-block is one contiguous run; reordering in the descriptor instead
-        # gives an innermost run of T=8 bf16 and measured 5.4x slower.
+    # B's slot pool, per shape. Resident where the column-block fits: DDR
+    # reads it once and the memtile replays it n_units times. Otherwise the
+    # pool is a plain ring and DDR re-reads B per unit, as a fifo would.
+    #
+    # Each slot is filled when its producer lock reaches b_uses and released
+    # by b_uses per fill, then drained once per use. So a resident slot is not
+    # refilled until every unit has read it, while a streamed one turns over
+    # like a fifo object. Both return the producer lock to b_uses by the end of
+    # the slab, which the sequence re-arms per slab since the previous one may
+    # have been a different shape.
+    def make_slab(first, units):
+        """The plan for ``units`` units from unit ``first``, armed at once."""
+        if k_iters <= B_SLOTS and units <= LOCK_MAX:
+            resident, b_slots, b_uses = True, k_iters, units
+        else:
+            # Streamed, a chain pass must cover whole units, so the ring must
+            # divide what one takes.
+            b_slots = max(
+                s for s in range(1, B_SLOTS + 1) if (units * k_iters) % s == 0
+            )
+            resident, b_uses = False, 1
+        return _Slab(first, units, resident, b_slots, b_uses)
+
+    def n_work(c):
+        """Column ``c`` has work in the first n_work(c) column-blocks."""
+        return n_full + (1 if c < rem_blocks else 0)
+
+    def b_mt_block_passes(slab):
+        """(fill, drain) passes over the used slots per column-block."""
+        if slab.b_resident:
+            return 1, slab.units
+        passes = slab.units * k_iters // slab.b_slots
+        return passes, passes
+
+    # M is cut into slabs of units, each armed once the last one's C has
+    # drained -- the state between two dispatches, which the cores cannot tell
+    # from one. Cut where a column-block's memtile pushes would not fit one
+    # task queue: they go out ahead of the block's C (see emit_slab), and one
+    # past the queue waits on the block's own first, so on that C. Also cut
+    # where it keeps B resident past LOCK_MAX units: B is then read once per
+    # slab instead of once per unit.
+    def slab_fits(slab):
+        return all(
+            passes <= DMA_TASK_QUEUE * MT_TASK_PASSES
+            for passes in b_mt_block_passes(slab)
+        )
+
+    def cut(n_slabs):
+        size, extra = divmod(n_units, n_slabs)
+        slabs, first = [], 0
+        for i in range(n_slabs):
+            units = size + (1 if i < extra else 0)
+            slabs.append(make_slab(first, units))
+            first += units
+        return slabs
+
+    for n_slabs in range(1, n_units + 1):
+        slabs = cut(n_slabs)
+        if all(map(slab_fits, slabs)) and (
+            k_iters > B_SLOTS or all(s.b_resident for s in slabs)
+        ):
+            break
+    else:
+        raise ValueError(
+            f"M={M} K={K} N={N}: even one unit per slab needs more passes over "
+            f"a B pool per column-block than the {DMA_TASK_QUEUE} x "
+            f"{MT_TASK_PASSES} one memtile channel can queue"
+        )
+
+    def b_tap(mega_col, c, slab):
+        # Every (mega_row, k) chunk this column consumes. B must arrive
+        # pre-packed so each k-block is one contiguous run; reordering in the
+        # descriptor instead gives an innermost run of T=8 bf16 and measured
+        # 5.4x slower.
         return TensorAccessPattern(
             tensor_dims=(K * N // B_GROUP,),
             offset=(mega_col * COLS + c) * N_TILE * K // B_GROUP,
-            # One k sweep per unit, not per row-block: the cores hold each B
-            # chunk across a group. The unit dimension keeps stride 0.
-            sizes=[n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP],
-            strides=[0, K_TILE * N_TILE // B_GROUP, 0, 1],
+            # Resident, one k sweep for the whole column-block. Otherwise one
+            # per unit, not per row-block: the cores hold each B chunk across a
+            # group. The unit dimension has stride 0 because B does not depend
+            # on the row.
+            sizes=[1 if slab.b_resident else slab.units, k_iters, 1, b_slot_elems],
+            strides=[0, b_slot_elems, 0, 1],
         )
 
-    def c_taps(mega_col, c, units):
+    def start_b_mt(c, direction, passes, slab):
+        """Program and start one of column ``c``'s memtile B channels.
+
+        The chain is one BD per used slot, walked ``passes`` times; past what
+        one queue push carries, the compiler pushes it again. The task is
+        returned for restarting, and never awaited: C completing implies it.
+        """
+        fill = direction == DMAChannelDir.S2MM
+        channel = (b_shim_flows if fill else b_bcast_flows)[c].endpoint(mt_tiles[c])
+        value = slab.b_uses if fill else 1
+        chain = []
+        for i in range(slab.b_slots):
+            prod, cons = b_mt_prod[c][i], b_mt_cons[c][i]
+            wait, post = (prod, cons) if fill else (cons, prod)
+            chain.append(
+                Bd(
+                    b_mt_bufs[c],
+                    offset=i * b_slot_elems,
+                    length=b_slot_elems,
+                    acquires=[Acquire(wait, value=value)],
+                    releases=[Release(post, value=value)],
+                )
+            )
+        return tile_dma_chain(
+            mt_tiles[c], direction, channel, chain, repeat_count=passes - 1
+        )
+
+    def c_tap(mega_col, c, slab):
         # Every joined block this column produces: one ROWS*M_TILE x N_TILE
         # per row-block, in plain row-block order even under M_CHUNK.
-        if c_split:
-            taps = []
-            for u in units:
-                first, count = unit_rows(u)
-                # One descriptor per row-block: grouping them would put the
-                # ROWS*M_TILE*N stride back in, which c_split exists to avoid.
-                for i in range(count):
-                    taps.append(
-                        TensorAccessPattern(
-                            tensor_dims=(M * N,),
-                            offset=(mega_col * COLS + c) * N_TILE
-                            + (first + i) * ROWS * M_TILE * N,
-                            sizes=[1, 1, ROWS * M_TILE, N_TILE],
-                            strides=[0, 0, N, 1],
-                        )
-                    )
-            return taps
-        return [_c_tap_unsplit(mega_col, c)]
-
-    def _c_tap_unsplit(mega_col, c):
         return TensorAccessPattern(
             tensor_dims=(M * N,),
-            offset=(mega_col * COLS + c) * N_TILE,
-            sizes=[1, m_row_blocks, ROWS * M_TILE, N_TILE],
+            offset=(mega_col * COLS + c) * N_TILE
+            + slab.first * M_CHUNK * ROWS * M_TILE * N,
+            sizes=[1, slab.units * M_CHUNK, ROWS * M_TILE, N_TILE],
             strides=[0, ROWS * M_TILE * N, N, 1],
         )
 
-    def sequence(A, B, C, a_prods, b_prods, c_conses):
-        # Write every core's parameters, then open every barrier. Both loops
-        # run to completion before the first fill is issued, so no core can
-        # read a half-written buffer.
-        for r in range(ROWS):
+    def emit_slab(slab, A, B, C, a_prods, c_conses):
+        # Per-slab setup: arming B's memtile channels and the cores'
+        # parameters. Neither is free -- together tens of microseconds of
+        # command-processor time -- so it goes out *behind* the first block's A
+        # and B fills, overlapping their DDR latency. A fill running ahead of
+        # it is harmless: A only lands in fifo buffers, and B backs up in the
+        # stream until its memtile channel has a task. Measured on the
+        # benchmark shapes, arming first cost up to +30 us (+9%) at M=256.
+        #
+        # Nothing ahead of it may wait on the cores, which are not released
+        # yet. The only waits are the compiler's, for a queue slot or a buffer
+        # descriptor, and here everything they can wait on is an earlier
+        # slab's.
+        b_mt_tasks = {}
+
+        def push_b_mt(bi):
+            """Push B's memtile chains for the chunks starting at block ``bi``.
+
+            A push covers as many whole blocks as MT_TASK_PASSES carries and
+            goes out at the first of them. Every push the compiler then waits
+            on for a queue slot is an earlier block's, whose fills and C are
+            already issued; pushing a whole slab up front would wait on fills
+            not issued yet.
+            """
             for c in range(n_active_cols):
-                rtps[r][c][RTP_N_VAL] = N
-                rtps[r][c][RTP_M_ROW_BLOCKS] = m_row_blocks
-                rtps[r][c][RTP_K_ITERS] = k_iters
-                rtps[r][c][RTP_EPILOGUE] = epilogue.mode
-                rtps[r][c][RTP_CLAMP_MIN] = clamp_min_bits
-                rtps[r][c][RTP_CLAMP_MAX] = clamp_max_bits
-                # Only what this configuration actually reads; see rtp_layout.
-                if "n_chunks" in rtp_slots:
-                    rtps[r][c][rtp_slots["n_chunks"]] = n_chunks
-                    rtps[r][c][rtp_slots["n_units"]] = n_units
-        for r in range(ROWS):
+                if bi >= n_work(c):
+                    continue
+                for direction, passes in zip(
+                    (DMAChannelDir.S2MM, DMAChannelDir.MM2S),
+                    b_mt_block_passes(slab),
+                ):
+                    per_push = max(1, MT_TASK_PASSES // passes)
+                    if bi % per_push:
+                        continue
+                    count = min(per_push, n_work(c) - bi) * passes
+                    task = b_mt_tasks.get((c, direction))
+                    if task is None:
+                        b_mt_tasks[c, direction] = start_b_mt(c, direction, count, slab)
+                    else:
+                        task.start(repeat_count=count - 1)
+
+        def set_up():
+            # Arm B's pools: only the slots this slab uses. A consumer lock is
+            # always back at 0 by the end of a slab, so only the producer side
+            # needs setting, and before its channel starts.
             for c in range(n_active_cols):
-                barriers[r][c].set(1)
+                if n_work(c):
+                    for i in range(slab.b_slots):
+                        b_mt_prod[c][i].set(slab.b_uses)
+            push_b_mt(0)
+
+            # Write every core's parameters, then open every barrier. Both
+            # loops run to completion before any barrier opens, so no core can
+            # read a half-written buffer.
+            for r in range(ROWS):
+                for c in range(n_active_cols):
+                    rtps[r][c][RTP_N_VAL] = N
+                    rtps[r][c][RTP_M_ROW_BLOCKS] = slab.units * M_CHUNK
+                    rtps[r][c][RTP_K_ITERS] = k_iters
+                    rtps[r][c][RTP_EPILOGUE] = epilogue.mode
+                    rtps[r][c][RTP_CLAMP_MIN] = clamp_min_bits
+                    rtps[r][c][RTP_CLAMP_MAX] = clamp_max_bits
+                    # Only what this configuration actually reads; see
+                    # rtp_layout.
+                    if "n_chunks" in rtp_slots:
+                        rtps[r][c][rtp_slots["n_chunks"]] = slab.units
+                        rtps[r][c][rtp_slots["n_units"]] = slab.units
+            for r in range(ROWS):
+                for c in range(n_active_cols):
+                    barriers[r][c].set(1)
 
         # A trailing block uses only the first rem_blocks columns. A is still
         # issued for every row, since the sitting-out columns drain it.
@@ -764,107 +958,37 @@ def gemm(
         if rem_blocks:
             blocks.append((n_full, rem_blocks))
 
-        # C is issued first and retired last: keeping that S2MM outstanding
-        # overlaps compute with write-back, and it must not share a group with
-        # the fills it depends on. Tasks stay live until retired here.
-        all_mb = list(range(n_units))
+        # Every transfer is unmanaged: the compiler meters each channel's queue
+        # and takes a descriptor back once a poll proves its transfer done. A
+        # column's C drains in order on one channel, and its last one finishing
+        # means the column's slab is done -- fills, memtile chains and cores --
+        # so only that one carries a token.
+        last_c = []
 
-        # One emitter per leg, so the paths below differ only in how they
-        # group and retire.
-        def issue_a(mega_col, mbs, group, wait=False):
+        # C goes out after its block's fills, since the first C only arrives
+        # after a whole k sweep. A leg whose pattern the shim cannot take in
+        # one descriptor, or that needs more of them than a task queue holds,
+        # the compiler cuts into pieces and interleaves with the other legs'.
+        for bi, (mega_col, active_cols) in enumerate(blocks):
             for r in range(ROWS):
-                taps = a_taps(mega_col, r, mbs)
-                for i, tap in enumerate(taps):
-                    # A leftover unit emits many fills back to back on one
-                    # channel, so await every SHIM_TASK_QUEUE-th to stay inside
-                    # the queue depth.
-                    bounded = (
-                        len(taps) > SHIM_TASK_QUEUE and (i + 1) % SHIM_TASK_QUEUE == 0
-                    )
-                    a_prods[r].fill(A, tap, group=group, wait=wait or bounded)
-
-        def issue_b(mega_col, active_cols, group):
+                a_prods[r].fill(A, a_tap(r, slab), managed=False)
             for c in range(active_cols):
-                b_prods[c].fill(B, b_tap(mega_col, c), group=group)
-
-        def issue_c(mega_col, active_cols, mbs, group):
+                b_shim_flows[c].fill(B, tap=b_tap(mega_col, c, slab), managed=False)
+            set_up() if bi == 0 else push_b_mt(bi)
             for c in range(active_cols):
-                for tap in c_taps(mega_col, c, mbs):
-                    c_conses[c].drain(C, tap, group=group, wait=True)
+                last = bi == n_work(c) - 1
+                task = c_conses[c].drain(
+                    C, c_tap(mega_col, c, slab), wait=last, managed=False
+                )
+                if last:
+                    last_c.append(task)
+        for task in last_c:
+            task.await_()
 
-        def emit_unsplit():
-            pending = []
-            for mega_col, active_cols in blocks:
-                # C in its own group so it does not share one with the fills
-                # it depends on; see above.
-                tg_c = TaskGroup()
-                issue_c(mega_col, active_cols, all_mb, tg_c)
-                tg_f = TaskGroup()
-                issue_a(mega_col, all_mb, tg_f)
-                issue_b(mega_col, active_cols, tg_f)
-
-                pending.append([tg_f, tg_c])
-                while len(pending) >= OVERLAP:
-                    for tg in pending.pop(0):
-                        tg.finish()
-
-            for group in pending:
-                for tg in group:
-                    tg.finish()
-
-        def emit_split():
-            """Issue split legs one unit at a time, retiring the oldest.
-
-            One TaskGroup per unit, retired only when a new one would exceed
-            SHIM_TASK_QUEUE outstanding. ``pending`` is retired in append
-            order, which keeps a block's B and unsplit-leg descriptors alive
-            until its units have been awaited.
-            """
-            # What a unit costs on the busiest channel. Under c_split it
-            # drains M_CHUNK C descriptors onto one, so counting units instead
-            # would overrun the queue by that factor.
-            unit_cost = _per_unit if c_split else 1
-            pending = []  # (group, queue cost), oldest first
-
-            def retire(limit):
-                while sum(q for _, q in pending) > limit:
-                    pending.pop(0)[0].finish()
-
-            for mega_col, active_cols in blocks:
-                tg_b = TaskGroup()
-                issue_b(mega_col, active_cols, tg_b)
-
-                tg_whole = TaskGroup()
-                if not c_split:
-                    issue_c(mega_col, active_cols, all_mb, tg_whole)
-                if not a_split:
-                    issue_a(mega_col, all_mb, tg_whole)
-
-                for u in all_mb:
-                    # Before issuing, not after: fill/drain pushes the task
-                    # immediately while TaskGroup.finish() emits the await, so
-                    # retiring afterwards would leave the queue transiently one
-                    # over. Await down to where this unit's transfers fit.
-                    retire(SHIM_TASK_QUEUE - unit_cost)
-                    tg_u = TaskGroup()
-                    if c_split:
-                        issue_c(mega_col, active_cols, [u], tg_u)
-                    if a_split:
-                        issue_a(mega_col, [u], tg_u, wait=True)
-                    pending.append((tg_u, unit_cost))
-
-                # Not queue-counted: B and the unsplit leg ride channels the
-                # units do not contend for. Still retired in order.
-                pending.append((tg_whole, 0))
-                pending.append((tg_b, 0))
-
-            # Drain everything, not retire(0): the tail groups are weighted 0,
-            # so a count-driven loop stops with them still open and the build
-            # fails with "Failed to close task groups".
-            for tg, _ in pending:
-                tg.finish()
-
-        emit_split() if (a_split or c_split) else emit_unsplit()
+    def sequence(A, B, C, a_prods, c_conses):
+        # Back to back: a slab returns only once its C has all drained.
+        for slab in slabs:
+            emit_slab(slab, A, B, C, a_prods, c_conses)
 
     rt = Runtime(
         sequence,
@@ -873,10 +997,22 @@ def gemm(
             b_l3_ty,
             c_l3_ty,
             [f.prod() for f in a_l3l2_fifos],
-            [f.prod() for f in b_l3l2_fifos],
             [f.cons() for f in c_l2l3_fifos],
         ],
     )
+    for flow in b_shim_flows + b_bcast_flows:
+        rt.add_flow(flow)
+    # Only the sequence's memtile chains touch the pools.
+    for buf in b_mt_bufs:
+        rt.add_buffer(buf)
+    for c in range(n_active_cols):
+        for lock in b_mt_prod[c] + b_mt_cons[c]:
+            rt.add_lock(lock)
+    for (r, c), (_, prod, cons) in b_l1.items():
+        rt.add_lock(prod)
+        rt.add_lock(cons)
+    for td in b_l1_dmas:
+        rt.add_tile_dma(td)
 
     my_program = Program(dev, rt, workers=workers)
     maybe_enable_trace(my_program, trace_size, workers)
