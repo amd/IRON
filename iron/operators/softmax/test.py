@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from aie.utils.verify import Tolerance
 import aie.utils as aie_utils
 
 from iron.operators.softmax.op import Softmax
-from iron.operators.softmax.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.operators.softmax.reference import generate_inputs
+from iron.common.test_utils import assert_matches_reference
 
 
 def get_optimal_columns_channels(input_length, tile_size, max_columns):
@@ -60,11 +61,9 @@ def get_params():
     get_params(),
 )
 def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_context):
-
     rows = input_length // tile_size
     cols = tile_size
-
-    golden_ref = generate_golden_reference(rows=rows, cols=cols)
+    x = generate_inputs(rows=rows, cols=cols)
 
     operator = Softmax(
         rows=rows,
@@ -74,14 +73,6 @@ def test_softmax(input_length, num_aie_columns, num_channels, tile_size, aie_con
         context=aie_context,
     )
 
-    input_buffers = {"in": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+    # The torch reference at this test's tolerance, tighter than the kernel
+    # contract's.
+    assert_matches_reference(operator, x, tolerance=Tolerance.relative(0.04, 1e-6))

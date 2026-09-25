@@ -4,14 +4,12 @@
 import torch
 
 
-def generate_golden_reference(input_length):
+def reference(x):
+    """CPU reference: a copy (ground truth)."""
+    return x.clone()
+
+
+def generate_inputs(input_length):
     torch.manual_seed(42)
-
-    # Generate random input data
     val_range = 4
-    A = torch.rand(input_length, dtype=torch.bfloat16) * val_range
-
-    return {
-        "input": A,
-        "output": A.clone(),
-    }
+    return torch.rand(input_length, dtype=torch.bfloat16) * val_range

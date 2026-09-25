@@ -2,23 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 
 
-def generate_golden_reference(input_length: int, scalar=3.0, dtype="bf16", seed=42):
+def reference(x, y, scalar):
+    """CPU reference: ``scalar * x + y`` in fp32, rounded once (ground truth).
+
+    The kernel takes ``scalar`` as bf16 and rounds only the result, where bf16
+    arithmetic would round the product as well.
+    """
+    a = torch.tensor(scalar, dtype=torch.bfloat16).float()
+    return (a * x.float() + y.float()).to(x.dtype)
+
+
+def generate_inputs(input_length: int, seed=42):
     torch.manual_seed(seed)
     val_range = 4
-    dtype_torch = torch_dtype_map[dtype]
-    A = torch.rand(input_length, dtype=dtype_torch) * val_range
-    B = torch.rand(input_length, dtype=dtype_torch) * val_range
-    s = torch.tensor(scalar, dtype=dtype_torch)
-
-    # Generate golden outputs: the kernel computes s * A + B in fp32 and rounds
-    # once, where bf16 arithmetic would round the product as well.
-    C = (s.float() * A.float() + B.float()).to(dtype_torch)
-
-    return {
-        "A": A,
-        "B": B,
-        "C": C,
-    }
+    x = torch.rand(input_length, dtype=torch.bfloat16) * val_range
+    y = torch.rand(input_length, dtype=torch.bfloat16) * val_range
+    return x, y

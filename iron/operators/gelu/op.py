@@ -18,3 +18,8 @@ class GELU(ChanneledUnaryOperator):
 
     def _kernel(self):
         return activation.gelu_sized(self._line_size)
+
+    def reference(self, x):
+        from iron.operators.gelu.reference import reference
+
+        return reference(x)

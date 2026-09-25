@@ -6,8 +6,11 @@ import pytest
 from aie.utils.verify import Tolerance
 
 from iron.operators.layer_norm.op import LayerNorm
-from iron.operators.layer_norm.reference import generate_golden_reference
-from iron.common.test_utils import run_test, make_channeled_unary_params
+from iron.operators.layer_norm.reference import generate_inputs
+from iron.common.test_utils import (
+    assert_matches_reference,
+    make_channeled_unary_params,
+)
 
 
 def get_params():
@@ -30,10 +33,7 @@ def get_params():
 def test_layer_norm(
     input_length, num_aie_columns, num_channels, tile_size, aie_context
 ):
-
-    rows = input_length // tile_size
-    cols = tile_size
-    golden_ref = generate_golden_reference(rows=rows, cols=cols)
+    x = generate_inputs(rows=input_length // tile_size, cols=tile_size)
 
     operator = LayerNorm(
         size=input_length,
@@ -43,19 +43,10 @@ def test_layer_norm(
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
+    assert_matches_reference(
         operator,
-        input_buffers,
-        output_buffers,
+        x,
         # The tighter of this test's former rel_tol (0.1) and the kernel
         # contract's atol (0.05).
         tolerance=Tolerance.relative(0.1, 0.05),
     )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"

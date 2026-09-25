@@ -13,15 +13,6 @@ from aie.utils.verify import Tolerance, compare, nearly_equal
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 
-torch_dtype_map = {
-    "bf16": torch.bfloat16,
-    "f32": torch.float32,
-    "i8": torch.int8,
-    "ui8": torch.uint8,
-    "i16": torch.int16,
-    "i32": torch.int32,
-}
-
 
 def verify_buffer(
     output: np.ndarray | torch.Tensor,
@@ -100,17 +91,19 @@ def verify_buffer(
 
     print(f"{buf_name}: {verdict.detail}")
     # compare() judges; it does not list the elements.
+    both_nan = np.isnan(output.astype(np.float32)) & np.isnan(
+        expected_np.astype(np.float32)
+    )
     if tolerance.kind == "relative":
         # nearly_equal is the same per-element test, except that it also
         # rejects a NaN that meets a NaN.
         bad = ~nearly_equal(
             output, expected_np, rtol=tolerance.rtol or 0.0, atol=tolerance.atol
         )
-        bad &= ~(
-            np.isnan(output.astype(np.float32))
-            & np.isnan(expected_np.astype(np.float32))
-        )
-        error_indices = np.flatnonzero(bad).tolist()
+        error_indices = np.flatnonzero(bad & ~both_nan).tolist()
+    elif tolerance.kind == "exact":
+        bad = output != expected_np.astype(output.dtype)
+        error_indices = np.flatnonzero(bad & ~both_nan).tolist()
     else:
         each = replace(tolerance, max_mismatch_frac=0.0)
         error_indices = [
@@ -252,6 +245,54 @@ def run_test(
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
 
     return errors, latency_us, bandwidth_gbps
+
+
+def assert_matches_reference(
+    operator: AIEOperatorBase,
+    *inputs: torch.Tensor,
+    tolerance: Tolerance | None = None,
+) -> None:
+    """Dispatch ``operator`` once and assert its output matches ``reference()``.
+
+    The expected output is ``operator.reference(*inputs)``, each input shaped
+    as its argument spec, so the test and a ``dispatch="compare"`` sequence
+    hold the operator to the same reference. Latency and bandwidth are printed
+    in the form the CI metrics parse.
+
+    Args:
+        operator: An operator with a single output and a ``reference()``
+        inputs: Its ``"in"`` arguments, in argument-spec order
+        tolerance: How close the output must come; defaults to
+                   ``operator.reference_tolerance()``, the contract of the
+                   kernel it runs
+    """
+    in_specs = [s for s in operator.get_arg_spec() if s.direction == "in"]
+    if len(inputs) != len(in_specs):
+        raise ValueError(
+            f"{type(operator).__name__} takes {len(in_specs)} inputs, "
+            f"got {len(inputs)}"
+        )
+    expected = operator.reference(
+        *(x.reshape(spec.shape) for x, spec in zip(inputs, in_specs))
+    )
+    if tolerance is None:
+        tolerance = operator.reference_tolerance()
+    if tolerance is None:
+        raise ValueError(
+            f"{type(operator).__name__} declares no tolerance; pass tolerance="
+        )
+
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator,
+        {f"input{i}": x for i, x in enumerate(inputs)},
+        {"output": expected},
+        tolerance=tolerance,
+    )
+
+    print(f"\nLatency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+
+    assert not errors, f"Test failed with errors: {errors}"
 
 
 def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choices):

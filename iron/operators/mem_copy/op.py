@@ -63,6 +63,11 @@ class MemCopy(MLIROperator):
             return None
         return eltwise.passthrough(mem_copy_line_size(self.tile_size), np.int16)
 
+    def reference(self, x):
+        from iron.operators.mem_copy.reference import reference
+
+        return reference(x)
+
     def get_kernel_artifacts(self):
         if self.bypass:
             return []

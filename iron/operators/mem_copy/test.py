@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from aie.utils.verify import Tolerance
 import aie.utils as aie_utils
 
 from iron.operators.mem_copy.op import MemCopy
-from iron.operators.mem_copy.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.operators.mem_copy.reference import generate_inputs
+from iron.common.test_utils import assert_matches_reference
 
 
 def get_params():
@@ -62,8 +63,9 @@ def get_params():
 def test_mem_copy(
     input_length, num_cores, num_channels, bypass, tile_size, aie_context
 ):
-    golden_ref = generate_golden_reference(input_length=input_length)
+    x = generate_inputs(input_length=input_length)
 
+    # num_cores >= num_channels is required: each channel must have at least one core assigned
     operator = MemCopy(
         size=input_length,
         num_cores=num_cores,
@@ -73,20 +75,5 @@ def test_mem_copy(
         context=aie_context,
     )
 
-    # num_cores >= num_channels is required: each channel must have at least one core assigned
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        # A copy that alters a value is a broken copy, so gate it exactly.
-        operator,
-        input_buffers,
-        output_buffers,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+    # A copy that alters a value is a broken copy, so gate it exactly.
+    assert_matches_reference(operator, x, tolerance=Tolerance.exact())

@@ -25,6 +25,12 @@ class LayerNorm(ChanneledUnaryOperator):
     def _kernel(self):
         return norm.layer_norm(self._line_size)
 
+    def reference(self, x):
+        """CPU reference: layer normalization of each line the kernel sees."""
+        from iron.operators.layer_norm.reference import reference
+
+        return reference(x.reshape(-1, self._line_size))
+
     def _mlir_callback_args(self):
         return [
             aie_utils.get_current_device(),

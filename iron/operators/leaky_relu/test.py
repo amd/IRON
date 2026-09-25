@@ -5,8 +5,11 @@
 import pytest
 
 from iron.operators.leaky_relu.op import LeakyReLU
-from iron.operators.leaky_relu.reference import generate_golden_reference
-from iron.common.test_utils import run_test, make_channeled_unary_params
+from iron.operators.leaky_relu.reference import generate_inputs
+from iron.common.test_utils import (
+    assert_matches_reference,
+    make_channeled_unary_params,
+)
 
 
 def get_params():
@@ -36,7 +39,7 @@ def get_params():
 def test_leaky_relu(
     input_length, num_aie_columns, num_channels, tile_size, alpha, aie_context
 ):
-    golden_ref = generate_golden_reference(input_length=input_length, alpha=alpha)
+    x = generate_inputs(input_length=input_length)
 
     operator = LeakyReLU(
         size=input_length,
@@ -47,17 +50,4 @@ def test_leaky_relu(
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        input_buffers,
-        output_buffers,
-        tolerance=operator._kernel().contract.tolerance,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+    assert_matches_reference(operator, x)

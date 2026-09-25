@@ -24,6 +24,11 @@ class AXPY(BinaryElementwiseOperator):
     def _kernel(self):
         return datamovement.axpy(self._tile_elements)
 
+    def reference(self, x, y):
+        from iron.operators.axpy.reference import reference
+
+        return reference(x, y, self.scalar_factor)
+
     def _mlir_callback_args(self):
         return super()._mlir_callback_args() + [self.scalar_factor, self._kernel()]
 

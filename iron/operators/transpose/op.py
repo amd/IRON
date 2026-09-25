@@ -114,7 +114,7 @@ class Transpose(MLIROperator):
         ]
 
     def reference(self, x):
-        """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""
+        """CPU reference: transpose of each (M, N) matrix, stored row-major."""
         from iron.operators.transpose.reference import reference
 
-        return reference(x.reshape(self.M, self.N))
+        return reference(x.reshape(-1, self.M, self.N))

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 from iron.operators.flm.gemm.design import Epilogue
 
 
@@ -62,7 +61,6 @@ def generate_golden_reference(
     M: int,
     K: int,
     N: int,
-    dtype="bf16",
     seed=42,
     epilogue=Epilogue.NONE,
     clamp=None,
@@ -77,8 +75,7 @@ def generate_golden_reference(
     range where the curve is actually interesting.
     """
     torch.manual_seed(seed)
-    dtype_torch = torch_dtype_map[dtype]
-    input_a = torch.randn(M, K, dtype=dtype_torch) * scale
-    input_b = torch.rand(K, N, dtype=dtype_torch) * scale
+    input_a = torch.randn(M, K, dtype=torch.bfloat16) * scale
+    input_b = torch.rand(K, N, dtype=torch.bfloat16) * scale
     output = reference(input_a, input_b, epilogue, clamp)
     return {"input": input_a, "input_b": input_b, "output": output}

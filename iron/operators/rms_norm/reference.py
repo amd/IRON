@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 
 
 def reference(x, w=None, weighted=False, eps=1e-5):
@@ -17,16 +16,11 @@ def reference(x, w=None, weighted=False, eps=1e-5):
     return out
 
 
-def generate_golden_reference(
-    rows: int, cols: int, dtype="bf16", seed=42, weighted=False, eps=1e-5
-):
+def generate_inputs(rows: int, cols: int, seed=42, weighted=False):
+    """The input, and with ``weighted`` the weights too."""
     torch.manual_seed(seed)
     val_range = 4
-    input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    if weighted:
-        weights = torch.rand(cols, dtype=torch_dtype_map[dtype]) * val_range
-        output_tensor = reference(input_tensor, weights, weighted=True, eps=eps)
-        return {"input": input_tensor, "weight": weights, "output": output_tensor}
-    else:
-        output_tensor = reference(input_tensor, eps=eps)
-        return {"input": input_tensor, "output": output_tensor}
+    x = torch.rand(rows, cols, dtype=torch.bfloat16) * val_range
+    if not weighted:
+        return (x,)
+    return x, torch.rand(cols, dtype=torch.bfloat16) * val_range

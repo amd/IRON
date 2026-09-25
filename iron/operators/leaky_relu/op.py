@@ -48,6 +48,11 @@ class LeakyReLU(ChanneledUnaryOperator):
     def _kernel(self):
         return activation.leaky_relu(self._line_size)
 
+    def reference(self, x):
+        from iron.operators.leaky_relu.reference import reference
+
+        return reference(x, self.alpha)
+
     def _mlir_callback_args(self):
         return super()._mlir_callback_args() + [self.alpha, self._kernel()]
 

@@ -2,17 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 
 
-def generate_golden_reference(rows: int, cols: int, dtype="bf16", seed=42):
+def reference(x):
+    """CPU reference: layer normalization of each row over its last dim, with no
+    learnable affine parameters (ground truth).
+
+    The AIE kernel normalizes one line at a time, computing mean and variance
+    over that line alone.
+    """
+    return torch.nn.functional.layer_norm(x, normalized_shape=(x.shape[-1],))
+
+
+def generate_inputs(rows: int, cols: int, seed=42):
     torch.manual_seed(seed)
     val_range = 4
-    input_tensor = torch.rand(rows, cols, dtype=torch_dtype_map[dtype]) * val_range
-    # normalized_shape=(cols,) normalizes each row independently over its `cols` elements.
-    # This matches the AIE kernel behavior, which processes one tile (one row) at a time
-    # and computes mean and variance per row (no learnable affine parameters).
-    output_tensor = torch.nn.functional.layer_norm(
-        input_tensor, normalized_shape=(cols,)
-    )
-    return {"input": input_tensor, "output": output_tensor}
+    return torch.rand(rows, cols, dtype=torch.bfloat16) * val_range

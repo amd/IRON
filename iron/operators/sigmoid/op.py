@@ -17,3 +17,8 @@ class Sigmoid(ChanneledUnaryOperator):
 
     def _kernel(self):
         return activation.sigmoid(self._line_size)
+
+    def reference(self, x):
+        from iron.operators.sigmoid.reference import reference
+
+        return reference(x)

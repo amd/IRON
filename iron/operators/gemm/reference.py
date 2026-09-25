@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 
 
 def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
@@ -23,7 +22,6 @@ def generate_golden_reference(
     M: int,
     K: int,
     N: int,
-    dtype="bf16",
     seed=42,
     b_col_maj=False,
     c_col_maj=False,
@@ -31,9 +29,8 @@ def generate_golden_reference(
 ):
     torch.manual_seed(seed)
     val_range = 4
-    dtype_torch = torch_dtype_map[dtype]
-    input_a = torch.randn(M, K, dtype=dtype_torch) * val_range
-    input_b_full = torch.rand(K, N, dtype=dtype_torch) * val_range
+    input_a = torch.randn(M, K, dtype=torch.bfloat16) * val_range
+    input_b_full = torch.rand(K, N, dtype=torch.bfloat16) * val_range
     if False:
         # The following inputs are useful for debugging;
         # the A matrix becomes a matrix where each element encodes its row and column index,
@@ -42,10 +39,10 @@ def generate_golden_reference(
         factor = 10 ** (col_digits + 1)
         row_indices = torch.arange(M, dtype=torch.int64).unsqueeze(1)
         col_indices = torch.arange(K, dtype=torch.int64).unsqueeze(0)
-        input_a = (row_indices * factor + col_indices).to(dtype=dtype_torch)
-        input_b_full = torch.zeros(K, N, dtype=dtype_torch)
+        input_a = (row_indices * factor + col_indices).to(dtype=torch.bfloat16)
+        input_b_full = torch.zeros(K, N, dtype=torch.bfloat16)
         diag_dim = min(K, N)
-        input_b_full[:diag_dim, :diag_dim] = torch.eye(diag_dim, dtype=dtype_torch)
+        input_b_full[:diag_dim, :diag_dim] = torch.eye(diag_dim, dtype=torch.bfloat16)
     # Store B in the operator's expected layout, then compute the output via the
     # shared reference so the test golden and the operator reference agree.
     if b_col_maj:

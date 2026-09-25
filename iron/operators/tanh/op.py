@@ -17,3 +17,8 @@ class Tanh(ChanneledUnaryOperator):
 
     def _kernel(self):
         return activation.tanh(self._line_size)
+
+    def reference(self, x):
+        from iron.operators.tanh.reference import reference
+
+        return reference(x)

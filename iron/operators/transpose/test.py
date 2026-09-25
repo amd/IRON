@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from aie.utils.verify import Tolerance
 import aie.utils as aie_utils
 
 from iron.operators.transpose.op import Transpose
-from iron.operators.transpose.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.operators.transpose.reference import generate_inputs
+from iron.common.test_utils import assert_matches_reference
 
 
 def get_params():
@@ -79,7 +80,7 @@ def get_params():
 )
 @pytest.mark.parametrize("M,N,aie_columns,channels,m,n,s,num_batches", get_params())
 def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_context):
-    golden_ref = generate_golden_reference(rows=M, cols=N, num_batches=num_batches)
+    x = generate_inputs(rows=M, cols=N, num_batches=num_batches)
 
     operator = Transpose(
         M=M,
@@ -93,23 +94,9 @@ def test_transpose(M, N, aie_columns, channels, m, n, s, num_batches, aie_contex
         context=aie_context,
     )
 
-    input_buffers = {"input": golden_ref["input"]}
-    output_buffers = {"output": golden_ref["output"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        # A transpose is a permutation. Any tolerance here also accepts some class of
-        # wrong permutation, so gate it exactly.
-        operator,
-        input_buffers,
-        output_buffers,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+    # A transpose is a permutation. Any tolerance here also accepts some class of
+    # wrong permutation, so gate it exactly.
+    assert_matches_reference(operator, x, tolerance=Tolerance.exact())
 
 
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient floors

@@ -6,8 +6,8 @@ import pytest
 import aie.utils as aie_utils
 
 from iron.operators.axpy.op import AXPY
-from iron.operators.axpy.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.operators.axpy.reference import generate_inputs
+from iron.common.test_utils import assert_matches_reference
 
 
 def get_params():
@@ -47,9 +47,7 @@ def get_params():
     get_params(),
 )
 def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_context):
-    golden_ref = generate_golden_reference(
-        input_length=input_length, scalar=scalar_factor
-    )
+    x, y = generate_inputs(input_length=input_length)
 
     operator = AXPY(
         size=input_length,
@@ -59,17 +57,4 @@ def test_axpy(input_length, num_aie_columns, tile_size, scalar_factor, aie_conte
         context=aie_context,
     )
 
-    input_buffers = {"x": golden_ref["A"], "y": golden_ref["B"]}
-    output_buffers = {"output": golden_ref["C"]}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator,
-        input_buffers,
-        output_buffers,
-        tolerance=operator._kernel().contract.tolerance,
-    )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"
+    assert_matches_reference(operator, x, y)

@@ -65,6 +65,12 @@ class Dequant(MLIROperator):
     def _kernel(self):
         return datamovement.expand(self.tile_size, self.group_size)
 
+    def reference(self, payload):
+        """CPU reference: each uint4 value times its group's bf16 scale."""
+        from iron.operators.dequant.reference import reference
+
+        return reference(payload, self.tile_size, self.group_size)
+
     def get_kernel_artifacts(self):
         return [KernelObjectArtifact.from_extern(self._kernel())]
 
