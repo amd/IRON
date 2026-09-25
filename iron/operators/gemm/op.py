@@ -595,6 +595,22 @@ class GEMM(Operator[GEMMOverlay]):
         # so that a shim never holds more than one block's descriptors.
         b_unrolled = any(len(f) > 1 for f in B_fills)
 
+        def fill(col, c_row, tg):
+            # A input transfer: the smallest unit is a
+            # (m*n_A_tiles_per_shim)-sized sub-tile, one per column,
+            # repeated (N//n//n_aie_cols) times; each shim carries
+            # separate rows.
+            tile_offset = (c_row * n_shim_mem_A + col) % len(A_tiles)
+            # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
+            if col < n_aie_rows:
+                for acc in A_fills[tile_offset]:
+                    rt.fill(ov.a[col], (self.A, acc), group=tg)
+            # B input transfer: the first (n)-wide block of columns
+            # of B, then the (n_aie_columns)-th such block, and so
+            # on; each shim starts at a different column offset.
+            for acc in B_fills[col]:
+                rt.fill(ov.b[col], (self.B, acc), group=tg)
+
         # Task groups determine when to sync, await and free DMA runtime ops.
         tg = rt.new_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
@@ -665,23 +681,21 @@ class GEMM(Operator[GEMMOverlay]):
                             strides=C_strides,
                         )
                         rt.drain(ov.c[col], (self.C, C_tile), group=tg, wait=True)
+                    if not b_unrolled:
+                        for tile_row in range(current_tb_n_rows):
+                            fill(col, row_base + tile_row, tg)
+                if b_unrolled:
+                    # Row-block by row-block across every column, where a
+                    # single B descriptor issues column by column. A shim
+                    # channel queues only a few tasks, and a push past that
+                    # stalls the whole instruction stream until one retires.
+                    # Column by column, the second row-block's B descriptors
+                    # stall it on a column whose cores still wait for A from
+                    # the columns not yet issued: a hang (2048x8192x2048,
+                    # b_col_maj, on eight columns).
                     for tile_row in range(current_tb_n_rows):
-                        # A input transfer: the smallest unit is a
-                        # (m*n_A_tiles_per_shim)-sized sub-tile, one per column,
-                        # repeated (N//n//n_aie_cols) times; each shim carries
-                        # separate rows.
-                        tile_offset = (
-                            (row_base + tile_row) * n_shim_mem_A + col
-                        ) % len(A_tiles)
-                        # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
-                        if col < n_aie_rows:
-                            for acc in A_fills[tile_offset]:
-                                rt.fill(ov.a[col], (self.A, acc), group=tg)
-                        # B input transfer: the first (n)-wide block of columns
-                        # of B, then the (n_aie_columns)-th such block, and so
-                        # on; each shim starts at a different column offset.
-                        for acc in B_fills[col]:
-                            rt.fill(ov.b[col], (self.B, acc), group=tg)
+                        for col in range(n_aie_cols):
+                            fill(col, row_base + tile_row, tg)
                 if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
                     tg.finish()
                     tg = rt.new_group()

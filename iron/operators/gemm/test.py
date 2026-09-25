@@ -34,6 +34,8 @@ def get_params():
         (2048,  2048,  2048,               8,      True,     False, 128,  32,  32),
         (2048,  2048,  8192,               2,      True,     False,  64,  64,  64),
         (2048,  8192,  2048,               2,      True,     False,  64,  64,  64),
+        # Llama 3.2 1B prefill's down projection, as the graph runs it.
+        (2048,  8192,  2048,               8,      True,     False,  64,  64,  64),
         (2048,    64,  2048,               2,      True,     False,  64,  64,  64),
         (2048,    64,  8192,               2,      True,     False,  64,  64,  64),
         (2048,  2048,  2048,               2,     False,      True,   8,  16,  32),
