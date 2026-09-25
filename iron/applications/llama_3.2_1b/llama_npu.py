@@ -1256,6 +1256,19 @@ def main():
         print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
         return
 
+    if args.check_determinism:
+        # The second prompt is the same amount of the text that follows.
+        other = harness.get_prompt(2 * args.prompt_len)[args.prompt_len :]
+        other_ids = [config.special_tokens["<|begin_of_text|>"]]
+        other_ids += config.tokenizer.encode(other)
+        prompts = [state.token_ids, torch.tensor([other_ids], dtype=torch.long)]
+        n_differ = harness.check_determinism(
+            config, prompts, llama_forward_pass, args.num_tokens, args.check_determinism
+        )
+        n_compared = len(prompts) * (args.check_determinism - 1)
+        print(f"[Determinism] Differing runs: {n_differ}/{n_compared}")
+        return
+
     print(prompt, end="", flush=True)
     harness.generate(
         config, state, llama_forward_pass, use_kv_cache=True, num_tokens=args.num_tokens

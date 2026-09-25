@@ -198,6 +198,36 @@ def check_accuracy(
     return results
 
 
+def check_determinism(config, prompts, forward_pass, num_tokens, rounds):
+    """Run each prompt `rounds` times, alternating, and compare logits bitwise.
+
+    Each round prefills from a fresh state and decodes greedily. Alternating
+    prompts with different text matters: a host write that never reaches the
+    device then reads the other prompt's data, not a leftover copy of its own.
+    Returns how many rounds differ from the first round of the same prompt.
+    """
+    first = [None] * len(prompts)
+    n_differ = 0
+    for r in range(rounds * len(prompts)):
+        p = r % len(prompts)
+        state = LlamaModelState(config)
+        state.token_ids = prompts[p]
+        logits = []
+        for _ in range(num_tokens):
+            out, state = forward_pass(config, state)
+            logits.append(out[0, -1].clone())
+            state.token_ids = out[:, -1:].argmax(dim=-1)
+        logits = torch.stack(logits).view(torch.int16)
+        if first[p] is None:
+            first[p] = logits
+            continue
+        steps = (logits != first[p]).any(dim=1).nonzero().flatten().tolist()
+        if steps:
+            n_differ += 1
+            print(f"round {r} (prompt {p}): logits differ at steps {steps}")
+    return n_differ
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LLaMA 3.2 1B Inference Harness")
     parser.add_argument(
@@ -223,6 +253,13 @@ def parse_args():
         action="store_true",
         help="Instead of sampling, compare each step's logits against an fp32 CPU "
         "reference, feeding both the reference's greedy token",
+    )
+    parser.add_argument(
+        "--check-determinism",
+        type=int,
+        metavar="ROUNDS",
+        help="Instead of sampling, run two prompts ROUNDS times each, alternating, "
+        "and count the runs whose logits differ bitwise from the first run",
     )
     return parser.parse_args()
 

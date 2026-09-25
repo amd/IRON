@@ -92,3 +92,19 @@ def test_llama_3_2_1b_accuracy():
     decode_kl = float(re.search(r"Decode max KL:\s*(\S+)", result.stdout).group(1))
     assert prefill_kl <= MAX_PREFILL_KL, f"prefill KL {prefill_kl} > {MAX_PREFILL_KL}"
     assert decode_kl <= MAX_DECODE_KL, f"decode KL {decode_kl} > {MAX_DECODE_KL}"
+
+
+# Repeated runs must produce bit-identical logits. A prefill KV hand-off that
+# was never flushed to the device made 12% of runs diverge. Alternating
+# two prompts makes such a missing flush fail every run: 38/38 in each of three
+# trials.
+@requires_weights
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.metrics(
+    DifferingRuns=r"\[Determinism\] Differing runs:\s*(?P<value>\d+)/",
+)
+def test_llama_3_2_1b_determinism():
+    result = run_llama_npu(1024, 4, "--check-determinism", "5")
+
+    differing = re.search(r"Differing runs:\s*(\d+)/(\d+)", result.stdout)
+    assert int(differing.group(1)) == 0, f"{differing.group(0)} (bitwise logits)"
