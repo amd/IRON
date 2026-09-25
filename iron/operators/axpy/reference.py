@@ -7,8 +7,9 @@ import torch
 def reference(x, y, scalar):
     """CPU reference: ``scalar * x + y`` in fp32, rounded once (ground truth).
 
-    The kernel takes ``scalar`` as bf16 and rounds only the result, where bf16
-    arithmetic would round the product as well.
+    The vectorized kernel accepts ``scalar`` as fp32 but broadcasts
+    ``bfloat16(a)`` internally. The product stays in an fp32 accumulator until
+    after adding ``y``; only the coefficient and final result round to bf16.
     """
     a = torch.tensor(scalar, dtype=torch.bfloat16).float()
     return (a * x.float() + y.float()).to(x.dtype)

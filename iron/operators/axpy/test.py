@@ -13,7 +13,7 @@ from iron.common.test_utils import assert_matches_reference
 def get_params():
     max_aie_columns = aie_utils.get_current_device().cols
     input_lengths = [1024, 2048, 4096, 8192]
-    scalar_factors = [3.0, 10.0]
+    scalar_factors = [3.0, 10.0, 1.003]
 
     params = []
     for input_length in input_lengths:
@@ -23,7 +23,7 @@ def get_params():
                 continue
             for scalar in scalar_factors:
                 # Determine if this is a regular test case
-                is_regular = input_length == 2048 and scalar == 3.0
+                is_regular = input_length == 2048 and scalar in (3.0, 1.003)
                 marks = [] if is_regular else [pytest.mark.extensive]
 
                 params.append(
