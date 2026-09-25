@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from aie.utils.verify import Tolerance
 
 from iron.operators.layer_norm.op import LayerNorm
 from iron.operators.layer_norm.reference import generate_golden_reference
@@ -46,7 +47,12 @@ def test_layer_norm(
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.1, abs_tol=0.1
+        operator,
+        input_buffers,
+        output_buffers,
+        # The tighter of this test's former rel_tol (0.1) and the kernel
+        # contract's atol (0.05).
+        tolerance=Tolerance.relative(0.1, 0.05),
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

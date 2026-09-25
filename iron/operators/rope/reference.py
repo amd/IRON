@@ -182,6 +182,10 @@ def generate_golden_reference(
         method_type=method_type,
         freq_config=freq_config,
     )
+    # The operator is handed the tables in bf16, so the golden output is computed
+    # from those rounded values rather than from the fp32 ones.
+    cos = cos.to(torch.bfloat16).to(torch.float32)
+    sin = sin.to(torch.bfloat16).to(torch.float32)
     val_range = 4
     # Head count is inferred from rows and context_len. This logic assumes rows is either
     # smaller than context_len (1 head, seq_len == rows) or an exact multiple of context_len

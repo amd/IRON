@@ -13,8 +13,9 @@ def generate_golden_reference(input_length: int, scalar=3.0, dtype="bf16", seed=
     B = torch.rand(input_length, dtype=dtype_torch) * val_range
     s = torch.tensor(scalar, dtype=dtype_torch)
 
-    # Generate golden outputs
-    C = s * A + B
+    # Generate golden outputs: the kernel computes s * A + B in fp32 and rounds
+    # once, where bf16 arithmetic would round the product as well.
+    C = (s.float() * A.float() + B.float()).to(dtype_torch)
 
     return {
         "A": A,

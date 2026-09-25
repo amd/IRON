@@ -51,7 +51,10 @@ def test_leaky_relu(
     output_buffers = {"output": golden_ref["output"]}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-6
+        operator,
+        input_buffers,
+        output_buffers,
+        tolerance=operator._kernel().contract.tolerance,
     )
 
     print(f"\nLatency (us): {latency_us:.1f}")

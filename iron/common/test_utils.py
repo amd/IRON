@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import torch
 import aie.utils as aie_utils
@@ -28,12 +30,13 @@ def verify_buffer(
     rel_tol: float = 0.04,
     abs_tol: float = 1e-6,
     max_error_rate: float = 0.0,
+    tolerance: Tolerance | None = None,
 ) -> list[int]:
     """
     Verify buffer contents match reference within tolerances.
 
-    The comparison is mlir-aie's ``aie.utils.verify.compare`` under a relative
-    ``Tolerance``: an element passes at ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``,
+    The comparison is mlir-aie's ``aie.utils.verify.compare``, by default under
+    a relative ``Tolerance``: an element passes at ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``,
     so ``rel_tol=abs_tol=0`` demands exact equality, and a NaN or infinity must
     meet the same value in the reference whatever ``max_error_rate`` allows.
 
@@ -45,10 +48,24 @@ def verify_buffer(
         abs_tol: Absolute tolerance for comparison
         max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
                        For example, 0.01 allows up to 1% of elements to fail
+        tolerance: A ``Tolerance`` to judge by instead of ``rel_tol``, ``abs_tol``
+                   and ``max_error_rate``; typically the contract of the kernel
+                   the operator runs (``ExternalFunction.contract.tolerance``).
+                   It must be judgeable element by element: no ``range_frac``
+                   and not a bound.
 
     Returns:
         List of error indices. Empty if verification passes.
     """
+    if tolerance is None:
+        tolerance = Tolerance.relative(
+            rel_tol, abs_tol, max_mismatch_frac=max_error_rate
+        )
+    elif tolerance.kind == "bound" or tolerance.range_frac is not None:
+        raise ValueError(
+            f"{buf_name}: a {tolerance.kind} tolerance with range_frac="
+            f"{tolerance.range_frac} depends on more than the element it judges"
+        )
 
     def _to_numpy(x):
         if isinstance(x, torch.Tensor):
@@ -69,26 +86,38 @@ def verify_buffer(
         return list(range(len(output), len(expected_np)))
     output = output[: len(expected_np)]
 
-    tolerance = Tolerance.relative(rel_tol, abs_tol, max_mismatch_frac=max_error_rate)
     verdict = compare(output, expected_np, tolerance)
-    if verdict.n_mismatch and max_error_rate > 0.0:
+    allowed = tolerance.max_mismatch_frac
+    if verdict.n_mismatch and allowed > 0.0:
         within = "within" if verdict else "exceeds"
         print(
             f"{buf_name}: {verdict.n_mismatch} errors "
             f"({verdict.n_mismatch / verdict.n_checked * 100:.2f}%) {within} allowed "
-            f"rate of {max_error_rate * 100:.2f}%"
+            f"rate of {allowed * 100:.2f}%"
         )
     if verdict:
         return []
 
     print(f"{buf_name}: {verdict.detail}")
-    # compare() judges; it does not list the elements. nearly_equal is the same
-    # per-element test, except that it also rejects a NaN that meets a NaN.
-    bad = ~nearly_equal(output, expected_np, rtol=rel_tol, atol=abs_tol)
-    bad &= ~(
-        np.isnan(output.astype(np.float32)) & np.isnan(expected_np.astype(np.float32))
-    )
-    error_indices = np.flatnonzero(bad).tolist()
+    # compare() judges; it does not list the elements.
+    if tolerance.kind == "relative":
+        # nearly_equal is the same per-element test, except that it also
+        # rejects a NaN that meets a NaN.
+        bad = ~nearly_equal(
+            output, expected_np, rtol=tolerance.rtol or 0.0, atol=tolerance.atol
+        )
+        bad &= ~(
+            np.isnan(output.astype(np.float32))
+            & np.isnan(expected_np.astype(np.float32))
+        )
+        error_indices = np.flatnonzero(bad).tolist()
+    else:
+        each = replace(tolerance, max_mismatch_frac=0.0)
+        error_indices = [
+            i
+            for i in range(len(output))
+            if not compare(output[i : i + 1], expected_np[i : i + 1], each)
+        ]
     for i in error_indices[:10]:
         print(
             f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
@@ -116,6 +145,7 @@ def run_test(
     max_error_rate: float = 0.0,
     warmup_iters: int = 1,
     timed_iters: int = 1,
+    tolerance: Tolerance | None = None,
 ) -> tuple[dict[str, list[int]], float, float]:
     """
     Run operator test with specified input/output buffers.
@@ -129,6 +159,8 @@ def run_test(
         max_error_rate: Maximum fraction of elements allowed to exceed tolerances (0.0 to 1.0)
         warmup_iters: Number of warmup iterations before timing
         timed_iters: Number of timed iterations for latency/bandwidth measurement
+        tolerance: Judge the outputs by this ``Tolerance`` instead; see
+                   ``verify_buffer``
 
     Returns:
         (errors: dict, latency_us: float, bandwidth_gbps: float)
@@ -201,7 +233,13 @@ def run_test(
             buf = output_map[buf_name]
             output_torch = buf.to_torch()
             buf_errors = verify_buffer(
-                output_torch, buf_name, expected, rel_tol, abs_tol, max_error_rate
+                output_torch,
+                buf_name,
+                expected,
+                rel_tol,
+                abs_tol,
+                max_error_rate,
+                tolerance=tolerance,
             )
             if buf_errors:
                 errors[buf_name] = buf_errors
