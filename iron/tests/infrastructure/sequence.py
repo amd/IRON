@@ -38,10 +38,9 @@ from iron.operators.relu.op import ReLU
 def _set_input(run, name, data):
     """Write a host tensor into an input buffer and push it to the device.
 
-    Mirrors the caller contract for the fused single-ELF callable: after
-    writing a get_buffer() sub-view via torch_view(), the caller is responsible
-    for calling .to("npu") so the write reaches the NPU (a no-op sync for the
-    separate/reference callables, whose __call__ syncs inputs themselves).
+    The explicit push is redundant, since every callable flushes host writes
+    at dispatch (see test_non_input_buffers_sync_without_explicit_flush), and
+    is a no-op sync for the reference callable.
     """
     buf = run.get_buffer(name)
     buf.torch_view()[: data.numel()] = data.reshape(-1)
@@ -57,7 +56,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(context, dispatch, name):
+def _build_add_relu_sequence(context, dispatch, name, input_args=("a", "b")):
     """out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -78,7 +77,7 @@ def _build_add_relu_sequence(context, dispatch, name):
             (add, "a", "b", "temp"),
             (relu, "temp", "out"),
         ],
-        input_args=["a", "b"],
+        input_args=list(input_args),
         output_args=["out"],
         dispatch=dispatch,
         context=context,
@@ -322,3 +321,45 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context)
     else:
         with pytest.raises(RuntimeError):
             run()  # compare mode reports the wrong reference by itself
+
+
+# ---------------------------------------------------------------------------
+# 5. Buffers that are neither inputs nor outputs (weights, KV caches,
+#    intermediates) sync like the rest in every NPU dispatch mode. The full-ELF
+#    callable places them in its scratch buffer, and NPU access to it is not
+#    cache-coherent: an unflushed host write is a race, not an error, so each
+#    dispatch below writes different data than the one before.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch", ["separate", "fused"])
+def test_non_input_buffers_sync_without_explicit_flush(dispatch, aie_context):
+    """Host writes through get_buffer() to a non-input buffer reach the NPU at
+    the next dispatch, and reads of a non-output buffer after a dispatch see
+    what the NPU wrote there, with no explicit ``to()`` from the caller."""
+    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
+        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+
+    # b is not an input, so it is held like a weight (in scratch, when fused).
+    seq = _build_add_relu_sequence(
+        aie_context, dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
+    )
+    seq.compile()
+    run = seq.get_callable()
+
+    torch.manual_seed(0)
+    for rep in range(4):
+        a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+        b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+        run.get_buffer("a").torch_view()[:] = a
+        run.get_buffer("b").torch_view()[:] = b
+        run()
+
+        temp = run.get_buffer("temp").to_torch()[:_ADD_RELU_SIZE]
+        out = run.get_buffer("out").to_torch()[:_ADD_RELU_SIZE]
+        errors = verify_buffer(temp, "temp", a + b, rel_tol=0.04, abs_tol=1e-6)
+        assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
+        errors = verify_buffer(
+            out, "out", torch.nn.functional.relu(a + b), rel_tol=0.04, abs_tol=1e-6
+        )
+        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"

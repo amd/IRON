@@ -1213,7 +1213,6 @@ def llama_forward_pass(config, state):
             aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[
                 :
             ] = (aie_buffers.values_cache[layer_idx].to_torch().flatten())
-        aie_ops.decode.fused.scratch_buffer.to("npu")
         return ret
     else:
         ret = llama_forward_pass_decode(config, state)
