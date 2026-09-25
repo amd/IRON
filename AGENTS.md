@@ -132,13 +132,13 @@ reuse lint
      - `test.py`: End-to-end test (build, run once, check against `reference()`)
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
-   - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package, not from this repo. Operators get them from mlir-aie's
-     kernel factories (`aie.iron.kernels`), each of which returns an
-     `ExternalFunction` carrying its source, flags, symbol and argument types:
-     - `generic/`: Works on both AIE2 and AIE2P
-     - `aie2/`: AIE2-specific (NPU1)
-     - `aie2p/`: AIE2P-specific (NPU2)
+   - C++ compute kernels, sourced from the installed mlir-aie package, not
+     from this repo. Operators get them from mlir-aie's kernel factories
+     (`aie.iron.kernels`), each of which returns an `ExternalFunction`
+     carrying its source, flags, symbol and argument types
+   - Grouped by family (`activation/`, `eltwise/`, `linalg/`, `norm/`,
+     `fused/`, `common/`, ...), not by architecture: a kernel's `.cc` includes
+     its `*_aie2.h` or `*_aie2p.h` header, chosen by `aie_arch.h`
    - Use AIE API for vectorization (e.g., `aie::mmul`, `aie::add`, `aie::mul`)
    - Compiled to `.o` files and linked into operator `.xclbin`
 
@@ -265,7 +265,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 4. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
    with a factory in `aie.iron.kernels`; IRON no longer hosts kernels
-   - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
+   - Choose the family directory (`activation/`, `eltwise/`, `linalg/`, ...);
+     put architecture-specific code in `*_aie2.h` / `*_aie2p.h` headers
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
 5. Implement `reference.py` with the CPU reference and `generate_inputs()`,
@@ -472,7 +473,7 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`, overridden by
+  `include/aie_kernels/<family>/` (`AIEContext.kernels_dir`, overridden by
   `MLIR_AIE_KERNEL_SOURCES`)
 - Check `get_kernel_artifacts()` in `op.py` returns every factory the design uses
 - Ensure the C signature matches the factory's (or `bind()`'s) argument types
@@ -505,7 +506,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 **Kernel compilation failures**
 
-- Check kernel is in correct architecture directory (`generic/`, `aie2/`, `aie2p/`)
+- Check the kernel's `.cc` includes the right `*_aie2.h` / `*_aie2p.h` header for the target
 - Verify `#include <aie_api/aie.hpp>` for AIE API kernels
 - Ensure template parameters match function signature
 - Check for syntax errors in vectorization code

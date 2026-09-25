@@ -67,7 +67,7 @@ def generate_golden_reference_batched(M=128, K=128, num_batches=2, seed=42):
 
 
 def gelu_tanh_approx(x):
-    """Tanh-approximation GELU, matching aie_kernels/aie2p/gelu.cc.
+    """Tanh-approximation GELU, matching aie_kernels/activation/gelu_aie2p.h.
 
     0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))). Computed in float32.
     """

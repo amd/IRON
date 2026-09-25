@@ -62,7 +62,7 @@ class GEMM(MLIROperator):
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
         # r, s, t are the aie::mmul tile dims the bf16 kernel is built from
-        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul)
+        # (aie_kernels/linalg/mm_aie2p.h, matmul_vectorized_2x2_mmul)
         if self.emulate_bf16_mmul_with_bfp16:
             r, s, t = 8, 8, 8
         else:
@@ -71,17 +71,17 @@ class GEMM(MLIROperator):
         if self.tile_m % min_tile_m != 0:
             raise ValueError(
                 f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
-                f"(aie_kernels/aie2p/mm.cc requires m % (2*r) == 0, r={r})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0, r={r})"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
                 f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
-                f"(aie_kernels/aie2p/mm.cc requires k % s == 0, s={s})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0, s={s})"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
                 f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
-                f"(aie_kernels/aie2p/mm.cc requires n % (2*t) == 0, t={t})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0, t={t})"
             )
 
         MLIROperator.__init__(self, context=self.context)

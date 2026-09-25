@@ -98,8 +98,8 @@ class GEMV(MLIROperator):
         )
 
     def _gelu(self):
-        # The epilogue is gelu.cc's in-place gelu_tile_bf16, which only aie2p's
-        # gelu.cc exports; it rides in the object the gelu factory builds.
+        # The epilogue is gelu.cc's in-place gelu_tile_bf16, which only
+        # gelu_aie2p.h provides; it rides in the object the gelu factory builds.
         if get_kernel_dir() != "aie2p":
             raise NotImplementedError(
                 "gemv gelu epilogue is only available on NPU2 (aie2p); "

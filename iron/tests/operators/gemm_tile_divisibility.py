@@ -4,7 +4,7 @@
 
 """GEMM.__post_init__ must reject tile sizes the kernel cannot build.
 
-aie_kernels/aie2p/mm.cc's matmul_vectorized_*x*x*_bf16_* wrappers static_assert
+aie_kernels/linalg/mm_aie2p.h's matmul_vectorized_*x*x*_bf16_* wrappers static_assert
 m % (2*r) == 0, k % s == 0 and n % (2*t) == 0 for the (r, s, t) triple selected
 by emulate_bf16_mmul_with_bfp16 (r=t=8 when enabled, the default; r=4, t=8
 otherwise). A tile size that meets a lower bound without dividing evenly

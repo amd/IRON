@@ -374,11 +374,15 @@ class GEMM(MLIROperator):
     def get_kernel_artifacts(self):
         # Built by hand rather than from aie.iron.kernels.fused_mm: that
         # factory compiles in one epilogue mode (this operator selects among
-        # several at runtime, from one xclbin), always rounds to nearest-even,
-        # and wraps mm_fused.cc in fused_mm_tile.cc.
+        # several at runtime, from one xclbin) and always rounds to
+        # nearest-even. Its translation unit, fused_mm_tile.cc, is still the
+        # one to compile, since mm_fused.h is a header. The whole-tile entry
+        # point it adds is never called, so the link drops it, but it also
+        # compiles out the per-step event0/event1 markers.
         kernel_dir = get_kernel_dir()
         kernels_dir = self.context.kernels_dir
-        generic = kernels_dir / "generic"
+        fused = kernels_dir / "fused"
+        common = kernels_dir / "common"
 
         # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
         # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
@@ -415,11 +419,12 @@ class GEMM(MLIROperator):
         kernel_obj = KernelObjectArtifact(
             self._kernel_object,
             dependencies=[
-                SourceArtifact(generic / "mm_fused.cc"),
-                SourceArtifact(generic / "mm_fused_mmul.h"),
-                SourceArtifact(generic / "activations.h"),
+                SourceArtifact(fused / "fused_mm_tile.cc"),
+                SourceArtifact(fused / "mm_fused.h"),
+                SourceArtifact(fused / "mm_fused_mmul.h"),
+                SourceArtifact(common / "activations.h"),
                 SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
-                SourceArtifact(generic / "zero.cc"),
+                SourceArtifact(common / "zero.h"),
             ],
             extra_flags=flags,
         )
