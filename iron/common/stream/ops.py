@@ -28,7 +28,6 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.common.layout import TiledStridedLayout, tiled_2d
-from iron.common.kernels import ZERO_CTYPES
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel
@@ -113,7 +112,7 @@ def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
                 "-DROUND_CONV_EVEN",
                 # zero.cc's entry point, over the m x n output tile.
-                f"-DZERO_TYPE={ZERO_CTYPES['bf16']}",
+                "-DZERO_TYPE=bfloat16",
                 f"-DTILE_SIZE={m * n}",
                 f"-include{zero_source}",
             ],
@@ -159,11 +158,14 @@ class StreamKernel:
 
 
 GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, artifacts=_gemm_artifacts)
-SILU = StreamKernel(key="silu", layouts=lambda: elementwise_layouts(2), source="silu")
+SILU = StreamKernel(
+    key="silu", layouts=lambda: elementwise_layouts(2), source="silu", subdir="generic"
+)
 ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
     layouts=lambda: elementwise_layouts(3),
     source="mul",
+    subdir="generic",
 )
 
 Silu = custom_op("Silu")

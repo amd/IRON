@@ -131,7 +131,9 @@ reuse lint
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`AIEContext.kernels_dir`), not from this repo:
+     mlir-aie package, not from this repo. Operators get them from mlir-aie's
+     kernel factories (`aie.iron.kernels`), each of which returns an
+     `ExternalFunction` carrying its source, flags, symbol and argument types:
      - `generic/`: Works on both AIE2 and AIE2P
      - `aie2/`: AIE2-specific (NPU1)
      - `aie2p/`: AIE2P-specific (NPU2)
@@ -244,16 +246,23 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 2. Implement `op.py`:
    - Subclass `MLIROperator`
    - Implement `get_operator_name()`, `get_mlir_artifact()`, `get_kernel_artifacts()`, `get_arg_spec()`
+   - Build kernels with the `aie.iron.kernels` factories in one `_kernels()`
+     helper, pass them to the design as keyword arguments, and return
+     `[KernelObjectArtifact.from_extern(k) for k in self._kernels().values()]`
+     from `get_kernel_artifacts()`
    - Add validation for dimension constraints (assert statements)
    - Define tile sizes and column counts
 3. Implement `design.py`:
-   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo, Kernel)
+   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo)
+   - Take the kernels as keyword arguments rather than declaring `Kernel(...)`;
+     bind further symbols of the same object with
+     `fn.object_file.bind(symbol, arg_types)`
    - Define function that builds MLIR-AIE design
    - Use `range_()` for loops (not Python `range`)
    - Handle device-specific logic (NPU1 vs NPU2) if needed
 4. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
-   and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
+   with a factory in `aie.iron.kernels`; IRON no longer hosts kernels
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
@@ -454,9 +463,10 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
-- Check `get_kernel_artifacts()` in `op.py` references correct kernel path
-- Ensure kernel function signature matches `Kernel()` declaration in `design.py`
+  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`, overridden by
+  `MLIR_AIE_KERNEL_SOURCES`)
+- Check `get_kernel_artifacts()` in `op.py` returns every factory the design uses
+- Ensure the C signature matches the factory's (or `bind()`'s) argument types
 
 **Compilation hangs or fails**
 

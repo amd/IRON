@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from typing import ClassVar, Dict
@@ -19,7 +20,6 @@ from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
-from iron.common.operator_bases import lut_based_ops_artifacts
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -43,6 +43,23 @@ from iron.operators.flm.gemm.design import (
     _hw_stride_ok,
     l1_budget,
 )
+
+
+def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
+    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
+    if kernel_dir != "aie2":
+        return []
+    mlir_aie_dir = Path(aie_utils.config.root_path())
+    return [
+        KernelObjectArtifact(
+            "lut_based_ops.o",
+            dependencies=[
+                SourceArtifact(
+                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
+                )
+            ],
+        )
+    ]
 
 
 @dataclass
@@ -355,6 +372,10 @@ class GEMM(MLIROperator):
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
     def get_kernel_artifacts(self):
+        # Built by hand rather than from aie.iron.kernels.fused_mm: that
+        # factory compiles in one epilogue mode (this operator selects among
+        # several at runtime, from one xclbin), always rounds to nearest-even,
+        # and wraps mm_fused.cc in fused_mm_tile.cc.
         kernel_dir = get_kernel_dir()
         kernels_dir = self.context.kernels_dir
         generic = kernels_dir / "generic"

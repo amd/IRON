@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, ClassVar
 
 import aie.utils as aie_utils
@@ -14,28 +13,10 @@ from .base import MLIROperator, AIERuntimeArgSpec
 from .context import AIEContext
 from .compilation import (
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 from .utils import get_shim_dma_limit
-
-
-def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
-    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
-    if kernel_dir != "aie2":
-        return []
-    mlir_aie_dir = Path(aie_utils.config.root_path())
-    return [
-        KernelObjectArtifact(
-            "lut_based_ops.o",
-            dependencies=[
-                SourceArtifact(
-                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
-                )
-            ],
-        )
-    ]
 
 
 @dataclass
