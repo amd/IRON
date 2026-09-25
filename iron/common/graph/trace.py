@@ -11,6 +11,8 @@ import itertools
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils import bfp
+
 from ..declare import Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
 from ..image.sequence import OperatorSequence
@@ -252,10 +254,10 @@ class Tracer:
                     f"{type(op).__name__}.{b.name} is {b.shape} "
                     f"({b.elements} elements); operand {h!r} has {h.elements}"
                 )
-            if np.dtype(h.dtype) != np.dtype(b.dtype):
+            if bfp.dtype_name(h.dtype) != bfp.dtype_name(b.dtype):
                 raise TypeError(
-                    f"{type(op).__name__}.{b.name} is {np.dtype(b.dtype).name}; "
-                    f"operand {h!r} is {np.dtype(h.dtype).name}"
+                    f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
+                    f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
         slots, outputs, it, given = [], [], iter(operands[: len(ins)]), iter(given_outs)
         for b in buffers:

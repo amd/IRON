@@ -4,9 +4,6 @@
 import dataclasses
 from dataclasses import field
 
-from pathlib import Path
-from typing import ClassVar
-
 import numpy as np
 
 from aie.iron import kernels
@@ -216,25 +213,7 @@ class GEMMOverlay(Overlay):
             flags.append("-DB_COL_MAJ")
         if self.c_col_maj:
             flags.append("-DC_COL_MAJ")
-        if target.arch == "aie2":
-            # INTERIM: aie2 sources a patched mm.cc from the tree (see the
-            # rounding note in aie_kernels/aie2/mm.cc). The -I lets that file's
-            # zero.cc and ../aie_kernel_utils.h resolve from the unchanged
-            # package copies.
-            flags.append(f"-I{target.kernels_dir / 'aie2'}")
         return flags
-
-    # aie2's mm.cc is patched in this repository rather than taken from the
-    # package. iron/operators/gemm/op.py -> gemm -> operators -> iron -> root.
-    IN_TREE_KERNELS: ClassVar[Path] = (
-        Path(__file__).resolve().parents[3] / "aie_kernels"
-    )
-
-    def kernel_source(self, target):
-        """The mm.cc this overlay compiles; aie2's is patched in-tree."""
-        if target.arch == "aie2":
-            return self.IN_TREE_KERNELS / "aie2" / "mm.cc"
-        return target.kernel_source("mm")
 
     def device(self, target):
         from aie.iron.device import NPU1, NPU1Col1, NPU1Col2, NPU2
@@ -284,11 +263,13 @@ class GEMMOverlay(Overlay):
 
         # AIE Core Function declarations
         scalar_suffix = "_scalar" if use_scalar else ""
-        # zero and matmul both come out of mm.cc, so they name one object:
-        # declared separately they would compile that translation unit twice and
-        # each copy would define both symbols.
+        # matmul is the only entry point this design takes out of mm.cc, so it
+        # can have the object to itself. Clearing the accumulator used to ride
+        # along in that same object -- mm.cc emitted a zero_<type> beside every
+        # matmul_ it defined -- and is now upstream's own kernel, parameterised
+        # by tile and element type rather than picked out by symbol name.
         mm_object = f"gemm_{m}x{k}x{n}.o"
-        kernel_source = self.kernel_source(target)
+        kernel_source = target.kernel_source("mm")
         kernel_flags = self.kernel_flags(target)
         convert_copy_kernel = None
         if use_larger_internal_buffer:
@@ -301,12 +282,8 @@ class GEMMOverlay(Overlay):
                 [C_l1_ty_internal, C_l1_ty, np.int32],
                 source=target.kernels_dir / "aie2p" / "cast_f32_bf16.cc",
             )
-            zero_kernel = target.kernel(
-                f"zero{scalar_suffix}_f32",
-                [C_l1_ty_internal],
-                source=kernel_source,
-                compile_flags=kernel_flags,
-                object_file_name=mm_object,
+            zero_kernel = kernels.zero(
+                tile_size=(m, n), dtype=dtype_out_internal, vectorized=not use_scalar
             )
             matmul_kernel = target.kernel(
                 f"matmul{scalar_suffix}_{dtype_in_str}_f32",
@@ -317,12 +294,8 @@ class GEMMOverlay(Overlay):
             )
         else:
             fifo_depth_out = fifo_depth
-            zero_kernel = target.kernel(
-                f"zero{scalar_suffix}_{dtype_out_str}",
-                [C_l1_ty],
-                source=kernel_source,
-                compile_flags=kernel_flags,
-                object_file_name=mm_object,
+            zero_kernel = kernels.zero(
+                tile_size=(m, n), dtype=dtype_out, vectorized=not use_scalar
             )
             matmul_kernel = target.kernel(
                 f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}",

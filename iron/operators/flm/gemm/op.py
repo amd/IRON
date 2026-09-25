@@ -17,7 +17,6 @@ per-choice breakdown against the shipped FastFlowLM overlay.
 """
 
 import dataclasses
-from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
@@ -26,6 +25,7 @@ from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import get_target_model
+from aie.helpers.util import v8bfp16ebs8
 
 from iron.common.declare import (
     Incompatible,
@@ -78,6 +78,7 @@ from iron.operators.flm.gemm.design import (
     _default_l1,
     _hw_stride_ok,
     compute_rows,
+    l1_budget,
     rtp_layout,
 )
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -130,8 +131,9 @@ class FLMGEMMOverlay(Overlay):
     rows: int | None = tunable(None, repr=False)
     cols: int | None = tunable(None, repr=False)
     bfp16_b: bool | None = tunable(None, repr=False)
-    b_dtype: object = tunable(None, repr=False)  # B's element type on the array
-    b_host_dtype: object = tunable(None, repr=False)  # and in DDR
+    # B's element type, on the array and in DDR alike; the host holds a
+    # block-float B as bytes (BoundBuffer.host_dtype).
+    b_dtype: object = tunable(None, repr=False)
     l1_b_depth: int | None = tunable(None, repr=False)
     shim_bds: int | None = tunable(None, repr=False)
     a_l2: int | None = tunable(None, repr=False)
@@ -201,18 +203,13 @@ class FLMGEMMOverlay(Overlay):
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
-        l1 = tm.get_local_memory_size()
+        l1 = l1_budget(dev)
         if self.tile_ma is None:
             tile_ma, l1_b_depth = _default_l1(tile_n, ct_k, b_elem_bytes, l1, m_chunk)
         else:
             tile_ma = self.tile_ma
             l1_b_depth = _b_depth_for(tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk)
-        if bfp16_b:
-            from aie.helpers.util import v8bfp16ebs8
-
-            b_dtype, b_host_dtype = v8bfp16ebs8, np.uint8
-        else:
-            b_dtype, b_host_dtype = bfloat16, bfloat16
+        b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return dataclasses.replace(
             self,
             tile_n=tile_n,
@@ -222,7 +219,6 @@ class FLMGEMMOverlay(Overlay):
             cols=cols,
             bfp16_b=bfp16_b,
             b_dtype=b_dtype,
-            b_host_dtype=b_host_dtype,
             l1_b_depth=l1_b_depth,
             shim_bds=tm.get_num_bds(0, 0),
             a_l2=m_chunk * M_TILE * K_TILE,
@@ -276,20 +272,11 @@ class FLMGEMMOverlay(Overlay):
             f"_em{self.epilogue_mask:x}.o"
         )
 
-    # mm_fused.cc is kept in this repository, pending upstreaming to
-    # mlir-aie: its runtime epilogue (#200) is newer than the package copy.
-    # iron/operators/flm/gemm/op.py -> gemm -> flm -> operators -> iron -> root.
-    IN_TREE_KERNELS: ClassVar[Path] = (
-        Path(__file__).resolve().parents[4] / "aie_kernels"
-    )
-
     def kernel_source(self, target):
-        return self.IN_TREE_KERNELS / "generic" / "mm_fused.cc"
+        return target.kernels_dir / "generic" / "mm_fused.cc"
 
     def kernel_flags(self, target) -> list[str]:
         """The -D set mm_fused.cc is compiled with."""
-        # Its #included companions are unchanged, so they come from
-        # kernels_dir; the include path needs generic/ and the arch dir.
         flags = [
             f"-DMM_FUSED_TILE_M={M_TILE}",
             f"-DMM_FUSED_TILE_K={K_TILE}",
@@ -304,8 +291,6 @@ class FLMGEMMOverlay(Overlay):
             f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
             f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
             f"-DMM_FUSED_EPILOGUE_MODE_MASK={self.epilogue_mask}",
-            f"-I{target.kernels_dir / 'generic'}",
-            f"-I{target.kernels_dir / target.arch}",
         ]
         if self.bfp16_b:
             # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs;
@@ -616,16 +601,19 @@ class GEMM(Operator[FLMGEMMOverlay]):
     epilogue: Epilogue = Epilogue.NONE
     # Optional (min, max) applied after the activation.
     clamp: tuple | None = None
-    # B's packed byte count on AIE2P; filled by validate() from K and N.
-    packed_bytes: int | None = dim(None, repr=False)
+    # B's packed block count on AIE2P; filled by validate() from K and N.
+    packed_blocks: int | None = dim(None, repr=False)
 
     A = In(M, K, to=FLMGEMMOverlay.a)
-    # On AIE2P B is quantized to bfp16ebs8, so it is declared in bytes and
-    # sized from what pack_B returns; a (K, N) bf16 spec would over-allocate
-    # by 1.78x. On AIE2 it is a (K, N) element count, pre-packed.
+    # On AIE2P B is quantized to bfp16ebs8, so it is declared as a count of
+    # those blocks -- the unit the array, the core and every descriptor into
+    # B already count in. Declaring it in bytes instead made the sequence's
+    # offsets and lengths address a ui8 buffer with block-unit numbers, so a
+    # transfer moved a ninth of what it named. On AIE2 it is a (K, N) element
+    # count, pre-packed.
     B = In(
-        select(FLMGEMMOverlay.bfp16_b, (packed_bytes,), (K, N)),
-        dtype=FLMGEMMOverlay.b_host_dtype,
+        select(FLMGEMMOverlay.bfp16_b, (packed_blocks,), (K, N)),
+        dtype=FLMGEMMOverlay.b_dtype,
         to=FLMGEMMOverlay.b,
     )
     C = Out(M, N, from_=FLMGEMMOverlay.c)
@@ -672,12 +660,14 @@ class GEMM(Operator[FLMGEMMOverlay]):
         self.epilogue = Epilogue(self.epilogue)
         if self.K % MIN_K:
             raise ValueError(f"K ({self.K}) must be a multiple of {MIN_K}")
-        expected = packed_b_size(self.K, self.N, True)
-        if self.packed_bytes is None:
-            self.packed_bytes = expected
-        elif self.packed_bytes != expected:
+        # Blocks, not bytes: B's declaration counts bfp16ebs8 blocks, and
+        # bfp.itemsize turns that back into the byte count pack_B returns.
+        expected = self.K * self.N // BFP16_GROUP
+        if self.packed_blocks is None:
+            self.packed_blocks = expected
+        elif self.packed_blocks != expected:
             raise ValueError(
-                f"packed_bytes={self.packed_bytes} does not match K={self.K}, "
+                f"packed_blocks={self.packed_blocks} does not match K={self.K}, "
                 f"N={self.N} ({expected})"
             )
         # A mode the mask leaves out reaches the kernel's default arm, which
@@ -982,7 +972,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
         tuned = self.tuned(aie_utils.get_current_device())
         M, K, N = tuned._reference_shape
         reference = dataclasses.replace(
-            tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_bytes=None
+            tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
         )
         image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
         stream = insts_design(self.generator())

@@ -145,7 +145,7 @@ class MHAOverlay(Overlay):
         import sys
 
         from aie.helpers.dialects.scf import else_, if_
-        from aie.iron import Buffer, ObjectFifo, Worker
+        from aie.iron import Buffer, ObjectFifo, Worker, kernels
         from aie.iron.controlflow import range_
         from aie.iron.device import Tile
 
@@ -182,7 +182,9 @@ class MHAOverlay(Overlay):
                 object_file_name="mha.o",
             )
 
-        zero_kernel = mha_kernel("zero_bf16", [qk_ty])
+        # mha.cc used to re-export a zero of its own over the (DIM_M, DIM_N)
+        # tile; upstream's standalone zero over the same tile is the same fill.
+        zero_kernel = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
         memcopy_kernel_scale = target.kernel(
             "passThroughLine",
             [s_ty, s_ty, np.int32],

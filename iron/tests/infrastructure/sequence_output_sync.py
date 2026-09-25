@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Every dispatch of an xclbin chain hands back its own output.
+
+A dispatch writes its output buffers on the device, which the host-side coherence
+map does not observe. ``to("cpu")`` transfers only the ranges the map holds as
+device-resident, so a range left marked ``cpu`` by the previous pull is skipped
+and the next dispatch hands back the previous one's output.
+"""
+
+import numpy as np
+import pytest
+from ml_dtypes import bfloat16
+
+import aie.utils as aie_utils
+from aie.iron.device import from_name
+from aie.utils.hostruntime.coherence import _CoherenceMap
+
+import iron
+from iron.operators import ElementwiseAdd
+
+SIZE = 1024
+
+
+@pytest.fixture(autouse=True)
+def device():
+    previous = aie_utils.get_current_device()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    yield
+    aie_utils.set_current_device(previous)
+
+
+def test_a_pull_is_skipped_while_the_range_reads_as_host_resident():
+    """The hazard the output sync has to defeat, at the layer that decides it."""
+    coherence = _CoherenceMap(64, _CoherenceMap.DEVICE)
+    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
+
+    coherence.set(0, 64, _CoherenceMap.HOST)
+    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == []
+
+    coherence.set(0, 64, _CoherenceMap.DEVICE)
+    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
+
+
+@pytest.mark.parametrize("calls", [2, 3])
+def test_every_dispatch_returns_its_own_output(calls, npu_runtime):
+    add = ElementwiseAdd(size=SIZE, tile_size=128)
+    w = np.ones(SIZE, dtype=bfloat16)
+
+    @iron.graph
+    def f(x):
+        return add(x, w)
+
+    net = f.compile(boundaries=iron.each_step, image=iron.XCLBIN, x=(SIZE,))
+    assert net.plan.dispatch == "separate"
+    for call in range(calls):
+        x = np.full(SIZE, call, dtype=bfloat16)
+        got = net(x).numpy().astype(np.float32)
+        assert np.all(got == call + 1), f"call {call} returned {got[:4]}"

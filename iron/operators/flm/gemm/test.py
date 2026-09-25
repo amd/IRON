@@ -24,6 +24,7 @@ from iron.operators.flm.gemm.design import (
     SHIM_TASK_QUEUE,
     _b_depth_for,
     _default_l1,
+    l1_budget,
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.reference import apply_epilogue
@@ -232,7 +233,7 @@ def tile_option_params():
     dev = aie_utils.get_current_device()
     if dev is None or dev.resolve().name not in ("npu1", "npu2"):
         return []
-    l1 = get_target_model(dev.resolve()).get_local_memory_size()
+    l1 = l1_budget(dev)
     b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
 
     params = []

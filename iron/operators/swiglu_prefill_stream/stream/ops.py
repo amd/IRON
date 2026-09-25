@@ -13,7 +13,7 @@ declared with :func:`custom_op`, which gives them a schema in a private domain s
 the exporter emits them as a single node.
 
 Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
-the kernel source is IRON's existing ``aie_kernels/<dir>/<name>.cc``, exactly as the
+the kernel source is mlir-aie's ``aie_kernels/<dir>/<name>.cc``, exactly as the
 hand-written operators use it.
 """
 
@@ -89,12 +89,16 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
     the two are reconciled the other way round: the object is prefixed, and the
     generated MLIR is rewritten to match through the returned map.
 
-    One declaration, not two. mm.cc defines both symbols in one translation
-    unit and ``symbol_prefix`` renames every symbol an object defines, so
-    prefixing once covers ``zero_bf16`` as well.
+    stream-dse also sets one ``link_with`` per core, naming
+    ``GemmKernel.linkwith_name``, so everything a core calls has to be in this
+    one object. mm.cc no longer carries the zero entry point, so zero.cc is
+    bundled into the same translation unit rather than left in an object
+    nothing would link. ``symbol_prefix`` renames every symbol an object
+    defines, so prefixing once covers ``zero`` as well.
     """
     suffix = f"{m}_{k}_{n}"
     prefix = f"mm{suffix}"
+    zero_source = kernels_dir / "generic" / "zero.cc"
     declare_kernel(
         # Unused as a declaration: stream-dse emits the func.func this design
         # links against, so ExternalFunction is here only to compile the source
@@ -104,6 +108,7 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
         source=kernels_dir / kernel_dir / "mm.cc",
         object_file_name=f"mm_{suffix}.o",
         symbol_prefix=prefix,
+        bundled_sources=(zero_source,),
         compile_flags=[
             f"-DDIM_M={m}",
             f"-DDIM_K={k}",
@@ -113,11 +118,14 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
             # MAC tile available, so it and the layouts move together.
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
             "-DROUND_CONV_EVEN",
+            # zero.cc's entry point, over the m x n output tile.
+            "-DZERO_TYPE=bfloat16",
+            f"-DTILE_SIZE={m * n}",
         ],
     )
     return {
         f"matmul_bf16_bf16_{suffix}": f"{prefix}_matmul_bf16_bf16",
-        f"zero_bf16_{suffix}": f"{prefix}_zero_bf16",
+        f"zero_bf16_{suffix}": f"{prefix}_zero",
     }
 
 
@@ -125,7 +133,7 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
 class StreamKernel:
     """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
 
-    ``source``/``subdir`` name the file in IRON's ``aie_kernels`` library the same
+    ``source``/``subdir`` name the file in mlir-aie's ``aie_kernels`` library the same
     way the hand-written operators do (``subdir=None`` means the device directory,
     e.g. ``aie2p``). The object name must equal the kernel's ``linkwith_name`` in
     stream-dse, since the generated MLIR links against it.

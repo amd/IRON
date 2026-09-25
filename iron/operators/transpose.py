@@ -238,10 +238,23 @@ class Transpose(Operator[TransposeOverlay]):
             raise Incompatible(
                 "Transfer size must be divisible by m*n*num_columns*num_channels"
             )
-        if (self.M // ov.num_channels) % ov.m or (self.N // ov.num_aie_columns) % ov.n:
+        # The product check is necessary but not sufficient: the design tiles each
+        # dimension separately, as [M // num_channels // m, N // num_columns // n, m, n].
+        # A quotient that is not a whole number of tiles silently drops the remainder,
+        # and one that floors to zero reaches the transfer as a zero-length size.
+        if (self.N // ov.num_aie_columns) % ov.n:
             raise Incompatible(
-                f"each channel's {self.M // ov.num_channels} rows and each column's "
-                f"{self.N // ov.num_aie_columns} columns must be whole tiles ({ov.m} x {ov.n})"
+                f"num_aie_columns ({ov.num_aie_columns}) does not split N={self.N} "
+                f"into whole n-wide tiles: each column gets "
+                f"{self.N // ov.num_aie_columns} columns, which is not a multiple "
+                f"of n={ov.n}"
+            )
+        if (self.M // ov.num_channels) % ov.m:
+            raise Incompatible(
+                f"num_channels ({ov.num_channels}) does not split M={self.M} "
+                f"into whole m-tall tiles: each channel gets "
+                f"{self.M // ov.num_channels} rows, which is not a multiple "
+                f"of m={ov.m}"
             )
 
     def residents(self) -> dict[str, int]:

@@ -10,6 +10,8 @@ from math import prod
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils import bfp
+
 from ..declare import Operator, Overlay
 
 class Handle:
@@ -35,14 +37,14 @@ class Handle:
 
     @property
     def nbytes(self) -> int:
-        return self.elements * np.dtype(self.dtype).itemsize
+        return self.elements * bfp.itemsize(self.dtype)
 
     @property
     def buffer_name(self) -> str:
         """The name the runlist uses: a slice is ``parent[start:stop]`` in bytes."""
         if self.parent is None:
             return self.name
-        item = np.dtype(self.dtype).itemsize
+        item = bfp.itemsize(self.dtype)
         return f"{self.parent.buffer_name}[{self.start * item}:{(self.start + self.elements) * item}]"
 
     def reshape(self, *shape) -> "Handle":
@@ -75,7 +77,7 @@ class Handle:
         return Handle(shape, self.dtype, self.name, "slice", self, start * inner)
 
     def __repr__(self) -> str:
-        return f"Handle({self.buffer_name!r}, {list(self.shape)}, {np.dtype(self.dtype).name})"
+        return f"Handle({self.buffer_name!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
 
 
 class State:

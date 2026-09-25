@@ -13,6 +13,8 @@ is the toolchain's job and the operator tests' job.
 import numpy as np
 import pytest
 
+from aie.helpers.util import v8bfp16ebs8
+
 from iron.common.design import Sequence, transfers
 from iron.common.declare import (
     In,
@@ -440,7 +442,10 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
     assert op.name == op.config_name + "_M512_K1024_N1024"
     a, b, c = op.buffers
     assert a.shape == (512, 1024) and c.shape == (512, 1024)
-    assert b.shape == (flm.packed_b_size(1024, 1024, True),) and b.dtype is np.uint8
+    # B is declared in bfp16ebs8 blocks; the host holds the same bytes as uint8.
+    assert b.shape == (1024 * 1024 // 8,) and b.dtype is v8bfp16ebs8
+    assert b.host_shape == (flm.packed_b_size(1024, 1024, True),)
+    assert b.host_dtype is np.uint8
     assert op.residents() == {
         "n_val": 1024,
         "m_row_blocks": 2,

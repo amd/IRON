@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 
+from aie.utils import bfp
+
 from ..tiling import view
 
 from .field import DeclarationError, DimRef, Incompatible, _Optional, _Select
@@ -183,11 +185,32 @@ class BoundBuffer:
 
     @property
     def nbytes(self) -> int:
-        return self.elements * np.dtype(self.dtype).itemsize
+        # bfp.itemsize covers ordinary dtypes too, and is the only thing that
+        # reports the 9 bytes a block-float block occupies: the marker class
+        # is not a numpy dtype, so np.dtype() raises on it.
+        return self.elements * bfp.itemsize(self.dtype)
+
+    # The host's view. Block floating point is the one place the host and the
+    # array disagree on the unit: numpy has no block-float dtype, so a host
+    # buffer is the equivalent run of bytes, while the array, the sequence and
+    # every descriptor go on counting blocks.
+    @property
+    def host_shape(self) -> tuple[int, ...]:
+        return (self.nbytes,) if bfp.is_bfp(self.dtype) else tuple(self.shape)
+
+    @property
+    def host_dtype(self):
+        return np.uint8 if bfp.is_bfp(self.dtype) else self.dtype
 
     @property
     def flat_type(self):
-        """The runtime-sequence argument type: the buffer flattened to 1-D."""
+        """The runtime-sequence argument type: the buffer flattened to 1-D.
+
+        In the buffer's own element units, which are the units its transfers
+        are expressed in. A packed operand declared in block-float blocks
+        lowers to a memref of blocks, so a descriptor's offset and length
+        count blocks -- the same thing the array and the core count.
+        """
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]  # type: ignore[misc]
 
     def stream(self, overlay: "Overlay") -> BoundStream | None:
@@ -218,7 +241,7 @@ class BoundBuffer:
 
     def __repr__(self) -> str:
         return (
-            f"<{self.direction} {self.name} {self.shape} {np.dtype(self.dtype).name}>"
+            f"<{self.direction} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"
         )
 
 

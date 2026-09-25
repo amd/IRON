@@ -9,6 +9,7 @@ import numpy as np
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
+from aie.utils import bfp
 
 from ..declare import Operator
 from .allocator import live_ranges, place
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 def _signature(op):
     """The runtime arguments an operator takes: direction, shape and dtype each."""
-    return [(b.direction, tuple(b.shape), np.dtype(b.dtype)) for b in op.buffers]
+    return [(b.direction, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers]
 
 class OperatorSequence:
     """Operator that concatenates a runlist of operators into a

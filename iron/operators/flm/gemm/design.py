@@ -24,7 +24,7 @@ share.
 
 from enum import StrEnum
 
-
+from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import get_target_model
 
 # --- Fixed geometry -------------------------------------------------------
@@ -64,6 +64,21 @@ A_DEPTH = 2
 # epilogue's clamp vectors, so the default fails the build outright. 2048
 # leaves headroom; aiecc names the exact requirement if a change outgrows it.
 STACK_SIZE = 2048
+# L1 bytes the activation LUT tables occupy, which the buffer budget must not
+# hand out either. On AIE2 the activations come from lut_based_ops, whose
+# tables are bank-pinned in local memory; AIE2P computes its activations and
+# links no tables, so it reserves nothing. The tables grew past the slack the
+# budget happened to leave when mlir-aie reorganized the kernel library, which
+# is why this is reserved explicitly rather than left to chance.
+LUT_STATIC_SIZE = 5248
+
+
+def l1_budget(dev):
+    """Local memory the buffer sizing may spend on this device."""
+    budget = get_target_model(dev.resolve()).get_local_memory_size()
+    return budget - (LUT_STATIC_SIZE if dev.arch == AIEArch.AIE2 else 0)
+
+
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
 # at the cost of that many L1 accumulators and forcing a_split. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while

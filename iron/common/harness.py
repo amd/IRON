@@ -56,10 +56,10 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
         if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
-        shape = tuple(b.shape) if value is None else tuple(value)
+        shape = b.host_shape if value is None else tuple(value)
         # A buffer whose dtype follows tuning (flm GEMM's packed B) has none
         # until tuned; the unpacked operand a shape override asks for is bf16.
-        dtype = np.dtype(bfloat16 if b.dtype is None else b.dtype)
+        dtype = np.dtype(bfloat16 if b.dtype is None else b.host_dtype)
         if dtype.kind not in "fc":
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
@@ -201,7 +201,7 @@ def run_test(
         try:
             if b.direction == "out":
                 name, _ = next(outs)
-                buf = tensor_class(tuple(b.shape), dtype=b.dtype)
+                buf = tensor_class(b.host_shape, dtype=b.host_dtype)
                 produced[name] = buf
             else:
                 name, data = next(ins)

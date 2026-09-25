@@ -13,26 +13,19 @@ from ml_dtypes import bfloat16
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 
 from iron.common import harness
+from iron.operators import ReLU
 
 
 class _Operator:
-    """What run_test needs of an operator: buffers, compile, get_callable."""
+    """A real operator's buffers, with a dispatch that reports chosen times."""
 
     def __init__(self, results):
         self.results = iter(results)
         self.calls = 0
+        self.buffers = ReLU(size=32).buffers
 
     def compile(self):
         return self
-
-    @property
-    def buffers(self):
-        from ml_dtypes import bfloat16
-
-        return [
-            SimpleNamespace(name="a", direction="in", shape=(32,), dtype=bfloat16),
-            SimpleNamespace(name="b", direction="out", shape=(32,), dtype=bfloat16),
-        ]
 
     def get_callable(self):
         def run(source, target):

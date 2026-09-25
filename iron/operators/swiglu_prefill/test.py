@@ -4,10 +4,13 @@
 
 import time
 
+import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
 from iron.common.harness import record_metric, verify_buffer
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm.op import GEMM
 from iron.operators.silu import SiLU
 from iron.operators.swiglu_prefill.op import swiglu_prefill
 
@@ -18,7 +21,10 @@ from iron.operators.swiglu_decode.reference import generate_golden_reference
 
 
 def get_params():
-    return [pytest.param(256, 2048, 2048, False)]
+    return [
+        pytest.param(256, 2048, 2048, False, False),
+        pytest.param(256, 2048, 2048, False, True),
+    ]
 
 
 def _step_output(net, op_type):
@@ -26,17 +32,25 @@ def _step_output(net, op_type):
     return net.buffer(step.outputs[0])
 
 
-@pytest.mark.parametrize("seq_len,embedding_dim,hidden_dim,prio_accuracy", get_params())
-def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, npu_runtime):
+@pytest.mark.parametrize(
+    "seq_len,embedding_dim,hidden_dim,prio_accuracy,b_col_maj", get_params()
+)
+def test_swiglu_prefill(
+    seq_len, embedding_dim, hidden_dim, prio_accuracy, b_col_maj, npu_runtime
+):
     golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
 
-    # GEMM takes its B operand in (K, N) layout, so the projections go in as
-    # they are. The graph closes over them: uploaded once, on first call.
+    # GEMM takes its B operand in (K, N) layout, or (N, K) under b_col_maj.
+    # The graph closes over the weights: uploaded once, on first call.
+    def _as_stored(w):
+        return w.t().contiguous() if b_col_maj else w
+
     ffn = swiglu_prefill(
-        golden_ref["w_gate"],
-        golden_ref["w_up"],
-        golden_ref["w_down"],
+        _as_stored(golden_ref["w_gate"]),
+        _as_stored(golden_ref["w_up"]),
+        _as_stored(golden_ref["w_down"]),
         prio_accuracy=bool(prio_accuracy),
+        b_col_maj=bool(b_col_maj),
     )
     net = ffn.compile(x=(seq_len, embedding_dim))
     x = golden_ref["input"]
@@ -80,3 +94,15 @@ def test_swiglu_prefill(seq_len, embedding_dim, hidden_dim, prio_accuracy, npu_r
         errors["output"] = errors_3
 
     assert not errors, f"Test failed with errors: {errors}"
+
+
+@pytest.mark.parametrize("b_col_maj", [False, True])
+def test_weight_layout_reaches_every_gemm(b_col_maj):
+    """Trace only: the layout reaches all three GEMMs, which read the right extents."""
+    E, H = 2048, 1024
+    w = np.zeros((H, E) if b_col_maj else (E, H), dtype=bfloat16)
+    down = np.zeros((E, H) if b_col_maj else (H, E), dtype=bfloat16)
+    t = swiglu_prefill(w, w, down, b_col_maj=b_col_maj).trace(x=(256, E))
+    gemms = [s.op for s in t.steps if type(s.op) is GEMM]
+    assert [g.ov.b_col_maj for g in gemms] == [b_col_maj] * 3
+    assert [(g.K, g.N) for g in gemms] == [(E, H), (E, H), (H, E)]

@@ -98,7 +98,6 @@ class Shipped(External, FLMGEMMOverlay):
     cols: int = tunable(COLS, repr=False)
     bfp16_b: bool = tunable(False, repr=False)
     b_dtype: object = tunable(bfloat16, repr=False)
-    b_host_dtype: object = tunable(bfloat16, repr=False)
     l1_b_depth: int = tunable(QUEUE_DEPTH, repr=False)
     shim_bds: int = tunable(16, repr=False)
     a_l2: int = tunable(M_TILE * K_TILE, repr=False)

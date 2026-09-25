@@ -71,7 +71,7 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
         N=rN,
         epilogue=flm.Epilogue.NONE,
         clamp=None,
-        packed_bytes=None,
+        packed_blocks=None,
     )
     (tmp_path / "config").mkdir()
     lower(reference, tmp_path / "config", name=op.config_name)

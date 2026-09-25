@@ -286,6 +286,16 @@ class SequenceXclbinCallable(SequenceCallable):
         scalars = {name: self.dispatch_values[name] for name in kernel.dispatch_params}
         kernel(*args, **scalars)
 
+    def _sync_outputs(self):
+        # _run rewrote these on the device, which the coherence map does not observe.
+        # Assert device residency first so the pull fires even when a prior read left
+        # the range marked "cpu"; otherwise a second dispatch reads the first's output.
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                buf = self._buffers[name]
+                buf.device = "npu"
+                buf.to("cpu")
+
 
 def _reshape_for_spec(flat_tensor, spec):
     """Slice a flat host buffer to ``spec``'s element count and reshape (a view)."""

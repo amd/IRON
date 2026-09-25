@@ -333,6 +333,14 @@ call. It does have to reproduce the core's rounding *mode* to be free — see
 
 ### NPU1
 
+L1 tile selection reserves the linked `lut_based_ops.cpp` tables (5,248 bytes
+per core) and the stack before it sizes the data buffers. The default
+`tile_n=64` configuration takes `tile_ma=32` and single-buffered L1 B;
+`tile_n=128` takes `tile_ma=32` and double-buffered L1 B. NPU2 links no
+activation LUT and keeps its defaults.
+
+The measurements below predate the LUT reservation.
+
 Against `iron.operators.GEMM` at its own defaults (64/64/64 over all 4
 columns), min of 5 interleaved rounds of 20 dispatches each:
 
