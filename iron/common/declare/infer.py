@@ -41,9 +41,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
             f"{cls.__name__} takes {len(ins)} operand(s) "
             f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
         )
-    outs = [
-        m for m in cls._members if isinstance(m, _Buffer) and m.direction == "out"
-    ]
+    outs = [m for m in cls._members if isinstance(m, _Buffer) and m.direction == "out"]
     if outputs and len(outputs) != len(outs):
         raise TypeError(
             f"{cls.__name__} produces {len(outs)} output(s) "

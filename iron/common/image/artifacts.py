@@ -94,9 +94,7 @@ class Artifacts:
                 f.name: (
                     [str(x) for x in v]
                     if isinstance(v, tuple)
-                    else path(v)
-                    if isinstance(v, Path)
-                    else v
+                    else path(v) if isinstance(v, Path) else v
                 )
                 for f in dataclasses.fields(e)
                 for v in [getattr(e, f.name)]

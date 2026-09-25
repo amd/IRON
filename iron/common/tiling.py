@@ -44,7 +44,6 @@ from typing import Iterator, Sequence
 import numpy as np
 from aie.helpers.taplib.tap import TensorAccessPattern
 
-
 _STRIDE_BITS = 20
 _ADDR_GRANULE_BYTES = 4
 

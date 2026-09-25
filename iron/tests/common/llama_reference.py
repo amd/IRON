@@ -115,12 +115,12 @@ def _assert_close(got, expected):
     for step, (a, b) in enumerate(zip(got, expected)):
         scale = b.abs().max()
         err = (a - b).abs().max()
-        assert err <= 0.05 * scale, (
-            f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
-        )
-        assert a.argmax() == b.argmax(), (
-            f"step {step}: argmax {a.argmax()} != {b.argmax()}"
-        )
+        assert (
+            err <= 0.05 * scale
+        ), f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
+        assert (
+            a.argmax() == b.argmax()
+        ), f"step {step}: argmax {a.argmax()} != {b.argmax()}"
 
 
 def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
@@ -201,6 +201,7 @@ def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
     state.token_ids = prompt.reshape(1, -1)
     logits, state = llama_npu.llama_forward_pass(config, state)
     assert logits.shape == (1, 1, config.vocab_size)
+
     # llama_forward_pass returns numpy, as every image does; the oracle it is
     # judged against is torch, so the comparison happens on that side.
     def as_torch(row):

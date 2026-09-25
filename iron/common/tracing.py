@@ -59,6 +59,7 @@ __all__ = [
 # Build time: switch tracing on
 # --------------------------------------------------------------------------
 
+
 def resolve_trace_size(trace_size=None):
     """Effective trace size: explicit argument first, then ``IRON_TRACE_SIZE``, else 0."""
     if trace_size and trace_size > 0:

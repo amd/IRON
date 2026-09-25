@@ -525,7 +525,9 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
         ).tuned(Dev())
         log = _record(op.ov)
         op.design(Sequence(op, op.ov, {"x": "dx", "y": "dy"}))
-        moved = lambda verb: sum(s[0] * s[3] for v, _, _, s, _ in log if v == verb)  # noqa: E731
+        moved = lambda verb: sum(
+            s[0] * s[3] for v, _, _, s, _ in log if v == verb
+        )  # noqa: E731
         return log, moved("fill"), moved("drain")
 
     log, filled, drained = run(1024)

@@ -20,6 +20,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import nearly_equal
 from ml_dtypes import bfloat16
 
+
 @dataclasses.dataclass
 class Vectors:
     """One operator's test vectors, keyed by its declared buffer names."""

@@ -30,9 +30,9 @@ def _run(*args, cwd):
     result = subprocess.run(
         [XCLBINUTIL, *args], cwd=cwd, capture_output=True, text=True, timeout=120
     )
-    assert result.returncode == 0, (
-        f"xclbinutil {' '.join(args)} failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"xclbinutil {' '.join(args)} failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
     return result
 
 

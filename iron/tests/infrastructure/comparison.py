@@ -29,9 +29,9 @@ def test_zero_tolerance_accepts_an_identical_buffer(dtype):
 def test_a_single_wrong_element_is_reported_alone(rel_tol, abs_tol):
     reference = np.arange(64, dtype=np.float32)
     output = reference.copy()
-    output[17] += (
-        10.0  # past the 4% relative tolerance at this magnitude, not just past 0
-    )
+    output[
+        17
+    ] += 10.0  # past the 4% relative tolerance at this magnitude, not just past 0
 
     assert verify_buffer(output, "out", reference, rel_tol, abs_tol) == [17]
 

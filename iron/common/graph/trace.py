@@ -25,6 +25,7 @@ def current():
     """The tracer a graph function is being traced under, or ``None``."""
     return _STACK[-1] if _STACK else None
 
+
 @dataclasses.dataclass
 class TracedStep:
     op: Operator

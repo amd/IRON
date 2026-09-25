@@ -274,7 +274,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         group from the exported module). Everything else takes the default,
         which is ``build_design`` over the declaration.
         """
-        from ..design import generator_for  # reads this package: a cycle at module scope
+        from ..design import (
+            generator_for,
+        )  # reads this package: a cycle at module scope
 
         return generator_for(self, image=image)
 

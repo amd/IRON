@@ -137,14 +137,20 @@ def test_every_traced_operator_tunes_from_the_device_alone():
     ffn, _ = _ffn()
     t = ffn.trace(x=(1, E))
     for op in t.operators:
-        op.tuned(aie_utils.get_current_device())  # every default fills; every extent is compatible
-    silu = next(s.op for s in t.steps if type(s.op) is SiLU).tuned(aie_utils.get_current_device())
+        op.tuned(
+            aie_utils.get_current_device()
+        )  # every default fills; every extent is compatible
+    silu = next(s.op for s in t.steps if type(s.op) is SiLU).tuned(
+        aie_utils.get_current_device()
+    )
     assert (silu.ov.num_aie_columns, silu.ov.num_channels, silu.ov.tile_size) == (
         8,
         1,
         256,
     )
-    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).tuned(aie_utils.get_current_device())
+    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).tuned(
+        aie_utils.get_current_device()
+    )
     assert norm.ov.num_aie_columns == 1  # one row: one core
 
 
@@ -432,4 +438,6 @@ def test_a_bound_value_survives_tuning():
         return copy(x, out_offset=a)
 
     f.trace(x=(64,))
-    assert [v.name for v in copy.tuned(aie_utils.get_current_device()).values] == ["out_offset"]
+    assert [v.name for v in copy.tuned(aie_utils.get_current_device()).values] == [
+        "out_offset"
+    ]

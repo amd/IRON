@@ -230,7 +230,7 @@ def fetch(image, directory=None) -> Path:
     artifact is and no caller has to name a directory for it.
     """
     if directory is None:
-            directory = Path(NPU_CACHE_HOME) / "prebuilt"
+        directory = Path(NPU_CACHE_HOME) / "prebuilt"
     target = Path(directory) / image.filename
 
     def digest(path):

@@ -60,6 +60,4 @@ def test_missing_npu_timing_is_rejected(monkeypatch):
     op = _Operator([None])
     data = np.ones(32, dtype=bfloat16)
     with pytest.raises(RuntimeError, match="NPU execution time"):
-        harness.run_test(
-            op, {"in": data}, {"out": data}, warmup_iters=0, timed_iters=1
-        )
+        harness.run_test(op, {"in": data}, {"out": data}, warmup_iters=0, timed_iters=1)

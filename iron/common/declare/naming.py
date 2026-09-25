@@ -60,4 +60,3 @@ def float_to_name(v: float) -> str:
       1e-10 -> '1en10'
     """
     return repr(v).replace(".", "p").replace("-", "n").replace("+", "")
-

@@ -29,6 +29,7 @@ def _signature(op):
     """The runtime arguments an operator takes: direction, shape and dtype each."""
     return [(b.direction, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers]
 
+
 class OperatorSequence:
     """Operator that concatenates a runlist of operators into a
     single dispatch.
@@ -174,7 +175,9 @@ class OperatorSequence:
 
     def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> the declared buffer
-        sliced_buffers = {}  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
+        sliced_buffers = (
+            {}
+        )  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
 
         for op, *bufs in self.runlist:
             declared = op.buffers
@@ -419,7 +422,6 @@ class OperatorSequence:
 
         buf_type, offset, length = self.subbuffer_layout[buffer_name]
         return buf_type, offset, length
-
 
 
 # The modes a sequence can be built in: the image (None builds nothing) and

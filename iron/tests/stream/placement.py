@@ -20,7 +20,9 @@ from aie.iron.device import NPU2  # noqa: E402
 
 aie_utils.set_current_device(NPU2())
 
-from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray  # noqa: E402
+from iron.operators.swiglu_prefill_stream.stream.hardware import (
+    ComputeArray,
+)  # noqa: E402
 from iron.operators.swiglu_prefill_stream import stream_design  # noqa: E402
 
 ARRAY = stream_design.array()

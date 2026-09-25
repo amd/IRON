@@ -14,6 +14,7 @@ from aie.utils import bfp
 
 from ..declare import Operator, Overlay
 
+
 class Handle:
     """A traced tensor: a buffer of the graph, with a shape and a dtype.
 
