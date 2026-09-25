@@ -85,15 +85,17 @@ class Testing:
 
 
 def channeled_unary_cases(
-    input_lengths, tile_cap, channels=(1, 2), regular=2048, **extra
+    input_lengths, tile_cap, channels=(1, 2), regular=2048, tile_floor=1, **extra
 ):
     """Cases for a channeled unary operator, resolved against the device.
 
     Every column count the device has by every channel count, at each
     length, with the tile capped at what one core holds; only the
-    ``regular`` length is in the default suite. ``channels=None`` leaves the
-    channel count out, for an operator without one. Returned as a callable:
-    the sweep needs the device, which is not bound when a class body runs.
+    ``regular`` length is in the default suite. ``tile_floor`` drops the
+    splits that leave a core a shorter line than its kernel takes.
+    ``channels=None`` leaves the channel count out, for an operator without
+    one. Returned as a callable: the sweep needs the device, which is not
+    bound when a class body runs.
     """
 
     def cases():
@@ -103,7 +105,7 @@ def channeled_unary_cases(
                 for chans in [1] if channels is None else channels:
                     cores = cols * chans
                     tile = min(length // cores, tile_cap)
-                    if tile * cores != length:
+                    if tile * cores != length or tile < tile_floor:
                         continue
                     kwargs = dict(size=length, num_aie_columns=cols)
                     if channels is not None:
