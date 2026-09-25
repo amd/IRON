@@ -10,12 +10,11 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from iron.common.device_utils import get_kernel_dir
 import aie.utils as aie_utils
+from aie.iron.kernels import datamovement
 
 
 @dataclass
@@ -59,22 +58,15 @@ class Dequant(MLIROperator):
                     self.tile_size,
                     self.group_size,
                 ),
+                {"dequant_kernel": self._kernel()},
             ),
         )
 
+    def _kernel(self):
+        return datamovement.expand(self.tile_size, self.group_size)
+
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"expand_{get_kernel_dir()}_{self.tile_size}.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "expand.cc")
-                ],
-                extra_flags=[
-                    f"-DTILE_SIZE={self.tile_size}",
-                    f"-DGROUP_SIZE={self.group_size}",
-                ],
-            )
-        ]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         return [
