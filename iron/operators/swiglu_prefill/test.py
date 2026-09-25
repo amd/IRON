@@ -17,7 +17,11 @@ from iron.operators.swiglu_prefill.op import swiglu_prefill
 # swiglu_prefill shares the same reference implementation as swiglu_decode:
 # both compute W3 @ (SiLU(W1 @ x) * (W2 @ x)), differing only in that prefill
 # operates on a full sequence (M > 1) while decode operates on a single token (M = 1).
-from iron.operators.swiglu_decode.reference import generate_golden_reference
+from iron.operators.swiglu_decode.reference import (
+    as_numpy,
+    bf16_matmul,
+    generate_golden_reference,
+)
 
 
 def get_params():
@@ -38,12 +42,14 @@ def _step_output(net, op_type):
 def test_swiglu_prefill(
     seq_len, embedding_dim, hidden_dim, prio_accuracy, b_col_maj, npu_runtime
 ):
-    golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
+    golden_ref = as_numpy(
+        generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
+    )
 
     # GEMM takes its B operand in (K, N) layout, or (N, K) under b_col_maj.
     # The graph closes over the weights: uploaded once, on first call.
     def _as_stored(w):
-        return w.t().contiguous() if b_col_maj else w
+        return np.ascontiguousarray(w.T) if b_col_maj else w
 
     ffn = swiglu_prefill(
         _as_stored(golden_ref["w_gate"]),
@@ -61,7 +67,7 @@ def test_swiglu_prefill(
     out = net(x)
     elapsed_us = (time.perf_counter() - start) * 1e6
 
-    total_bytes = (x.numel() + seq_len * embedding_dim) * 2  # bf16
+    total_bytes = (x.size + seq_len * embedding_dim) * 2  # bf16
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
 
@@ -73,9 +79,9 @@ def test_swiglu_prefill(
     up_buf = net.buffer(net.traced.steps[1].outputs[0])
     for buf in (swished_buf, product_buf, up_buf):
         buf.to("cpu")
-    left_swished = swished_buf.torch_view().reshape((seq_len, hidden_dim))
-    right = up_buf.torch_view().reshape((seq_len, hidden_dim))
-    intermediate = product_buf.torch_view().reshape((seq_len, hidden_dim))
+    left_swished = swished_buf.numpy().reshape((seq_len, hidden_dim))
+    right = up_buf.numpy().reshape((seq_len, hidden_dim))
+    intermediate = product_buf.numpy().reshape((seq_len, hidden_dim))
     errors_2 = verify_buffer(
         intermediate, "intermediate", left_swished * right, rel_tol=0.04, abs_tol=0.4
     )
@@ -85,8 +91,8 @@ def test_swiglu_prefill(
     # Verify the output from the observed product, which matches the bf16
     # path and isolates errors to the down projection. Up to 5% of values
     # may exceed the tolerances (precision outliers; TODO: investigate).
-    ref_3 = intermediate @ golden_ref["w_down"]
-    output = out.torch_view().reshape((seq_len, embedding_dim))
+    ref_3 = bf16_matmul(intermediate, golden_ref["w_down"])
+    output = out.numpy().reshape((seq_len, embedding_dim))
     errors_3 = verify_buffer(
         output, "output", ref_3, rel_tol=0.08, abs_tol=0.4, max_error_rate=0.05
     )

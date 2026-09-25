@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import torch
+from ml_dtypes import bfloat16
 
 
 def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
@@ -56,3 +58,18 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
         "intermediate": intermediate,
         "output": y,
     }
+
+
+def as_numpy(golden):
+    """``golden`` as numpy bf16, for the graph tests, which take numpy.
+
+    The reference itself stays torch: swiglu_prefill_stream checks its module
+    against it bit for bit. bf16 -> f32 -> bf16 is exact.
+    """
+    return {k: v.float().numpy().astype(bfloat16) for k, v in golden.items()}
+
+
+def bf16_matmul(a, b):
+    """``a @ b`` for bf16 arrays, accumulated in f32 as torch and the kernel
+    do; numpy would accumulate in bf16."""
+    return (a.astype(np.float32) @ b.astype(np.float32)).astype(bfloat16)

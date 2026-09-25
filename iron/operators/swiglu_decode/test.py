@@ -4,13 +4,19 @@
 
 import time
 
+import numpy as np
 import pytest
 
 from iron.common.harness import record_metric, verify_buffer
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv.op import GEMV
 from iron.operators.silu import SiLU
 from iron.operators.swiglu_decode.op import swiglu_decode
-from iron.operators.swiglu_decode.reference import generate_golden_reference
+from iron.operators.swiglu_decode.reference import (
+    as_numpy,
+    bf16_matmul,
+    generate_golden_reference,
+)
 
 
 def get_params():
@@ -29,14 +35,14 @@ def _step_output(net, op_type):
 
 @pytest.mark.parametrize("embedding_dim,hidden_dim", get_params())
 def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
-    golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
+    golden_ref = as_numpy(generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim))
 
     # GEMV takes its matrix in (M, K) layout, so the projections go in
     # transposed. The graph closes over them: uploaded once, on first call.
     ffn = swiglu_decode(
-        golden_ref["w_gate"].T.contiguous(),
-        golden_ref["w_up"].T.contiguous(),
-        golden_ref["w_down"].T.contiguous(),
+        np.ascontiguousarray(golden_ref["w_gate"].T),
+        np.ascontiguousarray(golden_ref["w_up"].T),
+        np.ascontiguousarray(golden_ref["w_down"].T),
     )
     net = ffn.compile(x=(1, embedding_dim))
     x = golden_ref["input"]
@@ -48,7 +54,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
     out = net(x)
     elapsed_us = (time.perf_counter() - start) * 1e6
 
-    total_bytes = (x.numel() + embedding_dim) * 2  # bf16
+    total_bytes = (x.size + embedding_dim) * 2  # bf16
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
 
@@ -60,14 +66,16 @@ def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
     # large-magnitude operand would amplify.
     swished_buf = _step_output(net, SiLU)
     product_buf = _step_output(net, ElementwiseMul)
-    up_step = [s for s in net.traced.steps if s.op is not None][2]
+    # The second GEMV is the up projection; the gate's buffer is dead by the
+    # time the product is written, so the planner may reuse it.
+    up_step = [s for s in net.traced.steps if type(s.op) is GEMV][1]
     for buf in (swished_buf, product_buf):
         buf.to("cpu")
     up_buf = net.buffer(up_step.outputs[0])
     up_buf.to("cpu")
-    left_swished = swished_buf.torch_view().reshape((1, hidden_dim))
-    right = up_buf.torch_view().reshape((1, hidden_dim))
-    intermediate = product_buf.torch_view().reshape((1, hidden_dim))
+    left_swished = swished_buf.numpy().reshape((1, hidden_dim))
+    right = up_buf.numpy().reshape((1, hidden_dim))
+    intermediate = product_buf.numpy().reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
         intermediate, "intermediate", left_swished * right, rel_tol=0.04, abs_tol=0.4
     )
@@ -76,8 +84,8 @@ def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
 
     # Verify the output from the observed product, which matches the bf16
     # path and isolates errors to the down projection.
-    ref_output = intermediate @ golden_ref["w_down"]
-    output = out.torch_view().reshape((1, embedding_dim))
+    ref_output = bf16_matmul(intermediate, golden_ref["w_down"])
+    output = out.numpy().reshape((1, embedding_dim))
     errors_output = verify_buffer(
         output, "output", ref_output, rel_tol=0.04, abs_tol=0.4
     )

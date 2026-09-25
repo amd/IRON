@@ -8,7 +8,7 @@ import aie.utils as aie_utils
 from iron.operators.gemv.op import GEMV, gelu_tanh_approx
 from iron.common.kernels import target_arch
 import numpy as np
-import torch
+from ml_dtypes import bfloat16
 from iron.common.harness import record_metric, run_test, vectors
 
 
@@ -129,10 +129,7 @@ def test_gemv_gelu(
     )
     # The reference is the plain product; the epilogue is applied here.
     data = vectors(operator, normal=("A", "B"))
-    c_ref = data["C"].to(torch.float32).numpy()
-    c_gelu = torch.from_numpy(gelu_tanh_approx(c_ref).astype(np.float32)).to(
-        torch.bfloat16
-    )
+    c_gelu = gelu_tanh_approx(data["C"].astype(np.float32)).astype(bfloat16)
     input_buffers = data.inputs
     output_buffers = {"C": c_gelu}
 

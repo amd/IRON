@@ -137,6 +137,13 @@ def flm_vectors(operator, scale=4.0):
     return vectors(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
 
 
+def accumulated_mass(K, A, B):
+    """K * mean|a| * mean|b|: the magnitude the accumulator's error tracks."""
+    return float(
+        K * np.abs(A.astype(np.float32)).mean() * np.abs(B.astype(np.float32)).mean()
+    )
+
+
 def check_on_device(operator, data, rounding=CONV_EVEN):
     """Run ``operator`` against its drawn vectors and return run_test's result.
 
@@ -150,7 +157,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
     truncates, so its bias accumulates and gets a looser bound on both.
     """
     A, B = data["A"], data["B"]
-    mass = operator.K * A.abs().float().mean() * B.abs().float().mean()
+    mass = accumulated_mass(operator.K, A, B)
     if aie_utils.get_current_device().resolve().name == "npu1":
         budget = 0.002 if rounding is FLOOR else 0.0002
     else:
@@ -160,7 +167,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
         {"A": A.flatten(), "B": operator.pack_B(B)},
         {"C": data["C"].flatten()},
         rel_tol=0.04,
-        abs_tol=float(budget * mass),
+        abs_tol=budget * mass,
     )
 
 
@@ -216,7 +223,9 @@ def test_gemm_split_leg_bounds_runs(npu_runtime):
     M, K, N = 512, 10240, 10240
     operator = GEMM(M=M, K=K, N=N)
 
-    errors, _latency_us, _bandwidth_gbps = check_on_device(operator, flm_vectors(operator))
+    errors, _latency_us, _bandwidth_gbps = check_on_device(
+        operator, flm_vectors(operator)
+    )
     assert not errors, "Test failed"
 
 
@@ -285,10 +294,7 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, npu_runtime):
     the class name, so with the cache keyed on filename the two operators would
     silently satisfy each other's builds in one build dir.
     """
-    assert (
-        GEMM(M=M, K=K, N=N).name
-        != GenericGEMM(M=M, K=K, N=N).name
-    )
+    assert GEMM(M=M, K=K, N=N).name != GenericGEMM(M=M, K=K, N=N).name
 
 
 def test_one_xclbin_serves_every_shape(npu_runtime):
@@ -312,13 +318,13 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
     for M, K, N, epilogue in shapes:
         operator = GEMM(M=M, K=K, N=N, epilogue=epilogue)
         data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
-        mass = K * data["A"].abs().float().mean() * data["B"].abs().float().mean()
+        mass = accumulated_mass(K, data["A"], data["B"])
         errors, _, _ = run_test(
             operator,
             {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
             {"C": data["C"].flatten()},
             rel_tol=0.04,
-            abs_tol=float(0.004 * mass),
+            abs_tol=0.004 * mass,
         )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
@@ -360,9 +366,7 @@ def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
     # The bounds do reach the instruction stream, though, so they must reach
     # its stem or the build cache serves one caller's stream to another.
     assert unclamped.name != clamped.name
-    assert (
-        clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1]).name
-    )
+    assert clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1]).name
 
 
 # The shipped overlay: the binary the port was ported from, as its second
@@ -415,9 +419,7 @@ BUDGET_FLOOR = 2e-2
 )
 def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
     """The shipped binary through the same operator: the second reference."""
-    operator = GEMM(
-        Shipped(), M=M, K=K, N=N, epilogue=epilogue, clamp=clamp
-    )
+    operator = GEMM(Shipped(), M=M, K=K, N=N, epilogue=epilogue, clamp=clamp)
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
     data = vectors(operator, normal=("A",), B=(K, N))
 
@@ -435,7 +437,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
     # no bound over this reference can be both correct and useful -- the
     # accumulator error alone exceeds their whole output range -- so they are
     # covered functionally by test_mm_prebuilt_epilogue_matches_accumulator.
-    mass = float(K * data["A"].abs().float().mean() * data["B"].abs().float().mean())
+    mass = accumulated_mass(K, data["A"], data["B"])
     abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
     errors, latency_us, bandwidth_gbps = run_test(
         operator,
@@ -482,16 +484,12 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     A, B = data["A"], data["B"]
 
     def run(epi, clm):
-        op = GEMM(
-            Shipped(), M=M, K=K, N=N, epilogue=epi, clamp=clm
-        )
+        op = GEMM(Shipped(), M=M, K=K, N=N, epilogue=epi, clamp=clm)
         op.compile()
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
-        op.get_callable()(
-            tensor.from_torch(A.flatten()), tensor.from_torch(op.pack_B(B)), out
-        )
-        return out.to_torch().reshape(M, N).float()
+        op.get_callable()(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        return out.numpy().reshape(M, N).astype(np.float32)
 
     acc = run(NONE, None)
     got = run(epilogue, clamp)
@@ -515,15 +513,15 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     # can reproduce. 0.05 is ~3x the measured worst case and still ~20x below
     # where the bound would go vacuous; the assertion at the end pins that down.
     approx = 0.0 if epilogue is NONE else 0.05
-    tol = MAX_SLOPE[epilogue] * acc.abs() * 2.0**-8 + 2.0**-8 + approx
-    err = (got - expected).abs()
+    tol = MAX_SLOPE[epilogue] * np.abs(acc) * 2.0**-8 + 2.0**-8 + approx
+    err = np.abs(got - expected)
     over = err > tol
     assert not over.any(), (
-        f"{epilogue} clamp={clamp}: {int(over.sum())} of {over.numel()} elements "
+        f"{epilogue} clamp={clamp}: {int(over.sum())} of {over.size} elements "
         f"differ from epilogue(device accumulator) by more than the bf16 bound; "
         f"worst {float((err - tol).max()):.4f} over"
     )
     # The bound must not be wide enough to admit a dead device.
-    assert (expected.abs() > tol).any(), (
-        f"{epilogue}: tolerance is vacuous -- an all-zero result would pass"
-    )
+    assert (
+        np.abs(expected) > tol
+    ).any(), f"{epilogue}: tolerance is vacuous -- an all-zero result would pass"
