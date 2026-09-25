@@ -11,12 +11,14 @@
 # [ ] Patching of operators (instantiating new xrt::elf for each token) is slow; find quicker way of patching instruction sequence in-memory
 # [ ] Spatial fusion of operators
 
+import copy
 import torch
 import math
 from pathlib import Path
 import sys
 import numpy as np
 import ml_dtypes
+import llama_cpu
 import llama_inference_harness as harness
 import logging
 
@@ -1234,6 +1236,25 @@ def main():
 
     aie_ops = AIELlamaOperators(config, max_seq_len)
     aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
+
+    if args.check_accuracy:
+        ref_config = copy.copy(config)
+        ref_config.weights = {k: v.float() for k, v in config.weights.items()}
+        results = harness.check_accuracy(
+            config,
+            state,
+            llama_forward_pass,
+            ref_config,
+            harness.LlamaModelState(ref_config),
+            llama_cpu.llama_forward_pass,
+            args.num_tokens,
+        )
+        kl = [k for k, _ in results]
+        print(f"[Accuracy] Prefill KL: {kl[0]:.6f}")
+        if len(kl) > 1:
+            print(f"[Accuracy] Decode max KL: {max(kl[1:]):.6f}")
+        print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
+        return
 
     print(prompt, end="", flush=True)
     harness.generate(
