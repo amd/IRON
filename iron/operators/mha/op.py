@@ -10,12 +10,12 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from iron.common.kernels import zero_artifact
 import aie.utils as aie_utils
+from aie.iron.kernels import eltwise, linalg, zero
+from ml_dtypes import bfloat16
 
 
 @dataclass
@@ -43,6 +43,21 @@ class MHA(MLIROperator):
             raise ValueError(f"Only d=64 is supported in this version, got d={self.d}")
         MLIROperator.__init__(self, context=self.context)
 
+    def _kernels(self):
+        return {
+            # QK^T; the rest of mha.cc's symbols are bound from its object.
+            "matmul_QK": linalg.mha(
+                self.B_q,
+                self.d,
+                self.B_kv,
+                b_col_maj=True,
+                emulate_bf16_mmul_with_bfp16=True,
+            ),
+            "zero_kernel": zero((self.B_q, self.B_kv), bfloat16),
+            # 16-bit passThroughLine, bound to the bf16 scale buffers.
+            "passthrough_kernel": eltwise.passthrough(4 * self.B_q, np.int16),
+        }
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -63,49 +78,13 @@ class MHA(MLIROperator):
                     "emulate_bf16_mmul_with_bfp16": True,
                     "trace_size": 0,
                     "verbose": False,
+                    **self._kernels(),
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        mm_source = str(self.context.kernels_dir / "aie2p" / "mm.cc")
-        softmax_source = str(self.context.kernels_dir / "aie2p" / "softmax.cc")
-        mha_source = str(self.context.kernels_dir / "aie2p" / "mha.cc")
-        passthrough_source = str(
-            self.context.kernels_dir / "generic" / "passThrough.cc"
-        )
-
-        mm_defines_rowmaj = [
-            "-Dbf16_bf16_ONLY",
-            f"-DDIM_M={self.B_q}",
-            f"-DDIM_K={self.d}",
-            f"-DDIM_N={self.B_kv}",
-            "-DROUND_CONV_EVEN",
-            "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-        ]
-        mm_defines_colmaj = mm_defines_rowmaj + [
-            "-DB_COL_MAJ",
-        ]
-        # mha.cc #includes softmax.cc and mm.cc (both col-major and row-major)
-        # directly, so everything is compiled into a single mha.o translation unit.
-        return [
-            KernelObjectArtifact(
-                "mha.o",
-                extra_flags=mm_defines_colmaj,
-                dependencies=[
-                    SourceArtifact(mha_source),
-                    SourceArtifact(mm_source),
-                    SourceArtifact(softmax_source),
-                ],
-            ),
-            KernelObjectArtifact(
-                "mha_passThrough.o",
-                extra_flags=["-DBIT_WIDTH=16"],
-                dependencies=[SourceArtifact(passthrough_source)],
-            ),
-            # The design zeroes one B_q x B_kv scores tile.
-            zero_artifact(self.context.kernels_dir, "bf16", self.B_q * self.B_kv),
-        ]
+        return [KernelObjectArtifact.from_extern(k) for k in self._kernels().values()]
 
     def get_arg_spec(self):
         seq_padding = self._calculate_seq_padding(self.seq_len, self.num_of_pipelines)
