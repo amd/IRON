@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import eltwise
+
 from iron.common import ChanneledUnaryOperator
 
 
@@ -11,9 +13,10 @@ from iron.common import ChanneledUnaryOperator
 class ReLU(ChanneledUnaryOperator):
     """AIE-accelerated ReLU activation function"""
 
-    kernel_name: ClassVar[str] = "relu"
-    kernel_fn_name: ClassVar[str] = "relu_bf16_size"
     callback_fn: ClassVar[str] = "my_relu"
+
+    def _kernel(self):
+        return eltwise.relu_sized(self._line_size)
 
     def reference(self, x):
         from iron.operators.relu.reference import reference

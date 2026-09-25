@@ -8,11 +8,11 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from aie.iron.kernels import datamovement
 
 
 @dataclass
@@ -53,6 +53,10 @@ class RoPE(MLIROperator):
 
         MLIROperator.__init__(self, context=self.context)
 
+    def _kernel(self):
+        # method_type 0 = two-halves (HF), 1 = interleaved (Llama paper).
+        return datamovement.rope(self.cols, two_halves=self.method_type == 0)
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -66,20 +70,13 @@ class RoPE(MLIROperator):
                     self.angle_rows,
                     self.num_aie_columns,
                     0,
-                    self.method_type,
                 ),
+                {"rope_kernel": self._kernel()},
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"rope_{self.method_type}.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "rope.cc")
-                ],
-            ),
-        ]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         return [

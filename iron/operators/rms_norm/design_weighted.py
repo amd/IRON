@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -18,7 +18,9 @@ def my_weighted_rms_norm(
     weight_length,
     trace_size,
     epsilon=1e-5,
-    func_prefix="",
+    *,
+    rms_norm_kernel,
+    eltwise_mul_kernel,
 ):
     per_tile_elements = weight_length
     total_cores = num_columns * num_channels
@@ -59,18 +61,6 @@ def my_weighted_rms_norm(
         for i in range(num_columns)
         for j in range(num_channels)
     ]
-
-    # AIE Core Function declaration
-    rms_norm_kernel = Kernel(
-        f"{func_prefix}rms_norm_eps",
-        f"{func_prefix}rms_norm.o",
-        [tile_ty, tile_ty, np.int32, np.float32],
-    )
-    eltwise_mul_kernel = Kernel(
-        f"{func_prefix}eltwise_mul_bf16_vector_size",
-        f"{func_prefix}mul.o",
-        [tile_ty, weights_ty, tile_ty, np.int32],
-    )
 
     # Define a task that will run on a compute tile
     def core_body_norm(of_in1, of_out1, rms_norm):

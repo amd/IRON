@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -17,10 +17,8 @@ def channeled_unary_design(
     num_channels,
     tile_size,
     trace_size,
-    kernel_fn_name,
-    kernel_obj_file,
+    kernel_fn,
     tile_cap=4096,
-    func_prefix="",
 ):
     xfr_dtype = bfloat16
     line_size = tile_cap if tile_size > tile_cap else tile_size
@@ -54,13 +52,6 @@ def channeled_unary_design(
         for j in range(num_channels)
     ]
 
-    # External, binary kernel definition
-    kernel_fcn = Kernel(
-        f"{func_prefix}{kernel_fn_name}",
-        f"{func_prefix}{kernel_obj_file}",
-        [line_type, line_type, np.int32],
-    )
-
     # Task for the core to perform
     def core_fn(of_in, of_out, kernel_line):
         for _ in range_(N_div_n):
@@ -77,7 +68,7 @@ def channeled_unary_design(
             [
                 of_ins[i * num_channels + j].cons(),
                 of_outs[i * num_channels + j].prod(),
-                kernel_fcn,
+                kernel_fn,
             ],
         )
         for i in range(num_columns)

@@ -3,16 +3,16 @@
 
 from dataclasses import dataclass, field
 
-import aie.utils as aie_utils
+import numpy as np
+from ml_dtypes import bfloat16
 
-from iron.common.device_utils import get_kernel_dir
-from iron.common.operator_bases import lut_based_ops_artifacts
+import aie.utils as aie_utils
+from aie.iron.kernels import activation
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelArchiveArtifact,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
@@ -45,14 +45,16 @@ class Softmax(MLIROperator):
             )
         MLIROperator.__init__(self, context=self.context)
 
-    @property
-    def _kernel_link_file(self):
-        kernel_dir = get_kernel_dir()
-        if kernel_dir == "aie2":
-            return f"{self.name}_kernels.a"
-        return "softmax.o"
+    def _softmax(self):
+        return activation.softmax(self.cols)
 
     def get_mlir_artifact(self):
+        softmax_fn = self._softmax()
+        # mask_bf16 is exported by the same softmax.cc translation unit.
+        mask_fn = softmax_fn.object_file.bind(
+            "mask_bf16",
+            [np.ndarray[(self.cols,), np.dtype[bfloat16]], np.int32, np.int32],
+        )
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
@@ -68,28 +70,14 @@ class Softmax(MLIROperator):
                     "tile_size": self.cols,
                     "rtp_vector_size": self.rtp_vector_size,
                     "vector_size_parameter": self.vector_size_parameter,
-                    "kernel_obj_file": self._kernel_link_file,
+                    "softmax_kernel": softmax_fn,
+                    "mask_kernel": mask_fn,
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        kernel_dir = get_kernel_dir()
-        softmax_obj = KernelObjectArtifact(
-            "softmax.o",
-            dependencies=[
-                SourceArtifact(self.context.kernels_dir / kernel_dir / "softmax.cc")
-            ],
-        )
-        lut_objs = lut_based_ops_artifacts(kernel_dir)
-        if lut_objs:
-            return [
-                KernelArchiveArtifact(
-                    f"{self.name}_kernels.a",
-                    dependencies=[softmax_obj] + lut_objs,
-                )
-            ]
-        return [softmax_obj]
+        return [KernelObjectArtifact.from_extern(self._softmax())]
 
     def get_arg_spec(self):
         return [

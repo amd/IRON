@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import activation
+
 from iron.common import ChanneledUnaryOperator
 
 
@@ -11,7 +13,7 @@ from iron.common import ChanneledUnaryOperator
 class Tanh(ChanneledUnaryOperator):
     """AIE-accelerated Tanh activation function"""
 
-    kernel_name: ClassVar[str] = "tanh"
-    kernel_fn_name: ClassVar[str] = "tanh_bf16"
-    needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_tanh"
+
+    def _kernel(self):
+        return activation.tanh(self._line_size)

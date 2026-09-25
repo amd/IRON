@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -17,6 +17,7 @@ def my_axpy(
     tile_size,
     trace_size,
     scalar_factor,
+    axpy_bf16_vector,
 ):
     factor = scalar_factor
     per_tile_elements = 4096 if tile_size > 4096 else tile_size
@@ -37,11 +38,6 @@ def my_axpy(
     of_in1s = [ObjectFifo(tile_ty, name=f"in1_{i}") for i in range(num_columns)]
     of_in2s = [ObjectFifo(tile_ty, name=f"in2_{i}") for i in range(num_columns)]
     of_outs = [ObjectFifo(tile_ty, name=f"out_{i}") for i in range(num_columns)]
-
-    # AIE Core Function declaration
-    axpy_bf16_vector = Kernel(
-        "saxpy", "axpy.o", [tile_ty, tile_ty, np.float32, tile_ty, np.int32]
-    )
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_in2, of_out, axpy):

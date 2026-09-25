@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 from iron.operators._trace import maybe_enable_trace
@@ -18,6 +18,7 @@ def my_leaky_relu(
     tile_size,
     trace_size,
     alpha,
+    leaky_relu_fcn,
 ):
     xfr_dtype = bfloat16
     # Cap to 4096 bfloat16 elements (8 KB) to fit AIE core local memory
@@ -44,14 +45,6 @@ def my_leaky_relu(
         for i in range(num_columns)
         for j in range(num_channels)
     ]
-
-    # External, binary kernel definition
-    # Leaky RELU kernel takes: input, output, input_size, alpha
-    leaky_relu_fcn = Kernel(
-        "leaky_relu_bf16",
-        "leaky_relu.o",
-        [line_type, line_type, np.int32, xfr_dtype],
-    )
 
     # Task for the core to perform
     def core_fn(of_in, of_out, leaky_relu_line):

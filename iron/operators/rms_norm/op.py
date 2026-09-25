@@ -8,12 +8,11 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
-from iron.common.device_utils import get_kernel_dir
+from aie.iron.kernels import eltwise, norm
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -68,6 +67,16 @@ class RMSNorm(MLIROperator):
             )
         MLIROperator.__init__(self, context=self.context)
 
+    def _kernels(self):
+        """The rms_norm kernel, then (if weighted) the weight multiply."""
+        # The unweighted design caps a core's tile at 8192 elements; the
+        # weighted one normalizes whole weight-length rows.
+        line = self.tile_size if self.weighted else min(self.tile_size, 8192)
+        kernels = {"rms_norm_kernel": norm.rms_norm_eps(line)}
+        if self.weighted:
+            kernels["eltwise_mul_kernel"] = eltwise.mul_sized(line)
+        return kernels
+
     def get_mlir_artifact(self):
         if self.weighted:
             source_path = self.operator_dir / "design_weighted.py"
@@ -90,29 +99,12 @@ class RMSNorm(MLIROperator):
                     0,  # trace_size
                     self.epsilon,
                 ),
+                self._kernels(),
             ),
         )
 
     def get_kernel_artifacts(self):
-        arch_dir = get_kernel_dir()
-        artifacts = [
-            KernelObjectArtifact(
-                "rms_norm.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / arch_dir / "rms_norm.cc")
-                ],
-            ),
-        ]
-        if self.weighted:
-            artifacts.append(
-                KernelObjectArtifact(
-                    "mul.o",
-                    dependencies=[
-                        SourceArtifact(self.context.kernels_dir / arch_dir / "mul.cc")
-                    ],
-                )
-            )
-        return artifacts
+        return [KernelObjectArtifact.from_extern(k) for k in self._kernels().values()]
 
     def get_arg_spec(self):
         specs = [AIERuntimeArgSpec("in", (self.size // self.tile_size, self.tile_size))]

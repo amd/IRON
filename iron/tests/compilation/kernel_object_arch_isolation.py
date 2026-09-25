@@ -45,7 +45,7 @@ def _mul_kernel_object(build_dir, device):
 
 def test_two_arches_do_not_resolve_the_same_kernel_object_path(tmp_path):
     """aie_kernels/generic/mul.cc is one source shared by aie2 and aie2p
-    (ElementwiseMul.kernel_subdir); its object must not collide in build_dir."""
+    (eltwise.mul_sized); its object must not collide in build_dir."""
     aie2 = _mul_kernel_object(tmp_path, NPU1())
     aie2p = _mul_kernel_object(tmp_path, NPU2())
     assert aie2.filename != aie2p.filename

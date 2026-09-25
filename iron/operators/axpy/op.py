@@ -4,10 +4,10 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import datamovement
+
 from iron.common import (
     BinaryElementwiseOperator,
-    KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
@@ -19,23 +19,13 @@ class AXPY(BinaryElementwiseOperator):
 
     scalar_factor: float = 3.0
 
-    kernel_name: ClassVar[str] = "axpy"
-    kernel_fn_name: ClassVar[str] = "saxpy"
     callback_fn: ClassVar[str] = "my_axpy"
 
-    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
-        # axpy.cc lives under aie_kernels/generic/ (not device-specific)
-        return [
-            KernelObjectArtifact(
-                "axpy.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "generic" / "axpy.cc")
-                ],
-            )
-        ]
+    def _kernel(self):
+        return datamovement.axpy(self._tile_elements)
 
     def _mlir_callback_args(self):
-        return super()._mlir_callback_args() + [self.scalar_factor]
+        return super()._mlir_callback_args() + [self.scalar_factor, self._kernel()]
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
         return PythonGeneratedMLIRArtifact(
