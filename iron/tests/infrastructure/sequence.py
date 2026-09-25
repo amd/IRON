@@ -36,10 +36,9 @@ from iron.operators.relu import ReLU
 def _set_input(run, name, data):
     """Write a host tensor into an input buffer and push it to the device.
 
-    Mirrors the caller contract for the fused single-ELF callable: after
-    writing a get_buffer() sub-view via numpy_view(), the caller is responsible
-    for calling .to("npu") so the write reaches the NPU (a no-op sync for the
-    separate/reference callables, whose __call__ syncs inputs themselves).
+    The explicit push is redundant, since every callable flushes host writes
+    at dispatch (see test_non_input_buffers_sync_without_explicit_flush), and
+    is a no-op sync for the reference callable.
     """
     buf = run.get_buffer(name)
     buf.numpy_view()[: data.size] = data.reshape(-1)
@@ -55,7 +54,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(dispatch, name):
+def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
     """out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -74,7 +73,7 @@ def _build_add_relu_sequence(dispatch, name):
             (add, "a", "b", "temp"),
             (relu, "temp", "out"),
         ],
-        input_args=["a", "b"],
+        input_args=list(input_args),
         output_args=["out"],
         dispatch=dispatch,
     )
@@ -146,12 +145,12 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     # Buffer sub-views handed to each operator's runtime sequence.
     assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
     # One inlined device per unique operator plus the top-level driver device.
-    assert "op0_ElementwiseAdd" in text and "op1_ReLU" in text, (
-        "operator devices not inlined into fused module"
-    )
-    assert text.count("aie.device") >= 3, (
-        "expected two operator devices plus a top-level device"
-    )
+    assert (
+        "op0_ElementwiseAdd" in text and "op1_ReLU" in text
+    ), "operator devices not inlined into fused module"
+    assert (
+        text.count("aie.device") >= 3
+    ), "expected two operator devices plus a top-level device"
 
 
 # ---------------------------------------------------------------------------
@@ -183,13 +182,12 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     a = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
     b = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
 
-    baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate"
-    )
+    baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate")
     out = _run_add_relu(dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
-    assert np.array_equal(out, baseline), (
-        f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
-    )
+    assert np.array_equal(
+        out, baseline
+    ), f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +208,8 @@ def _build_packed_output_sequence(dispatch, name):
     sized buffer via slice notation ("packed[start:end]"). Unlike
     _build_add_relu_sequence's "temp" hand-off (a whole-buffer alias), this
     exercises slice_info/explicit_buffer_sizes resolution directly."""
-    add0 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1
-    )
-    add1 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1
-    )
+    add0 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
+    add1 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
     return OperatorSequence(
         name=name,
         runlist=[
@@ -239,9 +233,7 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     a1 = rng.random(_SLICE_SIZE).astype(bfloat16)
     b1 = rng.random(_SLICE_SIZE).astype(bfloat16)
 
-    seq = _build_packed_output_sequence(
-        "reference", "infra_reference_sliced_packed"
-    )
+    seq = _build_packed_output_sequence("reference", "infra_reference_sliced_packed")
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a0", a0)
@@ -253,9 +245,9 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 
     expected = np.concatenate([a0 + b0, a1 + b1])
     errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
-    assert not errors, (
-        f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
-    )
+    assert (
+        not errors
+    ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
 
 
 # ---------------------------------------------------------------------------
@@ -279,9 +271,7 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime)
     a = rng.random(size).astype(bfloat16)
     b = rng.random(size).astype(bfloat16)
 
-    op = ElementwiseAdd(
-        size=size, tile_size=256, num_aie_columns=1
-    )
+    op = ElementwiseAdd(size=size, tile_size=256, num_aie_columns=1)
     if not reference_is_correct:
         # Override the reference on this instance to disagree with the NPU
         # kernel (which computes a + b). Keeping the real ElementwiseAdd class
@@ -309,3 +299,45 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime)
     else:
         with pytest.raises(RuntimeError):
             run()  # compare mode reports the wrong reference by itself
+
+
+# ---------------------------------------------------------------------------
+# 5. Buffers that are neither inputs nor outputs (weights, KV caches,
+#    intermediates) sync like the rest in every NPU dispatch mode. The full-ELF
+#    callable places them in its scratch buffer, and NPU access to it is not
+#    cache-coherent: an unflushed host write is a race, not an error, so each
+#    dispatch below writes different data than the one before.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch", ["separate", "fused"])
+def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
+    """Host writes through get_buffer() to a non-input buffer reach the NPU at
+    the next dispatch, and reads of a non-output buffer after a dispatch see
+    what the NPU wrote there, with no explicit ``to()`` from the caller."""
+    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
+        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+
+    # b is not an input, so it is held like a weight (in scratch, when fused).
+    seq = _build_add_relu_sequence(
+        dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
+    )
+    seq.compile()
+    run = seq.get_callable()
+
+    rng = np.random.default_rng(0)
+    for rep in range(4):
+        a = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
+        b = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
+        run.get_buffer("a").numpy_view()[:] = a
+        run.get_buffer("b").numpy_view()[:] = b
+        run()
+
+        temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
+        out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+        errors = verify_buffer(temp, "temp", a + b, rel_tol=0.04, abs_tol=1e-6)
+        assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
+        errors = verify_buffer(
+            out, "out", np.maximum(a + b, 0), rel_tol=0.04, abs_tol=1e-6
+        )
+        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"

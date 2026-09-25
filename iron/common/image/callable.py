@@ -40,6 +40,7 @@ BF16 = np.dtype(ml_dtypes.bfloat16)
 def _n_elements(nbytes):
     return max(nbytes, BF16.itemsize) // BF16.itemsize
 
+
 def _require_xrt() -> None:
     """Fail with the reason, rather than an AttributeError on ``None.elf``."""
     if pyxrt is None:
@@ -213,7 +214,13 @@ class SequenceFullELFCallable(SequenceCallable):
         # Sub-views handed out by get_buffer() share the parent's coherence map, so
         # a write through one (e.g. numpy_view()) marks its byte range host-dirty
         # there too, and `to("npu")` here syncs every dirty range in one pass.
+        # Scratch is flushed as well: get_buffer() hands out writable views into it
+        # (weights, KV caches), and this dispatch bypasses the host runtime's own
+        # per-argument flush. With nothing dirty, `to("npu")` transfers nothing. It
+        # also leaves all of scratch marked device-resident, so a read of a scratch
+        # view after the run pulls what the NPU wrote.
         self.input_buffer.to("npu")
+        self.scratch_buffer.to("npu")
 
     def _sync_outputs(self):
         # _run just rewrote the output arena on the device, so the device holds the
