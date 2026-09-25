@@ -1158,13 +1158,12 @@ def llama_forward_pass_decode(config, state):
 
     context_len = state.num_preceding_tokens + 1
     cache_offset = state.num_preceding_tokens * config.head_dim
-    state.softmax_vector_size_cum = (
-        getattr(state, "softmax_vector_size_cum", 0) + context_len
-    )
 
     params = aie_ops.decode.fused.params
     params.write("cache_offset", np.int32(cache_offset))
-    params.write("softmax_vector_size", np.int32(state.softmax_vector_size_cum))
+    # Softmax masks every score past the first context_len to -inf; the rest of
+    # the max_seq_len row is unwritten cache.
+    params.write("softmax_vector_size", np.int32(context_len))
     params.sync()
 
     # Prefill RoPE angle look-up tables
