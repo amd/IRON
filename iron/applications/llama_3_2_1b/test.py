@@ -86,7 +86,8 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
 
 
 # KL(fp32 CPU || NPU) of the next-token distribution, teacher-forced over 40
-# steps. The NPU measures 0.074 on prefill and at most 0.013 on decode. Decode
+# steps. The graphs measure 0.026 on prefill and at most 0.015 on decode; the
+# llama_npu.py they replaced, on the same toolchain, 0.074 and 0.013. Decode
 # attention over unmasked KV-cache slots measured 9.2.
 MAX_PREFILL_KL = 0.1
 MAX_DECODE_KL = 0.05
