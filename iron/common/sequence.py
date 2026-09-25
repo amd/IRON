@@ -13,6 +13,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+from aie.utils.trace import get_trace_buffer
 from aie.utils.verify import Tolerance, compare
 
 try:
@@ -633,7 +634,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
         if self.trace_buffer is not None:
-            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
+            self.run_handle.set_arg(self._trace_arg, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -672,13 +673,17 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         # Trace lowering appends one buffer covering every configured design, after
-        # the consolidated three. Its size depends on how many channels and
-        # sub-designs claim a share, so read it from the lowered module.
+        # the consolidated three. Its argument and size depend on how many channels
+        # and sub-designs claim a share, so read them from the lowered module.
         self.trace_buffer = None
+        self._trace_arg = None
         if self.op.trace_size:
-            total = comp.trace_buffer_size(self.lowered_mlir_text())
-            if total:
-                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+            layout = get_trace_buffer(
+                self.lowered_mlir_text(), f"{self.device_name}:{self.sequence_name}"
+            )
+            if layout:
+                self._trace_arg = layout["arg_index"]
+                self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
     def lowered_mlir_text(self) -> str:
         """aiecc's post-lowering module, which carries the trace buffer layout."""

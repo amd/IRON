@@ -11,6 +11,7 @@ Llama's AIEContext(build_dir="build_elf") hit exactly this. The operator
 tests never did because their build_dir is absolute.
 """
 
+import os
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -21,10 +22,9 @@ from iron.common.compilation import KernelObjectArtifact
 from iron.operators.elementwise_mul.op import ElementwiseMul
 
 
-def test_factory_kernel_compiles_with_a_relative_build_dir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+def test_factory_kernel_compiles_with_a_relative_build_dir(tmp_path):
     aie_utils.set_current_device(NPU2())
-    ctx = AIEContext(build_dir="build_rel")
+    ctx = AIEContext(build_dir=os.path.relpath(tmp_path / "build_rel"))
     op = ElementwiseMul(size=4096, tile_size=4096, num_aie_columns=1, context=ctx)
     op.compile()
 

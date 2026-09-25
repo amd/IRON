@@ -14,7 +14,6 @@ from pathlib import Path
 from aie import ir
 from aie.dialects import aie, aiex, memref
 from aie.extras.context import mlir_mod_ctx
-from aie.utils.trace import get_trace_slices
 import ml_dtypes
 
 from typing import Any
@@ -33,17 +32,6 @@ RESET_DEVICE = "reset_device"
 
 # Compilation Artifacts
 # ##########################################################################
-
-
-def trace_buffer_size(mlir_text: str) -> int:
-    """Bytes of the fused trace buffer the dispatched sequence takes.
-
-    `-aie-fuse-trace-buffers` gives the sequence one buffer covering every design
-    it configures, and records the split on the sequence. Returns 0 for an
-    untraced build.
-    """
-    slices = get_trace_slices(mlir_text)
-    return max((s["offset"] + s["size"] for s in slices), default=0)
 
 
 class SequenceMLIRArtifact(MLIRArtifact):
