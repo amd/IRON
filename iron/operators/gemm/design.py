@@ -9,7 +9,6 @@ from ml_dtypes import bfloat16
 import numpy as np
 
 from aie.iron import (
-    Kernel,
     ObjectFifo,
     Program,
     Buffer,
@@ -22,7 +21,8 @@ from aie.iron import (
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
 from aie.iron.controlflow import range_
-from iron.common.kernels import zero_object_name
+from aie.utils import set_current_device
+from aie.iron.kernels import datamovement, linalg, zero
 from iron.operators._trace import maybe_enable_trace
 
 microkernel_mac_dim_map = {
@@ -64,12 +64,6 @@ def main():
     )
     argparser.add_argument("--prio-accuracy", action="store_true", default=False)
     argparser.add_argument("--separate-c-tiles", type=int, choices=[0, 1], default=0)
-    argparser.add_argument(
-        "--archive",
-        type=str,
-        default=None,
-        help="Name of the archive file for the AIE kernels",
-    )
     argparser.add_argument("--dtype_in", type=str, choices=["bf16"], default="bf16")
     argparser.add_argument(
         "--dtype_out",
@@ -86,6 +80,25 @@ def main():
     )
 
     args = argparser.parse_args()
+    # The kernel factories pick their source and flags by the current device.
+    set_current_device(NPU1() if args.dev == "npu1" else NPU2())
+    dtype_acc = str_to_dtype("f32" if args.prio_accuracy else args.dtype_out)
+    kernels = {
+        "matmul_kernel": linalg.mm(
+            args.m,
+            args.k,
+            args.n,
+            input_dtype=str_to_dtype(args.dtype_in),
+            output_dtype=dtype_acc,
+            vectorized=not args.scalar,
+            b_col_maj=bool(args.b_col_maj),
+            c_col_maj=bool(args.c_col_maj),
+            emulate_bf16_mmul_with_bfp16=args.emulate_bf16_mmul_with_bfp16,
+        ),
+        "zero_kernel": zero(args.m * args.n, dtype_acc, vectorized=not args.scalar),
+    }
+    if args.prio_accuracy:
+        kernels["convert_copy_kernel"] = datamovement.convert_copy(args.m * args.n)
     module = my_matmul(
         args.dev,
         args.M,
@@ -104,7 +117,7 @@ def main():
         args.prio_accuracy,
         args.separate_c_tiles,
         args.trace_size,
-        kernel_object=args.archive,
+        **kernels,
     )
 
     output_file_path = Path(args.output_file_path)
@@ -134,9 +147,10 @@ def my_matmul(
     prio_accuracy,
     separate_c_tiles,
     trace_size,
-    kernel_object=None,
-    zero_object=None,
-    func_prefix="",
+    *,
+    matmul_kernel,
+    zero_kernel,
+    convert_copy_kernel=None,
 ):
     n_aie_rows = 4
 
@@ -273,54 +287,19 @@ def my_matmul(
     B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
     C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
 
-    # AIE Core Function declarations
-    scalar_suffix = "_scalar" if use_scalar else ""
-    gemm_object = (
-        f"{func_prefix}{kernel_object}"
-        if kernel_object
-        else f"{func_prefix}gemm_{m}x{k}x{n}.o"
-    )
-    # zero.cc is its own translation unit in mlir-aie, exporting a single `zero`
-    # specialized by -DZERO_TYPE/-DTILE_SIZE, so the zero kernel names a
-    # different object than the matmuls do.
-    zero_dtype_str = "f32" if use_larger_internal_buffer else dtype_out_str
-    zero_object = func_prefix + (
-        zero_object or zero_object_name(zero_dtype_str, m * n, use_scalar)
-    )
-    zero_func_name = f"{func_prefix}zero"
     if use_larger_internal_buffer:
         # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for accumulation
         # and another for transfer to L2
         fifo_depth_out = 1
         # Set the type for accumulation
-        C_l1_ty_internal = np.ndarray[(m, n), np.dtype[dtype_out_internal]]
+        # Flat, as the matmul, zero and convert_copy kernels all declare it
+        C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
         # A kernel to convert from the internal f32 accumulation to bf16 for transfer to L2 is needed
-        convert_copy_kernel = Kernel(
-            f"{func_prefix}cast_f32_bf16_row",
-            f"{func_prefix}cast_f32_bf16.o",
-            [C_l1_ty_internal, C_l1_ty, np.int32],
-        )
-        # Fix the kernels to use f32 outputs
-        zero_kernel = Kernel(zero_func_name, zero_object, [C_l1_ty_internal])
-        matmul_func_name = f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_f32"
-        matmul_kernel = Kernel(
-            matmul_func_name,
-            gemm_object,
-            [A_l1_ty, B_l1_ty, C_l1_ty_internal],
-        )
+        assert convert_copy_kernel is not None
     else:
         # No need to use separate buffers for accumulation and transfer to L2, so
         # we only need the zero and matmul kernels
         fifo_depth_out = fifo_depth
-        zero_kernel = Kernel(zero_func_name, zero_object, [C_l1_ty])
-        matmul_func_name = (
-            f"{func_prefix}matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}"
-        )
-        matmul_kernel = Kernel(
-            matmul_func_name,
-            gemm_object,
-            [A_l1_ty, B_l1_ty, C_l1_ty],
-        )
 
     # Tile declarations as tile[row][col]
     tiles = [[(col, row) for col in range(0, n_aie_cols)] for row in range(0, 6)]
