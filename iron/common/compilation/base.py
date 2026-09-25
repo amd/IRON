@@ -972,7 +972,10 @@ class KernelCompilationRule(CompilationRule):
         # than its source, or half-prefixed. mlir-aie reuses any object already
         # at the output path, so remove it to make mlir-aie rebuild it.
         Path(artifact.filename).unlink(missing_ok=True)
-        compile_external_kernel(fn, str(Path(artifact.filename).parent), kernel_dir)
+        # mlir-aie compiles with cwd set to the output directory, so a
+        # relative one (e.g. AIEContext(build_dir="build_elf")) resolves twice.
+        out_dir = Path(artifact.filename).parent.resolve()
+        compile_external_kernel(fn, str(out_dir), kernel_dir)
 
     def _find_tool(self, name):
         return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
