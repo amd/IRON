@@ -6,9 +6,11 @@
 
 One module for the whole catalog. An operator declares the shapes it is
 tested at as :class:`~iron.common.testing.Testing` beside itself, and this
-runs each: construct, draw inputs with :func:`golden`, dispatch, and
-compare every output element against ``reference()``. What it replaced was
-one test module per operator, each a single call with this body.
+runs each: construct, draw inputs with :func:`vectors`, dispatch, and
+judge every output element against ``reference()`` by the declared
+tolerance, or else by the contract of the kernel the operator runs. What
+it replaced was one test module per operator, each a single call with
+this body.
 
 An operator whose device test is more than that -- a composite compared
 step by step, a shipped overlay checked against its own accumulator --
@@ -21,7 +23,8 @@ import aie.utils as aie_utils
 
 import iron.operators as catalog
 from iron.common.harness import run_test, vectors
-from iron.common.testing import Testing
+from iron.common.declare import Operator
+from iron.common.testing import Case, Testing
 
 if aie_utils.get_current_device() is None:
     # Every case is sized from the device's width, so there is nothing to
@@ -41,8 +44,12 @@ def _declared():
     params = []
     for name in sorted(catalog._OPERATOR_MODULES):
         cls = getattr(catalog, name)
-        declaration = getattr(cls, "test", None)
-        if not isinstance(declaration, Testing):
+        # A composite (SwiGLUDecode) is a function returning a sequence, and
+        # tested by its own test.py.
+        if not (isinstance(cls, type) and issubclass(cls, Operator)):
+            continue
+        declaration = cls.test
+        if declaration is None:
             continue
         for case in declaration.resolve():
             params.append(
@@ -58,15 +65,15 @@ def _declared():
 
 
 @pytest.mark.parametrize("cls,declaration,case", _declared())
-def test_operator(cls, declaration, case, npu_runtime):
+def test_operator(cls: type[Operator], declaration: Testing, case: Case, npu_runtime):
     op = cls(**case.kwargs)
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
-    run = run_test(
-        op,
-        vectors(op, **extra),
-        rel_tol=declaration.rel_tol,
-        abs_tol=declaration.abs_tol,
-        max_error_rate=declaration.max_error_rate,
-    )
+    tolerance = declaration.tolerance or op.reference_tolerance()
+    if tolerance is None:
+        raise ValueError(
+            f"{cls.__name__} runs no kernel with a tolerance contract; "
+            "declare Testing(tolerance=...)"
+        )
+    run = run_test(op, vectors(op, **extra), tolerance=tolerance)
     assert not run.errors, f"{cls.__name__}({case.label}) failed: {run.errors}"

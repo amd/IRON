@@ -46,6 +46,13 @@ def _np(t):
     return t.numpy()
 
 
+def _torch(a):
+    """A numpy array as torch, bf16 preserved and memory shared: the inverse of _np."""
+    if a.dtype == bfloat16:
+        return torch.from_numpy(a.view(np.uint16)).view(torch.bfloat16)
+    return torch.from_numpy(a)
+
+
 class Weights:
     """A module tree's parameters as numpy, each converted exactly once.
 

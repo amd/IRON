@@ -127,18 +127,6 @@ class MHAOverlay(Overlay):
         unit = self.B_q * self.num_of_pipelines
         return ((seq_len + unit - 1) // unit) * unit
 
-    def kernel_flags(self) -> list[str]:
-        """The -D set mha.cc and everything it includes compile under."""
-        return [
-            "-Dbf16_bf16_ONLY",
-            f"-DDIM_M={self.B_q}",
-            f"-DDIM_K={self.d}",
-            f"-DDIM_N={self.B_kv}",
-            "-DROUND_CONV_EVEN",
-            "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-            "-DB_COL_MAJ",
-        ]
-
     # -- the array -------------------------------------------------------------
 
     def design(self, target) -> list:
@@ -168,32 +156,26 @@ class MHAOverlay(Overlay):
         joined_ty = self.q.tile  # (n_join * B_q, d)
 
         # Every one of these comes out of mha.cc, which #includes mm.cc and
-        # softmax.cc, so they all name one object: declared separately each would
-        # recompile that translation unit and redefine every symbol in it.
-        mha_source = target.kernels_dir / "aie2p" / "mha.cc"
-        kernel_flags = self.kernel_flags()
-
-        def mha_kernel(name, arg_types):
-            return target.kernel(
-                name,
-                arg_types,
-                source=mha_source,
-                compile_flags=kernel_flags,
-                object_file_name="mha.o",
-            )
+        # softmax.cc, so they all name one object: matmul_QK is its QK^T
+        # product, and the rest of its symbols are bound from that object
+        # rather than declared separately, which would recompile the
+        # translation unit and redefine every symbol in it.
+        matmul_QK = kernels.linalg.mha(
+            B_q, d, B_kv, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
+        )
+        mha_object = matmul_QK.object_file
 
         # mha.cc used to re-export a zero of its own over the (DIM_M, DIM_N)
         # tile; upstream's standalone zero over the same tile is the same fill.
         zero_kernel = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
-        memcopy_kernel_scale = target.kernel(
-            "passThroughLine",
-            [s_ty, s_ty, np.int32],
-            source=target.kernels_dir / "generic" / "passThrough.cc",
-            compile_flags=["-DBIT_WIDTH=16"],
-            object_file_name="mha_passThrough.o",
+        # The 16-bit passThroughLine, bound to the bf16 scale buffers.
+        memcopy_kernel_scale = kernels.eltwise.passthrough(
+            4 * B_q, np.int16
+        ).object_file.bind("passThroughLine", [s_ty, s_ty, np.int32])
+        scale_buffer_init_kernel = mha_object.bind(
+            "init_scale_buffer", [s_ty, np.int32]
         )
-        scale_buffer_init_kernel = mha_kernel("init_scale_buffer", [s_ty, np.int32])
-        partial_softmax_kernel = mha_kernel(
+        partial_softmax_kernel = mha_object.bind(
             "partial_softmax",
             [
                 qk_ty,
@@ -207,11 +189,7 @@ class MHAOverlay(Overlay):
                 np.int32,
             ],
         )
-        matmul_QK = mha_kernel(
-            "matmul_bf16_bf16_wrapper",
-            [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
-        )
-        matmul_PV = mha_kernel(
+        matmul_PV = mha_object.bind(
             "matmul_PV",
             [
                 qk_ty,
@@ -223,7 +201,7 @@ class MHAOverlay(Overlay):
                 np.ndarray[(2,), np.dtype[np.int32]],
             ],
         )
-        rescale_O = mha_kernel(
+        rescale_O = mha_object.bind(
             "rescale_O",
             [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
         )
@@ -713,9 +691,7 @@ class MHA(Operator[MHAOverlay]):
         # Against torch's FLASH backend this differs by under 1e-6, which is
         # less than torch's own FLASH and MATH backends differ from each other.
         q, k, v = (t.astype(np.float32) for t in (Q, K, V))
-        scores = np.matmul(q, np.swapaxes(k, -2, -1)) / np.sqrt(
-            np.float32(self.ov.d)
-        )
+        scores = np.matmul(q, np.swapaxes(k, -2, -1)) / np.sqrt(np.float32(self.ov.d))
         seq = scores.shape[-1]
         scores += np.triu(np.full((seq, seq), -np.inf, dtype=np.float32), 1)
         e = np.exp(scores - scores.max(axis=-1, keepdims=True))
@@ -723,7 +699,9 @@ class MHA(Operator[MHAOverlay]):
         if self.seq_len < self.seq_pad:
             O = O.copy()
             O[:, self.seq_len :] = 0
-        return np.ascontiguousarray(np.swapaxes(O, 0, 1)) if self.heads_interleaved else O
+        return (
+            np.ascontiguousarray(np.swapaxes(O, 0, 1)) if self.heads_interleaved else O
+        )
 
     # -- the runtime sequence --------------------------------------------------
 
@@ -790,4 +768,3 @@ class MHA(Operator[MHAOverlay]):
                     accs = q_rows(self.O, head0, shim)
                     for acc in accs:
                         rt.drain(ov.o[shim], (self.O, acc), wait=acc is accs[-1])
-

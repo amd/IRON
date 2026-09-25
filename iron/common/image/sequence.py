@@ -41,7 +41,8 @@ class OperatorSequence:
             one step at a time. ``"reference"`` builds nothing and runs each
             operator's CPU ``reference()``; ``"compare"`` runs the chain and
             after each step re-runs the reference on the NPU-produced inputs
-            (``SequenceCompareCallable`` holds the tolerances).
+            (``SequenceCompareCallable`` judges each step by its
+            operator's kernel contract).
     """
 
     def __init__(

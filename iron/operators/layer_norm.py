@@ -8,6 +8,8 @@ from aie.iron.kernels import norm
 
 import numpy as np
 
+from aie.utils.verify import Tolerance
+
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
 from iron.common.testing import Testing, channeled_unary_cases
 
@@ -28,8 +30,7 @@ class LayerNorm(ChanneledUnaryOperator[LayerNormOverlay]):
 
     test = Testing(
         channeled_unary_cases([1024, 2048, 4096, 8192], 8192),
-        rel_tol=0.1,
-        abs_tol=0.1,
+        tolerance=Tolerance.relative(0.1, 0.05),
     )
 
     # Hardware trace buffer size; 0 disables tracing.

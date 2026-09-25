@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 
 from iron.common.harness import record_metric, verify_buffer
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -47,12 +46,8 @@ def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
     net = ffn.compile(x=(1, embedding_dim))
     x = golden_ref["input"]
 
-    # Warmup
-    net(x)
-
-    start = time.perf_counter()
+    elapsed_us = run_iters(lambda: net(x), warmup=1, iters=1).e2e.avg_us
     out = net(x)
-    elapsed_us = (time.perf_counter() - start) * 1e6
 
     total_bytes = (x.size + embedding_dim) * 2  # bf16
     record_metric("Latency", elapsed_us)

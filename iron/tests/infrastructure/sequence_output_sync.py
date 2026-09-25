@@ -16,7 +16,6 @@ from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.iron.device import from_name
-from aie.utils.hostruntime.coherence import _CoherenceMap
 
 import iron
 from iron.operators import ElementwiseAdd
@@ -30,18 +29,6 @@ def device():
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
     yield
     aie_utils.set_current_device(previous)
-
-
-def test_a_pull_is_skipped_while_the_range_reads_as_host_resident():
-    """The hazard the output sync has to defeat, at the layer that decides it."""
-    coherence = _CoherenceMap(64, _CoherenceMap.DEVICE)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
-
-    coherence.set(0, 64, _CoherenceMap.HOST)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == []
-
-    coherence.set(0, 64, _CoherenceMap.DEVICE)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
 
 
 @pytest.mark.parametrize("calls", [2, 3])

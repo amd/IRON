@@ -51,7 +51,7 @@ def test_reference_matches_device_convention_for_batched_angle_rows():
     rows, angle_rows = 6, 3
     x, angles = _make_inputs(rows, angle_rows)
     expected = _block_major_expected(x, angles, rows, angle_rows)
-    got = reference(x, angles, rows=rows, cols=x.shape[-1])
+    got = reference(x, angles)
     assert np.array_equal(expected, got)
 
 
@@ -59,7 +59,7 @@ def test_reference_matches_device_convention_across_shapes():
     for rows, angle_rows in [(8, 2), (1024, 1), (4, 4), (13, 13), (12, 4)]:
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)
-        got = reference(x, angles, rows=rows, cols=x.shape[-1])
+        got = reference(x, angles)
         assert np.array_equal(
             expected, got
         ), f"mismatch at rows={rows} angle_rows={angle_rows}"

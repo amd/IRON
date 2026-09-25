@@ -3,6 +3,7 @@
 
 """What a caller invokes once a sequence has an image: one class per image kind."""
 
+from __future__ import annotations
 import logging
 import time
 
@@ -12,8 +13,11 @@ import numpy as np
 import aie.utils as aie_utils
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+from aie.utils.trace import get_trace_buffer
+from aie.utils.verify import Tolerance, compare
 
-from . import fusion
+from ..declare import Operator
+
 from .jit_compile import DispatchStream
 
 try:
@@ -131,6 +135,11 @@ class SequenceFullELFCallable(SequenceCallable):
     sub-view into whichever consolidated buffer holds the named argument.
     """
 
+    # The buffer trace lowering appends, and the kernel argument it binds to;
+    # both None on an untraced build.
+    trace_buffer: XRTTensor | None
+    _trace_arg: int | None
+
     def __init__(self, seq, device_name="main", sequence_name="sequence"):
         _require_xrt()
         self.device_name = device_name
@@ -152,7 +161,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
         if self.trace_buffer is not None:
-            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
+            self.run_handle.set_arg(self._trace_arg, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -185,17 +194,31 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         # Trace lowering appends one buffer covering every configured design, after
-        # the consolidated three. Its size depends on how many channels and
-        # sub-designs claim a share, so read it from the lowered module.
+        # the consolidated three. Its argument and size depend on how many channels
+        # and sub-designs claim a share, so read them from the lowered module.
         self.trace_buffer = None
+        self._trace_arg = None
         if self.op.trace_size:
-            total = fusion.trace_buffer_size(self.lowered_mlir_text())
-            if total:
-                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+            layout = get_trace_buffer(
+                self.lowered_mlir_path.read_text(),
+                f"{self.device_name}:{self.sequence_name}",
+            )
+            if layout:
+                self._trace_arg = layout["arg_index"]
+                self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
-    def lowered_mlir_text(self) -> str:
-        """aiecc's post-lowering module, which carries the trace buffer layout."""
-        return self.op.artifacts.lowered_mlir.read_text()
+    @property
+    def lowered_mlir_path(self):
+        """aiecc's post-lowering module, which carries the trace configuration and
+        the trace buffer layout. A traced build asks aiecc to keep it, in the
+        build's cache entry."""
+        path = self.op.artifacts.lowered_mlir
+        if path is None:
+            raise FileNotFoundError(
+                "the build produced no input_with_addresses.mlir; a traced build "
+                "passes --get-input-with-addresses to aiecc"
+            )
+        return path
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -338,16 +361,34 @@ class SequenceCompareCallable(SequenceXclbinCallable):
     """Runs the xclbin chain and, after each step, re-runs the operator's
     reference on the same NPU-produced inputs, logging per-step deviation. The
     NPU output propagates on both sides, so each comparison isolates a single
-    operator (no error accumulation). A step is a mismatch when it exceeds
-    both tolerances; ``raise_on_mismatch`` turns the first one into an error.
+    operator (no error accumulation). ``compare`` judges each step by
+    ``tolerance`` if given, else by :meth:`step_tolerance`;
+    ``raise_on_mismatch`` turns the first mismatch into an error.
     """
 
-    def __init__(self, seq, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
+    # For a step whose operator states no tolerance, or one compare cannot
+    # judge element by element (a bound, or relative to the output's range).
+    FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
+
+    def __init__(
+        self,
+        seq,
+        tolerance: Tolerance | None = None,
+        raise_on_mismatch: bool = True,
+    ):
         super().__init__(seq)
-        self.rel_tol = rel_tol
-        self.abs_tol = abs_tol
+        self.tolerance = tolerance
         self.raise_on_mismatch = raise_on_mismatch
         self.last_step_stats = []
+
+    def step_tolerance(self, op: Operator) -> Tolerance:
+        """The tolerance ``op``'s step is judged by."""
+        if self.tolerance is not None:
+            return self.tolerance
+        tol = op.reference_tolerance()
+        if tol is None or tol.kind == "bound" or tol.range_frac is not None:
+            return self.FALLBACK_TOLERANCE
+        return tol
 
     def _read_to_cpu(self, name, spec):
         buf = self._resolve_buffer(name)
@@ -370,13 +411,14 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
         kernel(*args)
 
-        npu_out = self._read_to_cpu(out_name, out_spec).astype(np.float32)
+        npu_raw = self._read_to_cpu(out_name, out_spec)
+        npu_out = npu_raw.astype(np.float32)
         ref_out = step_op.reference(*cpu_inputs)
 
         stats = {
             "step": step_idx,
             "op": type(step_op).__name__,
-            "op_name": getattr(step_op, "name", type(step_op).__name__),
+            "op_name": step_op.name,
             "inputs": list(in_names),
             "output": out_name,
         }
@@ -395,7 +437,9 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             max_rel=rel,
             ref_max=ref_max,
         )
-        fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+        tol = self.step_tolerance(step_op)
+        verdict = compare(npu_raw, ref_flat, tol)
+        fail = not verdict
         stats["mismatch"] = fail
         level = logging.ERROR if fail else logging.INFO
         logger.log(
@@ -408,14 +452,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             mean_abs,
             rel,
             ref_max,
-            "  MISMATCH" if fail else "",
+            f"  MISMATCH: {verdict.detail}" if fail else "",
         )
         if fail and self.raise_on_mismatch:
             raise RuntimeError(
                 f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
                 f"-> {out_name}: NPU output deviates from reference "
-                f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
-                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
-                f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
+                f"({verdict.detail}; max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
+                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; tolerance {tol})"
             )
         self.last_step_stats.append(stats)

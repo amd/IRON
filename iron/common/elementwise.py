@@ -45,12 +45,14 @@ line length (leaky_relu's alpha) or takes its arguments in another order
 from __future__ import annotations
 
 import dataclasses
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
 from aie.iron import ObjectFifo, Worker
+from aie.iron.kernel import ExternalFunction
 from aie.iron.controlflow import range_
+from aie.utils.verify import Tolerance
 
 from .declare import (
     O,
@@ -69,6 +71,9 @@ from .declare import (
 )
 from .declare.member import _Stream
 from .tiling import bank_elements
+
+if TYPE_CHECKING:
+    from .design.target import Target
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.
@@ -126,13 +131,19 @@ class ElementwiseOverlay(Overlay):
 
     # -- the kernel --------------------------------------------------------
 
-    def kernel(self, target):
+    def kernel(self, target: Target) -> ExternalFunction:
         """The ``ExternalFunction`` each core calls, over one line.
 
         Usually a factory from :mod:`aie.iron.kernels` at ``self.line_size``;
         ``target.kernel(...)`` declares one upstream does not offer.
         """
         raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
+
+    def tolerance(self, target: Target) -> Tolerance | None:
+        """The contract of the one kernel every core runs; ``None`` for a
+        kernel declared without one."""
+        contract = self.kernel(target).contract
+        return None if contract is None else contract.tolerance
 
     def kernel_call(self, kernel, *elements) -> None:
         """Call the kernel on this core's acquired elements: inputs, then the

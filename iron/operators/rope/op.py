@@ -3,7 +3,10 @@
 
 
 import numpy as np
+from aie.iron import kernels
 from ml_dtypes import bfloat16
+
+from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
     Incompatible,
@@ -56,12 +59,8 @@ class RoPEOverlay(Overlay):
 
         tile = self.x.tile
         n = self.num_aie_columns
-        symbol = "rope_two_halves" if self.method_type == 0 else "rope"
-        kernel = target.kernel(
-            symbol,
-            [tile, self.lut.tile, tile, np.int32],
-            source=target.kernels_dir / "generic" / "rope.cc",
-        )
+        # method_type 0 = two-halves (HF), 1 = interleaved (Llama paper).
+        kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
         of_in = [ObjectFifo(tile, name=f"in_{i}") for i in range(n)]
         of_lut = [ObjectFifo(self.lut.tile, name=f"lut_{i}") for i in range(n)]
         of_out = [ObjectFifo(tile, name=f"out_{i}") for i in range(n)]
@@ -147,7 +146,7 @@ def _angles(op):
 class RoPE(Operator[RoPEOverlay]):
     """AIE-accelerated RoPE (Rotary Position Embedding) operator"""
 
-    test = Testing(_cases, rel_tol=0.05, abs_tol=0.5, draw=_angles)
+    test = Testing(_cases, tolerance=Tolerance.relative(0.05), draw=_angles)
 
     rows: int = dim()
     angle_rows: int | None = dim(None)
@@ -184,15 +183,8 @@ class RoPE(Operator[RoPEOverlay]):
         return self.ov.method_type
 
     def reference(self, x, angles):
-        """CPU reference for RoPE.
-
-        Assumes ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs
-        along the last dim (length ``cols``).  Only ``method_type == 0``
-        (TWO_HALVES) is currently supported.
-
-        ``angles`` may have fewer rows than ``x``; in that case the angles
-        are tiled along the row dimension to match ``x``."""
-        return reference(x, angles, self.method_type, self.rows, self.cols)
+        """CPU reference for RoPE: see :func:`reference`."""
+        return reference(x, angles, self.method_type)
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +245,9 @@ def compute_rope_params(
     positions = np.arange(context_length, dtype=dtype)
 
     # Compute the angles
-    angles = positions[:, None] * inv_freq[None, :]  # Shape: (context_length, head_dim / 2)
+    angles = (
+        positions[:, None] * inv_freq[None, :]
+    )  # Shape: (context_length, head_dim / 2)
 
     # Precompute sine and cosine
     cos = np.cos(angles)
@@ -289,44 +283,37 @@ def angle_table(
     return table
 
 
-def reference(x, angles, method_type=0, rows=None, cols=None):
+def reference(x, angles, method_type=0):
     """CPU reference for RoPE from the operator's packed ``angles`` buffer.
 
     ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the last
-    dim (length ``cols``), the bf16 table the device reads. ``method_type`` 0
-    rotates the two halves of a row, 1 rotates even/odd pairs (the Llama
-    paper's interleaving). ``angles`` may have fewer rows than ``x``; in that
-    case each angle row is repeated for ``rows / angles.shape[0]``
-    *consecutive* rows of ``x``, matching the device kernel (design.py's
-    ``core_body`` acquires one angle row and applies it to that many
+    dim, the bf16 table the device reads. ``method_type`` 0 rotates the two
+    halves of each row (HF transformers); 1 rotates its interleaved even/odd
+    pairs (the Llama paper). The rotation is computed in fp32 and rounded once.
+
+    ``angles`` may have fewer rows than ``x``; each angle row then applies to
+    ``rows / angles.shape[0]`` *consecutive* rows of ``x``, matching the device
+    kernel (``core_body`` acquires one angle row and applies it to that many
     consecutive input rows before moving on).
     """
-    if method_type not in (0, 1):
-        raise ValueError(f"method_type must be 0 or 1, got {method_type}")
-    if cols is None:
-        cols = x.shape[-1]
-    if rows is None:
-        rows = x.shape[0]
-    half = cols // 2
-    cos = angles[..., 0::2].astype(np.float32)
-    sin = angles[..., 1::2].astype(np.float32)
-    if cos.shape[0] != rows:
-        if rows % cos.shape[0] == 0:
-            rep = rows // cos.shape[0]
-            cos = np.repeat(cos, rep, axis=0)
-            sin = np.repeat(sin, rep, axis=0)
-        else:
-            cos = cos[:rows]
-            sin = sin[:rows]
+    rows = x.shape[0]
+    if rows % angles.shape[0] != 0:
+        raise ValueError(
+            f"{rows} rows cannot share {angles.shape[0]} angle rows evenly"
+        )
+    rep = rows // angles.shape[0]
+    cos = np.repeat(angles[..., 0::2].astype(np.float32), rep, axis=0)
+    sin = np.repeat(angles[..., 1::2].astype(np.float32), rep, axis=0)
     x32 = x.astype(np.float32)
-    if method_type == 1:
-        x1, x2 = x32[..., 0::2], x32[..., 1::2]
-    else:
+    if method_type == 0:
+        half = x.shape[-1] // 2
         x1, x2 = x32[..., :half], x32[..., half:]
-    y1 = x1 * cos - x2 * sin
-    y2 = x2 * cos + x1 * sin
-    if method_type == 1:
-        y = np.stack([y1, y2], axis=-1).reshape(x.shape)
+        y = np.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
+    elif method_type == 1:
+        xe, xo = x32[..., 0::2], x32[..., 1::2]
+        y = np.empty_like(x32)
+        y[..., 0::2] = xe * cos - xo * sin
+        y[..., 1::2] = xe * sin + xo * cos
     else:
-        y = np.concatenate([y1, y2], axis=-1)
+        raise ValueError(f"method_type must be 0 or 1, got {method_type}")
     return y.astype(bfloat16)

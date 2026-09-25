@@ -3,7 +3,10 @@
 
 
 import ml_dtypes
+from aie.iron.kernels import activation
 import numpy as np
+
+from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
     BoundValue,
@@ -21,7 +24,6 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
-from iron.common.kernels import lut_sources
 
 
 @operator
@@ -47,26 +49,10 @@ class SoftmaxOverlay(Overlay):
         if self.cols % 16 != 0:
             raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
 
-    def _kernels(self, target, tile_ty):
-        # Both live in softmax.cc, so they name one object: declared separately
-        # they would compile that translation unit twice and each copy would
-        # define both symbols.
-        source = target.kernel_source("softmax")
-        bundle = lut_sources(target.dev)
-        softmax_k = target.kernel(
-            "softmax_bf16",
-            [tile_ty, tile_ty, np.int32],
-            source=source,
-            bundled_sources=bundle,
-            object_file_name="softmax.o",
-        )
-        mask_k = target.kernel(
-            "mask_bf16",
-            [tile_ty, np.int32, np.int32],
-            source=source,
-            bundled_sources=bundle,
-            object_file_name="softmax.o",
-        )
+    def _kernels(self, tile_ty):
+        softmax_k = activation.softmax(self.cols)
+        # mask_bf16 is exported by the same softmax.cc translation unit.
+        mask_k = softmax_k.object_file.bind("mask_bf16", [tile_ty, np.int32, np.int32])
         return softmax_k, mask_k
 
     def design(self, target) -> list:
@@ -76,7 +62,7 @@ class SoftmaxOverlay(Overlay):
         tile_ty = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
         n_cores = cols * chans
-        softmax_k, mask_k = self._kernels(target, tile_ty)
+        softmax_k, mask_k = self._kernels(tile_ty)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
             for i in range(cols)
@@ -179,7 +165,7 @@ def _cases():
 class Softmax(Operator[SoftmaxOverlay]):
     """AIE-accelerated Softmax operation"""
 
-    test = Testing(_cases)
+    test = Testing(_cases, tolerance=Tolerance.relative(0.04, 1e-6))
 
     rows: int = dim()
 

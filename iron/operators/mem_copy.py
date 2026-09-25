@@ -21,7 +21,10 @@ import math
 from dataclasses import dataclass
 from typing import List
 
+from aie.iron.kernels import eltwise
 import numpy as np
+
+from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
     In,
@@ -101,11 +104,9 @@ class MemCopyOverlay(Overlay):
                 ObjectFifo(line_type, name=f"out{i}", depth=fifodepth)
                 for i in range(num_cores)
             ]
-            mem_copy_fcn = target.kernel(
-                "passThroughLine",
-                [line_type, line_type, np.int32],
-                source=target.kernels_dir / "generic" / "passThrough.cc",
-                compile_flags=["-DBIT_WIDTH=16"],
+            # passthrough is the 16-bit passThroughLine; the lines are bf16.
+            mem_copy_fcn = eltwise.passthrough(line_size, np.int16).object_file.bind(
+                "passThroughLine", [line_type, line_type, np.int32]
             )
             num_lines = self.tile_size // line_size
 
@@ -252,7 +253,7 @@ class MemCopy(Operator[MemCopyOverlay]):
     """AIE-accelerated memory copy operator."""
 
     # A copy that alters a value is a broken copy, so gate it exactly.
-    test = Testing(_cases, rel_tol=0.0, abs_tol=0.0)
+    test = Testing(_cases, tolerance=Tolerance.exact())
 
     size: int = dim()
 

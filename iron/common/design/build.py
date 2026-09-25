@@ -162,5 +162,8 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
             # by path (pointing IRON at another tree changes the key).
             "dev": op.dev,
             "kernels_dir": kernels_dir(),
+            # The operator's own trace request inserts the trace flows; a
+            # sequence's trace_size only keeps the lowered module to read.
+            "trace_size": op.trace_size,
         },
     )

@@ -14,38 +14,38 @@ def get_params():
     max_aie_columns = dev.cols
     device_type = dev.resolve().name
     # fmt: off
-    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size
+    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n
     regular_params = [
-        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0),
-        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0),
-        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0),
-        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0),
-        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0),
-        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0),
-        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0),
-        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0),
+        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64),
+        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64),
+        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64),
+        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64),
+        (1792,   896,  1152,               8,     False,      True,  64,  32,  48),
+        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80),
+        ( 192,   384,    64,               4,     False,     False,  48,  96,  16),
+        ( 192,   384,    64,               4,      True,      True,  48,  96,  16),
     ]
     extensive_params = [
-        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0),
-        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0),
-        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0),
-        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0),
-        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0),
-        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0),
-        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0),
-        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0),
-        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0),
-        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0),
-        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0),
+        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128),
+        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64),
+        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64),
+        (2048,    64,  2048,               2,     False,     False,  64,  64,  64),
+        (2048,    64,  8192,               2,     False,     False,  64,  64,  64),
+        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32),
+        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64),
+        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64),
+        (2048,    64,  2048,               2,      True,     False,  64,  64,  64),
+        (2048,    64,  8192,               2,      True,     False,  64,  64,  64),
+        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32),
+        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64),
+        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64),
+        (2048,    64,  2048,               2,     False,      True,  64,  64,  64),
+        (2048,    64,  8192,               2,     False,      True,  64,  64,  64),
         # N wide enough that C's row stride (mem_tile_m_C * N) overflows the
         # shim BD's 20-bit iteration step, so the drain is issued as one
         # descriptor per row-block. Cover for that split.
-        (1024,  2560, 10240,               8,     False,     False,  64,  64,  64,          0),
-        (2048,  2560, 10240,               8,     False,     False,  64,  64,  64,          0),
+        (1024,  2560, 10240,               8,     False,     False,  64,  64,  64),
+        (2048,  2560, 10240,               8,     False,     False,  64,  64,  64),
     ]
     # fmt: on
 
@@ -64,7 +64,6 @@ def get_params():
                 m,
                 k,
                 n,
-                trace_size,
             ) = p
 
             # Skip tests that require more columns than available on the device
@@ -86,7 +85,7 @@ def get_params():
 
 
 @pytest.mark.parametrize(
-    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size",
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n",
     get_params(),
 )
 def test_gemm(
@@ -99,7 +98,6 @@ def test_gemm(
     m,
     k,
     n,
-    trace_size,
     npu_runtime,
 ):
     operator = GEMM(

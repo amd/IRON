@@ -6,6 +6,8 @@ import numpy as np
 
 from typing import ClassVar
 
+from aie.utils.verify import Tolerance
+
 from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
     Incompatible,
@@ -208,7 +210,7 @@ class RMSNorm(Operator[RMSNormOverlay]):
     form with a learned weight row, which a graph call with a weight picks.
     """
 
-    test = Testing(_cases(weighted=False))
+    test = Testing(_cases(weighted=False), tolerance=Tolerance.relative(0.04, 1e-6))
 
     rows: int = dim()
 
@@ -258,7 +260,7 @@ class RMSNorm(Operator[RMSNormOverlay]):
 class WeightedRMSNorm(RMSNorm, Operator[WeightedRMSNormOverlay]):
     """AIE-accelerated RMS Normalization layer with a learned weight row."""
 
-    test = Testing(_cases(weighted=True))
+    test = Testing(_cases(weighted=True), tolerance=Tolerance.relative(0.04, 1e-6))
 
     x = In(RMSNorm.rows, RMSNormOverlay.tile_size, to=RMSNormOverlay.x)
     w = In(RMSNormOverlay.tile_size, to=WeightedRMSNormOverlay.w)

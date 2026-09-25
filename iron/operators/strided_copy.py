@@ -6,6 +6,8 @@ from dataclasses import field
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils.verify import Tolerance
+
 from iron.common.declare import (
     In,
     Operator,
@@ -126,8 +128,7 @@ class StridedCopy(Operator[StridedCopyOverlay]):
             Case(_kv_slot(_SEQ, 5, num_aie_channels=4), id="kv_slot5_four_channels"),
             Case(_kv_slot(2048, 1000), id="kv_llama_full", extensive=True),
         ],
-        rel_tol=0.0,
-        abs_tol=0.0,
+        tolerance=Tolerance.exact(),
     )
 
     input_buffer_size: int = dim(repr=False)

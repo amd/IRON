@@ -14,7 +14,6 @@ in the operator, say -- is discarded and its object never compiled.
 """
 
 import hashlib
-import os
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -24,16 +23,13 @@ from aie.utils.compile.utils import resolve_target_arch
 
 
 def kernels_dir() -> Path:
-    """C++ kernel sources bundled with the installed mlir-aie package.
+    """C++ kernel sources the mlir-aie kernel factories build from.
 
-    ``IRON_AIE_KERNELS_DIR`` points this at a local mlir-aie checkout for
+    ``MLIR_AIE_KERNEL_SOURCES`` points this at a local mlir-aie checkout for
     kernel development. A fact about the install, not a per-build choice,
     which is why it is a function here rather than a field somewhere.
     """
-    override = os.environ.get("IRON_AIE_KERNELS_DIR")
-    if override:
-        return Path(override)
-    return Path(aie.utils.config.root_path()) / "include" / "aie_kernels"
+    return Path(aie.utils.config.aie_kernels_dir())
 
 
 def target_arch(dev=None) -> str:

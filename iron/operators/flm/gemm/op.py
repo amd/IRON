@@ -343,6 +343,8 @@ class FLMGEMMOverlay(Overlay):
         mt_out_ty = self.c.tile
 
         # All three are compiled into mm_fused.cc, so they name one object.
+        # Declared by hand rather than from aie.iron.kernels.fused_mm: this
+        # overlay's -D flags (tile sizes, bfp16 emulation) are its own.
         def fused_kernel(name, arg_types):
             return target.kernel(
                 name,

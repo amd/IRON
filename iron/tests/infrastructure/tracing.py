@@ -1,48 +1,71 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Trace dumps use the upstream tensor's host interface without torch."""
+"""IRON's side of tracing: the full-ELF sequence callable binds, fills and syncs
+the trace buffer mlir-aie's lowering asks for, and dump_traces writes it out.
+
+Trace insertion, the buffer layout and event decoding are mlir-aie's, and tested
+there.
+"""
 
 import json
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
+from aie.utils.trace import TraceConfig
+from ml_dtypes import bfloat16
 
-from iron.common import tracing as tracing_utils
+import iron
+from iron.common.tracing import dump_traces
+from iron.operators import LayerNorm
+
+SIZE = 2048
+TRACE_SIZE = 8192
 
 
-@pytest.mark.parametrize("dtype", [np.int8, np.uint8])
-def test_dump_preserves_raw_trace_bits(monkeypatch, tmp_path, dtype):
-    words = np.array([0xFFFFFFFF, 0x80000000, 0x12345678, 0], dtype=np.uint32)
-    buffer = CPUOnlyTensor(words.view(dtype), dtype=dtype)
-    run = SimpleNamespace(trace_buffer=buffer)
-    monkeypatch.setattr(
-        tracing_utils, "lowered_mlir", lambda run: (tmp_path / "test.mlir", "mlir")
-    )
-    events = [{"name": "event"}]
-
-    def parse(actual, mlir_text, colshift):
-        np.testing.assert_array_equal(actual, words)
-        assert mlir_text == "mlir"
-        assert colshift == 2
-        return [(None, events)]
-
-    monkeypatch.setattr(tracing_utils, "parse_trace_buffer", parse)
-    written = tracing_utils.dump_traces(
-        run, "test", out_dir=tmp_path, colshift=2, summary=False
+def _layer_norm_run(name, trace_size):
+    """A dispatched one-step fused sequence, and its output."""
+    layer_norm = LayerNorm(
+        size=SIZE,
+        num_aie_columns=1,
+        num_channels=1,
+        tile_size=SIZE,
+        trace_size=trace_size,
     )
 
-    assert written == [tmp_path / "test_trace.json"]
-    assert json.loads(written[0].read_text()) == events
-    assert (tmp_path / "test.txt").read_text().splitlines() == [
-        "ffffffff",
-        "80000000",
-        "12345678",
-        "00000000",
-    ]
+    @iron.graph
+    def f(x):
+        return layer_norm(x)
+
+    traced = f.trace(x=(SIZE,))
+    seq = traced.sequence(name, dispatch="fused", trace_size=trace_size).compile()
+    run = seq.get_callable()
+    x = run.get_buffer("x")
+    x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)
+    run()
+    return run, run.get_buffer(traced.output_args[0]).numpy()[:SIZE].copy()
 
 
-def test_untraced_run_needs_no_buffer(tmp_path):
-    assert tracing_utils.dump_traces(SimpleNamespace(), "test", tmp_path) == []
+@pytest.mark.supported_devices("npu2")
+def test_dump_writes_raw_words_and_perfetto_json(npu_runtime, tmp_path):
+    run, traced = _layer_norm_run("infra_trace_layer_norm", TRACE_SIZE)
+    _, untraced = _layer_norm_run("infra_trace_layer_norm_off", 0)
+    assert np.array_equal(
+        traced.view(np.uint16), untraced.view(np.uint16)
+    ), "tracing changed the result"
+
+    written = dump_traces(run, "layer_norm", out_dir=tmp_path, summary=False)
+
+    words = run.trace_buffer.numpy().view(np.uint32).reshape(-1)
+    assert words.any(), "the traced dispatch captured no trace data"
+    # The text reads back as the buffer's 32-bit words, unchanged by the int8
+    # buffer, so it can be reparsed without another dispatch.
+    raw = TraceConfig(
+        trace_size=words.nbytes, trace_file=str(tmp_path / "layer_norm.txt")
+    )
+    assert np.array_equal(raw.read_trace(), words)
+
+    assert written, "a buffer with trace data produced no Perfetto file"
+    for path in written:
+        assert path.parent == tmp_path and path.name.startswith("layer_norm")
+        assert json.loads(path.read_text()), f"{path.name} holds no events"

@@ -11,6 +11,8 @@ import statistics
 
 from iron.common import harness
 import aie.utils as aie_utils
+from aie.utils.benchmark import preflight, provenance
+from aie.utils.probe import npu_unavailable_reason
 
 
 @pytest.fixture
@@ -71,10 +73,21 @@ class CSVReporter:
 
     def finalize_results(self):
         """Compute statistics for all collected metrics"""
+        # The commit alone does not say which toolchain and kernel sources
+        # produced a number; mlir-aie's provenance line does. Only a run that
+        # measured something has used the NPU, so only then is it described:
+        # opening it otherwise would contend for the single-tenant device.
+        measured = any(len(data) > 1 for data in self.test_metrics.values())
+        if measured and aie_utils.DefaultNPURuntime is not None:
+            npu = preflight()
+            source = provenance(device=npu.device, pmode=npu.pmode)
+        else:
+            source = provenance()
         for (test_path, test_name), data in self.test_metrics.items():
             row = {
                 "Commit": self.commit,
                 "Date": self.date,
+                "Provenance": source,
                 "Test Path": test_path,
                 "Test": test_name,
                 "Checks": f"{sum(data['passed'])}/{len(data['passed'])}",
@@ -165,6 +178,10 @@ def pytest_collection_modifyitems(config, items):
         # else holds it and erroring out when none is attached.
         return
 
+    if aie_utils.DefaultNPURuntime is None:
+        # Most often an unsourced XRT, which otherwise surfaces as a pile of
+        # failures that look like a toolchain regression.
+        raise pytest.UsageError(f"No NPU runtime: {npu_unavailable_reason()}")
     device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item, marker in marked_items:
         if device not in marker.args:

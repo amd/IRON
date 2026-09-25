@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 import aie.utils as aie_utils
+from aie.utils.verify import Tolerance
 
 __all__ = [
     "Case",
@@ -67,15 +68,17 @@ class Testing:
     shapes follow the device's width declares. ``draw`` is extra
     :func:`iron.common.harness.vectors` arguments, or a callable of the
     operator returning them (an input that must satisfy the kernel's
-    preconditions: a packed quantization, an angle table). The tolerances
-    are the gate: an operator that only moves data sets both to zero, since
-    any tolerance there also accepts a wrong permutation.
+    preconditions: a packed quantization, an angle table).
+
+    ``tolerance`` is the gate. Left out, it is the contract of the one kernel
+    the operator runs (:meth:`~iron.common.declare.Operator.reference_tolerance`),
+    and an operator whose kernel declares none must state one here. An
+    operator that only moves data states :meth:`Tolerance.exact`, since any
+    other tolerance there also accepts a wrong permutation.
     """
 
     cases: Iterable[Case | dict] | Callable[[], Iterable[Case | dict]]
-    rel_tol: float = 0.04
-    abs_tol: float = 1e-6
-    max_error_rate: float = 0.0
+    tolerance: Tolerance | None = None
     draw: Any = None
 
     def resolve(self) -> list[Case]:

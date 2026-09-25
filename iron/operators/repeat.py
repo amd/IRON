@@ -7,6 +7,8 @@ from dataclasses import field
 import numpy as np
 from ml_dtypes import bfloat16
 
+from aie.utils.verify import Tolerance
+
 from iron.common.declare import (
     In,
     Operator,
@@ -78,8 +80,7 @@ class Repeat(Operator[RepeatOverlay]):
                 extensive=True,
             ),
         ],
-        rel_tol=0.0,
-        abs_tol=0.0,
+        tolerance=Tolerance.exact(),
     )
 
     rows: int = dim()

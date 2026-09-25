@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
 import pytest
 import torch
+from aie.utils.benchmark import run_iters
 
 from iron.common.tracing import dump_traces
 
@@ -90,16 +89,12 @@ def test_swiglu_prefill_stream(k, npu_runtime):
 
     # The first dispatch on a callable pays for its hardware context, so time the
     # ones after it.
-    latencies = []
-    for _ in range(TIMED_RUNS):
-        start = time.perf_counter()
-        run()
-        latencies.append((time.perf_counter() - start) * 1e6)
-    elapsed_us = min(latencies)
+    latency = run_iters(run, iters=TIMED_RUNS).e2e
+    elapsed_us = latency.min_us
     total_bytes = 4 * SEQ_LEN * EMBEDDING_DIM  # bf16 in + out
     print(
         f"Latency min/mean/max (us): {elapsed_us:.2f} / "
-        f"{sum(latencies) / len(latencies):.2f} / {max(latencies):.2f}"
+        f"{latency.avg_us:.2f} / {latency.max_us:.2f}"
     )
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)

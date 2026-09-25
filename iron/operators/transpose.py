@@ -4,8 +4,11 @@
 
 import dataclasses
 
+from aie.iron.kernels import datamovement
 import numpy as np
 from ml_dtypes import bfloat16
+
+from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
     Incompatible,
@@ -90,12 +93,7 @@ class TransposeOverlay(Overlay):
         # The memtile reshuffle: sizes/strides only, so it is extent-free.
         l2l1 = [m // s, s, n // s, s], [s, m, s * m, 1]
 
-        kernel = target.kernel(
-            f"transpose_{s}x{s}",
-            [tile_ty, tile_ty],
-            source=target.kernels_dir / "generic" / "transpose.cc",
-            compile_flags=[f"-DDIM_m={m}", f"-DDIM_n={n}"],
-        )
+        kernel = datamovement.transpose(m, n, s)
         of_l3l2 = [
             ObjectFifo(tile_ty, name=f"of_in1s_L3L2_{i}_{j}", depth=depth)
             for i in range(cols)
@@ -217,7 +215,7 @@ class Transpose(Operator[TransposeOverlay]):
 
     # A transpose is a permutation. Any tolerance here also accepts some class
     # of wrong permutation, so gate it exactly.
-    test = Testing(_cases, rel_tol=0.0, abs_tol=0.0)
+    test = Testing(_cases, tolerance=Tolerance.exact())
 
     M: int = dim()
     N: int = dim()

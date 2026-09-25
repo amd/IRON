@@ -22,12 +22,10 @@ holds::
 On an untraced build the call returns an empty list, so a test can call it
 unconditionally.
 
-A dump writes the raw 32-bit words as hex text, plus one JSON file per traced
-design for https://ui.perfetto.dev. Keep the text: :func:`parse_trace_buffer`
-reparses it with a different column shift for the price of no further dispatch.
-
-:func:`dump_traces` also prints mlir-aie's per-tile cycles summary for each file it
-writes.
+The writing and decoding are mlir-aie's ``TraceConfig``: a dump is its raw trace
+text, which ``TraceConfig.read_trace`` reads back to reparse without a further
+dispatch, plus one JSON file per traced design for https://ui.perfetto.dev.
+:func:`dump_traces` also prints mlir-aie's per-tile cycles summary for each.
 
 Environment:
   * ``IRON_TRACE_DIR``      where to write (default ``outputs/traces``)
@@ -37,21 +35,20 @@ Environment:
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import numpy as np
 
 import aie.utils.trace as trace_utils
-from aie.utils.trace import parse_trace_slices, print_cycles_summary
+from aie.utils.trace import TraceConfig, print_cycles_summary
+
+from .image.callable import SequenceCallable, SequenceFullELFCallable
 
 __all__ = [
     "maybe_enable_trace",
     "resolve_trace_size",
     "dump_traces",
-    "parse_trace_buffer",
-    "lowered_mlir",
 ]
 
 
@@ -122,84 +119,42 @@ def maybe_enable_trace(prog, trace_size, workers, coretile_events=None):
 DEFAULT_TRACE_DIR = "outputs/traces"
 
 
-def lowered_mlir(run) -> tuple[Path, str]:
-    """The post-lowering MLIR for a callable, as ``(path, text)``.
-
-    mlir-aie's trace parser matches ``aiex.npu.write32`` ops against the trace unit's
-    config addresses. ``aie-insert-trace-flows`` emits those writes inside aiecc, so
-    the parser needs aiecc's lowered module. A traced build requests it with
-    ``--get-input-with-addresses``, and it lands in the build's cache entry,
-    which the image's record names.
-    """
-    override = os.environ.get("IRON_TRACE_MLIR")
-    if override:
-        path = Path(override)
-        return path, path.read_text()
-
-    path = run.op.artifacts.lowered_mlir
-    if path is None:
-        raise FileNotFoundError(
-            "the build produced no input_with_addresses.mlir; a traced build "
-            "passes --get-input-with-addresses to aiecc. Point IRON_TRACE_MLIR "
-            "at a lowered module to override."
-        )
-    return path, path.read_text()
-
-
-def parse_trace_buffer(words, mlir_text: str, colshift: int | None = None):
-    """A trace buffer's words as ``(slice_info, events)`` per traced design.
-
-    The parser splits the buffer by the layout the compiler recorded on the
-    dispatched sequence, and decodes each region against the device that wrote it.
-
-    ``colshift`` of None lets the parser align the columns itself, which is what you
-    want by default: a design configured for one column may be loaded into another.
-    Override it when that alignment picks the wrong columns.
-
-    The parser calls ``sys.exit`` on some malformed input, so SystemExit becomes a
-    RuntimeError here: a visualisation failure must not fail a test.
-    """
-    try:
-        return parse_trace_slices(
-            np.asarray(words, dtype=np.uint32), mlir_text, colshift
-        )
-    except SystemExit as exc:
-        raise RuntimeError(
-            "mlir-aie's trace parser exited; the usual cause is an MLIR without the "
-            "trace register writes, or a column shift that does not match the data. "
-            "Run with logging at DEBUG to see the tiles it found."
-        ) from exc
-
-
 def _slug(text: str) -> str:
     keep = "-_."
     return "".join(c if c.isalnum() or c in keep else "_" for c in text)
 
 
 def dump_traces(
-    run,
+    run: SequenceCallable,
     tag: str,
-    out_dir=None,
+    out_dir: str | Path | None = None,
     colshift: int | None = None,
     summary: bool = True,
 ) -> list[Path]:
-    """Write a completed run's trace buffer as hex text and Perfetto JSON.
+    """Write a completed run's trace buffer as trace text and Perfetto JSON.
 
     Call it after ``run()``: the callable syncs its trace buffer device->host as part
     of the dispatch, so this only reads host memory. Returns the JSON paths written,
     empty on an untraced build.
 
     ``tag`` distinguishes one dump from another - a test name or parameter id. The
-    layout the compiler recorded on the dispatched sequence splits the buffer, so a
-    fused sequence yields one JSON file per configured design.
+    text goes to ``<tag>.txt``. A fused sequence shares the buffer between the
+    designs it configures, and each gets its own
+    ``<tag>_<index>_<device>_<sequence>.json``; otherwise the JSON is ``<tag>.json``.
+
+    ``colshift`` of None lets the parser align the columns itself, which is what you
+    want by default: a design configured for one column may be loaded into another.
+    Override it when that alignment picks the wrong columns.
     """
-    buffer = getattr(run, "trace_buffer", None)
-    if buffer is None:
-        if getattr(getattr(run, "op", None), "trace_size", 0):
+    if not isinstance(run, SequenceFullELFCallable):
+        if run.op.trace_size:
             raise TypeError(
-                f"{type(run).__name__} was built with tracing enabled but exposes no "
-                "trace_buffer; only the full-ELF sequence callable allocates one."
+                f"{type(run).__name__} was built with tracing enabled but has no "
+                "trace buffer; only the full-ELF sequence callable allocates one."
             )
+        return []
+    buffer = run.trace_buffer
+    if buffer is None:
         return []
 
     out_dir = Path(out_dir or os.environ.get("IRON_TRACE_DIR", DEFAULT_TRACE_DIR))
@@ -209,38 +164,32 @@ def dump_traces(
         env = os.environ.get("IRON_TRACE_COLSHIFT")
         colshift = int(env) if env else None
 
-    mlir_path, mlir_text = lowered_mlir(run)
-    print(f"[trace] parsing against {mlir_path}")
-
     words = buffer.numpy().view(np.uint32).reshape(-1)
     tag = _slug(tag)
-    raw = (out_dir / tag).with_suffix(".txt")
-    raw.write_text("\n".join(f"{w:08x}" for w in words) + "\n")
+    config = TraceConfig(
+        trace_size=words.nbytes, trace_file=str(out_dir / f"{tag}.txt")
+    )
+    config.write_trace(words)
     if not words.any():
         print("[trace] buffer is all zeros, no trace data captured")
         return []
 
+    mlir = os.environ.get("IRON_TRACE_MLIR") or run.lowered_mlir_path
+    print(f"[trace] parsing against {mlir}")
     try:
-        parsed = parse_trace_buffer(words, mlir_text, colshift)
+        written = config.trace_to_json(
+            str(mlir),
+            str(out_dir / f"{tag}.json"),
+            colshift=colshift,
+            kernel=f"{run.device_name}:{run.sequence_name}",
+        )
     except Exception as exc:  # a visualisation failure must not fail a run
-        print(f"[trace] parse failed ({exc}); raw words kept at {raw}")
+        print(f"[trace] parse failed ({exc}); raw words kept at {config.trace_file}")
         return []
 
-    written = []
-    for index, (entry, events) in enumerate(parsed):
-        # A device may hold several runtime sequences, so both names identify a slice.
-        name = f"{index}_{entry['device']}_{entry['sequence']}" if entry else "trace"
-        if entry and words[(entry["offset"] + entry["size"]) // 4 - 1]:
-            print(
-                f"[trace] {name}: slice full ({entry['size']} B), trace is likely "
-                "truncated - raise IRON_TRACE_SIZE"
-            )
-
-        target = (out_dir / f"{tag}_{_slug(name)}").with_suffix(".json")
-        target.write_text(json.dumps(events))
-        print(f"[trace] {target} ({len(events)} events)")
-        written.append(target)
-
+    paths = [Path(p) for p in written]
+    for path in paths:
+        print(f"[trace] {path}")
         if summary:
-            print_cycles_summary(target)
-    return written
+            print_cycles_summary(path)
+    return paths

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from aie.dialects.aie import WireBundle, get_target_model
+from aie.utils.verify import Tolerance
 
 from .bound import BoundResident, BoundStream, BoundValue
 from .field import Untunable
@@ -26,6 +27,7 @@ from .member import Resident, Xclbin, _Member, _Stream, _Value
 from .naming import label_parts
 
 if TYPE_CHECKING:
+    from ..design.target import Target
     from .operator import Operator
 
 
@@ -167,6 +169,17 @@ class Overlay:
         ``.bind(buffers)`` on every declared resident.
         """
         raise NotImplementedError(f"{type(self).__name__}.design() is not implemented")
+
+    def tolerance(self, target: Target) -> Tolerance | None:
+        """How close this array's output comes to the operator's reference:
+        the contract of the kernel it runs.
+
+        ``None`` here: an overlay that builds several kernels in
+        :meth:`design` has no one contract that speaks for its output, so its
+        operator states a tolerance itself. An overlay running one kernel
+        overrides this with that kernel's contract.
+        """
+        return None
 
     # -- library surface ---------------------------------------------------
 

@@ -202,16 +202,14 @@ def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
     logits, state = llama_npu.llama_forward_pass(config, state)
     assert logits.shape == (1, 1, config.vocab_size)
 
-    # llama_forward_pass returns numpy, as every image does; the oracle it is
-    # judged against is torch, so the comparison happens on that side.
-    def as_torch(row):
-        return torch.from_numpy(np.asarray(row).astype(np.float32))
-
-    _assert_close([as_torch(logits[0, -1])], [first])
+    # The images return numpy; llama_forward_pass hands the harness torch,
+    # which it samples and scores in.
+    assert isinstance(logits, torch.Tensor)
+    _assert_close([logits[0, -1].float()], [first])
     got, token = [], int(logits[0, -1].argmax())
     for _ in range(len(expected)):
         state.token_ids = torch.tensor(token).reshape(1, 1)
         logits, state = llama_npu.llama_forward_pass(config, state)
-        got.append(as_torch(logits[0, -1]))
+        got.append(logits[0, -1].float())
         token = int(logits[0, -1].argmax())
     _assert_close(got, expected)

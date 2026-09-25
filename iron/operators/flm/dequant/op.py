@@ -8,6 +8,7 @@ import numpy as np
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.util import v8bfp16ebs8
+from aie.iron.kernels import quant
 
 from iron.common.declare import (
     In,
@@ -116,19 +117,11 @@ class FLMDequantOverlay(Overlay):
         qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
         out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
-        kernel = target.kernel(
-            "q4nx_dequant_bfp",
-            [qw_blk_ty, out_blk_ty],
-            source=target.kernels_dir / "generic" / "q4nx_dequant.cc",
-            compile_flags=[
-                f"-DQ4NX_M_TILE={M_TILE}",
-                f"-DQ4NX_K_TILE={K_TILE}",
-                f"-DQ4NX_GROUP={GROUP}",
-                f"-DQ4NX_CT_K={CT_K}",
-                f"-DQ4NX_S={S}",
-                f"-DQ4NX_T={T}",
-            ],
-        )
+        # The factory declares both operands in bytes; the output FIFO carries
+        # bfp16ebs8 blocks.
+        kernel = quant.q4nx_dequant(
+            m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
+        ).object_file.bind("q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty])
 
         def core_body(qw_in, out_of, k):
             qw = qw_in.acquire(1)

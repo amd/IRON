@@ -172,11 +172,14 @@ class StreamKernel:
 
 
 GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, declare=_gemm_declare)
-SILU = StreamKernel(key="silu", layouts=lambda: elementwise_layouts(2), source="silu")
+SILU = StreamKernel(
+    key="silu", layouts=lambda: elementwise_layouts(2), source="silu", subdir="generic"
+)
 ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
     layouts=lambda: elementwise_layouts(3),
     source="mul",
+    subdir="generic",
 )
 
 Silu = custom_op("Silu")

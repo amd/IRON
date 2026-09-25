@@ -5,6 +5,8 @@ import dataclasses
 from dataclasses import field
 from typing import ClassVar
 
+from aie.iron.kernels import datamovement
+from aie.iron.kernels.datamovement import expand_ref
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -54,15 +56,7 @@ class DequantOverlay(ChanneledUnaryOverlay):
         return dataclasses.replace(tuned, in_tile=packed)
 
     def kernel(self, target):
-        return target.kernel(
-            "expand_uint4_to_bfloat16",
-            [self.x.tile, self.y.tile],
-            source=target.kernels_dir / "generic" / "expand.cc",
-            compile_flags=[
-                f"-DTILE_SIZE={self.tile_size}",
-                f"-DGROUP_SIZE={self.group_size}",
-            ],
-        )
+        return datamovement.expand(self.tile_size, self.group_size)
 
     def kernel_call(self, kernel, elem_in, elem_out) -> None:
         # The tile size is a compile flag, not an argument.
@@ -107,7 +101,7 @@ def _packed(op):
 class Dequant(Operator[DequantOverlay]):
     """AIE-accelerated dequantization operator"""
 
-    test = Testing(_cases, rel_tol=0.01, draw=_packed)
+    test = Testing(_cases, draw=_packed)
 
     size: int = dim()
     # The packed input's length: two 4-bit values per byte plus a bf16 scale
@@ -169,7 +163,9 @@ class Dequant(Operator[DequantOverlay]):
         # np.round is round-half-to-even, as torch.round is.
         q = np.clip(np.round(v / s), 0, 15).astype(np.uint8)
         nibbles = (q[..., 0::2] | (q[..., 1::2] << 4)).reshape(n_tiles, tile // 2)
-        scale_bytes = np.ascontiguousarray(scales.reshape(n_tiles, groups)).view(np.uint8)
+        scale_bytes = np.ascontiguousarray(scales.reshape(n_tiles, groups)).view(
+            np.uint8
+        )
         return np.concatenate(
             [nibbles, scale_bytes.reshape(n_tiles, -1)], axis=1
         ).reshape(-1)
@@ -185,12 +181,5 @@ class Dequant(Operator[DequantOverlay]):
         tile, group = self.ov.tile_size, self.ov.group_size
         if tile is None:
             raise ValueError("Dequant.reference needs tile_size (tune the overlay)")
-        n_tiles, groups = self.size // tile, tile // group
-        packed = x.reshape(n_tiles, tile // 2 + groups * 2)
-        nibbles = packed[:, : tile // 2].astype(np.int32)
-        q = np.stack([nibbles & 0xF, nibbles >> 4], axis=-1).reshape(
-            n_tiles, groups, group
-        )
-        scales = np.ascontiguousarray(packed[:, tile // 2 :].reshape(n_tiles, groups, 2))
-        scales = scales.view(bfloat16).astype(np.float32)  # (n_tiles, groups, 1)
-        return (q.astype(np.float32) * scales).reshape(self.size)
+        tiles = x.reshape(self.size // tile, -1)
+        return expand_ref(tiles, tile_size=tile, group_size=group).reshape(self.size)

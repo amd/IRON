@@ -28,11 +28,13 @@ from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
+from aie.utils.verify import Tolerance
 
 from iron.common.image import OperatorSequence, build_fused_mlir
 from iron.common.harness import verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
+from iron.operators.tanh import Tanh
 
 
 def _set_input(run, name, data):
@@ -200,7 +202,7 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
 #     rather than a hand-rolled numpy view. Not covered by
 #     test_dispatch_modes_bit_identical above, since reference() is a CPU
 #     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see SequenceCompareCallable's rel_tol/abs_tol).
+#     tolerance, not bit-for-bit (see SequenceCompareCallable's tolerance).
 # ---------------------------------------------------------------------------
 
 _SLICE_SIZE = 1024
@@ -255,37 +257,31 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 
 
 # ---------------------------------------------------------------------------
-# 4. Compare mode flags (and by default raises on) a per-step reference/NPU
-#    mismatch on its own.
+# 4. Compare mode holds each step to its kernel's contract, and flags (and by
+#    default raises on) a step that falls outside the tolerance it is judged by.
 #
-#    Normally the reference is trusted and the NPU kernel is the suspect; here
-#    we invert that (keep the NPU correct, vary the reference) because it is
-#    easier to inject a known-wrong reference than a known-wrong kernel.
+#    Tanh's kernel approximates np.tanh: within its contract, but not
+#    bit-exact. So the same NPU output must pass under the default tolerance
+#    and fail under an exact one.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reference_is_correct", [True, False])
-def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime):
+@pytest.mark.parametrize("exact", [False, True])
+def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
-    operator's ``reference()`` on the same NPU inputs. A correct reference must
-    run cleanly (no flagged step); a wrong one must make compare mode raise on
-    its own (``compare_raise_on_mismatch`` defaults to True)."""
-    size = 256
+    operator's ``reference()`` on the same NPU inputs. Under its kernel's
+    contract the step runs cleanly (no flagged step); held to exact equality it
+    makes compare mode raise on its own (``raise_on_mismatch`` defaults to
+    True)."""
+    size = 1024
     rng = np.random.default_rng(0)
-    a = rng.random(size).astype(bfloat16)
-    b = rng.random(size).astype(bfloat16)
+    x = rng.random(size).astype(bfloat16) * 4
 
-    op = ElementwiseAdd(size=size, tile_size=256, num_aie_columns=1)
-    if not reference_is_correct:
-        # Override the reference on this instance to disagree with the NPU
-        # kernel (which computes a + b). Keeping the real ElementwiseAdd class
-        # leaves its name/compilation intact for the xclbin compare path.
-        op.reference = lambda a, b: a + b + 1.0
-
+    op = Tanh(size=size, num_aie_columns=1, num_channels=1, tile_size=size)
     seq = OperatorSequence(
-        name="infra_compare_add",
-        runlist=[(op, "a", "b", "out")],
-        input_args=["a", "b"],
+        name="infra_compare_tanh",
+        runlist=[(op, "x", "out")],
+        input_args=["x"],
         output_args=["out"],
         dispatch="compare",
     )
@@ -293,16 +289,17 @@ def test_compare_mode_detects_wrong_reference(reference_is_correct, npu_runtime)
     assert seq.mode == "compare"
 
     run = seq.get_callable()
-    _set_input(run, "a", a)
-    _set_input(run, "b", b)
+    if exact:
+        run.tolerance = Tolerance.exact()
+    _set_input(run, "x", x)
 
-    if reference_is_correct:
+    if exact:
+        with pytest.raises(RuntimeError, match="deviates from reference"):
+            run()
+    else:
         run()  # must not raise
         flagged = any(step.get("mismatch") for step in run.last_step_stats)
-        assert not flagged, "compare mode should not flag a matching reference"
-    else:
-        with pytest.raises(RuntimeError):
-            run()  # compare mode reports the wrong reference by itself
+        assert not flagged, "compare mode flagged a step within its kernel contract"
 
 
 # ---------------------------------------------------------------------------

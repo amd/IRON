@@ -9,10 +9,8 @@ import numpy as np
 import torch
 from ml_dtypes import bfloat16
 
-from .graphs import _np
-
 from . import harness
-from .graphs import DecodeGraph, PrefillGraph
+from .graphs import DecodeGraph, PrefillGraph, _np, _torch
 
 max_seq_len = 2048
 
@@ -53,16 +51,15 @@ def llama_forward_pass_prefill(config, state):
     x[:seq_len] = _np(
         torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
     ).reshape(seq_len, config.emb_dim)
-    # The last prompt row's logits only, selected by its element offset.
-    logits = (
+    # The last prompt row's logits only, selected by its element offset. The
+    # harness samples and scores in torch, so the logits cross over here.
+    logits = _torch(
         npu.prefill(
             x,
             _np(config.angles)[:max_seq_len],
             last=(seq_len - 1) * config.emb_dim,
-        )
-        .numpy()
-        .reshape(1, 1, config.vocab_size)
-    )
+        ).numpy()
+    ).reshape(1, 1, config.vocab_size)
     npu.prefill_to_decode(config)
     return logits, state
 
@@ -92,16 +89,14 @@ def llama_forward_pass_decode(config, state):
         torch.nn.functional.embedding(state.token_ids, config.model.out_head.weight)
     )
 
-    logits = (
+    logits = _torch(
         npu.decode(
             x.reshape(1, config.emb_dim),
             angles.reshape(1, config.head_dim),
             cache_offset=cache_offset,
             vector_size=context_len,
-        )
-        .numpy()
-        .reshape(1, 1, config.vocab_size)
-    )
+        ).numpy()
+    ).reshape(1, 1, config.vocab_size)
     return logits, state
 
 
@@ -126,15 +121,45 @@ def main():
     logging.basicConfig(level=logging.DEBUG)
     args = harness.parse_args()
 
-    assert max_seq_len >= args.prompt_len + args.num_tokens, (
-        "max_seq_len must be at least prompt_len + num_tokens"
-    )
+    assert (
+        max_seq_len >= args.prompt_len + args.num_tokens
+    ), "max_seq_len must be at least prompt_len + num_tokens"
 
     prompt = harness.get_prompt(args.prompt_len)
 
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
 
     npu = AIELlama(config)
+
+    if args.check_accuracy:
+        results = harness.check_accuracy(
+            config,
+            state,
+            llama_forward_pass,
+            config,
+            harness.LlamaModelState(config),
+            harness.ReferenceForward(config),
+            args.num_tokens,
+        )
+        kl = [k for k, _ in results]
+        print(f"[Accuracy] Prefill KL: {kl[0]:.6f}")
+        if len(kl) > 1:
+            print(f"[Accuracy] Decode max KL: {max(kl[1:]):.6f}")
+        print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
+        return
+
+    if args.check_determinism:
+        # The second prompt is the same amount of the text that follows.
+        other = harness.get_prompt(2 * args.prompt_len)[args.prompt_len :]
+        other_ids = [config.special_tokens["<|begin_of_text|>"]]
+        other_ids += config.tokenizer.encode(other)
+        prompts = [state.token_ids, torch.tensor([other_ids], dtype=torch.long)]
+        n_differ = harness.check_determinism(
+            config, prompts, llama_forward_pass, args.num_tokens, args.check_determinism
+        )
+        n_compared = len(prompts) * (args.check_determinism - 1)
+        print(f"[Determinism] Differing runs: {n_differ}/{n_compared}")
+        return
 
     print(prompt, end="", flush=True)
     harness.generate(config, state, llama_forward_pass, num_tokens=args.num_tokens)

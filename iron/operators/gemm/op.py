@@ -26,23 +26,6 @@ from iron.common.declare import (
     tunable,
 )
 
-_DTYPES = {
-    "bf16": bfloat16,
-    "f32": np.float32,
-    "i8": np.int8,
-    "i16": np.int16,
-    "i32": np.int32,
-}
-
-
-def _dtype_str(t) -> str:
-    for name, dt in _DTYPES.items():
-        if dt is t:
-            return name
-    from aie.iron import dtype_to_str
-
-    return dtype_to_str(t)
-
 
 def ceildiv(a, b):
     return (a + b - 1) // b
@@ -197,24 +180,6 @@ class GEMMOverlay(Overlay):
 
     # -- kernels ------------------------------------------------------------
 
-    def kernel_flags(self, target) -> list[str]:
-        """The -D set that decides what mm.cc compiles to."""
-        flags = [
-            f"-DDIM_M={self.tile_m}",
-            f"-DDIM_K={self.tile_k}",
-            f"-DDIM_N={self.tile_n}",
-        ]
-        flags.append("-Dbf16_f32_ONLY" if self.prio_accuracy else "-Dbf16_bf16_ONLY")
-        if self.round_conv_even:
-            flags.append("-DROUND_CONV_EVEN")
-        if self.emulate_bf16_mmul_with_bfp16:
-            flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
-        if self.b_col_maj:
-            flags.append("-DB_COL_MAJ")
-        if self.c_col_maj:
-            flags.append("-DC_COL_MAJ")
-        return flags
-
     def device(self, target):
         from aie.iron.device import NPU1, NPU1Col1, NPU1Col2, NPU2
 
@@ -237,7 +202,6 @@ class GEMMOverlay(Overlay):
         b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
         use_scalar = self.use_scalar
         dtype_in, dtype_out = self.dtype_in, self.dtype_out
-        dtype_in_str, dtype_out_str = _dtype_str(dtype_in), _dtype_str(dtype_out)
         use_larger_internal_buffer = self.prio_accuracy
         if use_larger_internal_buffer:
             # bfloat16 accumulates in place in an f32 buffer, converted to bf16
@@ -261,49 +225,34 @@ class GEMMOverlay(Overlay):
         B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
         C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
 
-        # AIE Core Function declarations
-        scalar_suffix = "_scalar" if use_scalar else ""
-        # matmul is the only entry point this design takes out of mm.cc, so it
-        # can have the object to itself. Clearing the accumulator used to ride
-        # along in that same object -- mm.cc emitted a zero_<type> beside every
-        # matmul_ it defined -- and is now upstream's own kernel, parameterised
-        # by tile and element type rather than picked out by symbol name.
-        mm_object = f"gemm_{m}x{k}x{n}.o"
-        kernel_source = target.kernel_source("mm")
-        kernel_flags = self.kernel_flags(target)
+        # AIE Core Function declarations: upstream's factories, which pick the
+        # source and the -D set for the device they are resolved against.
+        # prio_accuracy accumulates in f32 in L1 and converts on the way out,
+        # so the matmul's C, and the buffer that gets zeroed, are f32 even
+        # when C is bf16. All three kernels declare their buffers flat.
+        dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
+        matmul_kernel = kernels.linalg.mm(
+            m,
+            k,
+            n,
+            input_dtype=dtype_in,
+            output_dtype=dtype_acc,
+            vectorized=not use_scalar,
+            b_col_maj=b_col_maj,
+            c_col_maj=c_col_maj,
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            round_conv_even=self.round_conv_even,
+        )
+        zero_kernel = kernels.zero(m * n, dtype_acc, vectorized=not use_scalar)
         convert_copy_kernel = None
         if use_larger_internal_buffer:
             # Fix fifo depth for C objfifo to 1 since 1 buffer will be used for
             # accumulation and another for transfer to L2
             fifo_depth_out = 1
-            C_l1_ty_internal = np.ndarray[(m, n), np.dtype[dtype_out_internal]]
-            convert_copy_kernel = target.kernel(
-                "cast_f32_bf16_row",
-                [C_l1_ty_internal, C_l1_ty, np.int32],
-                source=target.kernels_dir / "aie2p" / "cast_f32_bf16.cc",
-            )
-            zero_kernel = kernels.zero(
-                tile_size=(m, n), dtype=dtype_out_internal, vectorized=not use_scalar
-            )
-            matmul_kernel = target.kernel(
-                f"matmul{scalar_suffix}_{dtype_in_str}_f32",
-                [A_l1_ty, B_l1_ty, C_l1_ty_internal],
-                source=kernel_source,
-                compile_flags=kernel_flags,
-                object_file_name=mm_object,
-            )
+            C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
+            convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
         else:
             fifo_depth_out = fifo_depth
-            zero_kernel = kernels.zero(
-                tile_size=(m, n), dtype=dtype_out, vectorized=not use_scalar
-            )
-            matmul_kernel = target.kernel(
-                f"matmul{scalar_suffix}_{dtype_in_str}_{dtype_out_str}",
-                [A_l1_ty, B_l1_ty, C_l1_ty],
-                source=kernel_source,
-                compile_flags=kernel_flags,
-                object_file_name=mm_object,
-            )
 
         # AIE-array data movement with object fifos
         A_l3l2_fifos = [None] * n_shim_mem_A

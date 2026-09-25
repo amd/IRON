@@ -6,6 +6,8 @@ from dataclasses import field
 from typing import ClassVar
 
 import numpy as np
+from aie.iron.kernels import activation, linalg
+from ml_dtypes import bfloat16
 
 from iron.common.declare import (
     Incompatible,
@@ -151,13 +153,14 @@ class GEMVOverlay(Overlay):
         # ExternalFunction registers itself into a process-global set that
         # CompilableDesign clears when it starts generating, so anything built
         # before that is discarded.
-        func_type = "vectorized" if vectorized else "scalar"
-        matvec = target.kernel(
-            f"matvec_{func_type}_bf16_bf16",
-            [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
-            source=target.kernels_dir / "generic" / "mv.cc",
-            # mv.cc is a template over both: one source, one object per shape.
-            compile_flags=[f"-DDIM_K={K}", f"-DVEC_SIZE={self.kernel_vector_size}"],
+        matvec = linalg.mv(
+            tile_size_input,
+            K,
+            bfloat16,
+            bfloat16,
+            vectorized=vectorized,
+            vec_size=self.kernel_vector_size,
+            output_rows=tile_size_output,
         )
         # Optional fused activation over the full tile_size_output C-tile, applied
         # once per tile in core_body (after the matvec inner-loop has filled all
@@ -170,13 +173,13 @@ class GEMVOverlay(Overlay):
                     "gemv gelu epilogue is only available on NPU2 (aie2p); "
                     f"current kernel dir is {target.arch!r}"
                 )
-            # A second object, not an archive bundled with the first: each
-            # func.func carries its own link_with and aie-assign-core-link-files
+            # gelu.cc's in-place gelu_tile_bf16, which only aie2p's gelu.cc
+            # exports; it rides in the object the gelu factory builds. A second
+            # object, not an archive bundled with the first: each func.func
+            # carries its own link_with and aie-assign-core-link-files
             # aggregates them onto the core.
-            gelu_kernel = target.kernel(
-                "gelu_tile_bf16",
-                [np.int32, L1_C_ty],
-                source=target.kernels_dir / "aie2p" / "gelu.cc",
+            gelu_kernel = activation.gelu().object_file.bind(
+                "gelu_tile_bf16", [np.int32, L1_C_ty]
             )
 
         A_L3L1_fifos = [
@@ -376,9 +379,9 @@ class GEMV(Operator[GEMVOverlay]):
             # safe: a producer that gets ahead blocks on the buffer lock (worst
             # case a stall, never a corrupting overrun). depth>=2 only buys
             # overlap of fill with compute, so it is a performance guard here.
-            assert ov.a.depth >= 2 and ov.c.depth >= 2, (
-                "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
-            )
+            assert (
+                ov.a.depth >= 2 and ov.c.depth >= 2
+            ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
             A_coalesced = [
                 coalesced(A_elems, col * (M // cols) * K, A_split, A_bstride)
                 for col in range(cols)

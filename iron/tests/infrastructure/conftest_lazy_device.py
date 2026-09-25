@@ -2,100 +2,94 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The root conftest.py's pytest_collection_modifyitems must not resolve a
-device unless some collected test restricts itself to specific devices via
-@pytest.mark.supported_devices. Resolving one unconditionally opens the
-single-tenant NPU on every plain `pytest` in this tree, whatever was selected.
+"""The root conftest.py's device gating, run as a real pytest session.
 
-pytest loads the root conftest.py for these tests too, so the hook under test
-is imported by path instead and called directly, against fake items and a
-stubbed aie_utils.DefaultNPURuntime that raises if .device() is reached.
+Its pytest_collection_modifyitems must not resolve a device unless some collected
+test restricts itself via @pytest.mark.supported_devices: resolving one opens the
+single-tenant NPU on every plain `pytest` in this tree, whatever was selected.
+When a test does restrict itself, it skips the tests this device is not listed
+for, and stops with the reason when there is no NPU runtime at all.
+
+Each case runs pytest in a subprocess, over a directory holding a copy of the
+root conftest and one test module. The no-runtime cases hide pyxrt from it,
+which is what an unsourced XRT amounts to and the setup the laziness exists for.
 """
 
 import importlib.util
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 
-
-def _load_root_conftest():
-    spec = importlib.util.spec_from_file_location(
-        "_root_conftest_under_test", _ROOT_CONFTEST
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+_INI = """\
+[pytest]
+markers =
+    supported_devices(*devices): only supported on the given devices
+"""
 
 
-class _FakeMarker:
-    def __init__(self, *args):
-        self.args = args
-
-
-class _FakeItem:
-    def __init__(self, marker=None):
-        self._marker = marker
-        self.markers_added = []
-
-    def get_closest_marker(self, name):
-        assert name == "supported_devices"
-        return self._marker
-
-    def add_marker(self, marker):
-        self.markers_added.append(marker)
-
-
-class _DeviceCalledError(Exception):
-    pass
-
-
-def _stub_runtime_that_forbids_device_calls(root_conftest, monkeypatch):
-    def _raise():
-        raise _DeviceCalledError(
-            "DefaultNPURuntime.device() was called with no marked test collected"
-        )
-
-    monkeypatch.setattr(
-        root_conftest.aie_utils,
-        "DefaultNPURuntime",
-        SimpleNamespace(device=_raise),
+def _pytest(tmp_path, test_source, without_xrt=False):
+    """Run pytest over one test module under the root conftest."""
+    shutil.copy(_ROOT_CONFTEST, tmp_path / "conftest.py")
+    (tmp_path / "pytest.ini").write_text(_INI)
+    (tmp_path / "test_gated.py").write_text(test_source)
+    env = dict(os.environ)
+    pyxrt = importlib.util.find_spec("pyxrt")
+    if without_xrt and pyxrt is not None:
+        hidden = os.path.dirname(pyxrt.origin)
+        entries = env.get("PYTHONPATH", "").split(os.pathsep)
+        if hidden not in entries:
+            pytest.skip(f"pyxrt is installed, not on PYTHONPATH: {pyxrt.origin}")
+        env["PYTHONPATH"] = os.pathsep.join(p for p in entries if p != hidden)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
+        + ["--iterations", "1", "-v", "test_gated.py"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
     )
 
 
-def test_no_device_probe_when_nothing_is_device_restricted(monkeypatch):
-    root_conftest = _load_root_conftest()
-    _stub_runtime_that_forbids_device_calls(root_conftest, monkeypatch)
-
-    items = [_FakeItem(), _FakeItem(), _FakeItem()]
-    root_conftest.pytest_collection_modifyitems(config=None, items=items)
-    assert all(item.markers_added == [] for item in items)
-
-
-def test_device_probed_and_unsupported_items_skipped_when_a_test_is_restricted(
-    monkeypatch,
-):
-    root_conftest = _load_root_conftest()
-
-    class _FakeDevice:
-        def resolve(self):
-            return SimpleNamespace(name="npu2")
-
-    monkeypatch.setattr(
-        root_conftest.aie_utils,
-        "DefaultNPURuntime",
-        SimpleNamespace(device=lambda: _FakeDevice()),
+def test_unrestricted_tests_need_no_npu_runtime(tmp_path):
+    result = _pytest(
+        tmp_path,
+        "def test_plain():\n    pass\n",
+        without_xrt=True,
     )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
 
-    unrestricted = _FakeItem()
-    matches_device = _FakeItem(_FakeMarker("npu1", "npu2"))
-    excludes_device = _FakeItem(_FakeMarker("npu1"))
 
-    root_conftest.pytest_collection_modifyitems(
-        config=None, items=[unrestricted, matches_device, excludes_device]
+def test_restricted_test_without_npu_runtime_stops_with_the_reason(tmp_path):
+    result = _pytest(
+        tmp_path,
+        "import pytest\n"
+        "@pytest.mark.supported_devices('npu1', 'npu2')\n"
+        "def test_gated():\n    pass\n",
+        without_xrt=True,
     )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR, result.stdout
+    assert "No NPU runtime: " in result.stderr
+    assert "xrt" in result.stderr.lower(), result.stderr
 
-    assert unrestricted.markers_added == []
-    assert matches_device.markers_added == []
-    assert len(excludes_device.markers_added) == 1
-    assert excludes_device.markers_added[0].name == "skip"
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_restricted_tests_skip_where_the_device_is_not_listed(tmp_path):
+    result = _pytest(
+        tmp_path,
+        "import pytest\n"
+        "def test_plain():\n    pass\n"
+        "@pytest.mark.supported_devices('npu1', 'npu2')\n"
+        "def test_any_npu():\n    pass\n"
+        "@pytest.mark.supported_devices('no_such_npu')\n"
+        "def test_elsewhere():\n    pass\n",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed, 1 skipped" in result.stdout, result.stdout
+    assert "test_elsewhere SKIPPED (Not supported on" in result.stdout, result.stdout

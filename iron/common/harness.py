@@ -4,8 +4,8 @@
 """The device test harness: draw vectors, run an operator, check and time it.
 
 Everything is numpy, as an operator's ``reference`` is: a draw becomes the
-device buffer it is handed to, and mlir-aie's ``nearly_equal`` compares what
-comes back. The light half, how an operator *declares* the shapes it is
+device buffer it is handed to, and mlir-aie's ``compare`` judges what comes
+back. The light half, how an operator *declares* the shapes it is
 tested at, is :mod:`iron.common.testing`, which imports no pytest.
 """
 
@@ -17,8 +17,10 @@ from typing import NamedTuple
 import numpy as np
 import aie.utils as aie_utils
 from aie.utils.benchmark import run_iters
-from aie.utils.verify import nearly_equal
+from aie.utils.verify import Tolerance, compare, nearly_equal
 from ml_dtypes import bfloat16
+
+from iron.common.declare import Operator
 
 
 @dataclasses.dataclass
@@ -89,40 +91,77 @@ def verify_buffer(
     rel_tol: float = 0.04,
     abs_tol: float = 1e-6,
     max_error_rate: float = 0.0,
+    tolerance: Tolerance | None = None,
 ) -> list[int]:
     """The indices where ``output`` is outside tolerance of ``reference``.
 
-    The comparator is mlir-aie's (``aie.utils.verify.nearly_equal``):
-    ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``, in float32, with a NaN
-    on either side a mismatch. ``rel_tol = abs_tol = 0`` is an exact gate.
+    The judge is mlir-aie's ``aie.utils.verify.compare``, by default under a
+    relative ``Tolerance``: an element passes at
+    ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``, so
+    ``rel_tol = abs_tol = 0`` is an exact gate, and a NaN or infinity must meet
+    the same value in the reference whatever ``max_error_rate`` allows.
     ``max_error_rate`` lets that fraction of the elements miss; a shorter
     output than reference counts the missing elements as errors.
+
+    ``tolerance`` judges by that instead of the three numbers: typically the
+    contract of the kernel the operator runs. It must be judgeable element by
+    element: no ``range_frac`` and not a bound.
     """
+    if tolerance is None:
+        tolerance = Tolerance.relative(
+            rel_tol, abs_tol, max_mismatch_frac=max_error_rate
+        )
+    elif tolerance.kind == "bound" or tolerance.range_frac is not None:
+        raise ValueError(
+            f"{buf_name}: a {tolerance.kind} tolerance with range_frac="
+            f"{tolerance.range_frac} depends on more than the element it judges"
+        )
     expected = np.asarray(reference).reshape(-1)
     got = np.asarray(output).reshape(-1)
-    errors: list[int] = []
     if len(got) < len(expected):
         print(
             f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(got)}"
         )
-        errors.extend(range(len(expected) - len(got)))
-    n = min(len(got), len(expected))
-    ok = nearly_equal(got[:n], expected[:n], rtol=rel_tol, atol=abs_tol)
-    bad = np.flatnonzero(~ok).tolist()
-    for i in bad[:10]:
+        return list(range(len(got), len(expected)))
+    got = got[: len(expected)]
+
+    verdict = compare(got, expected, tolerance)
+    allowed = tolerance.max_mismatch_frac
+    if verdict.n_mismatch and allowed > 0.0:
+        within = "within" if verdict else "exceeds"
+        print(
+            f"{buf_name}: {verdict.n_mismatch} errors "
+            f"({verdict.n_mismatch / verdict.n_checked * 100:.2f}%) {within} allowed "
+            f"rate of {allowed * 100:.2f}%"
+        )
+    if verdict:
+        return []
+
+    print(f"{buf_name}: {verdict.detail}")
+    # compare() judges; it does not list the elements.
+    both_nan = np.isnan(got.astype(np.float32)) & np.isnan(expected.astype(np.float32))
+    if tolerance.kind == "relative":
+        # nearly_equal is the same per-element test, except that it also
+        # rejects a NaN that meets a NaN.
+        bad = ~nearly_equal(
+            got, expected, rtol=tolerance.rtol or 0.0, atol=tolerance.atol
+        )
+    elif tolerance.kind == "exact":
+        bad = got != expected.astype(got.dtype)
+    else:
+        each = dataclasses.replace(tolerance, max_mismatch_frac=0.0)
+        bad = np.array(
+            [
+                not compare(got[i : i + 1], expected[i : i + 1], each)
+                for i in range(len(got))
+            ],
+            dtype=bool,
+        )
+    errors = np.flatnonzero(bad & ~both_nan).tolist()
+    for i in errors[:10]:
         print(
             f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(got[i]):.6f}"
         )
-    errors.extend(bad)
-    if errors and max_error_rate > 0.0:
-        allowed = int(n * max_error_rate)
-        verdict = "within" if len(errors) <= allowed else "exceeds"
-        print(
-            f"{buf_name}: {len(errors)} errors ({len(errors) / n * 100:.2f}%) {verdict} "
-            f"allowed rate of {max_error_rate * 100:.2f}% ({allowed} errors)"
-        )
-        if len(errors) <= allowed:
-            return []
     return errors
 
 
@@ -166,7 +205,7 @@ class Run(NamedTuple):
 
 
 def run_test(
-    operator,
+    operator: Operator,
     inputs,
     outputs=None,
     *,
@@ -175,6 +214,7 @@ def run_test(
     max_error_rate: float = 0.0,
     warmup_iters: int = 1,
     timed_iters: int = 1,
+    tolerance: Tolerance | None = None,
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
@@ -182,13 +222,14 @@ def run_test(
     the expected outputs by name (an expected value of ``None`` is not
     checked); both are consumed in the order of the operator's declared
     buffers. An ``inout`` buffer is given as an input and checked under that
-    name. Latency (the NPU's own time) and effective bandwidth are recorded
-    for the CSV and returned.
+    name. The outputs are judged as :func:`verify_buffer` judges them, by
+    ``tolerance`` when given. Latency (the NPU's own time) and effective
+    bandwidth are recorded for the CSV and returned.
     """
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
-    if not hasattr(operator, "buffers"):
-        raise ValueError("run_test runs one declared operator (see Operator.buffers)")
+    if not isinstance(operator, Operator):
+        raise TypeError(f"run_test runs one declared Operator, not {operator!r}")
     operator.compile()
     fn = operator.get_callable()
     # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
@@ -227,7 +268,13 @@ def run_test(
             print(f"Warning: Output buffer {name} not found in operator arguments")
             continue
         bad = verify_buffer(
-            produced[name].numpy(), name, expected, rel_tol, abs_tol, max_error_rate
+            produced[name].numpy(),
+            name,
+            expected,
+            rel_tol,
+            abs_tol,
+            max_error_rate,
+            tolerance=tolerance,
         )
         if bad:
             errors[name] = bad

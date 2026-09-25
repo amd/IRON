@@ -19,8 +19,11 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
+from aie.utils.verify import Tolerance
 
 
+from ..kernels import kernels_dir
+from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
 from .infer import infer, infer_kwargs
 from .member import _Buffer, _Member, _Value
@@ -63,6 +66,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     _dim_fields: ClassVar[tuple[str, ...]] = ()
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
     _overlay_class: ClassVar[type | None] = None
+    # The cases iron/operators/test.py runs this operator at; None for an
+    # operator tested by its own test.py, or not on its own.
+    test: ClassVar[Testing | None] = None
 
     def __post_init__(self) -> None:
         if self._overlay_class is not None and not isinstance(
@@ -243,12 +249,29 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         kwargs = {**overrides, **values}
         return cls(**kwargs)  # classic-construction path splits overlay fields
 
+    def reference_tolerance(self) -> Tolerance | None:
+        """How close the NPU output must come to :meth:`reference`: the
+        tuned overlay's :meth:`~iron.common.declare.Overlay.tolerance` for
+        this device, ``None`` when it states none."""
+        from ..design.target import (
+            Target,
+        )  # imports this package: a cycle at module scope
+
+        tuned = self if self.ov._tuned else self.tuned(self.dev)
+        return tuned.ov.tolerance(Target(self.dev, kernels_dir()))
+
     # -- the image of one operator on its own -------------------------------
 
     @property
     def dev(self):
-        """The device a design is generated for."""
-        return aie_utils.get_current_device()
+        """The device a design is generated for, bound as the current one.
+
+        Bound rather than merely inferred: the ``aie.iron.kernels`` factories
+        read only a bound device, and fall back to aie2 without one, so a
+        contract asked for before the first compile (``reference_tolerance``)
+        would otherwise describe aie2's kernel on an NPU2.
+        """
+        return aie_utils.ensure_current_device()
 
     # Bytes of trace buffer to emit; 0 disables tracing. A plain attribute
     # rather than a property: OperatorSequence and LayerNorm assign it.

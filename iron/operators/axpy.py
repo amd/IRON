@@ -54,5 +54,7 @@ class AXPY(BinaryElementwiseOperator[AXPYOverlay]):
     test = Testing(_cases)
 
     def reference(self, a, b):
-        """CPU reference: ``scalar_factor * a + b``."""
-        return np.asarray(self.ov.scalar_factor, dtype=a.dtype) * a + b
+        """CPU reference: ``scalar_factor * a + b`` in fp32, rounded once, as
+        the kernel computes it; the scalar is bf16 on the device."""
+        scalar = np.float32(np.asarray(self.ov.scalar_factor, dtype=a.dtype))
+        return (scalar * a.astype(np.float32) + b.astype(np.float32)).astype(a.dtype)

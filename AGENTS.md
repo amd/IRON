@@ -150,7 +150,8 @@ reuse lint
        from it.
      - `test = Testing(cases, ...)` on the operator class
        (`iron/common/testing.py`): the shapes it is checked at on a device,
-       with the tolerances and any `draw=` its inputs need. One module,
+       any `draw=` its inputs need, and a `tolerance=` where the contract
+       of the kernel it runs is not the gate. One module,
        `iron/operators/test.py`, runs every declaration against
        `reference()`. An operator whose device test is more than that (a
        composite compared step by step, a shipped overlay against its own
@@ -158,8 +159,11 @@ reuse lint
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`iron.operators._kernels.kernels_dir()`), not from
-     this repo:
+     mlir-aie package (`iron.common.kernels.kernels_dir()`), not from this
+     repo. Operators get them from mlir-aie's kernel factories
+     (`aie.iron.kernels`), each of which returns an `ExternalFunction`
+     carrying its source, flags, symbol and argument types, and in
+     `.contract` the tolerance its output is held to:
      - `generic/`: Works on both AIE2 and AIE2P
      - `aie2/`: AIE2-specific (NPU1)
      - `aie2p/`: AIE2P-specific (NPU2)
@@ -167,19 +171,25 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `declare.py`: the declaration layer (`Overlay`, `Operator`, `@operator`,
+   - `declare/`: the declaration layer (`Overlay`, `Operator`, `@operator`,
      `dim`/`tunable`, streams, buffers, `Scratchpad`/`DispatchTime`, `Resident`,
      `Xclbin`, inference)
-   - `build.py`, `tiling.py`, `external.py`: the library-owned build: the
-     derived runtime sequence, legal DMA descriptors, the external-overlay path
-   - `graph.py`, `packaging.py`: graph functions (`iron.graph`, `iron.state`)
-     and `compile(dev, boundaries=, image=)`
+   - `design/`, `tiling.py`, `external.py`: the library-owned build: the
+     `Target` a design declares kernels against, the derived runtime
+     sequence, legal DMA descriptors, the external-overlay path
+   - `graph/`: graph functions (`iron.graph`, `iron.state`) and
+     `compile(dev, boundaries=, image=)`
+   - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
+     allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
+     runtime callables and the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise template and its two stream shapes
-   - `jit_compile.py`: the seam onto mlir-aie's `CompilableDesign`
-   - `sequence.py`: the image builder a graph lowers onto (`OperatorSequence`)
-   -    - `harness.py`: the device test harness (`vectors`, `run_test`, `verify_buffer`, `record_metric`)
+   - `kernels.py`: `kernels_dir()` and `declare_kernel`, for a kernel the
+     factories do not cover
+   - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
+     `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over
+     mlir-aie's `aie.utils.verify.compare`; `record_metric`)
    - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
-   - `artifacts.py`: the record of what a compiled image consists of
+   - `tracing.py`: `dump_traces`, for a sequence compiled with `trace_size=`
 
 ### Key Concepts
 
@@ -229,8 +239,8 @@ xclbin (NPU binary) + insts.bin (instruction sequence)
 
 **No build context.** An operator takes the device that is current and
 nothing else. What used to sit on a context object is either a fact
-(`iron.operators._kernels.kernels_dir()`, `iron_kernels_dir()`), an
-environment choice (`IRON_AIE_KERNELS_DIR`), or a keyword on the build
+(`iron.common.kernels.kernels_dir()`), an
+environment choice (`MLIR_AIE_KERNEL_SOURCES`), or a keyword on the build
 itself (`compile(record="disk")`). Kernels are built with Peano; IRON has
 no xchesscc path, and a kernel that needs one asks the `aie.iron.kernels`
 factory for it (`use_chess=True`) rather than IRON carrying a global flag.
@@ -302,19 +312,26 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `gemm/op.py` or `mha/op.py` for hand-written sequences
 4. Name the kernel with a factory from `aie.iron.kernels`
    (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
-   the symbol, the source, the argument types and aie2's LUT tables.
-   `target.kernel(...)` declares one the factories do not cover -- a kernel
-   whose compile flags carry the shape, or a source with two entry points
-   the design calls. If a new C++ compute kernel is needed, add it to the
+   the symbol, the source, the argument types, aie2's LUT tables and the
+   tolerance contract. Bind a further symbol of the same object with
+   `fn.object_file.bind(symbol, arg_types)`. `target.kernel(...)` declares
+   one the factories do not cover -- a kernel whose compile flags are the
+   overlay's own, like flm's `mm_fused.cc`. An overlay running one kernel
+   reports its contract from `tolerance(target)` (`ElementwiseOverlay` does
+   this from `kernel(target)`). If a new C++ compute kernel is needed, add it
+   to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
-   and consume it through a factory; IRON hosts only gemm's `mm.cc` and
-   flm's `mm_fused.cc`, under `iron.operators._kernels.iron_kernels_dir()`
+   with a factory in `aie.iron.kernels`; IRON hosts no kernels
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
-5. Give the operator a `reference(*inputs)` (torch, on the declared shapes)
-6. Declare how it is tested: `test = Testing(cases, rel_tol=, abs_tol=)` on
-   the operator class, from `iron.common.testing`
+5. Give the operator a `reference(*inputs)` (numpy, on the declared shapes:
+   upcast to float32, compute, round once)
+6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
+   operator class, from `iron.common.testing`
+   - leave `tolerance` out to be judged by the contract of the kernel the
+     operator runs (`Operator.reference_tolerance()`); give an
+     `aie.utils.verify.Tolerance` where that is not the right gate
    - the cases are `Case(kwargs, extensive=...)` or plain kwarg dicts, or a
      callable returning them when they follow the device's width;
      `channeled_unary_cases`/`binary_elementwise_cases` build the
@@ -424,26 +441,45 @@ void my_kernel(bfloat16* in, bfloat16* out, int32_t size) {
 ### Test Verification Pattern
 
 ```python
-from iron.common.harness import verify_buffer
+from aie.utils.verify import Tolerance
+from iron.common.harness import run_test, vectors
+from iron.operators import Tanh
 
-# Compare NPU output against CPU reference
-errors = verify_buffer(
-    output=npu_output,
-    buf_name="output",
-    reference=cpu_reference,
-    rel_tol=0.04,      # 4% relative tolerance
-    abs_tol=1e-6,      # Absolute tolerance for small values
-    max_error_rate=0.0 # 0% of elements can fail (strict)
-)
-assert len(errors) == 0, f"Found {len(errors)} mismatches"
+op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
+
+# Dispatch, and compare every output with op.reference() on the drawn inputs
+# under the tolerance contract of the kernel the operator runs ...
+run = run_test(op, vectors(op), tolerance=op.reference_tolerance())
+assert not run.errors, run.errors
+
+# ... or under an explicit one.
+run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 ```
+
+`verify_buffer()` compares a single buffer the same way, for tests that
+dispatch by hand.
+
+### bfloat16 between torch and numpy
+
+numpy has no bfloat16 of its own; use `ml_dtypes.bfloat16` and move the bits,
+never going through float32:
+
+```python
+import ml_dtypes, torch
+
+np_array = torch_tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+torch_tensor = torch.from_numpy(np_array.view("uint16")).view(torch.bfloat16)
+```
+
+Runtime tensors take and return torch tensors directly
+(`aie.utils.DEFAULT_TENSOR_CLASS.from_torch()`, `.to_torch()`).
 
 ## Debugging and Performance
 
 ### Building against a local kernel tree
 
 ```bash
-IRON_AIE_KERNELS_DIR=/path/to/mlir-aie/aie_kernels pytest ...
+MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie/aie_kernels pytest ...
 ```
 
 The path reaches the compile key, so pointing IRON at another tree rebuilds
@@ -497,10 +533,11 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`iron.operators._kernels.kernels_dir()`)
+  `include/aie_kernels/<arch>/` (`iron.common.kernels.kernels_dir()`,
+  overridden by `MLIR_AIE_KERNEL_SOURCES`)
 - Ensure the kernel's C++ signature matches the factory from
-  `aie.iron.kernels`, or the `target.kernel(...)` declaration, that the
-  overlay's `design()` names
+  `aie.iron.kernels` (or `bind()`'s argument types), or the
+  `target.kernel(...)` declaration, that the overlay's `design()` names
 
 **Compilation hangs or fails**
 
@@ -513,7 +550,8 @@ logging.basicConfig(level=logging.DEBUG)
 - Check datatype consistency (bfloat16 has limited precision)
 - Verify reference implementation matches NPU kernel exactly
 - Look for memory alignment issues in C++ kernel
-- Adjust tolerances in `verify_buffer()` if needed (`rel_tol`, `abs_tol`)
+- Check which tolerance the test judges by: the kernel's contract
+  (`op.reference_tolerance()`) unless the test passes `tolerance=`
 
 **Dimension mismatch errors**
 

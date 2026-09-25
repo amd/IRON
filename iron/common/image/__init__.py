@@ -23,7 +23,7 @@ from .callable import (
     SequenceXclbinCallable,
 )
 from .fused import FusedImage, XclbinChain, build_fused_mlir
-from .fusion import fuse_mlir, trace_buffer_size
+from .fusion import fuse_mlir
 from .jit_compile import DispatchStream, dispatch_stream, insts_design, xclbin_design
 from .packaging import ELF, XCLBIN, each_step, plan
 from .sequence import OperatorSequence
@@ -53,6 +53,5 @@ __all__ = [
     "peak_live_bytes",
     "place",
     "plan",
-    "trace_buffer_size",
     "xclbin_design",
 ]
