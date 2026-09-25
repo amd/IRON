@@ -13,6 +13,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+from aie.utils.verify import Tolerance, compare
 
 try:
     import pyxrt
@@ -245,19 +246,32 @@ class CompareDispatch(SeparateDispatch):
     per-step deviation.
 
     Args:
-        rel_tol / abs_tol: Per-step tolerances; a step counts as a mismatch
-            only when it exceeds both.
+        tolerance: How close every step's output must come to its reference.
+            By default each step is held to its operator's
+            ``reference_tolerance()``, the contract of the kernel it runs, as
+            its own test holds it; a step without one that can be judged
+            element by element falls back to ``FALLBACK_TOLERANCE``.
         raise_on_mismatch: When True (default), raise ``RuntimeError`` on the
             first mismatching step instead of only logging it.
     """
 
     name = "compare"
 
-    def __init__(self, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
+    FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
+
+    def __init__(self, tolerance=None, raise_on_mismatch=True):
         super().__init__()
-        self.rel_tol = rel_tol
-        self.abs_tol = abs_tol
+        self.tolerance = tolerance
         self.raise_on_mismatch = raise_on_mismatch
+
+    def step_tolerance(self, op):
+        """The tolerance ``op``'s step is judged by."""
+        if self.tolerance is not None:
+            return self.tolerance
+        tol = op.reference_tolerance() if isinstance(op, MLIROperator) else None
+        if tol is None or tol.kind == "bound" or tol.range_frac is not None:
+            return self.FALLBACK_TOLERANCE
+        return tol
 
     def make_callable(self, seq):
         return SequenceCompareCallable(seq, self)
@@ -305,7 +319,7 @@ class OperatorSequence(AIEOperatorBase):
             runs the ``"separate"`` xclbin path and, after each NPU step,
             also runs the operator's CPU reference on the NPU-produced
             inputs and logs the deviation for testing/debugging.  Pass a
-            :class:`CompareDispatch` instance to tune the compare tolerances.
+            :class:`CompareDispatch` instance to set the compare tolerance.
     """
 
     def __init__(
@@ -855,8 +869,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
     def __init__(self, op, dispatch):
         super().__init__(op, dispatch)
-        self.rel_tol = dispatch.rel_tol
-        self.abs_tol = dispatch.abs_tol
+        self.dispatch = dispatch
         self.raise_on_mismatch = dispatch.raise_on_mismatch
         self.last_step_stats = []
 
@@ -882,7 +895,8 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         kernel(*args)
 
         torch = _torch()
-        npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
+        npu_raw = self._read_to_cpu(out_name, out_spec)
+        npu_out = npu_raw.to(torch.float32)
         ref_out = step_op.reference(*cpu_inputs)
 
         stats = {
@@ -907,7 +921,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             max_rel=rel,
             ref_max=ref_max,
         )
-        fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+        tol = self.dispatch.step_tolerance(step_op)
+        if npu_raw.dtype == torch.bfloat16:
+            npu_np = npu_raw.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+        else:
+            npu_np = npu_raw.numpy()
+        verdict = compare(npu_np, ref_flat.numpy(), tol)
+        fail = not verdict
         stats["mismatch"] = fail
         level = logging.ERROR if fail else logging.INFO
         logger.log(
@@ -920,14 +940,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             mean_abs,
             rel,
             ref_max,
-            "  MISMATCH" if fail else "",
+            f"  MISMATCH: {verdict.detail}" if fail else "",
         )
         if fail and self.raise_on_mismatch:
             raise RuntimeError(
                 f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
                 f"-> {out_name}: NPU output deviates from reference "
-                f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
-                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
-                f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
+                f"({verdict.detail}; max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
+                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; tolerance {tol})"
             )
         self.last_step_stats.append(stats)
