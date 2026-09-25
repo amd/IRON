@@ -679,17 +679,19 @@ class SequenceFullELFCallable(SequenceCallable):
         self._trace_arg = None
         if self.op.trace_size:
             layout = get_trace_buffer(
-                self.lowered_mlir_text(), f"{self.device_name}:{self.sequence_name}"
+                self.lowered_mlir_path.read_text(),
+                f"{self.device_name}:{self.sequence_name}",
             )
             if layout:
                 self._trace_arg = layout["arg_index"]
                 self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
-    def lowered_mlir_text(self) -> str:
-        """aiecc's post-lowering module, which carries the trace buffer layout."""
+    @property
+    def lowered_mlir_path(self) -> Path:
+        """aiecc's post-lowering module, which carries the trace configuration and
+        the trace buffer layout. A traced build asks aiecc to keep it."""
         mlir_filename = self.op.artifacts[0].mlir_input.filename
-        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
-        return path.read_text()
+        return comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:

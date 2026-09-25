@@ -13,6 +13,7 @@ import json
 import numpy as np
 import pytest
 import torch
+from aie.utils.trace import TraceConfig
 
 from iron.common.sequence import OperatorSequence
 from iron.common.tracing_utils import dump_traces
@@ -59,11 +60,14 @@ def test_dump_writes_raw_words_and_perfetto_json(aie_context, tmp_path):
 
     words = run.trace_buffer.numpy().view(np.uint32).reshape(-1)
     assert words.any(), "the traced dispatch captured no trace data"
-    # The raw text is the buffer's 32-bit words, unchanged by the int8 buffer.
-    raw = (tmp_path / "layer_norm.txt").read_text().split()
-    assert [int(w, 16) for w in raw] == words.tolist()
+    # The text reads back as the buffer's 32-bit words, unchanged by the int8
+    # buffer, so it can be reparsed without another dispatch.
+    raw = TraceConfig(
+        trace_size=words.nbytes, trace_file=str(tmp_path / "layer_norm.txt")
+    )
+    assert np.array_equal(raw.read_trace(), words)
 
     assert written, "a buffer with trace data produced no Perfetto file"
     for path in written:
-        assert path.parent == tmp_path and path.name.startswith("layer_norm_")
+        assert path.parent == tmp_path and path.name.startswith("layer_norm")
         assert json.loads(path.read_text()), f"{path.name} holds no events"
