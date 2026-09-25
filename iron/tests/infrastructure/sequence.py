@@ -27,21 +27,22 @@ import torch
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
+from aie.utils.verify import Tolerance
 
-from iron.common.sequence import OperatorSequence
+from iron.common.sequence import CompareDispatch, OperatorSequence
 from iron.common.compilation.sequence import fuse_mlir
 from iron.common.test_utils import verify_buffer
 from iron.operators.elementwise_add.op import ElementwiseAdd
 from iron.operators.relu.op import ReLU
+from iron.operators.tanh.op import Tanh
 
 
 def _set_input(run, name, data):
     """Write a host tensor into an input buffer and push it to the device.
 
-    Mirrors the caller contract for the fused single-ELF callable: after
-    writing a get_buffer() sub-view via torch_view(), the caller is responsible
-    for calling .to("npu") so the write reaches the NPU (a no-op sync for the
-    separate/reference callables, whose __call__ syncs inputs themselves).
+    The explicit push is redundant, since every callable flushes host writes
+    at dispatch (see test_non_input_buffers_sync_without_explicit_flush), and
+    is a no-op sync for the reference callable.
     """
     buf = run.get_buffer(name)
     buf.torch_view()[: data.numel()] = data.reshape(-1)
@@ -57,7 +58,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(context, dispatch, name):
+def _build_add_relu_sequence(context, dispatch, name, input_args=("a", "b")):
     """out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -78,7 +79,7 @@ def _build_add_relu_sequence(context, dispatch, name):
             (add, "a", "b", "temp"),
             (relu, "temp", "out"),
         ],
-        input_args=["a", "b"],
+        input_args=list(input_args),
         output_args=["out"],
         dispatch=dispatch,
         context=context,
@@ -209,7 +210,7 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 #     rather than a hand-rolled numpy view. Not covered by
 #     test_dispatch_modes_bit_identical above, since reference() is a CPU
 #     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see CompareDispatch's rel_tol/abs_tol).
+#     tolerance, not bit-for-bit (see CompareDispatch's tolerance).
 # ---------------------------------------------------------------------------
 
 _SLICE_SIZE = 1024
@@ -271,54 +272,93 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
 
 
 # ---------------------------------------------------------------------------
-# 4. Compare mode flags (and by default raises on) a per-step reference/NPU
-#    mismatch on its own.
+# 4. Compare mode holds each step to its kernel's contract, and flags (and by
+#    default raises on) a step that falls outside the tolerance it is judged by.
 #
-#    Normally the reference is trusted and the NPU kernel is the suspect; here
-#    we invert that (keep the NPU correct, vary the reference) because it is
-#    easier to inject a known-wrong reference than a known-wrong kernel.
+#    Tanh's kernel approximates torch.tanh: within its contract, but not
+#    bit-exact. So the same NPU output must pass under the default tolerance
+#    and fail under an exact one.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reference_is_correct", [True, False])
-def test_compare_mode_detects_wrong_reference(reference_is_correct, aie_context):
+@pytest.mark.parametrize("exact", [False, True])
+def test_compare_mode_judges_each_step_by_its_tolerance(exact, aie_context):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
-    operator's ``reference()`` on the same NPU inputs. A correct reference must
-    run cleanly (no flagged step); a wrong one must make compare mode raise on
-    its own (``compare_raise_on_mismatch`` defaults to True)."""
-    size = 256
+    operator's ``reference()`` on the same NPU inputs. Under its kernel's
+    contract the step runs cleanly (no flagged step); held to exact equality it
+    makes compare mode raise on its own (``raise_on_mismatch`` defaults to
+    True)."""
+    size = 1024
     torch.manual_seed(0)
-    a = torch.rand(size, dtype=torch.bfloat16)
-    b = torch.rand(size, dtype=torch.bfloat16)
+    x = torch.rand(size, dtype=torch.bfloat16) * 4
 
-    op = ElementwiseAdd(
-        size=size, tile_size=256, num_aie_columns=1, context=aie_context
+    op = Tanh(
+        size=size,
+        num_aie_columns=1,
+        num_channels=1,
+        tile_size=size,
+        context=aie_context,
     )
-    if not reference_is_correct:
-        # Override the reference on this instance to disagree with the NPU
-        # kernel (which computes a + b). Keeping the real ElementwiseAdd class
-        # leaves its name/compilation intact for the xclbin compare path.
-        op.reference = lambda a, b: a + b + 1.0
-
     seq = OperatorSequence(
-        name="infra_compare_add",
-        runlist=[(op, "a", "b", "out")],
-        input_args=["a", "b"],
+        name="infra_compare_tanh",
+        runlist=[(op, "x", "out")],
+        input_args=["x"],
         output_args=["out"],
-        dispatch="compare",
+        dispatch=CompareDispatch(tolerance=Tolerance.exact() if exact else None),
         context=aie_context,
     )
     seq.compile()
     assert seq._dispatch.name == "compare"
 
     run = seq.get_callable()
-    _set_input(run, "a", a)
-    _set_input(run, "b", b)
+    _set_input(run, "x", x)
 
-    if reference_is_correct:
+    if exact:
+        with pytest.raises(RuntimeError, match="deviates from reference"):
+            run()
+    else:
         run()  # must not raise
         flagged = any(step.get("mismatch") for step in run.last_step_stats)
-        assert not flagged, "compare mode should not flag a matching reference"
-    else:
-        with pytest.raises(RuntimeError):
-            run()  # compare mode reports the wrong reference by itself
+        assert not flagged, "compare mode flagged a step within its kernel contract"
+
+
+# ---------------------------------------------------------------------------
+# 5. Buffers that are neither inputs nor outputs (weights, KV caches,
+#    intermediates) sync like the rest in every NPU dispatch mode. The full-ELF
+#    callable places them in its scratch buffer, and NPU access to it is not
+#    cache-coherent: an unflushed host write is a race, not an error, so each
+#    dispatch below writes different data than the one before.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch", ["separate", "fused"])
+def test_non_input_buffers_sync_without_explicit_flush(dispatch, aie_context):
+    """Host writes through get_buffer() to a non-input buffer reach the NPU at
+    the next dispatch, and reads of a non-output buffer after a dispatch see
+    what the NPU wrote there, with no explicit ``to()`` from the caller."""
+    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
+        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+
+    # b is not an input, so it is held like a weight (in scratch, when fused).
+    seq = _build_add_relu_sequence(
+        aie_context, dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
+    )
+    seq.compile()
+    run = seq.get_callable()
+
+    torch.manual_seed(0)
+    for rep in range(4):
+        a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+        b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+        run.get_buffer("a").torch_view()[:] = a
+        run.get_buffer("b").torch_view()[:] = b
+        run()
+
+        temp = run.get_buffer("temp").to_torch()[:_ADD_RELU_SIZE]
+        out = run.get_buffer("out").to_torch()[:_ADD_RELU_SIZE]
+        errors = verify_buffer(temp, "temp", a + b, rel_tol=0.04, abs_tol=1e-6)
+        assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
+        errors = verify_buffer(
+            out, "out", torch.nn.functional.relu(a + b), rel_tol=0.04, abs_tol=1e-6
+        )
+        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"

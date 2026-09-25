@@ -13,7 +13,7 @@ declared with :func:`custom_op`, which gives them a schema in a private domain s
 the exporter emits them as a single node.
 
 Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
-the kernel source is mlir-aie's ``aie_kernels/<dir>/<name>.cc``, exactly as the
+the kernel source is mlir-aie's ``aie_kernels/<family>/<name>.cc``, exactly as the
 hand-written operators use it.
 """
 
@@ -28,7 +28,6 @@ from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
 from iron.common.layout import TiledStridedLayout, tiled_2d
-from iron.common.kernels import ZERO_CTYPES
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
 # operand layouts are the contract the generated DMAs and the compiled kernel
@@ -95,12 +94,12 @@ def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
     from iron.common.compilation import KernelObjectArtifact, SourceArtifact
 
     suffix = f"{m}_{k}_{n}"
-    zero_source = kernels_dir / "generic" / "zero.cc"
+    zero_source = kernels_dir / "zero" / "zero.cc"
     return [
         KernelObjectArtifact(
             f"mm_{suffix}.o",
             dependencies=[
-                SourceArtifact(kernels_dir / kernel_dir / "mm.cc"),
+                SourceArtifact(kernels_dir / "linalg" / "mm.cc"),
                 SourceArtifact(zero_source),
             ],
             extra_flags=[
@@ -113,7 +112,7 @@ def _gemm_artifacts(kernels_dir, kernel_dir, m: int, k: int, n: int):
                 "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
                 "-DROUND_CONV_EVEN",
                 # zero.cc's entry point, over the m x n output tile.
-                f"-DZERO_TYPE={ZERO_CTYPES['bf16']}",
+                "-DZERO_TYPE=bfloat16",
                 f"-DTILE_SIZE={m * n}",
                 f"-include{zero_source}",
             ],
@@ -130,8 +129,8 @@ class StreamKernel:
     """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
 
     ``source``/``subdir`` name the file in mlir-aie's ``aie_kernels`` library the same
-    way the hand-written operators do (``subdir=None`` means the device directory,
-    e.g. ``aie2p``). The object name must equal the kernel's ``linkwith_name`` in
+    way the hand-written operators do (``subdir`` is the family directory, e.g.
+    ``activation``). The object name must equal the kernel's ``linkwith_name`` in
     stream-dse, since the generated MLIR links against it.
     """
 
@@ -147,23 +146,28 @@ class StreamKernel:
             return self.artifacts(kernels_dir, kernel_dir, **kwargs)
         from iron.common.compilation import KernelObjectArtifact, SourceArtifact
 
-        subdir = self.subdir or kernel_dir
         return [
             KernelObjectArtifact(
                 f"{self.source}.o",
                 dependencies=[
-                    SourceArtifact(kernels_dir / subdir / f"{self.source}.cc")
+                    SourceArtifact(kernels_dir / self.subdir / f"{self.source}.cc")
                 ],
             )
         ]
 
 
 GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, artifacts=_gemm_artifacts)
-SILU = StreamKernel(key="silu", layouts=lambda: elementwise_layouts(2), source="silu")
+SILU = StreamKernel(
+    key="silu",
+    layouts=lambda: elementwise_layouts(2),
+    source="silu",
+    subdir="activation",
+)
 ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
     layouts=lambda: elementwise_layouts(3),
     source="mul",
+    subdir="eltwise",
 )
 
 Silu = custom_op("Silu")

@@ -6,7 +6,7 @@
 
 KernelCompilationRule.compile() passes a different --target and
 aie_runtime_lib -I per arch for the same output filename (e.g. "mul.o"), and
-for aie_kernels/generic/ sources the very same input file compiles to
+for aie_kernels/ sources shared by both arches the very same input file compiles to
 different machine code per arch. CompilationArtifact.is_available_in_filesystem()
 only ever compares mtimes and never records which arch an object was built
 for, so if two arches' objects resolve to the same build_dir path, whichever
@@ -44,8 +44,8 @@ def _mul_kernel_object(build_dir, device):
 
 
 def test_two_arches_do_not_resolve_the_same_kernel_object_path(tmp_path):
-    """aie_kernels/generic/mul.cc is one source shared by aie2 and aie2p
-    (ElementwiseMul.kernel_subdir); its object must not collide in build_dir."""
+    """aie_kernels/eltwise/mul.cc is one source shared by aie2 and aie2p
+    (eltwise.mul_sized); its object must not collide in build_dir."""
     aie2 = _mul_kernel_object(tmp_path, NPU1())
     aie2p = _mul_kernel_object(tmp_path, NPU2())
     assert aie2.filename != aie2p.filename

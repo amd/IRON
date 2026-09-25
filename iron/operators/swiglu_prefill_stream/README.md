@@ -116,7 +116,7 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 ## Adding another operator
 
 One `StreamKernel` plus one `TORCH_OPS` entry in `iron/common/stream/ops.py`, pointing
-at mlir-aie's `aie_kernels/<dir>/<name>.cc`, plus that operator's own placement. The
+at mlir-aie's `aie_kernels/<family>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.
 

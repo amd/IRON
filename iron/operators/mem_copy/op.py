@@ -8,11 +8,14 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
+import numpy as np
+from aie.iron.kernels import eltwise
+
+from iron.operators.mem_copy.design import mem_copy_line_size
 
 
 @dataclass
@@ -51,23 +54,24 @@ class MemCopy(MLIROperator):
                     self.tile_size,
                     0,
                 ),
+                {"passthrough_kernel": self._kernel()},
             ),
         )
+
+    def _kernel(self):
+        if self.bypass:
+            return None
+        return eltwise.passthrough(mem_copy_line_size(self.tile_size), np.int16)
+
+    def reference(self, x):
+        from iron.operators.mem_copy.reference import reference
+
+        return reference(x)
 
     def get_kernel_artifacts(self):
         if self.bypass:
             return []
-        return [
-            KernelObjectArtifact(
-                "mem_copy.o",
-                extra_flags=["-DBIT_WIDTH=16"],
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "generic" / "passThrough.cc"
-                    )
-                ],
-            )
-        ]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         return [

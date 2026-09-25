@@ -4,11 +4,9 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
-
-from iron.common.device_utils import get_kernel_dir
 
 
 def my_dequant_kernel(
@@ -19,6 +17,8 @@ def my_dequant_kernel(
     trace_size,
     tile_size,
     group_size,
+    *,
+    dequant_kernel,
 ):
     per_tile_elements = (
         16384 if tile_size > 16384 else tile_size
@@ -60,13 +60,6 @@ def my_dequant_kernel(
         for i in range(num_columns)
         for j in range(num_channels)
     ]
-
-    # AIE Core Function declaration
-    dequant_kernel = Kernel(
-        "expand_uint4_to_bfloat16",
-        f"expand_{get_kernel_dir(dev)}_{tile_size}.o",
-        [in_tile_ty, out_tile_ty],
-    )
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, dequant_kernel):

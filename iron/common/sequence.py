@@ -13,6 +13,8 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
+from aie.utils.trace import get_trace_buffer
+from aie.utils.verify import Tolerance, compare
 
 try:
     import pyxrt
@@ -103,6 +105,18 @@ def _trace_tag(seq):
     return f"_traced{seq.trace_size}" if seq.trace_size else ""
 
 
+def _hand_built_kernels(op, objs=None):
+    """``op``'s kernel artifacts that IRON builds itself, rather than an
+    mlir-aie kernel factory, and so must be prefixed apart within a sequence."""
+    if objs is None:
+        objs = op.get_kernel_artifacts()
+    return [
+        obj
+        for obj in objs
+        if not (isinstance(obj, comp.KernelObjectArtifact) and obj.extern is not None)
+    ]
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -141,7 +155,7 @@ class FusedDispatch(SequenceDispatch):
 
         for idx, op in enumerate(designs):
             mlir_artifact = op.get_mlir_artifact()
-            if len(op.get_kernel_artifacts()) > 0:
+            if _hand_built_kernels(op):
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)
@@ -161,11 +175,12 @@ class FusedDispatch(SequenceDispatch):
         )
 
     def _collect_kernel_artifacts(self, seq):
-        """Kernel artifacts from all child operators, prefixed per operator index."""
+        """Kernel artifacts from all child operators, hand-built ones prefixed per
+        operator index. Factory-built objects are already unique per recipe."""
         kernel_artifacts = []
         for idx, op in enumerate(seq.unique_designs()[0]):
             objs = op.get_kernel_artifacts()
-            for obj in objs:
+            for obj in _hand_built_kernels(op, objs):
                 obj.filename = f"op{idx}_{obj.filename}"
                 obj.prefix_symbols = f"op{idx}_"
             kernel_artifacts.extend(objs)
@@ -232,19 +247,32 @@ class CompareDispatch(SeparateDispatch):
     per-step deviation.
 
     Args:
-        rel_tol / abs_tol: Per-step tolerances; a step counts as a mismatch
-            only when it exceeds both.
+        tolerance: How close every step's output must come to its reference.
+            By default each step is held to its operator's
+            ``reference_tolerance()``, the contract of the kernel it runs, as
+            its own test holds it; a step without one that can be judged
+            element by element falls back to ``FALLBACK_TOLERANCE``.
         raise_on_mismatch: When True (default), raise ``RuntimeError`` on the
             first mismatching step instead of only logging it.
     """
 
     name = "compare"
 
-    def __init__(self, rel_tol=0.05, abs_tol=1e-2, raise_on_mismatch=True):
+    FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
+
+    def __init__(self, tolerance=None, raise_on_mismatch=True):
         super().__init__()
-        self.rel_tol = rel_tol
-        self.abs_tol = abs_tol
+        self.tolerance = tolerance
         self.raise_on_mismatch = raise_on_mismatch
+
+    def step_tolerance(self, op):
+        """The tolerance ``op``'s step is judged by."""
+        if self.tolerance is not None:
+            return self.tolerance
+        tol = op.reference_tolerance() if isinstance(op, MLIROperator) else None
+        if tol is None or tol.kind == "bound" or tol.range_frac is not None:
+            return self.FALLBACK_TOLERANCE
+        return tol
 
     def make_callable(self, seq):
         return SequenceCompareCallable(seq, self)
@@ -292,7 +320,7 @@ class OperatorSequence(AIEOperatorBase):
             runs the ``"separate"`` xclbin path and, after each NPU step,
             also runs the operator's CPU reference on the NPU-produced
             inputs and logs the deviation for testing/debugging.  Pass a
-            :class:`CompareDispatch` instance to tune the compare tolerances.
+            :class:`CompareDispatch` instance to set the compare tolerance.
     """
 
     def __init__(
@@ -606,7 +634,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
         if self.trace_buffer is not None:
-            self.run_handle.set_arg(3, self.trace_buffer.buffer_object())
+            self.run_handle.set_arg(self._trace_arg, self.trace_buffer.buffer_object())
 
         self._params = None
 
@@ -645,19 +673,25 @@ class SequenceFullELFCallable(SequenceCallable):
             (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
         )
         # Trace lowering appends one buffer covering every configured design, after
-        # the consolidated three. Its size depends on how many channels and
-        # sub-designs claim a share, so read it from the lowered module.
+        # the consolidated three. Its argument and size depend on how many channels
+        # and sub-designs claim a share, so read them from the lowered module.
         self.trace_buffer = None
+        self._trace_arg = None
         if self.op.trace_size:
-            total = comp.trace_buffer_size(self.lowered_mlir_text())
-            if total:
-                self.trace_buffer = XRTTensor((total,), dtype=np.int8)
+            layout = get_trace_buffer(
+                self.lowered_mlir_path.read_text(),
+                f"{self.device_name}:{self.sequence_name}",
+            )
+            if layout:
+                self._trace_arg = layout["arg_index"]
+                self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
-    def lowered_mlir_text(self) -> str:
-        """aiecc's post-lowering module, which carries the trace buffer layout."""
+    @property
+    def lowered_mlir_path(self) -> Path:
+        """aiecc's post-lowering module, which carries the trace configuration and
+        the trace buffer layout. A traced build asks aiecc to keep it."""
         mlir_filename = self.op.artifacts[0].mlir_input.filename
-        path = comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
-        return path.read_text()
+        return comp._aiecc_work_dir(mlir_filename) / "input_with_addresses.mlir"
 
     def get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
@@ -676,7 +710,13 @@ class SequenceFullELFCallable(SequenceCallable):
         # Sub-views handed out by get_buffer() share the parent's coherence map, so
         # a write through one (e.g. torch_view()) marks its byte range host-dirty
         # there too, and `to("npu")` here syncs every dirty range in one pass.
+        # Scratch is flushed as well: get_buffer() hands out writable views into it
+        # (weights, KV caches), and this dispatch bypasses the host runtime's own
+        # per-argument flush. With nothing dirty, `to("npu")` transfers nothing. It
+        # also leaves all of scratch marked device-resident, so a read of a scratch
+        # view after the run pulls what the NPU wrote.
         self.input_buffer.to("npu")
+        self.scratch_buffer.to("npu")
 
     def _sync_outputs(self):
         # _run just rewrote the output arena on the device, so the device holds the
@@ -836,8 +876,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
 
     def __init__(self, op, dispatch):
         super().__init__(op, dispatch)
-        self.rel_tol = dispatch.rel_tol
-        self.abs_tol = dispatch.abs_tol
+        self.dispatch = dispatch
         self.raise_on_mismatch = dispatch.raise_on_mismatch
         self.last_step_stats = []
 
@@ -863,7 +902,8 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         kernel(*args)
 
         torch = _torch()
-        npu_out = self._read_to_cpu(out_name, out_spec).to(torch.float32)
+        npu_raw = self._read_to_cpu(out_name, out_spec)
+        npu_out = npu_raw.to(torch.float32)
         ref_out = step_op.reference(*cpu_inputs)
 
         stats = {
@@ -888,7 +928,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             max_rel=rel,
             ref_max=ref_max,
         )
-        fail = (max_abs > self.abs_tol) and (rel > self.rel_tol)
+        tol = self.dispatch.step_tolerance(step_op)
+        if npu_raw.dtype == torch.bfloat16:
+            npu_np = npu_raw.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+        else:
+            npu_np = npu_raw.numpy()
+        verdict = compare(npu_np, ref_flat.numpy(), tol)
+        fail = not verdict
         stats["mismatch"] = fail
         level = logging.ERROR if fail else logging.INFO
         logger.log(
@@ -901,14 +947,13 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             mean_abs,
             rel,
             ref_max,
-            "  MISMATCH" if fail else "",
+            f"  MISMATCH: {verdict.detail}" if fail else "",
         )
         if fail and self.raise_on_mismatch:
             raise RuntimeError(
                 f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
                 f"-> {out_name}: NPU output deviates from reference "
-                f"(max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
-                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; "
-                f"tolerances abs_tol={self.abs_tol}, rel_tol={self.rel_tol})"
+                f"({verdict.detail}; max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
+                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; tolerance {tol})"
             )
         self.last_step_stats.append(stats)

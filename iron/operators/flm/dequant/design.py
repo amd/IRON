@@ -8,9 +8,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
-
-from iron.common.device_utils import get_kernel_dir
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 
 # flm.GEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
@@ -91,8 +89,13 @@ def dequant_bfp(
     run_out_features=None,
     run_period_out_features=None,
     trace_size=0,
+    *,
+    dequant_kernel,
 ):
-    """K in-features, N out-features. B reaches the GEMM as (K, N)."""
+    """K in-features, N out-features. B reaches the GEMM as (K, N).
+
+    ``dequant_kernel`` is ``quant.q4nx_dequant`` at this module's geometry.
+    """
     if dev.arch != AIEArch.AIE2p:
         raise NotImplementedError("bfp16ebs8 exists only on AIE2P")
     if tile_n != N_TILE:
@@ -124,10 +127,10 @@ def dequant_bfp(
     out_half_ty = np.ndarray[(HALF_BLOCKS,), np.dtype[v8bfp16ebs8]]
     out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
-    kernel = Kernel(
-        "q4nx_dequant_bfp",
-        f"q4nx_dequant_{get_kernel_dir(dev)}.o",
-        [qw_blk_ty, out_blk_ty],
+    # The factory declares both operands in bytes; the output FIFO carries
+    # bfp16ebs8 blocks.
+    kernel = dequant_kernel.object_file.bind(
+        "q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty]
     )
 
     def core_body(qw_in, out_of, k):

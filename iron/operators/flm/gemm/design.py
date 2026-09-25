@@ -438,7 +438,7 @@ def gemm(
         kernel_object,
         [ct_a_obj_ty, ct_b_ty, ct_acc_ty, np.int32],
     )
-    # Same object as the mmul: the epilogue is compiled into mm_fused.cc, so
+    # Same object as the mmul: the epilogue is compiled into mm_fused.h, so
     # one -D flag set and one artifact cover both.
     epilogue_chunk = Kernel(
         EPILOGUE_SYMBOL,

@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
 import aie.utils as aie_utils
+from aie.iron.kernels import datamovement
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
@@ -96,24 +96,15 @@ class Transpose(MLIROperator):
                     self.s,
                     self.num_batches,
                 ),
+                {"transpose_fn": self._kernel()},
             ),
         )
 
+    def _kernel(self):
+        return datamovement.transpose(self.m, self.n, self.s)
+
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                f"transpose_{self.m}x{self.n}.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "generic" / "transpose.cc"
-                    )
-                ],
-                extra_flags=[
-                    f"-DDIM_m={self.m}",
-                    f"-DDIM_n={self.n}",
-                ],
-            ),
-        ]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()
@@ -123,7 +114,7 @@ class Transpose(MLIROperator):
         ]
 
     def reference(self, x):
-        """CPU reference: 2D transpose of an (M, N) matrix stored row-major."""
+        """CPU reference: transpose of each (M, N) matrix, stored row-major."""
         from iron.operators.transpose.reference import reference
 
-        return reference(x.reshape(self.M, self.N))
+        return reference(x.reshape(-1, self.M, self.N))

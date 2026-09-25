@@ -4,58 +4,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, ClassVar
 
 import aie.utils as aie_utils
+from aie.iron.kernel import ExternalFunction
 
 from .base import MLIROperator, AIERuntimeArgSpec
 from .context import AIEContext
 from .compilation import (
-    KernelArchiveArtifact,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from .device_utils import get_kernel_dir
 from .utils import get_shim_dma_limit
-
-
-def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
-    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
-    if kernel_dir != "aie2":
-        return []
-    mlir_aie_dir = Path(aie_utils.config.root_path())
-    return [
-        KernelObjectArtifact(
-            "lut_based_ops.o",
-            dependencies=[
-                SourceArtifact(
-                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
-                )
-            ],
-        )
-    ]
 
 
 @dataclass
 class ChanneledUnaryOperator(MLIROperator):
     """Base class for channeled unary AIE operators (single input, single output).
 
-    Assumes a single kernel source file and a standard design.py callback
-    with args [device, size, num_aie_columns, num_channels, tile_size, trace_size].
+    Assumes a single kernel and a standard design.py callback with args
+    [device, size, num_aie_columns, num_channels, tile_size, trace_size].
 
-    Subclasses must define ClassVar attributes:
-        kernel_name:   name of the kernel object file (e.g. "gelu" → gelu.o / gelu.cc)
-        callback_fn:   design.py callback function name (e.g. "my_gelu")
-        needs_lut_ops: set True for operators that require lut_based_ops.o on aie2
+    Subclasses must implement _kernel(), returning the mlir-aie kernel factory's
+    ExternalFunction for one line of _line_size elements.
 
     Customization points:
         - For operators with extra parameters (e.g. alpha, trace_size), add
           dataclass fields and override _mlir_callback_args().
-        - For operators requiring multiple kernels, extra compile flags, or
-          external source files, override get_kernel_artifacts() directly.
         - For non-standard arg specs, override get_arg_spec() directly.
         - If none of these fit, subclass MLIROperator instead.
     """
@@ -66,10 +42,7 @@ class ChanneledUnaryOperator(MLIROperator):
     tile_size: int
     context: AIEContext | None = field(default=None, repr=False)
 
-    kernel_name: ClassVar[str]
-    kernel_fn_name: ClassVar[str]
     callback_fn: ClassVar[str]
-    needs_lut_ops: ClassVar[bool] = False
     tile_cap: ClassVar[int] = 4096
 
     def __post_init__(self) -> None:
@@ -111,23 +84,16 @@ class ChanneledUnaryOperator(MLIROperator):
         ]
 
     @property
-    def _kernel_link_file(self) -> str:
-        """The file name that the MLIR Kernel declaration should link_with.
+    def _line_size(self) -> int:
+        """Elements each core processes per kernel call."""
+        return min(self.tile_size, self.tile_cap)
 
-        When auxiliary objects are required (e.g. lut_based_ops.o on aie2),
-        all objects are bundled into an archive and the archive name is
-        returned so that aiecc links the entire archive.
-        """
-        if self.needs_lut_ops and get_kernel_dir() == "aie2":
-            return f"{self.name}_kernels.a"
-        return f"{self.kernel_name}.o"
+    def _kernel(self) -> ExternalFunction:
+        """The kernel each core runs over one line of _line_size elements."""
+        raise NotImplementedError
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        callback_args = self._mlir_callback_args() + [
-            self.kernel_fn_name,
-            self._kernel_link_file,
-            self.tile_cap,
-        ]
+        callback_args = self._mlir_callback_args() + [self._kernel(), self.tile_cap]
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
@@ -137,43 +103,23 @@ class ChanneledUnaryOperator(MLIROperator):
             ),
         )
 
-    def get_kernel_artifacts(self) -> list:
-        dev = aie_utils.get_current_device()
-        kernel_dir = get_kernel_dir(dev)
-        kernel_obj = KernelObjectArtifact(
-            f"{self.kernel_name}.o",
-            dependencies=[
-                SourceArtifact(
-                    self.context.kernels_dir / kernel_dir / f"{self.kernel_name}.cc"
-                )
-            ],
-        )
-        if self.needs_lut_ops and kernel_dir == "aie2":
-            lut_objs = lut_based_ops_artifacts(kernel_dir)
-            return [
-                KernelArchiveArtifact(
-                    f"{self.name}_kernels.a",
-                    dependencies=[kernel_obj] + lut_objs,
-                )
-            ]
-        return [kernel_obj]
+    def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
 
 @dataclass
 class BinaryElementwiseOperator(MLIROperator):
     """Base class for binary element-wise AIE operators (two inputs, one output).
 
-    Assumes a single kernel source file and a standard design.py callback
-    with args [device, size, num_aie_columns, tile_size, trace_size].
+    Assumes a single kernel and a standard design.py callback with args
+    [device, size, num_aie_columns, tile_size, trace_size].
 
     Unlike ChanneledUnaryOperator, binary operators have no explicit num_channels
     parameter — each core uses 2 DMA channels (one per input), so the ShimDMA
     limit is enforced as num_aie_columns * 2 <= 16.
 
-    Subclasses must define ClassVar attributes:
-        kernel_name:   name of the kernel object file (e.g. "add" → add.o / add.cc)
-        kernel_subdir: subdirectory under aie_kernels/ (e.g. "generic")
-        callback_fn:   design.py callback function name (e.g. "my_eltwise_add")
+    Subclasses must implement _kernel(), returning the mlir-aie kernel factory's
+    ExternalFunction for one tile of _tile_elements elements.
     """
 
     size: int
@@ -181,9 +127,6 @@ class BinaryElementwiseOperator(MLIROperator):
     num_aie_columns: int = 8
     context: AIEContext | None = field(default=None, repr=False)
 
-    kernel_name: ClassVar[str]
-    kernel_fn_name: ClassVar[str]
-    kernel_subdir: ClassVar[str]
     callback_fn: ClassVar[str]
     # Override parent's "c" alias with "col" so binary-elementwise operator names
     # are unambiguous when num_aie_columns and num_channels both appear in the
@@ -231,11 +174,17 @@ class BinaryElementwiseOperator(MLIROperator):
             0,
         ]
 
+    @property
+    def _tile_elements(self) -> int:
+        """Elements each core processes per kernel call."""
+        return min(self.tile_size, 4096)
+
+    def _kernel(self) -> ExternalFunction:
+        """The kernel each core runs over one tile of _tile_elements elements."""
+        raise NotImplementedError
+
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        callback_args = self._mlir_callback_args() + [
-            self.kernel_fn_name,
-            f"{self.kernel_name}.o",
-        ]
+        callback_args = self._mlir_callback_args() + [self._kernel()]
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(
@@ -246,10 +195,4 @@ class BinaryElementwiseOperator(MLIROperator):
         )
 
     def get_kernel_artifacts(self) -> list[KernelObjectArtifact]:
-        source = self.context.kernels_dir / get_kernel_dir() / f"{self.kernel_name}.cc"
-        return [
-            KernelObjectArtifact(
-                f"{self.kernel_name}.o",
-                dependencies=[SourceArtifact(source)],
-            ),
-        ]
+        return [KernelObjectArtifact.from_extern(self._kernel())]

@@ -11,12 +11,14 @@
 # [ ] Patching of operators (instantiating new xrt::elf for each token) is slow; find quicker way of patching instruction sequence in-memory
 # [ ] Spatial fusion of operators
 
+import copy
 import torch
 import math
 from pathlib import Path
 import sys
 import numpy as np
 import ml_dtypes
+import llama_cpu
 import llama_inference_harness as harness
 import logging
 
@@ -1158,13 +1160,12 @@ def llama_forward_pass_decode(config, state):
 
     context_len = state.num_preceding_tokens + 1
     cache_offset = state.num_preceding_tokens * config.head_dim
-    state.softmax_vector_size_cum = (
-        getattr(state, "softmax_vector_size_cum", 0) + context_len
-    )
 
     params = aie_ops.decode.fused.params
     params.write("cache_offset", np.int32(cache_offset))
-    params.write("softmax_vector_size", np.int32(state.softmax_vector_size_cum))
+    # Softmax masks every score past the first context_len to -inf; the rest of
+    # the max_seq_len row is unwritten cache.
+    params.write("softmax_vector_size", np.int32(context_len))
     params.sync()
 
     # Prefill RoPE angle look-up tables
@@ -1212,7 +1213,6 @@ def llama_forward_pass(config, state):
             aie_ops.decode.fused.get_buffer(f"values_cache_{layer_idx}").torch_view()[
                 :
             ] = (aie_buffers.values_cache[layer_idx].to_torch().flatten())
-        aie_ops.decode.fused.scratch_buffer.to("cpu")
         return ret
     else:
         ret = llama_forward_pass_decode(config, state)
@@ -1235,6 +1235,38 @@ def main():
 
     aie_ops = AIELlamaOperators(config, max_seq_len)
     aie_buffers = AIELlamaBuffers(config, max_seq_len, aie_ops)
+
+    if args.check_accuracy:
+        ref_config = copy.copy(config)
+        ref_config.weights = {k: v.float() for k, v in config.weights.items()}
+        results = harness.check_accuracy(
+            config,
+            state,
+            llama_forward_pass,
+            ref_config,
+            harness.LlamaModelState(ref_config),
+            llama_cpu.llama_forward_pass,
+            args.num_tokens,
+        )
+        kl = [k for k, _ in results]
+        print(f"[Accuracy] Prefill KL: {kl[0]:.6f}")
+        if len(kl) > 1:
+            print(f"[Accuracy] Decode max KL: {max(kl[1:]):.6f}")
+        print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
+        return
+
+    if args.check_determinism:
+        # The second prompt is the same amount of the text that follows.
+        other = harness.get_prompt(2 * args.prompt_len)[args.prompt_len :]
+        other_ids = [config.special_tokens["<|begin_of_text|>"]]
+        other_ids += config.tokenizer.encode(other)
+        prompts = [state.token_ids, torch.tensor([other_ids], dtype=torch.long)]
+        n_differ = harness.check_determinism(
+            config, prompts, llama_forward_pass, args.num_tokens, args.check_determinism
+        )
+        n_compared = len(prompts) * (args.check_determinism - 1)
+        print(f"[Determinism] Differing runs: {n_differ}/{n_compared}")
+        return
 
     print(prompt, end="", flush=True)
     harness.generate(

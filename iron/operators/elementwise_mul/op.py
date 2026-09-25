@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import eltwise
+
 from iron.common import BinaryElementwiseOperator
 
 
@@ -11,11 +13,10 @@ from iron.common import BinaryElementwiseOperator
 class ElementwiseMul(BinaryElementwiseOperator):
     """AIE-accelerated element-wise multiplication"""
 
-    kernel_name: ClassVar[str] = "mul"
-    kernel_fn_name: ClassVar[str] = "eltwise_mul_bf16_vector_size"
-    kernel_subdir: ClassVar[str] = "generic"
     callback_fn: ClassVar[str] = "my_eltwise_mul"
-    kernels_from_mlir_aie: ClassVar[bool] = True
+
+    def _kernel(self):
+        return eltwise.mul_sized(self._tile_elements)
 
     def reference(self, a, b):
         from iron.operators.elementwise_mul.reference import reference

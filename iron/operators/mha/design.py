@@ -11,7 +11,6 @@ from ml_dtypes import bfloat16
 import numpy as np
 
 from aie.iron import (
-    Kernel,
     ObjectFifo,
     Program,
     Runtime,
@@ -24,7 +23,8 @@ from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
-from iron.common.kernels import zero_object_name
+from aie.iron.kernels import eltwise, linalg, zero
+from aie.utils import set_current_device
 from iron.operators._trace import maybe_enable_trace, resolve_trace_size
 
 dtype_map = {
@@ -82,6 +82,8 @@ def main():
 
     args = argparser.parse_args()
     dev = NPU2()
+    # The kernel factories pick their source and flags by the current device.
+    set_current_device(dev)
 
     maybe_module = fused_mha(
         dev=dev,
@@ -96,6 +98,15 @@ def main():
         emulate_bf16_mmul_with_bfp16=args.emulate_bf16_mmul_with_bfp16,
         trace_size=args.trace_size,
         verbose=args.verbose,
+        matmul_QK=linalg.mha(
+            args.B_q,
+            args.d,
+            args.B_kv,
+            b_col_maj=True,
+            emulate_bf16_mmul_with_bfp16=True,
+        ),
+        zero_kernel=zero((args.B_q, args.B_kv), bfloat16),
+        passthrough_kernel=eltwise.passthrough(4 * args.B_q, np.int16),
     )
 
     output_file_path = Path(args.output_file_path)
@@ -120,6 +131,10 @@ def fused_mha(
     emulate_bf16_mmul_with_bfp16: bool,
     trace_size: int = 0,
     verbose: bool = False,
+    *,
+    matmul_QK,
+    zero_kernel,
+    passthrough_kernel,
 ):
 
     of_depth = 2
@@ -213,20 +228,20 @@ def fused_mha(
     s_ty = np.ndarray[(4 * B_q,), np.dtype[dtype]]
 
     # AIE kernel declarations
-    func_type = "" if vectorized else "_scalar"
-    # mha.cc uses zero.cc's templates internally but no longer re-exports a
-    # zero_<dtype> entry point, so the zero kernel comes from its own object.
-    zero_kernel = Kernel("zero", zero_object_name(dtype_str, B_q * B_kv), [qk_ty])
+    # matmul_QK is mha.cc's QK^T product; the rest of mha.cc's toolkit is
+    # bound from the same object.
+    mha_object = matmul_QK.object_file
 
-    memcopy_kernel_scale = Kernel(
-        f"passThroughLine", "mha_passThrough.o", [s_ty, s_ty, np.int32]
+    # passthrough_kernel is the 16-bit passThroughLine; the scale buffers it
+    # copies are bf16.
+    memcopy_kernel_scale = passthrough_kernel.object_file.bind(
+        "passThroughLine", [s_ty, s_ty, np.int32]
     )
 
-    scale_buffer_init_kernel = Kernel("init_scale_buffer", "mha.o", [s_ty, np.int32])
+    scale_buffer_init_kernel = mha_object.bind("init_scale_buffer", [s_ty, np.int32])
 
-    partial_softmax_kernel = Kernel(
+    partial_softmax_kernel = mha_object.bind(
         "partial_softmax",
-        "mha.o",
         [
             qk_ty,
             qk_ty,
@@ -240,15 +255,8 @@ def fused_mha(
         ],
     )
 
-    matmul_QK = Kernel(
-        f"matmul_bf16_bf16_wrapper{func_type}",
-        "mha.o",
-        [q_ty, k_ty, qk_ty, np.ndarray[(2,), np.dtype[np.int32]]],
-    )
-
-    matmul_PV = Kernel(
+    matmul_PV = mha_object.bind(
         "matmul_PV",
-        "mha.o",
         [
             qk_ty,
             k_ty,
@@ -260,9 +268,8 @@ def fused_mha(
         ],
     )
 
-    rescale_O = Kernel(
+    rescale_O = mha_object.bind(
         "rescale_O",
-        "mha.o",
         [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
     )
 

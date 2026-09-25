@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from iron.common.test_utils import torch_dtype_map
 
 
 def reference(a, b):
@@ -10,10 +9,9 @@ def reference(a, b):
     return a + b
 
 
-def generate_golden_reference(input_length: int, dtype="bf16", seed=42):
+def generate_inputs(input_length: int, seed=42):
     torch.manual_seed(seed)
     val_range = 4
-    dtype_torch = torch_dtype_map[dtype]
-    input_a = torch.rand(input_length, dtype=dtype_torch) * val_range
-    input_b = torch.rand(input_length, dtype=dtype_torch) * val_range
-    return {"A": input_a, "B": input_b, "C": reference(input_a, input_b)}
+    a = torch.rand(input_length, dtype=torch.bfloat16) * val_range
+    b = torch.rand(input_length, dtype=torch.bfloat16) * val_range
+    return a, b

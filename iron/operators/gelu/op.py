@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import activation
+
 from iron.common import ChanneledUnaryOperator
 
 
@@ -11,8 +13,13 @@ from iron.common import ChanneledUnaryOperator
 class GELU(ChanneledUnaryOperator):
     """AIE-accelerated GELU activation function"""
 
-    kernel_name: ClassVar[str] = "gelu"
-    kernel_fn_name: ClassVar[str] = "gelu_bf16_size"
-    needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_gelu"
     tile_cap: ClassVar[int] = 8192
+
+    def _kernel(self):
+        return activation.gelu_sized(self._line_size)
+
+    def reference(self, x):
+        from iron.operators.gelu.reference import reference
+
+        return reference(x)

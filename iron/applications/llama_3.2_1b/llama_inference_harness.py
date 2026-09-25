@@ -169,6 +169,65 @@ def generate_token(config, forward_pass, state):
     return next_token.item(), state
 
 
+def check_accuracy(
+    config, state, forward_pass, ref_config, ref_state, ref_forward_pass, num_tokens
+):
+    """Teacher-forced comparison of forward_pass's logits against a reference.
+
+    Both models are fed the reference's greedy token at every step, so a
+    divergence at step N is the candidate's own error at step N rather than the
+    consequence of an earlier different choice. Step 0 is prefill.
+
+    Returns one (kl, top1) pair per step: KL(reference || candidate) of the
+    next-token distributions, and whether both rank the same token first.
+    """
+    ref_state.token_ids = state.token_ids
+    results = []
+    for step in range(num_tokens):
+        logits, state = forward_pass(config, state)
+        ref_logits, ref_state = ref_forward_pass(ref_config, ref_state)
+        cand = torch.log_softmax(logits[0, -1].float(), dim=0)
+        ref = torch.log_softmax(ref_logits[0, -1].float(), dim=0)
+        kl = torch.sum(ref.exp() * (ref - cand)).item()
+        next_token = int(ref.argmax())
+        top1 = int(cand.argmax()) == next_token
+        results.append((kl, top1))
+        print(f"step {step:3d}  KL {kl:.5f}  top-1 {'match' if top1 else 'MISMATCH'}")
+        state.token_ids = torch.tensor([[next_token]], dtype=torch.long)
+        ref_state.token_ids = state.token_ids
+    return results
+
+
+def check_determinism(config, prompts, forward_pass, num_tokens, rounds):
+    """Run each prompt `rounds` times, alternating, and compare logits bitwise.
+
+    Each round prefills from a fresh state and decodes greedily. Alternating
+    prompts with different text matters: a host write that never reaches the
+    device then reads the other prompt's data, not a leftover copy of its own.
+    Returns how many rounds differ from the first round of the same prompt.
+    """
+    first = [None] * len(prompts)
+    n_differ = 0
+    for r in range(rounds * len(prompts)):
+        p = r % len(prompts)
+        state = LlamaModelState(config)
+        state.token_ids = prompts[p]
+        logits = []
+        for _ in range(num_tokens):
+            out, state = forward_pass(config, state)
+            logits.append(out[0, -1].clone())
+            state.token_ids = out[:, -1:].argmax(dim=-1)
+        logits = torch.stack(logits).view(torch.int16)
+        if first[p] is None:
+            first[p] = logits
+            continue
+        steps = (logits != first[p]).any(dim=1).nonzero().flatten().tolist()
+        if steps:
+            n_differ += 1
+            print(f"round {r} (prompt {p}): logits differ at steps {steps}")
+    return n_differ
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LLaMA 3.2 1B Inference Harness")
     parser.add_argument(
@@ -188,6 +247,19 @@ def parse_args():
         type=int,
         default=40,
         help="Number of tokens to generate (default: 40)",
+    )
+    parser.add_argument(
+        "--check-accuracy",
+        action="store_true",
+        help="Instead of sampling, compare each step's logits against an fp32 CPU "
+        "reference, feeding both the reference's greedy token",
+    )
+    parser.add_argument(
+        "--check-determinism",
+        type=int,
+        metavar="ROUNDS",
+        help="Instead of sampling, run two prompts ROUNDS times each, alternating, "
+        "and count the runs whose logits differ bitwise from the first run",
     )
     return parser.parse_args()
 

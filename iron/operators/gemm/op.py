@@ -10,13 +10,11 @@ from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from iron.common.device_utils import get_kernel_dir
-from iron.common.kernels import zero_artifact, zero_object_name
 from aie.iron import str_to_dtype
+from aie.iron.kernels import datamovement, linalg, zero
 import aie.utils as aie_utils
 
 
@@ -64,7 +62,7 @@ class GEMM(MLIROperator):
             raise ValueError(f"N ({self.N}) must be a multiple of {min_N}")
 
         # r, s, t are the aie::mmul tile dims the bf16 kernel is built from
-        # (aie_kernels/aie2p/mm.cc, matmul_vectorized_2x2_mmul)
+        # (aie_kernels/linalg/mm_aie2p.h, matmul_vectorized_2x2_mmul)
         if self.emulate_bf16_mmul_with_bfp16:
             r, s, t = 8, 8, 8
         else:
@@ -73,34 +71,57 @@ class GEMM(MLIROperator):
         if self.tile_m % min_tile_m != 0:
             raise ValueError(
                 f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
-                f"(aie_kernels/aie2p/mm.cc requires m % (2*r) == 0, r={r})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0, r={r})"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
                 f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
-                f"(aie_kernels/aie2p/mm.cc requires k % s == 0, s={s})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0, s={s})"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
                 f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
-                f"(aie_kernels/aie2p/mm.cc requires n % (2*t) == 0, t={t})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0, t={t})"
             )
 
         MLIROperator.__init__(self, context=self.context)
 
-    @property
-    def _kernel_flags_suffix(self):
-        """Suffix encoding compile-time flags that affect the kernel binary."""
-        return f"_{int(self.prio_accuracy)}_{int(self.emulate_bf16_mmul_with_bfp16)}_{int(self.round_conv_even)}"
-
-    @property
-    def _zero_dtype(self):
-        """The dtype the zero kernel clears: the accumulator's, not always C's.
+    def _kernels(self):
+        """The matmul, the zero that clears its accumulator and, under
+        prio_accuracy, the f32 -> bf16 copy out of that accumulator.
 
         prio_accuracy accumulates in f32 in L1 and converts on the way out, so
-        the buffer that gets zeroed is f32 even when C is bf16.
+        the matmul's C, and the buffer that gets zeroed, are f32 even when C
+        is bf16.
         """
-        return "f32" if self.prio_accuracy else self.dtype_out
+        use_chess = self.context.compiler == "chess"
+        dtype_acc = np.float32 if self.prio_accuracy else str_to_dtype(self.dtype_out)
+        kernels = {
+            "matmul_kernel": linalg.mm(
+                self.tile_m,
+                self.tile_k,
+                self.tile_n,
+                input_dtype=str_to_dtype(self.dtype_in),
+                output_dtype=dtype_acc,
+                vectorized=not self.use_scalar,
+                b_col_maj=self.b_col_maj,
+                c_col_maj=self.c_col_maj,
+                use_chess=use_chess,
+                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+                round_conv_even=self.round_conv_even,
+            ),
+            "zero_kernel": zero(
+                self.tile_m * self.tile_n,
+                dtype_acc,
+                vectorized=not self.use_scalar,
+                use_chess=use_chess,
+            ),
+        }
+        if self.prio_accuracy:
+            kernels["convert_copy_kernel"] = datamovement.convert_copy(
+                self.tile_m * self.tile_n
+            )
+        return kernels
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
@@ -127,56 +148,13 @@ class GEMM(MLIROperator):
                     "prio_accuracy": self.prio_accuracy,
                     "separate_c_tiles": int(self.separate_c_tiles),
                     "trace_size": 0,
-                    "kernel_object": f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
-                    "zero_object": zero_object_name(
-                        self._zero_dtype, self.tile_m * self.tile_n, self.use_scalar
-                    ),
+                    **self._kernels(),
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        kernel_flags = [
-            f"-DDIM_M={self.tile_m}",
-            f"-DDIM_K={self.tile_k}",
-            f"-DDIM_N={self.tile_n}",
-        ]
-        if self.prio_accuracy:
-            kernel_flags.append("-Dbf16_f32_ONLY")
-        else:
-            kernel_flags.append("-Dbf16_bf16_ONLY")
-        if self.round_conv_even:
-            kernel_flags.append("-DROUND_CONV_EVEN")
-        if self.emulate_bf16_mmul_with_bfp16:
-            kernel_flags.append("-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16")
-        if self.b_col_maj:
-            kernel_flags.append("-DB_COL_MAJ")
-        if self.c_col_maj:
-            kernel_flags.append("-DC_COL_MAJ")
-
-        kernel_dir = get_kernel_dir()
-        mm_source = self.context.kernels_dir / kernel_dir / "mm.cc"
-        return [
-            KernelObjectArtifact(
-                f"gemm_{self.tile_m}x{self.tile_k}x{self.tile_n}_{int(self.b_col_maj)}_{int(self.c_col_maj)}{self._kernel_flags_suffix}.o",
-                extra_flags=kernel_flags,
-                dependencies=[SourceArtifact(mm_source)],
-            ),
-            KernelObjectArtifact(
-                "cast_f32_bf16.o",
-                [
-                    SourceArtifact(
-                        self.context.kernels_dir / "aie2p" / "cast_f32_bf16.cc"
-                    )
-                ],
-            ),
-            zero_artifact(
-                self.context.kernels_dir,
-                self._zero_dtype,
-                self.tile_m * self.tile_n,
-                self.use_scalar,
-            ),
-        ]
+        return [KernelObjectArtifact.from_extern(k) for k in self._kernels().values()]
 
     def get_arg_spec(self):
         dtype_in = str_to_dtype(self.dtype_in)

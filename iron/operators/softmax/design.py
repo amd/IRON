@@ -5,7 +5,6 @@
 import numpy as np
 
 from aie.iron import (
-    Kernel,
     ObjectFifo,
     ScratchpadParameter,
     Program,
@@ -32,8 +31,9 @@ def softmax(
     tile_size,
     rtp_vector_size=None,
     vector_size_parameter=None,
-    func_prefix="",
-    kernel_obj_file="softmax.o",
+    *,
+    softmax_kernel,
+    mask_kernel,
 ):
     per_tile_elements = tile_size
     if rtp_vector_size is None:
@@ -63,18 +63,6 @@ def softmax(
         for i in range(num_aie_columns)
         for j in range(num_channels)
     ]
-
-    # AIE Core Function declaration
-    softmax_kernel = Kernel(
-        f"{func_prefix}softmax_bf16",
-        f"{func_prefix}{kernel_obj_file}",
-        [tile_ty, tile_ty, np.int32],
-    )
-    mask_kernel = Kernel(
-        f"{func_prefix}mask_bf16",
-        f"{func_prefix}{kernel_obj_file}",
-        [tile_ty, np.int32, np.int32],
-    )
 
     # Vector size source: either a scratchpad Parameter (synced from host each
     # dispatch) or a write-RTP buffer set via rt.inline_ops at compile time.

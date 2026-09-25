@@ -8,7 +8,7 @@ import aie.dialects.index as index
 from aie.dialects.aie import T
 from aie.helpers.dialects.scf import _for as range_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 
 """
 Matrix-vector design
@@ -33,10 +33,10 @@ def my_matvec(
     m_input,
     m_output=None,
     num_batches=1,
-    kernel_object="mv.o",
-    func_prefix="",
     verbose=False,
-    epilogue="none",
+    *,
+    matvec_fn,
+    epilogue_fn=None,
 ):
     if m_output is None:
         m_output = m_input
@@ -56,11 +56,8 @@ def my_matvec(
     assert m_input <= M // cols, "m_input must be less than or equal to M/cols"
     assert (M // cols) % m_input == 0, "m_input must evenly divide M/cols"
 
-    vectorized = True
     dtype_in = np.dtype[bfloat16]
-    dtype_in_str = "bf16"
     dtype_out = np.dtype[bfloat16]
-    dtype_out_str = "bf16"
 
     assert M % cols == 0
 
@@ -80,26 +77,9 @@ def my_matvec(
     L3_B_ty = np.ndarray[(num_batches * K,), dtype_in]
     L3_C_ty = np.ndarray[(num_batches * M,), dtype_out]
 
-    func_type = "vectorized" if vectorized else "scalar"
-    matvec = Kernel(
-        f"{func_prefix}matvec_{func_type}_{dtype_in_str}_{dtype_out_str}",
-        f"{func_prefix}{kernel_object}",
-        [np.int32, np.int32, L1_A_ty, L1_B_ty, L1_C_ty],
-    )
-    # Optional fused activation over the full m_output C-tile, applied once per tile in core_body
-    # (after the matvec inner-loop has filled all rows) rather than per matvec call, whose m_input
-    # tile can be smaller than the 16-wide activation vector.
-    assert epilogue in ("none", "gelu")
-    gelu_kernel = None
-    if epilogue == "gelu":
-        assert (
-            m_output % 16 == 0
-        ), f"gelu epilogue needs m_output % 16 == 0 (got {m_output})"
-        gelu_kernel = Kernel(
-            f"{func_prefix}gelu_tile_bf16",
-            f"{func_prefix}{kernel_object}",
-            [np.int32, L1_C_ty],
-        )
+    # epilogue_fn: optional fused activation over the full m_output C-tile, applied once per
+    # tile in core_body (after the matvec inner-loop has filled all rows) rather than per
+    # matvec call, whose m_input tile can be smaller than the 16-wide activation vector.
 
     A_L3L1_fifos = [
         ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=2) for i in range(cols)
@@ -137,9 +117,9 @@ def my_matvec(
                 A_L3L1_fifos[i].cons(),
                 B_L3L1_fifos[i].cons(),
                 C_L1L3_fifos[i].prod(),
-                matvec,
+                matvec_fn,
             ]
-            + ([gelu_kernel] if epilogue == "gelu" else []),
+            + ([epilogue_fn] if epilogue_fn is not None else []),
         )
         for i in range(cols)
     ]

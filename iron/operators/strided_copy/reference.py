@@ -4,8 +4,6 @@
 import numpy as np
 import torch
 
-from iron.common.test_utils import torch_dtype_map
-
 
 def _pad_to_4d(sizes, strides):
     """design.py pads access patterns to 4D before building the taps; the reference
@@ -89,14 +87,11 @@ def generate_golden_reference(
     num_aie_channels=1,
     input_offset_addend=0,
     output_offset_addend=0,
-    dtype="bf16",
     seed=42,
 ):
     torch.manual_seed(seed)
     val_range = 4
-    input_tensor = (
-        torch.rand(int(input_buffer_size), dtype=torch_dtype_map[dtype]) * val_range
-    )
+    input_tensor = torch.rand(int(input_buffer_size), dtype=torch.bfloat16) * val_range
     output_tensor = reference(
         input_tensor,
         input_sizes,

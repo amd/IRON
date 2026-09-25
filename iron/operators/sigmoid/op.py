@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+from aie.iron.kernels import activation
+
 from iron.common import ChanneledUnaryOperator
 
 
@@ -11,7 +13,12 @@ from iron.common import ChanneledUnaryOperator
 class Sigmoid(ChanneledUnaryOperator):
     """AIE-accelerated Sigmoid activation function"""
 
-    kernel_name: ClassVar[str] = "sigmoid"
-    kernel_fn_name: ClassVar[str] = "sigmoid_bf16"
-    needs_lut_ops: ClassVar[bool] = True
     callback_fn: ClassVar[str] = "my_sigmoid"
+
+    def _kernel(self):
+        return activation.sigmoid(self._line_size)
+
+    def reference(self, x):
+        from iron.operators.sigmoid.reference import reference
+
+        return reference(x)

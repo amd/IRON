@@ -7,6 +7,7 @@ import numpy as np
 
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron.kernels import quant
 
 from iron.common import (
     AIERuntimeArgSpec,
@@ -14,10 +15,8 @@ from iron.common import (
     KernelObjectArtifact,
     MLIROperator,
     PythonGeneratedMLIRArtifact,
-    SourceArtifact,
 )
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
-from iron.common.device_utils import get_kernel_dir
 
 from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
@@ -126,6 +125,7 @@ class DequantBFP(MLIROperator):
                     self.run_out_features,
                     self.run_period_out_features,
                 ),
+                {"dequant_kernel": self._kernel()},
             ),
         )
 
@@ -151,28 +151,16 @@ class DequantBFP(MLIROperator):
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
-    def get_kernel_artifacts(self):
+    def _kernel(self):
         dev = aie_utils.get_current_device()
         if dev.arch != AIEArch.AIE2p:
             raise NotImplementedError("bfp16ebs8 exists only on AIE2P")
-        return [
-            KernelObjectArtifact(
-                f"q4nx_dequant_{get_kernel_dir(dev)}.o",
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "generic" / "q4nx_dequant.cc"
-                    )
-                ],
-                extra_flags=[
-                    f"-DQ4NX_M_TILE={M_TILE}",
-                    f"-DQ4NX_K_TILE={K_TILE}",
-                    f"-DQ4NX_GROUP={GROUP}",
-                    f"-DQ4NX_CT_K={CT_K}",
-                    f"-DQ4NX_S={S}",
-                    f"-DQ4NX_T={T}",
-                ],
-            )
-        ]
+        return quant.q4nx_dequant(
+            m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
+        )
+
+    def get_kernel_artifacts(self):
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         # Both buffers are declared in bytes: a q4nx block interleaves three

@@ -4,9 +4,10 @@
 
 import pytest
 import aie.utils as aie_utils
+from aie.utils.verify import Tolerance
 from iron.operators.rope.op import RoPE
-from iron.operators.rope.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.operators.rope.reference import generate_inputs
+from iron.common.test_utils import assert_matches_reference
 
 
 def get_params():
@@ -61,9 +62,7 @@ def get_params():
     get_params(),
 )
 def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
-    golden_ref = generate_golden_reference(
-        rows=rows, cols=cols, context_len=angle_rows, method_type=method_type
-    )
+    x, angles = generate_inputs(rows=rows, cols=cols, context_len=angle_rows)
 
     operator = RoPE(
         rows=rows,
@@ -74,19 +73,12 @@ def test_rope(rows, cols, angle_rows, aie_columns, method_type, aie_context):
         context=aie_context,
     )
 
-    # golden reference produces tensors of shape (n_heads, seq_len, cols);
-    # NPU design expects (seq_len, n_heads, cols), so we transpose inputs/outputs
-    input_buffers = {
-        "in": golden_ref["A"].transpose(0, 1).contiguous(),
-        "angles": golden_ref["B"],
-    }
-    output_buffers = {"output": golden_ref["C"].transpose(0, 1).contiguous()}
-
-    errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.05, abs_tol=0.5
+    assert_matches_reference(
+        operator,
+        x,
+        angles,
+        # The tighter of this test's former rel_tol and the kernel contract's
+        # atol (none): an output that cancels to near zero is judged
+        # relatively like any other.
+        tolerance=Tolerance.relative(0.05),
     )
-
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-
-    assert not errors, f"Test failed with errors: {errors}"

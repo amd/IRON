@@ -5,6 +5,7 @@ from dataclasses import dataclass, InitVar
 from typing import ClassVar
 
 import aie.utils as aie_utils
+from aie.iron.kernels import norm
 from iron.common import ChanneledUnaryOperator
 
 
@@ -14,14 +15,21 @@ class LayerNorm(ChanneledUnaryOperator):
 
     trace_size: InitVar[int] = 0
 
-    kernel_name: ClassVar[str] = "layer_norm"
-    kernel_fn_name: ClassVar[str] = "layer_norm"
     callback_fn: ClassVar[str] = "my_layer_norm"
     tile_cap: ClassVar[int] = 8192
 
     def __post_init__(self, trace_size):
         self.trace_size = trace_size
         super().__post_init__()
+
+    def _kernel(self):
+        return norm.layer_norm(self._line_size)
+
+    def reference(self, x):
+        """CPU reference: layer normalization of each line the kernel sees."""
+        from iron.operators.layer_norm.reference import reference
+
+        return reference(x.reshape(-1, self._line_size))
 
     def _mlir_callback_args(self):
         return [

@@ -10,7 +10,6 @@ import math
 
 from aie.iron import (
     TaskGroup,
-    Kernel,
     ObjectFifo,
     Program,
     Runtime,
@@ -164,14 +163,27 @@ def create_partial_workload_config(
 #
 
 
+def mem_copy_line_size(tile_size):
+    """Elements per ObjectFifo line, and per passThroughLine call."""
+    return 8192 if tile_size > 8192 else tile_size
+
+
 def my_mem_copy(
-    dev, size, num_cores, num_channels, bypass, tile_size, trace_size, func_prefix=""
+    dev,
+    size,
+    num_cores,
+    num_channels,
+    bypass,
+    tile_size,
+    trace_size,
+    *,
+    passthrough_kernel=None,
 ):
     # --------------------------------------------------------------------------
     # Configuration
     # --------------------------------------------------------------------------
     xfr_dtype = bfloat16
-    line_size = 8192 if tile_size > 8192 else tile_size
+    line_size = mem_copy_line_size(tile_size)
     fifodepth = 1 if line_size > 4096 else 2
     line_type = np.ndarray[(line_size,), np.dtype[xfr_dtype]]
     transfer_type = np.ndarray[(size,), np.dtype[xfr_dtype]]
@@ -199,11 +211,9 @@ def my_mem_copy(
         # Task core will run
         # --------------------------------------------------------------------------
 
-        # External, binary kernel definition
-        mem_copy_fcn = Kernel(
-            f"{func_prefix}passThroughLine",
-            f"{func_prefix}mem_copy.o",
-            [line_type, line_type, np.int32],
+        # passthrough_kernel is the 16-bit passThroughLine; the lines are bf16.
+        mem_copy_fcn = passthrough_kernel.object_file.bind(
+            "passThroughLine", [line_type, line_type, np.int32]
         )
 
         # Task for the core to perform

@@ -4,7 +4,7 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.iron.device import NPU1, NPU2
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
@@ -18,6 +18,8 @@ def my_rms_norm(
     tile_size,
     trace_size,
     epsilon=1e-5,
+    *,
+    rms_norm_kernel,
 ):
     per_tile_elements = 8192 if tile_size > 8192 else tile_size
     total_cores = num_columns * num_channels
@@ -47,11 +49,6 @@ def my_rms_norm(
         for i in range(num_columns)
         for j in range(num_channels)
     ]
-
-    # AIE Core Function declaration
-    rms_norm_kernel = Kernel(
-        "rms_norm_eps", "rms_norm.o", [tile_ty, tile_ty, np.int32, np.float32]
-    )
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, rms_norm_kernel):

@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
 import numpy as np
 import pytest
 import aie.utils as aie_utils
 import torch
 import ml_dtypes
+from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators.gemm.op import GEMM
@@ -21,39 +20,39 @@ def get_params():
     max_aie_columns = dev.cols
     device_type = dev.resolve().name
     # fmt: off
-    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, trace_size, partition_N
+    #   M,     K,     N, num_aie_columns, b_col_maj, c_col_maj,   m,   k,   n, partition_N
     regular_params = [
-        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64,          0, 1),
-        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64,          0, 1),
-        (1792,   896,  1152,               8,     False,      True,  64,  32,  48,          0, 1),
-        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80,          0, 1),
-        ( 192,   384,    64,               4,     False,     False,  48,  96,  16,          0, 1),
-        ( 192,   384,    64,               4,      True,      True,  48,  96,  16,          0, 1),
-        (  64,   512,   256,               4,      True,     False,  16,  64,  64,          0, 4),
+        (2048,  2048,  2048,               1,     False,     False,  64,  64,  64, 1),
+        (2048,  2048,  2048,               2,      True,     False,  64,  64,  64, 1),
+        (2048,  2048,  2048,               8,      True,      True,  64,  64,  64, 1),
+        ( 384,  1536,  1792,               4,      True,     False,  32,  48,  64, 1),
+        (1792,   896,  1152,               8,     False,      True,  64,  32,  48, 1),
+        ( 896,  1792,   640,               8,     False,      True,  32,  64,  80, 1),
+        ( 192,   384,    64,               4,     False,     False,  48,  96,  16, 1),
+        ( 192,   384,    64,               4,      True,      True,  48,  96,  16, 1),
+        (  64,   512,   256,               4,      True,     False,  16,  64,  64, 4),
     ]
     extensive_params = [
-        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128,          0, 1),
-        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32,          0, 1),
-        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,      True,     False,  64,  64,  64,          0, 1),
-        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32,          0, 1),
-        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,    64,  2048,               2,     False,      True,  64,  64,  64,          0, 1),
-        (2048,    64,  8192,               2,     False,      True,  64,  64,  64,          0, 1),
+        (2048,  2048,  2048,               8,     False,     False,  32,  32, 128, 1),
+        (2048,  2048,  8192,               2,     False,     False,  64,  64,  64, 1),
+        (2048,  8192,  2048,               2,     False,     False,  64,  64,  64, 1),
+        (2048,    64,  2048,               2,     False,     False,  64,  64,  64, 1),
+        (2048,    64,  8192,               2,     False,     False,  64,  64,  64, 1),
+        (2048,  2048,  2048,               8,      True,     False, 128,  32,  32, 1),
+        (2048,  2048,  8192,               2,      True,     False,  64,  64,  64, 1),
+        (2048,  8192,  2048,               2,      True,     False,  64,  64,  64, 1),
+        (2048,    64,  2048,               2,      True,     False,  64,  64,  64, 1),
+        (2048,    64,  8192,               2,      True,     False,  64,  64,  64, 1),
+        (2048,  2048,  2048,               2,     False,      True,   8,  16,  32, 1),
+        (2048,  2048,  8192,               2,     False,      True,  64,  64,  64, 1),
+        (2048,  8192,  2048,               2,     False,      True,  64,  64,  64, 1),
+        (2048,    64,  2048,               2,     False,      True,  64,  64,  64, 1),
+        (2048,    64,  8192,               2,     False,      True,  64,  64,  64, 1),
         # N wide enough that C's row stride (mem_tile_m_C * N) overflows the
         # shim BD's 20-bit iteration step, so the drain is issued as one
         # descriptor per row-block. Cover for that split.
-        (1024,  2560, 10240,               8,     False,     False,  64,  64,  64,          0, 1),
-        (2048,  2560, 10240,               8,     False,     False,  64,  64,  64,          0, 1),
+        (1024,  2560, 10240,               8,     False,     False,  64,  64,  64, 1),
+        (2048,  2560, 10240,               8,     False,     False,  64,  64,  64, 1),
     ]
     # fmt: on
 
@@ -72,7 +71,6 @@ def get_params():
                 m,
                 k,
                 n,
-                trace_size,
                 partition_N,
             ) = p
 
@@ -100,7 +98,7 @@ def get_params():
     Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
 )
 @pytest.mark.parametrize(
-    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,trace_size,partition_N",
+    "M,K,N,num_aie_columns,b_col_maj,c_col_maj,m,k,n,partition_N",
     get_params(),
 )
 def test_gemm(
@@ -113,7 +111,6 @@ def test_gemm(
     m,
     k,
     n,
-    trace_size,
     partition_N,
     aie_context,
 ):
@@ -188,12 +185,11 @@ def test_gemm(
             B_bufs.append(XRTTensor.from_torch(b_torch))
             C_bufs.append(XRTTensor(c_shape, dtype=c_dtype))
 
-        # Run each partition
-        start_time = time.perf_counter()
-        for i in range(partition_N):
-            op_func(A_buf, B_bufs[i], C_bufs[i])
-        end_time = time.perf_counter()
-        latency_us = (end_time - start_time) * 1e6
+        def run_partitions():
+            for i in range(partition_N):
+                op_func(A_buf, B_bufs[i], C_bufs[i])
+
+        latency_us = run_iters(run_partitions).e2e.avg_us
 
         # Read back and concatenate C partitions along the column dimension
         C_parts_torch = [buf.to_torch().reshape(c_shape) for buf in C_bufs]

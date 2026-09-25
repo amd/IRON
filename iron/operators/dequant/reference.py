@@ -2,12 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import numpy as np
-from ml_dtypes import bfloat16
+from aie.iron.kernels.datamovement import expand_ref
 
 
-def generate_golden_reference(input_length, tile_size, group_size):
-    torch.manual_seed(42)
+def reference(payload, tile_size, group_size):
+    """CPU reference: each uint4 value times its group's bf16 scale.
+
+    ``payload`` holds, per tile, ``tile_size`` packed uint4 values
+    (``tile_size // 2`` bytes, low nibble first) followed by one bf16 scale per
+    ``group_size`` elements. The product is exact in fp32 and rounded once.
+    """
+    tile_bytes = tile_size // 2 + 2 * (tile_size // group_size)
+    tiles = payload.reshape(-1, tile_bytes).numpy()
+    out = expand_ref(tiles, tile_size=tile_size, group_size=group_size)
+    return torch.from_numpy(out).to(torch.bfloat16).reshape(-1)
+
+
+def generate_inputs(input_length, tile_size, group_size, seed=42):
+    """Random bf16 values quantized to uint4 per group and packed as the
+    operator takes them (see ``reference``)."""
+    torch.manual_seed(seed)
 
     if input_length % tile_size != 0:
         raise ValueError("Input length must be a multiple of tile size.")
@@ -23,8 +37,7 @@ def generate_golden_reference(input_length, tile_size, group_size):
     )  # Total bytes (uint8 elements) after processing each tile
     val_range = 3.75  # Values in [0, 3.75)
 
-    # Generate golden output with uniform distribution between 0 and val_range
-    # This output will be quantized to be used as the input
+    # Uniform values in [0, val_range), quantized below to make the input
     A = (
         torch.rand(num_tiles * num_scale_factors, group_size, dtype=torch.bfloat16)
         * val_range
@@ -46,7 +59,6 @@ def generate_golden_reference(input_length, tile_size, group_size):
         axis=0,
         dtype=torch.quint8,
     )
-    B = torch.dequantize(A)
 
     # Convert A from a quantized tensor type to regular tensor type for data packing
     # We do the data packing here instead of the host to show how the data would need to be
@@ -79,7 +91,4 @@ def generate_golden_reference(input_length, tile_size, group_size):
                 0xFF,
             )
 
-    return {
-        "input": A_concat,
-        "output": B,
-    }
+    return A_concat.flatten()

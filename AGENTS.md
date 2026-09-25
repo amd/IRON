@@ -126,15 +126,19 @@ reuse lint
    - Each operator directory contains:
      - `op.py`: Python interface (inherits from `MLIROperator`) - defines operator parameters, compilation artifacts, and runtime argument specs
      - `design.py`: NPU implementation using MLIR-AIE Python API - defines ObjectFIFOs, Workers, and Runtime sequences
-     - `reference.py`: CPU reference implementation for validation
-     - `test.py`: End-to-end test (build, run, verify against reference)
+     - `reference.py`: `reference()`, the CPU ground truth the NPU output is
+       judged against (exposed as the operator's `reference()` method), and
+       `generate_inputs()`, the test's random inputs
+     - `test.py`: End-to-end test (build, run once, check against `reference()`)
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
-   - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`AIEContext.kernels_dir`), not from this repo:
-     - `generic/`: Works on both AIE2 and AIE2P
-     - `aie2/`: AIE2-specific (NPU1)
-     - `aie2p/`: AIE2P-specific (NPU2)
+   - C++ compute kernels, sourced from the installed mlir-aie package, not
+     from this repo. Operators get them from mlir-aie's kernel factories
+     (`aie.iron.kernels`), each of which returns an `ExternalFunction`
+     carrying its source, flags, symbol and argument types
+   - Grouped by family (`activation/`, `eltwise/`, `linalg/`, `norm/`,
+     `fused/`, `common/`, ...), not by architecture: a kernel's `.cc` includes
+     its `*_aie2.h` or `*_aie2p.h` header, chosen by `aie_arch.h`
    - Use AIE API for vectorization (e.g., `aie::mmul`, `aie::add`, `aie::mul`)
    - Compiled to `.o` files and linked into operator `.xclbin`
 
@@ -144,8 +148,8 @@ reuse lint
    - `fusion.py`: Operator sequencing framework (`OperatorSequence`)
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
-   - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: Test utilities (`verify_buffer`, `nearly_equal`)
+   - `utils.py`: Helper functions (`float_to_name`, `get_shim_dma_limit`, `split_run`)
+   - `test_utils.py`: Test utilities (`assert_matches_reference`, the one-call operator check; `verify_buffer`, a wrapper over mlir-aie's `aie.utils.verify.compare`; `run_test`, timed with `aie.utils.benchmark.run_iters`)
 
 ### Key Concepts
 
@@ -244,23 +248,33 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 2. Implement `op.py`:
    - Subclass `MLIROperator`
    - Implement `get_operator_name()`, `get_mlir_artifact()`, `get_kernel_artifacts()`, `get_arg_spec()`
+   - Build kernels with the `aie.iron.kernels` factories in one `_kernels()`
+     helper, pass them to the design as keyword arguments, and return
+     `[KernelObjectArtifact.from_extern(k) for k in self._kernels().values()]`
+     from `get_kernel_artifacts()`
    - Add validation for dimension constraints (assert statements)
    - Define tile sizes and column counts
 3. Implement `design.py`:
-   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo, Kernel)
+   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo)
+   - Take the kernels as keyword arguments rather than declaring `Kernel(...)`;
+     bind further symbols of the same object with
+     `fn.object_file.bind(symbol, arg_types)`
    - Define function that builds MLIR-AIE design
    - Use `range_()` for loops (not Python `range`)
    - Handle device-specific logic (NPU1 vs NPU2) if needed
 4. If a new C++ compute kernel is needed, add it to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
-   and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
-   - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
+   with a factory in `aie.iron.kernels`; IRON no longer hosts kernels
+   - Choose the family directory (`activation/`, `eltwise/`, `linalg/`, ...);
+     put architecture-specific code in `*_aie2.h` / `*_aie2p.h` headers
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
-5. Implement `reference.py` with CPU reference
+5. Implement `reference.py` with the CPU reference and `generate_inputs()`,
+   and a `reference()` method on the operator that calls it
 6. Implement `test.py` with pytest tests
    - Use `@pytest.mark.extensive` for slower/larger tests
-   - Use `verify_buffer()` from `iron.common.test_utils`
+   - Check the output with `assert_matches_reference()` from
+     `iron.common.test_utils`
 7. Register operator in `iron/operators/__init__.py`
 
 ## Operator Sequences
@@ -358,33 +372,38 @@ void my_kernel(bfloat16* in, bfloat16* out, int32_t size) {
 ### Test Verification Pattern
 
 ```python
-from iron.common.test_utils import verify_buffer
+from aie.utils.verify import Tolerance
+from iron.common.test_utils import assert_matches_reference
 
-# Compare NPU output against CPU reference
-errors = verify_buffer(
-    output=npu_output,
-    buf_name="output",
-    reference=cpu_reference,
-    rel_tol=0.04,      # 4% relative tolerance
-    abs_tol=1e-6,      # Absolute tolerance for small values
-    max_error_rate=0.0 # 0% of elements can fail (strict)
-)
-assert len(errors) == 0, f"Found {len(errors)} mismatches"
+x = generate_inputs(input_length=2048)
+op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
+
+# Dispatch once and compare with op.reference(x), under the declared
+# tolerance contract of the kernel the operator runs
+# (op.reference_tolerance()) ...
+assert_matches_reference(op, x)
+
+# ... or under an explicit one, e.g. exact for pure data movement.
+assert_matches_reference(op, x, tolerance=Tolerance.relative(0.04, 1e-6))
 ```
 
-### Datatype Conversion Helpers
+`verify_buffer()` compares a single buffer the same way, for tests that
+dispatch by hand.
+
+### bfloat16 between torch and numpy
+
+numpy has no bfloat16 of its own; use `ml_dtypes.bfloat16` and move the bits,
+never going through float32:
 
 ```python
-from iron.common.utils import torch_to_numpy, numpy_to_torch
+import ml_dtypes, torch
 
-# Convert torch tensor to numpy (preserves bfloat16)
-np_array = torch_to_numpy(torch_tensor)
-
-# Convert numpy array to torch (preserves bfloat16)
-torch_tensor = numpy_to_torch(np_array)
+np_array = torch_tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+torch_tensor = torch.from_numpy(np_array.view("uint16")).view(torch.bfloat16)
 ```
 
-These utilities handle bfloat16 conversion correctly (avoiding float32 intermediate).
+Runtime tensors take and return torch tensors directly
+(`aie.utils.DEFAULT_TENSOR_CLASS.from_torch()`, `.to_torch()`).
 
 ## Debugging and Performance
 
@@ -454,9 +473,10 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
-- Check `get_kernel_artifacts()` in `op.py` references correct kernel path
-- Ensure kernel function signature matches `Kernel()` declaration in `design.py`
+  `include/aie_kernels/<family>/` (`AIEContext.kernels_dir`, overridden by
+  `MLIR_AIE_KERNEL_SOURCES`)
+- Check `get_kernel_artifacts()` in `op.py` returns every factory the design uses
+- Ensure the C signature matches the factory's (or `bind()`'s) argument types
 
 **Compilation hangs or fails**
 
@@ -469,7 +489,8 @@ logging.basicConfig(level=logging.DEBUG)
 - Check datatype consistency (bfloat16 has limited precision)
 - Verify reference implementation matches NPU kernel exactly
 - Look for memory alignment issues in C++ kernel
-- Adjust tolerances in `verify_buffer()` if needed (`rel_tol`, `abs_tol`)
+- Check which tolerance the test judges by: the kernel's contract
+  (`op.reference_tolerance()`) unless the test passes `tolerance=`
 
 **Dimension mismatch errors**
 
@@ -485,7 +506,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 **Kernel compilation failures**
 
-- Check kernel is in correct architecture directory (`generic/`, `aie2/`, `aie2p/`)
+- Check the kernel's `.cc` includes the right `*_aie2.h` / `*_aie2p.h` header for the target
 - Verify `#include <aie_api/aie.hpp>` for AIE API kernels
 - Ensure template parameters match function signature
 - Check for syntax errors in vectorization code

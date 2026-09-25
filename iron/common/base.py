@@ -14,9 +14,11 @@ import numpy as np
 from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
+from aie.utils.verify import Tolerance
 
 from . import compilation as comp
 from .context import AIEContext
+from .device_utils import pin_current_device
 from .utils import float_to_name
 from .compilation import (
     CompilationArtifact,
@@ -35,6 +37,7 @@ class AIEOperatorBase(ABC):
 
     def __init__(self, context: AIEContext | None = None) -> None:
         self.artifacts = comp.CompilationArtifactGraph()
+        pin_current_device()
         if context is None:
             context = self.get_default_context()
         self.context = context
@@ -154,6 +157,19 @@ class MLIROperator(AIEOperatorBase):
     @abstractmethod
     def get_kernel_artifacts(self) -> list[CompilationArtifact]:
         pass
+
+    def reference_tolerance(self) -> Tolerance | None:
+        """How close the NPU output must come to ``reference()``.
+
+        This is the declared contract of the one kernel the operator runs, its
+        ``_kernel()``. ``None`` when it runs several kernels or none (a
+        ``_kernel()`` that returns ``None``), or when that kernel declares no
+        tolerance.
+        """
+        kernel = getattr(self, "_kernel", lambda: None)()
+        if kernel is None or kernel.contract is None:
+            return None
+        return kernel.contract.tolerance
 
     def get_artifacts(
         self, prefix: str = ""

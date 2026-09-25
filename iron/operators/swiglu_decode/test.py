@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
 import pytest
+from aie.utils.benchmark import run_iters
 
 from iron.operators.swiglu_decode.op import SwiGLUDecode
 from iron.operators.swiglu_decode.reference import generate_golden_reference
@@ -52,12 +52,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
     # Set the per-invocation input.
     fc.get_buffer("in").torch_view()[:] = golden_ref["input"].reshape(-1)
 
-    # Warmup
-    fc()
-
-    start = time.perf_counter()
-    fc()
-    elapsed_us = (time.perf_counter() - start) * 1e6
+    elapsed_us = run_iters(fc, warmup=1, iters=1).e2e.avg_us
 
     total_bytes = (golden_ref["input"].numel() + embedding_dim) * 2  # bf16
     bandwidth_gbps = total_bytes / (elapsed_us * 1e-6) / 1e9
