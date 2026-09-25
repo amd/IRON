@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Target: the device, the kernel tree and the fusion prefix, as one handle."""
+"""Target: the device and the kernel tree, as one handle."""
 
 from __future__ import annotations
 
@@ -17,35 +17,33 @@ from ..kernels import declare_kernel, target_arch
 class Target:
     """What an overlay's ``design()`` is given besides the overlay itself.
 
-    Carries the device, the kernel tree and the fusion prefix. ``kernel``
-    is :func:`~iron.common.kernels.declare_kernel` with the prefix already
-    bound, so an overlay never handles it and cannot forget it; ``rtp`` is
-    a runtime-parameter :class:`~aie.iron.Buffer` the same way.
+    Carries the device and the kernel tree. ``kernel`` is
+    :func:`~iron.common.kernels.declare_kernel`, whose digest prefix keeps
+    kernels apart when designs are fused, whatever else is fused with them;
+    ``rtp`` is a runtime-parameter :class:`~aie.iron.Buffer`.
     """
 
     def __init__(
         self,
         dev,
         kernels_dir,
-        func_prefix: str = "",
         trace_size: int = 0,
         image: str = "elf",
     ):
         self.dev = dev
         self.kernels_dir = Path(kernels_dir)
         self.arch = target_arch(dev)  # "aie2" | "aie2p"
-        self.func_prefix = func_prefix
         self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
         # scratchpad. "xclbin": there is none (spike S2); they are dispatch-
         # time scalars of the sequence, and a core-read value is a resident
         # the sequence writes (bind it to the runtime-parameter buffer).
         self.image = image
-        # Bound rather than re-declared: a method here would restate every
-        # declare_kernel parameter to add this one, and would have to track
-        # it. It did not -- it carried a `prebuilt` argument the factory has
-        # no notion of, and dropped it in silence.
-        self.kernel = partial(declare_kernel, func_prefix=func_prefix)
+        # The function itself rather than a method: a method would restate
+        # every declare_kernel parameter, and would have to track them. It did
+        # not -- it carried a `prebuilt` argument the factory has no notion
+        # of, and dropped it in silence.
+        self.kernel = declare_kernel
         self.rtp = partial(Buffer, use_write_rtp=True)
         self.barriers: list[Any] = []
 

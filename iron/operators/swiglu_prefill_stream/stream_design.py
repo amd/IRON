@@ -342,45 +342,21 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k):
     )
 
 
-def _prefixed(mlir_text: str, func_prefix: str) -> str:
-    """Apply a fused-operator ``func_prefix`` (``op<idx>_``) to a group's MLIR.
-
-    ``OperatorSequence`` renames each child's kernel object files and symbols to
-    ``op<idx>_...`` so the groups stay distinct inside one ELF; the group's MLIR
-    must reference the same prefixed names. Prefix the ``link_with`` object files
-    and every privately declared kernel symbol, and its call sites.
-    """
-    if not func_prefix:
-        return mlir_text
-    mlir_text = re.sub(
-        r'link_with\s*=\s*"([^"]+)"',
-        lambda m: f'link_with = "{func_prefix}{m.group(1)}"',
-        mlir_text,
-    )
-    symbols = sorted(
-        set(re.findall(r"func\.func\s+private\s+@([A-Za-z0-9_]+)", mlir_text)),
-        key=len,
-        reverse=True,
-    )
-    for symbol in symbols:
-        mlir_text = re.sub(
-            rf"@{re.escape(symbol)}\b", f"@{func_prefix}{symbol}", mlir_text
-        )
-    return mlir_text
-
-
-def region_module(mlir_text: str, func_prefix: str = "", renames: dict | None = None):
+def region_module(mlir_text: str, renames: dict | None = None):
     """Parse a group's MLIR text into an ``aie`` module for fusion.
 
     ``OperatorSequence`` consumes ``aie.DeviceOp`` objects, so the xDSL-emitted
-    group text is re-parsed with the mlir-aie bindings, after ``func_prefix``
-    rewriting.
+    group text is re-parsed with the mlir-aie bindings.
+
+    Fused, groups keep the names they were generated with: every object name
+    here already carries what distinguishes its recipe (``mm_<m>_<k>_<n>.o``),
+    and groups that name one object build it identically, so they share it.
     """
     from aie import ir
     from aie.extras.context import mlir_mod_ctx
 
     with mlir_mod_ctx():
-        return ir.Module.parse(_prefixed(_renamed(mlir_text, renames), func_prefix))
+        return ir.Module.parse(_renamed(mlir_text, renames))
 
 
 def _renamed(mlir_text: str, renames: dict | None) -> str:
@@ -388,8 +364,7 @@ def _renamed(mlir_text: str, renames: dict | None) -> str:
 
     stream-dse suffixes a GEMM's symbols with its tile shape so several shapes
     coexist in one design. ExternalFunction can only prefix, so the objects end
-    up prefixed instead and the text is rewritten to agree. Applied before
-    ``_prefixed`` so a fused group's op<idx>_ lands on top of the result.
+    up prefixed instead and the text is rewritten to agree.
     """
     if not renames:
         return mlir_text
@@ -399,7 +374,7 @@ def _renamed(mlir_text: str, renames: dict | None) -> str:
 
 
 def _group_text(group_index, *, k, seq_len, embedding_dim, hidden_dim, npu) -> str:
-    """One group's generated MLIR, before any ``func_prefix`` rewriting."""
+    """One group's generated MLIR, before any symbol renames."""
     finals = _design_paths(seq_len, embedding_dim, hidden_dim, k)
     if not all(os.path.exists(final) for final in finals):
         _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k)
@@ -414,7 +389,6 @@ def group_digest(group_index, **dims) -> str:
 def load_group(
     *,
     group_index,
-    func_prefix="",
     k,
     seq_len,
     embedding_dim,
@@ -427,9 +401,8 @@ def load_group(
     ``group_index`` selects the group, in the order :data:`GROUP_LAYERS` lists
     them, and is keyword-only like the rest: the compile cache keys on a
     design's parameters by name, so a positional one would not reach the key.
-    ``func_prefix`` is injected by ``OperatorSequence``. Every group loader
-    calls this; the first generates the design and the rest reuse the files on
-    disk.
+    Every group loader calls this; the first generates the design and the rest
+    reuse the files on disk.
 
     The kernels are declared here rather than by the operator because an
     ExternalFunction registers into a process-global set that CompilableDesign
@@ -445,7 +418,7 @@ def load_group(
         hidden_dim=hidden_dim,
         npu=npu,
     )
-    return region_module(text, func_prefix, renames=renames)
+    return region_module(text, renames=renames)
 
 
 def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:

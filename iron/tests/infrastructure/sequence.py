@@ -20,6 +20,8 @@ The ``OperatorSequence`` dispatch modes covered here are:
 * ``"reference"``– pure-CPU evaluation via each operator's ``reference()``.
 """
 
+import re
+
 import pytest
 import numpy as np
 from ml_dtypes import bfloat16
@@ -144,10 +146,12 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
     # Buffer sub-views handed to each operator's runtime sequence.
     assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
-    # One inlined device per unique operator plus the top-level driver device.
-    assert (
-        "op0_ElementwiseAdd" in text and "op1_ReLU" in text
-    ), "operator devices not inlined into fused module"
+    # One inlined device per unique operator plus the top-level driver device,
+    # each named for its class and its design, not its position.
+    names = re.findall(r"aie\.device\(\w+\) @(\w+)", text)
+    assert any(re.fullmatch(r"ElementwiseAdd_[0-9a-f]{8}", n) for n in names) and any(
+        re.fullmatch(r"ReLU_[0-9a-f]{8}", n) for n in names
+    ), f"operator devices not inlined into fused module: {names}"
     assert (
         text.count("aie.device") >= 3
     ), "expected two operator devices plus a top-level device"

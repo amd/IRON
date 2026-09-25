@@ -36,7 +36,6 @@ def build_design(
     dev,
     kernels_dir,
     op: Operator,
-    func_prefix: str = "",
     trace_size: int = 0,
     code: str = "",
     image: str = "elf",
@@ -55,7 +54,7 @@ def build_design(
         # A downloaded image: no array to build, only the sequence against
         # the pins the overlay declares, which the overlay itself emits.
         return ov.build(dev, op)
-    target = Target(dev, kernels_dir, func_prefix, trace_size, image)
+    target = Target(dev, kernels_dir, trace_size, image)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.

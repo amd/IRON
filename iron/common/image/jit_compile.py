@@ -17,21 +17,23 @@ not guessable from its signature, and each is load-bearing here:
   ``module.operation.verify()`` on whatever comes back, so text raises
   ``AttributeError``.
 * The cache key does not see closure contents, so two graphs whose generators
-  share a code object collide. The MLIR's own digest is passed through
-  ``compile_kwargs`` to give each graph a distinct key.
+  share a code object collide. Each graph's identity is passed through
+  ``compile_kwargs`` to give it a distinct key.
 """
 
 import dataclasses
+import functools
 import hashlib
 import inspect
 import re
 from pathlib import Path
 from typing import Any
 
+import aie
 import aie.utils as aie_utils
-from aie.iron import DispatchTime, ExternalFunction
+from aie.iron import DispatchTime
 from aie.ir import Module
-from aie.utils.compile.jit._hash import _device_identity_key
+from aie.utils.compile.jit._hash import _code_identity, _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
 from aie.utils.compile.jit.markers import CompileTime
 
@@ -44,11 +46,6 @@ FUSED_ELF_FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
 # Only when tracing: the trace parser reads the lowered module for the buffer
 # layout and each design's traced tiles and events.
 TRACE_FLAG = "--get-input-with-addresses"
-
-
-def _digest(text: str) -> str:
-    """Identity for a graph: the content of the MLIR it generated."""
-    return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
 # An object address in a parameter's str() would re-key the cache every process.
@@ -90,6 +87,12 @@ def _params_key(kwargs: dict) -> str:
             items.append((name, repr(_device_identity_key(value))))
             continue
         text = str(value)
+        # A per-call value a graph bound on an operator is part of what it
+        # builds (a device parameter, a patched descriptor), but not a field,
+        # so its repr leaves it out.
+        used = getattr(value, "used_values", None)
+        if used:
+            text += f" using {sorted(used)}"
         if _ADDRESS.search(text):
             raise ValueError(
                 f"design parameter {name!r} stringifies to {text!r}, which "
@@ -99,6 +102,62 @@ def _params_key(kwargs: dict) -> str:
             )
         items.append((name, text))
     return repr(items)
+
+
+def design_identity(generator) -> str:
+    """What a design generates from: its function's code and its parameters.
+
+    The two things :func:`_design_generator` puts in a standalone build's
+    key, spelled once so a fused build can name and key each of its designs
+    without running any of them.
+    """
+    design_fn, kwargs = _resolved(generator)
+    h = hashlib.sha256(_code_identity(design_fn.__code__))
+    h.update(_params_key(kwargs).encode())
+    return h.hexdigest()[:24]
+
+
+# What turns a design into MLIR text, beyond the design itself: IRON's
+# common tree (the declaration layer, the build, the fusion) and mlir-aie's
+# Python frontend and bindings.
+_GENERATOR_TREES = (
+    Path(__file__).resolve().parents[1],
+    Path(aie.__file__).resolve().parent / "iron",
+    Path(aie.__file__).resolve().parent / "dialects",
+)
+_BINDINGS = Path(aie.__file__).resolve().parent / "_mlir_libs"
+
+
+@functools.cache
+def _file_digest(path: str) -> bytes:
+    return hashlib.sha256(Path(path).read_bytes()).digest()
+
+
+@functools.cache
+def _generator_trees_digest() -> str:
+    h = hashlib.sha256()
+    for root in _GENERATOR_TREES:
+        for path in sorted(root.rglob("*.py")):
+            h.update(_file_digest(str(path)))
+    # Compiled, and large: by size and time rather than by content.
+    for path in sorted(_BINDINGS.glob("*.so")):
+        stat = path.stat()
+        h.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return h.hexdigest()
+
+
+def source_digest(files=()) -> str:
+    """A digest of the source that generates MLIR: the trees every design
+    shares (:data:`_GENERATOR_TREES`), and ``files`` besides.
+
+    Read once per process: a process runs the code it imported, so an edit
+    made while it runs is the next process's to see, in its key and its
+    text alike.
+    """
+    h = hashlib.sha256(_generator_trees_digest().encode())
+    for path in files:
+        h.update(_file_digest(str(path)))
+    return h.hexdigest()
 
 
 def _design_generator(call_kwargs: dict):
@@ -191,8 +250,8 @@ def _fuse_as_children(build_mlir) -> str:
 def _fused_generator(build_mlir):
     """Fuse a sequence's designs into one module, inside ``compile()``.
 
-    ``graph`` and ``trace`` are never read; they exist so the fused text's
-    digest and the trace size have somewhere to live in ``compile_kwargs``,
+    ``graph`` and ``trace`` are never read; they exist so the sequence's
+    identity and the trace size have somewhere to live in ``compile_kwargs``,
     which is what the cache key hashes.
     """
 
@@ -218,26 +277,20 @@ def _bind_device() -> None:
         pass
 
 
-def fused_design(build_mlir, extra_flags=(), trace_size=0) -> CompilableDesign:
+def fused_design(
+    build_mlir, identity: str, extra_flags=(), trace_size=0
+) -> CompilableDesign:
     """A sequence's fused full ELF, compiled (or found) in the JIT cache.
 
     ``build_mlir`` is called, not passed text: fusing several designs into
     one module runs each operator's design, and a design that declares
     ``ExternalFunction`` kernels only has them built if it runs inside
-    ``compile()``. It is called twice, deliberately: once here for the key,
-    the fused text's own digest, and once inside the generator, where the
-    kernels survive. Both calls go through :func:`_fuse_as_children`, so the
-    key describes the text that is compiled.
-
-    The key's call runs outside ``compile()``, so it owns the registry
-    lifecycle there: ``compile()`` clears ``ExternalFunction._instances`` only
-    when it generates, and on a cache hit it never does. Left in, the key's
-    kernels meet the next fusion's, and two GEMMs naming one object with
-    different flags raise a collision.
+    ``compile()``. It runs only there, and only on a miss: the key is
+    ``identity``, what the text is a function of
+    (:func:`~iron.common.image.fused.fused_identity`), so a hit generates
+    nothing. Keying on the text itself fused every design once more on
+    every call, hit or miss -- three quarters of a warm compile.
     """
-    ExternalFunction._instances.clear()
-    identity = _digest(_fuse_as_children(build_mlir))
-    ExternalFunction._instances.clear()
     design = CompilableDesign(
         _fused_generator(build_mlir),
         full_elf=True,

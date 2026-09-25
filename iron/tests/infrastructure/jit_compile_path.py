@@ -25,7 +25,6 @@ import iron
 from iron.common.image.jit_compile import (
     _bind_device,
     _design_generator,
-    _digest,
     _params_key,
 )
 from iron.operators import ElementwiseAdd
@@ -39,13 +38,15 @@ def device():
     aie_utils.set_current_device(previous)
 
 
-def _captured(name, trace_size=0):
-    """x + w + w as a graph function, fused and compiled."""
+def _captured(name, trace_size=0, adds=2):
+    """x + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128)
 
     @iron.graph
     def f(x, w):
-        return add(add(x, w), w)
+        for _ in range(adds):
+            x = add(x, w)
+        return x
 
     sequence = f.trace(x=(1024,), w=(1024,)).sequence(
         name, dispatch="fused", trace_size=trace_size
@@ -81,25 +82,14 @@ def test_kernel_objects_land_in_the_entry_under_bare_names():
 def test_two_graphs_get_distinct_cache_keys():
     """Identity rides in compile_kwargs because the key ignores closures.
 
-    Without this the second graph would be handed the first one's ELF, and
-    nothing would report it.
+    Two graphs of one operator differ only in how many steps they run, which
+    no design's code or parameters record. Without the graph's identity in
+    the key the second would be handed the first one's ELF, and nothing
+    would report it.
     """
-    assert _digest("module { /* graph one */ }") != _digest(
-        "module { /* graph two */ }"
-    )
-
-
-def test_tracing_does_not_reuse_an_untraced_cache_entry():
-    """Same MLIR, different flags, so it must be a different cache key.
-
-    Sharing one would hand a traced build the untraced ELF, which loads and
-    runs and produces no trace.
-    """
-    text = "module { /* identical */ }"
-    assert {"graph": _digest(text), "trace": 0} != {
-        "graph": _digest(text),
-        "trace": 8192,
-    }
+    two = _captured("jitpath_graphs", adds=2).artifacts.image
+    three = _captured("jitpath_graphs", adds=3).artifacts.image
+    assert two != three
 
 
 def test_identical_sequences_reuse_the_compiled_elf():
@@ -109,9 +99,9 @@ def test_identical_sequences_reuse_the_compiled_elf():
     mtime = first.stat().st_mtime_ns
     second = _captured("jitpath_cache_reuse").artifacts.image
     assert second == first, "an identical recipe landed in a different entry"
-    assert second.stat().st_mtime_ns == mtime, (
-        "identical recipe recompiled the ELF instead of reusing the cache hit"
-    )
+    assert (
+        second.stat().st_mtime_ns == mtime
+    ), "identical recipe recompiled the ELF instead of reusing the cache hit"
 
 
 def test_identical_operators_reuse_the_compiled_xclbin():

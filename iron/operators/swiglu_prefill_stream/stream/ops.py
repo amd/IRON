@@ -108,6 +108,9 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
         source=kernels_dir / kernel_dir / "mm.cc",
         object_file_name=f"mm_{suffix}.o",
         symbol_prefix=prefix,
+        # The generated MLIR names the object and, through the map returned
+        # below, the symbols: both must be exactly as given.
+        digest_prefix=False,
         bundled_sources=(zero_source,),
         compile_flags=[
             f"-DDIM_M={m}",
@@ -163,6 +166,7 @@ class StreamKernel:
             [],
             source=kernels_dir / subdir / f"{self.source}.cc",
             object_file_name=f"{self.source}.o",
+            digest_prefix=False,
         )
         return {}
 

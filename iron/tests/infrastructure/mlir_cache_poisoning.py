@@ -4,32 +4,22 @@
 
 """A fused build must not leave its MLIR in the standalone operator's slot.
 
-``sequence.build_fused_mlir`` takes each operator's MLIR generator and
-mutates it::
+A fused build once renamed each design's kernels by position::
 
     generator.kwargs["func_prefix"] = f"op{idx}_"
 
-This used to be a mutation of a ``PythonGeneratedMLIRArtifact`` that was also
-a dependency of ``SequenceMLIRArtifact``, so the artifact graph compiled it to
-disk -- writing symbol-prefixed MLIR to the exact path a standalone build of
-the same operator reads. The cache keyed only on filename and mtime, so a
-later standalone build trusted the prefixed file and asked the linker for
-``op0_add.o``, which a standalone build never produces.
+on a generator that was also an artifact the fused build compiled to disk --
+to the exact path a standalone build of the same operator reads. The cache
+keyed only on filename and mtime, so a later standalone build trusted the
+prefixed file and asked the linker for ``op0_add.o``, which a standalone
+build never produces. The failure surfaced as an undefined symbol at link
+time, in a build that did nothing wrong, possibly in a different process from
+the fused build that poisoned it.
 
-Three independent things closed this: ``PythonGeneratedMLIRArtifact`` now keys
-its own availability on a recipe hash of the generator's current kwargs (see
-the compile cache key now carries func_prefix, so this is the
-end-to-end check that it does);
-fused MLIR generation is no longer an artifact at all -- ``fuse_mlir()`` is a
-plain function that calls each operator's generator in-memory and returns
-text; and a standalone operator's own build does the same
--- it calls the generator directly rather than reading a compiled artifact
-off disk. Any one of the three would have prevented this; together there is
-nothing left to poison, on either side.
-
-The failure is far from its cause: it surfaced as an undefined symbol at link
-time, in a build that did nothing wrong, possibly in a different process or
-session from the fused build that poisoned it.
+Nothing is left to poison now: fused MLIR is not an artifact, standalone
+builds call their generator directly, and a kernel is named for its recipe
+rather than its position, so a design names the same objects whether it is
+built alone or fused. The last is what is checked here, end to end.
 
 Needs a device: the fused build runs for real, because the whole point is
 what it leaves lying around; the standalone side only needs a device to
@@ -45,6 +35,7 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 
 import iron
+from iron.common.image import build_fused_mlir
 from iron.operators import ElementwiseAdd
 
 SIZE = 1024
@@ -75,7 +66,7 @@ def _linked_objects(operator):
 
 
 def test_fused_build_does_not_poison_the_standalone_mlir():
-    """Build fused, then standalone, and check the standalone is unprefixed.
+    """Build fused, then standalone, and check both name the same objects.
 
     Order matters: the standalone build has to come second, since it is the
     one reading what the fused build left behind. Doing it the other way round
@@ -87,13 +78,14 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     def probe(x, w):
         return add(x, w)
 
-    probe.trace(x=(SIZE,), w=(SIZE,)).sequence(
+    seq = probe.trace(x=(SIZE,), w=(SIZE,)).sequence(
         "poisoning_probe", dispatch="fused"
-    ).compile()
+    )
+    seq.compile()
+    fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', build_fused_mlir(seq)))
 
     linked = _linked_objects(_operator())
-    assert not any(name.startswith("op") for name in linked), (
-        f"standalone build links {linked}; a fused build left its symbol-"
-        "prefixed MLIR in the standalone operator's cache slot, and nothing "
-        "about the filename distinguishes the two"
+    assert linked and set(linked) <= fused, (
+        f"standalone build links {linked}, the fused one {sorted(fused)}; a "
+        "design names different objects depending on what it is fused with"
     )

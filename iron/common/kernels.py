@@ -13,6 +13,7 @@ An ``ExternalFunction`` registers itself into a process-global set that
 in the operator, say -- is discarded and its object never compiled.
 """
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import aie.utils as aie_utils
 import aie.utils.config
 from aie.iron import ExternalFunction
 from aie.utils.compile.utils import resolve_target_arch
+
 
 def kernels_dir() -> Path:
     """C++ kernel sources bundled with the installed mlir-aie package.
@@ -64,12 +66,28 @@ def lut_sources(dev=None):
     return (runtime_dir(dev) / "lut_based_ops.cpp",)
 
 
+def recipe_digest(name, source, compile_flags, include_dirs, bundled, symbol_prefix):
+    """Eight hex digits naming what a kernel's object is built from.
+
+    The sources by content, not path, so a checkout elsewhere names the same
+    kernel the same way; everything else as given. Two declarations that
+    agree here build byte-identical objects, so they may share one.
+    """
+    h = hashlib.sha256()
+    for path in (*bundled, source):
+        h.update(Path(path).read_bytes())
+    h.update(
+        repr((name, tuple(compile_flags), tuple(include_dirs), symbol_prefix)).encode()
+    )
+    return h.hexdigest()[:8]
+
+
 def declare_kernel(
     name,
     arg_types,
     *,
     source=None,
-    func_prefix="",
+    digest_prefix=True,
     compile_flags=(),
     include_dirs=None,
     object_file_name=None,
@@ -97,32 +115,41 @@ def declare_kernel(
     source and flags give an identical content digest, so upstream neither
     reports a collision nor compiles twice.
 
-    ``func_prefix`` is IRON's fusion prefix and arrives with its trailing
-    underscore ("op0_"). ``ExternalFunction`` joins with an underscore of its
-    own, for the symbol name and for the rename pass alike, so it is stripped
-    here; handing it over whole yields "op0__matvec".
+    ``digest_prefix`` prefixes the symbol and the object with a digest of the
+    kernel's recipe (:func:`recipe_digest`). Designs fused into one ELF share
+    one object directory and one registry, so two naming one kernel with
+    different flags (two GEMV shapes) would otherwise collide. Keyed on the
+    recipe rather than on anything about the design, equal recipes -- the
+    same kernel in two designs, in two graphs, or standalone and fused --
+    get one symbol, one object and one compile, and different ones never
+    meet. Off only for a design whose MLIR names its kernels itself
+    (stream's), which must then keep distinct recipes under distinct names.
 
     ``symbol_prefix`` distinguishes several objects built from one source in a
-    single design -- stream's GEMMs, one per tile shape, all from mm.cc. It
-    composes with the fusion prefix rather than replacing it, so a fused
-    stream group gets "op0_mm128_64_64_matmul_bf16_bf16": both the group it
-    belongs to and the shape it was built for.
+    single design -- stream's GEMMs, one per tile shape, all from mm.cc. The
+    digest composes with it rather than replacing it:
+    "<digest>_mm128_64_64_matmul_bf16_bf16".
     """
-    prefix = f"{func_prefix}{symbol_prefix or ''}".rstrip("_") or None
-    if object_file_name is not None and func_prefix:
-        # Upstream names a defaulted object after the prefixed symbol; an
-        # explicit one is taken as given, so the fusion prefix has to be applied
-        # here or two fused operators would share one object.
-        #
-        # The fusion prefix only. symbol_prefix distinguishes symbols *within*
-        # one design, where the object name is already distinct -- adding it
-        # here would rename the file out from under a generated design that
-        # names it, which is exactly stream's case.
-        object_file_name = f"{func_prefix.rstrip('_')}_{object_file_name}"
-
     source = Path(source)
     # The aie_runtime_lib headers a kernel is compiled against.
     dirs = list([str(runtime_dir())] if include_dirs is None else include_dirs)
+
+    prefix = symbol_prefix
+    if digest_prefix:
+        digest = recipe_digest(
+            object_file_name or name,
+            source,
+            compile_flags,
+            dirs,
+            bundled_sources,
+            symbol_prefix,
+        )
+        prefix = f"{digest}_{symbol_prefix}" if symbol_prefix else digest
+        if object_file_name is not None:
+            # Upstream names a defaulted object after the prefixed symbol; an
+            # explicit one is taken as given, so the digest has to be applied
+            # here or two recipes naming one object would collide.
+            object_file_name = f"{digest}_{object_file_name}"
     if not bundled_sources:
         return ExternalFunction(
             name,

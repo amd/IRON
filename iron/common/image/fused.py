@@ -10,43 +10,96 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
 from . import fusion
-from .jit_compile import dispatch_stream, fused_design, xclbin_design
+from .jit_compile import (
+    design_identity,
+    dispatch_stream,
+    fused_design,
+    source_digest,
+    xclbin_design,
+)
 
-def build_fused_mlir(seq) -> str:
+
+def fused_plan(seq):
+    """Each design's device, by name, and the runlist over those names.
+
+    A device is named for what it is -- its class and its design's identity
+    -- not for where it sits in this sequence, so one design is one device
+    text whichever graph it is fused into and at whatever step. aiecc's
+    device cache keys on that text, and a positional name kept decode and
+    prefill from sharing any device, and a graph that gained a step from
+    reusing its own. Designs whose identities agree generate the same
+    device, so they are fused as one.
+    """
+    designs, design_of = seq.unique_designs()
+    names = []
+    generators = {}
+    for op in designs:
+        generator = op.generator()
+        name = f"{type(op).__name__}_{design_identity(generator)[:8]}"
+        names.append(name)
+        generators.setdefault(name, generator)
+    runlist = [(names[design_of[id(op)]], *bufs) for op, *bufs in seq.runlist]
+    return generators, runlist
+
+
+def build_fused_mlir(seq, plan=None) -> str:
     """The fused MLIR text: every design inlined into one module.
 
     ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
     ``slice_info``) must already be set.
     """
-    operator_generators = {}
-    comp_runlist = []
-    designs, design_of = seq.unique_designs()
-    design_names = []
-
-    for idx, op in enumerate(designs):
-        generator = op.generator()
-        # Ask the design whether it takes a prefix, rather than inferring it
-        # from the operator having kernel artifacts: a design that declares
-        # ExternalFunctions reports no artifacts at all, so inferring leaves
-        # every shape defining the same symbols, kept apart only by each
-        # core linking its own object.
-        design_fn, _, _ = generator.resolve()
-        if "func_prefix" in inspect.signature(design_fn).parameters:
-            generator.kwargs["func_prefix"] = f"op{idx}_"
-        op_name = f"op{idx}_{op.__class__.__name__}"
-        design_names.append(op_name)
-        operator_generators[op_name] = generator
-
-    for op, *bufs in seq.runlist:
-        comp_runlist.append((design_names[design_of[id(op)]], *bufs))
-
+    generators, runlist = plan or fused_plan(seq)
     return fusion.fuse_mlir(
-        operator_generators,
-        comp_runlist,
+        generators,
+        runlist,
         seq.subbuffer_layout,
         seq.buffer_sizes,
         seq.slice_info,
     )
+
+
+def _design_sources(generator) -> list:
+    """The modules a design is defined in: its function's, and its classes'.
+
+    A design's own key spells the operator's and overlay's class source; the
+    fused key also takes their modules, since a helper beside the class is
+    as much the design as the class is.
+    """
+    design_fn, _, kwargs = generator.resolve()
+    classes = []
+    if "op" in kwargs:
+        op = kwargs["op"]
+        classes = [*type(op).__mro__, *type(op.ov).__mro__]
+    files = set()
+    for obj in (design_fn, *classes):
+        try:
+            files.add(inspect.getsourcefile(obj))
+        except TypeError:
+            pass  # a builtin
+    return sorted(f for f in files if f)
+
+
+def fused_identity(seq, plan) -> str:
+    """What the fused text is a function of, without generating it.
+
+    The designs, each by its identity (:func:`design_identity`: the code
+    that generates it and the parameters it is called with); the runlist over
+    them; the buffer layout; and the source of what turns those into text --
+    IRON's common tree, where the fusion and the declaration layer live, the
+    operators' own modules, and mlir-aie's Python frontend
+    (:func:`source_digest`). A hit then costs a hash rather than a fusion.
+    """
+    generators, runlist = plan
+    h = hashlib.sha256()
+    files = set()
+    for name, generator in generators.items():
+        h.update(f"{name}={design_identity(generator)};".encode())
+        files.update(_design_sources(generator))
+    h.update(source_digest(tuple(sorted(files))).encode())
+    h.update(
+        repr((runlist, seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info)).encode()
+    )
+    return h.hexdigest()[:24]
 
 
 class FusedImage:
@@ -58,17 +111,19 @@ class FusedImage:
     def link(self, seq):
         """Build the ELF once (idempotent); returns its path.
 
-        Through CompilableDesign, which owns the cache: it keys on the fused
-        text's content, locks across processes and validates the kernels'
-        depfiles, and the ELF lands in its entry.
+        Through CompilableDesign, which owns the cache: it keys on
+        :func:`fused_identity`, locks across processes and validates the
+        kernels' depfiles, and the ELF lands in its entry.
         """
         if not isinstance(aie_utils.get_current_device(), NPU2):
             raise RuntimeError(
                 "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
             )
         if self.design is None:
+            plan = fused_plan(seq)
             self.design = fused_design(
-                lambda: build_fused_mlir(seq),
+                lambda: build_fused_mlir(seq, plan),
+                fused_identity(seq, plan),
                 extra_flags=seq.extra_flags,
                 trace_size=seq.trace_size,
             )
