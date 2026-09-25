@@ -136,10 +136,11 @@ CASES = [
             dict(rows=32, cols=64, angle_rows=8),
         ],
     ),
+    # mlir-aie's LUT activations need a tile of at least 1024.
     (
         "sigmoid",
         "Sigmoid",
-        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=1024)],
     ),
     ("silu", "SiLU", [dict(size=1024, num_aie_columns=1, tile_size=256)]),
     ("softmax", "Softmax", [dict(rows=16, cols=64)]),
@@ -204,10 +205,11 @@ CASES = [
             ),
         ],
     ),
+    # mlir-aie's LUT activations need a tile of at least 1024.
     (
         "tanh",
         "Tanh",
-        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=1024)],
     ),
     (
         "transpose",
