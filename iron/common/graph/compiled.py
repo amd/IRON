@@ -31,6 +31,16 @@ def _shape_and_dtype(spec):
     return tuple(spec), bfloat16
 
 
+def _store(view: np.ndarray, tensor) -> None:
+    """Copy ``tensor`` into a buffer view, casting in place.
+
+    Assignment casts element by element into the destination; ``astype``
+    first would build a whole temporary, and faulting in the 501 MiB one
+    for Llama's embedding took 5-50 s per upload.
+    """
+    view[:] = np.asarray(tensor).reshape(-1)
+
+
 class GraphFunction:
     """A function decorated with :func:`graph`."""
 
@@ -199,8 +209,7 @@ class CompiledGraph:
     def write(self, x, tensor) -> None:
         """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
         buf = self.buffer(x)
-        view = buf.numpy_view()
-        view[:] = np.asarray(tensor).reshape(-1).astype(view.dtype)
+        _store(buf.numpy_view(), tensor)
         buf.to("npu")
 
     def read(self, x):
@@ -211,8 +220,7 @@ class CompiledGraph:
         return buf.numpy().reshape(tuple(shape))
 
     def _copy_in(self, name, tensor) -> None:
-        view = self.callable.get_buffer(name).numpy_view()
-        view[:] = np.asarray(tensor).reshape(-1).astype(view.dtype)
+        _store(self.callable.get_buffer(name).numpy_view(), tensor)
 
     def upload(self) -> None:
         """Copy every closed-over weight into its buffer; once."""
@@ -221,6 +229,11 @@ class CompiledGraph:
         for tensor, handle in self.traced.weights.values():
             self._copy_in(handle.name, tensor)
         self._uploaded = True
+
+    def load(self) -> "CompiledGraph":
+        """Load the image and upload its weights now, rather than on first call."""
+        self.upload()
+        return self
 
     # -- calling ---------------------------------------------------------------
 

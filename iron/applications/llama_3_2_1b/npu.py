@@ -27,9 +27,9 @@ class AIELlama:
 
     def __init__(self, config):
         self.decode_graph = DecodeGraph(config, max_seq_len)
-        self.decode = self.decode_graph.compile(config)
+        self.decode = self.decode_graph.compile(config).load()
         self.prefill_graph = PrefillGraph(config, self.decode_graph)
-        self.prefill = self.prefill_graph.compile(config)
+        self.prefill = self.prefill_graph.compile(config).load()
 
     def prefill_to_decode(self, config):
         graph = self.decode_graph
