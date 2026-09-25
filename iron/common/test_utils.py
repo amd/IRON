@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import aie.utils as aie_utils
 from aie.utils.benchmark import run_iters
+from aie.utils.verify import Tolerance, compare, nearly_equal
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
 
@@ -18,34 +19,6 @@ torch_dtype_map = {
     "i16": torch.int16,
     "i32": torch.int32,
 }
-
-# TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
-
-
-def nearly_equal(
-    a: float,
-    b: float,
-    rel_tol: float = 128 * np.finfo(np.float32).eps,
-    abs_tol: float = np.finfo(np.float32).tiny,
-) -> bool:
-    """
-    Compare two floating point numbers for approximate equality.
-
-    Adapted from Stack Overflow, License CC BY-SA 4.0
-    Original author: P-Gn
-    Source: https://stackoverflow.com/a/32334103
-    """
-    if np.finfo(np.float32).eps > rel_tol:
-        raise ValueError(f"rel_tol {rel_tol!r} must be >= machine epsilon")
-    if rel_tol >= 1.0:
-        raise ValueError(f"rel_tol {rel_tol!r} must be < 1.0")
-
-    if a == b:
-        return True
-
-    diff = abs(float(a) - float(b))
-    norm = min(abs(float(a)) + abs(float(b)), np.finfo(np.float32).max)
-    return diff < max(abs_tol, rel_tol * norm)
 
 
 def verify_buffer(
@@ -59,6 +32,11 @@ def verify_buffer(
     """
     Verify buffer contents match reference within tolerances.
 
+    The comparison is mlir-aie's ``aie.utils.verify.compare`` under a relative
+    ``Tolerance``: an element passes at ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``,
+    so ``rel_tol=abs_tol=0`` demands exact equality, and a NaN or infinity must
+    meet the same value in the reference whatever ``max_error_rate`` allows.
+
     Args:
         output: Output buffer to verify
         buf_name: Name of buffer for error messages
@@ -71,7 +49,6 @@ def verify_buffer(
     Returns:
         List of error indices. Empty if verification passes.
     """
-    errors = []
 
     def _to_numpy(x):
         if isinstance(x, torch.Tensor):
@@ -89,41 +66,34 @@ def verify_buffer(
         print(
             f"Buffer size mismatch for {buf_name}: expected {len(expected_np)}, got {len(output)}"
         )
-        errors.extend(i for i in range(abs(len(output) - len(expected_np))))
-    compare_len = min(len(output), len(expected_np))
-    diff = np.abs(
-        output[:compare_len].astype(float) - expected_np[:compare_len].astype(float)
+        return list(range(len(output), len(expected_np)))
+    output = output[: len(expected_np)]
+
+    tolerance = Tolerance.relative(rel_tol, abs_tol, max_mismatch_frac=max_error_rate)
+    verdict = compare(output, expected_np, tolerance)
+    if verdict.n_mismatch and max_error_rate > 0.0:
+        within = "within" if verdict else "exceeds"
+        print(
+            f"{buf_name}: {verdict.n_mismatch} errors "
+            f"({verdict.n_mismatch / verdict.n_checked * 100:.2f}%) {within} allowed "
+            f"rate of {max_error_rate * 100:.2f}%"
+        )
+    if verdict:
+        return []
+
+    print(f"{buf_name}: {verdict.detail}")
+    # compare() judges; it does not list the elements. nearly_equal is the same
+    # per-element test, except that it also rejects a NaN that meets a NaN.
+    bad = ~nearly_equal(output, expected_np, rtol=rel_tol, atol=abs_tol)
+    bad &= ~(
+        np.isnan(output.astype(np.float32)) & np.isnan(expected_np.astype(np.float32))
     )
-    norm = np.minimum(
-        np.abs(output[:compare_len].astype(float))
-        + np.abs(expected_np[:compare_len].astype(float)),
-        np.finfo(np.float32).max,
-    )
-    # Use `>`, not `>=`, here, so that a user can pass rel_tol=abs_tol=0
-    # check exact equality.
-    mask = diff > np.maximum(abs_tol, rel_tol * norm)
-    error_indices = np.where(mask)[0].tolist()
+    error_indices = np.flatnonzero(bad).tolist()
     for i in error_indices[:10]:
         print(
             f"Mismatch in {buf_name}[{i}]: expected {float(expected_np[i]):.6f}, got {float(output[i]):.6f}"
         )
-    errors.extend(error_indices)
-
-    # Check if error rate is acceptable
-    if max_error_rate > 0.0 and len(errors) > 0:
-        error_rate = len(errors) / compare_len
-        max_allowed_errors = int(compare_len * max_error_rate)
-        if len(errors) <= max_allowed_errors:
-            print(
-                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) within allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
-            )
-            return []  # Pass - within allowed error rate
-        else:
-            print(
-                f"{buf_name}: {len(errors)} errors ({error_rate*100:.2f}%) exceeds allowed rate of {max_error_rate*100:.2f}% ({max_allowed_errors} errors)"
-            )
-
-    return errors
+    return error_indices
 
 
 def _nbytes(buf) -> int:

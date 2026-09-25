@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
 import numpy as np
 import pytest
 import aie.utils as aie_utils
 import torch
 import ml_dtypes
+from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
 from iron.operators.gemm.op import GEMM
@@ -188,12 +187,11 @@ def test_gemm(
             B_bufs.append(XRTTensor.from_torch(b_torch))
             C_bufs.append(XRTTensor(c_shape, dtype=c_dtype))
 
-        # Run each partition
-        start_time = time.perf_counter()
-        for i in range(partition_N):
-            op_func(A_buf, B_bufs[i], C_bufs[i])
-        end_time = time.perf_counter()
-        latency_us = (end_time - start_time) * 1e6
+        def run_partitions():
+            for i in range(partition_N):
+                op_func(A_buf, B_bufs[i], C_bufs[i])
+
+        latency_us = run_iters(run_partitions).e2e.avg_us
 
         # Read back and concatenate C partitions along the column dimension
         C_parts_torch = [buf.to_torch().reshape(c_shape) for buf in C_bufs]

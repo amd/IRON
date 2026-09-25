@@ -147,7 +147,7 @@ reuse lint
    - `device_manager.py`: XRT device initialization and management (singleton pattern)
    - `context.py`: `AIEContext` for operator compilation/execution
    - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: Test utilities (`verify_buffer`, `nearly_equal`)
+   - `test_utils.py`: Test utilities (`verify_buffer`, a wrapper over mlir-aie's `aie.utils.verify.compare`; `run_test`, timed with `aie.utils.benchmark.run_iters`)
 
 ### Key Concepts
 
