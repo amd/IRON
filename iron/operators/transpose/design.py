@@ -4,13 +4,13 @@
 from ml_dtypes import bfloat16
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, TaskGroup, Worker
+from aie.iron import ObjectFifo, Program, Runtime, TaskGroup, Worker
 from aie.helpers.taplib.tap import TensorAccessPattern
 from aie.iron.controlflow import range_
 
 
 def shuffle_transpose(
-    dev, M, N, num_columns, num_channels, m, n, s, num_batches=1, func_prefix=""
+    dev, M, N, num_columns, num_channels, m, n, s, num_batches=1, *, transpose_fn
 ):
     num_elements = M * N
     per_tile_elements = m * n
@@ -116,13 +116,6 @@ def shuffle_transpose(
         for j in range(num_channels)
     ]
 
-    # AIE Core Function declaration
-    transpose_kernel = Kernel(
-        f"{func_prefix}transpose_{s}x{s}",
-        f"{func_prefix}transpose_{m}x{n}.o",
-        [tile_ty, tile_ty],
-    )
-
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_out, transpose_kernel):
         # Process num_batches contiguous matrices through the same FIFOs: num_batches x the per-matrix
@@ -144,7 +137,7 @@ def shuffle_transpose(
             [
                 of_in1s_L2L1[i * num_channels + j].cons(),
                 of_outs[i * num_channels + j].prod(),
-                transpose_kernel,
+                transpose_fn,
             ],
         )
         for i in range(num_columns)

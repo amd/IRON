@@ -50,7 +50,13 @@ from typing import Any, Callable
 import sys
 
 from iron.common.device_utils import get_kernel_dir
-from aie.utils.compile.utils import compile_cxx_core_function, compile_mlir_module
+from aie.iron.kernel import ExternalFunction, Kernel
+from aie.utils.compile.utils import (
+    _has_current_symbol_prefix_stamp,
+    compile_cxx_core_function,
+    compile_external_kernel,
+    compile_mlir_module,
+)
 
 # Global Functions
 # ##########################################################################
@@ -72,6 +78,20 @@ class DesignGenerator:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return str(getattr(module, self.fn_name)(*self.args, **self.kwargs))
+
+    def kernels(self) -> list[Kernel]:
+        """The kernels passed to the design, which its module must declare."""
+        values = [*self.args, *self.kwargs.values()]
+        found = []
+        while values:
+            value = values.pop()
+            if isinstance(value, Kernel):
+                found.append(value)
+            elif isinstance(value, (list, tuple)):
+                values.extend(value)
+            elif isinstance(value, dict):
+                values.extend(value.values())
+        return found
 
 
 def plan(
@@ -386,11 +406,41 @@ class KernelObjectArtifact(CompilationArtifact):
         extra_flags: list[str] | None = None,
         rename_symbols: dict[str, str] | None = None,
         prefix_symbols: str | None = None,
+        extern: ExternalFunction | None = None,
     ) -> None:
         super().__init__(filename, dependencies)
         self.extra_flags = extra_flags if extra_flags is not None else []
         self.rename_symbols = rename_symbols if rename_symbols is not None else {}
         self.prefix_symbols = prefix_symbols
+        # The mlir-aie kernel factory recipe this object is built from, if any.
+        # Such an object is compiled by mlir-aie itself, and its file name and
+        # symbols already carry a digest of the recipe.
+        self.extern = extern
+
+    @classmethod
+    def from_extern(cls, fn: ExternalFunction) -> KernelObjectArtifact:
+        """The object an ``aie.iron.kernels`` factory's ExternalFunction links.
+
+        Every symbol bound from the same object (``fn.object_file.bind(...)``)
+        is served by this one artifact.
+        """
+        if fn.source_file is None:
+            raise ValueError(f"{fn.name}: only file-backed kernels are supported")
+        return cls(
+            fn.object_file_name,
+            dependencies=[SourceArtifact(fn.source_file)],
+            extern=fn,
+        )
+
+    def is_available_in_filesystem(self) -> bool:
+        if not super().is_available_in_filesystem():
+            return False
+        # A prefixed object whose prefix pass never completed exports the
+        # unprefixed symbols; mlir-aie stamps the object once the pass is done.
+        prefix = self.extern._symbol_prefix if self.extern is not None else None
+        return prefix is None or _has_current_symbol_prefix_stamp(
+            self.filename, f"{prefix}_"
+        )
 
 
 class KernelArchiveArtifact(CompilationArtifact):
@@ -407,6 +457,18 @@ class PythonGeneratedMLIRArtifact(MLIRArtifact):
     ) -> None:
         self.generator = generator
         super().__init__(filename, dependencies=[SourceArtifact(generator.source_path)])
+
+    def is_available_in_filesystem(self) -> bool:
+        if not super().is_available_in_filesystem():
+            return False
+        # A factory kernel's object is named after its recipe, so a changed
+        # recipe leaves a module that is newer than its design yet links an
+        # object that is no longer built -- or worse, an old one still on disk.
+        text = Path(self.filename).read_text()
+        return all(
+            f'link_with = "{kernel.object_file_name}"' in text
+            for kernel in self.generator.kernels()
+        )
 
 
 def _sha256_of(path: Path) -> str:
@@ -845,7 +907,20 @@ class KernelCompilationRule(CompilationRule):
             Path(self.mlir_aie_dir) / "aie_runtime_lib" / kernel_dir.upper()
         )
 
+        compiled_externs = set()
         for artifact in worklist:
+            if artifact.extern is not None:
+                # Operators sharing a recipe share its object, so a fused
+                # sequence may list the same one several times.
+                if artifact.filename not in compiled_externs:
+                    compiled_externs.add(artifact.filename)
+                    commands.append(
+                        PythonCallbackCompilationCommand(
+                            partial(self._compile_extern, artifact, kernel_dir)
+                        )
+                    )
+                artifact.available = True
+                continue
             if len(artifact.dependencies) < 1:
                 raise RuntimeError(
                     "Expected at least one dependency (the C source code) for KernelObjectArtifact"
@@ -885,6 +960,19 @@ class KernelCompilationRule(CompilationRule):
             artifact.available = True
 
         return commands
+
+    def _compile_extern(self, artifact, kernel_dir):
+        fn = artifact.extern
+        if fn.use_chess != self.use_chess:
+            raise RuntimeError(
+                f"{fn.name} is a {'Chess' if fn.use_chess else 'Peano'} kernel, "
+                f"but this context compiles with {'Chess' if self.use_chess else 'Peano'}"
+            )
+        # The artifact is only on the worklist if its object is missing, older
+        # than its source, or half-prefixed. mlir-aie reuses any object already
+        # at the output path, so remove it to make mlir-aie rebuild it.
+        Path(artifact.filename).unlink(missing_ok=True)
+        compile_external_kernel(fn, str(Path(artifact.filename).parent), kernel_dir)
 
     def _find_tool(self, name):
         return _find_tool(name, self.peano_dir, self.mlir_aie_dir)

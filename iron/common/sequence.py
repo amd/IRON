@@ -103,6 +103,18 @@ def _trace_tag(seq):
     return f"_traced{seq.trace_size}" if seq.trace_size else ""
 
 
+def _hand_built_kernels(op, objs=None):
+    """``op``'s kernel artifacts that IRON builds itself, rather than an
+    mlir-aie kernel factory, and so must be prefixed apart within a sequence."""
+    if objs is None:
+        objs = op.get_kernel_artifacts()
+    return [
+        obj
+        for obj in objs
+        if not (isinstance(obj, comp.KernelObjectArtifact) and obj.extern is not None)
+    ]
+
+
 class FusedDispatch(SequenceDispatch):
     """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
 
@@ -141,7 +153,7 @@ class FusedDispatch(SequenceDispatch):
 
         for idx, op in enumerate(designs):
             mlir_artifact = op.get_mlir_artifact()
-            if len(op.get_kernel_artifacts()) > 0:
+            if _hand_built_kernels(op):
                 mlir_artifact.generator.kwargs["func_prefix"] = f"op{idx}_"
             op_name = f"op{idx}_{op.__class__.__name__}"
             design_names.append(op_name)
@@ -161,11 +173,12 @@ class FusedDispatch(SequenceDispatch):
         )
 
     def _collect_kernel_artifacts(self, seq):
-        """Kernel artifacts from all child operators, prefixed per operator index."""
+        """Kernel artifacts from all child operators, hand-built ones prefixed per
+        operator index. Factory-built objects are already unique per recipe."""
         kernel_artifacts = []
         for idx, op in enumerate(seq.unique_designs()[0]):
             objs = op.get_kernel_artifacts()
-            for obj in objs:
+            for obj in _hand_built_kernels(op, objs):
                 obj.filename = f"op{idx}_{obj.filename}"
                 obj.prefix_symbols = f"op{idx}_"
             kernel_artifacts.extend(objs)

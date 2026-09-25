@@ -4,16 +4,18 @@
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict
 
+import numpy as np
+from ml_dtypes import bfloat16
+
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
     KernelObjectArtifact,
-    KernelArchiveArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 import aie.utils as aie_utils
+from aie.iron.kernels import activation, linalg
 from iron.common.device_utils import get_kernel_dir
 
 
@@ -84,16 +86,35 @@ class GEMV(MLIROperator):
             return base
         return f"{base}_epi{self.epilogue}"
 
-    @property
-    def _kernel_link_file(self):
-        # With the gelu epilogue the core also links the gelu kernel, so the object becomes an
-        # archive of (matvec, gelu); the plain matvec stays a single object.
-        if self.epilogue == "gelu":
-            return f"gemv_{self.K}k_{self.kernel_vector_size}vs_gelu_kernels.a"
-        return f"gemv_{self.K}k_{self.kernel_vector_size}vs.o"
+    def _matvec(self):
+        return linalg.mv(
+            self.tile_size_input,
+            self.K,
+            bfloat16,
+            bfloat16,
+            vec_size=self.kernel_vector_size,
+            output_rows=self.tile_size_output,
+            use_chess=self.context.compiler == "chess",
+        )
+
+    def _gelu(self):
+        # The epilogue is gelu.cc's in-place gelu_tile_bf16, which only aie2p's
+        # gelu.cc exports; it rides in the object the gelu factory builds.
+        if get_kernel_dir() != "aie2p":
+            raise NotImplementedError(
+                "gemv gelu epilogue is only available on NPU2 (aie2p); "
+                f"current kernel dir is {get_kernel_dir()!r}"
+            )
+        return activation.gelu()
 
     def get_mlir_artifact(self):
         mlir_verbose = getattr(self.context, "mlir_verbose", False)
+        epilogue_fn = None
+        if self.epilogue == "gelu":
+            epilogue_fn = self._gelu().object_file.bind(
+                "gelu_tile_bf16",
+                [np.int32, np.ndarray[(self.tile_size_output,), np.dtype[bfloat16]]],
+            )
 
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -111,42 +132,17 @@ class GEMV(MLIROperator):
                 ),
                 {
                     "verbose": mlir_verbose,
-                    "kernel_object": self._kernel_link_file,
-                    "epilogue": self.epilogue,
+                    "matvec_fn": self._matvec(),
+                    "epilogue_fn": epilogue_fn,
                 },
             ),
         )
 
     def get_kernel_artifacts(self):
-        matvec_obj = KernelObjectArtifact(
-            f"gemv_{self.K}k_{self.kernel_vector_size}vs.o",
-            dependencies=[
-                SourceArtifact(self.context.kernels_dir / "generic" / "mv.cc")
-            ],
-            extra_flags=[
-                f"-DDIM_K={self.K}",
-                f"-DVEC_SIZE={self.kernel_vector_size}",
-            ],
-        )
+        fns = [self._matvec()]
         if self.epilogue == "gelu":
-            # The gelu kernel lives in aie2p/gelu.cc, so the fused epilogue is NPU2-only.
-            if get_kernel_dir() != "aie2p":
-                raise NotImplementedError(
-                    "gemv gelu epilogue is only available on NPU2 (aie2p); "
-                    f"current kernel dir is {get_kernel_dir()!r}"
-                )
-            gelu_obj = KernelObjectArtifact(
-                "gelu.o",
-                dependencies=[
-                    SourceArtifact(self.context.kernels_dir / "aie2p" / "gelu.cc")
-                ],
-            )
-            return [
-                KernelArchiveArtifact(
-                    self._kernel_link_file, dependencies=[matvec_obj, gelu_obj]
-                )
-            ]
-        return [matvec_obj]
+            fns.append(self._gelu())
+        return [KernelObjectArtifact.from_extern(fn) for fn in fns]
 
     def get_arg_spec(self):
         batch_dim = (self.num_batches,) if self.num_batches > 1 else ()

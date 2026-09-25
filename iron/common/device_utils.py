@@ -10,3 +10,14 @@ def get_kernel_dir(dev=None) -> str:
     if dev is None:
         dev = aie_utils.get_current_device()
     return resolve_target_arch(dev)
+
+
+def pin_current_device() -> None:
+    """Bind the probed NPU as the explicitly selected device.
+
+    The mlir-aie kernel factories choose their sources by architecture from the
+    explicitly selected device only; with none selected they fall back to aie2,
+    which on an NPU2 machine silently builds aie2 kernels.
+    """
+    if aie_utils.get_current_device(probe_runtime=False) is None:
+        aie_utils.set_current_device(aie_utils.get_current_device())

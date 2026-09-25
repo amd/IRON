@@ -17,6 +17,7 @@ from aie.utils.npukernel import NPUKernel
 
 from . import compilation as comp
 from .context import AIEContext
+from .device_utils import pin_current_device
 from .utils import float_to_name
 from .compilation import (
     CompilationArtifact,
@@ -35,6 +36,7 @@ class AIEOperatorBase(ABC):
 
     def __init__(self, context: AIEContext | None = None) -> None:
         self.artifacts = comp.CompilationArtifactGraph()
+        pin_current_device()
         if context is None:
             context = self.get_default_context()
         self.context = context
