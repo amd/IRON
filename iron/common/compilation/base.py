@@ -50,12 +50,14 @@ from typing import Any, Callable
 import sys
 
 from iron.common.device_utils import get_kernel_dir
+import aie.utils.config
 from aie.iron.kernel import ExternalFunction, Kernel
 from aie.utils.compile.utils import (
     _has_current_symbol_prefix_stamp,
     compile_cxx_core_function,
     compile_external_kernel,
     compile_mlir_module,
+    prefix_symbols_in_object,
 )
 
 # Global Functions
@@ -826,71 +828,10 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
         return commands
 
 
-def _find_tool(name, peano_dir, mlir_aie_dir):
-    """Locate an LLVM tool by name, trying peano_dir, mlir_aie_dir, then system PATH."""
-    candidates = [
-        Path(peano_dir) / "bin" / name,
-        Path(mlir_aie_dir) / "bin" / name,
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    # Try versioned suffix for distros that install LLVM tools as e.g. llvm-objcopy-18
-    for tool_name in [name, f"{name}-18"]:
-        found = shutil.which(tool_name)
-        if found:
-            return found
-    raise FileNotFoundError(
-        f"{name} not found. Searched in: "
-        + ", ".join(str(c) for c in candidates)
-        + f", and system PATH (also tried {name}-18)"
-    )
-
-
-def _tool_runs(path):
-    """True if the tool at `path` actually executes. Guards against a binary that
-    is present on disk but cannot run -- e.g. one whose shared-library
-    dependency fails to load, so it exits nonzero and emits nothing rather than
-    producing output."""
-    try:
-        return (
-            subprocess.run([str(path), "--version"], capture_output=True).returncode
-            == 0
-        )
-    except OSError:
-        return False
-
-
-def _find_working_tool(name, peano_dir, mlir_aie_dir):
-    """Like _find_tool, but skip candidates that are present-but-broken (fail to
-    run) and fall through to the next, ending at the system PATH copy.
-
-    _find_tool returns the FIRST *existing* binary even if it cannot run. Used
-    silently in a `nm | awk > map` pipeline such a binary yields an EMPTY symbol
-    map (the pipe's exit status is awk's, so nm's failure is masked) -> the
-    fusion symbol prefix is never applied -> `undefined symbol: <prefix><sym>`
-    at the per-core link."""
-    candidates = [
-        Path(peano_dir) / "bin" / name,
-        Path(mlir_aie_dir) / "bin" / name,
-    ]
-    for tool_name in (name, f"{name}-18"):
-        found = shutil.which(tool_name)
-        if found:
-            candidates.append(Path(found))
-    for candidate in candidates:
-        if candidate.is_file() and _tool_runs(candidate):
-            return str(candidate)
-    # Nothing ran cleanly: defer to _find_tool (existence-only) so the caller
-    # still gets a path, or its clear FileNotFoundError if none exists at all.
-    return _find_tool(name, peano_dir, mlir_aie_dir)
-
-
 class KernelCompilationRule(CompilationRule):
     """Compile KernelObjectArtifacts using Peano (clang++) or xchesscc."""
 
-    def __init__(self, peano_dir, mlir_aie_dir, use_chess=False, *args, **kwargs):
-        self.peano_dir = peano_dir
+    def __init__(self, mlir_aie_dir, use_chess=False, *args, **kwargs):
         self.mlir_aie_dir = mlir_aie_dir
         self.use_chess = use_chess
         super().__init__(*args, **kwargs)
@@ -956,7 +897,15 @@ class KernelCompilationRule(CompilationRule):
             if artifact.rename_symbols:
                 commands.extend(self._rename_symbols(artifact))
             if artifact.prefix_symbols:
-                commands.extend(self._prefix_symbols(artifact, artifact.prefix_symbols))
+                commands.append(
+                    PythonCallbackCompilationCommand(
+                        partial(
+                            prefix_symbols_in_object,
+                            artifact.filename,
+                            artifact.prefix_symbols,
+                        )
+                    )
+                )
             artifact.available = True
 
         return commands
@@ -977,15 +926,8 @@ class KernelCompilationRule(CompilationRule):
         out_dir = Path(artifact.filename).parent.resolve()
         compile_external_kernel(fn, str(out_dir), kernel_dir)
 
-    def _find_tool(self, name):
-        return _find_tool(name, self.peano_dir, self.mlir_aie_dir)
-
-    def _find_working_tool(self, name):
-        return _find_working_tool(name, self.peano_dir, self.mlir_aie_dir)
-
     def _rename_symbols(self, artifact):
-        objcopy_path = self._find_working_tool("llvm-objcopy")
-        cmd = [objcopy_path]
+        cmd = [aie.utils.config.objcopy_path()]
         for old_sym, new_sym in artifact.rename_symbols.items():
             cmd += [
                 "--redefine-sym",
@@ -994,66 +936,15 @@ class KernelCompilationRule(CompilationRule):
         cmd += [artifact.filename]
         return [ShellCompilationCommand(cmd)]
 
-    def _prefix_symbols(self, artifact, prefix):
-        objcopy_path = self._find_working_tool("llvm-objcopy")
-        nm_path = self._find_working_tool("llvm-nm")
-        symbol_map_file = artifact.filename + ".symbol_map"
-
-        if os.name == "nt":
-            # Pure python code execution block wrapped cleanly for Windows
-            python_script = f"""
-import subprocess
-nm_cmd = [{repr(nm_path)}, '--defined-only', '--extern-only', {repr(artifact.filename)}]
-res = subprocess.run(nm_cmd, capture_output=True, text=True, check=True)
-lines = []
-for line in res.stdout.splitlines():
-    parts = line.strip().split()
-    if len(parts) >= 3:
-        sym = parts[-1]
-        lines.append(f"{{sym}} {prefix}{{sym}}\\n")
-with open({repr(symbol_map_file)}, 'w') as f:
-    f.writelines(lines)
-"""
-            nm_cmd = [sys.executable, "-c", python_script.strip()]
-        else:
-            # Extract defined symbols and build the redefine-syms map. Run nm to a
-            # file, THEN awk (joined by `&&`) rather than `nm | awk`: a pipe reports
-            # only awk's exit status, so a failing nm silently produces an EMPTY map
-            # and the prefix rename is skipped, surfacing much later as
-            # `undefined symbol: {prefix}<sym>` at the per-core link. With `&&` a
-            # failed nm aborts here loudly instead.
-            nm_cmd = [
-                "sh",
-                "-c",
-                f"{nm_path} --defined-only --extern-only {artifact.filename} "
-                f"> {symbol_map_file}.syms && "
-                f"awk '{{print $3 \" {prefix}\" $3}}' {symbol_map_file}.syms "
-                f"> {symbol_map_file}",
-            ]
-
-        # Apply the renaming using the symbol map
-        objcopy_cmd = [
-            objcopy_path,
-            "--redefine-syms=" + symbol_map_file,
-            artifact.filename,
-        ]
-
-        return [ShellCompilationCommand(nm_cmd), ShellCompilationCommand(objcopy_cmd)]
-
 
 class ArchiveCompilationRule(CompilationRule):
     """Bundle KernelObjectArtifacts into a static archive (.a)."""
-
-    def __init__(self, peano_dir, mlir_aie_dir, *args, **kwargs):
-        self.peano_dir = peano_dir
-        self.mlir_aie_dir = mlir_aie_dir
-        super().__init__(*args, **kwargs)
 
     def matches(self, artifacts):
         return any(artifacts.get_worklist(KernelArchiveArtifact))
 
     def compile(self, artifacts):
-        ar_path = _find_tool("llvm-ar", self.peano_dir, self.mlir_aie_dir)
+        ar_path = aie.utils.config.ar_path()
         worklist = artifacts.get_worklist(KernelArchiveArtifact)
         commands = []
         for artifact in worklist:
