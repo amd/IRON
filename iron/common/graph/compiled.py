@@ -19,6 +19,7 @@ from ..image.packaging import plan
 from .handle import Handle, State, Value, _tensor_dtype
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
+
 def _shape_and_dtype(spec):
     """``(shape)`` or ``((shape), dtype)``."""
     if (
@@ -255,7 +256,12 @@ class CompiledGraph:
             )
         if not self.symbols:
             return
-        params = getattr(self.callable, "params", None)
+        # Looked up on the class: getattr() on the instance would turn an
+        # AttributeError raised inside the property (a pyxrt without the ctrl
+        # scratchpad) into "takes no per-call values".
+        params = (
+            self.callable.params if hasattr(type(self.callable), "params") else None
+        )
         if params is not None:
             for name, symbol, dtype in self.symbols:
                 params.write(symbol, np.dtype(dtype).type(values[name]))
