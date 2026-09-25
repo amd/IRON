@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import aie.utils as aie_utils
-from aie.iron import DispatchTime
+from aie.iron import DispatchTime, ExternalFunction
 from aie.ir import Module
 from aie.utils.compile.jit._hash import _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
@@ -228,8 +228,16 @@ def fused_design(build_mlir, extra_flags=(), trace_size=0) -> CompilableDesign:
     the fused text's own digest, and once inside the generator, where the
     kernels survive. Both calls go through :func:`_fuse_as_children`, so the
     key describes the text that is compiled.
+
+    The key's call runs outside ``compile()``, so it owns the registry
+    lifecycle there: ``compile()`` clears ``ExternalFunction._instances`` only
+    when it generates, and on a cache hit it never does. Left in, the key's
+    kernels meet the next fusion's, and two GEMMs naming one object with
+    different flags raise a collision.
     """
+    ExternalFunction._instances.clear()
     identity = _digest(_fuse_as_children(build_mlir))
+    ExternalFunction._instances.clear()
     design = CompilableDesign(
         _fused_generator(build_mlir),
         full_elf=True,

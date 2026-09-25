@@ -26,10 +26,14 @@ image on.
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+from aie.iron import ExternalFunction
 from aie.iron.device import NPU2
+from ml_dtypes import bfloat16
 
 import iron
+from iron.operators.swiglu_prefill.op import swiglu_prefill
 from iron.tests.toolchain.tools import requires, swiglu_decode
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
@@ -60,9 +64,7 @@ def _params(artifacts):
 
 def test_swiglu_decode_graph_compiles_to_a_full_elf():
     fn, E = swiglu_decode()
-    net = fn.compile(
-        NPU2(), image=iron.ELF, x=(1, E)
-    )
+    net = fn.compile(NPU2(), image=iron.ELF, x=(1, E))
     assert net.plan.image == "elf" and net.plan.dispatch == "fused"
     elf = Path(net.image)
     assert elf.suffix == ".elf" and elf.stat().st_size > 0
@@ -130,3 +132,25 @@ def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
     artifacts = build_elf(traced, "prefill")
     _assert_values_in_table(traced, artifacts)
+
+
+def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
+    """A cache hit leaves the kernel registry empty.
+
+    Fusing a sequence runs its designs once outside ``compile()``, for the
+    cache key, and ``compile()`` clears the kernels that declared only when it
+    generates. On a hit they stayed registered, and the next graph naming one
+    of their object files with other flags -- GEMM's ``b_col_maj`` changes its
+    flags, not its object name -- raised a collision instead of building."""
+    M, E, H = 256, 512, 512
+
+    def build(b_col_maj):
+        shape = (H, E) if b_col_maj else (E, H)
+        z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
+        fn = swiglu_prefill(z(*shape), z(*shape), z(*shape[::-1]), b_col_maj=b_col_maj)
+        return fn.compile(NPU2(), image=iron.ELF, x=(M, E))
+
+    build(False)
+    build(False)  # a hit: compile() generates nothing
+    assert not ExternalFunction._instances
+    build(True)
