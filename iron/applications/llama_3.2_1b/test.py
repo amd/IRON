@@ -29,11 +29,12 @@ def generate_test_params():
 params, names = generate_test_params()
 
 requires_weights = pytest.mark.skipif(
-    not (
+    not os.environ.get("CI")
+    and not (
         (weights_dir / "llama3.2-1b" / "model.safetensors").exists()
         and (weights_dir / "llama3.2-1b" / "tokenizer.model").exists()
     ),
-    reason="llama3.2-1b weights not found",
+    reason="llama3.2-1b weights not found outside CI",
 )
 
 
