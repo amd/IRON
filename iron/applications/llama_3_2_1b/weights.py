@@ -306,11 +306,53 @@ class LlamaWeights:
 # ##########################################################################
 
 
+@dataclass(frozen=True)
+class Llama3RopeScaling:
+    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``).
+
+    How Llama 3.1 and later stretch a model trained at
+    ``original_max_position_embeddings`` to a longer context, by frequency:
+    one whose wavelength is under ``original / high_freq_factor`` positions
+    is kept, one over ``original / low_freq_factor`` is divided by
+    ``factor``, and one between is interpolated between the two by where its
+    wavelength falls. The fields are the checkpoint's ``rope_scaling``.
+    """
+
+    factor: float
+    low_freq_factor: float
+    high_freq_factor: float
+    original_max_position_embeddings: int
+
+    def __call__(self, inv_freq: np.ndarray) -> np.ndarray:
+        """``inv_freq`` (radians per position, per frequency), scaled."""
+        original = self.original_max_position_embeddings
+        wavelen = 2 * np.pi / inv_freq
+        smooth = (original / wavelen - self.low_freq_factor) / (
+            self.high_freq_factor - self.low_freq_factor
+        )
+        between = (1 - smooth) * inv_freq / self.factor + smooth * inv_freq
+        return np.where(
+            wavelen < original / self.high_freq_factor,
+            inv_freq,
+            np.where(
+                wavelen > original / self.low_freq_factor,
+                inv_freq / self.factor,
+                between,
+            ),
+        )
+
+
 def rope_angles(
-    head_dim: int, context_length: int, rope_base: float = 500000.0
+    head_dim: int,
+    context_length: int,
+    rope_base: float = 500000.0,
+    scaling: Llama3RopeScaling | None = None,
 ) -> np.ndarray:
     """The RoPE table, ``(context_length, head_dim)`` float32: cos and sin
     interleaved per frequency, as the device kernel reads it.
+
+    ``scaling``, if given, is applied to the frequencies in float64, before
+    their one rounding to float32.
 
     The formula is :func:`.model.rope_angles`' in float32 -- ``inv_freq`` and
     each ``position * inv_freq`` are rounded to float32 at the same points --
@@ -322,9 +364,10 @@ def rope_angles(
     0.28% of entries round to a different bf16, by at most 2**-8.
     """
     exponents = np.arange(0, head_dim, 2, dtype=np.float32) / np.float32(head_dim)
-    inv_freq = (1.0 / np.power(rope_base, exponents.astype(np.float64))).astype(
-        np.float32
-    )
+    inv_freq = 1.0 / np.power(rope_base, exponents.astype(np.float64))
+    if scaling is not None:
+        inv_freq = scaling(inv_freq)
+    inv_freq = inv_freq.astype(np.float32)
     freqs = np.outer(np.arange(context_length, dtype=np.float32), inv_freq)
     angles = np.empty((context_length, head_dim), dtype=np.float32)
     angles[:, ::2] = np.cos(freqs.astype(np.float64))

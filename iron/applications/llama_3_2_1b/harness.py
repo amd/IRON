@@ -25,7 +25,7 @@ import tiktoken
 import tiktoken.load
 
 from .sampling import Sampler
-from .weights import LlamaWeights, rope_angles
+from .weights import Llama3RopeScaling, LlamaWeights, rope_angles
 
 #: Seeds the sampler, so a run's text is reproducible.
 SEED = 1608560892
@@ -47,6 +47,12 @@ class LlamaConfig:
 
         # RoPE
         self.rope_base = 500000.0
+        self.rope_scaling = Llama3RopeScaling(
+            factor=32.0,
+            low_freq_factor=1.0,
+            high_freq_factor=4.0,
+            original_max_position_embeddings=8192,
+        )
         self.context_length = 131072
 
         # Generation
@@ -78,7 +84,9 @@ class LlamaConfig:
 
         # The RoPE angle look-up table, float32; the NPU and the CPU reference
         # both read this one.
-        self.angles = rope_angles(self.head_dim, self.context_length, self.rope_base)
+        self.angles = rope_angles(
+            self.head_dim, self.context_length, self.rope_base, self.rope_scaling
+        )
 
     def _check_weights(self):
         layer = self.weights.layers[0]
