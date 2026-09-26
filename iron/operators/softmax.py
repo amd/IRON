@@ -9,10 +9,12 @@ import numpy as np
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    BoundBuffer,
     BoundValue,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Resident,
@@ -25,6 +27,7 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.testing import Case, Testing, device_columns
+from iron.common.tiling import encode, split
 
 
 @operator
@@ -37,8 +40,9 @@ class SoftmaxOverlay(Overlay):
 
     ``causal`` is attention's mask: each row sees one element more than the
     row before it, ``vector_size`` the first row's (default one), counted
-    again from the first row of every batch. A core takes a contiguous block
-    of each batch's rows, so it starts each batch at its block's first row.
+    again from the first row of every batch. A core runs ``batches`` runs of
+    ``count`` rows, core ``k`` starting each at row ``k * core_offset`` of its
+    batch: whole batches with no offset, or a block of every batch's rows.
     """
 
     cols: int = dim()
@@ -51,8 +55,10 @@ class SoftmaxOverlay(Overlay):
     y = StreamOut(cols, per=(num_aie_columns, num_channels))
     count = Resident(np.int32)
     vector_size = Resident(np.int32)
-    # Causal only: the rows restart their count once per batch.
+    # Causal only: the rows restart their count once per batch, and core k
+    # starts it at row k * core_offset.
     batches = Resident(np.int32, optional=True)
+    core_offset = Resident(np.int32, optional=True)
 
     def validate(self) -> None:
         if self.cols % 16 != 0:
@@ -92,10 +98,10 @@ class SoftmaxOverlay(Overlay):
         # [count, vector_size] per core, or [count] when vector_size is a
         # scratchpad value the core reads. On an image without a scratchpad
         # the per-call value is written into [1] by the sequence instead.
-        # Causal: [count, vector_size, batches].
+        # Causal: [count, vector_size, batches, core_offset].
         dynamic = isinstance(self.vector_size, BoundValue) and target.image == "elf"
         causal = self.causal
-        words = 1 if dynamic else 3 if causal else 2
+        words = 1 if dynamic else 4 if causal else 2
         rtp_ty = np.ndarray[(words,), np.dtype[np.int32]]
         rtps = [target.rtp(rtp_ty, name=f"rtp_{k}") for k in range(n_cores)]
         barriers = [target.barrier() for _ in range(n_cores)]
@@ -130,8 +136,8 @@ class SoftmaxOverlay(Overlay):
             barrier.wait_for_value(1)
             n = rtp[0]
             for _ in range_(rtp[2]):
-                # This core's first row of the batch is row core * n.
-                valid[0] = rtp[1] + core * n
+                # This core's first row of the batch.
+                valid[0] = rtp[1] + core * rtp[3]
                 for _ in range_(n):
                     elem_in = of_in.acquire(1)
                     elem_out = of_out.acquire(1)
@@ -161,6 +167,7 @@ class SoftmaxOverlay(Overlay):
             self.vector_size.bind(rtps, 1)
         if causal:
             self.batches.bind(rtps, 2)
+            self.core_offset.bind(rtps, 3)
         return workers
 
 
@@ -203,16 +210,19 @@ def _row_cases():
 
 def _cases():
     """The row cases, and attention's scores, one batch per head: causal at
-    the scaled Llama's size and over a longer row than the batch has rows, a
-    causal mask that starts past the first column, and batches without a
-    mask; two cores per column, over every column, as the Llama graph runs
-    it."""
+    the scaled Llama's size, over several whole batches per core, and over a
+    longer row than the batch has rows, a causal mask that starts past the
+    first column, and batches without a mask; two cores per column, over
+    every column, as the Llama graph runs it. Extensive: Llama's heads, and
+    fewer heads than cores at its length."""
     out = _row_cases()
     for batches, rows, cols, extra, extensive in [
         (16, 64, 64, dict(causal=True), False),
+        (64, 32, 128, dict(causal=True), False),
         (3, 256, 512, dict(causal=True), False),
         (2, 128, 256, dict(causal=True, rtp_vector_size=100), False),
         (4, 128, 256, {}, False),
+        (32, 2048, 2048, dict(causal=True), True),
         (4, 2048, 2048, dict(causal=True), True),
     ]:
         out.append(
@@ -265,28 +275,58 @@ class Softmax(Operator[SoftmaxOverlay]):
         if self.rows % 16 != 0:
             raise ValueError(f"rows ({self.rows}) must be a multiple of 16")
 
+    @property
+    def cores(self) -> int:
+        return self.ov.num_aie_columns * self.ov.num_channels
+
+    @property
+    def whole_batches(self) -> bool:
+        """Each core takes a contiguous run of the rows of every batch at
+        once: its share of whole batches, or with no mask any rows at all.
+        Otherwise it takes a block of each batch's rows, a descriptor per
+        batch, which the shim's sixteen hold only a few batches of."""
+        return not self.ov.causal or self.batches % self.cores == 0
+
     def compatible(self) -> None:
-        ov = self.ov
-        if self.rows % ov.num_aie_columns:
+        total = self.cores
+        if self.whole_batches:
+            if self.batches * self.rows % total:
+                raise Incompatible(
+                    f"{self.batches} batches of {self.rows} rows do not divide "
+                    f"across the {total} cores"
+                )
+        elif self.rows % total:
             raise Incompatible(
-                f"rows ({self.rows}) must be a multiple of num_aie_columns ({ov.num_aie_columns})"
+                f"rows ({self.rows}) must be a multiple of the {total} cores, "
+                f"or the batches ({self.batches}) of them"
             )
-        total = ov.num_aie_columns * ov.num_channels
-        if self.rows % total:
-            raise Incompatible(
-                f"rows ({self.rows}) must be a multiple of the {total} cores"
-            )
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Whole batches: each slot a contiguous block of every batch's rows,
+        one descriptor. Otherwise the derived block of each batch's rows."""
+        if not self.whole_batches:
+            return super().order(buffer)
+        stream = buffer.stream(self.ov)
+        blocks = split((self.batches * self.rows, self.cols), stream.count, 0)
+        return Order(
+            stream,
+            tuple(tuple(encode(b, buffer.elements, buffer.dtype)) for b in blocks),
+        )
 
     def residents(self) -> dict[str, int]:
         ov = self.ov
-        # Each core's rows of one batch; a core that does not count the
-        # batches runs its rows of every batch as one run.
-        count = self.rows // (ov.num_aie_columns * ov.num_channels)
-        out = {"count": count if ov.causal else self.batches * count}
+        total = self.batches * self.rows // self.cores
+        if not ov.causal:
+            # The mask does not restart, so a core's rows are one run.
+            out = {"count": total}
+        elif self.whole_batches:
+            batches = total // self.rows
+            out = {"count": self.rows, "batches": batches, "core_offset": 0}
+        else:
+            count = self.rows // self.cores
+            out = {"count": count, "batches": self.batches, "core_offset": count}
         if not isinstance(ov.vector_size, BoundValue):
             out["vector_size"] = ov.first_vector_size
-        if ov.causal:
-            out["batches"] = self.batches
         return out
 
     def reference(self, x, vector_size=None):
