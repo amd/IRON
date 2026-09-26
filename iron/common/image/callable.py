@@ -44,8 +44,9 @@ logger = logging.getLogger(__name__)
 BF16 = np.dtype(ml_dtypes.bfloat16)
 
 
-def _n_elements(nbytes):
-    return max(nbytes, BF16.itemsize) // BF16.itemsize
+def _n_elements(nbytes, dtype=BF16):
+    itemsize = np.dtype(dtype).itemsize
+    return max(nbytes, itemsize) // itemsize
 
 
 def _require_xrt() -> None:
@@ -120,13 +121,14 @@ class SequenceCallable:
         self._buffer_cache = {}
         self._allocate_buffers()
 
-    def _make_buffer(self, n_elements):
-        return XRTTensor((n_elements,), dtype=ml_dtypes.bfloat16)
+    def _make_buffer(self, n_elements, dtype):
+        return XRTTensor((n_elements,), dtype=dtype)
 
     def _allocate_buffers(self):
         self._buffers = {}
         for name, (_, _, length) in self.op.subbuffer_layout.items():
-            self._buffers[name] = self._make_buffer(_n_elements(length))
+            dtype = self.op.buffer_dtype(name)
+            self._buffers[name] = self._make_buffer(_n_elements(length, dtype), dtype)
 
     def _resolve_buffer(self, buf_name):
         if buf_name in self._buffers:
@@ -134,8 +136,9 @@ class SequenceCallable:
         if buf_name in self.op.slice_info:
             base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
             size_bytes = end_bytes - start_bytes
+            dtype = self.op.buffer_dtype(buf_name)
             sub = self._buffers[base_name].subview(
-                start_bytes, (size_bytes // BF16.itemsize,), BF16
+                start_bytes, (size_bytes // dtype.itemsize,), dtype
             )
             self._buffers[buf_name] = sub
             return sub
@@ -186,7 +189,8 @@ class SequenceCallable:
 class SequenceFullELFCallable(SequenceCallable):
     """The full ELF (NPU2): every operator shares three consolidated
     input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
-    sub-view into whichever consolidated buffer holds the named argument.
+    sub-view of the named argument's dtype into whichever consolidated buffer
+    holds it.
 
     A sequence placed in a shared arena (``OperatorSequence(arena=...)``) runs
     its scratch in the ``arena`` buffer given here, which every other image
@@ -318,7 +322,8 @@ class SequenceFullELFCallable(SequenceCallable):
             "output": self.output_buffer,
             "scratch": self.scratch_buffer,
         }[buf_type]
-        sub = parent.subview(offset, (length // BF16.itemsize,), ml_dtypes.bfloat16)
+        dtype = self.op.buffer_dtype(buffer_name)
+        sub = parent.subview(offset, (length // dtype.itemsize,), dtype)
         self._buffer_cache[buffer_name] = sub
         return sub
 
@@ -446,8 +451,8 @@ class SequenceReferenceCallable(SequenceCallable):
     Device syncs are no-ops on the CPU buffers.
     """
 
-    def _make_buffer(self, n_elements):
-        return CPUOnlyTensor((n_elements,), dtype=BF16)
+    def _make_buffer(self, n_elements, dtype):
+        return CPUOnlyTensor((n_elements,), dtype=dtype)
 
     def _sync_inputs(self):
         # CPU-only inputs must stay CPU-resident, including lazily created subviews.
@@ -462,7 +467,7 @@ class SequenceReferenceCallable(SequenceCallable):
             out = step_op.reference(*inputs)
             out_flat = self._resolve_buffer(out_name).numpy_view()
             n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
-            out_flat[:n_out] = out.reshape(-1).astype(BF16)
+            out_flat[:n_out] = out.reshape(-1).astype(out_flat.dtype)
 
 
 class SequenceCompareCallable(SequenceXclbinCallable):

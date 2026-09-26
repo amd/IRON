@@ -17,6 +17,7 @@ from ..declare import Operator
 from .allocator import Allocation, ArenaPlan, align_up, live_ranges, place
 from .artifacts import Artifacts, Design, Step
 from .callable import (
+    BF16,
     ScratchArena,
     SequenceCompareCallable,
     SequenceFullELFCallable,
@@ -271,10 +272,11 @@ class OperatorSequence:
                     if buf_name not in args:
                         args[buf_name] = args_spec
                     else:
-                        if np.prod(args[buf_name].shape) != np.prod(args_spec.shape):
+                        if args[buf_name].nbytes != args_spec.nbytes:
                             raise ValueError(
                                 f"Buffer '{buf_name}' has conflicting sizes between operators: "
-                                f"{args[buf_name].shape} vs {args_spec.shape}"
+                                f"{args[buf_name].shape} {bfp.dtype_name(args[buf_name].dtype)} "
+                                f"vs {args_spec.shape} {bfp.dtype_name(args_spec.dtype)}"
                             )
 
         # Verify all input/output args are present (either as regular or sliced buffers)
@@ -366,6 +368,25 @@ class OperatorSequence:
 
         buffer_sizes = (input_buffer_size, output_buffer_size, scratch_buffer_size)
         return subbuffer_layout, buffer_sizes, slice_info
+
+    def buffer_dtype(self, name: str) -> np.dtype:
+        """The host dtype a named buffer (or slice) is viewed as.
+
+        What the first step naming it declares. A parent reached only
+        through slices takes its slices' dtype when they agree and is bytes
+        when they do not; one no step names stays bf16, as every buffer was
+        before buffers had a dtype of their own.
+        """
+        sliced = set()
+        for op, *bufs in self.runlist:
+            for buf, b in zip(bufs, op.buffers):
+                if buf == name:
+                    return np.dtype(b.host_dtype)
+                if _base_name(buf) == name:
+                    sliced.add(np.dtype(b.host_dtype))
+        if len(sliced) == 1:
+            return sliced.pop()
+        return np.dtype(np.uint8) if sliced else BF16
 
     def prepare(self):
         """Settle the mode and lay the buffers out, before anything is built."""
