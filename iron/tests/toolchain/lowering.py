@@ -36,9 +36,13 @@ def lower(op, tmp_path, name=None):
     src = tmp_path / f"{name}.mlir"
     # CompilableDesign clears the kernel registry before generating; a bare
     # generator() call in one process must do the same, or two designs
-    # declaring one kernel with different flags collide.
+    # declaring one kernel with different flags collide. And after, as
+    # compile() does: what stays registered is the next test's collision.
     ExternalFunction._instances.clear()
-    src.write_text(str(op.generator()()))
+    try:
+        src.write_text(str(op.generator()()))
+    finally:
+        ExternalFunction._instances.clear()
     out = tmp_path / "out"
     result = subprocess.run(
         [
