@@ -48,20 +48,6 @@ def runtime_dir(dev=None) -> Path:
     )
 
 
-def lut_sources(dev=None):
-    """``lut_based_ops.cpp`` when this arch's kernels need it, else nothing.
-
-    aie2's exp/log kernels reference its tables; aie2p's do not. Returned as a
-    bundle for :func:`declare_kernel` rather than as an object to link: the
-    tables have no MLIR call site, so an object carrying them can never be
-    discovered by tracing calls, and compiling them into the kernel's own
-    translation unit is what removes the problem rather than working around it.
-    """
-    if target_arch(dev) != "aie2":
-        return ()
-    return (runtime_dir(dev) / "lut_based_ops.cpp",)
-
-
 def recipe_digest(name, source, compile_flags, include_dirs, bundled, symbol_prefix):
     """Eight hex digits naming what a kernel's object is built from.
 

@@ -131,7 +131,7 @@ class GEMM(Operator):
         """r, s, t: the aie::mmul tile dims the kernel is built from.
 
         Read from the kernel factory rather than tabulated here: the geometry
-        belongs to the kernel mm.cc compiles, and upstream's table is the one
+        belongs to the kernel linalg/mm.cc compiles, and upstream's table is the one
         its ``combos(X) X(..., r, s, t)`` macros are kept in step with.
         """
         return _mac_dims(
@@ -149,7 +149,7 @@ class GEMM(Operator):
         # does not divide into them cannot be compiled for.
         #
         # aie2p's geometry whatever the device: the messages name
-        # aie_kernels/aie2p/mm.cc, and no device is known here anyway, since
+        # aie_kernels/linalg/mm_aie2p.h, and no device is known here anyway, since
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
@@ -163,17 +163,17 @@ class GEMM(Operator):
         if self.tile_m % min_tile_m != 0:
             raise ValueError(
                 f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
-                f"(aie_kernels/aie2p/mm.cc requires m % (2*r) == 0, r={r})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0, r={r})"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
                 f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
-                f"(aie_kernels/aie2p/mm.cc requires k % s == 0, s={s})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0, s={s})"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
                 f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
-                f"(aie_kernels/aie2p/mm.cc requires n % (2*t) == 0, t={t})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0, t={t})"
             )
         din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
         if self.prio_accuracy and dout != np.dtype(bfloat16):

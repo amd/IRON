@@ -42,7 +42,6 @@ from iron.common import (
     select,
 )
 from iron.common.device import bound_device, device_name
-from iron.common.kernels import lut_sources
 from iron.common.tiling import Access, run_dims
 from iron.exports.flm.gemm.design import (
     _VERIFIED_CT_K,
@@ -378,10 +377,14 @@ class GEMM(Operator):
         )
 
     def kernel_source(self, target):
-        return target.kernels_dir / "generic" / "mm_fused.cc"
+        # fused_mm_tile.cc, since mm_fused.h is a header. The whole-tile entry
+        # point it adds is never called, so the link drops it, but it also
+        # compiles out the per-step event0/event1 markers. On aie2 it includes
+        # lut_based_ops.cpp itself, for tanh's tables.
+        return target.kernels_dir / "fused" / "fused_mm_tile.cc"
 
     def kernel_flags(self, target) -> list[str]:
-        """The -D set mm_fused.cc is compiled with."""
+        """The -D set fused_mm_tile.cc is compiled with."""
         flags = [
             f"-DMM_FUSED_TILE_M={M_TILE}",
             f"-DMM_FUSED_TILE_K={K_TILE}",
@@ -446,15 +449,15 @@ class GEMM(Operator):
         mt_b_ty = self.B.tile
         mt_out_ty = self.C.tile
 
-        # All three are compiled into mm_fused.cc, so they name one object.
-        # Declared by hand rather than from aie.iron.kernels.fused_mm: this
-        # overlay's -D flags (tile sizes, bfp16 emulation) are its own.
+        # All three are compiled from mm_fused.h, so they name one object.
+        # Declared by hand rather than from aie.iron.kernels.fused_mm: that
+        # factory compiles in one epilogue mode (this overlay selects among
+        # several at runtime) and always rounds to nearest-even.
         def fused_kernel(name, arg_types):
             return target.kernel(
                 name,
                 arg_types,
                 source=self.kernel_source(target),
-                bundled_sources=lut_sources(target.dev),
                 compile_flags=self.kernel_flags(target),
                 object_file_name=self.kernel_object,
             )

@@ -45,10 +45,6 @@ class Target:
         self.rtp = partial(Buffer, use_write_rtp=True)
         self.barriers: list[Any] = []
 
-    def kernel_source(self, name: str):
-        """``<kernels_dir>/<arch>/<name>.cc``: the per-architecture kernel tree."""
-        return self.kernels_dir / self.arch / f"{name}.cc"
-
     def barrier(self, initial_value: int = 0):
         """A worker/runtime barrier the preamble sets to 1 after writing residents."""
         b = WorkerRuntimeBarrier(initial_value)

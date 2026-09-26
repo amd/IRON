@@ -13,7 +13,7 @@ declared with :func:`custom_op`, which gives them a schema in a private domain s
 the exporter emits them as a single node.
 
 Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
-the kernel source is mlir-aie's ``aie_kernels/<dir>/<name>.cc``, exactly as the
+the kernel source is mlir-aie's ``aie_kernels/<family>/<name>.cc``, exactly as the
 hand-written operators use it.
 """
 
@@ -98,14 +98,14 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
     """
     suffix = f"{m}_{k}_{n}"
     prefix = f"mm{suffix}"
-    zero_source = kernels_dir / "generic" / "zero.cc"
+    zero_source = kernels_dir / "zero" / "zero.cc"
     declare_kernel(
         # Unused as a declaration: stream-dse emits the func.func this design
         # links against, so ExternalFunction is here only to compile the source
         # with these flags into this object.
         "matmul_bf16_bf16",
         [],
-        source=kernels_dir / kernel_dir / "mm.cc",
+        source=kernels_dir / "linalg" / "mm.cc",
         object_file_name=f"mm_{suffix}.o",
         symbol_prefix=prefix,
         # The generated MLIR names the object and, through the map returned
@@ -137,8 +137,8 @@ class StreamKernel:
     """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
 
     ``source``/``subdir`` name the file in mlir-aie's ``aie_kernels`` library the same
-    way the hand-written operators do (``subdir=None`` means the device directory,
-    e.g. ``aie2p``). The object name must equal the kernel's ``linkwith_name`` in
+    way the hand-written operators do (``subdir`` is the family directory, e.g.
+    ``activation``). The object name must equal the kernel's ``linkwith_name`` in
     stream-dse, since the generated MLIR links against it.
     """
 
@@ -158,13 +158,12 @@ class StreamKernel:
         """
         if self.declare is not None:
             return self.declare(kernels_dir, kernel_dir, **kwargs)
-        subdir = self.subdir or kernel_dir
         # No prefix: stream-dse's generated MLIR already calls these by the
         # names the source defines, so renaming them would break the link.
         declare_kernel(
             self.source,
             [],
-            source=kernels_dir / subdir / f"{self.source}.cc",
+            source=kernels_dir / self.subdir / f"{self.source}.cc",
             object_file_name=f"{self.source}.o",
             digest_prefix=False,
         )
@@ -173,13 +172,16 @@ class StreamKernel:
 
 GEMM = StreamKernel(key="gemm", layouts=gemm_layouts, declare=_gemm_declare)
 SILU = StreamKernel(
-    key="silu", layouts=lambda: elementwise_layouts(2), source="silu", subdir="generic"
+    key="silu",
+    layouts=lambda: elementwise_layouts(2),
+    source="silu",
+    subdir="activation",
 )
 ELTWISE_MUL = StreamKernel(
     key="eltwise_mul",
     layouts=lambda: elementwise_layouts(3),
     source="mul",
-    subdir="generic",
+    subdir="eltwise",
 )
 
 Silu = custom_op("Silu")

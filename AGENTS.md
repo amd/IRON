@@ -171,15 +171,14 @@ reuse lint
        accumulator) keeps a `test.py` beside it.
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
-   - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`iron.common.kernels.kernels_dir()`), not from this
-     repo. Operators get them from mlir-aie's kernel factories
-     (`aie.iron.kernels`), each of which returns an `ExternalFunction`
-     carrying its source, flags, symbol and argument types, and in
-     `.contract` the tolerance its output is held to:
-     - `generic/`: Works on both AIE2 and AIE2P
-     - `aie2/`: AIE2-specific (NPU1)
-     - `aie2p/`: AIE2P-specific (NPU2)
+   - C++ compute kernels, sourced from the installed mlir-aie package
+     (`iron.common.kernels.kernels_dir()`), not from this repo. Operators get
+     them from mlir-aie's kernel factories (`aie.iron.kernels`), each of which
+     returns an `ExternalFunction` carrying its source, flags, symbol and
+     argument types, and in `.contract` the tolerance its output is held to
+   - Grouped by family (`activation/`, `eltwise/`, `linalg/`, `norm/`,
+     `fused/`, `common/`, ...), not by architecture: a kernel's `.cc` includes
+     its `*_aie2.h` or `*_aie2p.h` header, chosen by `aie_arch.h`
    - Use AIE API for vectorization (e.g., `aie::mmul`, `aie::add`, `aie::mul`)
    - Compiled to `.o` files and linked into operator `.xclbin`
 
@@ -335,7 +334,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    tolerance contract. Bind a further symbol of the same object with
    `fn.object_file.bind(symbol, arg_types)`. `target.kernel(...)` declares
    a kernel the factories do not cover (one whose compile flags are the
-   operator's own, like flm's `mm_fused.cc`) and, with `source_text=`, one
+   operator's own, like flm's `fused_mm_tile.cc`) and, with `source_text=`, one
    written in the operator's own file (the hello-world in
    `iron/tests/toolchain/inline_kernel.py`: a `vadd` in C++ text, the
    argument types the operands' tiles). An operator running one kernel
@@ -344,7 +343,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
    with a factory in `aie.iron.kernels`; IRON hosts no kernels
-   - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
+   - Choose the family directory (`activation/`, `eltwise/`, `linalg/`, ...);
+     put architecture-specific code in `*_aie2.h` / `*_aie2p.h` headers
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
 5. Give the operator a `reference(*inputs)` (numpy, on the declared shapes:
@@ -565,7 +565,7 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`iron.common.kernels.kernels_dir()`,
+  `include/aie_kernels/<family>/` (`iron.common.kernels.kernels_dir()`,
   overridden by `MLIR_AIE_KERNEL_SOURCES`)
 - Ensure the kernel's C++ signature matches the factory from
   `aie.iron.kernels` (or `bind()`'s argument types), or the
@@ -599,7 +599,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 **Kernel compilation failures**
 
-- Check kernel is in correct architecture directory (`generic/`, `aie2/`, `aie2p/`)
+- Check the kernel's `.cc` includes the right `*_aie2.h` / `*_aie2p.h` header for the target
 - Verify `#include <aie_api/aie.hpp>` for AIE API kernels
 - Ensure template parameters match function signature
 - Check for syntax errors in vectorization code

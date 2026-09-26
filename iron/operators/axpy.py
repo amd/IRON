@@ -13,10 +13,12 @@ class AXPY(BinaryElementwise):
     scalar as a kernel argument.
     """
 
-    # Every split at the default scalar (the 2048 shape in the default
-    # suite), then every split at a second scalar, all extensive.
+    # Every split at the default scalar and at a non-integer one that bf16
+    # rounds (the 2048 shape in the default suite), then every split at a
+    # third scalar, all extensive.
     test = Testing(
         lambda cls: binary_elementwise_cases(scalar_factor=3.0)(cls)
+        + binary_elementwise_cases(scalar_factor=1.003)(cls)
         + binary_elementwise_cases(scalar_factor=10.0, regular=None)(cls)
     )
 
@@ -31,7 +33,12 @@ class AXPY(BinaryElementwise):
 
     def reference(self, a, b):
         """CPU reference: ``scalar_factor * a + b`` in fp32, rounded once, as
-        the kernel computes it; the scalar is bf16 on the device.
+        the kernel computes it.
+
+        The vectorized kernel accepts the scalar as fp32 but broadcasts
+        ``bfloat16(a)`` internally. The product stays in an fp32 accumulator
+        until after adding ``b``; only the coefficient and the final result
+        round to bf16.
         """
         scalar = np.float32(np.asarray(self.scalar_factor, dtype=a.dtype))
         return (scalar * a.astype(np.float32) + b.astype(np.float32)).astype(a.dtype)

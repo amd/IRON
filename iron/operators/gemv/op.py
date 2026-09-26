@@ -231,7 +231,7 @@ class GEMV(Operator):
                     "gemv gelu epilogue is only available on NPU2 (aie2p); "
                     f"current kernel dir is {target.arch!r}"
                 )
-            # gelu.cc's in-place gelu_tile_bf16, which only aie2p's gelu.cc
+            # gelu.cc's in-place gelu_tile_bf16, which only gelu_aie2p.h
             # exports; it rides in the object the gelu factory builds. A second
             # object, not an archive bundled with the first: each func.func
             # carries its own link_with and aie-assign-core-link-files
@@ -461,7 +461,7 @@ def reference(A, B):
 
 
 def gelu_tanh_approx(x):
-    """Tanh-approximation GELU, matching aie_kernels/aie2p/gelu.cc.
+    """Tanh-approximation GELU, matching aie_kernels/activation/gelu_aie2p.h.
 
     0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))). Computed in float32.
     """
