@@ -57,9 +57,9 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, npu_runtime):
         )
     )
 
-    assert len(errors["O"]) <= max_acceptable_errors, (
-        f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
-    )
+    assert (
+        len(errors["O"]) <= max_acceptable_errors
+    ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
 
 
 @pytest.mark.parametrize(

@@ -110,12 +110,16 @@ def pack_b(
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(-1)
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(
+                -1
+            )
         else:
             #   -> (cb, kb, kslice, tb, i, s_in, t_in)
             # Row-major s x t within the block, which is what the plain mmul
             # loads.
-            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(-1)
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(
+                -1
+            )
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
         # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning
@@ -128,10 +132,10 @@ def pack_b(
     # exponent (8 consecutive k for one n) adjacent, which is what makes the
     # block grouping match the kernel's. Grouping over n instead measures
     # 1.95e-02 against this layout's 2.69e-04.
-    blocked = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 6, 3)).reshape(-1, 8)
-    return f32_to_bfp16ebs8(
-        blocked.astype(np.float32), round_conv_even=round_conv_even
+    blocked = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 6, 3)).reshape(
+        -1, 8
     )
+    return f32_to_bfp16ebs8(blocked.astype(np.float32), round_conv_even=round_conv_even)
 
 
 def packed_b_size(K, N, bfp16):

@@ -60,7 +60,7 @@ def reference(input_a, input_b, epilogue=Epilogue.NONE, clamp=None):
     ``torch.sigmoid`` can reproduce. Tolerances have to absorb that part.
     """
     out_dtype = input_a.dtype
-    C = np.matmul(
-        input_a.astype(np.float32), input_b.astype(np.float32)
-    ).astype(out_dtype)
+    C = np.matmul(input_a.astype(np.float32), input_b.astype(np.float32)).astype(
+        out_dtype
+    )
     return apply_epilogue(C, epilogue, clamp)
