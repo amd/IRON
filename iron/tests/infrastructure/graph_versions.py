@@ -113,6 +113,31 @@ def test_load_hands_each_weight_to_release_once_it_is_uploaded():
     np.testing.assert_array_equal(_f32(f(x1).numpy()), _f32(x1) + 2 * expect_w)
 
 
+def test_load_loads_a_version_whose_weights_are_already_uploaded():
+    """Loading the one-line version uploads ``w``, which is every weight the
+    two-line version reads; loading that one must still put its image on the
+    device, or its first call does."""
+    w = _numbers(E, 1)
+
+    @iron.graph
+    def f(x):
+        if x.shape[0] == E:
+            return ElementwiseAdd(x, w, tile_size=TILE)
+        # An input is not sliced in place; an intermediate is.
+        y = ElementwiseAdd(x, x, tile_size=TILE)
+        return ElementwiseAdd(y[E:], w, tile_size=TILE)
+
+    one = f.compile(x=(E,))
+    two = f.compile(x=(2 * E,))
+    one.load()
+    assert f.arena.loaded == {id(w)} and not two.is_loaded
+    two.load()
+    assert one.is_loaded and two.is_loaded
+
+    x = _numbers(2 * E, 10)
+    np.testing.assert_array_equal(_f32(two(x).numpy()), 2 * _f32(x[E:]) + _f32(w))
+
+
 def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state():
     """Compiling on first call at a new shape: the arena grows under the
     version that already ran, which keeps working."""
@@ -134,7 +159,7 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
     np.testing.assert_array_equal(_f32(out), _f32(x3) + 2 * _f32(w))
 
     # A state written through one version reads back through the other.
-    (one, two) = f.versions.values()
+    one, two = f.versions.values()
     line = _numbers(E, 8)
     one.write(s, line)
     np.testing.assert_array_equal(_f32(two.read(s)), _f32(line))

@@ -270,6 +270,11 @@ class CompiledGraph:
             self._callable = self.sequence.get_callable(self.arena)
         return self._callable
 
+    @property
+    def is_loaded(self) -> bool:
+        """Whether the image is on the device, so a call pays no setup."""
+        return self._callable is not None
+
     # -- buffers ---------------------------------------------------------------
 
     def buffer(self, x):
@@ -316,7 +321,14 @@ class CompiledGraph:
 
     def load(self, release: Callable[[object], None] | None = None) -> CompiledGraph:
         """Load the image and upload its weights now, rather than on first
-        call; ``release`` as for :meth:`upload`."""
+        call; ``release`` as for :meth:`upload`.
+
+        The image is loaded even when there is nothing to upload: in an
+        arena, another version may have put every weight there already, and
+        loading on first call cost Llama's first prefill 88 ms.
+        """
+        if not self.is_loaded:
+            self._callable = self.sequence.get_callable(self.arena)
         self.upload(release)
         return self
 
