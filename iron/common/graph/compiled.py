@@ -30,6 +30,7 @@ from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
+from .fold import Folding
 from .carried import (
     CARRY,
     EmitSite,
@@ -270,6 +271,7 @@ class GraphFunction:
         record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
+        fold: Folding | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -282,6 +284,8 @@ class GraphFunction:
         (:mod:`iron.common.image.coresidence`); a full ELF only. A
         :class:`~.narrowing.JointNarrowing` also narrows designs so that
         they fit; what it chose is the version's :attr:`CompiledGraph.tuning`.
+        ``fold`` removes movement steps into their neighbours first
+        (:mod:`.fold`).
 
         A full-ELF version is placed in :attr:`arena`, with the weights and
         states of every other version. Compile every version before the
@@ -296,6 +300,8 @@ class GraphFunction:
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
+        if fold is not None:
+            traced = fold.fold(traced, aie_utils.get_current_device())
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None = coresident
         if isinstance(coresident, JointNarrowing):

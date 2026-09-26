@@ -341,6 +341,14 @@ class GEMV(Operator[GEMVOverlay]):
             return None
         return a_split, c_split
 
+    def independent_batches(self) -> int:
+        # The core loops over batches without knowing which it is on: any
+        # walk A, B and C share computes the same products.
+        return self.num_batches
+
+    def accepts_folds(self) -> bool:
+        return True
+
     def order(self, buffer: BoundBuffer) -> Order:
         """A and C: each column's contiguous rows, one descriptor per batch or
         every batch in one iterated descriptor (:meth:`_batch_split`). B: the
@@ -388,7 +396,11 @@ class GEMV(Operator[GEMVOverlay]):
         batch, or in one group for all of them when the batches coalesce."""
         ov = self.ov
         cols = ov.num_aie_columns
-        a, b, c = self.order(self.A), self.order(self.B), self.order(self.C)
+        a, b, c = (
+            self.issued_order(self.A),
+            self.issued_order(self.B),
+            self.issued_order(self.C),
+        )
         if self._batch_split() is not None:
             # Dropping the per-batch drain wait lets the single iterated fill BD
             # run ahead of the core. ObjectFifo lock backpressure keeps that
@@ -401,13 +413,24 @@ class GEMV(Operator[GEMVOverlay]):
         with rt.group() as tg_b:
             for col in range(cols):
                 for tap in b[col]:
-                    rt.fill(ov.b[col], (self.B, tap), group=tg_b)
+                    rt.fill(ov.b[col], (self.B, tap), group=tg_b, offset_by=b.offset_by)
             for w in range(len(a[0])):
                 with rt.group() as tg_ac:
                     for col in range(cols):
-                        rt.fill(ov.a[col], (self.A, a[col][w]), group=tg_ac)
+                        rt.fill(
+                            ov.a[col],
+                            (self.A, a[col][w]),
+                            group=tg_ac,
+                            offset_by=a.offset_by,
+                        )
                     for col in range(cols):
-                        rt.drain(ov.c[col], (self.C, c[col][w]), group=tg_ac, wait=True)
+                        rt.drain(
+                            ov.c[col],
+                            (self.C, c[col][w]),
+                            group=tg_ac,
+                            wait=True,
+                            offset_by=c.offset_by,
+                        )
 
     def reference(self, A, B):
         """CPU reference: (optionally batched) matrix-vector product."""

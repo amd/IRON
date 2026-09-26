@@ -312,11 +312,14 @@ class Transpose(Operator[TransposeOverlay]):
             ),
         )
 
+    def accepts_folds(self) -> bool:
+        return True
+
     def design(self, rt):
         """One task group per batch (a parallel fill+drain over all cores), so the
         contiguous matrices stream through the same fifos in sequence."""
         ov = self.ov
-        src, dst = self.order(self.x), self.order(self.y)
+        src, dst = self.issued_order(self.x), self.issued_order(self.y)
         for batch in range(self.num_batches):
             with rt.group() as tg:
                 for k in range(len(src.slots)):

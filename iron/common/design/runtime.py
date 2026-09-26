@@ -70,7 +70,7 @@ class Transfers:
         """
         with self.group() as tg:
             for buf in self.op.inputs:
-                order = self.op.order(buf)
+                order = self.op.issued_order(buf)
                 if order.stream.direction != "in":
                     continue
                 for i, accesses in enumerate(order.slots):
@@ -82,7 +82,7 @@ class Transfers:
                             offset_by=order.offset_by,
                         )
             for buf in self.op.outputs:
-                order = self.op.order(buf)
+                order = self.op.issued_order(buf)
                 if order.stream.direction != "out":
                     continue
                 for i, accesses in enumerate(order.slots):
@@ -111,13 +111,13 @@ class Transfers:
         slot.extend(_Issued(acc, offset_by) for acc in accesses)
 
     def check_orders(self) -> None:
-        """Raise unless every buffer moved exactly as ``op.order()`` declares:
+        """Raise unless every buffer moved exactly as ``op.issued_order()`` declares:
         through its declared stream, each slot's descriptors in the declared
         sequence, shifted by the declared per-call value. What a fusion pass
         reads is then what the array receives."""
         op = type(self.op).__name__
         for buf in self.op.buffers:
-            order = self.op.order(buf)
+            order = self.op.issued_order(buf)
             issued = self._issued.get(buf.name, {})
             stray = sorted({name for name, _ in issued} - {order.stream.name})
             if stray:

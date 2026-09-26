@@ -261,11 +261,14 @@ class Sample(Operator[SampleOverlay]):
             return Order(ov.record, ((record,),), offset_by=at)
         return Order(ov.token, ((contiguous(1, 0, 1),),))
 
+    def accepts_folds(self) -> bool:
+        return True
+
     def design(self, rt):
         """One group: the draw and the logits in, then the record and the token."""
         ov = self.ov
-        draws, logits = self.order(self.draws), self.order(self.logits)
-        record, token = self.order(self.tokens), self.order(self.token)
+        draws, logits = self.issued_order(self.draws), self.issued_order(self.logits)
+        record, token = self.issued_order(self.tokens), self.issued_order(self.token)
         with rt.group() as tg:
             (draw,) = draws[0]
             rt.fill(ov.draw, (self.draws, draw), group=tg, offset_by=draws.offset_by)
