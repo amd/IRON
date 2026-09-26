@@ -1,8 +1,8 @@
 {
  "steps": {
   "DynamicSoftmax_1b120605e03135fc4ac39c82": {
-   "t_step_us": 318.75466083874926,
-   "alone_us": 69.85784420976415,
+   "t_step_us": 16.723213775549084,
+   "alone_us": 131.86284195398912,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
