@@ -14,6 +14,9 @@ change that quietly aliased two live buffers shows up here and nowhere
 else, because it produces wrong values rather than an error.
 """
 
+import subprocess
+import sys
+
 import pytest
 
 import aie.utils as aie_utils
@@ -153,3 +156,30 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
         outputs.append(np.array(f(a, b).numpy()[:SIZE]))
     temporal, packed = outputs
     assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
+
+
+def test_compile_binds_the_device_before_tracing():
+    """compile() with no device traces against the one the runtime reports.
+
+    A kernel factory asks for the bound device only (it must not start the
+    runtime), so a probed but unbound device reads to it as none. A fresh
+    process is the only one with nothing bound yet.
+    """
+    script = (
+        "import aie.utils as aie_utils\n"
+        "import iron\n"
+        "from iron.operators import ElementwiseAdd\n"
+        f"add = ElementwiseAdd(size={SIZE}, tile_size={TILE})\n"
+        "seen = []\n"
+        "@iron.graph\n"
+        "def f(x, w):\n"
+        "    seen.append(aie_utils.get_current_device(probe_runtime=False))\n"
+        "    return add(x, w)\n"
+        f"f.compile(x=({SIZE},), w=({SIZE},))\n"
+        "print(type(seen[0]).__name__, type(aie_utils.get_current_device()).__name__)\n"
+    )
+    other = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+    during_trace, probed = other.stdout.split()[-2:]
+    assert during_trace == probed != "NoneType"

@@ -293,8 +293,12 @@ class GraphFunction:
         itself -- so that one can run without the host
         (:class:`~iron.common.graph.carried.CarriedLoop`).
         """
+        # Bind the device before tracing: operators validate against it, and
+        # a probed device that is never bound reads as none to kernel factories.
         if dev is not None:
             aie_utils.set_current_device(dev)
+        else:
+            aie_utils.ensure_current_device()
         traced = self.trace(**shapes)
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None = coresident
