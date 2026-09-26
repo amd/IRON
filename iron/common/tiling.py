@@ -408,6 +408,48 @@ def legalize(
     return out
 
 
+def factor(indices: np.ndarray) -> tuple[int, list[tuple[int, int]]] | None:
+    """The nested loops that visit ``indices`` in order, or ``None`` if none do.
+
+    Returns ``(offset, dims)``, ``dims`` outermost first as (size, stride)
+    with unit dimensions dropped, such that unrolling them from ``offset``
+    reproduces ``indices`` exactly. A stride may come out 0 (a re-read) or
+    negative; whether a descriptor can hold it is the caller's question.
+    Each level takes the longest innermost run that repeats with one shape,
+    so contiguous levels come out merged.
+    """
+    rel = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if rel.size == 0:
+        raise ValueError("cannot factor an empty sequence")
+    offset = int(rel[0])
+    rel = rel - offset
+    inner_first: list[tuple[int, int]] = []
+    while rel.size > 1:
+        steps = np.diff(rel)
+        stride = int(steps[0])
+        breaks = np.flatnonzero(steps != stride)
+        run = int(breaks[0]) + 1 if breaks.size else rel.size
+        size = next(
+            (
+                n
+                for n in range(run, 1, -1)
+                if rel.size % n == 0 and _rows_match(rel, n, stride)
+            ),
+            None,
+        )
+        if size is None:
+            return None
+        inner_first.append((size, stride))
+        rel = rel[::size]
+    return offset, _merged(inner_first[::-1])
+
+
+def _rows_match(rel: np.ndarray, n: int, stride: int) -> bool:
+    """Every length-``n`` row of ``rel`` is its first element plus ``stride * arange(n)``."""
+    rows = rel.reshape(-1, n)
+    return bool(np.all(rows - rows[:, :1] == np.arange(n, dtype=np.int64) * stride))
+
+
 def _merged(dims: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Adjacent dimensions that nest contiguously, as one: fewer slots used."""
     out: list[tuple[int, int]] = []
