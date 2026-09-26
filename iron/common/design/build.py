@@ -9,7 +9,16 @@ import hashlib
 import inspect
 from typing import Any
 
-from aie.iron import Program, Runtime, ScratchpadParameter
+from aie.iron import (
+    Buffer,
+    Flow,
+    Lock,
+    PacketFlow,
+    Program,
+    Runtime,
+    ScratchpadParameter,
+    TileDma,
+)
 from aie.iron.device import AnyShimTile
 from aie.iron.runtime.endpoint import RuntimeEndpoint
 
@@ -108,19 +117,37 @@ def build_design(
             # A dispatch parameter arrives in the body as its live scalar.
             for value, scalar in zip(values, args[len(buffers) + 1 :]):
                 value.ssa = scalar
-        seq = Sequence(op, rt_data)
-        seq.preamble(target)
+        seq = Sequence(op, rt_data, target)
+        if not op.own_preamble:
+            seq.preamble()
         seq.run()
         # A declared stream slot this extent never transfers on (mem_copy's
         # idle cores at a small size) still needs a shim endpoint, or the
-        # program cannot be resolved. Place it on any shim tile.
-        idle = [h for h in handles if id(h) not in seq.used]
+        # program cannot be resolved. Place it on any shim tile. A flow lane
+        # names its shim end itself.
+        idle = [h for h in handles if id(h) not in seq.used and not isinstance(h, Flow)]
         if idle:
             for h in idle:
                 h.endpoint = RuntimeEndpoint(AnyShimTile)
                 rt._fifos.add(h)
 
     rt = Runtime(sequence, fn_args + params)
+    # What array() registered on the target: before the program resolves,
+    # since the sequence body, which runs last, may address all of it.
+    for obj in target.registered:
+        if isinstance(obj, (Flow, PacketFlow)):
+            rt.add_flow(obj)
+        elif isinstance(obj, Lock):
+            rt.add_lock(obj)
+        elif isinstance(obj, TileDma):
+            rt.add_tile_dma(obj)
+        elif isinstance(obj, Buffer):
+            rt.add_buffer(obj)
+        else:
+            raise TypeError(
+                f"target.register takes a Flow, PacketFlow, Lock, TileDma or "
+                f"Buffer, got {obj!r}"
+            )
     prog = Program(op.device(target), rt, workers=workers)
     if trace_size:
         maybe_enable_trace(prog, trace_size, workers)

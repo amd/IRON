@@ -20,7 +20,8 @@ class Target:
     Carries the device and the kernel tree. ``kernel`` is
     :func:`~iron.common.kernels.declare_kernel`, whose digest prefix keeps
     kernels apart when designs are fused, whatever else is fused with them;
-    ``rtp`` is a runtime-parameter :class:`~aie.iron.Buffer`.
+    ``rtp`` is a runtime-parameter :class:`~aie.iron.Buffer`; ``register``
+    hands the build what the Runtime must be told of explicitly.
     """
 
     def __init__(
@@ -44,9 +45,24 @@ class Target:
         self.kernel = declare_kernel
         self.rtp = partial(Buffer, use_write_rtp=True)
         self.barriers: list[Any] = []
+        self.registered: list[Any] = []
 
     def barrier(self, initial_value: int = 0):
         """A worker/runtime barrier the preamble sets to 1 after writing residents."""
         b = WorkerRuntimeBarrier(initial_value)
         self.barriers.append(b)
         return b
+
+    def register(self, obj):
+        """An explicit ``Flow``, ``Lock``, ``TileDma`` or ``Buffer`` the
+        runtime must know of; returns it.
+
+        A fifo reaches the program through its handles and a buffer through
+        the worker that takes it. These reach it through neither: a flow
+        only the sequence transfers on, a lock only DMA descriptors and the
+        sequence touch, a buffer only the sequence's DMA chains address. The
+        build hands each to the Runtime (``add_flow``, ``add_lock``,
+        ``add_tile_dma``, ``add_buffer``) before the program resolves.
+        """
+        self.registered.append(obj)
+        return obj
