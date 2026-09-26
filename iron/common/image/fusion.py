@@ -17,6 +17,7 @@ from aie.utils import bfp
 from typing import Any, NamedTuple
 
 from ..design import DesignGenerator
+from .coresidence import AdjacentPacking, Packing, merge_devices
 
 RESET_DEVICE = "reset_device"
 
@@ -113,11 +114,15 @@ def fuse_mlir(
     subbuffer_layout: dict[str, tuple[str, int, int]],
     buffer_sizes: ArgumentSizes,
     slice_info: dict[str, tuple[str, int, int]] | None = None,
+    packing: Packing | AdjacentPacking | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
 
     Inlines each operator's device operations and adds a new main device and
-    runtime sequence that calls into them in ``runlist`` order. A plain
+    runtime sequence that calls into them in ``runlist`` order. ``packing``
+    merges groups of designs into one device each (:mod:`.coresidence`):
+    consecutive steps in one device then share its configure point. An
+    :class:`AdjacentPacking` is resolved here, against the designs' text. A plain
     function rather than an artifact+rule: nothing here needs the artifact
     graph's file-based caching, since the caller (``FusedImage.link``)
     hands the returned text straight to ``CompilableDesign``, which keys its
@@ -178,6 +183,16 @@ def fuse_mlir(
                 )
             hoisted_params[sym_name] = param_type
 
+    params_preamble = "\n".join(
+        f"  aiex.scratchpad_parameter @{name} : {param_type}"
+        for name, param_type in hoisted_params.items()
+    )
+    if isinstance(packing, AdjacentPacking):
+        packing, _ = packing.pack(
+            [op_name for op_name, *_ in runlist], device_mlir_strings, params_preamble
+        )
+    packing = packing or Packing()
+
     # Build fused MLIR module
     with mlir_mod_ctx() as ctx:
         # Emit hoisted parameters first.
@@ -186,26 +201,33 @@ def fuse_mlir(
                 aiex.scratchpad_parameter(sym_name, param_type)
 
         # Concatenate aie.device ops.
-        params_preamble = "\n".join(
-            f"  aiex.scratchpad_parameter @{name} : {param_type}"
-            for name, param_type in hoisted_params.items()
-        )
-        for op_name, device_str in device_mlir_strings.items():
-            wrapped = f"module {{\n{params_preamble}\n{device_str}\n}}"
-            wrapper_module = ir.Module.parse(wrapped)
-            # Find the (sole) DeviceOp in the wrapper module.
-            dev_op = None
-            for op in wrapper_module.body.operations:
-                if isinstance(op, aie.DeviceOp):
-                    dev_op = op
-                    break
-            assert (
-                dev_op is not None
-            ), f"DeviceOp missing after re-parse for operator '{op_name}'"
-            dev_op.sym_name = ir.StringAttr.get(op_name)
-            ctx.module.body.append(dev_op)
+        for device_name, members in packing.devices(device_mlir_strings).items():
+            member_ops = {}
+            for op_name in members:
+                wrapped = (
+                    f"module {{\n{params_preamble}\n{device_mlir_strings[op_name]}\n}}"
+                )
+                wrapper_module = ir.Module.parse(wrapped)
+                # Find the (sole) DeviceOp in the wrapper module.
+                dev_op = None
+                for op in wrapper_module.body.operations:
+                    if isinstance(op, aie.DeviceOp):
+                        dev_op = op
+                        break
+                assert (
+                    dev_op is not None
+                ), f"DeviceOp missing after re-parse for operator '{op_name}'"
+                dev_op.sym_name = ir.StringAttr.get(op_name)
+                ctx.module.body.append(dev_op)
+                member_ops[op_name] = dev_op
+            if len(member_ops) > 1:
+                merge_devices(device_name, member_ops)
 
-        needs_reset = needs_additional_reset(runlist)
+        # Configure points are per device: steps of one pack share one.
+        device_runlist = [
+            (packing.device_of(op_name), *bufs) for op_name, *bufs in runlist
+        ]
+        needs_reset = needs_additional_reset(device_runlist)
         if needs_reset:
 
             @aie.device(device_ty)
@@ -232,19 +254,18 @@ def fuse_mlir(
 
                 # Execute operations in runlist order
                 configure_op = None
-                last_op_name = None
+                last_device = None
                 for op_name, *buffer_names in runlist:
                     expected_arg_types = sequence_arg_types[op_name]
+                    device_name = packing.device_of(op_name)
 
-                    # Avoid reconfiguring altogether if the same op is called multiple times consecutively
-                    if configure_op is None or op_name != last_op_name:
+                    # Avoid reconfiguring altogether if consecutive steps run in one device
+                    if configure_op is None or device_name != last_device:
                         # Configure Op
-                        configure_sym_ref_attr = ir.FlatSymbolRefAttr.get(op_name)
-                        configure_op = aiex.ConfigureOp(
-                            configure_sym_ref_attr
-                        )  # TODO: optimization -- if previous op was in the same device, skip reconfiguration
+                        configure_sym_ref_attr = ir.FlatSymbolRefAttr.get(device_name)
+                        configure_op = aiex.ConfigureOp(configure_sym_ref_attr)
                         configure_body = configure_op.body.blocks.append()
-                        last_op_name = op_name
+                        last_device = device_name
 
                     with ir.InsertionPoint(configure_body):
                         # For each buffer, view its bytes as the argument type
@@ -299,7 +320,9 @@ def fuse_mlir(
                             )
 
                         # Run Op
-                        sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
+                        sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get(
+                            packing.sequence_of(op_name)
+                        )
                         run_op = aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
 
                 if needs_reset:

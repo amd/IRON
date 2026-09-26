@@ -12,6 +12,8 @@ from ml_dtypes import bfloat16
 
 from iron.common import ChanneledUnaryOverlay
 from iron.common.declare import (
+    Local,
+    Semantics,
     Incompatible,
     In,
     Operator,
@@ -54,6 +56,10 @@ class DequantOverlay(ChanneledUnaryOverlay):
         tuned = super().tuning(dev)
         packed = (tuned.line_size // 2) + (tuned.line_size // self.group_size) * 2
         return dataclasses.replace(tuned, in_tile=packed)
+
+    def semantics(self) -> Semantics:
+        """Each group of values is expanded from its own packed bytes, scale and zero point."""
+        return Local(self.group_size)
 
     def kernel(self, target):
         return datamovement.expand(self.tile_size, self.group_size)

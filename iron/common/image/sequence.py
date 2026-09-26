@@ -22,6 +22,7 @@ from .allocator import (
     place,
 )
 from .artifacts import Artifacts, Design, Step
+from .coresidence import AdjacentPacking
 from .callable import (
     BF16,
     ScratchArena,
@@ -73,6 +74,11 @@ class OperatorSequence:
             scratchpad, so a value the device computes becomes that run's
             per-call value. Laid out back to back from the argument's start,
             in order; a sequence without any takes no such argument.
+        coresident: Groups of operators whose designs share one device
+            configuration in the full ELF (:mod:`.coresidence`), so steps
+            moving between them do not reconfigure the array. Every
+            operator in a group must be in the runlist. An
+            :class:`AdjacentPacking` packs them itself, asking the placer.
     """
 
     def __init__(
@@ -91,6 +97,7 @@ class OperatorSequence:
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
         feedback_args: Sequence[str] = (),
+        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         *args,
         **kwargs,
     ):
@@ -119,6 +126,26 @@ class OperatorSequence:
             raise TypeError(
                 f"OperatorSequence takes no positional extras, got {args!r}"
             )
+        if coresident and mode not in (None, "fused"):
+            raise ValueError(
+                f"co-residence packs designs into one full-ELF device; "
+                f"dispatch={dispatch!r} builds none"
+            )
+        if isinstance(coresident, AdjacentPacking):
+            self.coresident = coresident
+        else:
+            in_runlist = {id(op) for op, *_ in runlist}
+            strays = [
+                op.name
+                for group in coresident
+                for op in group
+                if id(op) not in in_runlist
+            ]
+            if strays:
+                raise ValueError(
+                    f"coresident names operators not in the runlist: {strays}"
+                )
+            self.coresident = tuple(tuple(group) for group in coresident)
         if kwargs:
             raise TypeError(f"unexpected keyword arguments {sorted(kwargs)}")
         self.runlist = runlist

@@ -10,9 +10,13 @@ from aie.iron.kernels import activation, linalg
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
+    Contraction,
+    Semantics,
+    BoundBuffer,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     StreamIn,
@@ -24,6 +28,23 @@ from iron.common.declare import (
 )
 from iron.common.tiling import Access
 from iron.common.tiling import DMA_BD_MAX_WRAP
+
+_GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
+_MAX_STRIDE = ((1 << 20) - 1) * _GRAN_ELEMS
+
+
+def _factor_run(run, lim=DMA_BD_MAX_WRAP, gran=_GRAN_ELEMS):
+    """``(hi, lo)`` with both at most ``lim`` elements.
+
+    Stricter than :func:`iron.common.tiling.split_run`, whose ``lo`` may run
+    to ``lim`` granules rather than ``lim`` elements.
+    """
+    lo_start = (lim // gran) * gran
+    for lo in range(lo_start, 0, -gran):
+        if run % lo == 0 and (run // lo) <= lim:
+            return (run // lo, lo)
+    return None
+
 
 # --------------------------------------------------------------------------
 # The overlay: what configures the array.
@@ -55,9 +76,9 @@ class GEMVOverlay(Overlay):
     epilogue: str = field(default="none", repr=False)
 
     # One fifo per column for each of A, B and C. B is the whole vector, sent
-    # to every column's own fifo; the sequence fills each one (see GEMV.design).
+    # to every column's own fifo.
     a = StreamIn(tile_size_input, K, per=num_aie_columns, depth=2)
-    b = StreamIn(K, per=num_aie_columns, depth=1)
+    b = StreamIn(K, per=num_aie_columns, replicate=True, depth=1)
     c = StreamOut(tile_size_output, per=num_aie_columns, depth=2)
 
     # Vector widths mv.cc's matvec_vectorized is instantiated at, widest first.
@@ -132,6 +153,10 @@ class GEMVOverlay(Overlay):
             tile_size_output=self.tile_size_output or self.tile_size_input,
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
+
+    def semantics(self) -> Semantics:
+        """K is reduced inside one core, so a released C tile is final."""
+        return Contraction(final_at_release=True)
 
     def design(self, target):
         from aie.dialects.aie import T
@@ -293,87 +318,78 @@ class GEMV(Operator[GEMVOverlay]):
             return base
         return f"{base}_epi{self.ov.epilogue}"
 
-    def design(self, rt):
-        """The runtime sequence, kept as it was: B once per column in an outer
-        group, then A/C per batch, coalesced into one iterated descriptor per
-        column when the shim can hold it.
+    # -- the runtime sequence --------------------------------------------------
+
+    def _batch_split(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """A's and C's ``(run_hi, run_lo)`` when every batch goes out as one
+        iterated descriptor per column, else ``None`` (one per batch).
+
+        Within one batch a column's run is contiguous and the batch stride is
+        the full matrix; the run is split in two only to fit the shim's wrap
+        field. :mod:`iron.common.tiling` states the general rules; this keeps
+        GEMV's own (both halves at most 1023 elements, ``run_lo`` even) so the
+        instruction stream stays what it was. A and C coalesce together or
+        not at all, since they share the per-batch waits.
         """
-        ov = self.ov
-        M, K, nb, cols = self.M, ov.K, self.num_batches, ov.num_aie_columns
-        A_elems, B_elems, C_elems = self.A.elements, self.B.elements, self.C.elements
-
-        # Distribution pattern for the input matrix A: each AIE core gets a
-        # contiguous chunk of rows; the shim puts all data on the stream in
-        # sequence and the ObjectFifo chunks it into tile_size_input x K tiles.
-        A_taps = [
-            [
-                Access(
-                    A_elems,
-                    col * (M // cols) * K + batch * M * K,
-                    (1, 1, 1, (M // cols) * K),
-                    (0, 0, 0, 1),
-                )
-                for batch in range(nb)
-            ]
-            for col in range(cols)
-        ]
-        # Every column gets the entirety of the vector B (all batches in sequence).
-        B_tap = Access(B_elems, 0, (1, 1, 1, nb * K), (0, 0, 0, 1))
-        # Collection pattern for C: each core writes back its contiguous chunk.
-        C_taps = [
-            [
-                Access(
-                    C_elems,
-                    col * (M // cols) + batch * M,
-                    (1, 1, 1, M // cols),
-                    (0, 0, 0, 1),
-                )
-                for batch in range(nb)
-            ]
-            for col in range(cols)
-        ]
-
-        # Batch coalescing replaces the per-batch unroll with a single iterated
-        # BD: within one batch the run is contiguous, the batch stride is the
-        # full matrix, and the run is split into [run_hi, run_lo] only to fit
-        # the shim's wrap field. iron.common.tiling states the general rules;
-        # this keeps GEMV's own (both halves <= 1023 elements, run_lo even) so
-        # the instruction stream stays what it was.
-        GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
-        MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
-
-        def factor_run(run, lim=DMA_BD_MAX_WRAP, gran=GRAN_ELEMS):
-            """``(hi, lo)`` with both at most ``lim`` elements.
-
-            Stricter than :func:`iron.common.tiling.split_run`, whose ``lo``
-            may run to ``lim`` granules rather than ``lim`` elements.
-            """
-            lo_start = (lim // gran) * gran
-            for lo in range(lo_start, 0, -gran):
-                if run % lo == 0 and (run // lo) <= lim:
-                    return (run // lo, lo)
+        nb, M, K, cols = self.num_batches, self.M, self.ov.K, self.ov.num_aie_columns
+        if nb == 1:
             return None
+        a_split = _factor_run((M // cols) * K)
+        c_split = _factor_run(M // cols)
+        strides_fit = all(s <= _MAX_STRIDE and s % _GRAN_ELEMS == 0 for s in (M * K, M))
+        if a_split is None or c_split is None or not strides_fit:
+            return None
+        return a_split, c_split
 
-        A_run, A_bstride = (M // cols) * K, M * K
-        C_run, C_bstride = (M // cols), M
-        A_split, C_split = factor_run(A_run), factor_run(C_run)
-        coalesce = (
-            nb > 1
-            and A_bstride <= MAX_STRIDE
-            and C_bstride <= MAX_STRIDE
-            and A_bstride % GRAN_ELEMS == 0
-            and C_bstride % GRAN_ELEMS == 0
-            and A_split is not None
-            and C_split is not None
+    def order(self, buffer: BoundBuffer) -> Order:
+        """A and C: each column's contiguous rows, one descriptor per batch or
+        every batch in one iterated descriptor (:meth:`_batch_split`). B: the
+        derived order of a ``replicate`` stream, the whole vector to every
+        column."""
+        if buffer is self.B:
+            return super().order(buffer)
+        ov = self.ov
+        M, nb, cols = self.M, self.num_batches, ov.num_aie_columns
+        width = ov.K if buffer is self.A else 1
+        stream = ov.a if buffer is self.A else ov.c
+        run, n = (M // cols) * width, buffer.elements
+        split = self._batch_split()
+        if split is None:
+            return Order(
+                stream,
+                tuple(
+                    tuple(
+                        Access(
+                            n,
+                            col * run + batch * M * width,
+                            (1, 1, 1, run),
+                            (0, 0, 0, 1),
+                        )
+                        for batch in range(nb)
+                    )
+                    for col in range(cols)
+                ),
+            )
+        run_hi, run_lo = split[0] if buffer is self.A else split[1]
+        return Order(
+            stream,
+            tuple(
+                (
+                    Access(
+                        n, col * run, (1, nb, run_hi, run_lo), (0, M * width, run_lo, 1)
+                    ),
+                )
+                for col in range(cols)
+            ),
         )
 
-        def coalesced(elems, col_off, split, bstride):
-            run_hi, run_lo = split
-            return Access(
-                elems, col_off, (1, nb, run_hi, run_lo), (0, bstride, run_lo, 1)
-            )
-
-        if coalesce:
+    def design(self, rt):
+        """B once per column in an outer group, then A and C in one group per
+        batch, or in one group for all of them when the batches coalesce."""
+        ov = self.ov
+        cols = ov.num_aie_columns
+        a, b, c = self.order(self.A), self.order(self.B), self.order(self.C)
+        if self._batch_split() is not None:
             # Dropping the per-batch drain wait lets the single iterated fill BD
             # run ahead of the core. ObjectFifo lock backpressure keeps that
             # safe: a producer that gets ahead blocks on the buffer lock (worst
@@ -382,32 +398,16 @@ class GEMV(Operator[GEMVOverlay]):
             assert (
                 ov.a.depth >= 2 and ov.c.depth >= 2
             ), "coalesced GEMV wants A/C ObjectFifo depth>=2 for fill/compute overlap"
-            A_coalesced = [
-                coalesced(A_elems, col * (M // cols) * K, A_split, A_bstride)
-                for col in range(cols)
-            ]
-            C_coalesced = [
-                coalesced(C_elems, col * (M // cols), C_split, C_bstride)
-                for col in range(cols)
-            ]
-
         with rt.group() as tg_b:
             for col in range(cols):
-                # Simple linear transfer of B, includes all batches in sequence
-                rt.fill(ov.b[col], (self.B, B_tap), group=tg_b)
-            # Coalesced: one iterated BD per column covers all batches (one
-            # drain wait per column). Fallback (incl. num_batches==1): the
-            # per-batch unroll, one wait per batch. Only the tap and the wait
-            # count differ.
-            num_waits = 1 if coalesce else nb
-            for w in range(num_waits):
+                for tap in b[col]:
+                    rt.fill(ov.b[col], (self.B, tap), group=tg_b)
+            for w in range(len(a[0])):
                 with rt.group() as tg_ac:
                     for col in range(cols):
-                        a_tap = A_coalesced[col] if coalesce else A_taps[col][w]
-                        rt.fill(ov.a[col], (self.A, a_tap), group=tg_ac)
+                        rt.fill(ov.a[col], (self.A, a[col][w]), group=tg_ac)
                     for col in range(cols):
-                        c_tap = C_coalesced[col] if coalesce else C_taps[col][w]
-                        rt.drain(ov.c[col], (self.C, c_tap), group=tg_ac, wait=True)
+                        rt.drain(ov.c[col], (self.C, c[col][w]), group=tg_ac, wait=True)
 
     def reference(self, A, B):
         """CPU reference: (optionally batched) matrix-vector product."""

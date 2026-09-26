@@ -4,12 +4,16 @@
 from aie.iron.kernels import eltwise
 
 from iron.common import BinaryElementwiseOperator, BinaryElementwiseOverlay, operator
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Testing, binary_elementwise_cases
 
 
 @operator
 class ElementwiseAddOverlay(BinaryElementwiseOverlay):
     """The array for ElementwiseAdd: the shared elementwise design over its kernel."""
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         return eltwise.add_sized(self.line_size)

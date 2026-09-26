@@ -6,6 +6,7 @@ from aie.iron.kernels import datamovement
 import numpy as np
 
 from iron.common import BinaryElementwiseOperator, BinaryElementwiseOverlay, operator
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Case, Testing, device_columns
 
 
@@ -14,6 +15,9 @@ class AXPYOverlay(BinaryElementwiseOverlay):
     """The array for aX + Y: the elementwise design with the scalar as a kernel argument."""
 
     scalar_factor: float = 3.0
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         return datamovement.axpy(self.line_size)

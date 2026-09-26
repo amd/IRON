@@ -15,16 +15,19 @@ binary.
 from __future__ import annotations
 
 import dataclasses
+from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.verify import Tolerance
 
-from .bound import BoundResident, BoundStream, BoundValue
+from .bound import BoundBuffer, BoundResident, BoundStream, BoundValue
 from .field import Untunable
 from .member import Resident, Xclbin, _Member, _Stream, _Value
 from .naming import label_parts
+from .order import Order
+from .semantics import Local, Semantics, Undeclared
 
 if TYPE_CHECKING:
     from ..design.target import Target
@@ -121,6 +124,14 @@ class Overlay:
         Takes precedence over the operator's ``design(rt)``."""
         raise NotImplementedError
 
+    def order(self, op: "Operator", buffer: "BoundBuffer") -> "Order":
+        """How ``buffer`` of ``op`` moves through its stream, on an overlay that
+        owns the sequence (see :meth:`sequence`); :meth:`Operator.order` asks
+        here first."""
+        raise NotImplementedError(
+            f"{type(self).__name__} owns its sequence but declares no order()"
+        )
+
     @classmethod
     def has_sequence(cls) -> bool:
         return cls.sequence is not Overlay.sequence
@@ -169,6 +180,36 @@ class Overlay:
         ``.bind(buffers)`` on every declared resident.
         """
         raise NotImplementedError(f"{type(self).__name__}.design() is not implemented")
+
+    def semantics(self) -> Semantics:
+        """What an output element of this array depends on (:mod:`.semantics`).
+
+        Derived from the declared streams when they say it: every stream
+        that is neither replicated nor broadcast carries one object shape
+        over one slot count, in and out, and any shared input carries that
+        shape too (a weight row). A core then turns object ``k`` in into
+        object ``k`` out, so the answer is :class:`Local` over the whole
+        object. An overlay whose kernel is finer (elementwise), or that
+        computes anything the streams cannot show (a contraction, a copy
+        that re-indexes), declares it. Needs a tuned overlay: tile shapes
+        may be tunables.
+        """
+        name = type(self).__name__
+        streams = list(self.streams.values())
+        split = [s for s in streams if not (s.replicate or s.broadcast)]
+        shared = [s for s in streams if s.replicate or s.broadcast]
+        if not any(s.direction == "in" for s in split) or not any(
+            s.direction == "out" for s in split
+        ):
+            return Undeclared(f"{name} has no per-slot stream in and out")
+        if len({(s.shape, s.count) for s in split}) > 1:
+            carried = ", ".join(f"{s.name} {s.shape} x{s.count}" for s in split)
+            return Undeclared(f"{name}'s streams carry different objects ({carried})")
+        shape = split[0].shape
+        odd = [s.name for s in shared if s.direction != "in" or s.shape != shape]
+        if odd:
+            return Undeclared(f"{name}'s shared streams {odd} are not {shape} inputs")
+        return Local(prod(shape))
 
     def tolerance(self, target: Target) -> Tolerance | None:
         """How close this array's output comes to the operator's reference:

@@ -11,9 +11,11 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron.kernels import quant
 
 from iron.common.declare import (
+    BoundBuffer,
     In,
     Incompatible,
     Operator,
+    Order,
     Out,
     Overlay,
     StreamIn,
@@ -262,37 +264,83 @@ class DequantBFP(Operator[FLMDequantOverlay]):
 
     # -- the runtime sequence --------------------------------------------------
 
-    def design(self, rt):
-        ov = self.ov
-        cols = ov.cols
-        k_tiles = self.K // K_TILE_B
-        blocks_per_row = self.K // K_TILE
-        n_blocks = self.N // N_TILE
-        out_blocks = self.K * self.N // BFP16_GROUP
-        cb_bytes = N_TILE * self.K * 5 // 8
-        qw_bytes = self.quantized_size()
+    def _sweeps(self) -> list[list[tuple[int, int]]]:
+        """The column blocks, a device width at a time: per sweep, ``(column,
+        column block)`` for every column with a block left."""
+        cols, n_blocks = self.ov.cols, self.N // N_TILE
+        return [
+            [(c, cb0 + c) for c in range(cols) if cb0 + c < n_blocks]
+            for cb0 in range(0, n_blocks, cols)
+        ]
+
+    def _qw(self, cb: int) -> Access:
+        """Column block ``cb``'s q4nx input, read straight through. The block
+        is split 10 x 512 so the innermost size stays inside the BD's field."""
         run_blocks, period_blocks = run_geometry(
-            self.run_out_features, self.run_period_out_features, n_blocks
+            self.run_out_features, self.run_period_out_features, self.N // N_TILE
+        )
+        cb_bytes = N_TILE * self.K * 5 // 8
+        offset = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
+        return Access(
+            self.quantized_size(),
+            offset,
+            (self.K // K_TILE, 2, BLOCK_BYTES // 512, 512),
+            (2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1),
         )
 
-        # A column block is read straight through. The block is split 10 x 512
-        # so the innermost size stays inside the BD's field.
-        qw_sizes = (blocks_per_row, 2, BLOCK_BYTES // 512, 512)
-        qw_strides = (2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1)
+    def _out(self, cb: int, kb: int, h: int) -> Access:
+        """Half ``h`` of k-tile ``kb`` of column block ``cb``, packed."""
+        k_tiles = self.K // K_TILE_B
+        return Access(
+            self.K * self.N // BFP16_GROUP,
+            (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
+            DRAIN_SIZES,
+            DRAIN_STRIDES,
+        )
 
-        for cb0 in range(0, n_blocks, cols):
-            columns = [(c, cb0 + c) for c in range(cols) if cb0 + c < n_blocks]
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Per column, its column block of every sweep: the q4nx block in,
+        and each k-tile's half out on each of the column's two halves."""
+        ov = self.ov
+        sweeps = self._sweeps()
+        if buffer is self.qw:
+            return Order(
+                ov.qw,
+                tuple(
+                    tuple(
+                        self._qw(cb)
+                        for sweep in sweeps
+                        for col, cb in sweep
+                        if col == c
+                    )
+                    for c in range(ov.cols)
+                ),
+            )
+        k_tiles = self.K // K_TILE_B
+        return Order(
+            ov.out,
+            tuple(
+                tuple(
+                    self._out(cb, kb, h)
+                    for sweep in sweeps
+                    for col, cb in sweep
+                    if col == c
+                    for kb in range(k_tiles)
+                )
+                for c in range(ov.cols)
+                for h in range(HALVES)
+            ),
+        )
 
+    def design(self, rt):
+        """Per sweep: the fills in one group, then each k-tile's drains in a
+        group of their own, closing the previous k-tile's as the next runs."""
+        ov = self.ov
+        k_tiles = self.K // K_TILE_B
+        for columns in self._sweeps():
             tg_fill = rt.new_group()
             for c, cb in columns:
-                offset = (
-                    (cb // run_blocks) * period_blocks + cb % run_blocks
-                ) * cb_bytes
-                rt.fill(
-                    ov.qw[c],
-                    (self.qw, Access(qw_bytes, offset, qw_sizes, qw_strides)),
-                    group=tg_fill,
-                )
+                rt.fill(ov.qw[c], (self.qw, self._qw(cb)), group=tg_fill)
 
             prev = None
             for kb in range(k_tiles):
@@ -301,15 +349,7 @@ class DequantBFP(Operator[FLMDequantOverlay]):
                     for h in range(HALVES):
                         rt.drain(
                             ov.out[c * HALVES + h],
-                            (
-                                self.out,
-                                Access(
-                                    out_blocks,
-                                    (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
-                                    DRAIN_SIZES,
-                                    DRAIN_STRIDES,
-                                ),
-                            ),
+                            (self.out, self._out(cb, kb, h)),
                             wait=True,
                             group=tg,
                         )

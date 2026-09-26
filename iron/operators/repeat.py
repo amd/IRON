@@ -10,8 +10,12 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    Movement,
+    Semantics,
+    BoundBuffer,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     StreamIn,
@@ -43,6 +47,9 @@ class RepeatOverlay(Overlay):
 
     def tuning(self, dev) -> "RepeatOverlay":
         return dataclasses.replace(self, transfer_size=self.transfer_size or self.cols)
+
+    def semantics(self) -> Semantics:
+        return Movement(has_cores=False)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo
@@ -139,26 +146,22 @@ class Repeat(Operator[RepeatOverlay]):
             f"({granule} elements = one 32-bit word). No divisor of {cols} satisfies all three."
         )
 
-    def design(self, rt):
+    def order(self, buffer: BoundBuffer) -> Order:
+        """One descriptor each way. The chunk length is innermost so the
+        contiguous run is the innermost dimension; the chunk count sits
+        outside it. The input's outermost (iteration) dimension re-reads the
+        whole matrix ``repeat`` times with a zero stride; the output's
+        interleaves. The derived sequence issues them: one group, the fill,
+        then the waited drain."""
         rows, cols, repeat = self.rows, self.ov.cols, self.repeat
         cols_split = self._cols_split()
         chunk = cols // cols_split
-        # The chunk length is innermost so the contiguous run is the innermost
-        # dimension; the chunk count sits outside it. The input's outermost
-        # (iteration) dimension re-reads the whole matrix ``repeat`` times with
-        # a zero stride; the output's interleaves.
-        input_tap = Access(
-            self.x.elements, 0, (repeat, rows, cols_split, chunk), (0, cols, chunk, 1)
-        )
-        output_tap = Access(
-            self.y.elements,
-            0,
-            (repeat, rows, cols_split, chunk),
-            (cols, cols * repeat, chunk, 1),
-        )
-        with rt.group() as tg:
-            rt.fill(self.ov.s, (self.x, input_tap), group=tg)
-            rt.drain(self.ov.d, (self.y, output_tap), group=tg, wait=True)
+        sizes = (repeat, rows, cols_split, chunk)
+        if buffer is self.x:
+            tap = Access(self.x.elements, 0, sizes, (0, cols, chunk, 1))
+            return Order(self.ov.s, ((tap,),))
+        tap = Access(self.y.elements, 0, sizes, (cols, cols * repeat, chunk, 1))
+        return Order(self.ov.d, ((tap,),))
 
     def reference(self, x):
         """CPU reference: repeat-interleave along the leading dimension."""

@@ -8,6 +8,7 @@ import numpy as np
 from aie.utils.verify import Tolerance
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator, tunable
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Testing, channeled_unary_cases
 
 
@@ -17,6 +18,9 @@ class SiLUOverlay(ChanneledUnaryOverlay):
 
     # One channel per column: the LUT-based kernel is sized for it.
     num_channels: int = tunable(1, repr=False, init=False)
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         return activation.silu_sized(self.line_size)

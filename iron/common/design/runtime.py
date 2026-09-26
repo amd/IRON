@@ -11,7 +11,7 @@ lowers each transfer to MLIR tasks. The same base serves
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -28,7 +28,7 @@ from ..declare import (
     Overlay,
 )
 from ..declare.bound import _StreamSlot
-from ..tiling import Access, encode, legalize, split, whole
+from ..tiling import Access, legalize
 from .target import Target
 
 
@@ -43,38 +43,87 @@ class Transfers:
     downloaded image.
     """
 
+    def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any]):
+        self.op = op
+        self.ov = ov
+        self._rt_data = rt_data
+        # Per buffer, per (stream, slot): what was moved, in issue order.
+        self._issued: dict[str, dict[tuple[str, int], list[_Issued]]] = {}
+
     def run(self) -> None:
         """The transfers: the overlay's sequence when it owns one, else the
-        operator's override, else the one derived from the declarations."""
+        operator's override, else the one derived from the declarations.
+        Whichever it is must issue exactly each buffer's declared order."""
         if self.ov.has_sequence():
             self.ov.sequence(self.op, self)
         elif self.op.has_design_override():
             self.op.design(self)
         else:
             self._derived()
+        self.check_orders()
 
     def _derived(self) -> None:
+        """Every buffer's declared order in one group: fills, then waited drains."""
         with self.group() as tg:
             for buf in self.op.inputs:
-                stream = buf.stream(self.ov)
-                if stream is None:
-                    raise ValueError(
-                        f"{type(self.op).__name__}.{buf.name} names no stream (to=), so its "
-                        f"sequence cannot be derived; add to= or override design(rt)"
-                    )
-                for slot, accesses in transfers(buf, stream):
+                order = self.op.order(buf)
+                for i, accesses in enumerate(order.slots):
                     for acc in accesses:
-                        self.fill(slot, (buf, acc), group=tg)
+                        self.fill(
+                            order.stream[i],
+                            (buf, acc),
+                            group=tg,
+                            offset_by=order.offset_by,
+                        )
             for buf in self.op.outputs:
-                stream = buf.stream(self.ov)
-                if stream is None:
-                    raise ValueError(
-                        f"{type(self.op).__name__}.{buf.name} names no stream (from_=), so its "
-                        f"sequence cannot be derived; add from_= or override design(rt)"
-                    )
-                for slot, accesses in transfers(buf, stream):
+                order = self.op.order(buf)
+                for i, accesses in enumerate(order.slots):
                     for acc in accesses:
-                        self.drain(slot, (buf, acc), group=tg, wait=True)
+                        self.drain(
+                            order.stream[i],
+                            (buf, acc),
+                            group=tg,
+                            wait=True,
+                            offset_by=order.offset_by,
+                        )
+
+    def _record(
+        self,
+        stream,
+        buffer: BoundBuffer,
+        accesses: list[Access],
+        offset_by: BoundValue | None,
+    ) -> None:
+        """Note what one fill or drain moved, for :meth:`check_orders`."""
+        if isinstance(stream, _StreamSlot):
+            key = (stream.stream.name, stream.index)
+        else:
+            key = (stream.name, 0)
+        slot = self._issued.setdefault(buffer.name, {}).setdefault(key, [])
+        slot.extend(_Issued(acc, offset_by) for acc in accesses)
+
+    def check_orders(self) -> None:
+        """Raise unless every buffer moved exactly as ``op.order()`` declares:
+        through its declared stream, each slot's descriptors in the declared
+        sequence, shifted by the declared per-call value. What a fusion pass
+        reads is then what the array receives."""
+        op = type(self.op).__name__
+        for buf in self.op.buffers:
+            order = self.op.order(buf)
+            issued = self._issued.get(buf.name, {})
+            stray = sorted({name for name, _ in issued} - {order.stream.name})
+            if stray:
+                raise ValueError(
+                    f"{op}.{buf.name} is declared to move through stream "
+                    f"{order.stream.name!r}, but the sequence moved it through {stray}"
+                )
+            for i, declared in enumerate(order.slots):
+                got = issued.get((order.stream.name, i), [])
+                want = [_Issued(acc, order.offset_by) for acc in declared]
+                if got != want:
+                    raise ValueError(
+                        _mismatch(op, buf.name, order.stream.name, i, got, want)
+                    )
 
 
 class Sequence(Transfers):
@@ -88,9 +137,7 @@ class Sequence(Transfers):
     """
 
     def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any]):
-        self.op = op
-        self.ov = ov
-        self._rt_data = rt_data
+        super().__init__(op, ov, rt_data)
         self._group = None
         # The shim handles this sequence issued a transfer on; the build
         # places the declared ones it did not touch (see build_design).
@@ -109,6 +156,7 @@ class Sequence(Transfers):
         self.used.add(id(handle))
         buffer, accesses, sliced_by = self._resolve(what)
         offset_by = offset_by or sliced_by
+        self._record(stream, buffer, accesses, offset_by)
         if offset_by is not None and offset_by.param is None:
             raise ValueError(
                 f"{offset_by.name} has no device parameter: the operator does not use "
@@ -184,12 +232,7 @@ class Sequence(Transfers):
             buffer, acc = what
             if isinstance(acc, Access):
                 return buffer, [acc], None
-            if hasattr(acc, "sizes") and hasattr(acc, "strides"):
-                # an upstream TensorAccessPattern (or a TensorTiler2D entry): pass it through
-                return buffer, [acc], None
-            raise TypeError(
-                "(buffer, Access) or (buffer, TensorAccessPattern) expected"
-            )
+            raise TypeError(f"(buffer, Access) expected, got (buffer, {acc!r})")
         raise TypeError(
             f"fill/drain take a buffer, a slice of one, or (buffer, Access); got {what!r}"
         )
@@ -261,35 +304,31 @@ class Sequence(Transfers):
             sync_parameters()
 
 
-def transfers(
-    buffer: BoundBuffer, stream: BoundStream
-) -> list[tuple[Any, list[Access]]]:
-    """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
+class _Issued(NamedTuple):
+    """One descriptor a sequence issued, and the per-call value shifting it."""
 
-    A single-slot or broadcast stream takes the whole buffer in one linear
-    transfer. A ``per=`` stream splits the buffer's first non-batch axis
-    across its slots; leading batch axes become repeats, coalesced into one
-    iterated descriptor when the slot rules allow and unrolled otherwise.
-    """
-    if stream.count == 1:
-        return [(stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))]
-    if stream.replicate:
-        everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
-        return [(stream[i], everything) for i in range(stream.count)]
-    axis = buffer.batch_axes
-    if axis >= len(buffer.shape):
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} has no axis to split across the "
-            f"{stream.count} slots of stream {stream.name!r}"
-        )
-    try:
-        blocks = split(buffer.shape, stream.count, axis)
-    except ValueError as e:
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} does not divide across stream "
-            f"{stream.name!r}: {e}. Check {type(buffer._op).__name__}.compatible()"
-        ) from None
-    return [(stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks]
+    access: Access
+    offset_by: BoundValue | None
+
+
+def _mismatch(op, buffer, stream, slot, got, want) -> str:
+    """Where a sequence first departs from a buffer's declared order."""
+    first = next(
+        (k for k, (g, w) in enumerate(zip(got, want)) if g != w),
+        min(len(got), len(want)),
+    )
+
+    def at(issued) -> str:
+        if first >= len(issued):
+            return "nothing"
+        return f"{issued[first].access}, offset by {issued[first].offset_by}"
+
+    return (
+        f"{op}.{buffer}: slot {slot} of stream {stream!r} was issued {len(got)} "
+        f"descriptors against {len(want)} in {op}.order(); the first difference is "
+        f"at #{first}: issued {at(got)}, declared {at(want)}. The sequence may "
+        f"group and wait as it likes, but every transfer must come from the order"
+    )
 
 
 def _plus(ssa, constant: int):
