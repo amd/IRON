@@ -43,10 +43,12 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
 
     cfg = _Config()
     L = cfg.context_length
-    graph = LlamaGraph(cfg, L)
+    graph = LlamaGraph(cfg, L)  # bounded if this toolchain can build it
     traced = graph.trace(cfg, L)
-    # Every block is bound by the rows the call runs; the last row once.
-    assert {b.value.name for b in traced.bindings} == {"rows", "vector_size", "last"}
+    # Every block is bound by the rows the call runs and MHA's masks by the
+    # true length, when bounded; the last row once.
+    bounded = {"rows", "vector_size"} if graph.bounded else set()
+    assert {b.value.name for b in traced.bindings} == bounded | {"last"}
     assert [b.value.name for b in traced.bindings].count("last") == 1
     _lower_all(traced, tmp_path)
 

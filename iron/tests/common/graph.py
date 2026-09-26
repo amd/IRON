@@ -453,7 +453,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 
     cfg = _Config()
     L = cfg.context_length
-    g = LlamaGraph(cfg, L)
+    g = LlamaGraph(cfg, L, bounded=True)
     t = g.trace(cfg, L)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
@@ -512,6 +512,25 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert offsets == [("Copy", "in_offset")]
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
+
+
+def test_an_unbounded_llama_prompt_runs_every_row():
+    """Without the size kind the prompt is not sliced: the same operators,
+    none bound by the rows, and MHA masked causally alone (its per-call
+    lengths are read only by a bounded build).
+    """
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.tests.common.llama_model import Config as _Config
+
+    cfg = _Config()
+    L = cfg.context_length
+    bounded = LlamaGraph(cfg, L, bounded=True).trace(cfg, L)
+    t = LlamaGraph(cfg, L, bounded=False).trace(cfg, L)
+    kinds = [type(op).__name__ for op, *_ in t.runlist]
+    assert kinds == [type(op).__name__ for op, *_ in bounded.runlist]
+    assert {b.value.name for b in t.bindings} == {"last"}
+    mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
+    assert mha.bound_values == {}
 
 
 def _resolved_fields(settings):

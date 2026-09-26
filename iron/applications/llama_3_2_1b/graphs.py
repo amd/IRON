@@ -42,6 +42,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Profile, Scratchpad
+from iron.common.design import has_size_kind
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -118,21 +119,29 @@ class LlamaGraph:
     decode's repeat reads. ``scale`` is the attention scale as a tensor,
     since the elementwise multiply takes one.
 
-    The prompt version is traced at ``max_seq_len`` rows and bounded per
-    call: ``rows`` (:func:`prompt_rows`) is how many of them a call runs,
-    so the work follows the prompt; ``vector_size`` is the true length,
-    which MHA masks to. A decode step reads the caches in full: the context
-    GEMV's reduction is the cache length and array-tier, so the value side
-    cannot shorten, and the key side alone would leave the CPU reference
-    nothing faithful to compute.
+    The prompt version is traced at ``max_seq_len`` rows and, when
+    ``bounded``, bounded per call: ``rows`` (:func:`prompt_rows`) is how
+    many of them a call runs, so the work follows the prompt; ``vector_size``
+    is the true length, which MHA masks to. A bounded prompt's full ELF
+    needs mlir-aie's size kind, so ``bounded`` defaults to whether the
+    toolchain has it; unbounded, a prompt runs every row, as it did before
+    the bound, and ``rows`` and ``vector_size`` are unread: a prompt row
+    attends causally, so the padding rows after it never reach it.
+
+    A decode step reads the caches in full: the context GEMV's reduction is
+    the cache length and array-tier, so the value side cannot shorten, and
+    the key side alone would leave the CPU reference nothing faithful to
+    compute.
     """
 
-    def __init__(self, config, max_seq_len):
+    def __init__(self, config, max_seq_len, *, bounded=None):
         W = config.weights
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E = config.emb_dim
         L = max_seq_len
         self.max_seq_len = L
+        self.bounded = has_size_kind() if bounded is None else bounded
+        bounded = self.bounded
         self.profile = profile(config, max_seq_len)
         cols = _device_columns()
         self.keys = [
@@ -211,14 +220,17 @@ class LlamaGraph:
                 values[i][:, :rows],
                 tile_size=1024,
             )
-            # Attention over the rows the call runs, masked to its true length.
+            # Attention over the rows the call runs, masked to its true length
+            # when bounded. Unbounded, MHA reads its lengths from its build,
+            # and the causal mask alone keeps the padding rows out of the
+            # prompt's.
+            masks = dict(s_q=vector_size, s_kv=vector_size) if bounded else {}
             o = MHA(
                 q.reshape(n, H, D),
                 k.reshape(n, G, D),
                 v.reshape(n, G, D),
                 heads_interleaved=True,
-                s_q=vector_size,
-                s_kv=vector_size,
+                **masks,
             )
             o = gemm(o.reshape(n, H * D), lw.o)
             # </grouped query attention>
@@ -241,13 +253,14 @@ class LlamaGraph:
             last: Scratchpad[np.int32],
         ):
             prompt = x.shape[0] > 1
-            if prompt:
+            if prompt and bounded:
                 # The first rows of the padded prompt are the ones this call
                 # runs; every operator below is bounded by them.
                 x, angles = x[:rows], angles[:rows]
             for i, lw in enumerate(W.layers):
                 if prompt:
-                    x = prefill_block(i, lw, x, angles, rows, vector_size)
+                    span = rows if bounded else x.shape[0]
+                    x = prefill_block(i, lw, x, angles, span, vector_size)
                 else:
                     x = decode_block(i, lw, x, angles, cache_offset, vector_size)
             if prompt:

@@ -48,9 +48,9 @@ def _embed(config, tokens):
     return config.weights.embed(tokens.numpy())
 
 
-def llama_graph(config):
+def llama_graph(config, bounded=None):
     """The graph at the test's context length; its profile fits the scaled model."""
-    return LlamaGraph(config, config.context_length)
+    return LlamaGraph(config, config.context_length, bounded=bounded)
 
 
 def graph_prefill(config, graph, prompt):
@@ -149,9 +149,13 @@ def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
     _assert_close(got, expected)
 
 
-def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
+@pytest.mark.parametrize("bounded", [True, False], ids=["bounded", "unbounded"])
+def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu, bounded):
+    """At its own rows or at every row: the padding rows are masked and
+    past the prompt in the caches, so the logits are the same either way.
+    """
     config, prompt, first, expected = cpu
-    graph = llama_graph(config)
+    graph = llama_graph(config, bounded)
     got_first = graph_prefill(config, graph, prompt)
     _assert_close([got_first], [first])
     # Decode continues from the caches the prompt wrote: the same states.
