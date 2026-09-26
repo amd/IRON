@@ -61,6 +61,9 @@ def _kv_slot():
 # a copy's padded remainder, flm.GEMM's split C and its shipped overlay.
 OVERRIDES = [
     lambda: GEMV(M=256, K=128, num_aie_columns=2, tile_size_output=64, num_batches=4),
+    lambda: GEMV(
+        M=256, K=128, num_aie_columns=2, tile_size_output=64, num_batches=8, repeat=4
+    ),
     lambda: GEMM(M=1024, K=2560, N=10240, tile_m=64, tile_k=64, tile_n=64),
     lambda: MHA(num_heads=8, seq_len=128, d=64, num_KV_heads=2, num_of_pipelines=1),
     lambda: Transpose(M=128, N=128, num_aie_columns=2, num_channels=1, num_batches=2),
@@ -80,6 +83,7 @@ OVERRIDES = [
     OVERRIDES,
     ids=[
         "GEMV",
+        "GEMV-repeat",
         "GEMM",
         "MHA",
         "Transpose",
@@ -157,6 +161,53 @@ def test_gemv_encodes_the_derived_split_its_own_way(npu2):
     assert b.replicated
     for slot in range(2):
         assert np.array_equal(b.indices(slot), np.arange(op.B.elements))
+
+
+@pytest.mark.parametrize(
+    "M,K,cols,num_batches,repeat,descriptors",
+    [
+        (256, 128, 2, 8, 4, 1),  # coalesced: A re-read in the iteration slot
+        (256, 128, 2, 4, 4, 1),  # one matrix for every batch
+        (1024, 1024, 1, 4, 2, 4),  # A's run does not factor: one per batch
+    ],
+)
+def test_a_repeated_gemv_reads_each_matrix_once_per_batch(
+    M, K, cols, num_batches, repeat, descriptors, npu2
+):
+    # Batch b is matrix b // repeat times row b of B into row b of C, and
+    # each column still takes its own rows of every matrix; only the batch
+    # order is the op's, and B, A and C agree on it.
+    op = GEMV(
+        M=M,
+        K=K,
+        num_aie_columns=cols,
+        tile_size_output=64,
+        num_batches=num_batches,
+        repeat=repeat,
+    ).tuned(npu2)
+    assert op.A.elements == op.num_matrices * M * K
+    batches = op._batch_order()
+    assert sorted(batches) == list(range(num_batches))
+    rows = M // cols
+    a, b, c = op.order(op.A), op.order(op.B), op.order(op.C)
+    for slot in range(cols):
+        assert len(a[slot]) == len(c[slot]) == descriptors
+        want_a = [
+            (bt // repeat) * M * K + slot * rows * K + np.arange(rows * K)
+            for bt in batches
+        ]
+        want_c = [bt * M + slot * rows + np.arange(rows) for bt in batches]
+        want_b = [bt * K + np.arange(K) for bt in batches]
+        assert np.array_equal(a.indices(slot), np.concatenate(want_a))
+        assert np.array_equal(c.indices(slot), np.concatenate(want_c))
+        assert np.array_equal(b.indices(slot), np.concatenate(want_b))
+
+
+def test_repeat_must_divide_the_batches():
+    with pytest.raises(ValueError, match="repeat=3 does not divide num_batches=8"):
+        GEMV(M=256, K=128, num_batches=8, repeat=3)
+    with pytest.raises(ValueError, match="A holds 4 matrices"):
+        GEMV(M=256, K=128, num_batches=8, repeat=4, num_matrices=4)
 
 
 @operator

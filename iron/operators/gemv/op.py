@@ -28,9 +28,11 @@ from iron.common.declare import (
 )
 from iron.common.tiling import Access
 from iron.common.tiling import DMA_BD_MAX_WRAP
+from iron.common.tiling import legalize
 
 _GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
 _MAX_STRIDE = ((1 << 20) - 1) * _GRAN_ELEMS
+_MAX_ITER = 64  # the iteration slot's 6-bit wrap, biased by one
 
 
 def _factor_run(run, lim=DMA_BD_MAX_WRAP, gran=_GRAN_ELEMS):
@@ -279,12 +281,34 @@ class GEMV(Operator[GEMVOverlay]):
 
     M: int = dim()
     num_batches: int = dim(1)
+    # Batches per matrix of A: batch ``b`` is multiplied by matrix
+    # ``b // repeat``. Grouped-query attention's scores, where each group's
+    # keys serve ``n_heads // n_kv_groups`` query heads: the matrix is read
+    # once per batch it serves, so no repeated copy is ever materialized.
+    repeat: int = dim(1)
+    # num_batches // repeat; derived unless given, since a shape may not be
+    # an expression.
+    num_matrices: int | None = dim(None, repr=False)
 
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so the unbatched shapes stay exactly as they were.
-    A = In(optional(num_batches), M, GEMVOverlay.K, to=GEMVOverlay.a)  # matrix
+    A = In(optional(num_matrices), M, GEMVOverlay.K, to=GEMVOverlay.a)  # matrix
     B = In(optional(num_batches), GEMVOverlay.K, to=GEMVOverlay.b)  # vector
     C = Out(optional(num_batches), M, from_=GEMVOverlay.c)  # output
+
+    def validate(self):
+        if self.repeat < 1 or self.num_batches % self.repeat:
+            raise ValueError(
+                f"repeat={self.repeat} does not divide num_batches={self.num_batches}"
+            )
+        expected = self.num_batches // self.repeat
+        if self.num_matrices is None:
+            self.num_matrices = expected
+        elif self.num_matrices != expected:
+            raise ValueError(
+                f"A holds {self.num_matrices} matrices, but num_batches="
+                f"{self.num_batches} at repeat={self.repeat} needs {expected}"
+            )
 
     def compatible(self):
         ov = self.ov
@@ -332,51 +356,85 @@ class GEMV(Operator[GEMVOverlay]):
         not at all, since they share the per-batch waits.
         """
         nb, M, K, cols = self.num_batches, self.M, self.ov.K, self.ov.num_aie_columns
-        if nb == 1:
+        rep = self.repeat
+        if nb == 1 or rep > _MAX_ITER:
             return None
         a_split = _factor_run((M // cols) * K)
         c_split = _factor_run(M // cols)
-        strides_fit = all(s <= _MAX_STRIDE and s % _GRAN_ELEMS == 0 for s in (M * K, M))
+        strides_fit = all(
+            s <= _MAX_STRIDE and s % _GRAN_ELEMS == 0 for s in (M * K, M, rep * M)
+        )
         if a_split is None or c_split is None or not strides_fit:
             return None
         return a_split, c_split
 
+    def _batch_order(self) -> list[int]:
+        """The batches in the order the array computes them.
+
+        In order, unless each matrix serves ``repeat`` batches. A matrix is
+        then re-read, and the shim can re-read only in its outermost
+        (iteration) dimension, whose stride alone may be 0: it cannot re-read
+        one matrix for consecutive batches inside a walk over the matrices.
+        So the walk over every matrix repeats, and pass ``r`` computes batch
+        ``m * repeat + r`` of each matrix ``m``. B and C visit the batches in
+        the same order; each batch's product is its own, so the order
+        changes no output.
+        """
+        rep, nm = self.repeat, self.num_matrices
+        return [m * rep + r for r in range(rep) for m in range(nm)]
+
     def order(self, buffer: BoundBuffer) -> Order:
         """A and C: each column's contiguous rows, one descriptor per batch or
-        every batch in one iterated descriptor (:meth:`_batch_split`). B: the
-        derived order of a ``replicate`` stream, the whole vector to every
-        column."""
-        if buffer is self.B:
-            return super().order(buffer)
+        every batch in one iterated descriptor (:meth:`_batch_split`), in
+        :meth:`_batch_order`. B: the whole vector to every column, as the
+        derived order of a ``replicate`` stream sends it, or its rows in
+        batch order when that is not their own."""
         ov = self.ov
-        M, nb, cols = self.M, self.num_batches, ov.num_aie_columns
-        width = ov.K if buffer is self.A else 1
+        M, K, cols, rep = self.M, ov.K, ov.num_aie_columns, self.repeat
+        n = buffer.elements
+        if buffer is self.B:
+            if rep == 1:
+                return super().order(buffer)
+            rows = legalize(
+                n, 0, (rep, self.num_matrices, K), (K, rep * K, 1), buffer.dtype
+            )
+            return Order(ov.b, (tuple(rows),) * cols)
+        width = K if buffer is self.A else 1
         stream = ov.a if buffer is self.A else ov.c
-        run, n = (M // cols) * width, buffer.elements
+        run = (M // cols) * width
         split = self._batch_split()
         if split is None:
+            # A's rows come from the batch's matrix, C's go to the batch.
+            per = rep if buffer is self.A else 1
             return Order(
                 stream,
                 tuple(
                     tuple(
                         Access(
                             n,
-                            col * run + batch * M * width,
+                            col * run + (batch // per) * M * width,
                             (1, 1, 1, run),
                             (0, 0, 0, 1),
                         )
-                        for batch in range(nb)
+                        for batch in self._batch_order()
                     )
                     for col in range(cols)
                 ),
             )
         run_hi, run_lo = split[0] if buffer is self.A else split[1]
+        # Every matrix per pass, `repeat` passes: A re-reads them (stride 0),
+        # C steps to the next batch of each (stride M, and 0 at a single pass
+        # so an unrepeated stream stays what it was).
+        strides = (0, M * K) if buffer is self.A else (M if rep > 1 else 0, rep * M)
         return Order(
             stream,
             tuple(
                 (
                     Access(
-                        n, col * run, (1, nb, run_hi, run_lo), (0, M * width, run_lo, 1)
+                        n,
+                        col * run,
+                        (rep, self.num_matrices, run_hi, run_lo),
+                        (*strides, run_lo, 1),
                     ),
                 )
                 for col in range(cols)
@@ -411,7 +469,7 @@ class GEMV(Operator[GEMVOverlay]):
 
     def reference(self, A, B):
         """CPU reference: (optionally batched) matrix-vector product."""
-        return reference(A, B)
+        return reference(A, B, repeat=self.repeat)
 
 
 # --------------------------------------------------------------------------
@@ -419,12 +477,15 @@ class GEMV(Operator[GEMVOverlay]):
 # --------------------------------------------------------------------------
 
 
-def reference(A, B):
+def reference(A, B, repeat=1):
     """CPU reference: matrix-vector product ``C = A @ B`` (ground truth).
 
     Batched when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``: one
-    product per batch, as the operator's ``num_batches`` runs them.
+    product per batch, as the operator's ``num_batches`` runs them. With
+    ``repeat``, each matrix of ``A`` serves that many consecutive batches.
     """
+    if repeat > 1:
+        A = np.repeat(A.reshape(-1, *A.shape[-2:]), repeat, axis=0)
     # In float32 and rounded once: numpy's matmul would otherwise accumulate
     # in bfloat16, where the AIE kernel's accumulator is f32. einsum has no
     # bfloat16 loop at all, so the batched case reshapes into a matmul.

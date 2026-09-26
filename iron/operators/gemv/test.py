@@ -104,6 +104,68 @@ def test_gemv_batched(
     assert not errors, f"batched GEMV failed: {errors}"
 
 
+def _device_output(operator, *inputs):
+    """``operator``'s one output, run once on the device on ``inputs``."""
+    run = operator.get_callable()
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    (out,) = operator.outputs
+    args = [tensor(x) for x in inputs] + [tensor(out.host_shape, dtype=out.host_dtype)]
+    run(*args)
+    # A copy: the tensor's numpy view does not keep its device buffer alive.
+    return args[-1].numpy().copy()
+
+
+@pytest.mark.parametrize(
+    "M,K,num_aie_columns,tile_size_input,tile_size_output,num_batches,repeat",
+    [
+        # Llama 3.2 1B's decode scores: 8 key groups, 4 query heads each,
+        # over the 2048-row cache.
+        pytest.param(2048, 64, 8, 4, 256, 32, 4),
+        pytest.param(512, 64, 8, 4, 64, 32, 4),
+        pytest.param(256, 128, 2, 1, 64, 8, 2),
+        pytest.param(256, 128, 1, 1, 256, 4, 4),  # one matrix for every batch
+        pytest.param(1024, 1024, 1, 1, 64, 4, 2),  # per-batch descriptors
+    ],
+)
+def test_gemv_repeated(
+    M,
+    K,
+    num_aie_columns,
+    tile_size_input,
+    tile_size_output,
+    num_batches,
+    repeat,
+    npu_runtime,
+):
+    """Each matrix of A read once per batch it serves: against the reference,
+    and bit for bit against the unrepeated GEMV on A repeated on the host."""
+    if num_aie_columns > aie_utils.get_current_device().cols:
+        pytest.skip(f"needs {num_aie_columns} columns")
+    shape = dict(
+        M=M,
+        K=K,
+        num_aie_columns=num_aie_columns,
+        tile_size_input=tile_size_input,
+        tile_size_output=tile_size_output,
+        num_batches=num_batches,
+    )
+    operator = GEMV(**shape, repeat=repeat)
+    data = vectors(operator, normal=("A", "B"))
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
+    )
+    record_metric("Throughput", (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9)
+    assert not errors, f"repeated GEMV failed: {errors}"
+
+    A, B = data["A"], data["B"]
+    A_all = np.repeat(A.reshape(-1, M, K), repeat, axis=0)
+    repeated = _device_output(operator, A, B)
+    materialized = _device_output(GEMV(**shape), A_all, B)
+    assert np.array_equal(
+        repeated.view(np.uint16), materialized.view(np.uint16)
+    ), "repeated GEMV differs from the GEMV of the repeated matrices"
+
+
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output",
     [
