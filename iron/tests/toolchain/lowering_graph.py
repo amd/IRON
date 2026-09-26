@@ -46,7 +46,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
 
     cfg = _Config()
     L = cfg.context_length
-    graph = LlamaGraph(cfg, L, num_aie_columns=4, num_of_pipelines=1, tile_m=16)
+    graph = LlamaGraph(cfg, L, num_aie_columns=4, tile_m=16)
     traced = graph.trace(cfg, L)
     # The last row's copy, and the draw row and record of its token.
     assert [b.value.name for b in traced.bindings] == ["position"] * 3
@@ -172,15 +172,54 @@ def _reorder(sizes, in_strides, out_strides, **kw):
             id="kv_into_cache",
         ),
         pytest.param(
-            lambda p: __import__("iron.operators.mha.op", fromlist=["MHA"]).MHA(
-                num_heads=p["H"],
-                seq_len=p["S"],
-                d=p["D"],
-                num_KV_heads=p["G"],
-                num_of_pipelines=8,
-                heads_interleaved=True,
+            lambda p: _reorder(
+                (p["H"], p["S"], p["D"]),
+                (p["D"], p["H"] * p["D"], 1),
+                (p["S"] * p["D"], p["D"], 1),
+                transfer_size=1024,
             ),
-            id="mha_in_the_projections_layout",
+            id="queries_to_heads",
+        ),
+        pytest.param(
+            lambda p: __import__("iron.operators.gemm.op", fromlist=["GEMM"]).GEMM(
+                M=p["H"] // p["G"] * p["S"],
+                K=p["D"],
+                N=p["S"],
+                num_batches=p["G"],
+                num_aie_columns=8,
+                tile_m=64,
+                tile_k=64,
+                tile_n=64,
+                b_col_maj=True,
+            ),
+            id="scores_per_group",
+        ),
+        pytest.param(
+            lambda p: __import__(
+                "iron.operators.softmax", fromlist=["Softmax"]
+            ).Softmax(
+                batches=p["H"],
+                rows=p["S"],
+                cols=p["S"],
+                causal=True,
+                num_aie_columns=8,
+                num_channels=2,
+            ),
+            id="causal_softmax_per_head",
+        ),
+        pytest.param(
+            lambda p: __import__("iron.operators.gemm.op", fromlist=["GEMM"]).GEMM(
+                M=p["H"] // p["G"] * p["S"],
+                K=p["S"],
+                N=p["D"],
+                num_batches=p["G"],
+                num_aie_columns=4,
+                tile_m=64,
+                tile_k=64,
+                tile_n=16,
+                prio_accuracy=True,
+            ),
+            id="context_per_group",
         ),
     ],
 )
@@ -188,7 +227,9 @@ def test_prefill_steps_lower_at_llama_size(make, tmp_path):
     """The steps a prefill graph needs that a small case does not exercise: the
     down projection's column-major weight (its column-block stride is past the
     descriptor's 20-bit step, so B unrolls), the cache write's 2048-wide
-    reorder (legalized), and MHA reading (seq, heads, d)."""
+    reorder (legalized), and attention's: the queries reordered to heads by
+    tokens, a group's heads batched against its cache in both GEMMs, and the
+    causal softmax over each head's (2048, 2048) scores."""
     op = make(PREFILL)
     op.tuned(aie_utils.get_current_device())
     lower(op, tmp_path)

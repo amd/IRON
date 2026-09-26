@@ -37,7 +37,8 @@ def handle_of(x):
 
     Slicing a closed-over numpy array makes a new array, which would trace
     as a weight of its own; slice this instead. Under the reference it is
-    ``x`` itself, so the slice is numpy's.
+    ``x`` itself, or a state's host tensor, so a slice or a reshape is
+    numpy's.
     """
     tracer = current()
     if tracer is None:
@@ -435,16 +436,21 @@ class _ReferenceTracer(Tracer):
     """
 
     def operand(self, x):
-        return x
+        # A state is its host tensor, so a view of it is numpy's.
+        return self._host(x) if isinstance(x, State) else x
+
+    @staticmethod
+    def _host(state: State) -> np.ndarray:
+        if state.host is None:
+            state.host = np.zeros(state.shape, dtype=state.dtype)
+        return state.host
 
     def call(self, target, args, kwargs):
         tensors, states = [], []
         for a in args:
             state = None
             if isinstance(a, State):
-                if a.host is None:
-                    a.host = np.zeros(a.shape, dtype=bfloat16)
-                state, a = a, a.host
+                state, a = a, self._host(a)
             tensors.append(a)
             states.append(state)
         kwargs = dict(kwargs)

@@ -56,7 +56,6 @@ def llama_graph(config):
         config,
         config.context_length,
         num_aie_columns=4,
-        num_of_pipelines=1,
         tile_m=16,
     )
 

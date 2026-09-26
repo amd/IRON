@@ -394,7 +394,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 
     cfg = _Config()
     L = cfg.context_length
-    g = LlamaGraph(cfg, L, num_aie_columns=4, num_of_pipelines=1, tile_m=16)
+    g = LlamaGraph(cfg, L, num_aie_columns=4, tile_m=16)
     t = g.trace(cfg, L)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
@@ -406,7 +406,12 @@ def test_llama_prompt_traces_over_the_same_caches():
         "RoPE",
         "StridedCopy",
         "StridedCopy",
-        "MHA",
+        # Attention: heads by tokens, scores, weights, context, and back.
+        "StridedCopy",
+        "GEMM",
+        "Softmax",
+        "GEMM",
+        "StridedCopy",
         "GEMM",
         "ElementwiseAdd",
         "WeightedRMSNorm",
@@ -426,16 +431,36 @@ def test_llama_prompt_traces_over_the_same_caches():
     token = g.trace(cfg, 1)
     assert set(t.states) == set(token.states)
     assert t.residents["keys_cache_0"] == token.residents["keys_cache_0"]
-    # A prompt's MHA takes no scale table. Both versions read the same RoPE
-    # table, and the embedding a token gathers from is the tied output head.
-    assert set(t.weights) == set(token.weights) - {id(g.scale)}
+    # A prompt's scale is in its query RoPE table, not a table of its own.
+    # Both versions read the same RoPE table, and the embedding a token
+    # gathers from is the tied output head.
+    assert set(t.weights) == set(token.weights) - {id(g.scale)} | {id(g.rope_q)}
     assert {id(g.rope), id(cfg.weights.embedding)} <= set(t.weights)
     # Every projection reads the (out, in) checkpoint layout through the
-    # column-major flag, which the trace carries into shape inference.
+    # column-major flag, which the trace carries into shape inference; so
+    # do the scores the (keys, head_dim) cache. The context reads the values
+    # cache as it is, (keys, head_dim): (K, N).
     gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
-    assert all(op.ov.b_col_maj for op in gemms)
-    K = {op.K for op in gemms}
+    projections = [op for op in gemms if op.num_batches == 1]
+    assert all(op.ov.b_col_maj for op in projections)
+    K = {op.K for op in projections}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
+    groups = cfg.n_heads // cfg.n_kv_groups
+    scores, context = [op for op in gemms if op.num_batches > 1][:2]
+    assert (scores.num_batches, scores.M, scores.K, scores.N) == (
+        cfg.n_kv_groups,
+        groups * L,
+        cfg.head_dim,
+        L,
+    )
+    assert scores.ov.b_col_maj
+    assert (context.num_batches, context.M, context.K, context.N) == (
+        cfg.n_kv_groups,
+        groups * L,
+        L,
+        cfg.head_dim,
+    )
+    assert not context.ov.b_col_maj and context.ov.prio_accuracy
     # The per-call values are the position of the last prompt row, which the
     # last-row copy reads in elements, and its draw row and record.
     assert [(type(b.op).__name__, b.member.name) for b in t.bindings] == [

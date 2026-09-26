@@ -5,7 +5,8 @@
 
 :class:`LlamaGraph` holds ``forward(x=None, *, token, position)``. Given
 ``x``, the embedded tokens of a prompt, ``(rows, emb_dim)``, it is a prompt:
-GEMM projections, causal MHA over the rows, the caches written in full from
+GEMM projections, causal attention over the rows -- scores, softmax and
+context, a head per batch of batched GEMMs -- the caches written in full from
 row zero, and the final norm and output head for row ``position`` alone.
 Without ``x`` it is a decode step on ``token`` at ``position``: the token's
 embedding row and the position's RoPE row gathered on the device, GEMV
@@ -47,7 +48,6 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
-from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope.op import RoPE
@@ -78,13 +78,15 @@ class LlamaGraph:
     """The graph function and the state it closes over.
 
     ``keys[i]`` and ``values[i]`` are the layer caches, each ``(n_kv_groups,
-    max_seq_len * head_dim)``: the flat per-group layout both phases write
-    and decode's repeat reads. ``scale`` is the attention scale as a tensor,
-    since the elementwise multiply takes one.
+    max_seq_len * head_dim)``: the flat per-group layout both phases write,
+    decode's repeat reads and a prompt's GEMMs read as ``(n_kv_groups,
+    max_seq_len, head_dim)``. ``scale`` is decode's attention scale as a
+    tensor, since the elementwise multiply takes one; a prompt's is in its
+    query RoPE table (``rope_q``).
 
-    A prompt of ``rows`` rows needs ``rows`` a multiple of 64 times
-    ``num_of_pipelines`` (MHA's) and of four times ``tile_m`` (the GEMMs'
-    row tile), and at most ``max_seq_len``.
+    A prompt of ``rows`` rows needs ``rows`` a multiple of four times
+    ``tile_m`` (the GEMMs' row tile) and of the softmax's two cores per
+    column, and at most ``max_seq_len``.
     """
 
     def __init__(
@@ -92,9 +94,8 @@ class LlamaGraph:
         config,
         max_seq_len,
         *,
-        num_aie_columns=None,
-        num_of_pipelines=8,
-        tile_m=64,
+        num_aie_columns: int | None = None,
+        tile_m: int = 64,
     ):
         W = config.weights
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
@@ -126,7 +127,15 @@ class LlamaGraph:
         # The RoPE table, one row per position, in the images' dtype: a prompt
         # reads its first rows, a decode step gathers its position's.
         self.rope = config.angles[:L].astype(bfloat16)
+        # A prompt's query rotation also scales by 1/sqrt(head_dim). The
+        # rotation is linear and rounds once, so for a power of two this is
+        # the product of the unscaled one and the scale, exactly: the scores
+        # come out scaled with no pass over them.
+        if math.log2(D) % 2:
+            raise ValueError(f"1/sqrt({D}) is not a power of two")
+        self.rope_q = (config.angles[:L] / math.sqrt(D)).astype(bfloat16)
         keys, values, scale, rope = self.keys, self.values, self.scale, self.rope
+        rope_q = self.rope_q
         draws, tokens = self.draws, self.tokens
 
         # -- one row: a decode step ------------------------------------------
@@ -253,7 +262,61 @@ class LlamaGraph:
                 num_aie_channels=1,
             )
 
-        def prefill_block(i, lw, x, angles):
+        def swap(x, a, b):
+            # (a, b, D) to (b, a, D): tokens by heads to heads by tokens, or
+            # back. Each head's D elements move as one run.
+            return StridedCopy(
+                x,
+                input_sizes=(b, a, D),
+                input_strides=(D, b * D, 1),
+                input_offset=0,
+                output_sizes=(b, a, D),
+                output_strides=(a * D, D, 1),
+                output_offset=0,
+                output_buffer_size=a * b * D,
+                transfer_size=1024,
+                num_aie_channels=1,
+            ).reshape(b, a, D)
+
+        def attention(i, q, n):
+            """Causal attention of the ``(H, n, D)`` queries, scaled, over the
+            first ``n`` rows of the layer's caches; ``(H, n, D)``.
+
+            Heads are grouped (``H // G`` share a group's keys and values), so
+            a group's heads are one batch of the GEMMs, their rows stacked.
+            The cache rows past ``n`` hold another prompt's keys; the causal
+            mask zeroes every weight on them, as on every later row.
+            """
+            scores = GEMM(
+                q.reshape(G, H // G * n, D),
+                handle_of(keys[i]).reshape(G, L, D),
+                b_col_maj=True,
+                num_aie_columns=cols,
+                tile_m=tile_m,
+                tile_k=D,
+                tile_n=min(64, L // cols),
+            )
+            weights = Softmax(
+                scores.reshape(H, n, L),
+                causal=True,
+                num_aie_columns=cols,
+                num_channels=2,
+            )
+            # The context's N is only head_dim: at most four columns divide it.
+            ctx_cols = min(cols, 4)
+            ctx = GEMM(
+                weights.reshape(G, H // G * n, L),
+                handle_of(values[i]).reshape(G, L, D),
+                num_aie_columns=ctx_cols,
+                tile_m=tile_m,
+                tile_k=64,
+                tile_n=D // ctx_cols,
+                # The sum runs over every key: accumulate it in f32.
+                prio_accuracy=True,
+            )
+            return ctx.reshape(H, n, D)
+
+        def prefill_block(i, lw, x, angles, angles_q):
             n = x.shape[0]
             h = norm(x, lw.norm1)
             # <grouped query attention>
@@ -261,17 +324,11 @@ class LlamaGraph:
             k = gemm(h, lw.k)  # (n, G*D)
             v = gemm(h, lw.v)
             # One angle row per position, applied to that position's heads.
-            q = RoPE(q.reshape(n * H, D), angles, num_aie_columns=cols)
+            q = RoPE(q.reshape(n * H, D), angles_q, num_aie_columns=cols)
             k = RoPE(k.reshape(n * G, D), angles, num_aie_columns=cols)
             StridedCopy(k, keys[i], **rows_into_cache(n))
             StridedCopy(v, values[i], **rows_into_cache(n))
-            o = MHA(
-                q.reshape(n, H, D),
-                k.reshape(n, G, D),
-                v.reshape(n, G, D),
-                heads_interleaved=True,
-                num_of_pipelines=num_of_pipelines,
-            )
+            o = swap(attention(i, swap(q, n, H), n), H, n)
             o = gemm(o.reshape(n, H * D), lw.o)
             # </grouped query attention>
             x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E)
@@ -298,7 +355,11 @@ class LlamaGraph:
             num_aie_channels=1,
         )
 
-        @iron.graph(names_from=_Parameters(W, **{"rope.angles": rope}))
+        @iron.graph(
+            names_from=_Parameters(
+                W, **{"rope.angles": rope, "rope.angles_scaled": rope_q}
+            )
+        )
         def forward(
             x=None,
             *,
@@ -306,9 +367,11 @@ class LlamaGraph:
             position: Carried[np.int32],
         ):
             if x is not None:
-                angles = handle_of(rope)[: x.shape[0]]
+                n = x.shape[0]
+                angles = handle_of(rope)[:n]
+                angles_q = handle_of(rope_q)[:n]
                 for i, lw in enumerate(W.layers):
-                    x = prefill_block(i, lw, x, angles)
+                    x = prefill_block(i, lw, x, angles, angles_q)
                 # The last prompt row alone, at ``position``: its logits are
                 # all the host reads.
                 x = StridedCopy(x, in_offset=position * E, **last_row).reshape(1, E)
