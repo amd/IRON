@@ -117,288 +117,288 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_021814239a2ec3b46dbff165": {
-   "t_step_us": 356.3862628652714,
-   "alone_us": 100.26517702499405,
+  "GEMV_117ebf5c3e53ab9c0ea536da": {
+   "t_step_us": 10559.553273196798,
+   "alone_us": 269.82755662174895,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_061aeeba0adaadb39cafc486": {
-   "t_step_us": 207.94207375729457,
-   "alone_us": 132.6641286141239,
+  "GEMV_18c360b504c659e736feb5e8": {
+   "t_step_us": 331.4021596452221,
+   "alone_us": 148.93712068442255,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0662a43e108485e0d8ee8da5": {
-   "t_step_us": 10731.158195994794,
-   "alone_us": 533.0884014256299,
+  "GEMV_22cbc3b66197bf8b42214b46": {
+   "t_step_us": 669.7565695503727,
+   "alone_us": 239.32340263854712,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_07b7a942f077957c0c4f3683": {
-   "t_step_us": 2439.099014736712,
-   "alone_us": 521.2499527260661,
+  "GEMV_2c4d6c46dfe4a5493e8a7ebf": {
+   "t_step_us": 778.6030109855346,
+   "alone_us": 148.08215928496793,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0b3b24fd271411f198d7364e": {
-   "t_step_us": 639.5468080881983,
-   "alone_us": 221.56714112497866,
+  "GEMV_31e918a769b8f59cde1311c5": {
+   "t_step_us": 198.88643873855472,
+   "alone_us": 209.38628586009145,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0c709a5f2c3b747d07267a07": {
-   "t_step_us": 621.2328153196722,
-   "alone_us": 129.81463805772364,
+  "GEMV_3608e7d25bd11ed4b4ef46b7": {
+   "t_step_us": 341.5834653424099,
+   "alone_us": 150.83349717315286,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0f743e9acc0796a12191196f": {
-   "t_step_us": 9405.598437297158,
-   "alone_us": 574.481746298261,
+  "GEMV_38fad391c1cb317e83cbe40a": {
+   "t_step_us": 632.6019793050364,
+   "alone_us": 123.72194032650441,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_13bd1cea8994090c30701a18": {
-   "t_step_us": 229.31856074137613,
-   "alone_us": 128.20662959711626,
+  "GEMV_3de8c4649001f0e8f51d5ed1": {
+   "t_step_us": 50.11235043639317,
+   "alone_us": 203.03812198108062,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_14476879b9a16a37fc319f2e": {
-   "t_step_us": 336.93780278554186,
-   "alone_us": 126.2732912437059,
+  "GEMV_4c321130c64ac0d22f5460ac": {
+   "t_step_us": 1338.9163796091452,
+   "alone_us": 118.54931653942913,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_1f5a39556cb8b7367b235856": {
-   "t_step_us": 1324.8345858301036,
-   "alone_us": 99.59645831258968,
+  "GEMV_4d4b1913b64b1cf5d3f7b836": {
+   "t_step_us": 55.51899812417105,
+   "alone_us": 158.2779732416384,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_24ecb6cd22e54470999e98f4": {
-   "t_step_us": 48.37563028559089,
-   "alone_us": 196.227862033993,
+  "GEMV_5aff9b501826cfbff4505e29": {
+   "t_step_us": 162.77124814223498,
+   "alone_us": 121.50646944064647,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_3515db47199ff3f58e6315b6": {
-   "t_step_us": 159.4609784660861,
-   "alone_us": 116.3425185950473,
+  "GEMV_65c95bd12e14adfb56bdd2c7": {
+   "t_step_us": 336.16158179938793,
+   "alone_us": 139.74198373034596,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_485c896e4f7c1db0c7f54523": {
-   "t_step_us": 177.66719247447327,
-   "alone_us": 204.6762892859988,
+  "GEMV_73511c49a19cce33a46d01de": {
+   "t_step_us": 196.73203496495262,
+   "alone_us": 167.68470959505066,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_4ce0d4a057c4bb67bbaf836b": {
-   "t_step_us": 1308.8018386042677,
-   "alone_us": 301.1926673934795,
+  "GEMV_7ad87e05f6fe9a420becb062": {
+   "t_step_us": 38090.00109322369,
+   "alone_us": 595.8208930678666,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_6e62896b6b5b0660adfa2a52": {
-   "t_step_us": 196.9904769794084,
-   "alone_us": 191.53751054545864,
+  "GEMV_7da6c9af01129d46925882ea": {
+   "t_step_us": 11831.944953883067,
+   "alone_us": 96.60483920015395,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_727dc9e82c16c978521a67a9": {
-   "t_step_us": 196.24662672867998,
-   "alone_us": 180.07090693572536,
+  "GEMV_8079d2a01bca3b158e91b685": {
+   "t_step_us": 756.3328399555758,
+   "alone_us": 144.31441377382725,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_7641afc1f9726b5f067f831c": {
-   "t_step_us": 1442.4946275539696,
-   "alone_us": 61.68632535263896,
+  "GEMV_866ee25fd31ec2e08a8284a4": {
+   "t_step_us": 205.99340496119112,
+   "alone_us": 173.057327629067,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_81ab1874a8ad7245b2f0f40f": {
-   "t_step_us": 691.6972124599852,
-   "alone_us": 115.22360000526533,
+  "GEMV_965eba8a814e362ce428b024": {
+   "t_step_us": 682.5894161011092,
+   "alone_us": 246.71579740243033,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_8a9c5dbbcacee4079556de03": {
-   "t_step_us": 719.8641251306981,
-   "alone_us": 165.777892107144,
+  "GEMV_9e34bce44016fede52268d00": {
+   "t_step_us": 2487.4244700185955,
+   "alone_us": 129.64900815859437,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_8d44537be46abe4e7523f5b3": {
-   "t_step_us": 629.691407084465,
-   "alone_us": 123.28679440543056,
+  "GEMV_a50a0e4b58b5d1c43a9bd45d": {
+   "t_step_us": 194.34140995144844,
+   "alone_us": 192.74710211902857,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_92440a343354ebb05f4cd934": {
-   "t_step_us": 2489.0222048270516,
-   "alone_us": 75.5928413127549,
+  "GEMV_af19d6455cdc7e4d68d045bf": {
+   "t_step_us": 200.27336722705513,
+   "alone_us": 161.392948939465,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_9b077fca7e4404e2e70ad60f": {
-   "t_step_us": 37388.40871665161,
-   "alone_us": 1153.627541498281,
+  "GEMV_b28a217dc7bcdd1ca5414eff": {
+   "t_step_us": 2504.4827998499386,
+   "alone_us": 139.97645146446303,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_a0b7fd6d68867abe8cfebc76": {
-   "t_step_us": 357.12047974811867,
-   "alone_us": 96.91347804619,
+  "GEMV_b5165b8d2083a80725d19d02": {
+   "t_step_us": 180.7887019822374,
+   "alone_us": 208.16612232010812,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_a4416de712f745d788f00a99": {
-   "t_step_us": 52.56400618236512,
-   "alone_us": 152.5462866993621,
+  "GEMV_b8188523db4181a7631f8744": {
+   "t_step_us": 625.3231622395106,
+   "alone_us": 141.65549509925768,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_aead3f9b9d6e86e6ac7e73ac": {
-   "t_step_us": 19176.020861777943,
-   "alone_us": 1223.75618229853,
+  "GEMV_cb0a2fd8413971553dc2bd60": {
+   "t_step_us": 1312.5504992785864,
+   "alone_us": 168.29127707751468,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_bc7cb681d907e659e2b3802e": {
-   "t_step_us": 614.5541847217828,
-   "alone_us": 246.62757641635835,
+  "GEMV_cf97e1064cf14e0d31531a29": {
+   "t_step_us": 671.0539601044729,
+   "alone_us": 129.9128489335999,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_c5ec7608a12dd0e46f332cf1": {
-   "t_step_us": 607.8349033487029,
-   "alone_us": 153.66909065051004,
+  "GEMV_db9b8e5a52c700ebf5f6c4a6": {
+   "t_step_us": 172.19476285390556,
+   "alone_us": 220.35869187675416,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_cc2480dfd9128d1e8edec35e": {
-   "t_step_us": 338.18164956755936,
-   "alone_us": 171.17740935645998,
+  "GEMV_e1580a421507447bd128129b": {
+   "t_step_us": 89.01426190277562,
+   "alone_us": 132.33428035164252,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_ddaacf3b1ca1b45b3f095a90": {
-   "t_step_us": 219.7216308559291,
-   "alone_us": 124.76731353672221,
+  "GEMV_f0d98b4921dda49f647e199d": {
+   "t_step_us": 334.4794095028192,
+   "alone_us": 138.95714073441923,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_e05080abbd20dae3d57cbb30": {
-   "t_step_us": 199.1360477404669,
-   "alone_us": 169.90314179565758,
+  "GEMV_f46877b095bb1bce0f14d1b2": {
+   "t_step_us": 628.5823183134198,
+   "alone_us": 137.07642210647464,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_ec42b18ab68858fab76153f2": {
-   "t_step_us": 85.15574154444039,
-   "alone_us": 126.89715367741883,
+  "GEMV_f661505aa20758c456a564dc": {
+   "t_step_us": 19855.845217534807,
+   "alone_us": 434.7852445789613,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_fc5f352682bf90da81a7f3a9": {
-   "t_step_us": 739.3347405013628,
-   "alone_us": 113.72204608051106,
+  "GEMV_fe13bd9a167ea8100368157a": {
+   "t_step_us": 1308.8790801702999,
+   "alone_us": 143.00863404059783,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
