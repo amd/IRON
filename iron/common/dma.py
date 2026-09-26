@@ -31,6 +31,7 @@ method they stand for, and the tests check both against a real device.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
@@ -53,6 +54,14 @@ class Direction(Enum):
 
     READ = "mm2s"
     WRITE = "s2mm"
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """One end of a transfer: which tile kind's DMA, moving which way."""
+
+    kind: TileKind
+    direction: Direction
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,7 @@ class Reason(Enum):
     LENGTH = "longer than one descriptor's length field"
     REPEAT = "more re-reads than the channel's repeat_count holds"
     BDS = "more descriptors than the tile has"
+    BOUNDS = "it reaches outside the buffer"
 
 
 @dataclass(frozen=True)
@@ -224,6 +234,109 @@ def fit(
     return _fit_tile(offset, dims, elements, dtype, kind, direction, limits)
 
 
+def access_legal(acc: Access, end: Endpoint, dtype, facts: DmaFacts) -> Unfit | None:
+    """Why one descriptor, exactly as it would be issued at ``end``, is
+    illegal, or ``None`` if it is legal. Nothing is re-encoded: a pattern
+    that only fails for want of re-encoding is :func:`fit`'s to rewrite.
+
+    On the shim ``acc`` is ``[iter, d2, d1, d0]`` and a re-read (stride 0)
+    is legal only in the iteration slot; on a memtile or core ``acc`` is the
+    descriptor's own dimensions, and an outermost stride 0 is the channel's
+    ``repeat_count``. A write must visit no address twice.
+    """
+    limits = facts[end.kind]
+    dims = [(n, s) for n, s in zip(acc.sizes, acc.strides) if n != 1]
+    if any(s < 0 for _, s in dims):
+        return Unfit(Reason.NEGATIVE_STRIDE, f"dims {dims}")
+    last = acc.offset + sum((n - 1) * s for n, s in dims)
+    if acc.offset < 0 or last >= acc.elements:
+        return Unfit(Reason.BOUNDS, f"elements {acc.offset}..{last} of {acc.elements}")
+    if end.direction is Direction.WRITE:
+        bad = _injective(acc, dims)
+        if bad is not None:
+            return bad
+    if end.kind is TileKind.SHIM:
+        return _check_shim(acc, dtype, limits)
+    peeled = _peel_repeat(dims, end.direction, limits)
+    if isinstance(peeled, Unfit):
+        return peeled
+    return _check_tile(acc.offset, peeled[1], acc.elements, dtype, end.kind, limits)
+
+
+def writes_disjoint(accs: Sequence[Access]) -> Unfit | None:
+    """Whether writes by ``accs`` (one slot's descriptors, or every slot's
+    of one buffer, where two channels would race) land on distinct
+    addresses."""
+    every = np.concatenate([a.indices() for a in accs])
+    distinct = np.unique(every).size
+    if distinct != every.size:
+        return Unfit(
+            Reason.NOT_INJECTIVE, f"{every.size} writes to {distinct} addresses"
+        )
+    return None
+
+
+def _injective(acc: Access, dims: list[tuple[int, int]]) -> Unfit | None:
+    if any(s == 0 for _, s in dims):
+        return Unfit(Reason.NOT_INJECTIVE, f"dims {dims}")
+    # Each dimension clearing the reach of every finer one proves it without
+    # listing the addresses; only a pattern that interleaves is listed.
+    reach = 1
+    for n, s in sorted(dims, key=lambda d: d[1]):
+        if s < reach:
+            return writes_disjoint([acc])
+        reach += (n - 1) * s
+    return None
+
+
+def _contiguous(dims: list[tuple[int, int]]) -> bool:
+    run = 1
+    for n, s in reversed(dims):
+        if s != run:
+            return False
+        run *= n
+    return True
+
+
+def _check_shim(acc: Access, dtype, limits: BdLimits) -> Unfit | None:
+    """The shim's rules (``AIEX::verifyStridesWraps``) for ``acc`` as issued."""
+    (it, it_s), *nd = zip(acc.sizes, acc.strides)
+    (d2, _), (d1, _), (d0, d0_s) = nd
+    inner = [(n, s) for n, s in nd if n != 1]
+    if any(s == 0 for _, s in inner):
+        return Unfit(Reason.INNER_REPEAT, f"dims {inner} under the iteration slot")
+    if it > limits.iteration:
+        # The verifier caps the iteration size before it lowers a zero
+        # stride to repeat_count, so a re-read is capped the same.
+        return Unfit(Reason.WRAP, f"iteration size {it} over {limits.iteration}")
+    itemsize = np.dtype(dtype).itemsize
+    if acc.offset * itemsize % 4 or d0 * itemsize % 4:
+        return Unfit(Reason.GRANULE, f"offset {acc.offset}, d0 size {d0}")
+    if d0 > 1 and d0_s != 1 and itemsize != 4:
+        return Unfit(
+            Reason.GRANULE, f"innermost stride {d0_s} of a {itemsize}-byte type"
+        )
+    # A contiguous innermost dimension is sized, not stepped; a zero
+    # iteration stride is a repeat by now.
+    stepped = [(it, it_s), *nd[:2]] + ([] if d0_s == 1 else [(d0, d0_s)])
+    for n, s in stepped:
+        if n == 1 or s == 0:
+            continue
+        if s * itemsize % 4:
+            return Unfit(Reason.GRANULE, f"stride {s} of a {itemsize}-byte type")
+        if s * itemsize // 4 > limits.step:
+            return Unfit(Reason.STEP, f"stride {s} over {limits.step} granules")
+    if not _contiguous(inner):
+        if d0 * itemsize // 4 > limits.wrap:
+            return Unfit(Reason.WRAP, f"d0 size {d0} over {limits.wrap} granules")
+        if d1 > limits.wrap:
+            return Unfit(Reason.WRAP, f"d1 size {d1} over {limits.wrap}")
+    words = d2 * d1 * d0 * itemsize // 4
+    if words > limits.length:
+        return Unfit(Reason.LENGTH, f"{words} words over {limits.length}")
+    return None
+
+
 def _fit_shim(offset, dims, elements, dtype, direction, limits) -> Fit | Unfit:
     try:
         bds = legalize(
@@ -241,23 +354,50 @@ def _fit_shim(offset, dims, elements, dtype, direction, limits) -> Fit | Unfit:
 
 
 def _fit_tile(offset, dims, elements, dtype, kind, direction, limits) -> Fit | Unfit:
-    repeat = 0
-    if dims and dims[0][1] == 0:
-        if direction is Direction.WRITE:
-            return Unfit(Reason.NOT_INJECTIVE, f"dims {dims}")
-        repeat = dims[0][0] - 1
-        dims = dims[1:]
-        if repeat > limits.repeat:
-            return Unfit(
-                Reason.REPEAT, f"{repeat + 1} reads, repeat_count holds {limits.repeat}"
-            )
-    if any(s == 0 for _, s in dims):
-        return Unfit(Reason.INNER_REPEAT, f"dims {dims}")
+    peeled = _peel_repeat(dims, direction, limits)
+    if isinstance(peeled, Unfit):
+        return peeled
+    repeat, dims = peeled
     if not dims:
         dims = [(1, 1)]
     if len(dims) > 1 or dims[0][1] != 1:
         # A single contiguous run needs no dimensions, only a length.
         dims = _split_wide(dims, limits, granule_elements(dtype))
+    bad = _check_tile(offset, dims, elements, dtype, kind, limits)
+    if bad is not None:
+        return bad
+    pad = [(1, 0)] * (4 - len(dims))
+    full = pad + list(dims)
+    access = Access(
+        elements, offset, tuple(n for n, _ in full), tuple(s for _, s in full)
+    )
+    return Fit(kind, direction, (access,), repeat)
+
+
+def _peel_repeat(
+    dims: list[tuple[int, int]], direction: Direction, limits: BdLimits
+) -> tuple[int, list[tuple[int, int]]] | Unfit:
+    """A memtile or core pattern's outermost zero-stride dimension, as the
+    channel's ``repeat_count``, and the dimensions its descriptor keeps."""
+    if not dims or dims[0][1] != 0:
+        return 0, dims
+    if direction is Direction.WRITE:
+        return Unfit(Reason.NOT_INJECTIVE, f"dims {dims}")
+    repeat = dims[0][0] - 1
+    if repeat > limits.repeat:
+        return Unfit(
+            Reason.REPEAT, f"{repeat + 1} reads, repeat_count holds {limits.repeat}"
+        )
+    return repeat, dims[1:]
+
+
+def _check_tile(offset, dims, elements, dtype, kind, limits) -> Unfit | None:
+    """Whether a memtile or core descriptor holds ``dims`` (unit dimensions
+    dropped, outermost first) from ``offset``, as they stand."""
+    if any(s == 0 for _, s in dims):
+        return Unfit(Reason.INNER_REPEAT, f"dims {dims}")
+    if not dims:
+        dims = [(1, 1)]
     if len(dims) > limits.dims:
         return Unfit(
             Reason.DIMS,
@@ -285,12 +425,7 @@ def _fit_tile(offset, dims, elements, dtype, kind, direction, limits) -> Fit | U
     words = prod(n for n, _ in dims) * itemsize // 4
     if words > limits.length:
         return Unfit(Reason.LENGTH, f"{words} words over {limits.length}")
-    pad = [(1, 0)] * (4 - len(dims))
-    full = pad + list(dims)
-    access = Access(
-        elements, offset, tuple(n for n, _ in full), tuple(s for _, s in full)
-    )
-    return Fit(kind, direction, (access,), repeat)
+    return None
 
 
 def _split_wide(

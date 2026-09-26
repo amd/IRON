@@ -26,11 +26,14 @@ from iron.common.dma import (
     BdLimits,
     Direction,
     DmaFacts,
+    Endpoint,
     Fit,
     Reason,
     TileKind,
     Unfit,
+    access_legal,
     fit,
+    writes_disjoint,
 )
 from iron.common import tiling
 from iron.common.tiling import Access
@@ -206,13 +209,21 @@ def _design(
         out = []
         for k, acc in enumerate(accesses):
             last = k == len(accesses) - 1
+            # As shim_dma_single_bd_task issues a tap: the length covers the
+            # three wrapped dims, and the iteration size is the task's
+            # repeat_count.
             bd = (
                 f"aie.dma_bd(%{arg} : memref<{total}x{elem}> offset = 0 len = {default_len})"
                 if acc is None
                 else f"aie.dma_bd(%{arg} : memref<{total}x{elem}> offset = {acc.offset}"
-                f" len = {acc.count}{_dims_attr(_access_dims(acc))})"
+                f" len = {prod(acc.sizes[1:])}{_dims_attr(_access_dims(acc))})"
             )
-            token = " {issue_token = true}" if direction == "S2MM" and last else ""
+            attrs = []
+            if direction == "S2MM" and last:
+                attrs.append("issue_token = true")
+            if acc is not None and acc.sizes[0] > 1:
+                attrs.append(f"repeat_count = {acc.sizes[0] - 1} : i32")
+            token = f" {{{', '.join(attrs)}}}" if attrs else ""
             out.append(
                 f"""      %{arg}{k} = aiex.dma_configure_task(%shim, {direction}, 0) {{
         {bd}
@@ -359,3 +370,168 @@ def test_the_toolchain_builds_a_write_that_is_not_injective(
     raw = Access(N, 0, (2, 1, 1, 64), (0, 0, 0, 1))
     kernel = _build(tmp_path, _design(CORE, repeat=1, shim_writes=[raw], out_n=N))
     np.testing.assert_array_equal(_run(kernel, _data(), N), _data())
+
+
+# -- one descriptor, as issued ------------------------------------------------
+
+
+def _legal(acc: Access, kind, direction, facts, dtype=np.int32):
+    return access_legal(acc, Endpoint(kind, direction), dtype, facts)
+
+
+def _reason(got):
+    return got.reason if isinstance(got, Unfit) else None
+
+
+def test_what_fit_encodes_is_legal_as_issued(facts):
+    rng = np.random.default_rng(0)
+    checked = 0
+    for _ in range(300):
+        dims = [
+            (int(rng.integers(1, 6)), int(rng.choice([0, 1, 2, 4, 8, 16, 64])))
+            for _ in range(int(rng.integers(1, 4)))
+        ]
+        dims.append((int(rng.choice([2, 4, 8, 16])), 1))
+        idx = _indices(0, dims)
+        elements = int(idx.max()) + 1
+        for kind in (SHIM, MEM, CORE):
+            for direction in (READ, WRITE):
+                got = fit(idx, elements, np.int32, kind, direction, facts[kind])
+                if isinstance(got, Fit):
+                    checked += 1
+                    for acc in got.bds:
+                        assert _legal(acc, kind, direction, facts) is None, (dims, acc)
+    assert checked > 500
+
+
+def test_a_shim_rereads_only_in_its_iteration_slot(facts):
+    reread = Access(N, 0, (4, 1, 2, 8), (0, 0, 16, 1))
+    assert _legal(reread, SHIM, READ, facts) is None
+    assert _reason(_legal(reread, SHIM, WRITE, facts)) is Reason.NOT_INJECTIVE
+    inner = Access(N, 0, (1, 2, 2, 16), (0, 16, 0, 1))
+    assert _reason(_legal(inner, SHIM, READ, facts)) is Reason.INNER_REPEAT
+    # Capped at the iteration field even as a repeat: the verifier checks
+    # the size before it lowers the zero stride to repeat_count.
+    many = Access(N, 0, (65, 1, 1, 8), (0, 0, 0, 1))
+    assert _reason(_legal(many, SHIM, READ, facts)) is Reason.WRAP
+
+
+def test_the_shim_granule_rules(facts):
+    bf16 = bfloat16
+    assert (
+        _legal(Access(N, 2, (1, 1, 4, 8), (0, 0, 16, 1)), SHIM, READ, facts, bf16)
+        is None
+    )
+    for acc in (
+        Access(N, 1, (1, 1, 4, 8), (0, 0, 16, 1)),  # offset inside a granule
+        Access(N, 0, (1, 1, 4, 7), (0, 0, 16, 1)),  # a row of 14 bytes
+        Access(N, 0, (1, 1, 4, 8), (0, 0, 15, 1)),  # a 30-byte stride
+        Access(N, 0, (1, 1, 1, 16), (0, 0, 0, 2)),  # bf16 stepped innermost
+    ):
+        assert _reason(_legal(acc, SHIM, READ, facts, bf16)) is Reason.GRANULE, acc
+    # 32-bit words step innermost freely: a transpose.
+    assert _legal(Access(N, 0, (1, 1, 16, 4), (0, 0, 1, 16)), SHIM, READ, facts) is None
+
+
+def test_the_shim_wraps_exempt_one_contiguous_run(facts):
+    n = 4096
+    assert (
+        _legal(Access(n, 0, (1, 1, 2, 2048), (0, 0, 2048, 1)), SHIM, READ, facts)
+        is None
+    )
+    wide = Access(n, 0, (1, 1, 2, 1024), (0, 0, 2048, 1))
+    assert _reason(_legal(wide, SHIM, READ, facts)) is Reason.WRAP
+    tall = Access(n, 0, (1, 1, 1024, 2), (0, 0, 4, 1))
+    assert _reason(_legal(tall, SHIM, READ, facts)) is Reason.WRAP
+    # d2 has no wrap field: its size is carried by the length.
+    assert (
+        _legal(Access(2 * n, 0, (1, 2000, 1, 2), (0, 4, 1, 1)), SHIM, READ, facts)
+        is None
+    )
+
+
+def test_a_descriptor_stays_in_its_buffer_and_steps_forward(facts):
+    for kind in (SHIM, MEM, CORE):
+        past = Access(N, 32, (1, 1, 1, 64), (0, 0, 0, 1))
+        assert _reason(_legal(past, kind, READ, facts)) is Reason.BOUNDS
+        back = Access(N, 60, (1, 1, 4, 4), (0, 0, -16, 1))
+        assert _reason(_legal(back, kind, READ, facts)) is Reason.NEGATIVE_STRIDE
+
+
+@pytest.mark.parametrize("kind", [SHIM, MEM, CORE])
+def test_a_write_is_injective_even_where_its_dimensions_interleave(kind, facts):
+    # (3, 2) x (2, 3) visits 0 3 2 5 4 7: no dimension clears the other,
+    # and no address repeats.
+    woven = Access(N, 0, (1, 1, 3, 2), (0, 0, 2, 3))
+    assert _legal(woven, kind, WRITE, facts) is None
+    overlapping = Access(N, 0, (1, 1, 2, 4), (0, 0, 2, 1))
+    assert _reason(_legal(overlapping, kind, WRITE, facts)) is Reason.NOT_INJECTIVE
+    assert _legal(overlapping, kind, READ, facts) is None
+
+
+@pytest.mark.parametrize("kind", [MEM, CORE])
+def test_a_tile_descriptor_rereads_only_as_its_channels_repeat(kind, facts):
+    outer = Access(N, 0, (1, 3, 4, 16), (0, 0, 16, 1))
+    assert _legal(outer, kind, READ, facts) is None
+    assert _reason(_legal(outer, kind, WRITE, facts)) is Reason.NOT_INJECTIVE
+    inner = Access(N, 0, (1, 4, 2, 8), (0, 16, 0, 1))
+    assert _reason(_legal(inner, kind, READ, facts)) is Reason.INNER_REPEAT
+
+
+def test_tile_kinds_differ_as_issued(facts):
+    four = Access(128, 0, (2, 2, 2, 8), (64, 24, 10, 1))
+    assert _legal(four, MEM, READ, facts) is None
+    assert _reason(_legal(four, CORE, READ, facts)) is Reason.DIMS
+    wide = Access(600, 0, (1, 1, 2, 257), (0, 0, 1, 2))
+    assert _legal(wide, MEM, READ, facts) is None
+    assert _reason(_legal(wide, CORE, READ, facts)) is Reason.WRAP
+
+
+def test_writes_across_descriptors_must_be_disjoint():
+    halves = [
+        Access(N, 0, (1, 1, 1, 32), (0, 0, 0, 1)),
+        Access(N, 32, (1, 1, 1, 32), (0, 0, 0, 1)),
+    ]
+    assert writes_disjoint(halves) is None
+    shifted = [halves[0], Access(N, 16, (1, 1, 1, 32), (0, 0, 0, 1))]
+    assert _reason(writes_disjoint(shifted)) is Reason.NOT_INJECTIVE
+
+
+SHIM_ACCESSES = {  # each 64 32-bit words of a 128-word input, issued as given
+    "iteration_reread": Access(2 * N, 0, (4, 1, 2, 8), (0, 0, 16, 1)),
+    "transpose": Access(2 * N, 0, (1, 1, 16, 4), (0, 0, 1, 16)),
+    "three_dims": Access(2 * N, 4, (2, 2, 4, 4), (64, 4, 16, 1)),
+}
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("name", sorted(SHIM_ACCESSES))
+def test_a_legal_shim_descriptor_reproduces_as_issued(
+    name, facts, tmp_path, npu_runtime
+):
+    acc = SHIM_ACCESSES[name]
+    assert _legal(acc, SHIM, READ, facts) is None
+    kernel = _build(tmp_path, _design(CORE, shim_reads=[acc], in_n=2 * N))
+    data = _data(2 * N)
+    np.testing.assert_array_equal(_run(kernel, data, N), data[acc.indices()])
+
+
+def test_a_shim_inner_reread_is_the_toolchains_error_too(facts, tmp_path):
+    acc = Access(2 * N, 0, (1, 2, 2, 16), (0, 16, 0, 1))
+    assert _reason(_legal(acc, SHIM, READ, facts)) is Reason.INNER_REPEAT
+    with pytest.raises(RuntimeError, match="Stride 1 must be a positive integer"):
+        _build(tmp_path, _design(CORE, shim_reads=[acc], in_n=2 * N))
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_bf16_innermost_step_moves_whole_granules(facts, tmp_path, npu_runtime):
+    """Why the bf16 innermost-stride rule is ours: the toolchain takes a
+    stride of 2 bf16 elements as one 4-byte granule and reads straight on,
+    two elements per granule, instead of every other element."""
+    acc = Access(2 * N, 0, (1, 1, 2, 32), (0, 0, 64, 2))
+    assert _reason(_legal(acc, SHIM, READ, facts, bfloat16)) is Reason.GRANULE
+    kernel = _build(tmp_path, _design(CORE, shim_reads=[acc], in_n=2 * N, elem="bf16"))
+    data = np.arange(2 * N).astype(bfloat16)
+    got = _run(kernel, data, N)
+    assert not np.array_equal(got, data[acc.indices()])
+    np.testing.assert_array_equal(got, np.concatenate([data[0:32], data[64:96]]))
