@@ -168,7 +168,10 @@ class GQAContextOverlay(Overlay):
 class GQAContext(Operator[GQAContextOverlay]):
     """Grouped-query attention context from the ``(G, L, D)`` value cache."""
 
-    # The sum is the kernel's arithmetic model, so any difference is a bug.
+    # The reference is the kernel's order in IEEE float32, which the core
+    # matches on the non-negative operands drawn here (see kernel.py), so
+    # any difference is a bug. Equality with the GEMV decode used before, on signed data, is
+    # iron/tests/operators/gqa_context_vs_gemv.py.
     # The llama arm is the shape decode dispatches: 8 KV groups of 4 heads
     # over a max_seq_len=2048 context of head_dim=64.
     test = Testing(

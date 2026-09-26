@@ -10,9 +10,14 @@ Until then the source sits beside this module, and the kernel library's
 ``linalg`` directory is on the include path so its ``../aie_kernel_utils.h``
 resolves as it will there.
 
-:func:`gqa_context_ref` is the arithmetic model: every float32 operation
-the core performs, in its order, so it is bit-exact and the operator is
-gated on exact equality.
+:func:`gqa_context_ref` models the core's arithmetic: every float32
+operation it performs, in its order, as IEEE operations. The core's float
+adder is not IEEE on every cancelling add of mixed signs, so the model
+matches the core bit for bit on the non-negative operands the declared
+cases draw, and misses an output bit now and then on signed ones (1 of
+16384 outputs in one of eight softmax-weighted llama-shape cases). The
+property decode relies on, the same bits as the GEMV it replaced, is
+checked on the device by ``iron/tests/operators/gqa_context_vs_gemv.py``.
 """
 
 from pathlib import Path
@@ -110,7 +115,8 @@ def gqa_context_ref(values, weights, heads_per_group: int) -> np.ndarray:
     in order of ``i``, starting from the first product; the lanes are halved,
     lane ``j + 32`` onto lane ``j``, then 16, 8, 4, 2, 1; the float left is
     rounded to bf16, to nearest even. A product of two bf16 is exact in
-    float32, so each step is one float32 addition, as on the core.
+    float32, so each step is one float32 addition, as on the core (whose
+    adds of mixed signs are not always IEEE: see the module docstring).
     """
     values = np.asarray(values, dtype=bfloat16)
     weights = np.asarray(weights, dtype=bfloat16)
