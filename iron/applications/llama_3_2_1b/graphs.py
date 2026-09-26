@@ -286,6 +286,11 @@ class LlamaGraph:
             a group's heads are one batch of the GEMMs, their rows stacked.
             The cache rows past ``n`` hold another prompt's keys; the causal
             mask zeroes every weight on them, as on every later row.
+
+            Both GEMMs multiply in bf16 rather than emulating it with bfp16.
+            Emulated, prefill KL against Hugging Face had a heavier tail than
+            the flash MHA's; in bf16 it is lower at every percentile but the
+            last. It is also the one mmul aie2 has, so npu1 computes the same.
             """
             scores = GEMM(
                 q.reshape(G, H // G * n, D),
@@ -295,6 +300,7 @@ class LlamaGraph:
                 tile_m=tile_m,
                 tile_k=D,
                 tile_n=min(64, L // cols),
+                emulate_bf16_mmul_with_bfp16=False,
             )
             weights = Softmax(
                 scores.reshape(H, n, L),
@@ -313,6 +319,7 @@ class LlamaGraph:
                 tile_n=D // ctx_cols,
                 # The sum runs over every key: accumulate it in f32.
                 prio_accuracy=True,
+                emulate_bf16_mmul_with_bfp16=False,
             )
             return ctx.reshape(H, n, D)
 
