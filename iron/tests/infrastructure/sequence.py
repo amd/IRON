@@ -146,8 +146,8 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
     assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
-    # Buffer sub-views handed to each operator's runtime sequence.
-    assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
+    # Typed views of the byte arguments, handed to each operator's runtime sequence.
+    assert "memref.view" in text, "missing buffer view in fused MLIR"
     # One inlined device per unique operator plus the top-level driver device,
     # each named for its class and its design, not its position.
     names = re.findall(r"aie\.device\(\w+\) @(\w+)", text)

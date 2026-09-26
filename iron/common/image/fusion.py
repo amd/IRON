@@ -9,15 +9,41 @@ from __future__ import annotations
 
 import numpy as np
 from aie import ir
-from aie.dialects import aie, aiex, memref
+from aie.dialects import aie, aiex, arith, memref
 from aie.extras.context import mlir_mod_ctx
-import ml_dtypes
+from aie.helpers.util import mlir_type_to_np_dtype
+from aie.utils import bfp
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..design import DesignGenerator
 
 RESET_DEVICE = "reset_device"
+
+# The shim DMA addresses host memory in 32-bit words, so every buffer handed
+# to a sub-design must start on one.
+SHIM_ADDRESS_ALIGNMENT = 4
+
+
+class ArgumentSizes(NamedTuple):
+    """Bytes of each runtime-sequence argument of a fused image, in argument order.
+
+    ``feedback`` is ``None`` for an image that declares no feedback buffer; the
+    argument then does not exist, and the image takes the first three alone.
+    """
+
+    input: int
+    output: int
+    scratch: int
+    feedback: int | None = None
+
+    def arguments(self) -> dict[str, int]:
+        """The arguments the runtime sequence takes: size by kind, in order, so
+        a kind's argument index is its position."""
+        sizes = self._asdict()
+        if self.feedback is None:
+            del sizes["feedback"]
+        return sizes
 
 
 # Helper Functions
@@ -38,6 +64,15 @@ def extract_runtime_sequence_arg_types(dev_op: Any) -> list[Any]:
                     ]
                     return arg_types
     raise RuntimeError("Could not find runtime sequence in device operation")
+
+
+def _memref_bytes(memref_type: ir.MemRefType) -> int:
+    """Bytes a runtime-sequence argument of ``memref_type`` spans (a block-float
+    element counts its packed block)."""
+    dtype = mlir_type_to_np_dtype(memref_type.element_type)
+    if dtype is None:
+        raise TypeError(f"no host dtype for the elements of {memref_type}")
+    return int(np.prod(memref_type.shape)) * bfp.itemsize(dtype)
 
 
 def get_child_mlir_module(generator: DesignGenerator) -> Any:
@@ -76,7 +111,7 @@ def fuse_mlir(
     operator_generators: dict[str, DesignGenerator],
     runlist: list[tuple[str, ...]],
     subbuffer_layout: dict[str, tuple[str, int, int]],
-    buffer_sizes: tuple[int, int, int],
+    buffer_sizes: ArgumentSizes,
     slice_info: dict[str, tuple[str, int, int]] | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
@@ -87,9 +122,13 @@ def fuse_mlir(
     graph's file-based caching, since the caller (``FusedImage.link``)
     hands the returned text straight to ``CompilableDesign``, which keys its
     own cache on the text's content.
+
+    The runtime sequence takes one flat byte argument per kind in
+    ``buffer_sizes``; each buffer is handed to its sub-design as a view of
+    exactly the type that sub-design declares, so a buffer keeps its dtype
+    and an ``offset_parameter`` on it is scaled by its own element size.
     """
     slice_info = slice_info or {}
-    input_buffer_size, output_buffer_size, scratch_buffer_size = buffer_sizes
 
     # Extract device operations and module-level parameter decls from each
     # operator's MLIR generator.  Note: in the current MLIR-AIE pipeline,
@@ -180,23 +219,16 @@ def fuse_mlir(
         # Create the main device -- this contains the runtime sequence calling into the other devices
         @aie.device(device_ty)
         def main():
-            buf_dtype = np.dtype[
-                ml_dtypes.bfloat16
-            ]  # TODO: support for other data types
-            itemsize = np.dtype(ml_dtypes.bfloat16).itemsize
+            # Each argument is a flat run of bytes; a buffer in one is a view
+            # of the type its sub-design declares, at the buffer's byte offset.
+            arguments = buffer_sizes.arguments()
 
             # RuntimeSequenceOp
             @aiex.runtime_sequence(
-                np.ndarray[(input_buffer_size // itemsize,), buf_dtype],
-                np.ndarray[(output_buffer_size // itemsize,), buf_dtype],
-                np.ndarray[(scratch_buffer_size // itemsize,), buf_dtype],
+                *(np.ndarray[(size,), np.dtype[np.int8]] for size in arguments.values())
             )
-            def sequence(input_buf, output_buf, scratch_buf):
-                consolidated_buffers = {
-                    "input": input_buf,
-                    "output": output_buf,
-                    "scratch": scratch_buf,
-                }
+            def sequence(*args):
+                consolidated_buffers = dict(zip(arguments, args))
 
                 # Execute operations in runlist order
                 configure_op = None
@@ -215,7 +247,8 @@ def fuse_mlir(
                         last_op_name = op_name
 
                     with ir.InsertionPoint(configure_body):
-                        # For each buffer, add subview and reinterpret_cast ops
+                        # For each buffer, view its bytes as the argument type
+                        # the sub-design declares
                         buffer_ssa_values = []
                         for idx, buf_name in enumerate(buffer_names):
                             # Check if this is a sliced buffer
@@ -232,47 +265,38 @@ def fuse_mlir(
                                 # Regular buffer
                                 buf_type, offset, length = subbuffer_layout[buf_name]
 
-                            # Subview Op
-                            consolidated_buf = consolidated_buffers[buf_type]
-                            offset_elements = offset // itemsize
-                            size_elements = length // itemsize
-                            subview = memref.subview(
-                                consolidated_buf,
-                                [offset_elements],
-                                [size_elements],
-                                [1],
+                            # Parsed anew: the sub-design's type belongs to the
+                            # context it was generated in, not this one.
+                            target_type = ir.MemRefType(
+                                ir.Type.parse(str(expected_arg_types[idx]))
                             )
+                            expected_bytes = _memref_bytes(target_type)
+                            if expected_bytes != length:
+                                raise ValueError(
+                                    f"Size mismatch for buffer '{buf_name}': the "
+                                    f"runtime sequence of '{op_name}' takes "
+                                    f"{target_type} ({expected_bytes} bytes), the "
+                                    f"layout gives it {length} bytes"
+                                )
+                            # The shim DMA addresses host memory in 32-bit
+                            # words: a descriptor's low address bits are dropped,
+                            # so a misaligned buffer would silently move.
+                            if offset % SHIM_ADDRESS_ALIGNMENT:
+                                raise ValueError(
+                                    f"Buffer '{buf_name}' of '{op_name}' starts at "
+                                    f"byte {offset} of the {buf_type} argument, which "
+                                    f"is not a multiple of {SHIM_ADDRESS_ALIGNMENT}"
+                                )
 
-                            # Reinterpret_cast Op
-                            target_type = expected_arg_types[idx]
-                            expected_memref = ir.MemRefType(target_type)
-                            target_shape = [
-                                expected_memref.shape[i]
-                                for i in range(expected_memref.rank)
-                            ]
-                            expected_size = np.prod(target_shape)
-                            assert (
-                                expected_size == size_elements
-                            ), f"Size mismatch for buffer '{buf_name}': MLIR runtime sequence expected {expected_size}, Python fused operator provided {size_elements}"
-                            strides = []
-                            stride = 1
-                            for dim in reversed(target_shape):
-                                strides.insert(0, stride)
-                                stride *= dim
-                            result_type = ir.MemRefType.get(
-                                target_shape, ir.BF16Type.get()
+                            # View Op
+                            buffer_ssa_values.append(
+                                memref.view(
+                                    target_type,
+                                    consolidated_buffers[buf_type],
+                                    arith.constant(ir.IndexType.get(), offset),
+                                    [],
+                                )
                             )
-                            reinterpreted = memref.reinterpret_cast(
-                                result=result_type,
-                                source=subview,
-                                offsets=[],
-                                sizes=[],
-                                strides=[],
-                                static_offsets=[0],
-                                static_sizes=target_shape,
-                                static_strides=strides,
-                            )
-                            buffer_ssa_values.append(reinterpreted)
 
                         # Run Op
                         sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
