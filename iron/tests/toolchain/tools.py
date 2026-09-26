@@ -16,7 +16,7 @@ aie = pytest.importorskip("aie")
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
-AIECC = Path(aie.__file__).resolve().parents[2] / "bin" / "aiecc"
+AIECC = Path(shutil.which("aiecc") or Path(aie.__file__).parents[2] / "bin" / "aiecc")
 AIEBU = shutil.which("aiebu-asm")
 XCLBINUTIL = shutil.which("xclbinutil")
 try:
