@@ -66,6 +66,7 @@ def _f32(a):
     return np.asarray(a, dtype=np.float32)
 
 
+@pytest.mark.supported_devices("npu2")
 def test_two_shapes_share_weights_and_state_through_one_arena():
     """Both compiled before the first call: the arena is made once, at size."""
     f, w, w2, s = _function()
@@ -96,6 +97,7 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     assert f.arena.plan.size < private
 
 
+@pytest.mark.supported_devices("npu2")
 def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
     """``release`` sees every weight once over every version, in order, in
     pieces of at most ``piece_bytes``; after that the host copy is not read:
@@ -127,6 +129,7 @@ def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
     np.testing.assert_array_equal(_f32(f(x2).numpy()), expect)
 
 
+@pytest.mark.supported_devices("npu2")
 def test_load_loads_a_version_whose_weights_are_already_uploaded():
     """Loading the one-line version uploads ``w``, which is every weight the
     two-line version reads; loading that one must still put its image on the
@@ -152,6 +155,7 @@ def test_load_loads_a_version_whose_weights_are_already_uploaded():
     np.testing.assert_array_equal(_f32(two(x).numpy()), 2 * _f32(x[E:]) + _f32(w))
 
 
+@pytest.mark.supported_devices("npu2")
 def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state():
     """Compiling on first call at a new shape: the arena grows under the
     version that already ran, which keeps working."""

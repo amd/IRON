@@ -16,7 +16,7 @@ inputs:
   test_suite:
     required: false
     default: "operators"
-    description: "Which tests to run: 'operators', 'applications', or 'both'"
+    description: "Which tests to run: 'operators', 'applications' or 'tests' (iron/tests)"
 
 runs:
   using: "composite"
@@ -35,6 +35,9 @@ runs:
             ;;
           applications)
             TEST_PATH="iron/applications/"
+            ;;
+          tests)
+            TEST_PATH="iron/tests/"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"

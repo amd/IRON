@@ -31,6 +31,7 @@ def device():
     aie_utils.set_current_device(previous)
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("calls", [2, 3])
 def test_every_dispatch_returns_its_own_output(calls, npu_runtime):
     add = ElementwiseAdd(size=SIZE, tile_size=128)

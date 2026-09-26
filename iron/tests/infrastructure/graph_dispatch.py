@@ -111,7 +111,10 @@ def _run(sequence, inputs):
     return run.get_buffer(out_name).torch_view()[: inputs[0].numel()].clone()
 
 
-@pytest.mark.parametrize("dispatch", ["reference", "fused"])
+@pytest.mark.parametrize(
+    "dispatch",
+    ["reference", pytest.param("fused", marks=pytest.mark.supported_devices("npu2"))],
+)
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
 def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time."""
@@ -142,6 +145,7 @@ def _narrow_chain(a, b):
     return SiLU(ElementwiseAdd(x, b, **narrow), **narrow)
 
 
+@pytest.mark.supported_devices("npu2")
 def test_a_packed_graph_computes_what_the_temporal_one_does():
     """compile(coresident=...) changes which device each step runs in, and
     nothing it computes."""

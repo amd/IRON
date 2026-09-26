@@ -127,6 +127,7 @@ def test_packs_designs_apart_in_first_use_order(tmp_path):
     assert tuning.predicted_us < tuning.baseline_us
 
 
+@pytest.mark.supported_devices("npu2")
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path, npu_runtime):
     table = CostTable(tmp_path / "costs.json")
     traced = iron.graph(_chain_fn).trace(a=(SIZE,), b=(SIZE,))

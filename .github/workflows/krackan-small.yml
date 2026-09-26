@@ -42,6 +42,19 @@ jobs:
           extensive: "false"
           test_suite: "operators"
 
+      # The infrastructure and toolchain tests under iron/tests. They time
+      # nothing, so one iteration each, and their results stay out of the
+      # CSV committed below.
+      - name: Test iron/tests
+        id: test_iron_tests
+        continue-on-error: true
+        uses: ./.github/actions/test
+        with:
+          env_name: ci_env
+          extensive: "false"
+          test_suite: "tests"
+          test_flags: "--iterations 1 --csv-output=iron_tests.csv"
+
       - name: Commit test results
         id: commit_results
         env:
@@ -58,6 +71,6 @@ jobs:
           retention-days: 7
 
       - name: Mark workflow as failed if tests failed
-        if: steps.test.outcome == 'failure'
+        if: steps.test.outcome == 'failure' || steps.test_iron_tests.outcome == 'failure'
         run: exit 1
         
