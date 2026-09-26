@@ -4,7 +4,7 @@
 """OperatorSequence: what one run of several operators builds and dispatches."""
 
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 
 import numpy as np
 
@@ -16,6 +16,7 @@ from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 from ..declare import Operator
 from .allocator import Allocation, ArenaPlan, align_up, live_ranges, place
 from .artifacts import Artifacts, Design, Step
+from .coresidence import AdjacentPacking
 from .callable import (
     ScratchArena,
     SequenceCompareCallable,
@@ -66,6 +67,11 @@ class OperatorSequence:
             nothing.
         residents: With ``arena``, the scratch buffers that are residents
             there, by storage key; every other scratch buffer is a transient.
+        coresident: Groups of operators whose designs share one device
+            configuration in the full ELF (:mod:`.coresidence`), so steps
+            moving between them do not reconfigure the array. Every
+            operator in a group must be in the runlist. An
+            :class:`AdjacentPacking` packs them itself, asking the placer.
     """
 
     def __init__(
@@ -83,6 +89,7 @@ class OperatorSequence:
         share_designs=False,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
+        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         *args,
         **kwargs,
     ):
@@ -106,6 +113,26 @@ class OperatorSequence:
             raise TypeError(
                 f"OperatorSequence takes no positional extras, got {args!r}"
             )
+        if coresident and mode not in (None, "fused"):
+            raise ValueError(
+                f"co-residence packs designs into one full-ELF device; "
+                f"dispatch={dispatch!r} builds none"
+            )
+        if isinstance(coresident, AdjacentPacking):
+            self.coresident = coresident
+        else:
+            in_runlist = {id(op) for op, *_ in runlist}
+            strays = [
+                op.name
+                for group in coresident
+                for op in group
+                if id(op) not in in_runlist
+            ]
+            if strays:
+                raise ValueError(
+                    f"coresident names operators not in the runlist: {strays}"
+                )
+            self.coresident = tuple(tuple(group) for group in coresident)
         if kwargs:
             raise TypeError(f"unexpected keyword arguments {sorted(kwargs)}")
         self.runlist = runlist

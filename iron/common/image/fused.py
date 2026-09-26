@@ -10,6 +10,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
 from . import fusion
+from .coresidence import AdjacentPacking, Packing
 from .jit_compile import (
     design_identity,
     dispatch_stream,
@@ -20,7 +21,8 @@ from .jit_compile import (
 
 
 def fused_plan(seq):
-    """Each design's device, by name, and the runlist over those names.
+    """Each design's device, by name, the runlist over those names, and
+    which of them share a device (``seq.coresident``, see :mod:`.coresidence`).
 
     A device is named for what it is -- its class and its design's identity
     -- not for where it sits in this sequence, so one design is one device
@@ -39,7 +41,17 @@ def fused_plan(seq):
         names.append(name)
         generators.setdefault(name, generator)
     runlist = [(names[design_of[id(op)]], *bufs) for op, *bufs in seq.runlist]
-    return generators, runlist
+    if isinstance(seq.coresident, AdjacentPacking):
+        # Resolved by fuse_mlir, against the designs' text: a function of
+        # the designs and the runlist, so the policy itself is the identity.
+        return generators, runlist, seq.coresident
+    packing = Packing(
+        tuple(
+            tuple(dict.fromkeys(names[design_of[id(op)]] for op in group))
+            for group in seq.coresident
+        )
+    )
+    return generators, runlist, packing
 
 
 def build_fused_mlir(seq, plan=None) -> str:
@@ -48,13 +60,14 @@ def build_fused_mlir(seq, plan=None) -> str:
     ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
     ``slice_info``) must already be set.
     """
-    generators, runlist = plan or fused_plan(seq)
+    generators, runlist, packing = plan or fused_plan(seq)
     return fusion.fuse_mlir(
         generators,
         runlist,
         seq.subbuffer_layout,
         seq.buffer_sizes,
         seq.slice_info,
+        packing,
     )
 
 
@@ -89,7 +102,7 @@ def fused_identity(seq, plan) -> str:
     operators' own modules, and mlir-aie's Python frontend
     (:func:`source_digest`). A hit then costs a hash rather than a fusion.
     """
-    generators, runlist = plan
+    generators, runlist, packing = plan
     h = hashlib.sha256()
     files = set()
     for name, generator in generators.items():
@@ -97,7 +110,9 @@ def fused_identity(seq, plan) -> str:
         files.update(_design_sources(generator))
     h.update(source_digest(tuple(sorted(files))).encode())
     h.update(
-        repr((runlist, seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info)).encode()
+        repr(
+            (runlist, seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info, packing)
+        ).encode()
     )
     return h.hexdigest()[:24]
 
