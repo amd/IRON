@@ -49,7 +49,6 @@ from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
 from iron.operators.gqa_context.op import GQAContext
 from iron.operators.mha.op import MHA
-from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope.op import RoPE
 from iron.operators.sample import Sample
