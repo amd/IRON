@@ -270,11 +270,6 @@ class WeightedRMSNorm(RMSNorm, Operator[WeightedRMSNormOverlay]):
     def weighted(self) -> bool:
         return True
 
-    @property
-    def weight_length(self) -> int:
-        """Length of the weight vector, which here is one tile."""
-        return self.ov.tile_size
-
 
 # --------------------------------------------------------------------------
 # The CPU reference this operator is checked against.

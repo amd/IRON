@@ -127,14 +127,6 @@ class Dequant(Operator[DequantOverlay]):
                 f"group_size={self.ov.group_size} (expected {expected})"
             )
 
-    @property
-    def input_size(self) -> int:
-        return self.packed
-
-    @property
-    def output_size(self) -> int:
-        return self.size
-
     def compatible(self) -> None:
         ov = self.ov
         total_cores = ov.num_aie_columns * ov.num_channels

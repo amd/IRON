@@ -34,8 +34,7 @@ def test_granularity_per_dtype():
 
 
 def test_channeled_unary_taps_are_reproduced():
-    # channeled_unary_design.py: chunk = size // cols // channels, fifo idx = i*ch + j,
-    # tap = ((1,size), chunk*i*ch + chunk*j, [1,1,1,chunk], [0,0,0,1]).
+    # A channeled unary design: chunk = size // cols // channels, fifo idx = i*ch + j.
     size, cols, ch = 4096, 4, 2
     chunk = size // cols // ch
     blocks = split((size,), cols * ch, axis=0)
@@ -127,7 +126,7 @@ def test_repeated_rejects_what_the_descriptor_cannot_hold():
 
 
 def test_repeated_zero_stride_rereads_the_run_from_the_iteration_slot():
-    # repeat/op.py's input: the whole buffer re-read `repeat` times. Only the
+    # repeat.py's input: the whole buffer re-read `repeat` times. Only the
     # iteration slot may carry a zero stride, and it holds at most 64.
     acc = repeated(64, 0, 64, [(3, 0)], bfloat16)
     assert acc.sizes == (3, 1, 1, 64) and acc.strides == (0, 0, 0, 1)

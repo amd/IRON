@@ -436,7 +436,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
     # Only the unbounded epilogues are checked this way. For sigmoid and clamp
     # no bound over this reference can be both correct and useful -- the
     # accumulator error alone exceeds their whole output range -- so they are
-    # covered functionally by test_mm_prebuilt_epilogue_matches_accumulator.
+    # covered functionally by test_shipped_epilogue_matches_accumulator.
     mass = accumulated_mass(K, data["A"], data["B"])
     abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
     errors, latency_us, bandwidth_gbps = run_test(

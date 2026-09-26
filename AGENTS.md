@@ -66,7 +66,7 @@ pytest iron/operators/
 ### Run Single Operator Test
 
 ```bash
-pytest iron/operators/axpy/
+pytest iron/operators/test.py -k AXPY
 ```
 
 ### Run Application Tests

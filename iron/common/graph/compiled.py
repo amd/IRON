@@ -91,9 +91,11 @@ def _store(
 class GraphFunction:
     """A function decorated with :func:`graph`."""
 
-    def __init__(self, fn, names_from=None):
+    def __init__(self, fn, names_from=None, verbose=False):
         self.fn = fn
         self.names_from = names_from
+        # Whether a call that compiles a version says so and prints its plan.
+        self.verbose = verbose
         self.__name__ = fn.__name__
         self.__doc__ = fn.__doc__
         sig = inspect.signature(fn)
@@ -378,8 +380,9 @@ class GraphFunction:
             shapes = {
                 name: (tuple(t.shape), _tensor_dtype(t)) for name, t in given.items()
             }
-            print(f"{self.__name__}: compiling for {shapes}")
-            version = self.compile(**shapes)
+            if self.verbose:
+                print(f"{self.__name__}: compiling for {shapes}")
+            version = self.compile(verbose=self.verbose, **shapes)
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values):
@@ -654,8 +657,12 @@ def _results(outputs: list, carry: Carry | None):
     return items[0] if len(items) == 1 else tuple(items)
 
 
-def graph(fn=None, *, names_from=None):
-    """Declare a graph function; see the module docstring."""
+def graph(fn=None, *, names_from=None, verbose=False):
+    """Declare a graph function; see the module docstring.
+
+    Under ``verbose``, a call that compiles a version says so and prints the
+    packaging plan, as :meth:`GraphFunction.compile` does under its own.
+    """
     if fn is None:
-        return lambda f: GraphFunction(f, names_from)
-    return GraphFunction(fn, names_from)
+        return lambda f: GraphFunction(f, names_from, verbose)
+    return GraphFunction(fn, names_from, verbose)

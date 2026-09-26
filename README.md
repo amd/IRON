@@ -128,14 +128,14 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
-   pytest ./iron/operators/axpy/
+   pytest ./iron/operators/test.py -k AXPY
    ```
 
 ### Building/Using & Testing Operators
 
 All available operators can be found in `iron/operators`. These each contain:
 
-- `op.py` (or `<name>.py` for a small operator): The operator, declared as two classes (see `iron/common/declare.py` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
+- `op.py` (or `<name>.py` for a small operator): The operator, declared as two classes (see `iron/common/declare/` and `OPERATOR_MODEL_PLAN.md`). The **overlay** is what configures the NPU array: its tunables, the streams into and out of the array in tile units, the values the cores read, and `design()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The **operator** is the host side: its buffers declared by shape against the overlay's streams, and the runtime sequence, which the library derives from that declaration or the operator writes by hand. One overlay serves every extent, so one build of the array serves many shapes.
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
 - `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/operators/test.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
@@ -160,7 +160,7 @@ pytest iron/operators/
 To run a specific operator's tests:
 
 ``` bash
-pytest iron/operators/axpy/
+pytest iron/operators/test.py -k AXPY
 ```
 
 ### Git Hooks (Optional but Recommended)
@@ -204,7 +204,7 @@ IRON uses a three-layer architecture:
    - Vectorized using AIE API for optimal performance
 
 3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
-   - The declaration layer (`declare.py`), the derived runtime sequence (`build.py`, `tiling.py`) and graph functions (`graph.py`, `packaging.py`)
+   - The declaration layer (`declare/`), the derived runtime sequence (`design/build.py`, `tiling.py`) and graph functions (`graph/`, `image/packaging.py`)
    - MLIR-AIE compilation pipeline
    - XRT runtime integration
 

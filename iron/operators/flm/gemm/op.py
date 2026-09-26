@@ -316,7 +316,6 @@ class FLMGEMMOverlay(Overlay):
         return Contraction(final_at_release=True)
 
     def design(self, target) -> list:
-        from aie.helpers.util import v8bfp16ebs8  # noqa: F401  (the array type)
         from aie.iron import Buffer, ObjectFifo, Worker
         from aie.iron.controlflow import range_
 
