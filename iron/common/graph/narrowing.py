@@ -179,7 +179,14 @@ class StepCost:
     """One design at one width, measured alone: its time per step while its
     device is configured; one run of one step less that (``D0 + base + load
     + R``); and whether its output is bit-identical to the default width's
-    on the same inputs."""
+    on the same inputs.
+
+    ``each_step_us`` is what a step of it costs dispatched alone right after
+    another design's (:data:`~iron.common.image.packaging.EACH_STEP`): its
+    dispatch, loading its configuration, and its time. That load grows with
+    the array, so no calibration constant stands for it; ``None`` until
+    measured (:func:`~.probe.measure_each_step`).
+    """
 
     t_step_us: float
     alone_us: float
@@ -188,6 +195,7 @@ class StepCost:
     rounds: int
     calls: int
     measured: str  # ISO date
+    each_step_us: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,6 +293,15 @@ class CostTable:
         cost = self.steps.get(key)
         return 0.0 if cost is None else cost.t_step_us
 
+    def entered_us(self, key: str, boundary: Boundary) -> float:
+        """A step of a design dispatched alone after another design's: its
+        measured ``each_step_us``, else its step time with the calibrated
+        dispatch and switch (which undercount a wide array)."""
+        cost = self.steps.get(key)
+        if cost is not None and cost.each_step_us is not None:
+            return cost.each_step_us
+        return self.t_step(key) + boundary.dispatch_us + boundary.base_us
+
     def load(self, key: str) -> float:
         """What configuring a measured design adds to a configure (its full-ELF
         run alone less the calibrated rest); zero for one not measured."""
@@ -370,10 +387,12 @@ def model_us(
         total = 0.0
         previous = None
         for k in keys:
-            total += table.t_step(chosen.get(k, k)) + b.dispatch_us
-            if k != previous:
-                total += b.base_us
-                previous = k
+            width = chosen.get(k, k)
+            entered = table.entered_us(width, b) if k != previous else None
+            total += (
+                entered if entered is not None else table.t_step(width) + b.dispatch_us
+            )
+            previous = k
         return total, len(keys)
     device = {k: i for i, group in enumerate(groups) for k in group}
     members: dict[object, list[str]] = {}

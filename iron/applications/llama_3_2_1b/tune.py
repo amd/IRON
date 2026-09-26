@@ -40,6 +40,7 @@ from iron.common.graph.probe import (
     Timing,
     calibrate,
     calibrate_each_step,
+    measure_each_step,
     measure_steps,
     pmode,
 )
@@ -204,6 +205,23 @@ def main() -> None:
                 f"{cal.dispatch_us:.1f}  R {cal.reset_us:.1f}  base "
                 f"{cal.base_us:.1f}  switch {cal.switch_us:.1f} us"
             )
+    # A step dispatched alone costs its array's configuration each time the
+    # design changes, which grows with the array: measured per design, at the
+    # width a per-step dispatch runs it (its default), against the first pair.
+    if EACH_STEP in allowed:
+        reference = (pairs[0][0].op, pairs[0][1].op)
+        for i, key in enumerate(order):
+            g, op = first[key]
+            default = found[key][0]
+            if not args.remeasure and table.steps[default.key].each_step_us is not None:
+                continue
+            values = per_call_values(g, op, graph_values)
+            inputs = per_call_inputs(g, op, contents)
+            got = measure_each_step(
+                table, [default.op], reference, timing, values=values, inputs=inputs
+            )
+            table.save()
+            print(f"[{i}] {type(op).__name__}: each_step {got[default.key]:8.1f} us")
     table.save()
 
 

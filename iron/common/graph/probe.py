@@ -348,3 +348,57 @@ def calibrate_each_step(
     )
     table.record_calibration((ka, kb), cal)
     return cal
+
+
+def measure_each_step(
+    table: CostTable,
+    ops: Sequence[Operator],
+    reference: tuple[Operator, Operator],
+    timing: Timing = Timing(),
+    pairs: int = 4,
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, float]:
+    """Each design in ``ops`` (already in ``table``), entered by a dispatch of
+    its own right after another design's: its ``each_step_us``.
+
+    A step entered from another design costs ``E`` (its dispatch, its
+    configuration, its time), so two designs alternating ``pairs`` times run
+    ``pairs * (E(a) + E(b))``. Against a fixed reference pair ``r, s``,
+    ``E(v) = (T(v, r) + T(v, s) - T(r, s)) / 2`` per round; the reference
+    designs' own figures follow from the first ``v``. ``values`` and
+    ``inputs`` are :class:`Standalone`'s, for ``ops``.
+    """
+    r, s = reference
+    tag = f"{cost_key(r)}_{cost_key(s)}"
+    rs = Standalone(f"es_ref{pairs}_{tag}", [r, s] * pairs, mode=EACH_STEP)
+    out: dict[str, float] = {}
+    for op in ops:
+        key = cost_key(op)
+        runs = [
+            rs,
+            Standalone(
+                f"es_{key}_r",
+                [op, r] * pairs,
+                values=values,
+                inputs=inputs,
+                mode=EACH_STEP,
+            ),
+            Standalone(
+                f"es_{key}_s",
+                [op, s] * pairs,
+                values=values,
+                inputs=inputs,
+                mode=EACH_STEP,
+            ),
+        ]
+        t_rs, t_vr, t_vs = (
+            t / pairs for t in time_interleaved([x.callable for x in runs], timing)
+        )
+        e_v = (t_vr + t_vs - t_rs) / 2
+        out[key] = e_v
+        for ref, other in ((r, t_vr), (s, t_vs)):
+            out.setdefault(cost_key(ref), other - e_v)
+    for key, e in out.items():
+        table.steps[key] = dataclasses.replace(table.steps[key], each_step_us=e)
+    return out

@@ -10,6 +10,8 @@ where it lowers the modelled time, and a folded design is priced at its
 unfolded twin.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -166,3 +168,27 @@ def test_the_estimate_is_the_twin_width_by_width(tmp_path, npu2):
     twin = variants(t.steps[1].op, npu2)
     assert len(choice.estimated) == len(twin)
     assert np.all([k not in {v.key for v in twin} for k in choice.estimated])
+
+
+def test_a_measured_entry_replaces_the_calibrated_one(tmp_path, npu2):
+    # A wide array's configuration costs more to load than the calibration's
+    # small pair: where a design's each_step entry is measured, the model
+    # takes it, and a repeat of the same design pays only its dispatch.
+    t = _scores()
+    keys = [cost_key(s.op) for s in t.steps]
+    table = _table(
+        tmp_path / "t.json",
+        t,
+        npu2,
+        t_step=dict(Repeat=5.0, GEMV=10.0),
+        load=dict(Repeat=20.0, GEMV=40.0),
+        elf=(50.0, 30.0, 30.0),
+        each_step=(200.0, 0.0, 70.0),
+    )
+    table.record_step(
+        keys[1], dataclasses.replace(table.steps[keys[1]], each_step_us=900.0)
+    )
+    each, _ = model_us(table, keys, mode=EACH_STEP)
+    assert each == pytest.approx((5 + 200 + 70) + 900)
+    twice, _ = model_us(table, keys + [keys[1]], mode=EACH_STEP)
+    assert twice == pytest.approx(each + 10 + 200)
