@@ -14,11 +14,15 @@ in the operator, say -- is discarded and its object never compiled.
 """
 
 import hashlib
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+
+import numpy as np
 
 import aie.utils as aie_utils
 import aie.utils.config
 from aie.iron import ExternalFunction
+from aie.iron.device import Device
 from aie.utils.compile.utils import resolve_target_arch
 
 
@@ -32,14 +36,14 @@ def kernels_dir() -> Path:
     return Path(aie.utils.config.aie_kernels_dir())
 
 
-def target_arch(dev=None) -> str:
+def target_arch(dev: Device | None = None) -> str:
     """``"aie2p"`` for NPU2 (Strix, Krackan), ``"aie2"`` for NPU1 (Phoenix)."""
     return resolve_target_arch(
         dev if dev is not None else aie_utils.get_current_device()
     )
 
 
-def runtime_dir(dev=None) -> Path:
+def runtime_dir(dev: Device | None = None) -> Path:
     """This architecture's ``aie_runtime_lib``: its headers and its tables."""
     return (
         Path(aie.utils.config.root_path())
@@ -48,7 +52,7 @@ def runtime_dir(dev=None) -> Path:
     )
 
 
-def lut_sources(dev=None):
+def lut_sources(dev: Device | None = None) -> tuple[Path, ...]:
     """``lut_based_ops.cpp`` when this arch's kernels need it, else nothing.
 
     aie2's exp/log kernels reference its tables; aie2p's do not. Returned as a
@@ -62,7 +66,14 @@ def lut_sources(dev=None):
     return (runtime_dir(dev) / "lut_based_ops.cpp",)
 
 
-def recipe_digest(name, source, compile_flags, include_dirs, bundled, symbol_prefix):
+def recipe_digest(
+    name: str,
+    source: Path | str,
+    compile_flags: Iterable[str],
+    include_dirs: Iterable[str],
+    bundled: Iterable[Path | str],
+    symbol_prefix: str | None,
+) -> str:
     """Eight hex digits naming what a kernel's object is built from.
 
     The sources by content, not path, so a checkout elsewhere names the same
@@ -79,17 +90,17 @@ def recipe_digest(name, source, compile_flags, include_dirs, bundled, symbol_pre
 
 
 def declare_kernel(
-    name,
-    arg_types,
+    name: str,
+    arg_types: list[type[np.ndarray] | type[np.generic] | np.dtype],
     *,
-    source=None,
-    digest_prefix=True,
-    compile_flags=(),
-    include_dirs=None,
-    object_file_name=None,
-    bundled_sources=(),
-    symbol_prefix=None,
-):
+    source: Path | str | None = None,
+    digest_prefix: bool = True,
+    compile_flags: Sequence[str] = (),
+    include_dirs: Iterable[str] | None = None,
+    object_file_name: str | None = None,
+    bundled_sources: Sequence[Path | str] = (),
+    symbol_prefix: str | None = None,
+) -> ExternalFunction:
     """Declare the kernel a design calls, and how it is built.
 
     ``bundled_sources`` names translation units the kernel needs linked but

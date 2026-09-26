@@ -10,6 +10,7 @@ lowers each transfer to MLIR tasks. The same base serves
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, NamedTuple
 
@@ -17,7 +18,7 @@ import numpy as np
 
 from aie.extras.dialects import arith
 from aie.helpers.util import np_dtype_to_mlir_type
-from aie.iron import TaskGroup, sync_parameters
+from aie.iron import Task, TaskGroup, sync_parameters
 
 from ..declare import (
     BoundBuffer,
@@ -30,6 +31,11 @@ from ..declare import (
 from ..declare.bound import _StreamSlot
 from ..tiling import Access, legalize
 from .target import Target
+
+# What fill/drain issue on: a stream, or one slot of a ``per=`` stream.
+StreamRef = BoundStream | _StreamSlot
+# What fill/drain move: a whole buffer, a slice of one, or one descriptor of it.
+Transferable = BoundBuffer | BufferView | tuple[BoundBuffer, Access]
 
 
 class Transfers:
@@ -153,10 +159,26 @@ class Sequence(Transfers):
 
     # -- transfers ---------------------------------------------------------
 
-    def fill(self, stream, source, *, group=None, wait: bool = False, offset_by=None):
+    def fill(
+        self,
+        stream: StreamRef,
+        source: Transferable,
+        *,
+        group: TaskGroup | None = None,
+        wait: bool = False,
+        offset_by: BoundValue | None = None,
+    ) -> Task | list[Task]:
         return self._transfer(True, stream, source, group, wait, offset_by)
 
-    def drain(self, stream, dest, *, group=None, wait: bool = True, offset_by=None):
+    def drain(
+        self,
+        stream: StreamRef,
+        dest: Transferable,
+        *,
+        group: TaskGroup | None = None,
+        wait: bool = True,
+        offset_by: BoundValue | None = None,
+    ) -> Task | list[Task]:
         return self._transfer(False, stream, dest, group, wait, offset_by)
 
     def _transfer(self, fill: bool, stream, what, group, wait: bool, offset_by=None):
@@ -248,7 +270,7 @@ class Sequence(Transfers):
     # -- structure ---------------------------------------------------------
 
     @contextmanager
-    def group(self):
+    def group(self) -> Iterator[TaskGroup]:
         """Open a task group; transfers issued inside join it; finished on exit."""
         tg = TaskGroup()
         previous, self._group = self._group, tg
@@ -258,11 +280,11 @@ class Sequence(Transfers):
             self._group = previous
             tg.finish()
 
-    def new_group(self):
+    def new_group(self) -> TaskGroup:
         """A task group the caller finishes itself (for hand-rolled pipelines)."""
         return TaskGroup()
 
-    def data(self, buffer: BoundBuffer):
+    def data(self, buffer: BoundBuffer) -> Any:
         """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""
         return self._rt_data[buffer.name]
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from aie.dialects.aie import WireBundle, get_target_model
+from aie.iron.device import Device
 from aie.utils.verify import Tolerance
 
 from .bound import BoundBuffer, BoundResident, BoundStream, BoundValue
@@ -30,11 +31,14 @@ from .order import Order
 from .semantics import Local, Semantics, Undeclared
 
 if TYPE_CHECKING:
+    from aie.ir import Module
+
+    from ..design.runtime import Transfers
     from ..design.target import Target
     from .operator import Operator
 
 
-def get_shim_dma_limit(dev) -> int:
+def get_shim_dma_limit(dev: Device) -> int:
     """Return the total number of ShimDMA output channels available on the device.
 
     Each shim tile exposes a fixed number of DMA source connections; summing
@@ -71,7 +75,7 @@ class Overlay:
     # -- placement ---------------------------------------------------------
 
     @classmethod
-    def shim_columns(cls, dev, num_channels: int = 1) -> int:
+    def shim_columns(cls, dev: Device, num_channels: int = 1) -> int:
         """How many of ``dev``'s columns this overlay's shim budget allows.
 
         One core per (column, channel) fills one fifo per input stream from
@@ -89,7 +93,7 @@ class Overlay:
         limit = get_shim_dma_limit(dev)
         return max(1, min(dev.cols, (limit - fixed) // cost))
 
-    def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
+    def check_shim_columns(self, dev: Device, cols: int, num_channels: int = 1) -> None:
         """Raise :class:`Untunable` if ``cols`` exceeds the shim budget."""
         allowed = type(self).shim_columns(dev, num_channels)
         if cols > allowed:
@@ -108,7 +112,7 @@ class Overlay:
             f"{type(self).__name__} declares an Xclbin but no prebuilt()"
         )
 
-    def build(self, dev, op: "Operator"):
+    def build(self, dev: Device, op: "Operator") -> "Module":
         """The MLIR module for ``op`` on this overlay, when ``design()`` does
         not build the array: a runtime sequence against the prebuilt image."""
         raise NotImplementedError(
@@ -117,7 +121,7 @@ class Overlay:
 
     # -- the sequence, when the overlay owns it -----------------------------
 
-    def sequence(self, op: "Operator", rt) -> None:
+    def sequence(self, op: "Operator", rt: "Transfers") -> None:
         """The runtime sequence for ``op`` on this overlay, when the overlay
         rather than the operator knows it: a external image consumes its
         transfers in the order it was built for, whatever operator drives it.
@@ -153,7 +157,7 @@ class Overlay:
     def validate(self) -> None:
         """Check the compile-time fields. Runs at construction and after tuning."""
 
-    def tuning(self, dev) -> "Overlay":
+    def tuning(self, dev: Device) -> "Overlay":
         """Return a copy with every tunable filled for ``dev``; raise :class:`Untunable`.
 
         Sees the device and nothing else, so a tuned overlay serves every
@@ -161,7 +165,7 @@ class Overlay:
         """
         return self
 
-    def device(self, target):
+    def device(self, target: "Target") -> Device:
         """The device the Program is built for; the current device by default.
 
         An overlay that builds for a column subset (gemm's NPU1Col1/NPU1Col2)
@@ -224,7 +228,7 @@ class Overlay:
 
     # -- library surface ---------------------------------------------------
 
-    def tuned(self, dev) -> "Overlay":
+    def tuned(self, dev: Device) -> "Overlay":
         if self._tuned:
             return self
         new = self.tuning(dev)
@@ -244,7 +248,7 @@ class Overlay:
         new._bind()
         return new
 
-    def for_extent(self, **overrides) -> "Overlay":
+    def for_extent(self, **overrides: Any) -> "Overlay":
         """A specialised copy: tunables set for one extent, at the cost of sharing."""
         bad = [k for k in overrides if k not in self._tunable_fields]
         if bad:

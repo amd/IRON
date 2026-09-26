@@ -26,8 +26,9 @@ import functools
 import hashlib
 import inspect
 import re
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aie
 import aie.utils as aie_utils
@@ -39,6 +40,9 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_con
 from aie.utils.compile.jit.markers import CompileTime
 
 from ..declare import Operator
+
+if TYPE_CHECKING:
+    from ..design.generator import DesignGenerator
 
 # Flags the fused full-ELF build needs. --expand-load-pdis is what makes a
 # multi-device runlist switch PDIs between steps; --get-scratchpad-parameters
@@ -105,7 +109,7 @@ def _params_key(kwargs: dict) -> str:
     return repr(items)
 
 
-def design_identity(generator) -> str:
+def design_identity(generator: "DesignGenerator") -> str:
     """What a design generates from: its function's code and its parameters.
 
     The two things :func:`_design_generator` puts in a standalone build's
@@ -147,7 +151,7 @@ def _generator_trees_digest() -> str:
     return h.hexdigest()
 
 
-def source_digest(files=()) -> str:
+def source_digest(files: Iterable[Path | str] = ()) -> str:
     """A digest of the source that generates MLIR: the trees every design
     shares (:data:`_GENERATOR_TREES`), and ``files`` besides.
 
@@ -279,7 +283,10 @@ def _bind_device() -> None:
 
 
 def fused_design(
-    build_mlir, identity: str, extra_flags=(), trace_size=0
+    build_mlir: Callable[[], str],
+    identity: str,
+    extra_flags: Iterable[str] = (),
+    trace_size: int = 0,
 ) -> CompilableDesign:
     """A sequence's fused full ELF, compiled (or found) in the JIT cache.
 
@@ -315,7 +322,9 @@ def _resolved(generator):
     return design_fn, kwargs
 
 
-def insts_design(generator, extra_flags=()) -> CompilableDesign:
+def insts_design(
+    generator: "DesignGenerator", extra_flags: Iterable[str] = ()
+) -> CompilableDesign:
     """One design's instruction stream alone, against an image built elsewhere.
 
     The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
@@ -349,7 +358,10 @@ class DispatchStream:
 
 
 def xclbin_design(
-    generator, kernel_name: str, xclbin_input=None, extra_flags=()
+    generator: "DesignGenerator",
+    kernel_name: str,
+    xclbin_input: Path | str | None = None,
+    extra_flags: Iterable[str] = (),
 ) -> CompilableDesign:
     """One operator's design as an xclbin and its instruction stream.
 

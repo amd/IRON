@@ -43,7 +43,7 @@ offset, the same in every image, and each image's *transients* are planned
 around them, free to reuse the bytes of any other image's transients.
 """
 
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Container, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
@@ -89,7 +89,7 @@ class Allocation:
         return self.offset < other.end and other.offset < self.end
 
 
-def live_ranges(steps, pinned=()):
+def live_ranges(steps: Steps, pinned: Container[str] = ()) -> dict[str, LiveRange]:
     """Map every poolable buffer to the step interval it must stay live for.
 
     ``steps`` is an iterable of ``(reads, writes)`` buffer names, in execution
@@ -151,7 +151,12 @@ def touch_ranges(steps: Steps, names: Iterable[str]) -> dict[str, LiveRange]:
     }
 
 
-def place(ranges, sizes, alignment=64, fixed: Iterable[Allocation] = ()):
+def place(
+    ranges: Mapping[str, LiveRange],
+    sizes: Mapping[str, int],
+    alignment: int = 64,
+    fixed: Iterable[Allocation] = (),
+) -> tuple[dict[str, Allocation], int]:
     """Assign pool offsets. Returns ``(allocations, pool_bytes)``.
 
     Greedy by size descending; each buffer takes the lowest offset that clears
@@ -192,7 +197,7 @@ def place(ranges, sizes, alignment=64, fixed: Iterable[Allocation] = ()):
     return allocations, pool_bytes
 
 
-def peak_live_bytes(ranges, sizes):
+def peak_live_bytes(ranges: Mapping[str, LiveRange], sizes: Mapping[str, int]) -> int:
     """Total bytes simultaneously live at the worst step: the lower bound.
 
     Known as LOAD in the Dynamic Storage Allocation literature (max weighted

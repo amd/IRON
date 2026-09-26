@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import urllib.request
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -37,11 +38,13 @@ from ml_dtypes import bfloat16
 from aie.dialects import aie, aiex
 from aie.dialects.aie import DMAChannelDir, get_target_model
 from aie.extras.context import mlir_mod_ctx
-from aie.ir import BF16Type, F32Type, IntegerType, MemRefType
+from aie.ir import BF16Type, F32Type, IntegerType, MemRefType, Module
+from aie.iron.device import Device
 from aie.utils.compile import NPU_CACHE_HOME
 
 from .design import Transfers
-from .declare import BoundBuffer, BoundStream, Operator, Overlay
+from .design.runtime import StreamRef, Transferable
+from .declare import BoundBuffer, BoundStream, BoundValue, Operator, Overlay, Xclbin
 from .declare.bound import _StreamSlot
 from .tiling import Access
 
@@ -62,17 +65,35 @@ class ExternalSequence(Transfers):
     transfer to words for a downloaded image instead of MLIR tasks.
     """
 
-    def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any], emit):
+    def __init__(
+        self, op: Operator, ov: Overlay, rt_data: dict[str, Any], emit: _MLIREmitter
+    ):
         super().__init__(op, ov, rt_data)
         self._emit = emit
         self._queues: dict[tuple[str, int], list] = {}
 
     # -- transfers ---------------------------------------------------------
 
-    def fill(self, stream, source, *, group=None, wait=False, offset_by=None):
+    def fill(
+        self,
+        stream: StreamRef,
+        source: Transferable,
+        *,
+        group: _NoGroup | None = None,
+        wait: bool = False,
+        offset_by: BoundValue | None = None,
+    ) -> None:
         self._transfer(stream, source, offset_by)
 
-    def drain(self, stream, dest, *, group=None, wait=True, offset_by=None):
+    def drain(
+        self,
+        stream: StreamRef,
+        dest: Transferable,
+        *,
+        group: _NoGroup | None = None,
+        wait: bool = True,
+        offset_by: BoundValue | None = None,
+    ) -> None:
         self._transfer(stream, dest, offset_by)
 
     def _transfer(self, stream, what, offset_by) -> None:
@@ -129,17 +150,19 @@ class ExternalSequence(Transfers):
     # -- structure (no-ops: the queues above are the only ordering) ----------
 
     @contextmanager
-    def group(self):
+    def group(self) -> Iterator[_NoGroup]:
         yield _NoGroup()
 
-    def new_group(self):
+    def new_group(self) -> _NoGroup:
         return _NoGroup()
 
-    def data(self, buffer: BoundBuffer):
+    def data(self, buffer: BoundBuffer) -> Any:
         return self._rt_data[buffer.name]
 
 
-def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
+def write_residents(
+    op: Operator, ov: Overlay, core_tiles: list[tuple[int, int]], emit: _MLIREmitter
+) -> None:
     """Write every resident's words into every core, then release the locks.
 
     A resident's value may be one word or a sequence of words written at
@@ -173,7 +196,13 @@ def write_residents(op: Operator, ov: Overlay, core_tiles, emit) -> None:
                 emit.write32(LOCK_ADDRESS_BASE + 16 * res.lock, 1, col, row)
 
 
-def run_sequence(op: Operator, ov: Overlay, rt_data, core_tiles, emit) -> None:
+def run_sequence(
+    op: Operator,
+    ov: Overlay,
+    rt_data: dict[str, Any],
+    core_tiles: list[tuple[int, int]],
+    emit: _MLIREmitter,
+) -> None:
     """Residents, then the operator's sequence, then the trailing awaits."""
     write_residents(op, ov, core_tiles, emit)
     seq = ExternalSequence(op, ov, rt_data, emit)
@@ -220,7 +249,7 @@ class _MLIREmitter:
         aiex.dma_await_task(task)
 
 
-def fetch(image, directory=None) -> Path:
+def fetch(image: Xclbin, directory: Path | str | None = None) -> Path:
     """The downloaded image, by digest: fetched unless a file of the pinned
     content is already there.
 
@@ -253,7 +282,7 @@ def fetch(image, directory=None) -> Path:
     return target
 
 
-def build_external(dev, op: Operator):
+def build_external(dev: Device, op: Operator) -> Module:
     """The module whose runtime sequence drives ``op.ov``'s downloaded image."""
     ov = op.ov
     tm = get_target_model(dev.resolve())
@@ -308,5 +337,5 @@ class External:
     def prebuilt(self) -> Path:
         return fetch(self.external)
 
-    def build(self, dev, op: Operator):
+    def build(self, dev: Device, op: Operator) -> Module:
         return build_external(dev, op)

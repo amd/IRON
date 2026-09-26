@@ -12,6 +12,7 @@ tested at, is :mod:`iron.common.testing`, which imports no pytest.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Collection
 from typing import NamedTuple
 
 import numpy as np
@@ -34,7 +35,15 @@ class Vectors:
         return self.inputs[name] if name in self.inputs else self.outputs[name]
 
 
-def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vectors:
+def vectors(
+    op: Operator,
+    *,
+    seed: int = 42,
+    scale: float = 4.0,
+    normal: Collection[str] = (),
+    centered: Collection[str] = (),
+    **given: np.ndarray | tuple[int, ...],
+) -> Vectors:
     """Random inputs for ``op``'s declared buffers, and its reference's outputs.
 
     Not a golden model: the expected outputs are ``op.reference()`` on the
@@ -206,8 +215,8 @@ class Run(NamedTuple):
 
 def run_test(
     operator: Operator,
-    inputs,
-    outputs=None,
+    inputs: Vectors | dict[str, np.ndarray],
+    outputs: dict[str, np.ndarray | None] | None = None,
     *,
     rel_tol: float = 0.04,
     abs_tol: float = 1e-6,

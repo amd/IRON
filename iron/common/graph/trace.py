@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable
+from typing import Any, Protocol
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -18,21 +19,30 @@ from ..declare import BoundValue, Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
-from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
+from .handle import (
+    Affine,
+    Carry,
+    Handle,
+    HostTensor,
+    State,
+    Value,
+    _tensor_dtype,
+    is_operand,
+)
 
-_STACK: list = []
+_STACK: list[Tracer] = []
 
 
 def _as_affine(value: Value | Affine) -> Affine:
     return value.affine() if isinstance(value, Value) else value
 
 
-def current():
+def current() -> Tracer | None:
     """The tracer a graph function is being traced under, or ``None``."""
     return _STACK[-1] if _STACK else None
 
 
-def handle_of(x):
+def handle_of(x: State | HostTensor) -> Handle | State | HostTensor:
     """What a graph function sees for an array or state it closes over.
 
     Slicing a closed-over numpy array makes a new array, which would trace
@@ -131,7 +141,7 @@ class TracedGraph:
     def output_args(self) -> list:
         return [h.name for h in self.outputs]
 
-    def sequence(self, name=None, **kwargs):
+    def sequence(self, name: str | None = None, **kwargs: Any) -> OperatorSequence:
         """The :class:`OperatorSequence` this graph lowers to (the image builder)."""
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
         kwargs.setdefault("share_designs", True)
@@ -179,10 +189,17 @@ class TracedGraph:
         return list(seen.values())
 
 
+class NamedParameters(Protocol):
+    """What names a graph's weights: a torch module, or anything that lists
+    ``(name, tensor)`` pairs the same way."""
+
+    def named_parameters(self) -> Iterable[tuple[str, object]]: ...
+
+
 class Tracer:
     """Records operator calls on handles while a graph function runs."""
 
-    def __init__(self, name: str, names_from=None):
+    def __init__(self, name: str, names_from: NamedParameters | None = None):
         self.name = name
         self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
@@ -204,7 +221,7 @@ class Tracer:
 
     # -- operands ---------------------------------------------------------
 
-    def operand(self, x) -> Handle:
+    def operand(self, x: Handle | State | HostTensor) -> Handle:
         if isinstance(x, Handle):
             return x
         if isinstance(x, State):
@@ -226,7 +243,12 @@ class Tracer:
 
     # -- calls -------------------------------------------------------------
 
-    def call(self, target, args, kwargs):
+    def call(
+        self,
+        target: type[Operator] | Operator,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Handle | tuple[Handle, ...] | None:
         """Record ``target(*args, **kwargs)``.
 
         ``args`` are the operator's inputs, optionally followed by its
@@ -389,7 +411,11 @@ class Tracer:
     # -- the result ----------------------------------------------------------
 
     def finish(
-        self, inputs, outputs, values, carry: Carry | None = None
+        self,
+        inputs: list[Handle],
+        outputs: list[Handle],
+        values: list[Value],
+        carry: Carry | None = None,
     ) -> TracedGraph:
         carry = dict(carry or {})
         returned = list(outputs)

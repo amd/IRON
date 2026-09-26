@@ -16,17 +16,20 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.iron.device import Device
 from aie.utils import bfp
+from aie.utils.hostruntime.tensor_class import Tensor
 
 from ..declare import Operator, ValueSpec
 from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
-from ..image.callable import FullELFRun, ScratchArena
+from ..image.callable import FullELFRun, ScratchArena, SequenceCallable
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
@@ -38,9 +41,9 @@ from .carried import (
     compose,
     read_parameters,
 )
-from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype
+from .handle import Affine, Carry, Handle, HostTensor, State, Value, _tensor_dtype
 from .narrowing import JointNarrowing, Tuning
-from .trace import TracedGraph, Tracer, _ReferenceTracer
+from .trace import NamedParameters, TracedGraph, Tracer, _ReferenceTracer
 
 # One (parameter, shape, dtype name) per input: what picks a version.
 Signature = tuple[tuple[str, tuple[int, ...], str], ...]
@@ -91,7 +94,12 @@ def _store(
 class GraphFunction:
     """A function decorated with :func:`graph`."""
 
-    def __init__(self, fn, names_from=None, verbose=False):
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        names_from: NamedParameters | None = None,
+        verbose: bool = False,
+    ):
         self.fn = fn
         self.names_from = names_from
         # Whether a call that compiles a version says so and prints its plan.
@@ -156,7 +164,7 @@ class GraphFunction:
 
     # -- tracing ---------------------------------------------------------------
 
-    def trace(self, **shapes) -> TracedGraph:
+    def trace(self, **shapes: Any) -> TracedGraph:
         """Run the function on handles of the given shapes; return the graph.
 
         An optional input given no shape (or None) is absent: the function
@@ -264,15 +272,15 @@ class GraphFunction:
 
     def compile(
         self,
-        dev=None,
+        dev: Device | None = None,
         *,
-        boundaries=None,
-        image=None,
-        verbose=False,
-        record="memory",
+        boundaries: str | None = None,
+        image: str | None = None,
+        verbose: bool = False,
+        record: str = "memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
-        **shapes,
+        **shapes: Any,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
 
@@ -369,7 +377,7 @@ class GraphFunction:
             raise TypeError(f"{self.__name__}: inputs {missing} missing")
         return given
 
-    def __call__(self, *tensors, **values):
+    def __call__(self, *tensors: HostTensor | None, **values: int) -> Any:
         given = self._given(tensors)
         signature = tuple(
             (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
@@ -385,7 +393,7 @@ class GraphFunction:
             version = self.compile(verbose=self.verbose, **shapes)
         return version(*given.values(), **values)
 
-    def reference(self, *tensors, **values):
+    def reference(self, *tensors: HostTensor | None, **values: int) -> Any:
         """The same function, each operator run through its ``reference()``.
 
         Returns what a call returns: the outputs, then the next values of
@@ -412,7 +420,7 @@ class CompiledGraph:
         self,
         traced: TracedGraph,
         plan: Plan,
-        record="memory",
+        record: str = "memory",
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
@@ -448,7 +456,7 @@ class CompiledGraph:
         self._loaded: set = set() if arena is None else arena.loaded
 
     @property
-    def callable(self):
+    def callable(self) -> SequenceCallable:
         """The loaded image, made on first use (needs the XRT runtime)."""
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
@@ -477,7 +485,7 @@ class CompiledGraph:
             return self.traced.weights[id(x)][1].name
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
 
-    def buffer(self, x):
+    def buffer(self, x: State | Handle | HostTensor) -> Tensor:
         """The device buffer of a state, a weight tensor, or a handle."""
         return self.callable.get_buffer(self._buffer_name(x))
 
@@ -489,13 +497,13 @@ class CompiledGraph:
             return self.callable.get_buffer(name)
         return self.callable.get_storage(name)
 
-    def write(self, x, tensor) -> None:
+    def write(self, x: State | Handle | HostTensor, tensor: HostTensor) -> None:
         """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
         buf = self._storage(x)
         _store(buf.numpy_view()[: int(np.prod(x.shape))], tensor)
         buf.to("npu")
 
-    def read(self, x):
+    def read(self, x: State | Handle | HostTensor) -> np.ndarray:
         """A state's or weight's current contents, as a host tensor of its shape."""
         buf = self._storage(x)
         buf.to("cpu")
@@ -548,7 +556,7 @@ class CompiledGraph:
 
     # -- calling ---------------------------------------------------------------
 
-    def __call__(self, *tensors, **values):
+    def __call__(self, *tensors: HostTensor, **values: int) -> Any:
         self._stage(tensors, values)
         self.callable()
         outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
@@ -556,7 +564,7 @@ class CompiledGraph:
             return _results(outputs, None)
         return _results(outputs, self._next_values(values))
 
-    def start(self, run: FullELFRun, /, *tensors, **values) -> None:
+    def start(self, run: FullELFRun, /, *tensors: HostTensor, **values: int) -> None:
         """Start a call of this full ELF on ``run`` (one of its callable's
         :meth:`~iron.common.image.callable.SequenceFullELFCallable.new_run`),
         without waiting for it."""
@@ -648,7 +656,7 @@ def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
     handle.name, handle.role = name, "output"
 
 
-def _results(outputs: list, carry: Carry | None):
+def _results(outputs: list, carry: Carry | None) -> Any:
     """A call's return, shaped as the function's: one output alone, several
     as a tuple, and the carry last."""
     items = list(outputs) + ([] if carry is None else [carry])
@@ -657,7 +665,12 @@ def _results(outputs: list, carry: Carry | None):
     return items[0] if len(items) == 1 else tuple(items)
 
 
-def graph(fn=None, *, names_from=None, verbose=False):
+def graph(
+    fn: Callable[..., Any] | None = None,
+    *,
+    names_from: NamedParameters | None = None,
+    verbose: bool = False,
+) -> GraphFunction | Callable[[Callable[..., Any]], GraphFunction]:
     """Declare a graph function; see the module docstring.
 
     Under ``verbose``, a call that compiles a version says so and prints the

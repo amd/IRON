@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABCMeta
-from typing import Any, ClassVar, Generic, TypeVar
-
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 import aie.utils as aie_utils
+from aie.iron.device import Device
 from aie.utils.npukernel import NPUKernel
 from aie.utils.verify import Tolerance
-
 
 from ..image.artifacts import Artifacts, Design, Step
 from ..kernels import kernels_dir
@@ -31,6 +31,10 @@ from .member import _Buffer, _Member, _Value
 from .naming import label_parts
 from .order import Order, derived
 from .overlay import Overlay
+
+if TYPE_CHECKING:
+    from ..design.generator import DesignGenerator
+    from ..graph import Handle
 
 O = TypeVar("O", bound=Overlay)
 
@@ -159,7 +163,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         """An explicit device symbol for a per-call value, or ``None`` for the default."""
         return None
 
-    def design_key(self):
+    def design_key(self) -> tuple:
         """Identity for sharing a build: the class, the overlay's key, every compared field.
 
         Two operators with equal keys generate byte-identical MLIR, so a
@@ -175,7 +179,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             ),
         )
 
-    def tuned(self, dev) -> "Operator":
+    def tuned(self, dev: Device) -> "Operator":
         """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""
         ov = self.ov.tuned(dev).copy()
         new = dataclasses.replace(self, ov=ov)
@@ -240,7 +244,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         """
         return cls
 
-    def __call__(self, *args, **kwargs):
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> "Handle | tuple[Handle, ...] | None":
         """An explicit instance applied to graph handles records a step."""
         from .. import graph as _graph  # as above
 
@@ -264,7 +270,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     # -- construction from operand shapes ----------------------------------
 
     @classmethod
-    def from_operands(cls, *operand_shapes, **overrides) -> "Operator":
+    def from_operands(
+        cls, *operand_shapes: tuple[int, ...], **overrides: Any
+    ) -> "Operator":
         """Construct an operator (and its overlay) from operand shapes."""
         values = infer(cls, *operand_shapes, **infer_kwargs(cls, overrides))
         kwargs = {**overrides, **values}
@@ -284,7 +292,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     # -- the image of one operator on its own -------------------------------
 
     @property
-    def dev(self):
+    def dev(self) -> Device:
         """The device a design is generated for, bound as the current one.
 
         Bound rather than merely inferred: the ``aie.iron.kernels`` factories
@@ -309,7 +317,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
 
-    def generator(self, image: str = "elf"):
+    def generator(self, image: str = "elf") -> "DesignGenerator":
         """The design generator :class:`CompilableDesign` runs for this operator.
 
         An override point, not a forwarder: an operator whose design is
@@ -391,7 +399,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(self.buffers)},
         )
 
-    def get_callable(self):
+    def get_callable(self) -> Callable[..., Any]:
         """The loaded image, ready to call on device tensors."""
         self.compile()
         image = self.ov.external
