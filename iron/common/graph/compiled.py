@@ -27,10 +27,12 @@ from ..declare import ValueSpec
 from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
 from ..image.callable import ScratchArena
+from ..declare import Operator
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Plan, plan
 from ..image.sequence import ALIGNMENT
 from .handle import Handle, State, Value, _tensor_dtype
+from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
 # One (parameter, shape, dtype name) per input: what picks a version.
@@ -179,7 +181,7 @@ class GraphFunction:
         image=None,
         verbose=False,
         record="memory",
-        coresident: AdjacentPacking | None = None,
+        coresident: AdjacentPacking | JointNarrowing | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -189,7 +191,9 @@ class GraphFunction:
         ``verbose``, printed. ``record="disk"`` writes the image's
         :class:`~iron.common.image.artifacts.Artifacts` record beside it.
         ``coresident`` packs designs into shared device configurations
-        (:mod:`iron.common.image.coresidence`); a full ELF only.
+        (:mod:`iron.common.image.coresidence`); a full ELF only. A
+        :class:`~.narrowing.JointNarrowing` also narrows designs so that
+        they fit; what it chose is the version's :attr:`CompiledGraph.tuning`.
 
         A full-ELF version is placed in :attr:`arena`, with the weights and
         states of every other version. Compile every version before the
@@ -199,6 +203,11 @@ class GraphFunction:
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
+        tuning = None
+        groups: AdjacentPacking | list[list[Operator]] | None = coresident
+        if isinstance(coresident, JointNarrowing):
+            tuning = coresident.tune(traced, aie_utils.get_current_device())
+            traced, groups = tuning.apply(traced)
         chosen = plan(
             aie_utils.get_current_device().resolve().name, traced, boundaries, image
         )
@@ -222,7 +231,8 @@ class GraphFunction:
             chosen,
             record=record,
             arena=self._arena if shared else None,
-            coresident=coresident,
+            coresident=groups,
+            tuning=tuning,
         )
         self._versions[signature] = version
         return version
@@ -266,11 +276,13 @@ class CompiledGraph:
         plan: Plan,
         record="memory",
         arena: ScratchArena | None = None,
-        coresident: AdjacentPacking | None = None,
+        coresident: AdjacentPacking | list[list[Operator]] | None = None,
+        tuning: Tuning | None = None,
     ):
         self.traced = traced
         self.plan = plan
         self.arena = arena
+        self.tuning = tuning
         # (graph value name, device symbol, dtype) per bound value.
         self.symbols = [
             (b.value.name, b.symbol, b.value.dtype) for b in traced.bindings
@@ -281,7 +293,7 @@ class CompiledGraph:
         placement = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
-        if coresident is not None:
+        if coresident:
             placement["coresident"] = coresident
         self.sequence = traced.sequence(dispatch=plan.dispatch, **placement).compile(
             record=record

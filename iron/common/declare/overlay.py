@@ -257,6 +257,24 @@ class Overlay:
         }
 
     @property
+    def widths(self) -> tuple[str, ...]:
+        """The settable tunables a ``per=`` stream's count is a product of:
+        how many shim channels, and cores behind them, the array takes. A
+        narrower array leaves the rest of the device to another design. A
+        tunable the overlay fixes (``init=False``) is not one."""
+        settable = {f.name for f in dataclasses.fields(self) if f.init}
+        names: list[str] = []
+        for stream in self.streams.values():
+            for ref in stream.member.per or ():
+                if (
+                    ref.name in self._tunable_fields
+                    and ref.name in settable
+                    and ref.name not in names
+                ):
+                    names.append(ref.name)
+        return tuple(names)
+
+    @property
     def residents(self) -> dict[str, BoundResident]:
         return {
             m.name: self._bound[m.name]
