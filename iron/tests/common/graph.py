@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import DispatchTime, Scratchpad
-from iron.common.graph import Handle, TracedGraph
+from iron.common.graph import Affine, Handle, TracedGraph
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV, GEMVOverlay
@@ -196,7 +196,7 @@ def test_binding_two_handles_to_one_instance_is_an_error():
         y = copy(x, out_offset=a)
         return copy(y, out_offset=b)
 
-    with pytest.raises(ValueError, match="bound to Value\\('a'"):
+    with pytest.raises(ValueError, match=r"bound to Affine\(a\)"):
         two.trace(x=(64,))
 
 
@@ -318,6 +318,7 @@ def test_llama_decode_traces_and_tunes():
     L = 256
     t = LlamaGraph(cfg, L).trace(cfg, 1)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
+    gathers = ["StridedCopy", "StridedCopy"]  # the token's embedding, its angles
     per_block = [
         "WeightedRMSNorm",
         "GEMV",
@@ -344,23 +345,28 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "ElementwiseAdd",
     ]
-    assert kinds == per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
-    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    # One function, so every version takes every value; one token binds two.
-    assert [v.name for v in t.values] == ["cache_offset", "vector_size", "last"]
-    assert {b.value.name for b in t.bindings} == {"cache_offset", "vector_size"}
+    assert kinds == gathers + per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
+    # A token takes no tensor: its rows are gathered from the tables.
+    assert t.input_args == [] and t.output_args == ["out"]
+    assert [v.name for v in t.values] == ["token", "position"]
+    embedding, angles = t.steps[0].op, t.steps[1].op
+    by_op = {id(b.op): b for b in t.bindings}
+    assert by_op[id(embedding)].expression == Affine(t.values[0], cfg.emb_dim)
+    assert by_op[id(angles)].expression == Affine(t.values[1], cfg.head_dim)
+    assert embedding.ov is angles.ov  # one design, back to back
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.attn.q.weight" in t.pinned and "keys_cache_0" in t.pinned
     assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
-    # One strided copy instance per layer is bound to cache_offset on both of
-    # its call sites; every softmax binds vector_size on its overlay.
-    copies = [
-        (b.op, b.member.name) for b in t.bindings if b.value.name == "cache_offset"
-    ]
-    assert len(copies) == cfg.n_layers * 2 and all(n == "out_offset" for _, n in copies)
-    softmaxes = [b.op for b in t.bindings if b.value.name == "vector_size"]
+    # One strided copy instance per layer writes the row at the position, on
+    # both of its call sites; every softmax sees position + 1 keys.
+    position = t.values[1]
+    copies = [b for b in t.bindings if b.member.name == "out_offset"]
+    assert len(copies) == cfg.n_layers * 2
+    assert {b.expression for b in copies} == {Affine(position, cfg.head_dim)}
+    softmaxes = [b for b in t.bindings if b.member.name == "vector_size"]
     assert len(softmaxes) == cfg.n_layers
-    assert type(softmaxes[0].ov).__name__ == "DynamicSoftmaxOverlay"
+    assert {b.expression for b in softmaxes} == {Affine(position, 1, 1)}
+    assert type(softmaxes[0].op.ov).__name__ == "DynamicSoftmaxOverlay"
     # The same array serves every layer's like projections.
     q_ovs = {
         id(s.op.ov)
@@ -407,24 +413,29 @@ def test_llama_prompt_traces_over_the_same_caches():
     ]
     tail = ["StridedCopy", "WeightedRMSNorm", "GEMV"]
     assert kinds == per_block * cfg.n_layers + tail
-    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    assert [v.name for v in t.values] == ["cache_offset", "vector_size", "last"]
+    assert t.input_args == ["x"] and t.output_args == ["out"]
+    assert [v.name for v in t.values] == ["token", "position"]
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
     token = g.trace(cfg, 1)
     assert set(t.states) == set(token.states)
     assert t.residents["keys_cache_0"] == token.residents["keys_cache_0"]
+    # A prompt's MHA takes no scale table. Both versions read the same RoPE
+    # table, and the embedding a token gathers from is the tied output head.
     assert set(t.weights) == set(token.weights) - {id(g.scale)}
+    assert {id(g.rope), id(cfg.weights.embedding)} <= set(t.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
     gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
     assert all(op.ov.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
-    # The last-row copy is the one operator bound to the per-call offset.
+    # The last-row copy is the one operator bound to a per-call value: the
+    # position of the last prompt row, in elements.
     assert [(type(b.op).__name__, b.member.name) for b in t.bindings] == [
         ("StridedCopy", "in_offset")
     ]
+    assert t.bindings[0].expression == Affine(t.values[1], cfg.emb_dim)
     for op in t.operators:
         op.tuned(aie_utils.get_current_device())
 
@@ -449,3 +460,50 @@ def test_a_bound_value_survives_tuning():
     assert [v.name for v in copy.tuned(aie_utils.get_current_device()).values] == [
         "out_offset"
     ]
+
+
+def _row_copy(n, rows):
+    """A copy of one ``n``-element row out of a ``(rows, n)`` table."""
+    return StridedCopy(
+        input_sizes=(n,),
+        input_strides=(1,),
+        input_offset=0,
+        output_sizes=(n,),
+        output_strides=(1,),
+        output_offset=0,
+        input_buffer_size=rows * n,
+        output_buffer_size=n,
+    )
+
+
+def test_integer_arithmetic_on_a_value_binds_an_expression():
+    table = np.arange(4 * 64, dtype=np.int32).astype(bfloat16).reshape(4, 64)
+    copy = _row_copy(64, 4)
+
+    @iron.graph
+    def row(*, r: Scratchpad[np.int32]):
+        return copy(table, in_offset=(r + 1) * 64)
+
+    t = row.trace()
+    (binding,) = t.bindings
+    assert binding.expression == Affine(t.values[0], 64, 64)
+    assert binding.expression.evaluate({"r": 2}) == 192
+    np.testing.assert_array_equal(row.reference(r=2), table[3])
+    with pytest.raises(TypeError, match="unsupported operand"):
+        t.values[0] * 0.5
+
+
+def test_an_optional_input_gives_a_version_without_it():
+    table = np.ones((4, 64), dtype=bfloat16)
+    gather, add = _row_copy(64, 4), ElementwiseAdd(size=64)
+
+    @iron.graph
+    def f(x=None, *, r: Scratchpad[np.int32]):
+        y = gather(table, in_offset=r * 64)
+        return y if x is None else add(x, y)
+
+    assert f.trace().input_args == []
+    assert f.trace(x=(64,)).input_args == ["x"]
+    x = np.full(64, 2, dtype=bfloat16)
+    np.testing.assert_array_equal(f.reference(r=1), table[1])
+    np.testing.assert_array_equal(f.reference(x, r=1), table[1] + x)

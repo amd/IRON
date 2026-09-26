@@ -3,14 +3,15 @@
 
 """Llama as one graph function over one set of weights and caches.
 
-:class:`LlamaGraph` holds ``forward(x, angles, *, cache_offset, vector_size,
-last)``: ``x`` is the embedded tokens, ``(rows, emb_dim)``, and the function
-branches on its static shape. One row is a decode step: GEMV projections,
-attention against the KV caches, the row written into them at
-``cache_offset``, the softmax masked to ``vector_size`` keys. Many rows are
-a prompt: GEMM projections, causal MHA over the rows, the caches written in
-full from row zero, and the final norm and output head for row ``last``
-alone. Both end in the same norm and head.
+:class:`LlamaGraph` holds ``forward(x=None, *, token, position)``. Given
+``x``, the embedded tokens of a prompt, ``(rows, emb_dim)``, it is a prompt:
+GEMM projections, causal MHA over the rows, the caches written in full from
+row zero, and the final norm and output head for row ``position`` alone.
+Without ``x`` it is a decode step on ``token`` at ``position``: the token's
+embedding row and the position's RoPE row gathered on the device, GEMV
+projections, attention against the KV caches, the row written into them at
+the position, the softmax masked to the ``position + 1`` keys so far. Both
+end in the same norm and head.
 
 Each shape compiles its own version of the one function, and every version
 runs in the function's one scratch arena (:mod:`iron.common.graph.compiled`):
@@ -36,6 +37,7 @@ import aie.utils as aie_utils
 
 import iron
 from iron.common.declare import Scratchpad
+from iron.common.graph import Value, handle_of
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm.op import GEMM
@@ -48,6 +50,22 @@ from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.operators.strided_copy import StridedCopy
 from iron.operators.transpose import Transpose
+
+from .weights import LlamaWeights
+
+
+class _Parameters:
+    """The names the tracer gives the arrays ``forward`` closes over: the
+    checkpoint's weights under theirs, and the tables derived from the
+    config under the given ones."""
+
+    def __init__(self, weights: LlamaWeights, **tables: np.ndarray):
+        self.weights = weights
+        self.tables = tables
+
+    def named_parameters(self):
+        yield from self.weights.named_parameters()
+        yield from self.tables.items()
 
 
 class LlamaGraph:
@@ -92,7 +110,10 @@ class LlamaGraph:
         ]
         # 1/sqrt(head_dim) over every score, as the elementwise multiply wants it.
         self.scale = np.full((H, L), 1.0 / math.sqrt(D), dtype=bfloat16)
-        keys, values, scale = self.keys, self.values, self.scale
+        # The RoPE table, one row per position, in the images' dtype: a prompt
+        # reads its first rows, a decode step gathers its position's.
+        self.rope = config.angles[:L].astype(bfloat16)
+        keys, values, scale, rope = self.keys, self.values, self.scale, self.rope
 
         # -- one row: a decode step ------------------------------------------
 
@@ -116,6 +137,28 @@ class LlamaGraph:
             output_offset=0,  # base; the per-call addend is cache_offset
             num_aie_channels=1,
         )
+
+        def gather_row(table, row: Value):
+            """Row ``row`` of a ``(rows, n)`` table, copied out on the device.
+
+            The row is a per-call value, so the copy's base address is patched
+            by ``row * n`` elements. Every gather has one transfer size, so
+            they are one design, and back to back they switch nothing.
+            """
+            n = table.shape[1]
+            return StridedCopy(
+                table,
+                in_offset=row * n,
+                input_sizes=(1, n),
+                input_strides=(n, 1),
+                input_offset=0,
+                output_sizes=(1, n),
+                output_strides=(n, 1),
+                output_offset=0,
+                output_buffer_size=n,
+                transfer_size=D,
+                num_aie_channels=1,
+            ).reshape(1, n)
 
         def decode_block(i, lw, x, angles, cache_offset, vector_size):
             h = RMSNorm(x, lw.norm1)
@@ -241,33 +284,37 @@ class LlamaGraph:
             num_aie_channels=1,
         )
 
-        @iron.graph(names_from=W)
+        @iron.graph(names_from=_Parameters(W, **{"rope.angles": rope}))
         def forward(
-            x,
-            angles,
+            x=None,
             *,
-            cache_offset: Scratchpad[np.int32],
-            vector_size: Scratchpad[np.int32],
-            last: Scratchpad[np.int32],
+            token: Scratchpad[np.int32],
+            position: Scratchpad[np.int32],
         ):
-            prompt = x.shape[0] > 1
-            for i, lw in enumerate(W.layers):
-                if prompt:
+            if x is not None:
+                angles = handle_of(rope)[: x.shape[0]]
+                for i, lw in enumerate(W.layers):
                     x = prefill_block(i, lw, x, angles)
-                else:
-                    x = decode_block(i, lw, x, angles, cache_offset, vector_size)
-            if prompt:
-                # The last prompt row alone, selected by its element offset:
-                # its logits are all the host reads.
-                x = StridedCopy(x, in_offset=last, **last_row).reshape(1, E)
+                # The last prompt row alone, at ``position``: its logits are
+                # all the host reads.
+                x = StridedCopy(x, in_offset=position * E, **last_row).reshape(1, E)
+            else:
+                # Both gathers first, so they run back to back as one design.
+                x = gather_row(W.embedding, token)
+                angles = gather_row(rope, position)
+                for i, lw in enumerate(W.layers):
+                    # The row lands in the caches at its position, and the
+                    # softmax sees every key up to and including it.
+                    x = decode_block(i, lw, x, angles, position * D, position + 1)
             x = RMSNorm(x, W.norm)
             return gemv(W.out_head, x, tile_out=32)
 
         self.graph = forward
 
     def shapes(self, config, rows):
-        """The input shapes of the version that runs ``rows`` tokens."""
-        return dict(x=(rows, config.emb_dim), angles=(rows, config.head_dim))
+        """The input shapes of the version that runs ``rows`` tokens: none
+        for a decode step, which gathers its row on the device."""
+        return dict(x=(rows, config.emb_dim)) if rows > 1 else {}
 
     def trace(self, config, rows):
         return self.graph.trace(**self.shapes(config, rows))

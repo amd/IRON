@@ -92,9 +92,21 @@ class GraphFunction:
             for p in sig.parameters.values()
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
+        # An input defaulting to None may be left out: a version without it
+        # is traced with None in its place, and the function branches on
+        # that as it does on a shape.
+        self.optional = set()
         self.value_params = {}
         for p in sig.parameters.values():
-            if p.kind is p.KEYWORD_ONLY:
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                if p.default is None:
+                    self.optional.add(p.name)
+                elif p.default is not p.empty:
+                    raise TypeError(
+                        f"{fn.__name__}: input {p.name!r} defaults to "
+                        f"{p.default!r}; an input may only default to None"
+                    )
+            elif p.kind is p.KEYWORD_ONLY:
                 ann = p.annotation
                 if isinstance(ann, type) and issubclass(ann, _Value):
                     ann = ValueSpec(ann.kind, np.int32)
@@ -127,23 +139,32 @@ class GraphFunction:
     # -- tracing ---------------------------------------------------------------
 
     def trace(self, **shapes) -> TracedGraph:
-        """Run the function on handles of the given shapes; return the graph."""
-        missing = [p for p in self.params if p not in shapes]
+        """Run the function on handles of the given shapes; return the graph.
+
+        An optional input given no shape (or None) is absent: the function
+        sees None for it, and the version takes no such input.
+        """
+        shapes = {k: v for k, v in shapes.items() if v is not None}
+        missing = [p for p in self.params if p not in shapes and p not in self.optional]
         unknown = [k for k in shapes if k not in self.params]
         if missing or unknown:
             raise TypeError(
                 f"{self.__name__}: shapes for {missing} missing"
                 + (f"; {unknown} are not inputs" if unknown else "")
             )
-        inputs = []
+        inputs, args = [], []
         for name in self.params:
+            if name not in shapes:
+                args.append(None)
+                continue
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
+            args.append(inputs[-1])
         values = [
             Value(n, spec.kind, spec.dtype) for n, spec in self.value_params.items()
         ]
         with Tracer(self.__name__, self.names_from) as tracer:
-            result = self.fn(*inputs, **{v.name: v for v in values})
+            result = self.fn(*args, **{v.name: v for v in values})
         outputs = self._outputs(result, tracer)
         return tracer.finish(inputs, outputs, values)
 
@@ -219,30 +240,39 @@ class GraphFunction:
         self._versions[signature] = version
         return version
 
-    def __call__(self, *tensors, **values):
-        if len(tensors) != len(self.params):
+    def _given(self, tensors) -> dict:
+        """Input name -> tensor, for the inputs a call passes (in order)."""
+        if len(tensors) > len(self.params):
             raise TypeError(
                 f"{self.__name__} takes {len(self.params)} input(s), got "
                 f"{len(tensors)}"
             )
+        given = {n: t for n, t in zip(self.params, tensors) if t is not None}
+        missing = [p for p in self.params if p not in given and p not in self.optional]
+        if missing:
+            raise TypeError(f"{self.__name__}: inputs {missing} missing")
+        return given
+
+    def __call__(self, *tensors, **values):
+        given = self._given(tensors)
         signature = tuple(
             (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
-            for name, t in zip(self.params, tensors)
+            for name, t in given.items()
         )
         version = self._versions.get(signature)
         if version is None:
             shapes = {
-                name: (tuple(t.shape), _tensor_dtype(t))
-                for name, t in zip(self.params, tensors)
+                name: (tuple(t.shape), _tensor_dtype(t)) for name, t in given.items()
             }
             print(f"{self.__name__}: compiling for {shapes}")
             version = self.compile(**shapes)
-        return version(*tensors, **values)
+        return version(*given.values(), **values)
 
     def reference(self, *tensors, **values):
         """The same function, each operator run through its ``reference()``."""
         with _ReferenceTracer(self.__name__) as tracer:
-            return self.fn(*tensors, **{k: values.get(k) for k in self.value_params})
+            args = list(tensors) + [None] * (len(self.params) - len(tensors))
+            return self.fn(*args, **{k: values.get(k) for k in self.value_params})
 
 
 class CompiledGraph:
@@ -262,10 +292,8 @@ class CompiledGraph:
         self.traced = traced
         self.plan = plan
         self.arena = arena
-        # (graph value name, device symbol, dtype) per bound value.
-        self.symbols = [
-            (b.value.name, b.symbol, b.value.dtype) for b in traced.bindings
-        ]
+        # (expression, device symbol) per binding: what is written where.
+        self.symbols = [(b.expression, b.symbol) for b in traced.bindings]
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
@@ -403,8 +431,8 @@ class CompiledGraph:
             return
         self.callable.write_values(
             {
-                symbol: np.dtype(dtype).type(values[name])
-                for name, symbol, dtype in self.symbols
+                symbol: np.dtype(expression.dtype).type(expression.evaluate(values))
+                for expression, symbol in self.symbols
             }
         )
 

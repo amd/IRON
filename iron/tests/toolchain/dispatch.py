@@ -79,7 +79,7 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
         assert Path(stream.lib_path).exists(), f"{name}: no dispatch library"
         assert len(stream.params) == 1, (name, stream.params)
     # The graph's symbols are the kernels' parameter names.
-    symbols = {symbol for _, symbol, _ in net.symbols}
+    symbols = {symbol for _, symbol in net.symbols}
     assert symbols == {s.params[0] for s in streams.values()}
     assert Path(net.image).stat().st_size > 0
     assert net._callable is None

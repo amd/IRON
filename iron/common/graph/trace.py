@@ -18,14 +18,31 @@ from ..declare import BoundValue, Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
-from .handle import Handle, State, Value, _tensor_dtype, is_operand
+from .handle import Affine, Handle, State, Value, _tensor_dtype, is_operand
 
 _STACK: list = []
+
+
+def _as_affine(value: Value | Affine) -> Affine:
+    return value.affine() if isinstance(value, Value) else value
 
 
 def current():
     """The tracer a graph function is being traced under, or ``None``."""
     return _STACK[-1] if _STACK else None
+
+
+def handle_of(x):
+    """What a graph function sees for an array or state it closes over.
+
+    Slicing a closed-over numpy array makes a new array, which would trace
+    as a weight of its own; slice this instead. Under the reference it is
+    ``x`` itself, so the slice is numpy's.
+    """
+    tracer = current()
+    if tracer is None:
+        raise RuntimeError("handle_of is for use inside a graph function")
+    return tracer.operand(x)
 
 
 @dataclasses.dataclass
@@ -47,11 +64,18 @@ class Binding:
 
     ``member`` is the operator's own, or its overlay's for a core-read value
     the overlay declares (the dynamic softmax's vector size).
+    ``expression`` is what the member is written, computed per call from one
+    of the graph's values.
     """
 
     op: Operator
     member: BoundValue
-    value: Value
+    expression: Affine
+
+    @property
+    def value(self) -> Value:
+        """The graph's value the member is computed from."""
+        return self.expression.value
 
     @property
     def symbol(self) -> str:
@@ -185,11 +209,14 @@ class Tracer:
         """
         operands = [self.operand(a) for a in args]
         kwargs = dict(kwargs)
-        # A keyword whose value is a per-call handle binds a value member: the
-        # operator's own, or one on the overlay of the class resolve_class
-        # picks for it (the dynamic softmax).
+        # A keyword whose value is a per-call handle, or an expression of
+        # one, binds a value member: the operator's own, or one on the
+        # overlay of the class resolve_class picks for it (the dynamic
+        # softmax).
         values = {
-            k: kwargs.pop(k) for k in list(kwargs) if isinstance(kwargs[k], Value)
+            k: _as_affine(kwargs.pop(k))
+            for k in list(kwargs)
+            if isinstance(kwargs[k], (Value, Affine))
         }
         if isinstance(target, type):
             # The class sees the values too: a family that picks a member from
@@ -236,18 +263,18 @@ class Tracer:
         ov = self.overlays.setdefault(ov.design_key(), ov)
         return cls(ov, **op_kwargs)
 
-    def _bind(self, op, name, value) -> None:
-        if not isinstance(value, Value):
+    def _bind(self, op, name, value: Affine) -> None:
+        if not isinstance(value, Affine):
             raise TypeError(
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
                 f"keyword-only parameter of the graph function), got {value!r}"
             )
         bound = self._bound.setdefault(id(op), {})
-        if name in bound and bound[name] is not value:
+        if name in bound and bound[name] != value:
             raise ValueError(
                 f"{type(op).__name__}.{name} is bound to {bound[name]!r} at an "
                 f"earlier call site and to {value!r} here; one instance has one "
-                f"value, bind one handle at every site or use two instances"
+                f"value, bind one expression at every site or use two instances"
             )
         if name not in bound:
             op.use_value(name)
@@ -255,7 +282,7 @@ class Tracer:
             member = next(v for v in op.values if v.name == name)
             self.bindings.append(Binding(op, member, value))
 
-    def _bind_overlay(self, op, name, value) -> None:
+    def _bind_overlay(self, op, name, value: Affine) -> None:
         """Bind a core-read value the operator's overlay declares."""
         if name not in {v.name for v in op.ov.values}:
             raise TypeError(
@@ -263,7 +290,7 @@ class Tracer:
                 f"on {type(op.ov).__name__}"
             )
         bound = self._bound.setdefault(id(op), {})
-        if name in bound and bound[name] is not value:
+        if name in bound and bound[name] != value:
             raise ValueError(
                 f"{type(op).__name__}.{name} is bound to {bound[name]!r} at an "
                 f"earlier call site and to {value!r} here"
@@ -406,8 +433,9 @@ class _ReferenceTracer(Tracer):
             )
             op = self._construct(cls, shapes[:n_in], shapes[n_in:], kwargs)
         else:
+            # An instance is called with its values alone.
             op = target
-            values = {}
+            values = kwargs
             n_in = sum(1 for b in op.buffers if b.direction != "out")
         values = {k: v for k, v in values.items() if v is not None}
         result = op.reference(*tensors, **values)

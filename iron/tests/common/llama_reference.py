@@ -8,8 +8,9 @@ application is judged against. ``LlamaGraph.graph`` is the same
 computation as one graph function, called at a prompt's shape and at one
 token's, and ``GraphFunction.reference`` runs it operator by operator
 through each ``reference()`` on host tensors, with the per-call values
-modelled (the last prompt row selects the logits, the cache offset moves the
-copy, the vector size masks the softmax) and the caches as state. So the two
+modelled (a decode step gathers its token's embedding and its position's
+angles, the position moves the cache copy, masks the softmax and selects a
+prompt's last row) and the caches as state. So the two
 can be compared without a device, from the same prompt: that checks the
 graph's wiring (layouts, reshapes, the scale, the repeat, the transposes,
 the caches the prompt leaves for decode) against the model, leaving only
@@ -64,30 +65,21 @@ def graph_prefill(config, graph, prompt):
     """Run the prompt through the graph's reference; the logits of its last token.
 
     The graph runs at the context length: the prompt fills the first rows
-    of ``x`` and the rest are zero; ``last`` picks the last prompt row."""
+    of ``x`` and the rest are zero; ``position`` picks the last prompt row."""
     rows = config.context_length
-    E = config.emb_dim
     n = prompt.shape[0]
-    x = np.zeros((rows, E), dtype=bfloat16)
+    x = np.zeros((rows, config.emb_dim), dtype=bfloat16)
     x[:n] = _embed(config, prompt)
-    logits = graph.graph.reference(
-        x, config.angles[:rows], cache_offset=0, vector_size=n, last=(n - 1) * E
-    )
+    logits = graph.graph.reference(x, token=int(prompt[-1]), position=n - 1)
     return torch.from_numpy(logits.reshape(-1).astype(np.float32))
 
 
-def graph_decode(config, graph, tokens, pos, *, vector_size=None):
+def graph_decode(config, graph, tokens, pos):
     """Feed ``tokens`` one at a time through the graph's reference from
     position ``pos``, its caches as they are; the logits after each."""
-    D = config.head_dim
     out = []
-    for step, token in enumerate(tokens):
-        x = _embed(config, token.reshape(1)).reshape(1, config.emb_dim)
-        angles = config.angles[pos : pos + 1]
-        n = pos + 1 if vector_size is None else vector_size(step, pos)
-        logits = graph.graph.reference(
-            x, angles, cache_offset=pos * D, vector_size=n, last=0
-        )
+    for token in tokens:
+        logits = graph.graph.reference(token=int(token), position=pos)
         out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
         pos += 1
     return out
@@ -154,29 +146,6 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     _assert_close(got, expected)
 
 
-def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
-    """§18's first candidate. npu.py used to write the softmax's valid
-    length as a running sum of context lengths, so from the second token on
-    the softmax saw stale zero columns beyond the context as real keys.
-    Modelled here: it drifts from the forward where the correct context
-    length does not."""
-    config, prompt, first, expected = cpu
-    graph = llama_graph(config)
-    graph_prefill(config, graph, prompt)
-    cum = {"total": 0}
-
-    def cumulative(step, pos):
-        cum["total"] += pos + 1
-        return min(cum["total"], config.context_length)
-
-    tokens = torch.stack([first.argmax()] + [e.argmax() for e in expected[:-1]])
-    got = graph_decode(config, graph, tokens, prompt.shape[0], vector_size=cumulative)
-    # The first token is right (a sum of one term), later ones are not.
-    _assert_close(got[:1], expected[:1])
-    drift = [(a - b).abs().max().item() for a, b in zip(got[1:], expected[1:])]
-    assert max(drift) > 0.05 * expected[1].abs().max(), drift
-
-
 class _Output:
     """What an image returns: a buffer read with ``numpy()``."""
 
@@ -200,8 +169,8 @@ def application(config):
 
 def test_the_application_runs_both_phases_through_its_images(cpu):
     """npu.py's own forward pass, its graph stood in by the reference: the
-    embedding, the prompt's padding and its last-row offset, the angles and
-    decode's values are the application's."""
+    prompt's embedding, its padding and its last position, and decode's
+    token and position are the application's."""
     config, prompt, first, expected = cpu
     npu = application(config)
 

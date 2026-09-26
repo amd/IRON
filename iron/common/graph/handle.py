@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Mapping
 from math import prod
 
 import numpy as np
@@ -107,15 +109,90 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 
 
 class Value:
-    """A per-call scalar parameter of a graph function."""
+    """A per-call scalar parameter of a graph function.
+
+    Integer arithmetic on one makes an :class:`Affine`: ``position * 64`` or
+    ``position + 1`` is what an operator is bound to, and the graph computes
+    it from ``position`` on every call.
+    """
 
     __slots__ = ("name", "kind", "dtype")
 
     def __init__(self, name, kind, dtype):
         self.name, self.kind, self.dtype = name, kind, dtype
 
+    def affine(self) -> Affine:
+        """This value, as the identity expression of itself."""
+        return Affine(self)
+
+    def __mul__(self, k: int) -> Affine:
+        return self.affine() * k
+
+    __rmul__ = __mul__
+
+    def __add__(self, k: int) -> Affine:
+        return self.affine() + k
+
+    __radd__ = __add__
+
+    def __sub__(self, k: int) -> Affine:
+        return self.affine() - k
+
     def __repr__(self) -> str:
         return f"Value({self.name!r}, {self.kind}[{np.dtype(self.dtype).name}])"
+
+
+@dataclasses.dataclass(frozen=True)
+class Affine:
+    """``scale * value + bias`` over the integers: what a binding writes.
+
+    Closed under adding and multiplying by integers, so ``(p + 1) * 64`` is
+    ``Affine(p, 64, 64)``. Evaluated per call from the graph's values.
+    """
+
+    value: Value
+    scale: int = 1
+    bias: int = 0
+
+    def __post_init__(self):
+        if not isinstance(self.scale, int) or not isinstance(self.bias, int):
+            raise TypeError(
+                f"a per-call value is scaled and offset by integers, got "
+                f"scale={self.scale!r} bias={self.bias!r}"
+            )
+
+    def __mul__(self, k: int) -> Affine:
+        if not isinstance(k, (int, np.integer)):
+            return NotImplemented
+        return Affine(self.value, self.scale * int(k), self.bias * int(k))
+
+    __rmul__ = __mul__
+
+    def __add__(self, k: int) -> Affine:
+        if not isinstance(k, (int, np.integer)):
+            return NotImplemented
+        return Affine(self.value, self.scale, self.bias + int(k))
+
+    __radd__ = __add__
+
+    def __sub__(self, k: int) -> Affine:
+        return self + (-k)
+
+    @property
+    def dtype(self):
+        return self.value.dtype
+
+    def evaluate(self, values: Mapping[str, int]) -> int:
+        """The number this expression is for the graph's ``values``, by name."""
+        return self.scale * int(values[self.value.name]) + self.bias
+
+    def __repr__(self) -> str:
+        text = self.value.name
+        if self.scale != 1:
+            text = f"{text} * {self.scale}"
+        if self.bias:
+            text = f"{text} {'+' if self.bias > 0 else '-'} {abs(self.bias)}"
+        return f"Affine({text})"
 
 
 def is_operand(x) -> bool:

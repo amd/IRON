@@ -9,8 +9,9 @@ The prompt and each decode step are calls of the one ``forward``
 the weights are uploaded once and the caches a prompt writes are the caches
 decode reads.
 
-No torch: the weights are the mapped checkpoint, the embedding a numpy
-gather, the logits numpy. The accuracy check, which needs the torch CPU
+No torch: the weights are the mapped checkpoint, the prompt's embedding a
+numpy gather (a decode step gathers its token's row on the device), the
+logits numpy. The accuracy check, which needs the torch CPU
 reference, is its own entry point (:mod:`.accuracy`).
 """
 
@@ -39,10 +40,6 @@ class AIELlama:
         self.config = config
         self.forward_graph = forward_graph
         self.max_seq_len = max_seq_len
-        # The RoPE table as the images read it, as far as they reach. A
-        # float32 table would be another input signature, and so another
-        # compile.
-        self.angles = config.angles[:max_seq_len].astype(bfloat16)
 
     @classmethod
     def compile(cls, config, max_seq_len=MAX_SEQ_LEN) -> "AIELlama":
@@ -86,31 +83,18 @@ class AIELlama:
         x = np.zeros((rows, config.emb_dim), dtype=bfloat16)
         x[:n] = config.weights.embed(token_ids)
         # Every call passes every per-call value; a version reads the ones
-        # its operators bind. Here: the last prompt row's logits only,
-        # selected by its element offset.
-        return self.forward_graph(
-            x,
-            self.angles[:rows],
-            cache_offset=0,
-            vector_size=n,
-            last=(n - 1) * config.emb_dim,
-        ).numpy()
+        # its operators bind. A prompt reads the position of its last row,
+        # whose logits are the only ones it computes.
+        return self.forward_graph(x, token=int(token_ids[-1]), position=n - 1).numpy()
 
     def _decode(self, token_id, position):
-        config = self.config
         assert position < self.max_seq_len
-        # The softmax's valid row length is the context length: the kernel masks
-        # every column from there on before the softmax, so the cache's unwritten
-        # tail contributes nothing. It used to be written as a running sum of
-        # context lengths, which iron/tests/common/llama_reference.py shows
-        # drifting from the CPU reference from the second token on (§18).
-        return self.forward_graph(
-            config.weights.embed([token_id]).reshape(1, config.emb_dim),
-            self.angles[position : position + 1],
-            cache_offset=position * config.head_dim,
-            vector_size=position + 1,
-            last=0,
-        ).numpy()
+        # The graph derives the rest from the position: the cache row, and
+        # the softmax's valid length, position + 1 (it used to be written as
+        # a running sum of context lengths, which
+        # iron/tests/common/llama_reference.py shows drifting from the CPU
+        # reference from the second token on, §18).
+        return self.forward_graph(token=token_id, position=position).numpy()
 
 
 # Main
