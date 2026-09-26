@@ -150,6 +150,16 @@ def operator(cls: type) -> type:
                 f"{cls.__name__}.{name}: members are declared without an "
                 f"annotation; annotating one turns it into a constructor argument"
             )
+        # A member named like the base's own API (``values``, ``buffers``, ...)
+        # would silently replace it for every caller of that API.
+        if isinstance(value, _Member):
+            for base in cls.__mro__[1:]:
+                shadowed = vars(base).get(name)
+                if shadowed is not None and not isinstance(shadowed, _Member):
+                    raise DeclarationError(
+                        f"{cls.__name__}.{name}: the member shadows "
+                        f"{base.__name__}.{name}; give it another name"
+                    )
 
     # The Field objects the class body bound to bare names, before dataclass
     # processing renames/replaces them.

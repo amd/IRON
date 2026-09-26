@@ -190,6 +190,24 @@ def test_annotated_member_is_rejected():
             A: In = In(M, to=MVOverlay.a)
 
 
+def test_member_shadowing_the_base_api_is_rejected():
+    # Operator.values lists the bound values; a buffer named "values" once
+    # replaced it, and list(op.values) iterated the buffer without end.
+    with pytest.raises(DeclarationError, match="shadows Operator.values"):
+
+        @operator
+        class Bad(Operator[MVOverlay]):
+            M: int = dim()
+            values = In(M, to=MVOverlay.a)
+
+    with pytest.raises(DeclarationError, match="shadows Overlay.values"):
+
+        @operator
+        class BadOverlay(Overlay):
+            n: int = dim()
+            values = StreamIn(n)
+
+
 def test_buffers_on_an_overlay_are_rejected():
     with pytest.raises(
         DeclarationError, match="buffers and DispatchTime values belong"
