@@ -35,6 +35,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
+    Order,
     Resident,
     Shim,
     StreamIn,
@@ -171,64 +172,95 @@ class Shipped(External, FLMGEMMOverlay):
             ]
         }
 
+    # One transfer per (column-block, row-block, leg), in the order the
+    # memtiles consume: column-block outermost, then row-block, then column.
+
+    def _walk(self, op) -> list[tuple[int, int, int]]:
+        """``(column-block, active columns, row-block)`` in consume order.
+        Sweeps of the whole grid, plus a trailing group of ``rem_blocks``
+        columns."""
+        n_full = op.N // (N_TILE * COLS)
+        rem_blocks = (op.N % (N_TILE * COLS)) // N_TILE
+        return [
+            (
+                mega_col,
+                rem_blocks if (rem_blocks and mega_col == n_full) else COLS,
+                mega_row,
+            )
+            for mega_col in range(n_full + (1 if rem_blocks else 0))
+            for mega_row in range(op.M // MIN_M)
+        ]
+
+    def _a(self, op, mega_row: int, r: int) -> Access:
+        """Compute row ``r``'s A for one row-block, every k block."""
+        K = op.K
+        return Access(
+            op.A.elements,
+            mega_row * ROWS * M_TILE * K + r * M_TILE * K,
+            (1, K // K_TILE, M_TILE, K_TILE),
+            (0, K_TILE, K, 1),
+        )
+
+    def _b(self, op, mega_col: int, c: int) -> Access:
+        """Column ``c``'s B for one column-block: one contiguous run, since
+        pack_B has already put its k-blocks in the order the memtile writes
+        them."""
+        K = op.K
+        return Access(
+            op.B.elements,
+            (mega_col * COLS + c) * N_TILE * K,
+            (1, 1, 1, (K // K_TILE) * K_TILE * N_TILE),
+            (0, 0, 0, 1),
+        )
+
+    def _c(self, op, mega_col: int, mega_row: int, c: int) -> Access:
+        """Column ``c``'s joined block of C for one (column-block, row-block)."""
+        N = op.N
+        return Access(
+            op.C.elements,
+            mega_col * COLS * N_TILE + mega_row * ROWS * M_TILE * N + c * N_TILE,
+            (1, 1, ROWS * M_TILE, N_TILE),
+            (0, 0, N, 1),
+        )
+
+    def order(self, op, buffer) -> Order:
+        """Per slot, its transfers of the consume-order walk. Every compute
+        row receives A in every column-block, even a trailing one: A is
+        broadcast along a whole row, and the row stalls if one column stops
+        draining it."""
+        walk = self._walk(op)
+        if buffer is op.A:
+            return Order(
+                self.a,
+                tuple(
+                    tuple(self._a(op, mega_row, r) for _, _, mega_row in walk)
+                    for r in range(ROWS)
+                ),
+            )
+        if buffer is op.B:
+            return Order(
+                self.b,
+                tuple(
+                    tuple(self._b(op, mc, c) for mc, n, mr in walk if c < n)
+                    for c in range(COLS)
+                ),
+            )
+        return Order(
+            self.c,
+            tuple(
+                tuple(self._c(op, mc, mr, c) for mc, n, mr in walk if c < n)
+                for c in range(COLS)
+            ),
+        )
+
     def sequence(self, op, rt) -> None:
-        """One transfer per (column-block, row-block, leg), in the order the
-        memtiles consume: column-block outermost, then row-block, then column."""
-        M, K, N = op.M, op.K, op.N
-        k_iters = K // K_TILE
-        m_row_blocks = M // MIN_M
-        # Sweeps of the whole grid, plus a trailing group of rem_blocks
-        # columns. The columns outside that group still receive A, because A
-        # is broadcast along a whole compute row and the row stalls if one
-        # column stops draining it.
-        n_full = N // (N_TILE * COLS)
-        rem_blocks = (N % (N_TILE * COLS)) // N_TILE
-        a_n, b_n, c_n = op.A.elements, op.B.elements, op.C.elements
-        for mega_col in range(n_full + (1 if rem_blocks else 0)):
-            active = rem_blocks if (rem_blocks and mega_col == n_full) else COLS
-            for mega_row in range(m_row_blocks):
-                for c in range(COLS):
-                    if c in A_SOURCE_COL:
-                        r = A_SOURCE_COL.index(c)
-                        rt.fill(
-                            self.a[r],
-                            (
-                                op.A,
-                                Access(
-                                    a_n,
-                                    mega_row * ROWS * M_TILE * K + r * M_TILE * K,
-                                    (1, k_iters, M_TILE, K_TILE),
-                                    (0, K_TILE, K, 1),
-                                ),
-                            ),
-                        )
-                    if c >= active:
-                        continue
-                    # One contiguous run: pack_B has already put this
-                    # column's k-blocks in the order the memtile writes them.
-                    rt.fill(
-                        self.b[c],
-                        (
-                            op.B,
-                            Access(
-                                b_n,
-                                (mega_col * COLS + c) * N_TILE * K,
-                                (1, 1, 1, k_iters * K_TILE * N_TILE),
-                                (0, 0, 0, 1),
-                            ),
-                        ),
-                    )
-                    rt.drain(
-                        self.c[c],
-                        (
-                            op.C,
-                            Access(
-                                c_n,
-                                mega_col * COLS * N_TILE
-                                + mega_row * ROWS * M_TILE * N
-                                + c * N_TILE,
-                                (1, 1, ROWS * M_TILE, N_TILE),
-                                (0, 0, N, 1),
-                            ),
-                        ),
-                    )
+        """The consume-order walk, each column's legs in turn."""
+        for mega_col, active, mega_row in self._walk(op):
+            for c in range(COLS):
+                if c in A_SOURCE_COL:
+                    r = A_SOURCE_COL.index(c)
+                    rt.fill(self.a[r], (op.A, self._a(op, mega_row, r)))
+                if c >= active:
+                    continue
+                rt.fill(self.b[c], (op.B, self._b(op, mega_col, c)))
+                rt.drain(self.c[c], (op.C, self._c(op, mega_col, mega_row, c)))

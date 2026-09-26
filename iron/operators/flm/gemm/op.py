@@ -28,9 +28,11 @@ from aie.dialects.aie import get_target_model
 from aie.helpers.util import v8bfp16ebs8
 
 from iron.common.declare import (
+    BoundBuffer,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Resident,
@@ -766,110 +768,142 @@ class GEMM(Operator[FLMGEMMOverlay]):
 
     # -- the runtime sequence --------------------------------------------------
 
-    def design(self, rt):
-        ov = self.ov
-        M, K, N = self.M, self.K, self.N
-        COLS, ROWS = ov.cols, ov.rows
-        N_TILE, M_CHUNK, B_GROUP = ov.tile_n, ov.m_chunk, ov.b_group
-        m_row_blocks, k_iters, n_units = (
-            self._m_row_blocks,
-            self._k_iters,
-            self._n_units,
-        )
-        a_split, c_split = self._a_split, self._c_split
-        # The unsplit path pipelines whole column-blocks, at 3 descriptors
-        # each (A + B + C). The split path bounds itself and ignores this.
-        OVERLAP = max(1, min(OVERLAP_DEFAULT, ov.shim_bds // 3))
-        # Sweeps where all COLS columns have work, plus a trailing group of
-        # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
-        n_full = N // (N_TILE * COLS)
-        rem_blocks = (N % (N_TILE * COLS)) // N_TILE
-        a_elems, b_elems, c_elems = self.A.elements, self.B.elements, self.C.elements
-        # B's extents are in array elements (values // B_GROUP), whatever the
-        # host buffer counts.
-        b_units = K * N // B_GROUP
-
-        def unit_rows(u):
-            """(first row-block, how many) for unit ``u``; always a full group."""
-            return u * M_CHUNK, M_CHUNK
-
-        # One transfer per (column-block, leg), not one per object: a
-        # descriptor walks many fifo objects in consume order. Dimension
-        # order must match the core's nest.
-        def a_taps(r, units):
-            # Every (row-block, k) block this row consumes for one
-            # column-block, k outermost. Re-fetched per column-block because
-            # the cores re-consume it.
-            if M_CHUNK == 1 and not a_split:
-                return [
-                    Access(
-                        a_elems,
-                        r * M_TILE * K,
-                        (m_row_blocks, k_iters, M_TILE, K_TILE),
-                        (ROWS * M_TILE * K, K_TILE, K, 1),
-                    )
-                ]
-            taps = []
-            for u in units:
-                first, _ = unit_rows(u)
-                taps.append(
-                    Access(
-                        a_elems,
-                        first * ROWS * M_TILE * K + r * M_TILE * K,
-                        (k_iters, M_CHUNK, M_TILE, K_TILE),
-                        (K_TILE, ROWS * M_TILE * K, K, 1),
-                    )
-                )
-            return taps
-
-        def b_tap(mega_col, c):
-            # Every (mega_row, k) chunk this column consumes. B does not
-            # depend on mega_row, hence the 0 stride. Pre-packed so each
-            # k-block is one contiguous run.
-            return Access(
-                b_units,
-                (mega_col * COLS + c) * N_TILE * K // B_GROUP,
-                (n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP),
-                (0, K_TILE * N_TILE // B_GROUP, 0, 1),
-            )
-
-        def c_taps(mega_col, c, units):
-            # Every joined block this column produces: one ROWS*M_TILE x
-            # N_TILE per row-block, in plain row-block order.
-            if c_split:
-                taps = []
-                for u in units:
-                    first, count = unit_rows(u)
-                    for i in range(count):
-                        taps.append(
-                            Access(
-                                c_elems,
-                                (mega_col * COLS + c) * N_TILE
-                                + (first + i) * ROWS * M_TILE * N,
-                                (1, 1, ROWS * M_TILE, N_TILE),
-                                (0, 0, N, 1),
-                            )
-                        )
-                return taps
-            return [
-                Access(
-                    c_elems,
-                    (mega_col * COLS + c) * N_TILE,
-                    (1, m_row_blocks, ROWS * M_TILE, N_TILE),
-                    (0, ROWS * M_TILE * N, N, 1),
-                )
-            ]
-
-        # A trailing block uses only the first rem_blocks columns. A is still
-        # issued for every row, since the sitting-out columns drain it.
+    def _col_blocks(self) -> list[tuple[int, int]]:
+        """``(column-block, active columns)`` in issue order: sweeps where all
+        COLS columns have work, plus a trailing group of ``rem_blocks``
+        columns (0 <= rem_blocks < COLS) that do one block more."""
+        COLS, N_TILE = self.ov.cols, self.ov.tile_n
+        n_full = self.N // (N_TILE * COLS)
+        rem_blocks = (self.N % (N_TILE * COLS)) // N_TILE
         blocks = [(mc, COLS) for mc in range(n_full)]
         if rem_blocks:
             blocks.append((n_full, rem_blocks))
-        all_mb = list(range(n_units))
+        return blocks
+
+    # One transfer per (column-block, leg), not one per object: a
+    # descriptor walks many fifo objects in consume order. Dimension order
+    # must match the core's nest.
+
+    def _a_taps(self, r: int, units) -> list[Access]:
+        """Every (row-block, k) block compute row ``r`` consumes for one
+        column-block, k outermost; one descriptor per unit when A is split.
+        Re-fetched per column-block because the cores re-consume it."""
+        ov = self.ov
+        K, ROWS, M_CHUNK = self.K, ov.rows, ov.m_chunk
+        a_elems, k_iters = self.A.elements, self._k_iters
+        if M_CHUNK == 1 and not self._a_split:
+            return [
+                Access(
+                    a_elems,
+                    r * M_TILE * K,
+                    (self._m_row_blocks, k_iters, M_TILE, K_TILE),
+                    (ROWS * M_TILE * K, K_TILE, K, 1),
+                )
+            ]
+        return [
+            Access(
+                a_elems,
+                u * M_CHUNK * ROWS * M_TILE * K + r * M_TILE * K,
+                (k_iters, M_CHUNK, M_TILE, K_TILE),
+                (K_TILE, ROWS * M_TILE * K, K, 1),
+            )
+            for u in units
+        ]
+
+    def _b_tap(self, mega_col: int, c: int) -> Access:
+        """Every (mega_row, k) chunk column ``c`` consumes. B does not depend
+        on mega_row, hence the 0 stride. Pre-packed so each k-block is one
+        contiguous run. B's extents are in array elements (values //
+        B_GROUP), whatever the host buffer counts."""
+        ov = self.ov
+        K, B_GROUP, N_TILE = self.K, ov.b_group, ov.tile_n
+        return Access(
+            K * self.N // B_GROUP,
+            (mega_col * ov.cols + c) * N_TILE * K // B_GROUP,
+            (self._n_units, self._k_iters, 1, K_TILE * N_TILE // B_GROUP),
+            (0, K_TILE * N_TILE // B_GROUP, 0, 1),
+        )
+
+    def _c_taps(self, mega_col: int, c: int, units) -> list[Access]:
+        """Every joined block column ``c`` produces: one ROWS*M_TILE x N_TILE
+        per row-block, in plain row-block order; one per row-block when C is
+        split."""
+        ov = self.ov
+        N, ROWS, N_TILE, M_CHUNK = self.N, ov.rows, ov.tile_n, ov.m_chunk
+        c_elems = self.C.elements
+        if self._c_split:
+            return [
+                Access(
+                    c_elems,
+                    (mega_col * ov.cols + c) * N_TILE
+                    + (u * M_CHUNK + i) * ROWS * M_TILE * N,
+                    (1, 1, ROWS * M_TILE, N_TILE),
+                    (0, 0, N, 1),
+                )
+                for u in units
+                for i in range(M_CHUNK)
+            ]
+        return [
+            Access(
+                c_elems,
+                (mega_col * ov.cols + c) * N_TILE,
+                (1, self._m_row_blocks, ROWS * M_TILE, N_TILE),
+                (0, ROWS * M_TILE * N, N, 1),
+            )
+        ]
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Column-block by column-block: every compute row its A (even the
+        rows of columns sitting a trailing block out, which drain it), and
+        each active column its B and its C."""
+        ov = self.ov
+        if ov.has_sequence():
+            return super().order(buffer)
+        blocks, units = self._col_blocks(), range(self._n_units)
+        if buffer is self.A:
+            return Order(
+                ov.a,
+                tuple(
+                    tuple(a for _ in blocks for a in self._a_taps(r, units))
+                    for r in range(ov.rows)
+                ),
+            )
+        if buffer is self.B:
+            return Order(
+                ov.b,
+                tuple(
+                    tuple(self._b_tap(mc, c) for mc, active in blocks if c < active)
+                    for c in range(ov.cols)
+                ),
+            )
+        return Order(
+            ov.c,
+            tuple(
+                tuple(
+                    t
+                    for mc, active in blocks
+                    if c < active
+                    for t in self._c_taps(mc, c, units)
+                )
+                for c in range(ov.cols)
+            ),
+        )
+
+    def design(self, rt):
+        ov = self.ov
+        a_split, c_split = self._a_split, self._c_split
+        M_CHUNK = ov.m_chunk
+        # The unsplit path pipelines whole column-blocks, at 3 descriptors
+        # each (A + B + C). The split path bounds itself and ignores this.
+        OVERLAP = max(1, min(OVERLAP_DEFAULT, ov.shim_bds // 3))
+        # A trailing block uses only the first rem_blocks columns. A is still
+        # issued for every row, since the sitting-out columns drain it.
+        blocks = self._col_blocks()
+        all_mb = list(range(self._n_units))
 
         def issue_a(mbs, group, wait=False):
-            for r in range(ROWS):
-                taps = a_taps(r, mbs)
+            for r in range(ov.rows):
+                taps = self._a_taps(r, mbs)
                 for i, tap in enumerate(taps):
                     # A leftover unit emits many fills back to back on one
                     # channel, so await every SHIM_TASK_QUEUE-th.
@@ -880,11 +914,11 @@ class GEMM(Operator[FLMGEMMOverlay]):
 
         def issue_b(mega_col, active_cols, group):
             for c in range(active_cols):
-                rt.fill(ov.b[c], (self.B, b_tap(mega_col, c)), group=group)
+                rt.fill(ov.b[c], (self.B, self._b_tap(mega_col, c)), group=group)
 
         def issue_c(mega_col, active_cols, mbs, group):
             for c in range(active_cols):
-                for tap in c_taps(mega_col, c, mbs):
+                for tap in self._c_taps(mega_col, c, mbs):
                     rt.drain(ov.c[c], (self.C, tap), group=group, wait=True)
 
         def emit_unsplit():
