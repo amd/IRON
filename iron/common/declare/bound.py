@@ -214,8 +214,23 @@ class BoundBuffer:
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]  # type: ignore[misc]
 
     def stream(self, overlay: "Overlay") -> BoundStream | None:
-        """The bound stream this buffer feeds or drains on ``overlay``."""
-        member = self.to if self.direction == "in" else self.from_
+        """The bound stream this buffer feeds or drains on ``overlay``.
+
+        An ``InOut`` names one: ``to=`` when the array reads it, ``from_=``
+        when the array updates it in place (the host's copy keeps what the
+        array does not write). One order covers one stream, so a buffer read
+        and written back through two streams has none.
+        """
+        if self.direction == "inout":
+            if self.to is not None and self.from_ is not None:
+                raise ValueError(
+                    f"{type(self._op).__name__}.{self.name} is an InOut through "
+                    f"both {self.to.name!r} and {self.from_.name!r}; an order "
+                    f"covers one stream, so name one of to= or from_="
+                )
+            member = self.to if self.to is not None else self.from_
+        else:
+            member = self.to if self.direction == "in" else self.from_
         if member is None:
             return None
         return getattr(overlay, member.name)

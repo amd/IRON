@@ -93,7 +93,7 @@ def derived(buffer: "BoundBuffer", stream: "BoundStream | None") -> Order:
     """
     op = type(buffer._op).__name__
     if stream is None:
-        member = "to=" if buffer.direction == "in" else "from_="
+        member = {"in": "to=", "out": "from_="}.get(buffer.direction, "to= or from_=")
         raise ValueError(
             f"{op}.{buffer.name} names no stream ({member}), so its sequence "
             f"cannot be derived; add {member} or override order() and design(rt)"

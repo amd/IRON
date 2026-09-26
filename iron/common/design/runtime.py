@@ -63,10 +63,16 @@ class Transfers:
         self.check_orders()
 
     def _derived(self) -> None:
-        """Every buffer's declared order in one group: fills, then waited drains."""
+        """Every buffer's declared order in one group: fills, then waited drains.
+
+        An ``InOut`` moves the way its one stream does: filled through a
+        ``to=``, drained through a ``from_=``.
+        """
         with self.group() as tg:
             for buf in self.op.inputs:
                 order = self.op.order(buf)
+                if order.stream.direction != "in":
+                    continue
                 for i, accesses in enumerate(order.slots):
                     for acc in accesses:
                         self.fill(
@@ -77,6 +83,8 @@ class Transfers:
                         )
             for buf in self.op.outputs:
                 order = self.op.order(buf)
+                if order.stream.direction != "out":
+                    continue
                 for i, accesses in enumerate(order.slots):
                     for acc in accesses:
                         self.drain(

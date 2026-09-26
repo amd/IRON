@@ -32,9 +32,11 @@ from aie.iron.kernels import sample as kernels
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    BoundBuffer,
     In,
     InOut,
     Operator,
+    Order,
     Out,
     Overlay,
     Scratchpad,
@@ -228,34 +230,54 @@ class Sample(Operator[SampleOverlay]):
         tokens[at] = token
         return tokens, np.array([token], dtype=np.int32)
 
-    def design(self, rt):
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Each column's slice of the logits, once per select pass; one draw
+        row and one record, each at its position's offset when a graph binds
+        one; the token."""
         ov = self.ov
-        row = self.row if self.uses_value("row") else None
-        at = self.at if self.uses_value("at") else None
-        with rt.group() as tg:
-            rt.fill(
-                ov.draw,
-                (self.draws, contiguous(self.draws.elements, 0, kernels.ROW_WORDS)),
-                group=tg,
-                offset_by=row,
-            )
-            for c in range(ov.cores):
-                slice_ = repeated(
+        if buffer is self.logits:
+            slices = (
+                repeated(
                     self.logits.elements,
                     c * ov.slice_size,
                     ov.slice_size,
                     [(_PASSES, 0)],
                     bfloat16,
                 )
+                for c in range(ov.cores)
+            )
+            return Order(ov.logits, tuple((s,) for s in slices))
+        if buffer is self.draws:
+            row = self.row if self.uses_value("row") else None
+            draw = contiguous(self.draws.elements, 0, kernels.ROW_WORDS)
+            return Order(ov.draw, ((draw,),), offset_by=row)
+        if buffer is self.tokens:
+            at = self.at if self.uses_value("at") else None
+            record = contiguous(self.tokens.elements, 0, 1)
+            return Order(ov.record, ((record,),), offset_by=at)
+        return Order(ov.token, ((contiguous(1, 0, 1),),))
+
+    def design(self, rt):
+        """One group: the draw and the logits in, then the record and the token."""
+        ov = self.ov
+        draws, logits = self.order(self.draws), self.order(self.logits)
+        record, token = self.order(self.tokens), self.order(self.token)
+        with rt.group() as tg:
+            (draw,) = draws[0]
+            rt.fill(ov.draw, (self.draws, draw), group=tg, offset_by=draws.offset_by)
+            for c in range(ov.cores):
+                (slice_,) = logits[c]
                 rt.fill(ov.logits[c], (self.logits, slice_), group=tg)
+            (slot,) = record[0]
             rt.drain(
                 ov.record,
-                (self.tokens, contiguous(self.tokens.elements, 0, 1)),
+                (self.tokens, slot),
                 group=tg,
                 wait=True,
-                offset_by=at,
+                offset_by=record.offset_by,
             )
-            rt.drain(ov.token, (self.token, contiguous(1, 0, 1)), group=tg, wait=True)
+            (out,) = token[0]
+            rt.drain(ov.token, (self.token, out), group=tg, wait=True)
 
 
 # --------------------------------------------------------------------------

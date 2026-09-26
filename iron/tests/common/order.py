@@ -15,10 +15,11 @@ import pytest
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
-from iron.common.declare import Order, operator
+from iron.common.declare import InOut, Order, operator
 from iron.common.declare.order import derived
 from iron.common.design import generator_for
 from iron.common.tiling import Access
+from iron.operators.emit import Emit, EmitOverlay
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.flm.gemm.shipped import Shipped
@@ -27,6 +28,7 @@ from iron.operators.gemv.op import GEMV
 from iron.operators.mem_copy import MemCopy
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.sample import Sample
 from iron.operators.strided_copy import StridedCopy
 from iron.operators.transpose import Transpose
 
@@ -68,6 +70,8 @@ OVERRIDES = [
     lambda: DequantBFP(K=1024, N=512),
     lambda: FLMGEMM(M=512, K=1024, N=10240),
     lambda: FLMGEMM(Shipped(), M=256, K=512, N=1280),
+    lambda: Sample(vocab=128256, cores=4, steps=8),
+    lambda: Emit(slots=32, carried=2),
 ]
 
 
@@ -85,6 +89,8 @@ OVERRIDES = [
         "DequantBFP",
         "flm.GEMM",
         "flm.GEMM-Shipped",
+        "Sample",
+        "Emit",
     ],
 )
 def test_each_sequence_issues_its_declared_order(make, npu2):
@@ -151,3 +157,33 @@ def test_gemv_encodes_the_derived_split_its_own_way(npu2):
     assert b.replicated
     for slot in range(2):
         assert np.array_equal(b.indices(slot), np.arange(op.B.elements))
+
+
+@operator
+class EmitInPlace(Emit):
+    """Emit with its state updated in place: an InOut drained through its from_=."""
+
+    state = InOut(EmitOverlay.carried, dtype=np.int32, from_=EmitOverlay.state)
+
+
+def test_a_derived_inout_moves_the_way_its_stream_does(npu2):
+    # Only drained: filling it through an output stream is no transfer at all.
+    op = EmitInPlace(slots=32, carried=2).tuned(npu2)
+    assert op.order(op.state).stream is op.ov.state
+    mlir = str(generator_for(op)())
+    assert mlir.count("dma_configure_task_for @state") == 1
+
+
+def test_an_inout_through_two_streams_has_no_order(npu2):
+    @operator
+    class BothWays(Emit):
+        state = InOut(
+            EmitOverlay.carried,
+            dtype=np.int32,
+            to=EmitOverlay.planes,
+            from_=EmitOverlay.state,
+        )
+
+    op = BothWays(slots=32, carried=2).tuned(npu2)
+    with pytest.raises(ValueError, match=r"BothWays\.state is an InOut through both"):
+        op.order(op.state)
