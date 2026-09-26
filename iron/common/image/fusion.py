@@ -14,7 +14,7 @@ from aie.extras.context import mlir_mod_ctx
 from aie.helpers.util import mlir_type_to_np_dtype
 from aie.utils import bfp
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..design import DesignGenerator
 
@@ -23,6 +23,27 @@ RESET_DEVICE = "reset_device"
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
 SHIM_ADDRESS_ALIGNMENT = 4
+
+
+class ArgumentSizes(NamedTuple):
+    """Bytes of each runtime-sequence argument of a fused image, in argument order.
+
+    ``feedback`` is ``None`` for an image that declares no feedback buffer; the
+    argument then does not exist, and the image takes the first three alone.
+    """
+
+    input: int
+    output: int
+    scratch: int
+    feedback: int | None = None
+
+    def arguments(self) -> dict[str, int]:
+        """The arguments the runtime sequence takes: size by kind, in order, so
+        a kind's argument index is its position."""
+        sizes = self._asdict()
+        if self.feedback is None:
+            del sizes["feedback"]
+        return sizes
 
 
 # Helper Functions
@@ -90,7 +111,7 @@ def fuse_mlir(
     operator_generators: dict[str, DesignGenerator],
     runlist: list[tuple[str, ...]],
     subbuffer_layout: dict[str, tuple[str, int, int]],
-    buffer_sizes: tuple[int, int, int],
+    buffer_sizes: ArgumentSizes,
     slice_info: dict[str, tuple[str, int, int]] | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
@@ -103,10 +124,9 @@ def fuse_mlir(
     own cache on the text's content.
 
     The runtime sequence takes one flat byte argument per kind in
-    ``buffer_sizes`` (input, output, scratch); each buffer is handed to its
-    sub-design as a view of exactly the type that sub-design declares, so a
-    buffer keeps its dtype and an ``offset_parameter`` on it is scaled by its
-    own element size.
+    ``buffer_sizes``; each buffer is handed to its sub-design as a view of
+    exactly the type that sub-design declares, so a buffer keeps its dtype
+    and an ``offset_parameter`` on it is scaled by its own element size.
     """
     slice_info = slice_info or {}
 
@@ -201,7 +221,7 @@ def fuse_mlir(
         def main():
             # Each argument is a flat run of bytes; a buffer in one is a view
             # of the type its sub-design declares, at the buffer's byte offset.
-            arguments = dict(zip(("input", "output", "scratch"), buffer_sizes))
+            arguments = buffer_sizes.arguments()
 
             # RuntimeSequenceOp
             @aiex.runtime_sequence(

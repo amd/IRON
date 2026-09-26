@@ -4,7 +4,7 @@
 """OperatorSequence: what one run of several operators builds and dispatches."""
 
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 
 import numpy as np
 
@@ -25,6 +25,7 @@ from .callable import (
     SequenceXclbinCallable,
 )
 from .fused import FusedImage, XclbinChain
+from .fusion import ArgumentSizes
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,12 @@ class OperatorSequence:
             nothing.
         residents: With ``arena``, the scratch buffers that are residents
             there, by storage key; every other scratch buffer is a transient.
+        feedback_args: Buffers the full ELF takes in one more argument, after
+            scratch, which the caller may bind to memory of its own per run
+            (:meth:`FullELFRun.bind_feedback`) -- another run's ctrl
+            scratchpad, so a value the device computes becomes that run's
+            per-call value. Laid out back to back from the argument's start,
+            in order; a sequence without any takes no such argument.
     """
 
     def __init__(
@@ -84,6 +91,7 @@ class OperatorSequence:
         share_designs=False,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
+        feedback_args: Sequence[str] = (),
         *args,
         **kwargs,
     ):
@@ -95,6 +103,11 @@ class OperatorSequence:
             )
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
+        if feedback_args and mode not in (None, "fused", "reference"):
+            raise ValueError(
+                f"feedback arguments are an argument of the full ELF; "
+                f"dispatch={dispatch!r} has none"
+            )
         if not all(
             isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
@@ -115,6 +128,7 @@ class OperatorSequence:
         self.name = name + "_shared" if share_designs else name
         self.input_args = input_args
         self.output_args = output_args
+        self.feedback_args = list(feedback_args)
         # Planned byte offsets per buffer name; None keeps the
         # back-to-back layout this had before.
         self.buffer_offsets = buffer_offsets
@@ -200,6 +214,7 @@ class OperatorSequence:
             steps.append((reads, writes))
 
         pinned = set(self.input_args) | set(self.output_args)
+        pinned |= set(self.feedback_args)
         pinned |= set(self.explicit_buffer_sizes)
         # A slice is not free to move: it has to sit at its parent's offset
         # plus its start, and calculate_buffer_layout resolves it that way.
@@ -287,6 +302,15 @@ class OperatorSequence:
         for arg in self.output_args:
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
                 raise ValueError(f"Output argument {arg} not found in runlist buffers")
+        for arg in self.feedback_args:
+            if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
+                raise ValueError(
+                    f"Feedback argument {arg} not found in runlist buffers"
+                )
+            if arg in self.input_args or arg in self.output_args:
+                raise ValueError(
+                    f"Feedback argument {arg} is also an input or output argument"
+                )
 
         subbuffer_layout = {}
         slice_info = {}  # full_buffer_name -> (base_name, start, end)
@@ -319,6 +343,10 @@ class OperatorSequence:
             if offsets is None and self.plan_scratch:
                 offsets = self.infer_buffer_offsets()
             offsets = offsets or {}
+            if buffer_type == "feedback":
+                # Where the caller binds its own memory, a buffer's offset is
+                # part of the contract, so it is never planned.
+                offsets = {}
 
             # Unplanned buffers first, packed back to back, each aligned.
             cursor = end = 0
@@ -351,22 +379,23 @@ class OperatorSequence:
 
         input_buffer_size = add_buffers("input", self.input_args)
         output_buffer_size = add_buffers("output", self.output_args)
-        scratch_args = [
-            arg
-            for arg in args
-            if arg not in self.input_args and arg not in self.output_args
-        ]
+        host_args = {*self.input_args, *self.output_args, *self.feedback_args}
+        scratch_args = [arg for arg in args if arg not in host_args]
         # Also include explicit buffers that are only used for slicing
         for explicit_buf in self.explicit_buffer_sizes:
-            if (
-                explicit_buf not in self.input_args
-                and explicit_buf not in self.output_args
-                and explicit_buf not in scratch_args
-            ):
+            if explicit_buf not in host_args and explicit_buf not in scratch_args:
                 scratch_args.append(explicit_buf)
         scratch_buffer_size = add_buffers("scratch", scratch_args)
+        feedback_buffer_size = (
+            add_buffers("feedback", self.feedback_args) if self.feedback_args else None
+        )
 
-        buffer_sizes = (input_buffer_size, output_buffer_size, scratch_buffer_size)
+        buffer_sizes = ArgumentSizes(
+            input_buffer_size,
+            output_buffer_size,
+            scratch_buffer_size,
+            feedback_buffer_size,
+        )
         return subbuffer_layout, buffer_sizes, slice_info
 
     def buffer_dtype(self, name: str) -> np.dtype:
@@ -395,10 +424,10 @@ class OperatorSequence:
             # through packaging.plan, which also weighs its values and boundaries.
             npu2 = isinstance(aie_utils.get_current_device(), NPU2)
             self.mode = "fused" if npu2 else "separate"
-            if self.arena is not None and not npu2:
+            if (self.arena is not None or self.feedback_args) and not npu2:
                 raise ValueError(
-                    f"{self.name}: a shared arena needs the full ELF, which this "
-                    f"device does not dispatch"
+                    f"{self.name}: a shared arena and feedback arguments need the "
+                    f"full ELF, which this device does not dispatch"
                 )
         # After the mode: a sequence that cannot run in its arena must not
         # have placed anything there.
