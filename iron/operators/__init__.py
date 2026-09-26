@@ -22,6 +22,7 @@ _OPERATOR_MODULES = {
     "GELU": "gelu",
     "GEMM": "gemm.op",
     "GEMV": "gemv.op",
+    "GQAContext": "gqa_context.op",
     "LayerNorm": "layer_norm",
     "LeakyReLU": "leaky_relu",
     "MHA": "mha.op",

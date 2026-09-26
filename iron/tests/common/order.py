@@ -25,6 +25,7 @@ from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
+from iron.operators.gqa_context.op import GQAContext
 from iron.operators.mem_copy import MemCopy
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
@@ -75,6 +76,7 @@ OVERRIDES = [
     lambda: FLMGEMM(Shipped(), M=256, K=512, N=1280),
     lambda: Sample(vocab=128256, cores=4, steps=8),
     lambda: Emit(slots=32, carried=2),
+    lambda: GQAContext(groups=8, heads_per_group=4, seq_len=2048),
 ]
 
 
@@ -95,6 +97,7 @@ OVERRIDES = [
         "flm.GEMM-Shipped",
         "Sample",
         "Emit",
+        "GQAContext",
     ],
 )
 def test_each_sequence_issues_its_declared_order(make, npu2):
