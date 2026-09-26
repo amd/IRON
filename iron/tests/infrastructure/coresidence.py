@@ -81,12 +81,14 @@ def _shim_pinned(col: int, channel: int) -> str:
     return device
 
 
-@iron.graph
-def _chain(a, b):
+def _chain_fn(a, b):
     narrow = dict(num_aie_columns=2, tile_size=TILE)
     x = SiLU(ElementwiseAdd(a, b, **narrow), **narrow)
     x = ElementwiseMul(x, b, **narrow)
     return SiLU(ElementwiseAdd(x, b, **narrow), **narrow)
+
+
+_chain = iron.graph(_chain_fn)
 
 
 @pytest.fixture(autouse=True)
@@ -235,3 +237,17 @@ def test_traced_graph_packs_and_compiles():
     ]
     packed.compile()
     assert packed.elf_path.is_file()
+
+
+def test_graph_compile_forwards_the_packing():
+    # A fresh graph function: versions are cached per function and signature.
+    version = iron.graph(_chain_fn).compile(
+        coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
+    )
+    assert version.sequence.coresident == AdjacentPacking()
+    generators, _, _ = fused_plan(version.sequence)
+    text = build_fused_mlir(version.sequence)
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [
+        Packing.device_name(list(generators)),
+        "reset_device",
+    ]

@@ -27,6 +27,7 @@ from ..declare import ValueSpec
 from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
 from ..image.callable import ScratchArena
+from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Plan, plan
 from ..image.sequence import ALIGNMENT
 from .handle import Handle, State, Value, _tensor_dtype
@@ -178,6 +179,7 @@ class GraphFunction:
         image=None,
         verbose=False,
         record="memory",
+        coresident: AdjacentPacking | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -186,6 +188,8 @@ class GraphFunction:
         (:mod:`iron.common.image.packaging`); everything else is derived and, under
         ``verbose``, printed. ``record="disk"`` writes the image's
         :class:`~iron.common.image.artifacts.Artifacts` record beside it.
+        ``coresident`` packs designs into shared device configurations
+        (:mod:`iron.common.image.coresidence`); a full ELF only.
 
         A full-ELF version is placed in :attr:`arena`, with the weights and
         states of every other version. Compile every version before the
@@ -214,7 +218,11 @@ class GraphFunction:
                 f"dispatches {chosen.dispatch!r}"
             )
         version = CompiledGraph(
-            traced, chosen, record=record, arena=self._arena if shared else None
+            traced,
+            chosen,
+            record=record,
+            arena=self._arena if shared else None,
+            coresident=coresident,
         )
         self._versions[signature] = version
         return version
@@ -258,6 +266,7 @@ class CompiledGraph:
         plan: Plan,
         record="memory",
         arena: ScratchArena | None = None,
+        coresident: AdjacentPacking | None = None,
     ):
         self.traced = traced
         self.plan = plan
@@ -272,6 +281,8 @@ class CompiledGraph:
         placement = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
+        if coresident is not None:
+            placement["coresident"] = coresident
         self.sequence = traced.sequence(dispatch=plan.dispatch, **placement).compile(
             record=record
         )
