@@ -7,6 +7,8 @@ Temporal fusion of multiple MLIR modules into one module with multiple devices a
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 from aie import ir
 from aie.dialects import aie, aiex, arith, memref
@@ -88,6 +90,44 @@ def get_child_mlir_module(generator: DesignGenerator) -> Any:
     return callback_function(*args, **kwargs)
 
 
+@dataclasses.dataclass
+class GeneratedDesign:
+    """What one design generates: its module, the one ``aie.device`` op in it,
+    and the scratchpad parameters it declares at module scope (symbol ->
+    type). The device op lives in the module, so the module is kept."""
+
+    module: Any
+    device: Any
+    params: dict[str, Any]
+
+
+def generate_design(generator: DesignGenerator) -> GeneratedDesign:
+    """Run ``generator`` and find its device op and module-scope parameters."""
+    mlir_module = get_child_mlir_module(generator)
+    device_ops = []
+    params: dict[str, Any] = {}
+    for op in mlir_module.body.operations:
+        if isinstance(op, aie.DeviceOp):
+            device_ops.append(op)
+        elif op.operation.name == "aiex.scratchpad_parameter":
+            sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
+            params[sym_name] = ir.TypeAttr(op.operation.attributes["type"]).value
+    if len(device_ops) != 1:
+        raise ValueError(
+            f"Expected exactly one device operation in the MLIR of {generator!r}, "
+            f"got {len(device_ops)}"
+        )
+    return GeneratedDesign(mlir_module, device_ops[0], params)
+
+
+def format_params(params: dict[str, Any]) -> str:
+    """Module-scope scratchpad parameter decls (symbol -> type), as text."""
+    return "\n".join(
+        f"  aiex.scratchpad_parameter @{name} : {param_type}"
+        for name, param_type in params.items()
+    )
+
+
 def needs_additional_reset(runlist: list[Any]) -> bool:
     """Whether the sequence must configure one more device than the runlist asks for.
 
@@ -148,22 +188,8 @@ def fuse_mlir(
     device_ty = None
     sequence_arg_types = {}
     for op_name, generator in operator_generators.items():
-        mlir_module = get_child_mlir_module(generator)
-        device_ops = []
-        params_here: dict[str, ir.Type] = {}
-        for op in mlir_module.body.operations:
-            if isinstance(op, aie.DeviceOp):
-                device_ops.append(op)
-            elif op.operation.name == "aiex.scratchpad_parameter":
-                sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
-                param_type = ir.TypeAttr(op.operation.attributes["type"]).value
-                params_here[sym_name] = param_type
-        if len(device_ops) != 1:
-            raise ValueError(
-                f"Expected exactly one device operation in MLIR artifact for operator '{op_name}', "
-                f"got {len(device_ops)}"
-            )
-        device_op = device_ops[0]
+        generated = generate_design(generator)
+        device_op, params_here = generated.device, generated.params
         if device_ty is None:
             device_ty = device_op.device
         device_mlir_strings[op_name] = str(device_op)
@@ -183,10 +209,7 @@ def fuse_mlir(
                 )
             hoisted_params[sym_name] = param_type
 
-    params_preamble = "\n".join(
-        f"  aiex.scratchpad_parameter @{name} : {param_type}"
-        for name, param_type in hoisted_params.items()
-    )
+    params_preamble = format_params(hoisted_params)
     if isinstance(packing, AdjacentPacking):
         packing, _ = packing.pack(
             [op_name for op_name, *_ in runlist], device_mlir_strings, params_preamble

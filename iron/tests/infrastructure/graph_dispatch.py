@@ -19,9 +19,13 @@ import pytest
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
+import numpy as np
+from ml_dtypes import bfloat16
+
 import iron
 from iron.common.image import OperatorSequence
-from iron.operators import ElementwiseAdd
+from iron.common.image.coresidence import AdjacentPacking
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 
 SIZE = 1024
 TILE = 128
@@ -125,3 +129,27 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
         "a graph must compute exactly what the hand-written runlist computes; "
         "a difference here means the traced wiring or the planned layout is wrong"
     )
+
+
+def _narrow_chain(a, b):
+    """Five steps over three designs, each on two columns: small enough that
+    all three share the array."""
+    narrow = dict(num_aie_columns=2, tile_size=TILE)
+    x = SiLU(ElementwiseAdd(a, b, **narrow), **narrow)
+    x = ElementwiseMul(x, b, **narrow)
+    return SiLU(ElementwiseAdd(x, b, **narrow), **narrow)
+
+
+def test_a_packed_graph_computes_what_the_temporal_one_does():
+    """compile(coresident=...) changes which device each step runs in, and
+    nothing it computes."""
+    rng = np.random.default_rng(0)
+    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    outputs = []
+    for coresident in (None, AdjacentPacking()):
+        f = iron.graph(_narrow_chain)
+        f.compile(coresident=coresident, a=(SIZE,), b=(SIZE,))
+        outputs.append(np.array(f(a, b).numpy()[:SIZE]))
+    temporal, packed = outputs
+    assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()

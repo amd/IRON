@@ -241,6 +241,13 @@ def argument_parser(description="LLaMA 3.2 1B Inference Harness"):
         default=40,
         help="Number of tokens to generate (default: 40)",
     )
+    parser.add_argument(
+        "--cost-table",
+        type=Path,
+        default=None,
+        help="Narrow and pack the decode step's designs by this measured cost "
+        "table (iron.common.graph.narrowing); default: as written",
+    )
     return parser
 
 

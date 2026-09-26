@@ -27,6 +27,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -34,6 +35,7 @@ from ml_dtypes import bfloat16
 import iron
 from aie.iron.kernels.sample import ROW_WORDS
 from iron.common.graph.compiled import CompiledGraph
+from iron.common.graph.narrowing import CostTable, JointNarrowing
 
 from . import harness
 from .graphs import LlamaGraph
@@ -65,16 +67,28 @@ class AIELlama:
         self.device = device
 
     @classmethod
-    def compile(cls, config, max_seq_len=MAX_SEQ_LEN) -> "AIELlama":
+    def compile(
+        cls, config, max_seq_len=MAX_SEQ_LEN, cost_table: Path | None = None
+    ) -> "AIELlama":
         """Trace, compile and load both versions, weights uploaded.
 
         Both before the first call, so the shared arena is made once at its
         final size. The checkpoint's pages are dropped a piece at a time as
         they reach the device, so the process holds at most one piece of it
         beside the buffers; the embedding's rows fault back in as it is read.
+        With a ``cost_table`` the decode version's designs are narrowed and
+        packed by it (:class:`~iron.common.graph.narrowing.JointNarrowing`).
         """
         model = LlamaGraph(config, max_seq_len)
-        decode = model.compile(config, 1)
+        decode = model.compile(
+            config,
+            1,
+            coresident=(
+                None if cost_table is None else JointNarrowing(CostTable(cost_table))
+            ),
+        )
+        if decode.tuning is not None:
+            print("[Tuning] decode:\n" + decode.tuning.report(), flush=True)
         # A prompt's carried values start a decode step (see DeviceGeneration).
         prompt = model.compile(config, max_seq_len, feeds=decode)
         for version in (decode, prompt):
@@ -206,7 +220,7 @@ def setup(args):
             f"a {n_prompt}-token prompt and {args.num_tokens} generated tokens "
             f"exceed the model's {MAX_SEQ_LEN} rows"
         )
-    return config, state, prompt, AIELlama.compile(config)
+    return config, state, prompt, AIELlama.compile(config, cost_table=args.cost_table)
 
 
 def main():
