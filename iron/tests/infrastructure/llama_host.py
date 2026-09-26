@@ -22,6 +22,8 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from aie.iron.kernels.sample import sample_ref
+
 from iron.applications.llama_3_2_1b.sampling import Sampler
 from iron.applications.llama_3_2_1b.weights import (
     Llama3RopeScaling,
@@ -457,6 +459,37 @@ def test_probabilities_are_the_harness_pipeline():
     assert np.array_equal(got > 0, expected > 0)
     assert np.count_nonzero(got) >= 50
     np.testing.assert_allclose(got, expected, rtol=1e-6, atol=0)
+
+
+def test_device_rows_are_the_host_draws():
+    """rows() takes the uniforms the host draws would, greedy steps included,
+    so the device's tokens are the host's for the same seed."""
+    logits = random_logits(4096, seed=6)
+    for temperature in (0.7, 0.0):
+        host = Sampler(temperature, 50, np.random.default_rng(9))
+        device = Sampler(temperature, 50, np.random.default_rng(9))
+        rows = device.rows(8, k_max=64)
+        want = [host(logits) for _ in range(8)]
+        assert [sample_ref(logits, *decode_row(r)) for r in rows] == want
+        assert host.rng.random() == device.rng.random()
+
+
+def decode_row(row):
+    """(temperature, top_k, n53) of one device draw row."""
+    words = row.view(np.uint32)
+    return (
+        words[0:1].view(np.float32)[0],
+        int(words[1]),
+        int(words[2]) | int(words[3]) << 32,
+    )
+
+
+def test_device_rows_refuse_an_unbounded_top_k():
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="device draws"):
+        Sampler(0.7, None, rng).rows(1, k_max=64)
+    with pytest.raises(ValueError, match="device draws"):
+        Sampler(0.7, 65, rng).rows(1, k_max=64)
 
 
 def test_draws_follow_the_distribution():
