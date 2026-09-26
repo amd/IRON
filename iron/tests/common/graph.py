@@ -345,9 +345,16 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "ElementwiseAdd",
     ]
-    assert kinds == gathers + per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
-    # A token takes no tensor: its rows are gathered from the tables.
-    assert t.input_args == [] and t.output_args == ["out"]
+    head = ["WeightedRMSNorm", "GEMV", "Sample"]
+    assert kinds == gathers + per_block * cfg.n_layers + head
+    # A token takes no tensor: its rows are gathered from the tables. It
+    # returns the logits and carries the token it draws from them, at the
+    # position's draw row and record.
+    assert t.input_args == [] and t.output_args == ["out", "carry_token"]
+    position = t.values[1]
+    assert t.carry["position"] == Affine(position, 1, 1)
+    draw = {b.member.name: b.expression for b in t.bindings if b.op is t.steps[-1].op}
+    assert draw == {"row": Affine(position, 4), "at": Affine(position)}
     assert [v.name for v in t.values] == ["token", "position"]
     embedding, angles = t.steps[0].op, t.steps[1].op
     by_op = {id(b.op): b for b in t.bindings}
@@ -359,7 +366,6 @@ def test_llama_decode_traces_and_tunes():
     assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
     # One strided copy instance per layer writes the row at the position, on
     # both of its call sites; every softmax sees position + 1 keys.
-    position = t.values[1]
     copies = [b for b in t.bindings if b.member.name == "out_offset"]
     assert len(copies) == cfg.n_layers * 2
     assert {b.expression for b in copies} == {Affine(position, cfg.head_dim)}
@@ -411,9 +417,9 @@ def test_llama_prompt_traces_over_the_same_caches():
         "GEMM",
         "ElementwiseAdd",
     ]
-    tail = ["StridedCopy", "WeightedRMSNorm", "GEMV"]
+    tail = ["StridedCopy", "WeightedRMSNorm", "GEMV", "Sample"]
     assert kinds == per_block * cfg.n_layers + tail
-    assert t.input_args == ["x"] and t.output_args == ["out"]
+    assert t.input_args == ["x"] and t.output_args == ["out", "carry_token"]
     assert [v.name for v in t.values] == ["token", "position"]
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
@@ -430,10 +436,12 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert all(op.ov.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
-    # The last-row copy is the one operator bound to a per-call value: the
-    # position of the last prompt row, in elements.
+    # The per-call values are the position of the last prompt row, which the
+    # last-row copy reads in elements, and its draw row and record.
     assert [(type(b.op).__name__, b.member.name) for b in t.bindings] == [
-        ("StridedCopy", "in_offset")
+        ("StridedCopy", "in_offset"),
+        ("Sample", "row"),
+        ("Sample", "at"),
     ]
     assert t.bindings[0].expression == Affine(t.values[1], cfg.emb_dim)
     for op in t.operators:

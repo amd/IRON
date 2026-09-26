@@ -70,7 +70,7 @@ def graph_prefill(config, graph, prompt):
     n = prompt.shape[0]
     x = np.zeros((rows, config.emb_dim), dtype=bfloat16)
     x[:n] = _embed(config, prompt)
-    logits = graph.graph.reference(x, token=int(prompt[-1]), position=n - 1)
+    logits, _ = graph.graph.reference(x, token=int(prompt[-1]), position=n - 1)
     return torch.from_numpy(logits.reshape(-1).astype(np.float32))
 
 
@@ -79,7 +79,7 @@ def graph_decode(config, graph, tokens, pos):
     position ``pos``, its caches as they are; the logits after each."""
     out = []
     for token in tokens:
-        logits = graph.graph.reference(token=int(token), position=pos)
+        logits, _ = graph.graph.reference(token=int(token), position=pos)
         out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
         pos += 1
     return out
@@ -162,7 +162,8 @@ def application(config):
     graph = llama_graph(config)
 
     def forward(*tensors, **values):
-        return _Output(graph.graph.reference(*tensors, **values))
+        logits, carried = graph.graph.reference(*tensors, **values)
+        return _Output(logits), carried
 
     return AIELlama(config, forward, config.context_length)
 

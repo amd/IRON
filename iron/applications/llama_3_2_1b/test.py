@@ -131,3 +131,24 @@ def test_llama_3_2_1b_determinism():
 
     differing = re.search(r"Differing runs:\s*(\d+)/(\d+)", result.stdout)
     assert int(differing.group(1)) == 0, f"{differing.group(0)} (bitwise logits)"
+
+
+# The device draws every token and starts every decode step itself; from the
+# same seed its text must be the host loop's, token for token. The figures
+# are the device loop's, which runs first.
+DEVICE_LOOP = {
+    **PERFORMANCE,
+    "DifferingTokens": r"\[DeviceLoop\] Tokens differing from the host loop:\s*(?P<value>\d+)/",
+}
+
+
+@requires_weights
+@pytest.mark.supported_devices("npu2")
+def test_llama_3_2_1b_device_loop():
+    result = run_llama_npu(
+        1024, 100, "--device-loop", "--compare-host", figures=DEVICE_LOOP
+    )
+
+    differing = re.search(r"differing from the host loop:\s*(\d+)/(\d+)", result.stdout)
+    assert differing, "the run printed no comparison"
+    assert int(differing.group(1)) == 0, differing.group(0)

@@ -11,7 +11,11 @@ Without ``x`` it is a decode step on ``token`` at ``position``: the token's
 embedding row and the position's RoPE row gathered on the device, GEMV
 projections, attention against the KV caches, the row written into them at
 the position, the softmax masked to the ``position + 1`` keys so far. Both
-end in the same norm and head.
+end in the same norm and head, and draw the next token from its logits on
+the device (:class:`~iron.operators.Sample`). They return the logits and
+carry the token and ``position + 1`` into the next call, so a decode step
+can start another with nothing from the host
+(:class:`~iron.common.graph.carried.CarriedLoop`).
 
 Each shape compiles its own version of the one function, and every version
 runs in the function's one scratch arena (:mod:`iron.common.graph.compiled`):
@@ -34,9 +38,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.iron.kernels.sample import ROW_WORDS
 
 import iron
-from iron.common.declare import Scratchpad
+from iron.common.declare import Carried
 from iron.common.graph import Value, handle_of
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -46,6 +51,7 @@ from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope.op import RoPE
+from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.operators.strided_copy import StridedCopy
@@ -100,6 +106,8 @@ class LlamaGraph:
             num_aie_columns = dev.cols if dev is not None else 8
         L, cols = max_seq_len, num_aie_columns
         self.max_seq_len = L
+        # The largest top-k the device draws with.
+        self.k_max = 64
         self.num_aie_columns = cols
         self.keys = [
             iron.state((G, L * D), name=f"keys_cache_{i}") for i in range(len(W.layers))
@@ -108,12 +116,18 @@ class LlamaGraph:
             iron.state((G, L * D), name=f"values_cache_{i}")
             for i in range(len(W.layers))
         ]
+        # The draws, one four-word row per position (``Sampler.rows``), and
+        # the tokens drawn, each recorded at its position: the host writes
+        # the one before a prompt and reads the other after the loop.
+        self.draws = iron.state((L, ROW_WORDS), np.int32, name="sample_draws")
+        self.tokens = iron.state((L,), np.int32, name="sampled_tokens")
         # 1/sqrt(head_dim) over every score, as the elementwise multiply wants it.
         self.scale = np.full((H, L), 1.0 / math.sqrt(D), dtype=bfloat16)
         # The RoPE table, one row per position, in the images' dtype: a prompt
         # reads its first rows, a decode step gathers its position's.
         self.rope = config.angles[:L].astype(bfloat16)
         keys, values, scale, rope = self.keys, self.values, self.scale, self.rope
+        draws, tokens = self.draws, self.tokens
 
         # -- one row: a decode step ------------------------------------------
 
@@ -288,8 +302,8 @@ class LlamaGraph:
         def forward(
             x=None,
             *,
-            token: Scratchpad[np.int32],
-            position: Scratchpad[np.int32],
+            token: Carried[np.int32],
+            position: Carried[np.int32],
         ):
             if x is not None:
                 angles = handle_of(rope)[: x.shape[0]]
@@ -307,7 +321,16 @@ class LlamaGraph:
                     # softmax sees every key up to and including it.
                     x = decode_block(i, lw, x, angles, position * D, position + 1)
             x = RMSNorm(x, W.norm)
-            return gemv(W.out_head, x, tile_out=32)
+            logits = gemv(W.out_head, x, tile_out=32)
+            _, sampled = Sample(
+                logits.reshape(config.vocab_size),
+                draws,
+                tokens,
+                row=position * ROW_WORDS,
+                at=position,
+                k_max=self.k_max,
+            )
+            return logits, iron.carry(token=sampled, position=position + 1)
 
         self.graph = forward
 

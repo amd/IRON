@@ -273,30 +273,34 @@ def init(
 
 
 def generate(config, state, forward_pass, num_tokens=100, seed=SEED):
+    """Generate ``num_tokens`` tokens after the prompt, printing each as it
+    comes and then the timings; return their ids. Each is drawn on the host
+    (:class:`.sampling.Sampler`) from the logits ``forward_pass`` returns."""
     sampler = Sampler(config.temperature, config.top_k, np.random.default_rng(seed))
-    # Generate tokens
     # First token (prefill)
-    n_tokens_generated = 0
     t_prefill_start = time.perf_counter()
     first_token, state = generate_token(config, forward_pass, state, sampler)
-    token_text = config.tokenizer.decode([first_token])
-    n_tokens_generated += 1
-    print(token_text, end="", flush=True)
+    print(config.tokenizer.decode([first_token]), end="", flush=True)
     t_prefill_stop = time.perf_counter()
+    generated = [first_token]
 
     # Remaining tokens (decode)
     state.token_ids = np.array([[first_token]], dtype=np.int64)
     t_decode_start = time.perf_counter()
     for _ in range(num_tokens - 1):
         next_token, state = generate_token(config, forward_pass, state, sampler)
-        token_text = config.tokenizer.decode([next_token])
-        n_tokens_generated += 1
-        print(token_text, end="", flush=True)
+        print(config.tokenizer.decode([next_token]), end="", flush=True)
+        generated.append(next_token)
         state.token_ids = np.array([[next_token]], dtype=np.int64)
     t_decode_end = time.perf_counter()
 
-    t_prefill = t_prefill_stop - t_prefill_start
-    t_decode = t_decode_end - t_decode_start
+    report(t_prefill_stop - t_prefill_start, t_decode_end - t_decode_start, num_tokens)
+    return generated
+
+
+def report(t_prefill, t_decode, n_tokens_generated):
+    """Print the timings of a generation: the prompt's first token in
+    ``t_prefill`` seconds, the other ``n_tokens_generated - 1`` in ``t_decode``."""
     sys.stderr.write("\n\n=== Performance Statistics ===\n")
     sys.stderr.write(f"[Prefill] Time to first token:   {t_prefill:7.3f} s\n")
     if n_tokens_generated > 1:

@@ -111,7 +111,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
     cfg = Llama1B(n_layers=1)
     traced = LlamaGraph(cfg, cfg.context_length).trace(cfg, cfg.context_length)
-    assert len(traced.runlist) == 18 + 3
+    assert len(traced.runlist) == 18 + 4  # the last row, norm, head, draw
     artifacts = build_elf(traced, "prefill_1b")
     _assert_values_in_table(traced, artifacts)
 
