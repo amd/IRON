@@ -3,7 +3,8 @@
 
 
 import ml_dtypes
-from aie.iron.kernels import activation
+from aie.extras.dialects import arith
+from aie.iron.kernels import activation, zero
 import numpy as np
 
 from aie.utils.verify import Tolerance
@@ -25,6 +26,10 @@ from iron.common.declare import (
 )
 from iron.common.testing import Case, Testing, device_columns
 
+# softmax_bf16's vector step on both targets (activation.softmax holds a
+# row to a multiple of it). Its loops cover only whole steps.
+_VECTOR_STEP = 32
+
 
 @operator
 class SoftmaxOverlay(Overlay):
@@ -32,7 +37,13 @@ class SoftmaxOverlay(Overlay):
 
     Each row is masked to ``vector_size`` valid elements before the softmax;
     here that is a resident the sequence writes once per build
-    (``rtp_vector_size``, default the full row).
+    (``rtp_vector_size``, default the full row). ``vector_size`` must be at
+    least 1.
+
+    The kernels only run over the span: ``vector_size`` rounded up to the
+    softmax's 32-element vector step. Past it the masked elements' exponents
+    are exact zeros, so leaving them out of the lanes' sums changes no bit;
+    the output past the span is zero-filled instead of computed.
     """
 
     cols: int = dim()
@@ -53,7 +64,8 @@ class SoftmaxOverlay(Overlay):
         softmax_k = activation.softmax(self.cols)
         # mask_bf16 is exported by the same softmax.cc translation unit.
         mask_k = softmax_k.object_file.bind("mask_bf16", [tile_ty, np.int32, np.int32])
-        return softmax_k, mask_k
+        zero_k = zero(self.cols, ml_dtypes.bfloat16)
+        return softmax_k, mask_k, zero_k
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker
@@ -62,7 +74,7 @@ class SoftmaxOverlay(Overlay):
         tile_ty = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
         n_cores = cols * chans
-        softmax_k, mask_k = self._kernels(tile_ty)
+        softmax_k, mask_k, zero_k = self._kernels(tile_ty)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
             for i in range(cols)
@@ -88,6 +100,7 @@ class SoftmaxOverlay(Overlay):
             of_out,
             softmax_kernel,
             mask_kernel,
+            zero_kernel,
             rtp,
             barrier,
             vector_size_src=None,
@@ -97,11 +110,20 @@ class SoftmaxOverlay(Overlay):
             # `dynamic` is a compile-time constant, so only one of these is
             # emitted: a scratchpad parameter read or a write-RTP buffer load.
             vector_size = vector_size_src.read() if dynamic else rtp[1]
+            i32 = vector_size.type
+            span = arith.minsi(
+                arith.andi(
+                    arith.addi(vector_size, arith.constant(_VECTOR_STEP - 1, i32)),
+                    arith.constant(-_VECTOR_STEP, i32),
+                ),
+                arith.constant(per_tile, i32),
+            )
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                mask_kernel(elem_in, vector_size, per_tile)
-                softmax_kernel(elem_in, elem_out, per_tile)
+                zero_kernel(elem_out)
+                mask_kernel(elem_in, vector_size, span)
+                softmax_kernel(elem_in, elem_out, span)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -113,6 +135,7 @@ class SoftmaxOverlay(Overlay):
                     of_outs[k].prod(),
                     softmax_k,
                     mask_k,
+                    zero_k,
                     rtps[k],
                     barriers[k],
                 ]
