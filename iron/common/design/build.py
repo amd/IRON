@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import inspect
 from typing import Any
@@ -38,6 +39,7 @@ def build_design(
     op: Operator,
     trace_size: int = 0,
     code: str = "",
+    fields: str = "",
     image: str = "elf",
     **dispatch,
 ):
@@ -45,8 +47,8 @@ def build_design(
 
     Called by :mod:`iron.common.image.jit_compile`'s compile functions and by
     ``fuse_mlir`` through the
-    operator's ``DesignGenerator``; ``code`` exists only to reach the cache
-    key (see :func:`mlir_artifact_for`).
+    operator's ``DesignGenerator``; ``code`` and ``fields`` exist only to
+    reach the cache key (see :func:`mlir_artifact_for`).
     """
     op = op.tuned(dev)
     ov = op.ov
@@ -136,6 +138,26 @@ def _design_code(op: Operator) -> str:
     return h.hexdigest()[:24]
 
 
+def _design_fields(op: Operator) -> str:
+    """Every field of the overlay and the operator, hidden ones too, for the cache key.
+
+    ``op`` reaches the key as its ``str()``, the dataclass repr, which leaves
+    out every ``repr=False`` field. Such a field still changes the design
+    (GEMM's ``emulate_bf16_mmul_with_bfp16``, ``prio_accuracy``,
+    ``dtype_out``), so two operators differing only there would otherwise
+    share one cache entry, and the second would silently get the first's
+    build.
+    """
+    return repr(
+        [
+            (f.name, getattr(obj, f.name))
+            for obj in (op.ov, op)
+            for f in dataclasses.fields(obj)
+            if f.name != "ov"
+        ]
+    )
+
+
 def dispatch_parameters(op: Operator) -> list[tuple[str, Any]]:
     """The (symbol, dtype) of every per-call value, as dispatch-time scalars."""
     return [
@@ -157,6 +179,7 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
             "image": image,
             "dispatch": dispatch_parameters(op) if image != "elf" else [],
             "code": _design_code(op),
+            "fields": _design_fields(op),
             # Spelled here, not bound by name from the operator: the
             # device reaches the cache key by identity, the kernel tree
             # by path (pointing IRON at another tree changes the key).
