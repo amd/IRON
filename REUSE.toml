@@ -14,3 +14,9 @@ path = "iron/applications/llama_3_2_1b/decode_costs_npu2.json"
 precedence = "closest"
 SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
 SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "iron/tests/toolchain/patches/*.patch"
+precedence = "closest"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
+SPDX-License-Identifier = "Apache-2.0"

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # aiecc clones the whole module per split item
 
 A note to act on later, in mlir-aie's `tools/aiecc`. Found while building
