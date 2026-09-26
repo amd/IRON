@@ -522,27 +522,18 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Transpose_950b7f7484b5a1504768803d": {
-   "t_step_us": 1799.502206267789,
-   "alone_us": 428.70818288065493,
-   "exact": true,
-   "pmode": "turbo",
-   "rounds": 8,
-   "calls": 50,
-   "measured": "2026-09-26"
-  },
-  "Transpose_ecc85b98b6307dbbadd2fb6d": {
-   "t_step_us": 1205.8319625793956,
-   "alone_us": 517.5650949240662,
-   "exact": true,
-   "pmode": "turbo",
-   "rounds": 8,
-   "calls": 50,
-   "measured": "2026-09-26"
-  },
   "WeightedRMSNorm_7780ba9164272945d92b17fa": {
    "t_step_us": 3.396562533453107,
    "alone_us": 124.1226855199784,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GQAContext_b3c806484231e8f0c42b9e53": {
+   "t_step_us": 53.06353705236688,
+   "alone_us": 398.53745693108067,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
