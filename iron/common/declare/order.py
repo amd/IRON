@@ -40,11 +40,27 @@ class Order:
     offset_by: "BoundValue | None" = None
 
     def __post_init__(self) -> None:
-        if len(self.slots) != self.stream.count:
+        name, count = self.stream.name, self.stream.count
+        if len(self.slots) != count:
             raise ValueError(
-                f"an order over stream {self.stream.name!r} needs "
-                f"{self.stream.count} slots, got {len(self.slots)}"
+                f"an order over stream {name!r} needs {count} slots, "
+                f"got {len(self.slots)}"
             )
+        # The stream's replicate flag is what the shim budget and a fusion
+        # pass read; an order that says otherwise is the declaration lying
+        # (GEMV's B was sent whole to every column of a stream declared split).
+        if count > 1 and any(self.slots):
+            same = all(s == self.slots[0] for s in self.slots)
+            if same and not self.stream.replicate:
+                raise ValueError(
+                    f"stream {name!r} is not declared replicate=True, but this "
+                    f"order gives each of its {count} slots the same transfers"
+                )
+            if self.stream.replicate and not same:
+                raise ValueError(
+                    f"stream {name!r} is declared replicate=True, but this order "
+                    f"gives its slots different transfers"
+                )
 
     def __getitem__(self, slot: int) -> tuple[Access, ...]:
         return self.slots[slot]

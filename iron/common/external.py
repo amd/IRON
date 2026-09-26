@@ -63,9 +63,7 @@ class ExternalSequence(Transfers):
     """
 
     def __init__(self, op: Operator, ov: Overlay, rt_data: dict[str, Any], emit):
-        self.op = op
-        self.ov = ov
-        self._rt_data = rt_data
+        super().__init__(op, ov, rt_data)
         self._emit = emit
         self._queues: dict[tuple[str, int], list] = {}
 
@@ -85,6 +83,7 @@ class ExternalSequence(Transfers):
         key = self._key(stream)
         depth = self._depth(stream)
         buffer, accesses = self._resolve(what)
+        self._record(stream, buffer, accesses, None)
         data = self._rt_data[buffer.name]
         queue = self._queues.setdefault(key, [])
         for acc in accesses:
