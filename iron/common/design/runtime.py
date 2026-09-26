@@ -154,12 +154,12 @@ class Sequence(Transfers):
     # -- transfers ---------------------------------------------------------
 
     def fill(self, stream, source, *, group=None, wait: bool = False, offset_by=None):
-        return self._transfer("fill", stream, source, group, wait, offset_by)
+        return self._transfer(True, stream, source, group, wait, offset_by)
 
     def drain(self, stream, dest, *, group=None, wait: bool = True, offset_by=None):
-        return self._transfer("drain", stream, dest, group, wait, offset_by)
+        return self._transfer(False, stream, dest, group, wait, offset_by)
 
-    def _transfer(self, verb: str, stream, what, group, wait: bool, offset_by=None):
+    def _transfer(self, fill: bool, stream, what, group, wait: bool, offset_by=None):
         handle = self._handle(stream)
         self.used.add(id(handle))
         buffer, accesses, sliced_by = self._resolve(what)
@@ -178,7 +178,7 @@ class Sequence(Transfers):
         tasks = []
         for i, acc in enumerate(accesses):
             last = i == len(accesses) - 1
-            fn = getattr(handle, verb)
+            fn = handle.fill if fill else handle.drain
             common = dict(
                 wait=wait and last,
                 group=group if group is not None else self._group,

@@ -176,6 +176,14 @@ class OperatorSequence:
         self._arena_layout: dict[str, Allocation] | None = None
         self.mode = mode  # None until the device is known (prepare)
         self._image = None  # the mode's image builder, once resolved
+        # Set by prepare(): the buffer layout.
+        self.prepared = False
+        self.subbuffer_layout: dict[str, tuple[str, int, int]] = {}
+        self.buffer_sizes: ArgumentSizes | None = None
+        self.slice_info: dict[str, tuple[str, int, int]] = {}
+        # Set by link(): the image, and the record of it.
+        self.image = None
+        self._artifacts: Artifacts | None = None
 
     @staticmethod
     def _coerce_dispatch(dispatch):
@@ -462,6 +470,7 @@ class OperatorSequence:
         )
         image, _ = _MODES[self.mode]
         self._image = image() if image is not None else None
+        self.prepared = True
 
     def compile(self, record: str = "memory"):
         """Build the image ahead of time, and record what it consists of.
@@ -481,7 +490,7 @@ class OperatorSequence:
     def link(self):
         """Build this sequence's image, once; sets ``self.image`` (``None`` for
         the reference mode) and :attr:`artifacts`."""
-        if not hasattr(self, "subbuffer_layout"):
+        if not self.prepared:
             self.prepare()
         self.image = self._image.link(self) if self._image is not None else None
         self._artifacts = self._record()
@@ -493,11 +502,11 @@ class OperatorSequence:
         return self.image if isinstance(self._image, FusedImage) else None
 
     @property
-    def artifacts(self):
+    def artifacts(self) -> Artifacts | None:
         """The record of what :meth:`link` produced (``None`` in reference mode)."""
-        return getattr(self, "_artifacts", None)
+        return self._artifacts
 
-    def _record(self):
+    def _record(self) -> Artifacts | None:
         """What this image consists of: its designs, its steps, its buffers."""
         if self._image is None:
             return None
@@ -559,7 +568,7 @@ class OperatorSequence:
         A sequence placed in an arena plan runs its scratch in ``arena``, the
         buffer behind that plan; made here if not given.
         """
-        if not hasattr(self, "subbuffer_layout"):
+        if not self.prepared:
             self.compile()
         self.link()
         if self.mode != "fused":

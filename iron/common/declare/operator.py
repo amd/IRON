@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABCMeta
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 
 import aie.utils as aie_utils
@@ -30,6 +30,9 @@ from .member import _Buffer, _Member, _Value
 from .naming import label_parts
 from .order import Order, derived
 from .overlay import Overlay
+
+if TYPE_CHECKING:
+    from ..image.artifacts import Artifacts
 
 O = TypeVar("O", bound=Overlay)
 
@@ -79,6 +82,10 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
                 f"{type(self).__name__} is declared against {self._overlay_class.__name__}, "
                 f"got {type(self.ov).__name__}"
             )
+        # Set by compile(): the record of this operator's own image.
+        self._artifacts: Artifacts | None = None
+        # The per-call values a graph binds on this instance (use_value).
+        self._used_values: set[str] = set()
         self.validate()
         self._bind()
 
@@ -177,8 +184,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         # What a graph bound on this instance is part of it, not of a field:
         # the build works on the copy, and a copy that forgot would silently
         # drop the per-call value from the sequence.
-        if self.used_values:
-            new.__dict__["_used_values"] = set(self.used_values)
+        new._used_values = set(self._used_values)
         new.compatible()
         return new
 
@@ -219,11 +225,11 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"
             )
-        self.__dict__.setdefault("_used_values", set()).add(name)
+        self._used_values.add(name)
 
     @property
-    def used_values(self) -> frozenset:
-        return frozenset(self.__dict__.get("_used_values", ()))
+    def used_values(self) -> frozenset[str]:
+        return frozenset(self._used_values)
 
     # -- graph functions ---------------------------------------------------
 
@@ -326,16 +332,16 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         ``record="disk"`` also writes the :class:`~iron.common.image.artifacts.Artifacts`
         record beside the image; by default it is only kept in memory.
         """
-        if getattr(self, "_artifacts", None) is None:
+        if self._artifacts is None:
             self._artifacts = self._build()
             if record == "disk":
                 self._artifacts.dump()
         return self
 
     @property
-    def artifacts(self):
+    def artifacts(self) -> Artifacts | None:
         """The record of what :meth:`compile` produced (None before)."""
-        return getattr(self, "_artifacts", None)
+        return self._artifacts
 
     def _members_io(self):
         """The declared buffers, without resolving a shape: their names alone."""
@@ -352,7 +358,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         tuned = self.ov._tuned and self or self.tuned(self.dev)
         return {b.name: ("arg", i, b.nbytes) for i, b in enumerate(tuned.buffers)}
 
-    def _build(self):
+    def _build(self) -> Artifacts:
         """Compile to an xclbin and an instruction stream, or, on an external
         overlay, to the stream alone against the downloaded image."""
         # image/ reads this package, so naming it at module scope would make
@@ -370,7 +376,6 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             design = insts_design(self.generator())
             entry = design.get_cache_entry()
             insts = entry.insts
-        self._design = design
         return Artifacts(
             kind="xclbin",
             image=picture,

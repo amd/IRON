@@ -173,11 +173,11 @@ class BoundBuffer:
     # untuned overlay is still a valid thing to hold.
     @property
     def shape(self) -> tuple[int, ...]:
-        return _resolve_shape(self.member.dims, self._op)
+        return _resolve_shape(self.member.dims, self._op, self._op.ov)
 
     @property
     def dtype(self):
-        return _resolve_dtype(self.member.dtype, self._op)
+        return _resolve_dtype(self.member.dtype, self._op, self._op.ov)
 
     @property
     def elements(self) -> int:
@@ -242,7 +242,7 @@ class BoundBuffer:
         for d in self.member.dims:
             if not isinstance(d, _Optional):
                 break
-            if _resolve_dim(d.ref, self._op) > 1:
+            if _resolve_dim(d.ref, self._op, self._op.ov) > 1:
                 n += 1
         return n
 
@@ -356,26 +356,29 @@ class BoundResident:
 # --------------------------------------------------------------------------
 
 
-def _lookup_ref(ref: DimRef, instance) -> Any:
-    """Follow a DimRef from an instance: its own class, or its overlay's class."""
+def _lookup_ref(ref: DimRef, instance, overlay: Overlay | None) -> Any:
+    """Follow a DimRef from an instance: its own class, or its overlay's class.
+
+    ``overlay`` is the overlay an operator is declared against; None for an
+    overlay itself, which has none.
+    """
     if isinstance(instance, ref.owner):
         return getattr(instance, ref.name)
-    ov = getattr(instance, "ov", None)
-    if ov is not None and isinstance(ov, ref.owner):
-        return getattr(ov, ref.name)
+    if overlay is not None and isinstance(overlay, ref.owner):
+        return getattr(overlay, ref.name)
     raise DeclarationError(
         f"{ref!r} is not reachable from {type(instance).__name__}: a shape may "
         f"reference the class's own fields or its overlay's"
     )
 
 
-def _resolve_dim(spec, instance) -> int:
+def _resolve_dim(spec, instance, overlay: Overlay | None = None) -> int:
     if isinstance(spec, bool):
         raise DeclarationError(f"{spec!r} is not a dimension")
     if isinstance(spec, (int, np.integer)):
         return int(spec)
     if isinstance(spec, DimRef):
-        value = _lookup_ref(spec, instance)
+        value = _lookup_ref(spec, instance, overlay)
         if value is None:
             raise Incompatible(
                 f"{spec!r} is None; it must be set before the shape can be resolved"
@@ -387,9 +390,9 @@ def _resolve_dim(spec, instance) -> int:
     raise DeclarationError(f"cannot resolve {spec!r} as a dimension")
 
 
-def _flag_value(flag, instance) -> bool:
+def _flag_value(flag, instance, overlay: Overlay | None = None) -> bool:
     if isinstance(flag, DimRef):
-        value = _lookup_ref(flag, instance)
+        value = _lookup_ref(flag, instance, overlay)
         if value is None:
             raise Incompatible(
                 f"{flag!r} is None; a select() on it needs a tuned overlay"
@@ -400,25 +403,27 @@ def _flag_value(flag, instance) -> bool:
     return bool(flag)
 
 
-def _resolve_shape(dims, instance) -> tuple[int, ...]:
+def _resolve_shape(dims, instance, overlay: Overlay | None = None) -> tuple[int, ...]:
     out: list[int] = []
     for d in dims:
         if isinstance(d, _Optional):
-            n = _resolve_dim(d.ref, instance)
+            n = _resolve_dim(d.ref, instance, overlay)
             if n > 1:
                 out.append(n)
             continue
         if isinstance(d, _Select):
-            branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
-            out.extend(_resolve_shape(branch, instance))
+            branch = (
+                d.when_true if _flag_value(d.flag, instance, overlay) else d.when_false
+            )
+            out.extend(_resolve_shape(branch, instance, overlay))
             continue
-        out.append(_resolve_dim(d, instance))
+        out.append(_resolve_dim(d, instance, overlay))
     return tuple(out)
 
 
-def _resolve_dtype(spec, instance):
+def _resolve_dtype(spec, instance, overlay: Overlay | None = None):
     if isinstance(spec, DimRef):
-        return _lookup_ref(spec, instance)
+        return _lookup_ref(spec, instance, overlay)
     if isinstance(spec, Field):
         return getattr(instance, spec.name)
     return spec

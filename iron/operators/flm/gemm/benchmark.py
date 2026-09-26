@@ -139,7 +139,7 @@ class Candidate:
         run = op.get_callable()
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        packed_b = op.pack_B(B) if hasattr(op, "pack_B") else B
+        packed_b = op.pack_B(B) if isinstance(op, FLMGEMM) else B
         args = [
             XRTTensor.from_torch(A.flatten()),
             XRTTensor.from_torch(packed_b.flatten()),

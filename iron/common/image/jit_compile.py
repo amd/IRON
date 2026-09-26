@@ -32,10 +32,13 @@ from typing import Any
 import aie
 import aie.utils as aie_utils
 from aie.iron import DispatchTime
+from aie.iron.device import Device
 from aie.ir import Module
 from aie.utils.compile.jit._hash import _code_identity, _device_identity_key
 from aie.utils.compile.jit.compilabledesign import CompilableDesign, compile_context
 from aie.utils.compile.jit.markers import CompileTime
+
+from ..declare import Operator
 
 # Flags the fused full-ELF build needs. --expand-load-pdis is what makes a
 # multi-device runlist switch PDIs between steps; --get-scratchpad-parameters
@@ -55,13 +58,12 @@ _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 def _is_device(value) -> bool:
     """Whether a design parameter is an IRON device.
 
-    Duck-typed on exactly the attributes ``_device_identity_key`` reads, rather
-    than on the parameter being called ``dev``: the name a design gives it is
-    not what makes it a device, and keying on the name would both miss a design
-    that spells it differently and drop a non-device parameter that happens to
-    share the name.
+    By type rather than by the parameter being called ``dev``: the name a
+    design gives it is not what makes it a device, and keying on the name would
+    both miss a design that spells it differently and drop a non-device
+    parameter that happens to share the name.
     """
-    return all(hasattr(value, attr) for attr in ("arch", "cols", "rows"))
+    return isinstance(value, Device)
 
 
 def _params_key(kwargs: dict) -> str:
@@ -90,9 +92,8 @@ def _params_key(kwargs: dict) -> str:
         # A per-call value a graph bound on an operator is part of what it
         # builds (a device parameter, a patched descriptor), but not a field,
         # so its repr leaves it out.
-        used = getattr(value, "used_values", None)
-        if used:
-            text += f" using {sorted(used)}"
+        if isinstance(value, Operator) and value.used_values:
+            text += f" using {sorted(value.used_values)}"
         if _ADDRESS.search(text):
             raise ValueError(
                 f"design parameter {name!r} stringifies to {text!r}, which "

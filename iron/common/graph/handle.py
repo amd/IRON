@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Iterator, Mapping
 from math import prod
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -235,17 +236,29 @@ def carry(**next_values: Handle | Affine | Value | int) -> Carry:
     return Carry(**next_values)
 
 
+@runtime_checkable
+class HostTensor(Protocol):
+    """A host tensor: what a graph is called on, or closes over as a weight
+    (numpy, torch, or a device tensor)."""
+
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+
+    @property
+    def dtype(self) -> Any: ...
+
+
 def is_operand(x) -> bool:
     """A graph handle, a state, or a host tensor (a weight)."""
     if isinstance(x, (Handle, State)):
         return True
     if isinstance(x, (Overlay, Operator, type)):
         return False
-    return hasattr(x, "shape") and hasattr(x, "dtype")
+    return isinstance(x, HostTensor)
 
 
-def _tensor_dtype(t):
-    dt = getattr(t, "dtype", None)
+def _tensor_dtype(t: HostTensor):
+    dt = t.dtype
     name = str(dt)
     return {
         "bfloat16": bfloat16,

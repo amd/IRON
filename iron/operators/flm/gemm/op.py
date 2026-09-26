@@ -1018,7 +1018,6 @@ class GEMM(Operator[FLMGEMMOverlay]):
         image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
         stream = insts_design(self.generator())
         config, own = image.get_cache_entry(), stream.get_cache_entry()
-        self._design = stream
         return Artifacts(
             kind="xclbin",
             image=config.xclbin,

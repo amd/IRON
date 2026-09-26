@@ -56,16 +56,11 @@ class ArgumentSizes(NamedTuple):
 def extract_runtime_sequence_arg_types(dev_op: Any) -> list[Any]:
     """MLIR helper: Extract argument types from a device operation's runtime sequence."""
     for nested_op in dev_op.body_region.blocks[0].operations:
-        op_name = nested_op.operation.name
-        if op_name == "aie.runtime_sequence":
-            if hasattr(nested_op, "body") and hasattr(nested_op.body, "blocks"):
-                if len(nested_op.body.blocks) > 0:
-                    entry_block = nested_op.body.blocks[0]
-                    arg_types = [
-                        entry_block.arguments[i].type
-                        for i in range(len(entry_block.arguments))
-                    ]
-                    return arg_types
+        if isinstance(nested_op, aie.RuntimeSequenceOp) and nested_op.body.blocks:
+            entry_block = nested_op.body.blocks[0]
+            return [
+                entry_block.arguments[i].type for i in range(len(entry_block.arguments))
+            ]
     raise RuntimeError("Could not find runtime sequence in device operation")
 
 

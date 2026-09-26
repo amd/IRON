@@ -13,7 +13,7 @@ import importlib
 import pytest
 
 import iron.operators as ops
-from iron.common.declare import Operator, Overlay
+from iron.common.declare import In, InOut, Operator, Out, Overlay
 
 FACTORIES = {"SwiGLUDecode", "SwiGLUPrefill"}
 
@@ -26,7 +26,7 @@ def test_exported_operator_is_declared(name):
         return
     assert isinstance(cls, type) and issubclass(cls, Operator), name
     assert issubclass(cls._overlay_class, Overlay), name
-    assert [b.name for b in cls._members if hasattr(b, "direction")], name
+    assert [b.name for b in cls._members if isinstance(b, (In, Out, InOut))], name
 
 
 def test_flm_declares_one_operator_and_its_shipped_overlay():

@@ -222,18 +222,22 @@ class DequantBFP(Operator[FLMDequantOverlay]):
         run_geometry(
             self.run_out_features, self.run_period_out_features, self.N // N_TILE
         )
-        for name, computed in (
-            ("quantized_bytes", self.quantized_size()),
-            ("packed_blocks", self.K * self.N // BFP16_GROUP),
-        ):
-            declared = getattr(self, name)
-            if declared is None:
-                setattr(self, name, computed)
-            elif declared != computed:
-                raise ValueError(
-                    f"{name}={declared} does not match K={self.K}, N={self.N} "
-                    f"({computed})"
-                )
+        self.quantized_bytes = self._filled(
+            "quantized_bytes", self.quantized_bytes, self.quantized_size()
+        )
+        self.packed_blocks = self._filled(
+            "packed_blocks", self.packed_blocks, self.K * self.N // BFP16_GROUP
+        )
+
+    def _filled(self, name: str, declared: int | None, computed: int) -> int:
+        """A buffer extent K and N decide: ``computed``, which one given
+        explicitly (``declared``) must match."""
+        if declared is not None and declared != computed:
+            raise ValueError(
+                f"{name}={declared} does not match K={self.K}, N={self.N} "
+                f"({computed})"
+            )
+        return computed
 
     @staticmethod
     def _check_extents(K, N, error) -> None:
@@ -393,7 +397,6 @@ class DequantBFP(Operator[FLMDequantOverlay]):
         image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
         stream = insts_design(self.generator())
         config, own = image.get_cache_entry(), stream.get_cache_entry()
-        self._design = stream
         return Artifacts(
             kind="xclbin",
             image=config.xclbin,

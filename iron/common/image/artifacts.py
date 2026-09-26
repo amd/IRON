@@ -19,7 +19,8 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from aie.utils.compile.jit.compilabledesign import CacheEntry
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class Design:
 
     name: str  # its symbol in the module (``op3_RoPE``), or the operator's label
     operators: tuple[str, ...]  # labels of the operators sharing it
-    entry: Any = None  # its own cache entry, when built as its own image
+    entry: CacheEntry | None = None  # its own cache entry, when built as its own image
     image: Path | None = None  # its own image, when it has one (an xclbin chain)
     insts: Path | None = None  # its own instruction stream, likewise
 
@@ -57,22 +58,22 @@ class Artifacts:
     kind: str
     image: Path
     insts: Path | None
-    entry: Any
+    entry: CacheEntry | None
     designs: tuple[Design, ...]
     steps: tuple[Step, ...]
     buffers: dict[str, tuple[str, int, int]]
 
     @property
     def params(self) -> Path | None:
-        return getattr(self.entry, "params", None)
+        return None if self.entry is None else self.entry.params
 
     @property
     def lowered_mlir(self) -> Path | None:
-        return getattr(self.entry, "lowered_mlir", None)
+        return None if self.entry is None else self.entry.lowered_mlir
 
     @property
     def directory(self) -> Path | None:
-        return getattr(self.entry, "directory", None)
+        return None if self.entry is None else self.entry.directory
 
     def report(self, name: str = "") -> str:
         lines = [f"{name or 'image'}: {self.kind} {self.image}"]
