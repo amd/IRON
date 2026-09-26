@@ -1,0 +1,585 @@
+{
+ "steps": {
+  "DynamicSoftmax_1b120605e03135fc4ac39c82": {
+   "t_step_us": 318.75466083874926,
+   "alone_us": 69.85784420976415,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseAdd_7f695c9aa0ff17eda7ce9256": {
+   "t_step_us": 2.864042471628636,
+   "alone_us": 133.35608673514798,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseAdd_834efb16a8d563cfac908a15": {
+   "t_step_us": 6.613496225327253,
+   "alone_us": 147.89775013923645,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseAdd_9996b9289e30e527f4431884": {
+   "t_step_us": 3.4197873901575804,
+   "alone_us": 126.72392767854035,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseAdd_b66c11f26fd847b2e57333bd": {
+   "t_step_us": 13.666911399923265,
+   "alone_us": 180.04457524511963,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_2aa9abe483429816637095c2": {
+   "t_step_us": 11.434924090281129,
+   "alone_us": 146.67559298686683,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_3fe14064f768b99714797e34": {
+   "t_step_us": 13.888253306504339,
+   "alone_us": 177.31343541527167,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_6a575e22d7acd5bf425c9e0a": {
+   "t_step_us": 5.589477950707078,
+   "alone_us": 141.4906873833388,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_829b09ec9bf48852c66adb67": {
+   "t_step_us": 11.245283531025052,
+   "alone_us": 172.63044719584286,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+   "t_step_us": 17.739119357429445,
+   "alone_us": 125.8896809304133,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_b1b727fea8a6e0cf8c034ec4": {
+   "t_step_us": 12.27088796440512,
+   "alone_us": 131.29010039847344,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_b6160aa1f4d9762c3f016790": {
+   "t_step_us": 4.492394509725273,
+   "alone_us": 126.24748342204839,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseMul_d9c7a9261963eb6c949c9f6b": {
+   "t_step_us": 4.0077866287902,
+   "alone_us": 120.50264922436327,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_021814239a2ec3b46dbff165": {
+   "t_step_us": 356.3862628652714,
+   "alone_us": 100.26517702499405,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_061aeeba0adaadb39cafc486": {
+   "t_step_us": 207.94207375729457,
+   "alone_us": 132.6641286141239,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_0662a43e108485e0d8ee8da5": {
+   "t_step_us": 10731.158195994794,
+   "alone_us": 533.0884014256299,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_07b7a942f077957c0c4f3683": {
+   "t_step_us": 2439.099014736712,
+   "alone_us": 521.2499527260661,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_0b3b24fd271411f198d7364e": {
+   "t_step_us": 639.5468080881983,
+   "alone_us": 221.56714112497866,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_0c709a5f2c3b747d07267a07": {
+   "t_step_us": 621.2328153196722,
+   "alone_us": 129.81463805772364,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_0f743e9acc0796a12191196f": {
+   "t_step_us": 9405.598437297158,
+   "alone_us": 574.481746298261,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_13bd1cea8994090c30701a18": {
+   "t_step_us": 229.31856074137613,
+   "alone_us": 128.20662959711626,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_14476879b9a16a37fc319f2e": {
+   "t_step_us": 336.93780278554186,
+   "alone_us": 126.2732912437059,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_1f5a39556cb8b7367b235856": {
+   "t_step_us": 1324.8345858301036,
+   "alone_us": 99.59645831258968,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_24ecb6cd22e54470999e98f4": {
+   "t_step_us": 48.37563028559089,
+   "alone_us": 196.227862033993,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_3515db47199ff3f58e6315b6": {
+   "t_step_us": 159.4609784660861,
+   "alone_us": 116.3425185950473,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_485c896e4f7c1db0c7f54523": {
+   "t_step_us": 177.66719247447327,
+   "alone_us": 204.6762892859988,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_4ce0d4a057c4bb67bbaf836b": {
+   "t_step_us": 1308.8018386042677,
+   "alone_us": 301.1926673934795,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_6e62896b6b5b0660adfa2a52": {
+   "t_step_us": 196.9904769794084,
+   "alone_us": 191.53751054545864,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_727dc9e82c16c978521a67a9": {
+   "t_step_us": 196.24662672867998,
+   "alone_us": 180.07090693572536,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_7641afc1f9726b5f067f831c": {
+   "t_step_us": 1442.4946275539696,
+   "alone_us": 61.68632535263896,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_81ab1874a8ad7245b2f0f40f": {
+   "t_step_us": 691.6972124599852,
+   "alone_us": 115.22360000526533,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_8a9c5dbbcacee4079556de03": {
+   "t_step_us": 719.8641251306981,
+   "alone_us": 165.777892107144,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_8d44537be46abe4e7523f5b3": {
+   "t_step_us": 629.691407084465,
+   "alone_us": 123.28679440543056,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_92440a343354ebb05f4cd934": {
+   "t_step_us": 2489.0222048270516,
+   "alone_us": 75.5928413127549,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_9b077fca7e4404e2e70ad60f": {
+   "t_step_us": 37388.40871665161,
+   "alone_us": 1153.627541498281,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_a0b7fd6d68867abe8cfebc76": {
+   "t_step_us": 357.12047974811867,
+   "alone_us": 96.91347804619,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_a4416de712f745d788f00a99": {
+   "t_step_us": 52.56400618236512,
+   "alone_us": 152.5462866993621,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_aead3f9b9d6e86e6ac7e73ac": {
+   "t_step_us": 19176.020861777943,
+   "alone_us": 1223.75618229853,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_bc7cb681d907e659e2b3802e": {
+   "t_step_us": 614.5541847217828,
+   "alone_us": 246.62757641635835,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_c5ec7608a12dd0e46f332cf1": {
+   "t_step_us": 607.8349033487029,
+   "alone_us": 153.66909065051004,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_cc2480dfd9128d1e8edec35e": {
+   "t_step_us": 338.18164956755936,
+   "alone_us": 171.17740935645998,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_ddaacf3b1ca1b45b3f095a90": {
+   "t_step_us": 219.7216308559291,
+   "alone_us": 124.76731353672221,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_e05080abbd20dae3d57cbb30": {
+   "t_step_us": 199.1360477404669,
+   "alone_us": 169.90314179565758,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_ec42b18ab68858fab76153f2": {
+   "t_step_us": 85.15574154444039,
+   "alone_us": 126.89715367741883,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "GEMV_fc5f352682bf90da81a7f3a9": {
+   "t_step_us": 739.3347405013628,
+   "alone_us": 113.72204608051106,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Repeat_b68f5f3b7b13530348a5de81": {
+   "t_step_us": 698.9140238147229,
+   "alone_us": 130.93449524603784,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "RoPE_767cc7a64599cf68a4a34c01": {
+   "t_step_us": 3.116670995950699,
+   "alone_us": 123.19529196247458,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "RoPE_8f8acbe2560d588f763c4299": {
+   "t_step_us": 5.184941983316094,
+   "alone_us": 129.59227751707658,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Sample_11b4916290c13686cc97a493": {
+   "t_step_us": 4257.974978827406,
+   "alone_us": 293.70647825999185,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Sample_8c39d817e091dc85e5dd68aa": {
+   "t_step_us": 2267.054849653505,
+   "alone_us": 301.18915310595185,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Sample_a5e08d14772354b0525bde0d": {
+   "t_step_us": 8295.722429465968,
+   "alone_us": 541.4460247266106,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "SiLU_1986171938c4eb52bf519a53": {
+   "t_step_us": 3.9830338209867477,
+   "alone_us": 124.74076356738806,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "SiLU_4d38c3ebe6828c20a728fc29": {
+   "t_step_us": 3.807035682257265,
+   "alone_us": 119.45932783419266,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "SiLU_628c0adda24cbc756be54bd7": {
+   "t_step_us": 4.79265145258978,
+   "alone_us": 136.55435031978413,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "SiLU_fba6721d9905d49d51ce46ef": {
+   "t_step_us": 9.015799150802195,
+   "alone_us": 163.5065273148939,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "StridedCopy_0bd6ee317f91a4d9da654989": {
+   "t_step_us": 2.592285454738885,
+   "alone_us": 124.55844989744946,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "StridedCopy_1cda5d55db91b6e4814d4529": {
+   "t_step_us": 4.518020432442427,
+   "alone_us": 126.00701302289963,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "StridedCopy_31af6f34900fb87894ba85d1": {
+   "t_step_us": 2.9197835829108953,
+   "alone_us": 124.9922497663647,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Transpose_950b7f7484b5a1504768803d": {
+   "t_step_us": 1799.502206267789,
+   "alone_us": 428.70818288065493,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "Transpose_ecc85b98b6307dbbadd2fb6d": {
+   "t_step_us": 1205.8319625793956,
+   "alone_us": 517.5650949240662,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "WeightedRMSNorm_7780ba9164272945d92b17fa": {
+   "t_step_us": 3.396562533453107,
+   "alone_us": 124.1226855199784,
+   "exact": true,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  }
+ },
+ "calibrations": {
+  "ElementwiseAdd_9996b9289e30e527f4431884|ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+   "dispatch_us": 44.33202169214685,
+   "reset_us": 38.716575848714754,
+   "base_us": 31.65943538382028,
+   "switch_us": 39.331226920088135,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "ElementwiseAdd_9996b9289e30e527f4431884|SiLU_4d38c3ebe6828c20a728fc29": {
+   "dispatch_us": 50.062963661427304,
+   "reset_us": 33.54834795269805,
+   "base_us": 32.36634681040111,
+   "switch_us": 38.4946276123325,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  },
+  "SiLU_4d38c3ebe6828c20a728fc29|ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+   "dispatch_us": 43.673625138277814,
+   "reset_us": 36.630901983395844,
+   "base_us": 32.40675020303267,
+   "switch_us": 38.63665430496136,
+   "pmode": "turbo",
+   "rounds": 8,
+   "calls": 50,
+   "measured": "2026-09-26"
+  }
+ }
+}

@@ -8,3 +8,9 @@ path = "iron/applications/llama_3_2_1b/prompt.txt"
 precedence = "closest"
 SPDX-FileCopyrightText = "Public Domain"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "iron/applications/llama_3_2_1b/decode_costs_npu2.json"
+precedence = "closest"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
+SPDX-License-Identifier = "Apache-2.0"

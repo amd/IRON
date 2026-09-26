@@ -47,3 +47,44 @@ python inference.py <weights_file_path> <tokenizer_file_path> [--num_tokens NUM_
 - `--prompt`: (Optional) Prompt for the model to generate text from. Default is the text in `prompts.txt`.
 - `--use_prompt_template`: (Optional) Use a prompt template for the model. Should be passed in when using Instruct weights.
 - `--save_outputs`: (Optional) Enable hooks to save outputs of at each layer of the model.
+## Tuning the Decode Step
+
+`npu.py --cost-table TABLE` narrows the decode step's designs (fewer columns
+where a design gains little from more) and packs them into shared device
+configurations, choosing by what each design costs on the device. The costs
+come from a table measured by `tune.py`:
+
+```bash
+python -m iron.applications.llama_3_2_1b.tune /path/to/model.safetensors /path/to/tokenizer.model
+python -m iron.applications.llama_3_2_1b.npu /path/to/model.safetensors /path/to/tokenizer.model \
+    --cost-table iron/applications/llama_3_2_1b/decode_costs_npu2.json
+```
+
+`decode_costs_npu2.json` is an example table, measured on a Strix Halo NPU
+(8 columns) in turbo power mode. Its entries are keyed by each design's
+identity -- its code and parameters -- so a design changed since the table was
+measured is not in it, and the tuner leaves that design as written (the
+`[Tuning]` report lists it as unmeasured). Run `tune.py` again after changing
+a design, or to measure for another NPU; it keeps the entries still current
+and measures only the rest.
+
+## Tuning the Decode Step
+
+`npu.py --cost-table TABLE` narrows the decode step's designs (fewer columns
+where a design gains little from more) and packs them into shared device
+configurations, choosing by what each design costs on the device. The costs
+come from a table that `tune.py` measures:
+
+```bash
+python -m iron.applications.llama_3_2_1b.tune /path/to/model.safetensors /path/to/tokenizer.model
+python -m iron.applications.llama_3_2_1b.npu /path/to/model.safetensors /path/to/tokenizer.model \
+    --cost-table iron/applications/llama_3_2_1b/decode_costs_npu2.json
+```
+
+`decode_costs_npu2.json` is an example table, measured on a Strix Halo NPU
+(8 columns) in turbo power mode. Its entries are keyed by each design's
+identity -- its code and parameters -- so a design changed since the table was
+measured is not in it, and the tuner leaves that design as written (the
+`[Tuning]` report lists it as unmeasured). Run `tune.py` again after changing
+a design, or to measure for another NPU; it keeps the entries that are still
+current and measures only the rest.
