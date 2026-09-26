@@ -4,8 +4,10 @@
 """What a caller invokes once a sequence has an image: one class per image kind."""
 
 from __future__ import annotations
+
 import logging
 import time
+from collections.abc import Mapping
 
 import ml_dtypes
 import numpy as np
@@ -169,6 +171,10 @@ class SequenceCallable:
     def _run(self):
         raise NotImplementedError
 
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        """Set the per-call values, by device symbol, for the next run."""
+        raise NotImplementedError(f"{type(self).__name__} takes no per-call values")
+
     def __call__(self):
         self._sync_inputs()
         t0 = time.perf_counter()
@@ -252,6 +258,18 @@ class SequenceFullELFCallable(SequenceCallable):
             return None
         self._params = ParameterScratchpad(self.run_handle, str(params_path))
         return self._params
+
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        """Write each value into the ctrl scratchpad and sync it."""
+        params = self.params
+        if params is None:
+            raise ValueError(
+                f"{self.op.name} was built without per-call values; got "
+                f"{sorted(values)}"
+            )
+        for symbol, value in values.items():
+            params.write(symbol, value)
+        params.sync()
 
     def _allocate_buffers(self):
         in_sz, out_sz, scratch_sz = self.op.buffer_sizes
@@ -387,6 +405,11 @@ class SequenceXclbinCallable(SequenceCallable):
             )
             for step_op, *buf_names in self.op.runlist
         ]
+
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        """Each kernel takes its values as dispatch-time scalars and
+        regenerates its stream (§6)."""
+        self.dispatch_values = dict(values)
 
     def _run(self):
         # Walk the execution plan alongside the resolved runlist steps; the

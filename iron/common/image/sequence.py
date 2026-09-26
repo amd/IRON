@@ -61,6 +61,9 @@ class OperatorSequence:
         arena: Place the scratch buffers in this shared :class:`ArenaPlan`
             rather than a private arena. Only the full ELF addresses its
             scratch by offset in a buffer it is handed, so only it can share.
+            The reference mode lays the arena out (a plan checkable without
+            an NPU) but runs each buffer on the host by name, so it shares
+            nothing.
         residents: With ``arena``, the scratch buffers that are residents
             there, by storage key; every other scratch buffer is a transient.
     """
@@ -365,15 +368,22 @@ class OperatorSequence:
         return subbuffer_layout, buffer_sizes, slice_info
 
     def prepare(self):
-        """Lay the buffers out and settle the mode, before anything is built."""
-        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
-            self.calculate_buffer_layout()
-        )
+        """Settle the mode and lay the buffers out, before anything is built."""
         if self.mode is None:
             # The platform default for a hand-written sequence; a graph goes
             # through packaging.plan, which also weighs its values and boundaries.
             npu2 = isinstance(aie_utils.get_current_device(), NPU2)
             self.mode = "fused" if npu2 else "separate"
+            if self.arena is not None and not npu2:
+                raise ValueError(
+                    f"{self.name}: a shared arena needs the full ELF, which this "
+                    f"device does not dispatch"
+                )
+        # After the mode: a sequence that cannot run in its arena must not
+        # have placed anything there.
+        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
+            self.calculate_buffer_layout()
+        )
         image, _ = _MODES[self.mode]
         self._image = image() if image is not None else None
 

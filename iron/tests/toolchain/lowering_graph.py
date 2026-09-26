@@ -34,7 +34,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 
     cfg = _Config()
     traced = DecodeGraph(cfg, 256).trace(cfg)
-    bound = {id(op) for op, _, _ in traced.bindings}
+    bound = {id(b.op) for b in traced.bindings}
     assert bound, "the decode graph binds values"
     _lower_all(traced, tmp_path)
 
@@ -47,7 +47,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     cfg = _Config()
     decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
     traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
-    assert [v.name for _, _, v in traced.bindings] == ["last"]
+    assert [b.value.name for b in traced.bindings] == ["last"]
     _lower_all(traced, tmp_path)
 
 

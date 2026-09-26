@@ -79,16 +79,12 @@ def test_swiglu_decode_graph_compiles_to_a_full_elf():
 
 
 def _assert_values_in_table(traced, artifacts):
-    from iron.common.design import device_symbol
-
     table = _params(artifacts)
     # Every value the graph bound is a parameter the host can write.
-    for op, name, value in traced.bindings:
-        bound = getattr(op, name, None)
-        if bound is None or not hasattr(bound, "kind"):
-            bound = next(v for v in op.ov.values if v.name == name)
-        symbol = device_symbol(op, bound)
-        assert symbol in table, f"{symbol} ({value.name}) missing from {sorted(table)}"
+    for b in traced.bindings:
+        assert (
+            b.symbol in table
+        ), f"{b.symbol} ({b.value.name}) missing from {sorted(table)}"
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():

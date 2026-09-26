@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+from collections.abc import Hashable
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.utils import bfp
 
-from ..declare import Operator, Resident, infer, infer_kwargs
+from ..declare import BoundValue, Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
+from ..design import device_symbol
 from ..image.sequence import OperatorSequence
 from .handle import Handle, State, Value, _tensor_dtype, is_operand
 
@@ -39,9 +41,31 @@ class TracedStep:
         return [h.buffer_name for h in self.slots]
 
 
+@dataclasses.dataclass(frozen=True)
+class Binding:
+    """A per-call value of the graph, bound to one operator's value member.
+
+    ``member`` is the operator's own, or its overlay's for a core-read value
+    the overlay declares (the dynamic softmax's vector size).
+    """
+
+    op: Operator
+    member: BoundValue
+    value: Value
+
+    @property
+    def symbol(self) -> str:
+        """The device symbol the host writes this value through."""
+        return device_symbol(self.op, self.member)
+
+
 @dataclasses.dataclass
 class TracedGraph:
-    """What tracing a graph function for given shapes produced."""
+    """What tracing a graph function for given shapes produced.
+
+    ``weights`` and ``states`` are keyed by the identity of the object the
+    function closed over, and hold that object, so the key stays its own.
+    """
 
     name: str
     steps: list
@@ -49,13 +73,25 @@ class TracedGraph:
     outputs: list  # Handles returned
     values: list  # Values, in parameter order
     pinned: dict  # buffer name -> nbytes, for weights, states and slice parents
-    weights: dict  # id(tensor) -> (tensor, Handle)
-    states: dict  # id(State) -> Handle
-    bindings: list  # (op, member name, Value)
+    weights: dict[int, tuple[object, Handle]]  # id(tensor) -> (tensor, Handle)
+    states: dict[int, tuple[State, Handle]]  # id(State) -> (State, Handle)
+    bindings: list[Binding]
 
     @property
     def runlist(self) -> list:
         return [(s.op, *s.names) for s in self.steps]
+
+    @property
+    def residents(self) -> dict[str, Hashable]:
+        """Buffer name -> storage key of every weight and state.
+
+        The key is the identity of the tensor or :class:`State` closed over:
+        the same in every trace of the function, so each version compiled
+        from it addresses one copy.
+        """
+        found = {h.name: key for key, (_, h) in self.weights.items()}
+        found.update((h.name, key) for key, (_, h) in self.states.items())
+        return found
 
     @property
     def input_args(self) -> list:
@@ -98,10 +134,10 @@ class Tracer:
     def __init__(self, name: str, names_from=None):
         self.name = name
         self.steps: list[TracedStep] = []
-        self.weights: dict[int, tuple] = {}
-        self.states: dict[int, Handle] = {}
+        self.weights: dict[int, tuple[object, Handle]] = {}
+        self.states: dict[int, tuple[State, Handle]] = {}
         self.overlays: dict = {}
-        self.bindings: list = []
+        self.bindings: list[Binding] = []
         self._bound: dict[int, dict] = {}  # id(op) -> {member: Value}
         self._counter = itertools.count()
         self._names = {}
@@ -124,8 +160,8 @@ class Tracer:
             key = id(x)
             if key not in self.states:
                 x.name = x.name or f"state{len(self.states)}"
-                self.states[key] = Handle(x.shape, x.dtype, x.name, "state")
-            return self.states[key]
+                self.states[key] = (x, Handle(x.shape, x.dtype, x.name, "state"))
+            return self.states[key][1]
         if is_operand(x):
             key = id(x)
             if key not in self.weights:
@@ -216,7 +252,8 @@ class Tracer:
         if name not in bound:
             op.use_value(name)
             bound[name] = value
-            self.bindings.append((op, name, value))
+            member = next(v for v in op.values if v.name == name)
+            self.bindings.append(Binding(op, member, value))
 
     def _bind_overlay(self, op, name, value) -> None:
         """Bind a core-read value the operator's overlay declares."""
@@ -233,7 +270,8 @@ class Tracer:
             )
         if name not in bound:
             bound[name] = value
-            self.bindings.append((op, name, value))
+            member = next(v for v in op.ov.values if v.name == name)
+            self.bindings.append(Binding(op, member, value))
 
     def _record(self, op, operands):
         buffers = op.buffers
@@ -300,7 +338,7 @@ class Tracer:
         pinned = {}
         for _, h in self.weights.values():
             pinned[h.name] = h.nbytes
-        for h in self.states.values():
+        for _, h in self.states.values():
             pinned[h.name] = h.nbytes
         # A slice's parent must have an explicit size, whatever produced it.
         for step in self.steps:

@@ -1,7 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph function, and the image it compiles to."""
+"""A graph function, and the images it compiles to.
+
+A graph function is compiled once per input signature (shapes and dtypes):
+each is a *version*, its own image. Every version reads the same weights
+and states, and on a full ELF they share one scratch arena
+(:class:`~iron.common.image.ArenaPlan`), so a weight is on the device once
+and a state one version writes is where the next reads it. Nothing asks for
+this: calling the function with a new shape compiles a version into the
+arena its other versions already use.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +20,19 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.utils import bfp
 
 from ..declare import ValueSpec
 from ..declare.member import _Value
-from ..design import device_symbol
-from ..image.packaging import plan
+from ..image.allocator import ArenaPlan
+from ..image.callable import ScratchArena
+from ..image.packaging import Plan, plan
+from ..image.sequence import ALIGNMENT
 from .handle import Handle, State, Value, _tensor_dtype
 from .trace import TracedGraph, Tracer, _ReferenceTracer
+
+# One (parameter, shape, dtype name) per input: what picks a version.
+Signature = tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 def _shape_and_dtype(spec):
@@ -70,7 +85,22 @@ class GraphFunction:
                 self.value_params[p.name] = ann
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 raise TypeError(f"{fn.__name__}: *args/**kwargs are not traceable")
-        self._compiled = None
+        self._versions: dict[Signature, CompiledGraph] = {}
+        self._arena = ScratchArena(ArenaPlan(ALIGNMENT))
+
+    @property
+    def versions(self) -> dict[Signature, CompiledGraph]:
+        """Every version compiled so far, by input signature."""
+        return dict(self._versions)
+
+    @property
+    def arena(self) -> ScratchArena:
+        """The scratch arena every full-ELF version runs in."""
+        return self._arena
+
+    @staticmethod
+    def _signature(inputs: list[Handle]) -> Signature:
+        return tuple((h.name, h.shape, bfp.dtype_name(h.dtype)) for h in inputs)
 
     # -- tracing ---------------------------------------------------------------
 
@@ -127,13 +157,18 @@ class GraphFunction:
         verbose=False,
         record="memory",
         **shapes,
-    ):
-        """Compile for the given input shapes and return a :class:`CompiledGraph`.
+    ) -> CompiledGraph:
+        """Compile the version for the given input shapes and return it.
 
         ``boundaries`` and ``image`` are the two packaging choices
         (:mod:`iron.common.image.packaging`); everything else is derived and, under
         ``verbose``, printed. ``record="disk"`` writes the image's
         :class:`~iron.common.image.artifacts.Artifacts` record beside it.
+
+        A full-ELF version is placed in :attr:`arena`, with the weights and
+        states of every other version. Compile every version before the
+        first call where you can: a version placed after the arena's buffer
+        exists grows it, which copies it once.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
@@ -143,19 +178,44 @@ class GraphFunction:
         )
         if verbose:
             print(chosen.report(self.__name__))
-        self._compiled = CompiledGraph(traced, record=record, dispatch=chosen.dispatch)
-        self._compiled.plan = chosen
-        return self._compiled
+        signature = self._signature(traced.inputs)
+        shared = chosen.dispatch == "fused"
+        # Versions see one state only through the arena. Weights alone could
+        # be copied per version, so a stateless function still compiles.
+        others = [v for k, v in self._versions.items() if k != signature]
+        apart = not shared or any(v.arena is None for v in others)
+        stateful = traced.states or any(v.traced.states for v in others)
+        if others and apart and stateful:
+            raise NotImplementedError(
+                f"{self.__name__}: versions share their states through one "
+                f"scratch arena, which only a full ELF addresses; this version "
+                f"dispatches {chosen.dispatch!r}"
+            )
+        version = CompiledGraph(
+            traced, chosen, record=record, arena=self._arena if shared else None
+        )
+        self._versions[signature] = version
+        return version
 
     def __call__(self, *tensors, **values):
-        if self._compiled is None:
+        if len(tensors) != len(self.params):
+            raise TypeError(
+                f"{self.__name__} takes {len(self.params)} input(s), got "
+                f"{len(tensors)}"
+            )
+        signature = tuple(
+            (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
+            for name, t in zip(self.params, tensors)
+        )
+        version = self._versions.get(signature)
+        if version is None:
             shapes = {
                 name: (tuple(t.shape), _tensor_dtype(t))
                 for name, t in zip(self.params, tensors)
             }
             print(f"{self.__name__}: compiling for {shapes}")
-            self.compile(**shapes)
-        return self._compiled(*tensors, **values)
+            version = self.compile(**shapes)
+        return version(*tensors, **values)
 
     def reference(self, *tensors, **values):
         """The same function, each operator run through its ``reference()``."""
@@ -164,32 +224,49 @@ class GraphFunction:
 
 
 class CompiledGraph:
-    """A traced graph built into an image, ready to call."""
+    """A traced graph built into an image, ready to call.
 
-    def __init__(self, traced: TracedGraph, record="memory", dispatch="auto"):
+    With an ``arena`` its weights and states are residents of that shared
+    scratch arena: placed once for every image in it, and uploaded once.
+    """
+
+    def __init__(
+        self,
+        traced: TracedGraph,
+        plan: Plan,
+        record="memory",
+        arena: ScratchArena | None = None,
+    ):
         self.traced = traced
-        self.symbols = []
-        for op, name, value in traced.bindings:
-            bound = getattr(op, name, None)
-            if bound is None or not hasattr(bound, "kind"):
-                bound = next(v for v in op.ov.values if v.name == name)
-            self.symbols.append((value.name, device_symbol(op, bound), value.dtype))
+        self.plan = plan
+        self.arena = arena
+        # (graph value name, device symbol, dtype) per bound value.
+        self.symbols = [
+            (b.value.name, b.symbol, b.value.dtype) for b in traced.bindings
+        ]
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
-        self.sequence = traced.sequence(dispatch=dispatch).compile(record=record)
+        placement = (
+            {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
+        )
+        self.sequence = traced.sequence(dispatch=plan.dispatch, **placement).compile(
+            record=record
+        )
         self.image = self.sequence.image
         # What the image consists of, by identity: its designs, which step
         # runs which, and where each buffer lands in its plan.
         self.artifacts = self.sequence.artifacts
         self._callable = None
-        self._uploaded = False
+        # Weights in this image's buffers, by storage key; an arena's own set
+        # when there is one, since then every image's weights are the same.
+        self._loaded: set = set() if arena is None else arena.loaded
 
     @property
     def callable(self):
         """The loaded image, made on first use (needs the XRT runtime)."""
         if self._callable is None:
-            self._callable = self.sequence.get_callable()
+            self._callable = self.sequence.get_callable(self.arena)
         return self._callable
 
     # -- buffers ---------------------------------------------------------------
@@ -197,7 +274,7 @@ class CompiledGraph:
     def buffer(self, x):
         """The device buffer of a state, a weight tensor, or a handle."""
         if isinstance(x, State):
-            name = self.traced.states[id(x)].name
+            name = self.traced.states[id(x)][1].name
         elif isinstance(x, Handle):
             name = x.buffer_name
         elif id(x) in self.traced.weights:
@@ -216,19 +293,17 @@ class CompiledGraph:
         """A state's or weight's current contents, as a host tensor of its shape."""
         buf = self.buffer(x)
         buf.to("cpu")
-        shape = self.traced.states[id(x)].shape if isinstance(x, State) else x.shape
-        return buf.numpy().reshape(tuple(shape))
+        return buf.numpy().reshape(tuple(x.shape))
 
     def _copy_in(self, name, tensor) -> None:
         _store(self.callable.get_buffer(name).numpy_view(), tensor)
 
     def upload(self) -> None:
-        """Copy every closed-over weight into its buffer; once."""
-        if self._uploaded:
-            return
-        for tensor, handle in self.traced.weights.values():
-            self._copy_in(handle.name, tensor)
-        self._uploaded = True
+        """Copy every closed-over weight into its buffer, once per storage."""
+        for key, (tensor, handle) in self.traced.weights.items():
+            if key not in self._loaded:
+                self._copy_in(handle.name, tensor)
+                self._loaded.add(key)
 
     def load(self) -> "CompiledGraph":
         """Load the image and upload its weights now, rather than on first call."""
@@ -269,27 +344,11 @@ class CompiledGraph:
             )
         if not self.symbols:
             return
-        # Looked up on the class: getattr() on the instance would turn an
-        # AttributeError raised inside the property (a pyxrt without the ctrl
-        # scratchpad) into "takes no per-call values".
-        params = (
-            self.callable.params if hasattr(type(self.callable), "params") else None
-        )
-        if params is not None:
-            for name, symbol, dtype in self.symbols:
-                params.write(symbol, np.dtype(dtype).type(values[name]))
-            params.sync()
-            return
-        if hasattr(self.callable, "dispatch_values"):
-            # An image without a scratchpad: each kernel takes its values as
-            # dispatch-time scalars and regenerates its stream (§6).
-            self.callable.dispatch_values = {
+        self.callable.write_values(
+            {
                 symbol: np.dtype(dtype).type(values[name])
                 for name, symbol, dtype in self.symbols
             }
-            return
-        raise NotImplementedError(
-            f"{type(self.callable).__name__} takes no per-call values"
         )
 
 

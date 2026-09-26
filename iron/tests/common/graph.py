@@ -126,8 +126,9 @@ def test_overlays_are_shared_by_design_key_and_extents_are_not():
 def test_per_call_values_bind_to_the_operator_and_enable_it():
     ffn, _ = _ffn()
     t = ffn.trace(x=(1, E))
-    ((op, member, value),) = t.bindings
-    assert type(op) is StridedCopy and member == "out_offset"
+    (binding,) = t.bindings
+    op, value = binding.op, binding.value
+    assert type(op) is StridedCopy and binding.member.name == "out_offset"
     assert value.name == "pos" and value.kind == "scratchpad"
     assert op.uses_value("out_offset") and not op.uses_value("in_offset")
     assert [v.name for v in op.values] == ["out_offset"]
@@ -157,7 +158,8 @@ def test_every_traced_operator_tunes_from_the_device_alone():
 def test_a_state_written_by_one_step_is_pinned_and_readable():
     ffn, refs = _ffn()
     t = ffn.trace(x=(1, E))
-    handle = t.states[id(refs["cache"])]
+    state, handle = t.states[id(refs["cache"])]
+    assert state is refs["cache"]
     assert handle.role == "state" and handle.name == "state0"
     assert refs["cache"].name == "state0"
 
@@ -351,9 +353,11 @@ def test_llama_decode_traces_and_tunes(monkeypatch):
     assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
     # One strided copy instance per layer is bound to cache_offset on both of
     # its call sites; every softmax binds vector_size on its overlay.
-    copies = [(op, n) for op, n, v in t.bindings if v.name == "cache_offset"]
+    copies = [
+        (b.op, b.member.name) for b in t.bindings if b.value.name == "cache_offset"
+    ]
     assert len(copies) == cfg.n_layers * 2 and all(n == "out_offset" for _, n in copies)
-    softmaxes = [op for op, n, v in t.bindings if v.name == "vector_size"]
+    softmaxes = [b.op for b in t.bindings if b.value.name == "vector_size"]
     assert len(softmaxes) == cfg.n_layers
     assert type(softmaxes[0].ov).__name__ == "DynamicSoftmaxOverlay"
     # The same array serves every layer's like projections.
@@ -414,7 +418,7 @@ def test_llama_prefill_traces_over_the_decode_caches():
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
     # The last-row copy is the one operator bound to the per-call offset.
-    assert [(type(op).__name__, n) for op, n, _ in t.bindings] == [
+    assert [(type(b.op).__name__, b.member.name) for b in t.bindings] == [
         ("StridedCopy", "in_offset")
     ]
     for op in t.operators:
