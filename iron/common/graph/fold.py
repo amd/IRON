@@ -45,6 +45,8 @@ from ..declare import Local, Movement, Operator, Overlay
 from ..declare.field import Incompatible
 from ..declare.refold import Adopted, Refold, Relation, Reorder, Side, Unfoldable
 from ..design.target import Target
+from ..image.coresidence import fits
+from ..image.fusion import format_params, generate_design
 from ..kernels import kernels_dir
 from .handle import Affine, Handle
 from .trace import Binding, TracedGraph, TracedStep
@@ -287,7 +289,11 @@ def _hosts(producer: Operator, epilogue: Overlay, slot: int, dev) -> str | None:
         return str(e)
     if pointwise is None:
         return f"{type(epilogue).__name__} has no pointwise kernel"
-    return None
+    # The epilogue's staging tile and kernel take local memory the array may
+    # not have: the placer and the buffer allocation say.
+    generated = generate_design(tuned.generator())
+    params = format_params({n: str(t) for n, t in generated.params.items()})
+    return fits({"host": str(generated.device)}, params)
 
 
 def _readers(traced: TracedGraph, i: int, name: str) -> list[int]:
