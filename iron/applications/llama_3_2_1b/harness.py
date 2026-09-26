@@ -258,6 +258,12 @@ def argument_parser(description="LLaMA 3.2 1B Inference Harness"):
         help="Narrow and pack the decode step's designs by this measured cost "
         "table (iron.common.graph.narrowing); default: as written",
     )
+    parser.add_argument(
+        "--each-step",
+        action="store_true",
+        help="Dispatch every step of a decode step on its own from one xclbin, "
+        "as NPU1 does; the prompt then runs a token at a time",
+    )
     return parser
 
 

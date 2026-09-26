@@ -115,6 +115,22 @@ def test_llama_3_2_1b_accuracy():
         assert kl <= bound, f"{stat.lower()} KL {kl} > {bound}"
 
 
+# The form NPU1 runs: the decode step alone, each of its steps its own
+# dispatch of one xclbin, and the prompt fed through it a token at a time. A
+# shorter run than the full ELF's, since every step is a host round trip.
+@requires_weights
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_llama_3_2_1b_each_step_accuracy():
+    pytest.importorskip("torch")
+    result = run_llama_npu(
+        256, 20, "--each-step", figures=ACCURACY, entry_point="accuracy"
+    )
+
+    for stat, bound in MAX_KL.items():
+        kl = float(re.search(ACCURACY[f"{stat}KL"], result.stdout).group("value"))
+        assert kl <= bound, f"{stat.lower()} KL {kl} > {bound}"
+
+
 # Repeated runs must produce bit-identical logits. A prefill KV hand-off that
 # was never flushed to the device made 12% of runs diverge. Alternating
 # two prompts makes such a missing flush fail every run: 38/38 in each of three

@@ -15,6 +15,11 @@ draws each token from the logits it returns. With ``--device-loop``
 first decode step and each step the next, the host only restarting runs, and
 the text is the same token for token (``--compare-host`` checks it).
 
+Where a decode step is not a full ELF -- NPU1, which has no full-ELF
+dispatch, or ``--each-step`` -- it is the only version: every step is its
+own dispatch of one xclbin, the prompt runs through it a token at a time,
+and there is no device loop.
+
 No torch: the weights are the mapped checkpoint, the prompt's embedding a
 numpy gather (a decode step gathers its token's row on the device), the
 logits numpy. The accuracy check, which needs the torch CPU
@@ -59,23 +64,34 @@ class AIELlama:
         forward_graph: Callable,
         max_seq_len: int,
         device: DeviceGeneration | None = None,
+        prompt_by_token: bool = False,
     ):
         self.config = config
         self.forward_graph = forward_graph
         self.max_seq_len = max_seq_len
         # The same images, looped on the device; None where there is none.
         self.device = device
+        # Whether a prompt runs as decode steps, where there is no prompt version.
+        self.prompt_by_token = prompt_by_token
 
     @classmethod
     def compile(
-        cls, config, max_seq_len=MAX_SEQ_LEN, cost_table: Path | None = None
+        cls,
+        config,
+        max_seq_len=MAX_SEQ_LEN,
+        cost_table: Path | None = None,
+        boundaries=None,
     ) -> "AIELlama":
         """Trace, compile and load both versions, weights uploaded.
 
         Both before the first call, so the shared arena is made once at its
-        final size. The checkpoint's pages are dropped a piece at a time as
-        they reach the device, so the process holds at most one piece of it
-        beside the buffers; the embedding's rows fault back in as it is read.
+        final size. Where the decode version is not a full ELF (NPU1, or
+        ``boundaries=each_step``) it is the only one, and a prompt runs
+        through it a token at a time: versions share their caches through
+        the arena, which only a full ELF addresses. The checkpoint's pages
+        are dropped a piece at a time as they reach the device, so the
+        process holds at most one piece of it beside the buffers; the
+        embedding's rows fault back in as it is read.
         With a ``cost_table`` the decode version's designs are narrowed and
         packed by it (:class:`~iron.common.graph.narrowing.JointNarrowing`).
         """
@@ -86,9 +102,14 @@ class AIELlama:
             coresident=(
                 None if cost_table is None else JointNarrowing(CostTable(cost_table))
             ),
+            boundaries=boundaries,
         )
         if decode.tuning is not None:
             print("[Tuning] decode:\n" + decode.tuning.report(), flush=True)
+        if decode.plan.image != iron.ELF:
+            print(decode.plan.report("decode"), flush=True)
+            decode.load(release=config.weights.release)
+            return cls(config, model.graph, max_seq_len, prompt_by_token=True)
         # A prompt's carried values start a decode step (see DeviceGeneration).
         prompt = model.compile(config, max_seq_len, feeds=decode)
         for version in (decode, prompt):
@@ -117,6 +138,10 @@ class AIELlama:
         config, rows = self.config, self.max_seq_len
         n = token_ids.shape[0]
         assert 0 < n <= rows
+        if self.prompt_by_token:
+            for position, token_id in enumerate(token_ids):
+                logits = self._decode(int(token_id), position)
+            return logits
         x = prompt_rows(config, token_ids, rows)
         # Every call passes every per-call value; a version reads the ones
         # its operators bind. A prompt reads the position of its last row,
@@ -220,7 +245,9 @@ def setup(args):
             f"a {n_prompt}-token prompt and {args.num_tokens} generated tokens "
             f"exceed the model's {MAX_SEQ_LEN} rows"
         )
-    return config, state, prompt, AIELlama.compile(config, cost_table=args.cost_table)
+    boundaries = iron.each_step if args.each_step else None
+    npu = AIELlama.compile(config, cost_table=args.cost_table, boundaries=boundaries)
+    return config, state, prompt, npu
 
 
 def main():
@@ -249,6 +276,10 @@ def main():
     if args.compare_host and not args.device_loop:
         parser.error("--compare-host compares the --device-loop run")
     config, state, prompt, npu = setup(args)
+    if args.device_loop and npu.device is None:
+        parser.error(
+            "--device-loop needs a full-ELF decode step (not NPU1 or --each-step)"
+        )
 
     if args.check_determinism:
         # The second prompt is the same amount of the text that follows.

@@ -156,7 +156,7 @@ class _Output:
         return self.array
 
 
-def application(config):
+def application(config, prompt_by_token=False):
     """npu.py's AIELlama with its graph function stood in by its reference,
     which runs at whatever shape it is called with."""
     graph = llama_graph(config)
@@ -165,15 +165,22 @@ def application(config):
         logits, carried = graph.graph.reference(*tensors, **values)
         return _Output(logits), carried
 
-    return AIELlama(config, forward, config.context_length)
+    return AIELlama(
+        config, forward, config.context_length, prompt_by_token=prompt_by_token
+    )
 
 
-def test_the_application_runs_both_phases_through_its_images(cpu):
+@pytest.mark.parametrize(
+    "prompt_by_token", [False, True], ids=["prompt_version", "prompt_by_token"]
+)
+def test_the_application_runs_both_phases_through_its_images(cpu, prompt_by_token):
     """npu.py's own forward pass, its graph stood in by the reference: the
     prompt's embedding, its padding and its last position, and decode's
-    token and position are the application's."""
+    token and position are the application's. ``prompt_by_token`` is the
+    form without a prompt version (NPU1): the prompt runs as decode steps
+    from position 0, and decode goes on from the caches they wrote."""
     config, prompt, first, expected = cpu
-    npu = application(config)
+    npu = application(config, prompt_by_token)
 
     state = LlamaModelState(config)
     state.token_ids = prompt.numpy().reshape(1, -1)
