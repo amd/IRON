@@ -2,82 +2,47 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Device-free tests for the per-buffer output sync.
+"""Every dispatch of an xclbin chain hands back its own output.
 
 A dispatch writes its output buffers on the device, which the host-side coherence
 map does not observe. ``to("cpu")`` transfers only the ranges the map holds as
-device-resident, so a range left marked ``cpu`` by an earlier read is skipped and
-the next dispatch hands back the previous one's output.
+device-resident, so a range left marked ``cpu`` by the previous pull is skipped
+and the next dispatch hands back the previous one's output.
 """
 
+import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
-from aie.utils.hostruntime.coherence import _CoherenceMap
+import aie.utils as aie_utils
+from aie.iron.device import from_name
 
-from iron.common.sequence import SequenceXclbinCallable
+import iron
+from iron.operators import ElementwiseAdd
 
-
-def test_a_pull_is_skipped_while_the_range_reads_as_host_resident():
-    """The hazard the output sync has to defeat, at the layer that decides it."""
-    coherence = _CoherenceMap(64, _CoherenceMap.DEVICE)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
-
-    coherence.set(0, 64, _CoherenceMap.HOST)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == []
-
-    coherence.set(0, 64, _CoherenceMap.DEVICE)
-    assert coherence.ranges(0, 64, _CoherenceMap.DEVICE) == [(0, 64)]
+SIZE = 1024
 
 
-class _RecordingBuffer:
-    def __init__(self):
-        self.calls = []
-        self._device = "cpu"
-
-    @property
-    def device(self):
-        return self._device
-
-    @device.setter
-    def device(self, value):
-        self._device = value
-        self.calls.append(("device", value))
-
-    def to(self, target):
-        self._device = target
-        self.calls.append(("to", target))
+@pytest.fixture(autouse=True)
+def device():
+    previous = aie_utils.get_current_device()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    yield
+    aie_utils.set_current_device(previous)
 
 
-class _Op:
-    def __init__(self, names, inputs):
-        self.subbuffer_layout = {n: (None, None, 8) for n in names}
-        self.input_args = set(inputs)
+@pytest.mark.parametrize("calls", [2, 3])
+def test_every_dispatch_returns_its_own_output(calls, npu_runtime):
+    add = ElementwiseAdd(size=SIZE, tile_size=128)
+    w = np.ones(SIZE, dtype=bfloat16)
 
+    @iron.graph
+    def f(x):
+        return add(x, w)
 
-def _callable(names, inputs):
-    """A SequenceXclbinCallable with recording buffers and no XRT behind it."""
-    call = object.__new__(SequenceXclbinCallable)
-    call.op = _Op(names, inputs)
-    call._buffers = {n: _RecordingBuffer() for n in names}
-    return call
-
-
-def test_output_sync_claims_the_device_before_pulling():
-    call = _callable(["a", "out"], inputs=["a"])
-    call._sync_outputs()
-    assert call._buffers["out"].calls == [("device", "npu"), ("to", "cpu")]
-
-
-@pytest.mark.parametrize("reps", [2, 3])
-def test_every_dispatch_pulls_again(reps):
-    call = _callable(["out"], inputs=[])
-    for _ in range(reps):
-        call._sync_outputs()
-    assert call._buffers["out"].calls.count(("to", "cpu")) == reps
-    assert call._buffers["out"].calls.count(("device", "npu")) == reps
-
-
-def test_inputs_are_left_alone():
-    call = _callable(["a", "out"], inputs=["a"])
-    call._sync_outputs()
-    assert call._buffers["a"].calls == []
+    net = f.compile(boundaries=iron.each_step, image=iron.XCLBIN, x=(SIZE,))
+    assert net.plan.dispatch == "separate"
+    for call in range(calls):
+        x = np.full(SIZE, call, dtype=bfloat16)
+        got = net(x).numpy().astype(np.float32)
+        assert np.all(got == call + 1), f"call {call} returned {got[:4]}"

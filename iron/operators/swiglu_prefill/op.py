@@ -1,107 +1,71 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SwiGLU feed-forward over a sequence, as a graph function.
+
+``W_down @ (SiLU(W_gate @ x) * (W_up @ x))`` for ``seq_len`` tokens. The
+weights are closed over, so they are uploaded once; the gate and up
+projections share one GEMM array and one build. Nothing is padded: a
+sequence length the GEMM cannot tile is an error at trace time.
+"""
+
 import aie.utils as aie_utils
 
-from iron.common.sequence import OperatorSequence
-from iron.common.utils import get_shim_dma_limit
-from iron.operators.gemm.op import GEMM
-from iron.operators.silu.op import SiLU
-from iron.operators.elementwise_mul.op import ElementwiseMul
+import iron
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm.op import GEMM, GEMMOverlay
+from iron.operators.silu import SiLU
 
 
-class SwiGLUPrefill(OperatorSequence):
-    """SwiGLU feed-forward (full-sequence prefill) as an OperatorSequence.
+def swiglu_prefill(
+    w_gate, w_up, w_down, *, prio_accuracy=False, b_col_maj=False, num_aie_columns=None
+):
+    """The graph function for a sequence.
 
-    Computes ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))`` over ``seq_len``
-    tokens. Runtime buffers (via ``get_callable().get_buffer(name)``): input
-    ``in``; persistent weight scratch ``w_gate`` / ``w_up`` / ``w_down``;
-    output ``out``.
-
-    ``b_col_maj`` selects the layout all three weights are stored in: ``(K, N)``
-    when False, ``(N, K)`` when True. ``(N, K)`` is what the decode-side GEMV
-    reads, so a pipeline running prefill and decode against the same weight
-    buffers can set it instead of storing a transposed second copy of each.
+    ``b_col_maj`` selects the layout all three weights are stored in. When
+    False, ``w_gate`` and ``w_up`` are ``(embedding_dim, hidden_dim)`` and
+    ``w_down`` is ``(hidden_dim, embedding_dim)``: the ``(K, N)`` layout
+    GEMM's ``B`` takes, so a checkpoint's projection weights go in as they
+    are. When True each is stored transposed, which is what the decode-side
+    GEMV reads, so a pipeline running both against the same weight buffers
+    does not need a second copy of each.
     """
-
-    def __init__(
-        self,
-        seq_len,
-        embedding_dim,
-        hidden_dim,
-        prio_accuracy=False,
-        b_col_maj=False,
-        context=None,
-    ):
-        self.seq_len = seq_len
-        self.hidden_dim = hidden_dim
-        self.embedding_dim = embedding_dim
-        self.prio_accuracy = prio_accuracy
-        self.b_col_maj = b_col_maj
-
-        # GEMM, SiLU, ElementwiseMul require input shapes that meet hardware
-        # alignment requirements (e.g. GEMM needs M % (tile_m * 4) == 0). We
-        # read the dims back off gemm_1 only to size SiLU/ElementwiseMul
-        # from the same source GEMM validated, not because they differ.
-        accuracy_flags = {}
-        if self.prio_accuracy:
-            accuracy_flags = {
-                "emulate_bf16_mmul_with_bfp16": False,
-                "prio_accuracy": True,
-                "round_conv_even": True,
-            }
-
-        dev = aie_utils.get_current_device()
-        n_cols = get_shim_dma_limit(dev) // 2
-
-        gemm_1 = GEMM(
-            M=self.seq_len,
-            K=self.embedding_dim,
-            N=self.hidden_dim,
-            num_aie_columns=n_cols,
-            b_col_maj=self.b_col_maj,
-            **accuracy_flags,
+    if b_col_maj:
+        hidden_dim, embedding_dim = w_gate.shape
+    else:
+        embedding_dim, hidden_dim = w_gate.shape
+    expected_down = (
+        (embedding_dim, hidden_dim) if b_col_maj else (hidden_dim, embedding_dim)
+    )
+    if tuple(w_up.shape) != tuple(w_gate.shape) or tuple(w_down.shape) != expected_down:
+        raise ValueError(
+            f"swiglu_prefill: w_gate {tuple(w_gate.shape)}, w_up {tuple(w_up.shape)} "
+            f"and w_down {tuple(w_down.shape)} do not agree on (embedding, hidden) "
+            f"at b_col_maj={b_col_maj}"
         )
-        self.seq_len_aligned = gemm_1.M
-        self.embedding_dim_aligned = gemm_1.K
-        self.hidden_dim_aligned = gemm_1.N
+    accuracy = (
+        dict(
+            emulate_bf16_mmul_with_bfp16=False, prio_accuracy=True, round_conv_even=True
+        )
+        if prio_accuracy
+        else {}
+    )
+    projection = dict(b_col_maj=b_col_maj, **accuracy)
 
-        silu = SiLU(
-            size=self.seq_len_aligned * self.hidden_dim_aligned,
-            num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_aligned // n_cols,
+    @iron.graph
+    def prefill(x):
+        cols = num_aie_columns or GEMMOverlay.shim_columns(
+            aie_utils.get_current_device()
         )
-        eltwise_mul = ElementwiseMul(
-            size=self.seq_len_aligned * self.hidden_dim_aligned,
-            num_aie_columns=n_cols,
-            tile_size=self.hidden_dim_aligned // n_cols,
+        gate = GEMM(x, w_gate, num_aie_columns=cols, **projection)
+        up = GEMM(x, w_up, num_aie_columns=cols, **projection)
+        swished = SiLU(gate, num_aie_columns=cols, tile_size=hidden_dim // cols)
+        act = ElementwiseMul(
+            swished, up, num_aie_columns=cols, tile_size=hidden_dim // cols
         )
-        gemm_2 = GEMM(
-            M=self.seq_len,
-            K=self.hidden_dim,
-            N=self.embedding_dim,
-            num_aie_columns=n_cols,
-            b_col_maj=self.b_col_maj,
-            **accuracy_flags,
-        )
+        return GEMM(act, w_down, num_aie_columns=cols, **projection)
 
-        # gemm_1 is reused for both the gate and up projections.
-        # GEMM arg order is (input, weight, output).
-        runlist = [
-            (gemm_1, "in", "w_gate", "left"),
-            (gemm_1, "in", "w_up", "right"),
-            (silu, "left", "left_swished"),
-            (eltwise_mul, "left_swished", "right", "intermediate"),
-            (gemm_2, "intermediate", "w_down", "out"),
-        ]
+    return prefill
 
-        super().__init__(
-            name=(
-                f"swiglu_prefill_s{seq_len}_e{embedding_dim}_h{hidden_dim}"
-                + ("_bc" if b_col_maj else "")
-            ),
-            runlist=runlist,
-            input_args=["in"],
-            output_args=["out"],
-            context=context,
-        )
+
+SwiGLUPrefill = swiglu_prefill

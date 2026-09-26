@@ -7,21 +7,25 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 import pytest
-import sys
 import statistics
 
-from iron.common import AIEContext
+from iron.common import harness
 import aie.utils as aie_utils
+from aie.utils.benchmark import preflight, provenance
+from aie.utils.probe import npu_unavailable_reason
 
 
 @pytest.fixture
-def aie_context(request):
-    """Create a fresh AIEContext for each test"""
-    verbose_mlir = request.config.option.verbose > 0
-    compiler = request.config.getoption("--compiler", default="peano")
-    ctx = AIEContext(mlir_verbose=verbose_mlir, compiler=compiler)
-    yield ctx
-    aie_utils.DefaultNPURuntime.cleanup()
+def npu_runtime():
+    """Release the loaded NPU runtime after a test that ran on hardware.
+
+    ``DefaultNPURuntime`` is None until something loads an image, so a test
+    that only compiled has nothing to release -- and must not be reported as
+    an error for it.
+    """
+    yield
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
 
 
 def pytest_addoption(parser):
@@ -35,12 +39,6 @@ def pytest_addoption(parser):
         type=int,
         default=5,
         help="Number of iterations to run each test for statistics",
-    )
-    parser.addoption(
-        "--compiler",
-        default="peano",
-        choices=["peano", "chess"],
-        help="Kernel compiler: 'peano' (default) or 'chess' (requires Vitis/aietools)",
     )
 
 
@@ -67,25 +65,29 @@ class CSVReporter:
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
 
-    def add_result(
-        self, test_path, test_name, passed, captured_output, metric_patterns
-    ):
+    def add_result(self, test_path, test_name, passed, metrics):
         key = (test_path, test_name)
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
-
-        for metric_name, pattern in metric_patterns.items():
-            match = re.search(pattern, captured_output)
-            if not match:
-                continue
-            value = float(match.group("value"))
+        for metric_name, value in metrics:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
     def finalize_results(self):
         """Compute statistics for all collected metrics"""
+        # The commit alone does not say which toolchain and kernel sources
+        # produced a number; mlir-aie's provenance line does. Only a run that
+        # measured something has used the NPU, so only then is it described:
+        # opening it otherwise would contend for the single-tenant device.
+        measured = any(len(data) > 1 for data in self.test_metrics.values())
+        if measured and aie_utils.DefaultNPURuntime is not None:
+            npu = preflight()
+            source = provenance(device=npu.device, pmode=npu.pmode)
+        else:
+            source = provenance()
         for (test_path, test_name), data in self.test_metrics.items():
             row = {
                 "Commit": self.commit,
                 "Date": self.date,
+                "Provenance": source,
                 "Test Path": test_path,
                 "Test": test_name,
                 "Checks": f"{sum(data['passed'])}/{len(data['passed'])}",
@@ -126,7 +128,7 @@ def csv_reporter(request):
     reporter.write_csv()
 
 
-# Hook into test completion to capture metrics in CSVReporter
+# Hook into test completion to collect each test's metrics into the CSVReporter
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -153,25 +155,16 @@ def pytest_runtest_makereport(item, call):
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
-            captured = report.capstdout
-
-            # Get metric patterns from test item's markers
-            metric_patterns = {}
-            for marker in item.iter_markers("metrics"):
-                metric_patterns = marker.kwargs
-                break
-
+            # What the test reported through harness.record_metric (run_test
+            # records latency and bandwidth; a test adds its own, e.g. throughput).
             csv_reporter.add_result(
-                test_path, test_name, passed, captured, metric_patterns
+                test_path, test_name, passed, harness.take_metrics()
             )
 
 
 def pytest_configure(config):
     csv_path = config.getoption("--csv-output")
     config._csv_reporter = CSVReporter(csv_path)
-    config.addinivalue_line(
-        "markers", "metrics(**patterns): specify metric patterns for this test"
-    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -185,6 +178,10 @@ def pytest_collection_modifyitems(config, items):
         # else holds it and erroring out when none is attached.
         return
 
+    if aie_utils.DefaultNPURuntime is None:
+        # Most often an unsourced XRT, which otherwise surfaces as a pile of
+        # failures that look like a toolchain regression.
+        raise pytest.UsageError(f"No NPU runtime: {npu_unavailable_reason()}")
     device = aie_utils.DefaultNPURuntime.device().resolve().name
     for item, marker in marked_items:
         if device not in marker.args:

@@ -1,9 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-from iron.common.test_utils import torch_dtype_map
+import numpy as np
+
 from iron.operators.flm.gemm.design import Epilogue
+
+
+def _sigmoid(x):
+    """``1 / (1 + exp(-x))`` in float32, rounded once back to ``x``'s dtype."""
+    f = x.astype(np.float32)
+    return (1 / (1 + np.exp(-f))).astype(x.dtype)
 
 
 def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
@@ -11,7 +17,7 @@ def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
 
     Separate from ``reference`` because a test that wants to check the epilogue
     without the accumulation needs exactly this -- see
-    ``mm_prebuilt/test.py``'s accumulator comparison, where the device's own
+    ``test.py``'s accumulator comparison on the shipped image, where the device's own
     output is the input.
 
     ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, matching the
@@ -22,13 +28,13 @@ def apply_epilogue(C, epilogue=Epilogue.NONE, clamp=None):
         case Epilogue.NONE:
             pass
         case Epilogue.GELU:
-            C = C * torch.sigmoid(1.702 * C)
+            C = C * _sigmoid(np.float32(1.702) * C)
         case Epilogue.SILU:
-            C = C * torch.sigmoid(C)
+            C = C * _sigmoid(C)
         case Epilogue.SIGMOID:
-            C = torch.sigmoid(C)
+            C = _sigmoid(C)
     if clamp is not None:
-        C = torch.clamp(C, clamp[0], clamp[1])
+        C = np.clip(C, clamp[0], clamp[1])
     return C
 
 
@@ -54,31 +60,7 @@ def reference(input_a, input_b, epilogue=Epilogue.NONE, clamp=None):
     ``torch.sigmoid`` can reproduce. Tolerances have to absorb that part.
     """
     out_dtype = input_a.dtype
-    C = torch.matmul(input_a.float(), input_b.float()).to(out_dtype)
+    C = np.matmul(
+        input_a.astype(np.float32), input_b.astype(np.float32)
+    ).astype(out_dtype)
     return apply_epilogue(C, epilogue, clamp)
-
-
-def generate_golden_reference(
-    M: int,
-    K: int,
-    N: int,
-    dtype="bf16",
-    seed=42,
-    epilogue=Epilogue.NONE,
-    clamp=None,
-    scale=4.0,
-):
-    """Random A (signed) and B (non-negative), scaled by ``scale``.
-
-    ``scale`` matters for the epilogue tests: the result grows like
-    ``sqrt(K) * scale**2``, and at the default scale a K=512 product lands
-    around +-200, where gelu/silu are indistinguishable from the identity (or
-    from zero). Activation tests pass a smaller scale so the result sits in the
-    range where the curve is actually interesting.
-    """
-    torch.manual_seed(seed)
-    dtype_torch = torch_dtype_map[dtype]
-    input_a = torch.randn(M, K, dtype=dtype_torch) * scale
-    input_b = torch.rand(K, N, dtype=dtype_torch) * scale
-    output = reference(input_a, input_b, epilogue, clamp)
-    return {"input": input_a, "input_b": input_b, "output": output}

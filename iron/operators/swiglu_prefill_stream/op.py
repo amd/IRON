@@ -1,110 +1,72 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
 
 import aie.utils as aie_utils
 
-from iron.common import (
-    MLIROperator,
-    AIERuntimeArgSpec,
-    PythonGeneratedMLIRArtifact,
-    DesignGenerator,
-)
-from iron.common.device_utils import get_kernel_dir
-from iron.common.sequence import OperatorSequence
-from iron.common.stream.ops import ELTWISE_MUL, GEMM, SILU
+from iron.common import DesignGenerator, from_spec
+from iron.common.kernels import kernels_dir
+from iron.common.image import OperatorSequence
 
 
-@dataclass
-class _SwiGLUStreamGroup(MLIROperator):
-    """One stream-dse design, used as an ``OperatorSequence`` child.
+def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
+    """One stream-dse design, as an operator declared from the exported graph.
 
     ``k`` is how many fused groups the block is split into and ``group_index``
     which of them this is, in the order
     :data:`~iron.operators.swiglu_prefill_stream.stream_design.GROUP_LAYERS`
-    lists them.
+    lists them. The buffers' shapes and order come from the workload, which is
+    also the order the generated design takes its arguments in; the design
+    itself is the exported text, so the class is built at run time
+    (:func:`~iron.common.declare.from_spec`) rather than declared.
     """
+    from iron.operators.swiglu_prefill_stream import stream_design
 
-    seq_len: int
-    embedding_dim: int
-    hidden_dim: int
-    k: int
-    group_index: int
-    context: Any = field(default=None, repr=False, compare=False)
+    dims = (seq_len, embedding_dim, hidden_dim)
+    shapes = stream_design.workload_for(*dims).shapes
+    inputs, outputs = stream_design.group_ports(*dims, k=k)[group_index]
+    npu = aie_utils.get_current_device().resolve().name
 
-    def __post_init__(self):
-        MLIROperator.__init__(self, context=self.context)
-
-    @property
-    def _design(self):
-        from iron.operators.swiglu_prefill_stream import stream_design
-
-        return stream_design
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                self.operator_dir / "stream_design.py",
-                "load_group",
-                (self.group_index,),
-                {
-                    "k": self.k,
-                    "seq_len": self.seq_len,
-                    "embedding_dim": self.embedding_dim,
-                    "hidden_dim": self.hidden_dim,
-                    "npu": aie_utils.get_current_device().resolve().name,
-                },
-            ),
+    def generator(self, image="elf"):
+        """The exported design, loaded from its module rather than derived."""
+        return DesignGenerator(
+            source_path=Path(stream_design.__file__),
+            fn_name="load_group",
+            kwargs={
+                "group_index": group_index,
+                "k": k,
+                "seq_len": seq_len,
+                "embedding_dim": embedding_dim,
+                "hidden_dim": hidden_dim,
+                "npu": npu,
+                "kernels_dir": kernels_dir(),
+            },
         )
 
-    def get_kernel_artifacts(self):
-        # The registry is the single place a kernel's source, compile flags and
-        # symbol names are declared, so the object and the design agree.
-        design = self._design
-        gemm_tiles = design.gemm_tiles(self.k)
-        per_layer = {
-            design.GATE: (GEMM, gemm_tiles[design.GATE]),
-            design.UP: (GEMM, gemm_tiles[design.UP]),
-            design.DOWN: (GEMM, gemm_tiles[design.DOWN]),
-            design.SILU: (SILU, None),
-            design.MUL: (ELTWISE_MUL, None),
-        }
-        layers = design.GROUP_LAYERS[self.k][self.group_index]
-        kernels_dir, kernel_dir = self.context.kernels_dir, get_kernel_dir()
-        return [
-            artifact
-            for kernel, tiles in dict.fromkeys(per_layer[layer] for layer in layers)
-            for artifact in kernel.kernel_artifacts(
-                kernels_dir, kernel_dir, **(dict(zip("mkn", tiles)) if tiles else {})
-            )
-        ]
-
-    def design_key(self):
-        """Groups whose generated design is byte-identical share it."""
-        return self._design.group_digest(
-            self.group_index,
-            k=self.k,
-            seq_len=self.seq_len,
-            embedding_dim=self.embedding_dim,
-            hidden_dim=self.hidden_dim,
-            npu=aie_utils.get_current_device().resolve().name,
-        )
-
-    def get_arg_spec(self):
-        """The group's runtime arguments, shaped by the exported graph.
-
-        Both the names and their order come from the workload, which is also the
-        order the generated design takes its arguments in.
-        """
-        dims = (self.seq_len, self.embedding_dim, self.hidden_dim)
-        shapes = self._design.workload_for(*dims).shapes
-        inputs, outputs = self._design.group_ports(*dims, k=self.k)[self.group_index]
-        return [AIERuntimeArgSpec("in", shapes[name]) for name in inputs] + [
-            AIERuntimeArgSpec("out", shapes[name]) for name in outputs
-        ]
+    cls = from_spec(
+        "SwiGLUStreamGroup",
+        inputs={name: shapes[name] for name in inputs},
+        outputs={name: shapes[name] for name in outputs},
+        # Groups whose generated design is byte-identical share it.
+        key=stream_design.group_digest(
+            group_index,
+            k=k,
+            seq_len=seq_len,
+            embedding_dim=embedding_dim,
+            hidden_dim=hidden_dim,
+            npu=npu,
+        ),
+        params={
+            "seq_len": seq_len,
+            "embedding_dim": embedding_dim,
+            "hidden_dim": hidden_dim,
+            "k": k,
+            "group_index": group_index,
+        },
+        generator=generator,
+    )
+    return cls(cls._overlay_class(), context=context)
 
 
 def _wiring(seq_len, embedding_dim, hidden_dim, k):
@@ -152,14 +114,7 @@ class SwiGLUPrefillStream(OperatorSequence):
 
         ports, inputs, outputs = _wiring(seq_len, embedding_dim, hidden_dim, k)
         groups = [
-            _SwiGLUStreamGroup(
-                seq_len=seq_len,
-                embedding_dim=embedding_dim,
-                hidden_dim=hidden_dim,
-                k=k,
-                group_index=index,
-                context=context,
-            )
+            _stream_group(seq_len, embedding_dim, hidden_dim, k, index, context)
             for index in range(len(ports))
         ]
         super().__init__(

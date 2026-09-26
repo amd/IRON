@@ -12,7 +12,6 @@ validated against.
 
 import numpy as np
 import pytest
-import torch
 
 from iron.operators.flm.dequant.design import (
     CORE_JOIN_OFFSETS,
@@ -103,7 +102,7 @@ def test_bytes_match_pack_b(K, N):
     B = (bf.astype(np.uint32) << 16).view(np.float32)
 
     golden = pack_b(
-        torch.from_numpy(B),
+        B,
         K_TILE_B,
         N_TILE,
         S,
@@ -111,13 +110,13 @@ def test_bytes_match_pack_b(K, N):
         CT_K,
         bfp16=True,
         round_conv_even=False,
-    ).numpy()
+    )
 
     blk = _model(K, N)
     slot = np.broadcast_to(np.arange(K)[None, :] % S, blk.shape)
     flat = np.empty(K * N, dtype=np.float32)
     flat[(blk * S + slot).ravel()] = B.T.ravel()
-    mine = f32_to_bfp16ebs8(flat.reshape(-1, 8), round_conv_even=False).numpy()
+    mine = f32_to_bfp16ebs8(flat.reshape(-1, 8), round_conv_even=False)
 
     assert np.array_equal(mine, golden)
 

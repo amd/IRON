@@ -5,7 +5,6 @@
 the device. See the operator's README.md for the layout and the rounding."""
 
 import numpy as np
-import torch
 
 from iron.operators.flm.dequant.design import (
     CT_K,
@@ -82,7 +81,7 @@ def reference(qw, K, N):
     w = dequantize(np.asarray(qw, dtype=np.uint8).ravel(), K, N)
     w = _bf16_to_f32(f32_to_bf16_floor(w))
     return pack_b(
-        torch.from_numpy(np.ascontiguousarray(w.T)),
+        np.ascontiguousarray(w.T),
         K_TILE_B,
         N_TILE,
         S,
@@ -90,7 +89,7 @@ def reference(qw, K, N):
         CT_K,
         bfp16=True,
         round_conv_even=False,
-    ).numpy()
+    )
 
 
 def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):

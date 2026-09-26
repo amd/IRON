@@ -37,9 +37,13 @@ python3 -m pip install -r requirements.txt
 
 **Note:** XRT must be sourced before running any tests or operators.
 
-### Build Directory
+### Where build outputs go
 
-Compiled artifacts (`.xclbin`, `.bin`, `.o` files) are stored in `build/` directory by default. The build directory can be customized via `AIEContext(build_dir="path/to/build")`.
+Compiled artifacts (`.xclbin`, `.bin`, `.o`, the full ELF) live in
+mlir-aie's JIT cache, keyed on the content that produced them:
+`~/.npu/cache/<hash>/`, or wherever `NPU_CACHE_HOME` points. Nothing is
+written to the working directory, and `compile(record="disk")` writes the
+`Artifacts` record of an image beside it in the cache.
 
 ### Environment Variables
 
@@ -74,6 +78,7 @@ pytest iron/applications/
 ### Run Specific Test Function
 
 ```bash
+pytest iron/operators/test.py -k relu
 pytest iron/operators/gemm/test.py::test_gemm
 ```
 
@@ -123,15 +128,42 @@ reuse lint
 ### Three-Layer Structure
 
 1. **Operators** (`iron/operators/`)
-   - Each operator directory contains:
-     - `op.py`: Python interface (inherits from `MLIROperator`) - defines operator parameters, compilation artifacts, and runtime argument specs
-     - `design.py`: NPU implementation using MLIR-AIE Python API - defines ObjectFIFOs, Workers, and Runtime sequences
-     - `reference.py`: CPU reference implementation for validation
-     - `test.py`: End-to-end test (build, run, verify against reference)
+   - One operator is one module: `relu.py` for a small one, a directory with
+     `op.py` for one that also has a design, a reference, a README or a
+     device test of its own (`gemm/`, `mha/`, `flm/gemm/`).
+   - An operator module holds:
+     - the operator, declared as two classes (`iron/common/declare/`,
+       `OPERATOR_MODEL_PLAN.md`). The **overlay** (`XOverlay(Overlay)`) is the
+       array configuration: `tunable()` fields filled by `tuning(dev)` from the
+       device alone, `StreamIn`/`StreamOut` members in tile units, `Resident`
+       values the cores read (trip counts), and `design(target)`, which builds
+       ObjectFIFOs and Workers and binds each stream to a fifo's shim end. The
+       **operator** (`X(Operator[XOverlay])`) is the host side: `dim()` fields,
+       `In`/`Out` buffers declared by shape against the overlay's streams,
+       `residents()` from the extents, and optionally `design(rt)` when the
+       runtime sequence is not the derived one. External overlays (a downloaded
+       xclbin) declare an `Xclbin` attribute and pinned streams instead of
+       `design()`.
+     - The operator's `reference(*inputs)` is the CPU reference the tests
+       and the graph reference run; `vectors(op)` in `iron/common/harness`
+       draws random inputs for its declared buffers and takes the outputs
+       from it.
+     - `test = Testing(cases, ...)` on the operator class
+       (`iron/common/testing.py`): the shapes it is checked at on a device,
+       any `draw=` its inputs need, and a `tolerance=` where the contract
+       of the kernel it runs is not the gate. One module,
+       `iron/operators/test.py`, runs every declaration against
+       `reference()`. An operator whose device test is more than that (a
+       composite compared step by step, a shipped overlay against its own
+       accumulator) keeps a `test.py` beside it.
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - Architecture-specific C++ compute kernels, sourced from the installed
-     mlir-aie package (`AIEContext.kernels_dir`), not from this repo:
+     mlir-aie package (`iron.common.kernels.kernels_dir()`), not from this
+     repo. Operators get them from mlir-aie's kernel factories
+     (`aie.iron.kernels`), each of which returns an `ExternalFunction`
+     carrying its source, flags, symbol and argument types, and in
+     `.contract` the tolerance its output is held to:
      - `generic/`: Works on both AIE2 and AIE2P
      - `aie2/`: AIE2-specific (NPU1)
      - `aie2p/`: AIE2P-specific (NPU2)
@@ -139,13 +171,25 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `base.py`: Base classes (`AIEOperatorBase`, `MLIROperator`, `CompositeOperator`)
-   - `compilation/`: Compilation artifact system (MLIR → xclbin)
-   - `fusion.py`: Operator sequencing framework (`OperatorSequence`)
-   - `device_manager.py`: XRT device initialization and management (singleton pattern)
-   - `context.py`: `AIEContext` for operator compilation/execution
-   - `utils.py`: Helper functions (`torch_to_numpy`, `numpy_to_torch`)
-   - `test_utils.py`: Test utilities (`verify_buffer`, `nearly_equal`)
+   - `declare/`: the declaration layer (`Overlay`, `Operator`, `@operator`,
+     `dim`/`tunable`, streams, buffers, `Scratchpad`/`DispatchTime`, `Resident`,
+     `Xclbin`, inference)
+   - `design/`, `tiling.py`, `external.py`: the library-owned build: the
+     `Target` a design declares kernels against, the derived runtime
+     sequence, legal DMA descriptors, the external-overlay path
+   - `graph/`: graph functions (`iron.graph`, `iron.state`) and
+     `compile(dev, boundaries=, image=)`
+   - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
+     allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
+     runtime callables and the record of what a compiled image consists of
+   - `elementwise.py`: the shared elementwise template and its two stream shapes
+   - `kernels.py`: `kernels_dir()` and `declare_kernel`, for a kernel the
+     factories do not cover
+   - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
+     `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over
+     mlir-aie's `aie.utils.verify.compare`; `record_metric`)
+   - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
+   - `tracing.py`: `dump_traces`, for a sequence compiled with `trace_size=`
 
 ### Key Concepts
 
@@ -166,37 +210,44 @@ reuse lint
 - Used to parallelize work across multiple columns
 - Format: `(tensor_shape, offset, dimensions, strides)`
 
-**Runtime Sequence**: Host-side control flow
+**Runtime Sequence**: Host-side control flow. The library derives it from
+the operator's declaration (each buffer split over its stream's slots); an
+operator that needs a different order overrides `design(rt)`:
 
-- `rt.fill()`: DMA data from host → NPU (shim → L2/L1)
-- `rt.drain()`: DMA data from NPU → host
-- `rt.start()`: Launch workers
-- `rt.task_group()`: Coordinate parallel DMA operations
+- `rt.fill(slot, view)`: DMA data from host → NPU (shim → L2/L1)
+- `rt.drain(slot, view)`: DMA data from NPU → host
+- `rt.group()`: Coordinate parallel DMA operations
+- views are slices of the declared buffers (`self.A[:, r0:r1, :]`) or
+  explicit `Access` descriptors; `tiling.legalize` makes them legal
+
+**Per-call values**: `Scratchpad(T)` members are patched into descriptors
+or read by cores without a rebuild; `DispatchTime(T)` regenerates the
+sequence per call (xclbin only). A graph binds them to keyword-only
+parameters.
 
 **Compilation Flow**:
 
 ```text
-design.py (Python MLIR-AIE API)
+op.py (XOverlay.design + X.design or the derived sequence)
     ↓
-PythonGeneratedMLIRArtifact
+iron.common.design.build_design (library-owned Runtime/Program)
     ↓
 MLIR (.mlir file)
     ↓ (aie-opt + aie-translate via Peano toolchain)
 xclbin (NPU binary) + insts.bin (instruction sequence)
 ```
 
-**AIEContext**: Manages compilation and runtime state
+**No build context.** An operator takes the device that is current and
+nothing else. What used to sit on a context object is either a fact
+(`iron.common.kernels.kernels_dir()`), an
+environment choice (`MLIR_AIE_KERNEL_SOURCES`), or a keyword on the build
+itself (`compile(record="disk")`). Kernels are built with Peano; IRON has
+no xchesscc path, and a kernel that needs one asks the `aie.iron.kernels`
+factory for it (`use_chess=True`) rather than IRON carrying a global flag.
 
-- Default build directory: `build/` in current working directory
-- Compilation rules: Defines pipeline from Python → MLIR → xclbin
-- Device manager: Singleton for XRT resource sharing
-- Use `AIEContext(build_dir="...", mlir_verbose=True)` for custom settings
-
-**Device Manager**: Singleton that manages XRT resources
-
-- Automatically initializes `pyxrt.device(0)`
-- Caches contexts and kernels per xclbin path
-- Shared across all operators to avoid resource conflicts
+**Runtime**: `aie.utils.DefaultNPURuntime` loads an image and runs it,
+shared across operators. A test that ran on hardware takes the
+`npu_runtime` fixture, which releases it afterwards.
 
 ## Hardware Constraints
 
@@ -240,66 +291,98 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 
 ## Adding a New Operator
 
-1. Create directory in `iron/operators/<operator_name>/`
-2. Implement `op.py`:
-   - Subclass `MLIROperator`
-   - Implement `get_operator_name()`, `get_mlir_artifact()`, `get_kernel_artifacts()`, `get_arg_spec()`
-   - Add validation for dimension constraints (assert statements)
-   - Define tile sizes and column counts
-3. Implement `design.py`:
-   - Import from `aie.iron` (Program, Runtime, Worker, ObjectFifo, Kernel)
-   - Define function that builds MLIR-AIE design
-   - Use `range_()` for loops (not Python `range`)
-   - Handle device-specific logic (NPU1 vs NPU2) if needed
-4. If a new C++ compute kernel is needed, add it to the
+1. Create `iron/operators/<operator_name>.py` (a directory with `op.py` only
+   if it needs more than one module: a hand-written design, its own
+   reference, a README, a device test of its own)
+2. Declare the overlay (`@operator class XOverlay(Overlay)`):
+   - `tunable()` fields with device defaults in `tuning(dev)`; `dim()` fields
+     only for what a host shape names
+   - `StreamIn`/`StreamOut` members in tile units (`per=` a column count)
+   - a `Resident` for every trip count the core reads, so the array never
+     depends on the extent
+   - `design(target)`: build ObjectFIFOs and Workers (`target.kernel(...)`,
+     `target.rtp(...)`, `target.barrier()`), `range_()` for loops, and
+     `self.x[i].bind(fifo.prod())` / `self.count.bind(rtps)` for every member
+3. Declare the operator (`@operator class X(Operator[XOverlay])`):
+   - `dim()` fields; `In`/`Out` buffers with `to=`/`from_=` naming the stream
+   - `compatible()` for divisibility against the tuned overlay, `residents()`
+     for the counts
+   - `design(rt)` only if the derived sequence is not the one you want
+   - see `iron/common/elementwise.py` for the elementwise families, and
+     `gemm/op.py` or `mha/op.py` for hand-written sequences
+4. Name the kernel with a factory from `aie.iron.kernels`
+   (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
+   the symbol, the source, the argument types, aie2's LUT tables and the
+   tolerance contract. Bind a further symbol of the same object with
+   `fn.object_file.bind(symbol, arg_types)`. `target.kernel(...)` declares
+   one the factories do not cover -- a kernel whose compile flags are the
+   overlay's own, like flm's `mm_fused.cc`. An overlay running one kernel
+   reports its contract from `tolerance(target)` (`ElementwiseOverlay` does
+   this from `kernel(target)`). If a new C++ compute kernel is needed, add it
+   to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
-   and consume it via `AIEContext.kernels_dir`; IRON no longer hosts kernels
+   with a factory in `aie.iron.kernels`; IRON hosts no kernels
    - Choose appropriate directory: `generic/`, `aie2/`, or `aie2p/`
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
-5. Implement `reference.py` with CPU reference
-6. Implement `test.py` with pytest tests
-   - Use `@pytest.mark.extensive` for slower/larger tests
-   - Use `verify_buffer()` from `iron.common.test_utils`
-7. Register operator in `iron/operators/__init__.py`
+5. Give the operator a `reference(*inputs)` (numpy, on the declared shapes:
+   upcast to float32, compute, round once)
+6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
+   operator class, from `iron.common.testing`
+   - leave `tolerance` out to be judged by the contract of the kernel the
+     operator runs (`Operator.reference_tolerance()`); give an
+     `aie.utils.verify.Tolerance` where that is not the right gate
+   - the cases are `Case(kwargs, extensive=...)` or plain kwarg dicts, or a
+     callable returning them when they follow the device's width;
+     `channeled_unary_cases`/`binary_elementwise_cases` build the
+     elementwise sweeps
+   - `extensive=True` keeps a case out of the default suite
+   - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
+     tensor or shape per input), or a callable of the operator for an input
+     with preconditions (a packed quantization, an angle table)
+   - `iron/operators/test.py` runs it; a test with a body of its own goes
+     beside the operator and calls `run_test(op, vectors(op), ...)`, with
+     `record_metric()` for any figure beyond latency and bandwidth
+   - a shape the operator must *refuse* goes in
+     `iron/tests/operators/rejected_shapes.py`, which needs no device
+7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
+   the name, and the module that defines it)
 
-## Operator Sequences
+## Graph Functions
 
-IRON supports chaining multiple operators into a single ELF file, so they run
-back-to-back within a single dispatch. This is *temporal* sequencing (distinct
-kernels executed one after another, with the NPU command processor
-reconfiguring the array between steps) rather than *operator fusion* (a single
-kernel computing multiple operations at once). This works only with the "full
-ELF" flow, which uses ELF files at runtime. The ELF files take the place of
-`xclbin`s:
+Operators compose into a graph function: a Python function called on
+handles, traced once for its shapes, compiled to one image and called per
+token. Inputs are its positional parameters, outputs its return values,
+weights whatever tensors it closes over, `iron.state(...)` device-resident
+state it closes over, and keyword-only parameters annotated
+`Scratchpad[T]` per-call values:
 
 ```python
-from iron.common.sequence import OperatorSequence
+import iron
+from iron.common.declare import Scratchpad
 
-# Define individual operators
-gemm1 = AIEGEMM(...)
-relu = AIERELU(...)
-gemm2 = AIEGEMM(...)
+kv = iron.state((n_kv_groups, max_len * head_dim))
 
-# Create an operator sequence with a runlist
-# Intermediate buffers are automatically managed
-seq_op = OperatorSequence(
-    name="gemm_relu_gemm_seq",
-    runlist=[
-        (gemm1, "in", "temp1"),      # (operator, input_buffers, output_buffers)
-        (relu, "temp1", "temp2"),
-        (gemm2, "temp2", "out"),
-    ],
-    input_args={"in": size_in},
-    output_args={"out": size_out},
-    context=ctx
-)
+@iron.graph(names_from=model)
+def decode(x, angles, *, pos: Scratchpad[np.int32]):
+    h = RMSNorm(x, model.norm.weight)             # a bare tensor is a weight
+    k = RoPE(GEMV(model.wk, h), angles)          # class calls infer overlay and extent
+    StridedCopy(k, kv, out_offset=pos, ...)      # a state passed as an output is written
+    return GEMV(model.wo, h)
+
+net = decode.compile(dev, x=(1, emb), angles=(1, head_dim))
+logits = net(x_tok, ang_tok, pos=n * head_dim)
 ```
 
-Benefits of operator sequences:
-
-- Reduces host ↔ NPU data transfers
-- Runs a chain of operators using a single host-side dispatch (one CPU/host interrupt for the whole sequence vs. one interrupt per operator otherwise)
+Overlays with equal `design_key()` are one array; operators with equal keys
+are one build. `compile(dev, boundaries=, image=)` derives the image (a
+fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
+`verbose=True` prints why. It links the image (`net.image`) and stops
+there: the runtime that loads it is made on the first call, so a host with
+the toolchain and no NPU can compile ahead of time.
+`iron/applications/llama_3_2_1b/graphs.py` is the worked example;
+`iron/tests/common/graph.py` traces it device-free and
+`iron/tests/toolchain/` builds it.
 
 ## Common Patterns
 
@@ -358,53 +441,49 @@ void my_kernel(bfloat16* in, bfloat16* out, int32_t size) {
 ### Test Verification Pattern
 
 ```python
-from iron.common.test_utils import verify_buffer
+from aie.utils.verify import Tolerance
+from iron.common.harness import run_test, vectors
+from iron.operators import Tanh
 
-# Compare NPU output against CPU reference
-errors = verify_buffer(
-    output=npu_output,
-    buf_name="output",
-    reference=cpu_reference,
-    rel_tol=0.04,      # 4% relative tolerance
-    abs_tol=1e-6,      # Absolute tolerance for small values
-    max_error_rate=0.0 # 0% of elements can fail (strict)
-)
-assert len(errors) == 0, f"Found {len(errors)} mismatches"
+op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
+
+# Dispatch, and compare every output with op.reference() on the drawn inputs
+# under the tolerance contract of the kernel the operator runs ...
+run = run_test(op, vectors(op), tolerance=op.reference_tolerance())
+assert not run.errors, run.errors
+
+# ... or under an explicit one.
+run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 ```
 
-### Datatype Conversion Helpers
+`verify_buffer()` compares a single buffer the same way, for tests that
+dispatch by hand.
+
+### bfloat16 between torch and numpy
+
+numpy has no bfloat16 of its own; use `ml_dtypes.bfloat16` and move the bits,
+never going through float32:
 
 ```python
-from iron.common.utils import torch_to_numpy, numpy_to_torch
+import ml_dtypes, torch
 
-# Convert torch tensor to numpy (preserves bfloat16)
-np_array = torch_to_numpy(torch_tensor)
-
-# Convert numpy array to torch (preserves bfloat16)
-torch_tensor = numpy_to_torch(np_array)
+np_array = torch_tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+torch_tensor = torch.from_numpy(np_array.view("uint16")).view(torch.bfloat16)
 ```
 
-These utilities handle bfloat16 conversion correctly (avoiding float32 intermediate).
+Runtime tensors take and return torch tensors directly
+(`aie.utils.DEFAULT_TENSOR_CLASS.from_torch()`, `.to_torch()`).
 
 ## Debugging and Performance
 
-### Debug Mode
+### Building against a local kernel tree
 
-Disable XRT runlist for easier debugging (executes kernels individually):
-
-```python
-context = AIEContext(use_runlist=False)
+```bash
+MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie/aie_kernels pytest ...
 ```
 
-This sacrifices performance but makes it easier to identify which kernel fails.
-
-### Verbose MLIR Output
-
-Enable verbose MLIR compilation output:
-
-```python
-context = AIEContext(mlir_verbose=True)
-```
+The path reaches the compile key, so pointing IRON at another tree rebuilds
+rather than reusing the cache.
 
 ### Performance Profiling
 
@@ -454,22 +533,25 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<arch>/` (`AIEContext.kernels_dir`)
-- Check `get_kernel_artifacts()` in `op.py` references correct kernel path
-- Ensure kernel function signature matches `Kernel()` declaration in `design.py`
+  `include/aie_kernels/<arch>/` (`iron.common.kernels.kernels_dir()`,
+  overridden by `MLIR_AIE_KERNEL_SOURCES`)
+- Ensure the kernel's C++ signature matches the factory from
+  `aie.iron.kernels` (or `bind()`'s argument types), or the
+  `target.kernel(...)` declaration, that the overlay's `design()` names
 
 **Compilation hangs or fails**
 
 - Check MLIR-AIE is installed: `python -c "import aie.iron"`
 - Verify `llvm-aie` is available: `which aie-opt`
-- Look for syntax errors in `design.py` (common: using `range` instead of `range_()`)
+- Look for errors in the overlay's `design()` (common: using `range` instead of `range_()`)
 
 **Test failures with numerical differences**
 
 - Check datatype consistency (bfloat16 has limited precision)
 - Verify reference implementation matches NPU kernel exactly
 - Look for memory alignment issues in C++ kernel
-- Adjust tolerances in `verify_buffer()` if needed (`rel_tol`, `abs_tol`)
+- Check which tolerance the test judges by: the kernel's contract
+  (`op.reference_tolerance()`) unless the test passes `tolerance=`
 
 **Dimension mismatch errors**
 
@@ -494,12 +576,12 @@ logging.basicConfig(level=logging.DEBUG)
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama_3.2_1b/`:
+Full LLM inference example at `iron/applications/llama_3_2_1b/`:
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama_3.2_1b/`
+- **Run**: `pytest iron/applications/llama_3_2_1b/`
 
 ### AIE Kernel Reference
 

@@ -5,16 +5,11 @@
 import pytest
 import aie.utils as aie_utils
 
-from iron.operators.gemv.op import GEMV
-from iron.operators.gemv.reference import (
-    generate_golden_reference,
-    generate_golden_reference_batched,
-    gelu_tanh_approx,
-)
-from iron.common.device_utils import get_kernel_dir
+from iron.operators.gemv.op import GEMV, gelu_tanh_approx
+from iron.common.kernels import target_arch
 import numpy as np
-import torch
-from iron.common.test_utils import run_test
+from ml_dtypes import bfloat16
+from iron.common.harness import record_metric, run_test, vectors
 
 
 def get_params():
@@ -42,38 +37,24 @@ def get_params():
     return params
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output", get_params()
 )
-def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context):
-    golden_ref = generate_golden_reference(M=M, K=K)
-
+def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runtime):
     operator = GEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
-        context=aie_context,
     )
-
-    input_buffers = {"matrix": golden_ref["A"].flatten(), "vector": golden_ref["B"]}
-    output_buffers = {"output": golden_ref["C"]}
+    data = vectors(operator, normal=("A", "B"))
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-
-    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"Test failed with errors: {errors}"
 
@@ -98,19 +79,13 @@ def get_batched_params():
     return out
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output,num_batches",
     get_batched_params(),
 )
 def test_gemv_batched(
-    M, K, num_aie_columns, tile_size_input, tile_size_output, num_batches, aie_context
+    M, K, num_aie_columns, tile_size_input, tile_size_output, num_batches, npu_runtime
 ):
-    golden = generate_golden_reference_batched(M=M, K=K, num_batches=num_batches)
     operator = GEMV(
         M=M,
         K=K,
@@ -118,30 +93,17 @@ def test_gemv_batched(
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
         num_batches=num_batches,
-        context=aie_context,
     )
-    input_buffers = {
-        "matrix": golden["A"].flatten(),
-        "vector": golden["B"].flatten(),
-    }
-    output_buffers = {"output": golden["C"].flatten()}
+    data = vectors(operator, normal=("A", "B"))
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-    gflops = (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"batched GEMV failed: {errors}"
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 @pytest.mark.parametrize(
     "M,K,num_aie_columns,tile_size_input,tile_size_output",
     [
@@ -151,17 +113,11 @@ def test_gemv_batched(
     ],
 )
 def test_gemv_gelu(
-    M, K, num_aie_columns, tile_size_input, tile_size_output, aie_context
+    M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runtime
 ):
     """GEMV with the fused GELU epilogue (NPU2-only) vs a gelu(A @ B) golden."""
-    if get_kernel_dir() != "aie2p":
+    if target_arch() != "aie2p":
         pytest.skip("gemv gelu epilogue is only available on NPU2 (aie2p)")
-
-    golden_ref = generate_golden_reference(M=M, K=K)
-    c_ref = golden_ref["C"].to(torch.float32).numpy()
-    c_gelu = torch.from_numpy(gelu_tanh_approx(c_ref).astype(np.float32)).to(
-        torch.bfloat16
-    )
 
     operator = GEMV(
         M=M,
@@ -170,19 +126,17 @@ def test_gemv_gelu(
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
         epilogue="gelu",
-        context=aie_context,
     )
-
-    input_buffers = {"matrix": golden_ref["A"].flatten(), "vector": golden_ref["B"]}
-    output_buffers = {"output": c_gelu}
+    # The reference is the plain product; the epilogue is applied here.
+    data = vectors(operator, normal=("A", "B"))
+    c_gelu = gelu_tanh_approx(data["C"].astype(np.float32)).astype(bfloat16)
+    input_buffers = data.inputs
+    output_buffers = {"C": c_gelu}
 
     errors, latency_us, bandwidth_gbps = run_test(
         operator, input_buffers, output_buffers, rel_tol=0.06, abs_tol=2e-2
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
-    gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
-    print(f"Throughput: {gflops:.6e} GFLOP/s")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
+    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"Test failed with errors: {errors}"

@@ -3,7 +3,7 @@
 
 """Weight packing shared by the FastFlowLM-derived operators.
 
-Both ``flm.GEMM`` and ``flm.MMPrebuilt`` consume B pre-packed into the order
+Both flm.GEMM overlays, the port and the shipped image, consume B pre-packed into the order
 the compute tiles read it, so their B transfers are plain linear descriptors.
 The reorder is deliberately the caller's job: expressing it as a strided
 descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so
@@ -13,7 +13,7 @@ belongs here.
 """
 
 import numpy as np
-import torch
+from ml_dtypes import bfloat16
 
 
 def f32_to_bfp16ebs8(a, round_conv_even=True):
@@ -61,7 +61,7 @@ def f32_to_bfp16ebs8(a, round_conv_even=True):
     out = np.empty((flat.shape[0], 9), dtype=np.uint8)
     out[:, 0] = max_exp[:, 0].astype(np.uint8)
     out[:, 1:] = v8.astype(np.int8).view(np.uint8)
-    return torch.from_numpy(out.reshape(-1))
+    return out.reshape(-1)
 
 
 def pack_b(
@@ -89,7 +89,7 @@ def pack_b(
     already happened, and makes B 9 bytes per 8 values instead of 16.
 
     ``overlay_order`` swaps the two within-block k axes (``i`` and ``s_in``
-    below). It exists solely for :class:`iron.operators.flm.MMPrebuilt`, whose
+    below). It exists solely for the shipped image (:mod:`iron.operators.flm.gemm.shipped`), whose
     B stream is read by FastFlowLM's shipped ``mm.xclbin``, not by a kernel
     built here: that overlay's own loop nest sweeps ``s_in`` outer and ``i``
     inner, the reverse of ``mm_fused_mmul_2x2``'s ``i``-outer loop. The
@@ -110,17 +110,17 @@ def pack_b(
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(-1)
         else:
             #   -> (cb, kb, kslice, tb, i, s_in, t_in)
             # Row-major s x t within the block, which is what the plain mmul
             # loads.
-            out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(-1)
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
-        # native f32 weight); the kernels and get_arg_spec() assume the result
+        # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning
         # whatever B.dtype was.
-        return out.to(torch.bfloat16)
+        return out.astype(bfloat16)
     #   -> (cb, kb, kslice, tb, i, t_in, s_in)
     # t-major within the block: the mixed mmul hands B straight to
     # mac_8x8_8x8T without the transpose the bf16 form applies, so the transpose
@@ -128,8 +128,10 @@ def pack_b(
     # exponent (8 consecutive k for one n) adjacent, which is what makes the
     # block grouping match the kernel's. Grouping over n instead measures
     # 1.95e-02 against this layout's 2.69e-04.
-    blocked = blocked.permute(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8).contiguous()
-    return f32_to_bfp16ebs8(blocked.float().numpy(), round_conv_even=round_conv_even)
+    blocked = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 6, 3)).reshape(-1, 8)
+    return f32_to_bfp16ebs8(
+        blocked.astype(np.float32), round_conv_even=round_conv_even
+    )
 
 
 def packed_b_size(K, N, bfp16):

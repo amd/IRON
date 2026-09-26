@@ -5,19 +5,20 @@
 
 Operators are re-exported lazily (PEP 562):
 
-    from iron.operators.flm import GEMM  # imports iron.operators.flm.gemm.op
+    from iron.operators.flm import GEMM, Shipped  # imports iron.operators.flm.gemm.*
 """
 
 import importlib
 
 _OPERATOR_MODULES = {
     # The port, built from source for the current device.
-    "GEMM": "gemm",
+    "GEMM": "gemm.op",
     # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
-    "DequantBFP": "dequant",
-    # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
-    # exists so the port can be measured against what it was ported from.
-    "MMPrebuilt": "mm_prebuilt",
+    "DequantBFP": "dequant.op",
+    # The shipped overlay itself, downloaded as a pinned binary, as a second
+    # overlay for GEMM: GEMM(Shipped(), ...). NPU2 only; exists so the port
+    # can be measured against what it was ported from.
+    "Shipped": "gemm.shipped",
 }
 
 __all__ = sorted(_OPERATOR_MODULES)
@@ -28,7 +29,7 @@ def __getattr__(name):
     module = _OPERATOR_MODULES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}.op", __name__), name)
+    return getattr(importlib.import_module(f".{module}", __name__), name)
 
 
 def __dir__():

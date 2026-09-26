@@ -2,12 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
+import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 
-from iron.operators.swiglu_decode.op import SwiGLUDecode
-from iron.operators.swiglu_decode.reference import generate_golden_reference
-from iron.common.test_utils import verify_buffer
+from iron.common.harness import record_metric, verify_buffer
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv.op import GEMV
+from iron.operators.silu import SiLU
+from iron.operators.swiglu_decode.op import swiglu_decode
+from iron.operators.swiglu_decode.reference import (
+    as_numpy,
+    bf16_matmul,
+    generate_golden_reference,
+)
 
 
 def get_params():
@@ -15,90 +23,64 @@ def get_params():
     # Square shape is the historical smoke-test config; the rectangular
     # shape reflects real decoder-model FFN dims (e.g. Qwen3.5-0.8B
     # embedding=1024, hidden=3584) that downstream runtimes actually hit.
-    params_list = [
-        (2048, 2048),
-        (1024, 3584),
-    ]
-
-    params = []
-    for p in params_list:
-        params.append(pytest.param(*p))
-    return params
+    return [pytest.param(2048, 2048), pytest.param(1024, 3584)]
 
 
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
+def _step_output(net, op_type):
+    """The device buffer holding the output of the graph's one ``op_type`` step."""
+    (step,) = [s for s in net.traced.steps if type(s.op) is op_type]
+    return net.buffer(step.outputs[0])
+
+
 @pytest.mark.parametrize("embedding_dim,hidden_dim", get_params())
-def test_swiglu_decode(embedding_dim, hidden_dim, aie_context):
-    golden_ref = generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim)
+def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
+    golden_ref = as_numpy(generate_golden_reference(M=1, K=embedding_dim, N=hidden_dim))
 
-    operator = SwiGLUDecode(
-        embedding_dim=embedding_dim, hidden_dim=hidden_dim, context=aie_context
+    # GEMV takes its matrix in (M, K) layout, so the projections go in
+    # transposed. The graph closes over them: uploaded once, on first call.
+    ffn = swiglu_decode(
+        np.ascontiguousarray(golden_ref["w_gate"].T),
+        np.ascontiguousarray(golden_ref["w_up"].T),
+        np.ascontiguousarray(golden_ref["w_down"].T),
     )
-    operator.compile()
-    fc = operator.get_callable()
+    net = ffn.compile(x=(1, embedding_dim))
+    x = golden_ref["input"]
 
-    # Upload the persistent weight buffers. GEMV takes its matrix in (M, K)
-    # layout, so the projection weights go in transposed.
-    fc.get_buffer("w_gate").torch_view()[:] = golden_ref["w_gate"].T.reshape(-1)
-    fc.get_buffer("w_up").torch_view()[:] = golden_ref["w_up"].T.reshape(-1)
-    fc.get_buffer("w_down").torch_view()[:] = golden_ref["w_down"].T.reshape(-1)
-    # Push the persistent weight buffers to the device.
-    for name in ("w_gate", "w_up", "w_down"):
-        fc.get_buffer(name).to("npu")
+    elapsed_us = run_iters(lambda: net(x), warmup=1, iters=1).e2e.avg_us
+    out = net(x)
 
-    # Set the per-invocation input.
-    fc.get_buffer("in").torch_view()[:] = golden_ref["input"].reshape(-1)
-
-    # Warmup
-    fc()
-
-    start = time.perf_counter()
-    fc()
-    elapsed_us = (time.perf_counter() - start) * 1e6
-
-    total_bytes = (golden_ref["input"].numel() + embedding_dim) * 2  # bf16
-    bandwidth_gbps = total_bytes / (elapsed_us * 1e-6) / 1e9
-    print(f"Latency (us): {elapsed_us:.2f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.4f} GB/s")
+    total_bytes = (x.size + embedding_dim) * 2  # bf16
+    record_metric("Latency", elapsed_us)
+    record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
 
     errors = {}
 
-    # Bring the buffers we verify back to the host.
-    for name in ("left_swished", "right", "intermediate", "out"):
-        fc.get_buffer(name).to("cpu")
-
-    # Verify intermediate result (left_swished * right) against a chained
-    # reference built from the observed AIE left_swished and right buffers.
-    # This isolates eltwise_mul from any sub-tolerance drift accumulated in
-    # the upstream gemv_1 / silu stages that would otherwise be amplified by
-    # multiplication against a large-magnitude right operand (e.g. silu
-    # outputs that land near zero for very-negative inputs, where bf16
-    # rounding asymmetrically flushes NPU vs fp32-CPU). This mirrors the
-    # approach used by swiglu_prefill/test.py.
-    left_swished = fc.get_buffer("left_swished").torch_view().reshape((1, hidden_dim))
-    right = fc.get_buffer("right").torch_view().reshape((1, hidden_dim))
-    ref_intermediate = left_swished * right
-
-    intermediate = fc.get_buffer("intermediate").torch_view().reshape((1, hidden_dim))
+    # Verify the elementwise product against a chained reference built from
+    # the observed SiLU and up-projection buffers. This isolates it from any
+    # sub-tolerance drift accumulated upstream that multiplication against a
+    # large-magnitude operand would amplify.
+    swished_buf = _step_output(net, SiLU)
+    product_buf = _step_output(net, ElementwiseMul)
+    # The second GEMV is the up projection; the gate's buffer is dead by the
+    # time the product is written, so the planner may reuse it.
+    up_step = [s for s in net.traced.steps if type(s.op) is GEMV][1]
+    for buf in (swished_buf, product_buf):
+        buf.to("cpu")
+    up_buf = net.buffer(up_step.outputs[0])
+    up_buf.to("cpu")
+    left_swished = swished_buf.numpy().reshape((1, hidden_dim))
+    right = up_buf.numpy().reshape((1, hidden_dim))
+    intermediate = product_buf.numpy().reshape((1, hidden_dim))
     errors_intermediate = verify_buffer(
-        intermediate,
-        "intermediate",
-        ref_intermediate,
-        rel_tol=0.04,
-        abs_tol=0.4,
+        intermediate, "intermediate", left_swished * right, rel_tol=0.04, abs_tol=0.4
     )
     if errors_intermediate:
         errors["intermediate"] = errors_intermediate
 
-    # Verify output using intermediate result.
-    # Note: we use the AIE intermediate buffer as reference (rather than
-    # golden_ref["output"]) because this better matches the bfloat16 precision
-    # path and isolates errors to gemv_2.
-    ref_output = intermediate @ golden_ref["w_down"]
-    output = fc.get_buffer("out").torch_view().reshape((1, embedding_dim))
+    # Verify the output from the observed product, which matches the bf16
+    # path and isolates errors to the down projection.
+    ref_output = bf16_matmul(intermediate, golden_ref["w_down"])
+    output = out.numpy().reshape((1, embedding_dim))
     errors_output = verify_buffer(
         output, "output", ref_output, rel_tol=0.04, abs_tol=0.4
     )

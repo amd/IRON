@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import pytest
 
 from iron.operators.mha.op import MHA
-from iron.operators.mha.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.harness import run_test, vectors
 
 
 def get_params():
@@ -29,57 +30,36 @@ def get_params():
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-)
 @pytest.mark.parametrize(
     "seq_len,dim,num_heads,num_pipelines,num_kv_heads", get_params()
 )
-def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
-    golden_ref = generate_golden_reference(
-        S_q=seq_len,
-        S_kv=seq_len,
-        d=dim,
-        heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        num_pipeline=num_pipelines,
-    )
-
+def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, npu_runtime):
     operator = MHA(
         num_heads=num_heads,
         seq_len=seq_len,
         d=dim,
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
-        context=aie_context,
     )
 
-    input_buffers = {
-        "Q": golden_ref["Q"].flatten(),
-        "K": golden_ref["K"].flatten(),
-        "V": golden_ref["V"].flatten(),
-    }
-    output_buffers = {"O": golden_ref["O"].flatten()}
+    data = vectors(operator)
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=4.0e-2, abs_tol=1.5e-1
+        operator, data.inputs, data.outputs, rel_tol=4.0e-2, abs_tol=1.5e-1
     )
 
     error_threshold = 0.005
     max_acceptable_errors = int(seq_len * dim * num_heads * error_threshold)
 
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
     print(
         "({} errors out of {} max allowable)".format(
             len(errors["O"]), max_acceptable_errors
         )
     )
 
-    assert (
-        len(errors["O"]) <= max_acceptable_errors
-    ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
+    assert len(errors["O"]) <= max_acceptable_errors, (
+        f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
+    )
 
 
 @pytest.mark.parametrize(
@@ -93,7 +73,7 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
 def test_arg_spec_matches_design_shapes(
     seq_len, dim, num_heads, num_pipelines, num_kv_heads
 ):
-    """get_arg_spec sizes the runtime buffers; design.py declares the MLIR arg
+    """The declared buffers size the runtime buffers; design.py declares the MLIR arg
     types. The two must agree.
     """
     op = MHA(
@@ -103,9 +83,9 @@ def test_arg_spec_matches_design_shapes(
         num_KV_heads=num_kv_heads,
         num_of_pipelines=num_pipelines,
     )
-    q, k, v, o = (spec.shape[0] for spec in op.get_arg_spec())
+    q, k, v, o = (math.prod(b.shape) for b in op.buffers)
 
-    pad = op._calculate_seq_padding(seq_len, num_pipelines)
+    pad = op.ov.seq_padding(seq_len)
     kv_heads = num_kv_heads if num_kv_heads else num_heads
     assert q == num_heads * pad * dim
     assert o == num_heads * pad * dim

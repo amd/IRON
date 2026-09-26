@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from aie.iron.kernels import activation
+
+import numpy as np
+
+from aie.utils.verify import Tolerance
+
+from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator, tunable
+from iron.common.testing import Testing, channeled_unary_cases
+
+
+@operator
+class SiLUOverlay(ChanneledUnaryOverlay):
+    """The array for SiLU: the shared elementwise design over its kernel."""
+
+    # One channel per column: the LUT-based kernel is sized for it.
+    num_channels: int = tunable(1, repr=False, init=False)
+
+    def kernel(self, target):
+        return activation.silu_sized(self.line_size)
+
+
+@operator
+class SiLU(ChanneledUnaryOperator[SiLUOverlay]):
+    """AIE-accelerated SiLU activation function"""
+
+    test = Testing(
+        channeled_unary_cases([1024, 2048, 4096, 8192], 4096, channels=None),
+        tolerance=Tolerance.relative(0.04, 1e-6),
+    )
+
+    def reference(self, x):
+        """CPU reference: ``x * sigmoid(x)``."""
+        f = x.astype(np.float32)
+        return (f / (1 + np.exp(-f))).astype(x.dtype)

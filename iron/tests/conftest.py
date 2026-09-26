@@ -19,8 +19,11 @@ _EXCLUDED_NAMES = {"conftest.py", "__init__.py"}
 def pytest_collect_file(parent, file_path):
     if file_path.suffix != ".py" or file_path.name in _EXCLUDED_NAMES:
         return None
-    # Let the default collector handle files matching the configured patterns
-    # (e.g. ``test.py``) to avoid double-collection.
+    # pytest's own collector takes a file that matches ``python_files`` and
+    # any file named on the command line, whatever its name; collecting
+    # those here too would collect them twice.
+    if parent.session.isinitpath(file_path):
+        return None
     patterns = parent.config.getini("python_files")
     if any(fnmatch.fnmatch(file_path.name, pat) for pat in patterns):
         return None
