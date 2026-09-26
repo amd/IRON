@@ -34,7 +34,16 @@ from .callable import (
 from .fused import FusedImage, XclbinChain, build_fused_mlir
 from .fusion import fuse_mlir
 from .jit_compile import DispatchStream, dispatch_stream, insts_design, xclbin_design
-from .packaging import ELF, XCLBIN, each_step, plan
+from .packaging import (
+    ELF,
+    NPU1_SUPPORT,
+    NPU2_SUPPORT,
+    XCLBIN,
+    DeviceSupport,
+    device_support,
+    each_step,
+    plan,
+)
 from .sequence import OperatorSequence
 
 __all__ = [
@@ -42,10 +51,13 @@ __all__ = [
     "ArenaPlan",
     "Artifacts",
     "Design",
+    "DeviceSupport",
     "DispatchStream",
     "ELF",
     "FusedImage",
     "LiveRange",
+    "NPU1_SUPPORT",
+    "NPU2_SUPPORT",
     "OperatorSequence",
     "ScratchArena",
     "SequenceCallable",
@@ -57,6 +69,7 @@ __all__ = [
     "XCLBIN",
     "XclbinChain",
     "build_fused_mlir",
+    "device_support",
     "dispatch_stream",
     "each_step",
     "fuse_mlir",

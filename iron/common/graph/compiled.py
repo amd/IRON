@@ -31,7 +31,7 @@ from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
 from ..image.callable import FullELFRun, ScratchArena, SequenceCallable
 from ..image.coresidence import AdjacentPacking
-from ..image.packaging import ELF, Plan, plan
+from ..image.packaging import ELF, Plan, device_support, plan
 from ..image.sequence import ALIGNMENT
 from .carried import (
     CARRY,
@@ -316,7 +316,7 @@ class GraphFunction:
             tuning = coresident.tune(traced, aie_utils.get_current_device())
             traced, groups = tuning.apply(traced)
         chosen = plan(
-            aie_utils.get_current_device().resolve().name, traced, boundaries, image
+            device_support(aie_utils.get_current_device()), traced, boundaries, image
         )
         if verbose:
             print(chosen.report(self.__name__))

@@ -9,9 +9,9 @@ Two arguments, both optional, and everything else derived and reported:
     net = decode.compile(dev, boundaries=each_step)    # one dispatch per step
 
 The rules, in order: a ``DispatchTime`` value anywhere forces ``xclbin``
-(its sequence is generated per call); NPU1 forces ``xclbin`` (no full-ELF
-dispatch); more than one boundary forces ``xclbin`` (one image, N
-kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
+(its sequence is generated per call); a device without full-ELF dispatch
+(:class:`DeviceSupport`; NPU1) forces ``xclbin``; more than one boundary
+forces ``xclbin`` (one image, N kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
 an error naming the member, the boundaries or the device.
 
 What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
@@ -32,10 +32,45 @@ from __future__ import annotations
 
 import dataclasses
 
+from aie.dialects._aie_enum_gen import AIEArch
+
 ELF = "elf"
 XCLBIN = "xclbin"
 
 each_step = "each_step"
+
+
+@dataclasses.dataclass(frozen=True)
+class DeviceSupport:
+    """What one device generation can dispatch, whatever its column count."""
+
+    name: str
+    full_elf: bool
+
+
+# npu1's full_elf is INFERRED from source and has not been tested on
+# hardware. IRON's npu1 ELF carries .pdi sections, and XRT sends any such
+# ELF as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031-1041). The
+# amdxdna driver refuses that opcode unless the firmware has AIE2_PREEMPT
+# (2.25 aie2_message.c:1006-1009), and npu1's feature table never lists it
+# (npu1_regs.c:68-72; npu4_regs.c:96 does, from firmware 6.12). To verify
+# it: set True, then run a full-ELF test on an npu1 machine.
+NPU1_SUPPORT = DeviceSupport("npu1", full_elf=False)
+NPU2_SUPPORT = DeviceSupport("npu2", full_elf=True)
+
+# Keyed on the architecture rather than the class or the name: NPU1Col1 is
+# not an NPU1, and it resolves to "npu1_1col".
+_SUPPORT = {AIEArch.AIE2: NPU1_SUPPORT, AIEArch.AIE2p: NPU2_SUPPORT}
+
+
+def device_support(dev) -> DeviceSupport:
+    """The :class:`DeviceSupport` for ``dev``, an ``aie.iron.device.Device``."""
+    if dev is None:
+        raise ValueError("no current device; call aie.utils.set_current_device")
+    try:
+        return _SUPPORT[dev.arch]
+    except KeyError:
+        raise ValueError(f"no dispatch support recorded for {dev.arch}") from None
 
 
 @dataclasses.dataclass
@@ -55,7 +90,9 @@ class Plan:
         return "\n".join(lines)
 
 
-def plan(device_name: str, traced, boundaries=None, image: str | None = None) -> Plan:
+def plan(
+    support: DeviceSupport, traced, boundaries=None, image: str | None = None
+) -> Plan:
     """Derive the image and the dispatch policy for ``traced`` on the device."""
     if image not in (None, ELF, XCLBIN):
         raise ValueError(f"image must be {ELF!r} or {XCLBIN!r}, got {image!r}")
@@ -69,8 +106,8 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    if device_name == "npu1":
-        forced.append("npu1 has no full-ELF dispatch")
+    if not support.full_elf:
+        forced.append(f"{support.name} has no full-ELF dispatch")
     if boundaries is not None:
         forced.append(f"boundaries={boundaries}: more than one dispatch")
 

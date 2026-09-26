@@ -9,7 +9,6 @@ from collections.abc import Hashable, Mapping, Sequence
 import numpy as np
 
 import aie.utils as aie_utils
-from aie.iron.device import NPU2
 from aie.utils import bfp
 
 from ..declare import Operator
@@ -33,6 +32,7 @@ from .callable import (
 )
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
+from .packaging import device_support
 
 logger = logging.getLogger(__name__)
 
@@ -456,9 +456,9 @@ class OperatorSequence:
         if self.mode is None:
             # The platform default for a hand-written sequence; a graph goes
             # through packaging.plan, which also weighs its values and boundaries.
-            npu2 = isinstance(aie_utils.get_current_device(), NPU2)
-            self.mode = "fused" if npu2 else "separate"
-            if (self.arena is not None or self.feedback_args) and not npu2:
+            full_elf = device_support(aie_utils.get_current_device()).full_elf
+            self.mode = "fused" if full_elf else "separate"
+            if (self.arena is not None or self.feedback_args) and not full_elf:
                 raise ValueError(
                     f"{self.name}: a shared arena and feedback arguments need the "
                     f"full ELF, which this device does not dispatch"

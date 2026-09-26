@@ -7,7 +7,6 @@ import hashlib
 import inspect
 
 import aie.utils as aie_utils
-from aie.iron.device import NPU2
 
 from . import fusion
 from .coresidence import AdjacentPacking, Packing
@@ -18,6 +17,7 @@ from .jit_compile import (
     source_digest,
     xclbin_design,
 )
+from .packaging import device_support
 
 
 def fused_plan(seq):
@@ -130,9 +130,11 @@ class FusedImage:
         :func:`fused_identity`, locks across processes and validates the
         kernels' depfiles, and the ELF lands in its entry.
         """
-        if not isinstance(aie_utils.get_current_device(), NPU2):
+        support = device_support(aie_utils.get_current_device())
+        if not support.full_elf:
             raise RuntimeError(
-                "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
+                f"dispatch='fused' needs a full ELF; {support.name} has no "
+                f"full-ELF dispatch"
             )
         if self.design is None:
             plan = fused_plan(seq)

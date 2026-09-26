@@ -27,10 +27,9 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
-from aie.iron.device import NPU2
 from aie.utils.verify import Tolerance
 
-from iron.common.image import OperatorSequence, build_fused_mlir
+from iron.common.image import OperatorSequence, build_fused_mlir, device_support
 from iron.common.harness import verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
@@ -101,7 +100,9 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     seq.compile()
 
     expected_mode = (
-        "fused" if isinstance(aie_utils.get_current_device(), NPU2) else "separate"
+        "fused"
+        if device_support(aie_utils.get_current_device()).full_elf
+        else "separate"
     )
     assert seq.mode == expected_mode, (
         f"auto dispatch resolved to {seq.mode!r}, expected {expected_mode!r} "
@@ -181,8 +182,11 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform)."""
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    if (
+        dispatch == "fused"
+        and not device_support(aie_utils.get_current_device()).full_elf
+    ):
+        pytest.skip("fused (single-ELF) dispatch needs a full-ELF device")
 
     rng = np.random.default_rng(0)
     a = rng.random(_ADD_RELU_SIZE).astype(bfloat16) * 4 - 2
@@ -316,8 +320,11 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
     """Host writes through get_buffer() to a non-input buffer reach the NPU at
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller."""
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    if (
+        dispatch == "fused"
+        and not device_support(aie_utils.get_current_device()).full_elf
+    ):
+        pytest.skip("fused (single-ELF) dispatch needs a full-ELF device")
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
     seq = _build_add_relu_sequence(
