@@ -25,8 +25,9 @@ from iron.common.image.jit_compile import (
     _bind_device,
     _design_generator,
     _params_key,
+    design_identity,
 )
-from iron.operators import ElementwiseAdd
+from iron.operators import GEMM, GEMV, ElementwiseAdd
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
@@ -158,6 +159,26 @@ def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
     )
     _bind_device()
     assert design._compute_cache_hash() == bound_hash
+
+
+@pytest.mark.parametrize(
+    "plain, other",
+    [
+        (GEMV(M=2048, K=8192), GEMV(M=2048, K=8192, epilogue="gelu")),
+        (GEMM(M=256, K=256, N=256), GEMM(M=256, K=256, N=256, prio_accuracy=True)),
+    ],
+    ids=["gemv_epilogue", "gemm_prio_accuracy"],
+)
+def test_a_field_the_repr_leaves_out_still_keys_the_build(plain, other):
+    """Two operators alike but for a repr=False field build different designs.
+
+    The repr leaves such a field out, so a key spelled from it handed the
+    GEMV+GELU of a Llama MLP shape the plain GEMV's cached binary, and the
+    output came back un-GELU'd with nothing reporting it.
+    """
+    assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
+    assert _params_key({"op": plain}) != _params_key({"op": other})
+    assert design_identity(plain.generator()) != design_identity(other.generator())
 
 
 def test_a_device_parameter_is_keyed_by_identity_not_address():

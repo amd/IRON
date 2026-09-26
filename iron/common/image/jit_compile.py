@@ -90,7 +90,11 @@ def _params_key(kwargs: dict) -> str:
         if _is_device(value):
             items.append((name, repr(_device_identity_key(value))))
             continue
-        text = str(value)
+        # An operator by its design key, not its repr: a repr=False field
+        # (GEMV's epilogue, GEMM's precision flags, a dtype) changes what it
+        # builds without changing its repr, and would share a cache entry.
+        design_key = getattr(value, "design_key", None)
+        text = repr(design_key()) if callable(design_key) else str(value)
         # A per-call value a graph bound on an operator is part of what it
         # builds (a device parameter, a patched descriptor), but not a field,
         # so its repr leaves it out.
