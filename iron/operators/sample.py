@@ -11,10 +11,11 @@ logits and the same uniform agree exactly. A draw is a four-word row of
 per position; the token is written to ``token`` (what the next step embeds)
 and recorded at its position in ``tokens``.
 
-The logits are split over ``cores`` columns. Each column's core streams its
-slice three times through ``sample_select`` (a histogram pass, a refining
-pass, a collecting pass) into a summary of its top k; the summaries join in
-a memtile into one ``sample_combine`` core, which draws the token.
+The logits are split over ``cores`` columns. Each column's core passes its
+slice twice through ``sample_select`` (a threshold pass, a collecting pass)
+into a summary of its top k -- streamed twice, or once when a chunk is the
+whole slice; the summaries join in a memtile into one ``sample_combine``
+core, which draws the token.
 
 In a graph, the position is two per-call values: ``row`` is the element
 offset of its draw (``4 * position``) and ``at`` the element offset of its
@@ -51,8 +52,6 @@ from iron.common.tiling import contiguous, repeated
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
 _CHUNK_LIMIT = 8192
-# The select kernel's passes over its slice.
-_PASSES = 3
 
 
 @operator
@@ -74,6 +73,11 @@ class SampleOverlay(Overlay):
     @property
     def slice_size(self) -> int:
         return self.vocab // self.cores
+
+    @property
+    def select_streams(self) -> int:
+        """How often each select core takes its slice per position."""
+        return kernels.select_streams(self.slice_size, self.chunk)
 
     def validate(self) -> None:
         if self.vocab % self.cores:
@@ -103,7 +107,7 @@ class SampleOverlay(Overlay):
     def design(self, target) -> list:
         select, combine = self._select(), self._combine()
         words = kernels.summary_words(self.slice_size, self.k_max)
-        calls = _PASSES * self.slice_size // self.chunk
+        calls = self.select_streams * self.slice_size // self.chunk
         of_draw = ObjectFifo(self.draw.tile, name="draw", depth=1)
         of_token = ObjectFifo(self.token.tile, name="token", depth=1)
         of_record = ObjectFifo(self.record.tile, name="record", depth=1)
@@ -231,7 +235,7 @@ class Sample(Operator[SampleOverlay]):
         return tokens, np.array([token], dtype=np.int32)
 
     def order(self, buffer: BoundBuffer) -> Order:
-        """Each column's slice of the logits, once per select pass; one draw
+        """Each column's slice of the logits, once per select stream; one draw
         row and one record, each at its position's offset when a graph binds
         one; the token."""
         ov = self.ov
@@ -241,7 +245,7 @@ class Sample(Operator[SampleOverlay]):
                     self.logits.elements,
                     c * ov.slice_size,
                     ov.slice_size,
-                    [(_PASSES, 0)],
+                    [(ov.select_streams, 0)],
                     bfloat16,
                 )
                 for c in range(ov.cores)
