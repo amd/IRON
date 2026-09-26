@@ -96,21 +96,35 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     assert f.arena.plan.size < private
 
 
-def test_load_hands_each_weight_to_release_once_it_is_uploaded():
-    """``release`` sees each weight once over every version, after which the
-    host copy is not read: overwriting it changes nothing on the device."""
+def test_load_hands_each_piece_of_each_weight_to_release_once_it_is_uploaded():
+    """``release`` sees every weight once over every version, in order, in
+    pieces of at most ``piece_bytes``; after that the host copy is not read:
+    overwriting it changes nothing on the device."""
     f, w, w2, s = _function()
     f.compile(x=(E,))
     f.compile(x=(2 * E,))
+    piece_bytes = 512
     released = []
     for version in f.versions.values():
-        version.load(release=released.append)
-    assert sorted(map(id, released)) == sorted([id(w), id(w2)])
+        version.load(release=released.append, piece_bytes=piece_bytes)
 
-    expect_w = _f32(w)
+    step = piece_bytes // w.itemsize
+    for weight in (w, w2):
+        pieces = [p for p in released if np.shares_memory(p, weight)]
+        assert [p.ctypes.data for p in pieces] == [
+            weight.ctypes.data + begin * w.itemsize
+            for begin in range(0, weight.size, step)
+        ]
+        assert all(p.size == step for p in pieces)
+    assert len(released) == (w.size + w2.size) // step
+
+    expect_w, expect_w2 = _f32(w), _f32(w2)
     w[:] = 0
-    x1 = _numbers(E, 9)
+    w2[:] = 0
+    x1, x2 = _numbers(E, 9), _numbers(2 * E, 10)
     np.testing.assert_array_equal(_f32(f(x1).numpy()), _f32(x1) + 2 * expect_w)
+    expect = (_f32(x2) + expect_w2)[E:] + _f32(x1) + expect_w
+    np.testing.assert_array_equal(_f32(f(x2).numpy()), expect)
 
 
 def test_load_loads_a_version_whose_weights_are_already_uploaded():

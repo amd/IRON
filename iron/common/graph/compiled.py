@@ -47,14 +47,35 @@ def _shape_and_dtype(spec):
     return tuple(spec), bfloat16
 
 
-def _store(view: np.ndarray, tensor) -> None:
+# A weight is uploaded in pieces of at most this many bytes of the host copy.
+UPLOAD_PIECE = 64 * 2**20
+
+
+def _store(
+    view: np.ndarray,
+    tensor,
+    release: Callable[[np.ndarray], None] | None = None,
+    piece_bytes: int = UPLOAD_PIECE,
+) -> None:
     """Copy ``tensor`` into a buffer view, casting in place.
 
     Assignment casts element by element into the destination; ``astype``
     first would build a whole temporary, and faulting in the 501 MiB one
     for Llama's embedding took 5-50 s per upload.
+
+    ``release``, if given, is called with each piece of the flattened host
+    copy once it is in the buffer, so a mapped checkpoint need never have
+    more than a piece of a weight resident beside it.
     """
-    view[:] = np.asarray(tensor).reshape(-1)
+    flat = np.asarray(tensor).reshape(-1)
+    if release is None:
+        view[:] = flat
+        return
+    step = max(1, piece_bytes // flat.itemsize)
+    for begin in range(0, flat.size, step):
+        piece = flat[begin : begin + step]
+        view[begin : begin + step] = piece
+        release(piece)
 
 
 class GraphFunction:
@@ -301,27 +322,41 @@ class CompiledGraph:
         buf.to("cpu")
         return buf.numpy().reshape(tuple(x.shape))
 
-    def _copy_in(self, name, tensor) -> None:
-        _store(self.callable.get_buffer(name).numpy_view(), tensor)
+    def _copy_in(
+        self,
+        name,
+        tensor,
+        release: Callable[[np.ndarray], None] | None = None,
+        piece_bytes: int = UPLOAD_PIECE,
+    ) -> None:
+        view = self.callable.get_buffer(name).numpy_view()
+        _store(view, tensor, release, piece_bytes)
 
-    def upload(self, release: Callable[[object], None] | None = None) -> None:
+    def upload(
+        self,
+        release: Callable[[np.ndarray], None] | None = None,
+        piece_bytes: int = UPLOAD_PIECE,
+    ) -> None:
         """Copy every closed-over weight into its buffer, once per storage.
 
-        ``release``, if given, is called with each weight as soon as it is
-        in its buffer, for its owner to drop the host copy's pages. In an
+        ``release``, if given, is called with each piece of each weight --
+        a flat view of at most ``piece_bytes`` -- as soon as it is in its
+        buffer, for the weight's owner to drop the host copy's pages. In an
         arena that is the last time the weight is read: a grown arena keeps
         the device's contents.
         """
         for key, (tensor, handle) in self.traced.weights.items():
             if key not in self._loaded:
-                self._copy_in(handle.name, tensor)
+                self._copy_in(handle.name, tensor, release, piece_bytes)
                 self._loaded.add(key)
-                if release is not None:
-                    release(tensor)
 
-    def load(self, release: Callable[[object], None] | None = None) -> CompiledGraph:
+    def load(
+        self,
+        release: Callable[[np.ndarray], None] | None = None,
+        piece_bytes: int = UPLOAD_PIECE,
+    ) -> CompiledGraph:
         """Load the image and upload its weights now, rather than on first
-        call; ``release`` as for :meth:`upload`.
+        call; ``release`` and ``piece_bytes`` as for :meth:`upload`.
 
         The image is loaded even when there is nothing to upload: in an
         arena, another version may have put every weight there already, and
@@ -329,7 +364,7 @@ class CompiledGraph:
         """
         if not self.is_loaded:
             self._callable = self.sequence.get_callable(self.arena)
-        self.upload(release)
+        self.upload(release, piece_bytes)
         return self
 
     # -- calling ---------------------------------------------------------------
