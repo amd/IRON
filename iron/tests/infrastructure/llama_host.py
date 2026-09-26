@@ -407,6 +407,16 @@ def test_scaled_rope_table_rotates_by_the_scaled_frequencies():
     assert not np.array_equal(angles[:, 30:], unscaled[:, 30:])
 
 
+@pytest.mark.parametrize("rows", [1, 17, 2047, 2048])
+def test_rope_rows_are_the_whole_tables_rows_bitwise(rows):
+    """``LlamaConfig.rope_rows`` builds only the rows the NPU reads, not
+    Llama 3.2's 131072; they must be the whole table's, bit for bit."""
+    D, base = 64, 500000.0
+    whole = rope_angles(D, 131072, base, LLAMA_3_2)
+    first = rope_angles(D, rows, base, LLAMA_3_2)
+    assert np.array_equal(first.view(np.uint32), whole[:rows].view(np.uint32))
+
+
 # Tier 1 -- sampling
 # ##########################################################################
 

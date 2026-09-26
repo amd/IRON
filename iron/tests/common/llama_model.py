@@ -64,6 +64,10 @@ class Config:
         )
         self.angles = rope_angles(self.head_dim, self.context_length).astype(bfloat16)
 
+    def rope_rows(self, rows):
+        """The first ``rows`` rows of ``angles``, as the harness config gives them."""
+        return self.angles[:rows]
+
 
 class Llama1B(Config):
     """Llama 3.2 1B's real shape with unset weights: for builds, not numbers.

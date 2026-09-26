@@ -16,6 +16,7 @@ nothing here needs torch. Only the CPU reference does (:mod:`.reference`).
 """
 
 import argparse
+import functools
 import sys
 import time
 from pathlib import Path
@@ -82,11 +83,20 @@ class LlamaConfig:
         self._check_weights()
         self.tokenizer = get_tokenizer(tokenizer_path, self.special_tokens)
 
-        # The RoPE angle look-up table, float32; the NPU and the CPU reference
-        # both read this one.
-        self.angles = rope_angles(
-            self.head_dim, self.context_length, self.rope_base, self.rope_scaling
-        )
+    def rope_rows(self, rows: int) -> np.ndarray:
+        """The first ``rows`` rows of :attr:`angles`, without the rest.
+
+        Each row is a function of its position alone, so these are bitwise
+        the table's; the NPU reads only its ``max_seq_len`` rows, and the
+        whole table costs half a second to build.
+        """
+        return rope_angles(self.head_dim, rows, self.rope_base, self.rope_scaling)
+
+    @functools.cached_property
+    def angles(self) -> np.ndarray:
+        """The RoPE angle look-up table, float32, for the whole context; the
+        NPU (through :meth:`rope_rows`) and the CPU reference both read it."""
+        return self.rope_rows(self.context_length)
 
     def _check_weights(self):
         layer = self.weights.layers[0]

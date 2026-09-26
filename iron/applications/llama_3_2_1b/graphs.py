@@ -125,7 +125,7 @@ class LlamaGraph:
         self.scale = np.full((H, L), 1.0 / math.sqrt(D), dtype=bfloat16)
         # The RoPE table, one row per position, in the images' dtype: a prompt
         # reads its first rows, a decode step gathers its position's.
-        self.rope = config.angles[:L].astype(bfloat16)
+        self.rope = config.rope_rows(L).astype(bfloat16)
         keys, values, scale, rope = self.keys, self.values, self.scale, self.rope
         draws, tokens = self.draws, self.tokens
 
