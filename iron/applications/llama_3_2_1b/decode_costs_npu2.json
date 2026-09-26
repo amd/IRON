@@ -432,27 +432,27 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_11b4916290c13686cc97a493": {
-   "t_step_us": 4257.974978827406,
-   "alone_us": 293.70647825999185,
+  "Sample_be8714c459b8a019279bddee": {
+   "t_step_us": 279.17572151636705,
+   "alone_us": 196.96958042914048,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_8c39d817e091dc85e5dd68aa": {
-   "t_step_us": 2267.054849653505,
-   "alone_us": 301.18915310595185,
+  "Sample_ee1b8d34779069682d5291c1": {
+   "t_step_us": 500.2465331926942,
+   "alone_us": 184.55088138580322,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_a5e08d14772354b0525bde0d": {
-   "t_step_us": 8295.722429465968,
-   "alone_us": 541.4460247266106,
+  "Sample_f4b571e5ed17f0449d4422c1": {
+   "t_step_us": 323.0195143260062,
+   "alone_us": 184.10099437460303,
    "exact": true,
    "pmode": "turbo",
    "rounds": 8,
