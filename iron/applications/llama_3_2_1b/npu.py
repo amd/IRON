@@ -117,11 +117,15 @@ class AIELlama:
 
 def setup(args):
     """The config, the prompt's state and the compiled model, from the arguments."""
-    assert (
-        MAX_SEQ_LEN >= args.prompt_len + args.num_tokens
-    ), "MAX_SEQ_LEN must be at least prompt_len + num_tokens"
     prompt = harness.get_prompt(args.prompt_len)
     config, state = harness.init(args.weights_path, args.tokenizer_path, prompt=prompt)
+    # --prompt-len counts characters; the rows are tokens, known only now.
+    n_prompt = state.token_ids.shape[1]
+    if n_prompt + args.num_tokens > MAX_SEQ_LEN:
+        raise ValueError(
+            f"a {n_prompt}-token prompt and {args.num_tokens} generated tokens "
+            f"exceed the model's {MAX_SEQ_LEN} rows"
+        )
     return config, state, prompt, AIELlama.compile(config)
 
 

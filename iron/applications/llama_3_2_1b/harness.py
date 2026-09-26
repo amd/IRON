@@ -233,7 +233,7 @@ def argument_parser(description="LLaMA 3.2 1B Inference Harness"):
         "--prompt-len",
         type=int,
         default=2048,
-        help="Length of the input prompt in tokens (default: 2048)",
+        help="Length of the input prompt, in characters of prompt.txt (default: 2048)",
     )
     parser.add_argument(
         "--num-tokens",
