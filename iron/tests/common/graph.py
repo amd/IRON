@@ -322,7 +322,6 @@ def test_llama_decode_traces_and_tunes():
         "RoPE",
         "StridedCopy",
         "StridedCopy",
-        "Repeat",
         "GEMV",
         "ElementwiseMul",
         "DynamicSoftmax",
