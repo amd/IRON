@@ -14,18 +14,18 @@ def get_params():
     # (seq_len, head_dim, heads, number_of_pipeline, num_kv_heads)
     # Constraints (from design.py):
     #   - head_dim must be 64
-    #   - num_kv_heads == 0 means standard MHA (treated as num_kv_heads == num_heads internally)
+    #   - num_kv_heads == num_heads is standard MHA
     #   - For GQA: 0 < num_kv_heads < num_heads, and num_heads % num_kv_heads == 0
     #   - number_of_pipelines determines how many AIE tile columns are used (col=0..N-1)
     return [
         # Standard MHA configuration (default suite)
-        pytest.param(16384, 64, 1, 8, 0),
+        pytest.param(16384, 64, 1, 8, 1),
         # GQA configuration: 8 query heads with 2 KV heads (group factor = 4)
         # num_heads=8, num_KV_heads=2 satisfies: 8 % 2 == 0 and 2 < 8
         pytest.param(16384, 64, 8, 8, 2, marks=pytest.mark.extensive),
         # Multi-pipeline variant with 4 pipelines instead of 8
-        # Uses fewer AIE columns; seq_len=16384, standard MHA (num_kv_heads=0)
-        pytest.param(16384, 64, 1, 4, 0, marks=pytest.mark.extensive),
+        # Uses fewer AIE columns; seq_len=16384, standard MHA
+        pytest.param(16384, 64, 1, 4, 1, marks=pytest.mark.extensive),
     ]
 
 
@@ -66,8 +66,8 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, npu_runtime):
     "seq_len,dim,num_heads,num_pipelines,num_kv_heads",
     [
         (16384, 64, 8, 8, 2),
-        # num_kv_heads == 0 means plain MHA.
-        (16384, 64, 1, 8, 0),
+        # num_kv_heads == num_heads is plain MHA.
+        (16384, 64, 1, 8, 1),
     ],
 )
 def test_arg_spec_matches_design_shapes(
@@ -86,8 +86,7 @@ def test_arg_spec_matches_design_shapes(
     q, k, v, o = (math.prod(b.shape) for b in op.buffers)
 
     pad = op.seq_padding(seq_len)
-    kv_heads = num_kv_heads if num_kv_heads else num_heads
     assert q == num_heads * pad * dim
     assert o == num_heads * pad * dim
-    assert k == kv_heads * pad * dim
-    assert v == kv_heads * pad * dim
+    assert k == num_kv_heads * pad * dim
+    assert v == num_kv_heads * pad * dim
