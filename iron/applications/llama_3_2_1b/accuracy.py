@@ -10,6 +10,8 @@ the NPU application is not. Run with
 
 import logging
 
+import numpy as np
+
 from . import harness
 from .npu import setup
 from .reference import ReferenceForward
@@ -32,10 +34,12 @@ def main():
         ReferenceForward(config),
         args.num_tokens,
     )
-    kl = [k for k, _ in results]
-    print(f"[Accuracy] Prefill KL: {kl[0]:.6f}")
-    if len(kl) > 1:
-        print(f"[Accuracy] Decode max KL: {max(kl[1:]):.6f}")
+    # Over every step, prefill and decode alike: one step's KL depends as much
+    # on how confident the reference is at that position as on the NPU.
+    kl = np.array([k for k, _ in results])
+    print(f"[Accuracy] Mean KL: {kl.mean():.6f}")
+    print(f"[Accuracy] P90 KL: {np.percentile(kl, 90):.6f}")
+    print(f"[Accuracy] Max KL: {kl.max():.6f} (step {kl.argmax()})")
     print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
 
 

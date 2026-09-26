@@ -86,17 +86,19 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
 
 
 # KL(fp32 CPU || NPU) of the next-token distribution, teacher-forced over 40
-# steps. With Llama 3's RoPE scaling the graphs measure 0.091 on prefill and
-# at most 0.023 on decode. The prefill figure is one position, and an unlucky
-# one: over 140 positions of prompt.txt the median is 0.006 with or without
-# the scaling, and this is one of two above 0.05. Without the scaling it
-# measured 0.035. Decode attention over unmasked KV-cache slots measured 9.2.
-MAX_PREFILL_KL = 0.1
-MAX_DECODE_KL = 0.05
+# steps, bounded over all of them: any one step's KL is as much the
+# position's as the NPU's. The graphs measure a mean of 0.0083 and a p90 of
+# 0.018; over 140 positions of prompt.txt the p90 is 0.017. The mean and p90
+# bound a drift across many steps, the max a single broken step. The largest
+# step is prefill at 0.091, one of two positions of the 140 above 0.05.
+# Decode attention over unmasked KV-cache slots measured 9.2.
+MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 ACCURACY = {
-    "PrefillKL": r"\[Accuracy\] Prefill KL:\s*(?P<value>[\d\.e\+-]+)",
-    "DecodeMaxKL": r"\[Accuracy\] Decode max KL:\s*(?P<value>[\d\.e\+-]+)",
+    **{
+        f"{stat}KL": rf"\[Accuracy\] {stat} KL:\s*(?P<value>[\d\.e\+-]+)"
+        for stat in MAX_KL
+    },
     "Top1Mismatches": r"\[Accuracy\] Top-1 mismatches:\s*(?P<value>\d+)",
 }
 
@@ -108,10 +110,9 @@ def test_llama_3_2_1b_accuracy():
     pytest.importorskip("torch")
     result = run_llama_npu(1024, 40, figures=ACCURACY, entry_point="accuracy")
 
-    prefill_kl = float(re.search(r"Prefill KL:\s*(\S+)", result.stdout).group(1))
-    decode_kl = float(re.search(r"Decode max KL:\s*(\S+)", result.stdout).group(1))
-    assert prefill_kl <= MAX_PREFILL_KL, f"prefill KL {prefill_kl} > {MAX_PREFILL_KL}"
-    assert decode_kl <= MAX_DECODE_KL, f"decode KL {decode_kl} > {MAX_DECODE_KL}"
+    for stat, bound in MAX_KL.items():
+        kl = float(re.search(ACCURACY[f"{stat}KL"], result.stdout).group("value"))
+        assert kl <= bound, f"{stat.lower()} KL {kl} > {bound}"
 
 
 # Repeated runs must produce bit-identical logits. A prefill KV hand-off that
