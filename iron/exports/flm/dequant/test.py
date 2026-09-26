@@ -8,7 +8,9 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron.device import from_name
 
+from iron.common import Incompatible
 from iron.common.harness import run_test
 from iron.exports.flm.dequant.op import DequantBFP
 from iron.exports.flm.dequant.reference import (
@@ -191,10 +193,11 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
         # this operator does not emit that order and must say so.
         (512, 128, dict(tile_n=128), NotImplementedError, "tile_n"),
-        (1000, 128, {}, ValueError, "multiple of"),
-        (1024, 100, {}, ValueError, "multiple of"),
+        # Extents the grid does not divide: refused once the grid is known.
+        (1000, 128, {}, Incompatible, "multiple of"),
+        (1024, 100, {}, Incompatible, "multiple of"),
     ],
 )
 def test_rejects_unservable_shapes(K, N, extra, exc, match):
     with pytest.raises(exc, match=match):
-        DequantBFP(K=K, N=N, **extra)
+        DequantBFP(K=K, N=N, **extra).resolved(from_name("npu2", n_cols=8))
