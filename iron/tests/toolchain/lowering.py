@@ -4,13 +4,16 @@
 """Every declared operator lowers to an NPU instruction stream.
 
 Needs the mlir-aie package (its bindings generate the MLIR, its ``aiecc``
-lowers it) but neither Peano nor a device: ``--get-npu-insts`` places,
-routes, assigns buffer addresses, lowers the DMAs and emits the runtime
-sequence's instructions without compiling a core. What that checks is
-everything the operator model owns: the array an ``array()`` builds is
-placeable and routable, every descriptor a sequence issues is legal, the
-resident writes and barrier sets lower. What it cannot check is the
-kernels, which need Peano, and the numbers, which need hardware.
+lowers it) and Peano, but no device: ``--get-npu-insts`` places, routes,
+assigns buffer addresses, lowers the DMAs and emits the runtime sequence's
+instructions. Peano is there for aiecc's probe of each core, which measures
+its stack and so lowers the core's IR with every kernel it merges (an
+``inline`` kernel, like the rounding-mode setup a kernel contract asks for);
+object-linked kernels are not compiled. What that checks is everything the
+operator model owns: the array an ``array()`` builds is placeable and
+routable, every descriptor a sequence issues is legal, the resident writes
+and barrier sets lower. What it cannot check is the kernels' objects and
+the numbers, which need hardware.
 
 The case table is ``iron/tests/common/cases.py``, one construction per
 shape and dtype decision each operator makes.
@@ -25,12 +28,14 @@ from iron.common import Incompatible, Unresolvable
 from iron.tests.common.cases import CASES
 from iron.tests.toolchain.tools import AIECC, requires
 
-pytestmark = requires("aiecc")
+pytestmark = requires("aiecc", "peano")
 
 
 def lower(op, tmp_path, name=None):
     """Generate the operator's MLIR and lower it to instructions; return both paths."""
     from aie.iron import ExternalFunction
+    from aie.utils import get_current_device
+    from aie.utils.compile import compile_external_kernels, resolve_target_arch
 
     name = name or op.name
     src = tmp_path / f"{name}.mlir"
@@ -41,8 +46,13 @@ def lower(op, tmp_path, name=None):
     ExternalFunction._instances.clear()
     try:
         src.write_text(str(op.generator()()))
+        # aiecc merges these into the core IR it probes, reading them beside
+        # the MLIR; the object-linked kernels it never reads here.
+        merged = [f for f in ExternalFunction._instances if f.link_with_mode == "merge"]
     finally:
         ExternalFunction._instances.clear()
+    arch = resolve_target_arch(get_current_device(probe_runtime=False))
+    compile_external_kernels(merged, str(src.parent), arch)
     out = tmp_path / "out"
     result = subprocess.run(
         [

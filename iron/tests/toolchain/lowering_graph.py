@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires, swiglu_decode
 
-pytestmark = [*requires("aiecc"), pytest.mark.usefixtures("npu2")]
+pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
 
 def _lower_all(traced, tmp_path):

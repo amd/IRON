@@ -15,7 +15,7 @@ from iron.common import BinaryElementwise
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires
 
-pytestmark = requires("aiecc")
+pytestmark = requires("aiecc", "peano")
 
 VADD = """
 #include <aie_api/aie.hpp>
