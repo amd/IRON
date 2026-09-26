@@ -33,7 +33,16 @@ source ironenv/bin/activate
 # 4. Install dependencies
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
+
+# 5. Use a source build of mlir-aie's iron-next branch (no wheel exists)
+export PYTHONPATH=/path/to/mlir-aie/build/python:$PYTHONPATH
+export PATH=/path/to/mlir-aie/build/bin:$PATH
+export MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie
+export PEANO_INSTALL_DIR=$VIRTUAL_ENV/lib/python3.12/site-packages/llvm-aie
 ```
+
+**Note:** This branch tracks mlir-aie's `iron-next` branch, not a released
+wheel. Its kernel paths follow that branch's family layout of `aie_kernels/`.
 
 **Note:** XRT must be sourced before running any tests or operators.
 
@@ -511,7 +520,7 @@ Runtime tensors take and return torch tensors directly
 ### Building against a local kernel tree
 
 ```bash
-MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie/aie_kernels pytest ...
+MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie pytest ...
 ```
 
 The path reaches the compile key, so pointing IRON at another tree rebuilds

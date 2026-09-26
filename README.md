@@ -126,6 +126,20 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    pip install -r requirements.txt
    ```
 
+1. Build mlir-aie from source, on its `iron-next` branch. This branch of IRON
+   tracks it, and no wheel of it is published:
+   ```bash
+   git clone -b iron-next https://github.com/Xilinx/mlir-aie.git
+   ```
+   Follow mlir-aie's instructions for building from source, then point this
+   environment at the build:
+   ```bash
+   export PYTHONPATH=/path/to/mlir-aie/build/python:$PYTHONPATH
+   export PATH=/path/to/mlir-aie/build/bin:$PATH
+   export MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie
+   export PEANO_INSTALL_DIR=$VIRTUAL_ENV/lib/python3.12/site-packages/llvm-aie
+   ```
+
 1. To test your installation, you can try to build and run the example below:
    ```bash
    pytest iron/operators/test.py -k AXPY
