@@ -23,9 +23,11 @@ import pytest
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
+from iron.common.design.build import _classes_code, _design_code
 from iron.common.image import OperatorSequence, build_fused_mlir
 from iron.common.image.fused import fused_identity, fused_plan
 from iron.operators.gemv.op import GEMV
+from iron.operators.relu import ReLU
 
 
 def _bind_npu2():
@@ -102,6 +104,20 @@ def test_identity_is_what_the_text_is_a_function_of():
     assert _identity(SHAPES) == _identity(SHAPES)
     assert _identity(SHAPES) != _identity([(512, 1024), (256, 1024), (512, 4096)])
     assert _identity(SHAPES) != _identity(SHAPES[::-1])
+
+
+def test_design_code_is_the_classes_read_once():
+    """The code in a design's key is its classes' source, not its parameters,
+    and a process reads it once per class: the tuner builds a generator for
+    every step it prices, and re-parsing the module each time was most of a
+    warm tuned Llama compile."""
+    a, b = GEMV(M=512, K=1024), GEMV(M=256, K=2048)
+    relu = ReLU(size=1024, tile_size=256, num_aie_columns=1)
+    assert _design_code(a) == _design_code(b)
+    assert _design_code(a) != _design_code(relu)
+    hits = _classes_code.cache_info().hits
+    a.generator(), b.generator()
+    assert _classes_code.cache_info().hits >= hits + 2
 
 
 def test_identity_holds_across_processes():

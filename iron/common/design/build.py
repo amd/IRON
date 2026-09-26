@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 from typing import Any
@@ -127,8 +128,20 @@ def _design_code(op: Operator) -> str:
     that function is :func:`build_design` for every declared operator. The
     code that actually varies is the two classes', so it is spelled here.
     """
+    return _classes_code(type(op.ov), type(op))
+
+
+@functools.cache
+def _classes_code(*classes: type) -> str:
+    """:func:`_design_code` of these classes, read once per process.
+
+    A process runs the code it imported, which is also how
+    :func:`~iron.common.image.jit_compile.source_digest` reads its source;
+    and ``inspect.getsource`` re-parses the class's whole module each time,
+    once per ``generator()`` call -- most of a warm tuned Llama compile.
+    """
     h = hashlib.sha256()
-    for cls in (type(op.ov), type(op)):
+    for cls in classes:
         try:
             h.update(inspect.getsource(cls).encode())
         except (OSError, TypeError):
