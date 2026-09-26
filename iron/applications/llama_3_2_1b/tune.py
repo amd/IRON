@@ -10,7 +10,10 @@ design's step time at each width it tunes to, and the configure cost
 measured between a few pairs of designs. It is keyed by each design's
 identity -- its code and parameters -- so a design that has changed since
 is not in it, and the tuner leaves that design as written. This measures
-one for the decode step as the graph is now: every design, each width.
+one for the decode step as the graph is now: every design, each width,
+and every design a legal fold makes (:mod:`iron.common.graph.fold`), which
+the tuner otherwise prices at the design it came from. Each packaging the
+device runs is calibrated (:mod:`iron.common.image.packaging`).
 
 ``decode_costs_npu2.json`` beside this file is such a table, measured on a
 Strix Halo NPU (8 columns) in turbo power mode. Designs already in the
@@ -30,6 +33,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import numpy as np
 
+from iron.common.graph.fold import FoldAll
 from iron.common.graph.handle import Handle
 from iron.common.graph.narrowing import CostTable, Runlist, cost_key, variants
 from iron.common.graph.probe import (
@@ -108,6 +112,13 @@ def main() -> None:
         "a run of one, per extra step (default: 9)",
     )
     parser.add_argument(
+        "--no-folds",
+        action="store_true",
+        help="measure only the graph as written; by default the designs every "
+        "legal fold makes are measured too, so the tuner prices a fold measured "
+        "rather than estimated (and a table kept without them drops them)",
+    )
+    parser.add_argument(
         "--remeasure",
         action="store_true",
         help="measure designs and calibrations already in the table again",
@@ -125,12 +136,17 @@ def main() -> None:
     sampler = Sampler(config.temperature, config.top_k, np.random.default_rng(SEED))
     _, draws = traced.states[id(graph.draws)]
     contents = {draws: sampler.rows(MAX_SEQ_LEN, graph.k_max)}
-    keys = [cost_key(s.op) for s in traced.steps]
-    first = {}
-    for key, step in zip(keys, traced.steps):
-        first.setdefault(key, step.op)
+    graphs = [traced] + ([] if args.no_folds else [FoldAll().fold(traced, dev)])
+    # Each design, and the graph whose bindings and contents it is measured at.
+    first: dict[str, tuple[TracedGraph, object]] = {}
+    keys = []
+    for g in graphs:
+        for step in g.steps:
+            key = cost_key(step.op)
+            keys.append(key)
+            first.setdefault(key, (g, step.op))
     order = Runlist(keys).order
-    found = {key: variants(first[key], dev) for key in order}
+    found = {key: variants(first[key][1], dev) for key in order}
 
     table = CostTable(args.table)
     current = {v.key for vs in found.values() for v in vs}
@@ -142,13 +158,13 @@ def main() -> None:
     timing = Timing(args.rounds, args.calls)
 
     for i, key in enumerate(order):
-        op = first[key]
+        g, op = first[key]
         name = type(op).__name__
         if not args.remeasure and all(v.key in table.steps for v in found[key]):
             print(f"[{i}] {name}: in the table")
             continue
-        values = per_call_values(traced, op, graph_values)
-        inputs = per_call_inputs(traced, op, contents)
+        values = per_call_values(g, op, graph_values)
+        inputs = per_call_inputs(g, op, contents)
         start = time.time()
         costs = measure_steps(table, found[key], timing, args.repeats, values, inputs)
         table.save()
@@ -163,7 +179,7 @@ def main() -> None:
     # Each pair's first designs of those classes, at their narrowest.
     by_class = {}
     for key in order:
-        by_class.setdefault(type(first[key]).__name__, found[key][-1])
+        by_class.setdefault(type(first[key][1]).__name__, found[key][-1])
     pairs = [(by_class[a], by_class[b]) for a, b in CALIBRATION_PAIRS]
     # Every packaging the device runs has boundaries of its own to measure.
     allowed = modes(dev.resolve().name, traced)
