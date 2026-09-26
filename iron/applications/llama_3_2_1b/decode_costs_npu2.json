@@ -1,6 +1,6 @@
 {
  "steps": {
-  "DynamicSoftmax_1b120605e03135fc4ac39c82": {
+  "DynamicSoftmax_f9d1cd2d59abdcae7ef05c2c": {
    "t_step_us": 318.75466083874926,
    "alone_us": 69.85784420976415,
    "exact": true,
@@ -9,7 +9,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseAdd_7f695c9aa0ff17eda7ce9256": {
+  "ElementwiseAdd_1c92045b18fc0ef2d1589928": {
    "t_step_us": 2.864042471628636,
    "alone_us": 133.35608673514798,
    "exact": true,
@@ -18,7 +18,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseAdd_834efb16a8d563cfac908a15": {
+  "ElementwiseAdd_8a54af70b8613c1a311a5055": {
    "t_step_us": 6.613496225327253,
    "alone_us": 147.89775013923645,
    "exact": true,
@@ -27,7 +27,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseAdd_9996b9289e30e527f4431884": {
+  "ElementwiseAdd_e1717dcb498d586c3b770a5f": {
    "t_step_us": 3.4197873901575804,
    "alone_us": 126.72392767854035,
    "exact": true,
@@ -36,7 +36,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseAdd_b66c11f26fd847b2e57333bd": {
+  "ElementwiseAdd_f07beeca6de4fe1ba2b9d119": {
    "t_step_us": 13.666911399923265,
    "alone_us": 180.04457524511963,
    "exact": true,
@@ -45,7 +45,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_2aa9abe483429816637095c2": {
+  "ElementwiseMul_daf615ce4a59cf3384882146": {
    "t_step_us": 11.434924090281129,
    "alone_us": 146.67559298686683,
    "exact": true,
@@ -54,7 +54,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_3fe14064f768b99714797e34": {
+  "ElementwiseMul_1b50a207a65602d37edec0cf": {
    "t_step_us": 13.888253306504339,
    "alone_us": 177.31343541527167,
    "exact": true,
@@ -63,7 +63,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_6a575e22d7acd5bf425c9e0a": {
+  "ElementwiseMul_5b1af4b005fd9a6f318e1682": {
    "t_step_us": 5.589477950707078,
    "alone_us": 141.4906873833388,
    "exact": true,
@@ -72,7 +72,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_829b09ec9bf48852c66adb67": {
+  "ElementwiseMul_1498248949fbf09840ccd61f": {
    "t_step_us": 11.245283531025052,
    "alone_us": 172.63044719584286,
    "exact": true,
@@ -81,7 +81,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+  "ElementwiseMul_b55aa055199f8af7d12cf69d": {
    "t_step_us": 17.739119357429445,
    "alone_us": 125.8896809304133,
    "exact": true,
@@ -90,7 +90,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_b1b727fea8a6e0cf8c034ec4": {
+  "ElementwiseMul_ee62dd825e94832127ee0d09": {
    "t_step_us": 12.27088796440512,
    "alone_us": 131.29010039847344,
    "exact": true,
@@ -99,7 +99,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_b6160aa1f4d9762c3f016790": {
+  "ElementwiseMul_f54be5bfbbeb754b8918d73a": {
    "t_step_us": 4.492394509725273,
    "alone_us": 126.24748342204839,
    "exact": true,
@@ -108,7 +108,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseMul_d9c7a9261963eb6c949c9f6b": {
+  "ElementwiseMul_86ea44fa210bf8437460d76b": {
    "t_step_us": 4.0077866287902,
    "alone_us": 120.50264922436327,
    "exact": true,
@@ -117,7 +117,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_021814239a2ec3b46dbff165": {
+  "GEMV_abb296db568f119a6aae68e5": {
    "t_step_us": 356.3862628652714,
    "alone_us": 100.26517702499405,
    "exact": true,
@@ -126,7 +126,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_061aeeba0adaadb39cafc486": {
+  "GEMV_59739ab2b7b0295af98df789": {
    "t_step_us": 207.94207375729457,
    "alone_us": 132.6641286141239,
    "exact": true,
@@ -135,7 +135,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0662a43e108485e0d8ee8da5": {
+  "GEMV_9a7273d3754e0b819a1fb5e1": {
    "t_step_us": 10731.158195994794,
    "alone_us": 533.0884014256299,
    "exact": true,
@@ -144,7 +144,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_07b7a942f077957c0c4f3683": {
+  "GEMV_da6055fed0de26f43b783670": {
    "t_step_us": 2439.099014736712,
    "alone_us": 521.2499527260661,
    "exact": true,
@@ -153,7 +153,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0b3b24fd271411f198d7364e": {
+  "GEMV_6dc5845009ebb465acd6ef06": {
    "t_step_us": 639.5468080881983,
    "alone_us": 221.56714112497866,
    "exact": true,
@@ -162,7 +162,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0c709a5f2c3b747d07267a07": {
+  "GEMV_b3ab3e1dcbdb633dc0fbd1cf": {
    "t_step_us": 621.2328153196722,
    "alone_us": 129.81463805772364,
    "exact": true,
@@ -171,7 +171,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_0f743e9acc0796a12191196f": {
+  "GEMV_46c4973da5fc805b2aa2e301": {
    "t_step_us": 9405.598437297158,
    "alone_us": 574.481746298261,
    "exact": true,
@@ -180,7 +180,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_13bd1cea8994090c30701a18": {
+  "GEMV_0e0334be2017b9097f8e36df": {
    "t_step_us": 229.31856074137613,
    "alone_us": 128.20662959711626,
    "exact": true,
@@ -189,7 +189,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_14476879b9a16a37fc319f2e": {
+  "GEMV_fe28761c258380c29b29b136": {
    "t_step_us": 336.93780278554186,
    "alone_us": 126.2732912437059,
    "exact": true,
@@ -198,7 +198,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_1f5a39556cb8b7367b235856": {
+  "GEMV_9d7a733d3f9a7c2b26865410": {
    "t_step_us": 1324.8345858301036,
    "alone_us": 99.59645831258968,
    "exact": true,
@@ -207,7 +207,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_24ecb6cd22e54470999e98f4": {
+  "GEMV_187c7e5b6908617a042de0ea": {
    "t_step_us": 48.37563028559089,
    "alone_us": 196.227862033993,
    "exact": true,
@@ -216,7 +216,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_3515db47199ff3f58e6315b6": {
+  "GEMV_652527fd17660bf225eef8fd": {
    "t_step_us": 159.4609784660861,
    "alone_us": 116.3425185950473,
    "exact": true,
@@ -225,7 +225,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_485c896e4f7c1db0c7f54523": {
+  "GEMV_bac8d276182c2974386e492f": {
    "t_step_us": 177.66719247447327,
    "alone_us": 204.6762892859988,
    "exact": true,
@@ -234,7 +234,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_4ce0d4a057c4bb67bbaf836b": {
+  "GEMV_15b68ffa4702216daec18a65": {
    "t_step_us": 1308.8018386042677,
    "alone_us": 301.1926673934795,
    "exact": true,
@@ -243,7 +243,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_6e62896b6b5b0660adfa2a52": {
+  "GEMV_7b56c21532a21db2da4df441": {
    "t_step_us": 196.9904769794084,
    "alone_us": 191.53751054545864,
    "exact": true,
@@ -252,7 +252,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_727dc9e82c16c978521a67a9": {
+  "GEMV_82d7babd9c2ba5d87185fd63": {
    "t_step_us": 196.24662672867998,
    "alone_us": 180.07090693572536,
    "exact": true,
@@ -261,7 +261,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_7641afc1f9726b5f067f831c": {
+  "GEMV_37edd72ad8548e4144ec461a": {
    "t_step_us": 1442.4946275539696,
    "alone_us": 61.68632535263896,
    "exact": true,
@@ -270,7 +270,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_81ab1874a8ad7245b2f0f40f": {
+  "GEMV_0ab96860525df04e190dcd90": {
    "t_step_us": 691.6972124599852,
    "alone_us": 115.22360000526533,
    "exact": true,
@@ -279,7 +279,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_8a9c5dbbcacee4079556de03": {
+  "GEMV_d2da70f8e6afe4fbda8fa22c": {
    "t_step_us": 719.8641251306981,
    "alone_us": 165.777892107144,
    "exact": true,
@@ -288,7 +288,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_8d44537be46abe4e7523f5b3": {
+  "GEMV_21537b1f37222ce1e358639f": {
    "t_step_us": 629.691407084465,
    "alone_us": 123.28679440543056,
    "exact": true,
@@ -297,7 +297,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_92440a343354ebb05f4cd934": {
+  "GEMV_28ffbe5259ad3f24e62b9fa7": {
    "t_step_us": 2489.0222048270516,
    "alone_us": 75.5928413127549,
    "exact": true,
@@ -306,7 +306,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_9b077fca7e4404e2e70ad60f": {
+  "GEMV_9e5528fc3e37fe4625ac1282": {
    "t_step_us": 37388.40871665161,
    "alone_us": 1153.627541498281,
    "exact": true,
@@ -315,7 +315,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_a0b7fd6d68867abe8cfebc76": {
+  "GEMV_cce9a7ddaf69955ee1d792b6": {
    "t_step_us": 357.12047974811867,
    "alone_us": 96.91347804619,
    "exact": true,
@@ -324,7 +324,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_a4416de712f745d788f00a99": {
+  "GEMV_6b7c7ca0f7ad9a2bb03d260b": {
    "t_step_us": 52.56400618236512,
    "alone_us": 152.5462866993621,
    "exact": true,
@@ -333,7 +333,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_aead3f9b9d6e86e6ac7e73ac": {
+  "GEMV_3414efe4697535279fa1acf3": {
    "t_step_us": 19176.020861777943,
    "alone_us": 1223.75618229853,
    "exact": true,
@@ -342,7 +342,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_bc7cb681d907e659e2b3802e": {
+  "GEMV_923b9982bcaed844e15b8af9": {
    "t_step_us": 614.5541847217828,
    "alone_us": 246.62757641635835,
    "exact": true,
@@ -351,7 +351,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_c5ec7608a12dd0e46f332cf1": {
+  "GEMV_7bf839782e73aa4d275c91dc": {
    "t_step_us": 607.8349033487029,
    "alone_us": 153.66909065051004,
    "exact": true,
@@ -360,7 +360,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_cc2480dfd9128d1e8edec35e": {
+  "GEMV_6aaba651b0c83f249fc91db7": {
    "t_step_us": 338.18164956755936,
    "alone_us": 171.17740935645998,
    "exact": true,
@@ -369,7 +369,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_ddaacf3b1ca1b45b3f095a90": {
+  "GEMV_50e87784652a372aadfe7965": {
    "t_step_us": 219.7216308559291,
    "alone_us": 124.76731353672221,
    "exact": true,
@@ -378,7 +378,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_e05080abbd20dae3d57cbb30": {
+  "GEMV_4bad78199e67b0c47bbc0e2f": {
    "t_step_us": 199.1360477404669,
    "alone_us": 169.90314179565758,
    "exact": true,
@@ -387,7 +387,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_ec42b18ab68858fab76153f2": {
+  "GEMV_a37bbfa56c082e1cf4a1b682": {
    "t_step_us": 85.15574154444039,
    "alone_us": 126.89715367741883,
    "exact": true,
@@ -396,7 +396,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "GEMV_fc5f352682bf90da81a7f3a9": {
+  "GEMV_b4afcc4a42791b254d93a5f0": {
    "t_step_us": 739.3347405013628,
    "alone_us": 113.72204608051106,
    "exact": true,
@@ -405,7 +405,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Repeat_b68f5f3b7b13530348a5de81": {
+  "Repeat_1afe609f58bc9a07df1a1a82": {
    "t_step_us": 698.9140238147229,
    "alone_us": 130.93449524603784,
    "exact": true,
@@ -414,7 +414,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "RoPE_767cc7a64599cf68a4a34c01": {
+  "RoPE_a7f9503f7f7c1d2af3c63df3": {
    "t_step_us": 3.116670995950699,
    "alone_us": 123.19529196247458,
    "exact": true,
@@ -423,7 +423,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "RoPE_8f8acbe2560d588f763c4299": {
+  "RoPE_1a872715b996940c6992f181": {
    "t_step_us": 5.184941983316094,
    "alone_us": 129.59227751707658,
    "exact": true,
@@ -432,7 +432,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_be8714c459b8a019279bddee": {
+  "Sample_0895e72907c95979492c6f37": {
    "t_step_us": 352.80673910165206,
    "alone_us": 203.78108456498012,
    "exact": true,
@@ -441,7 +441,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_ee1b8d34779069682d5291c1": {
+  "Sample_199e693cb84cfee103f161ea": {
    "t_step_us": 584.5939376740716,
    "alone_us": 157.5930873514153,
    "exact": true,
@@ -450,7 +450,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Sample_f4b571e5ed17f0449d4422c1": {
+  "Sample_8b64cfada7014a0db977aa61": {
    "t_step_us": 403.05375296156853,
    "alone_us": 183.11601888854057,
    "exact": true,
@@ -459,7 +459,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "SiLU_1986171938c4eb52bf519a53": {
+  "SiLU_131931c9de250506c26284e9": {
    "t_step_us": 3.9830338209867477,
    "alone_us": 124.74076356738806,
    "exact": true,
@@ -468,7 +468,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "SiLU_4d38c3ebe6828c20a728fc29": {
+  "SiLU_ada391d7b95206cb90d0417e": {
    "t_step_us": 3.807035682257265,
    "alone_us": 119.45932783419266,
    "exact": true,
@@ -477,7 +477,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "SiLU_628c0adda24cbc756be54bd7": {
+  "SiLU_b1ae4d29cbff6aa7415b6ea8": {
    "t_step_us": 4.79265145258978,
    "alone_us": 136.55435031978413,
    "exact": true,
@@ -486,7 +486,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "SiLU_fba6721d9905d49d51ce46ef": {
+  "SiLU_c1c89b954c4470032ff0d9c4": {
    "t_step_us": 9.015799150802195,
    "alone_us": 163.5065273148939,
    "exact": true,
@@ -495,7 +495,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "StridedCopy_0bd6ee317f91a4d9da654989": {
+  "StridedCopy_8fe6928c64e002d72c6918c7": {
    "t_step_us": 2.592285454738885,
    "alone_us": 124.55844989744946,
    "exact": true,
@@ -504,7 +504,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "StridedCopy_1cda5d55db91b6e4814d4529": {
+  "StridedCopy_87988e117e15e0fa05dbaacd": {
    "t_step_us": 4.518020432442427,
    "alone_us": 126.00701302289963,
    "exact": true,
@@ -513,7 +513,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "StridedCopy_31af6f34900fb87894ba85d1": {
+  "StridedCopy_945a036efafef3ded0e6fb42": {
    "t_step_us": 2.9197835829108953,
    "alone_us": 124.9922497663647,
    "exact": true,
@@ -522,7 +522,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Transpose_950b7f7484b5a1504768803d": {
+  "Transpose_76290071fbde3ab08304a3b7": {
    "t_step_us": 1799.502206267789,
    "alone_us": 428.70818288065493,
    "exact": true,
@@ -531,7 +531,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "Transpose_ecc85b98b6307dbbadd2fb6d": {
+  "Transpose_57cb3d9debd242e7e009dfb4": {
    "t_step_us": 1205.8319625793956,
    "alone_us": 517.5650949240662,
    "exact": true,
@@ -540,7 +540,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "WeightedRMSNorm_7780ba9164272945d92b17fa": {
+  "WeightedRMSNorm_f1218968c3e28df24a20d4ac": {
    "t_step_us": 3.396562533453107,
    "alone_us": 124.1226855199784,
    "exact": true,
@@ -551,7 +551,7 @@
   }
  },
  "calibrations": {
-  "ElementwiseAdd_9996b9289e30e527f4431884|ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+  "ElementwiseAdd_e1717dcb498d586c3b770a5f|ElementwiseMul_b55aa055199f8af7d12cf69d": {
    "dispatch_us": 44.33202169214685,
    "reset_us": 38.716575848714754,
    "base_us": 31.65943538382028,
@@ -561,7 +561,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "ElementwiseAdd_9996b9289e30e527f4431884|SiLU_4d38c3ebe6828c20a728fc29": {
+  "ElementwiseAdd_e1717dcb498d586c3b770a5f|SiLU_ada391d7b95206cb90d0417e": {
    "dispatch_us": 50.062963661427304,
    "reset_us": 33.54834795269805,
    "base_us": 32.36634681040111,
@@ -571,7 +571,7 @@
    "calls": 50,
    "measured": "2026-09-26"
   },
-  "SiLU_4d38c3ebe6828c20a728fc29|ElementwiseMul_a87852a66aad6ed3f2492d0b": {
+  "SiLU_ada391d7b95206cb90d0417e|ElementwiseMul_b55aa055199f8af7d12cf69d": {
    "dispatch_us": 43.673625138277814,
    "reset_us": 36.630901983395844,
    "base_us": 32.40675020303267,
