@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The declaration layer, device-free.
+"""The declaration layer, without hardware.
 
-Everything here runs without a device and without generating MLIR: it checks
+Everything here runs without an NPU and without generating MLIR: it checks
 what ``@operator`` records and rejects at class creation, how bound members
 resolve on instances, how inference binds fields from operand shapes, and how
 tuning and specialisation behave. The design-generating half is
@@ -14,6 +14,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+from aie.iron.device import NPU2, from_name
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
@@ -43,15 +44,6 @@ from iron.operators.gemm.op import GEMM, GEMMOverlay
 from iron.operators.mha.op import MHA, MHAOverlay
 from iron.operators.repeat import Repeat
 
-
-class FakeDev:
-    def __init__(self, cols=8):
-        self.cols = cols
-
-    def columns(self):
-        return self.cols
-
-
 # --------------------------------------------------------------------------
 # A worked pair, close to GEMV
 # --------------------------------------------------------------------------
@@ -70,7 +62,7 @@ class MVOverlay(Overlay):
     count = Resident(np.int32)
 
     def tuning(self, dev):
-        cols = self.num_aie_columns or dev.columns()
+        cols = self.num_aie_columns or dev.cols
         vec = self.vec or next(
             (w for w in (64, 32, 16) if self.K % w == 0 and self.K >= 2 * w), None
         )
@@ -357,15 +349,15 @@ def test_per_call_values_bind_on_the_operator():
 
 
 def test_tuning_fills_tunables_from_the_device_only():
-    ov = MVOverlay(K=256).tuned(FakeDev(cols=8))
+    ov = MVOverlay(K=256).tuned(from_name("npu2", n_cols=8))
     assert ov.num_aie_columns == 8 and ov.vec == 64
     assert ov.a.count == 8
-    assert ov.tuned(FakeDev(cols=4)) is ov  # idempotent once tuned
+    assert ov.tuned(from_name("npu2", n_cols=4)) is ov  # idempotent once tuned
 
 
 def test_untunable_is_raised_not_defaulted():
     with pytest.raises(Untunable, match="K=24"):
-        MVOverlay(K=24).tuned(FakeDev())
+        MVOverlay(K=24).tuned(NPU2())
 
 
 def test_tuning_that_leaves_a_tunable_unset_is_an_error():
@@ -376,15 +368,15 @@ def test_tuning_that_leaves_a_tunable_unset_is_an_error():
         s = StreamIn(n)
 
     with pytest.raises(Untunable, match=r"left \['t'\] unset"):
-        Lazy(n=4).tuned(FakeDev())
+        Lazy(n=4).tuned(NPU2())
 
 
 def test_for_extent_is_a_distinct_specialised_overlay():
-    base = MVOverlay(K=256).tuned(FakeDev())
+    base = MVOverlay(K=256).tuned(NPU2())
     spec = base.for_extent(tile_size_output=32)
     assert spec.specialised and not base.specialised
     assert spec != base and hash(spec) != hash(base)
-    assert MVOverlay(K=256).tuned(FakeDev()) == base  # equal by design_key
+    assert MVOverlay(K=256).tuned(NPU2()) == base  # equal by design_key
     with pytest.raises(TypeError, match="non-tunable"):
         base.for_extent(K=128)
 
@@ -392,8 +384,8 @@ def test_for_extent_is_a_distinct_specialised_overlay():
 def test_operator_tuned_runs_compatible():
     op = MV(MVOverlay(K=256, tile_size_output=64), M=1000)
     with pytest.raises(Incompatible, match="M=1000"):
-        op.tuned(FakeDev(cols=8))
-    ok = MV(MVOverlay(K=256, tile_size_output=64), M=1024).tuned(FakeDev(cols=8))
+        op.tuned(NPU2())
+    ok = MV(MVOverlay(K=256, tile_size_output=64), M=1024).tuned(NPU2())
     assert ok.ov.num_aie_columns == 8
 
 

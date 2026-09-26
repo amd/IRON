@@ -4,7 +4,7 @@
 
 """Infrastructure tests for :mod:`iron.common.image.allocator`, the memory planner.
 
-Pure logic over synthetic runlists -- no operators, no toolchain, no hardware.
+Runlists of real operators, planned without the toolchain or hardware.
 The properties that matter are: a plan never lets two simultaneously-live
 buffers share bytes (correctness), it reaches the peak-liveness lower bound on
 the shapes real models produce (quality), and it leaves host-addressed buffers
@@ -12,7 +12,6 @@ alone (pinning).
 """
 
 import random
-from types import SimpleNamespace
 
 import aie.utils as aie_utils
 import pytest
@@ -29,18 +28,17 @@ from iron.common.image.allocator import (
     touch_ranges,
 )
 from iron.common.image.sequence import ALIGNMENT
-from iron.operators import ElementwiseAdd
+from iron.operators import ElementwiseAdd, SiLU
 
 
-def _buf(direction):
-    return SimpleNamespace(direction=direction, shape=(1,), nbytes=2)
+def _unary():
+    """One input, one output: every chain in these runlists."""
+    return SiLU(size=1024)
 
 
-class Op:
-    """Stand-in operator: N inputs then M outputs, declared like a real one's buffers."""
-
-    def __init__(self, n_in, n_out=1):
-        self.buffers = [_buf("in")] * n_in + [_buf("out")] * n_out
+def _binary():
+    """Two inputs, one output: where branches rejoin."""
+    return ElementwiseAdd(size=1024)
 
 
 def steps_of(runlist):
@@ -87,7 +85,7 @@ def test_sequential_chain_double_buffers():
     (Only an operator that declares itself in-place could, and none here do.)
     Two slots therefore suffice and are necessary: the chain ping-pongs.
     """
-    op = Op(1)
+    op = _unary()
     runlist = [(op, "x", "a"), (op, "a", "b"), (op, "b", "c"), (op, "c", "out")]
     ranges = live_ranges(steps_of(runlist))
     sizes = dict.fromkeys(ranges, 1024)
@@ -100,7 +98,7 @@ def test_sequential_chain_double_buffers():
 
 def test_simultaneously_live_buffers_do_not_share():
     """Fan-out then fan-in: both branches are live together, so both are resident."""
-    unary, binary = Op(1), Op(2)
+    unary, binary = _unary(), _binary()
     runlist = [
         (unary, "x", "left"),
         (unary, "x", "right"),
@@ -114,7 +112,7 @@ def test_simultaneously_live_buffers_do_not_share():
 
 
 def test_pinned_buffers_are_not_pooled():
-    op = Op(1)
+    op = _unary()
     runlist = [(op, "x", "scratch"), (op, "scratch", "keep"), (op, "keep", "out")]
     ranges = live_ranges(steps_of(runlist), pinned={"keep"})
     assert "keep" not in ranges
@@ -123,7 +121,7 @@ def test_pinned_buffers_are_not_pooled():
 
 def test_graph_inputs_and_outputs_are_left_alone():
     """Values the host supplies or reads back outlive the sequence."""
-    op = Op(1)
+    op = _unary()
     runlist = [(op, "x", "mid"), (op, "mid", "logits")]
     ranges = live_ranges(steps_of(runlist))
     assert "x" not in ranges, "an input is never written; not ours to pool"
@@ -138,7 +136,7 @@ def test_repeated_block_packs_to_one_block_worth():
     intermediate itself -- 16 copies of each scratch buffer, none of which are
     live at the same time.
     """
-    unary = Op(1)
+    unary = _unary()
     runlist, prev = [], "x"
     for layer in range(16):
         runlist.append((unary, prev, f"h_{layer}"))
@@ -159,7 +157,7 @@ def test_repeated_block_packs_to_one_block_worth():
 
 def test_mixed_sizes_reach_the_lower_bound():
     """Greedy-by-size + best-fit should match peak liveness on ragged sizes."""
-    unary = Op(1)
+    unary = _unary()
     runlist, prev = [], "x"
     for i in range(12):
         runlist.append((unary, prev, f"b{i}"))
@@ -173,7 +171,7 @@ def test_mixed_sizes_reach_the_lower_bound():
 
 
 def test_offsets_are_aligned():
-    unary, binary = Op(1), Op(2)
+    unary, binary = _unary(), _binary()
     runlist = [(unary, "x", "a"), (unary, "x", "b"), (binary, "a", "b", "out")]
     ranges = live_ranges(steps_of(runlist))
     sizes = {n: 100 for n in ranges}  # deliberately not a multiple of 64
