@@ -15,7 +15,7 @@ import pytest
 
 from aie.helpers.util import v8bfp16ebs8
 
-from iron.common.design import Sequence, transfers
+from iron.common.design import Sequence
 from iron.common.declare import (
     In,
     Operator,
@@ -114,27 +114,25 @@ def _bind_all(ov, log):
 def test_plan_reproduces_the_channeled_unary_split():
     ov = UnaryOverlay().tuned(FakeDev())
     op = Unary(ov, size=8192)
-    (x,) = [s for s in ov.streams.values() if s.name == "x"]
-    p = transfers(op.A, x)
-    assert len(p) == 8  # 4 columns x 2 channels
+    order = op.order(op.A)
+    assert order.stream is ov.x and len(order.slots) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
-    for i, (slot, accesses) in enumerate(p):
-        assert slot.index == i
-        assert accesses == [Access(8192, chunk * i, (1, 1, 1, chunk), (0, 0, 0, 1))]
+    for i, accesses in enumerate(order.slots):
+        assert accesses == (Access(8192, chunk * i, (1, 1, 1, chunk), (0, 0, 0, 1)),)
 
 
 def test_plan_batched_gemv_coalesces_and_broadcasts():
     ov = MVOverlay(K=128)
     op = MV(ov, M=256, num_batches=100)
-    a_transfers = transfers(op.A, ov.a)
-    assert [slot.index for slot, _ in a_transfers] == [0, 1]
-    (acc,) = a_transfers[1][1]
+    a_order = op.order(op.A)
+    assert len(a_order.slots) == 2
+    (acc,) = a_order[1]
     run = (256 // 2) * 128
     assert acc.offset == run and acc.sizes[1] == 100 and acc.strides[1] == 256 * 128
-    b_slot, b_accesses = transfers(op.B, ov.b)[0]
-    assert b_slot is ov.b and b_accesses == [
-        Access(100 * 128, 0, (1, 1, 1, 100 * 128), (0, 0, 0, 1))
-    ]
+    b_order = op.order(op.B)
+    assert b_order.stream is ov.b and b_order.slots == (
+        (Access(100 * 128, 0, (1, 1, 1, 100 * 128), (0, 0, 0, 1)),),
+    )
 
 
 def test_derived_sequence_issues_fills_then_waited_drains():

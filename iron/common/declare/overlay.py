@@ -21,10 +21,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.verify import Tolerance
 
-from .bound import BoundResident, BoundStream, BoundValue
+from .bound import BoundBuffer, BoundResident, BoundStream, BoundValue
 from .field import Untunable
 from .member import Resident, Xclbin, _Member, _Stream, _Value
 from .naming import label_parts
+from .order import Order
 
 if TYPE_CHECKING:
     from ..design.target import Target
@@ -120,6 +121,14 @@ class Overlay:
         transfers in the order it was built for, whatever operator drives it.
         Takes precedence over the operator's ``design(rt)``."""
         raise NotImplementedError
+
+    def order(self, op: "Operator", buffer: "BoundBuffer") -> "Order":
+        """How ``buffer`` of ``op`` moves through its stream, on an overlay that
+        owns the sequence (see :meth:`sequence`); :meth:`Operator.order` asks
+        here first."""
+        raise NotImplementedError(
+            f"{type(self).__name__} owns its sequence but declares no order()"
+        )
 
     @classmethod
     def has_sequence(cls) -> bool:

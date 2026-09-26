@@ -28,7 +28,7 @@ from ..declare import (
     Overlay,
 )
 from ..declare.bound import _StreamSlot
-from ..tiling import Access, encode, legalize, split, whole
+from ..tiling import Access, legalize
 from .target import Target
 
 
@@ -54,27 +54,18 @@ class Transfers:
             self._derived()
 
     def _derived(self) -> None:
+        """Every buffer's declared order in one group: fills, then waited drains."""
         with self.group() as tg:
             for buf in self.op.inputs:
-                stream = buf.stream(self.ov)
-                if stream is None:
-                    raise ValueError(
-                        f"{type(self.op).__name__}.{buf.name} names no stream (to=), so its "
-                        f"sequence cannot be derived; add to= or override design(rt)"
-                    )
-                for slot, accesses in transfers(buf, stream):
+                order = self.op.order(buf)
+                for i, accesses in enumerate(order.slots):
                     for acc in accesses:
-                        self.fill(slot, (buf, acc), group=tg)
+                        self.fill(order.stream[i], (buf, acc), group=tg)
             for buf in self.op.outputs:
-                stream = buf.stream(self.ov)
-                if stream is None:
-                    raise ValueError(
-                        f"{type(self.op).__name__}.{buf.name} names no stream (from_=), so its "
-                        f"sequence cannot be derived; add from_= or override design(rt)"
-                    )
-                for slot, accesses in transfers(buf, stream):
+                order = self.op.order(buf)
+                for i, accesses in enumerate(order.slots):
                     for acc in accesses:
-                        self.drain(slot, (buf, acc), group=tg, wait=True)
+                        self.drain(order.stream[i], (buf, acc), group=tg, wait=True)
 
 
 class Sequence(Transfers):
@@ -259,37 +250,6 @@ class Sequence(Transfers):
             b.set(1)
         if target.image == "elf" and (self.op.values or self.ov.values):
             sync_parameters()
-
-
-def transfers(
-    buffer: BoundBuffer, stream: BoundStream
-) -> list[tuple[Any, list[Access]]]:
-    """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
-
-    A single-slot or broadcast stream takes the whole buffer in one linear
-    transfer. A ``per=`` stream splits the buffer's first non-batch axis
-    across its slots; leading batch axes become repeats, coalesced into one
-    iterated descriptor when the slot rules allow and unrolled otherwise.
-    """
-    if stream.count == 1:
-        return [(stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))]
-    if stream.replicate:
-        everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
-        return [(stream[i], everything) for i in range(stream.count)]
-    axis = buffer.batch_axes
-    if axis >= len(buffer.shape):
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} has no axis to split across the "
-            f"{stream.count} slots of stream {stream.name!r}"
-        )
-    try:
-        blocks = split(buffer.shape, stream.count, axis)
-    except ValueError as e:
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} does not divide across stream "
-            f"{stream.name!r}: {e}. Check {type(buffer._op).__name__}.compatible()"
-        ) from None
-    return [(stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks]
 
 
 def _plus(ssa, constant: int):

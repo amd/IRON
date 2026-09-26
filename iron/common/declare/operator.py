@@ -28,6 +28,7 @@ from .bound import BoundBuffer, BoundValue
 from .infer import infer, infer_kwargs
 from .member import _Buffer, _Member, _Value
 from .naming import label_parts
+from .order import Order, derived
 from .overlay import Overlay
 
 O = TypeVar("O", bound=Overlay)
@@ -99,13 +100,29 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
 
         ``rt`` is an :class:`iron.common.design.Sequence`: ``rt.fill(stream,
         view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
-        (residents, barriers, parameter sync) has already run.
+        (residents, barriers, parameter sync) has already run. What an
+        override issues on each slot must be exactly :meth:`order`; it
+        decides only grouping and waits.
         """
         raise NotImplementedError
 
     def residents(self) -> dict[str, int]:
         """Values for the overlay's residents (trip counts, RTPs), from the extents."""
         return {}
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """How ``buffer`` moves through its stream: per slot, its transfers in order.
+
+        The one statement of it. The derived sequence issues it, an
+        overridden :meth:`design` must issue exactly it (the build checks),
+        and a fusion pass reads it. The default is the library's derivation
+        (:func:`~iron.common.declare.order.derived`); an operator whose
+        ``design(rt)`` moves a buffer any other way overrides this for that
+        buffer. On an overlay that owns its sequence, the overlay says.
+        """
+        if self.ov.has_sequence():
+            return self.ov.order(self, buffer)
+        return derived(buffer, buffer.stream(self.ov))
 
     @classmethod
     def has_design_override(cls) -> bool:

@@ -68,6 +68,16 @@ class Access:
             (self.elements,), self.offset, list(self.sizes), list(self.strides)
         )
 
+    def indices(self) -> np.ndarray:
+        """The flat elements this transfer visits, in the order it visits them."""
+        axes = np.ix_(
+            *(
+                np.arange(n, dtype=np.int64) * s
+                for n, s in zip(self.sizes, self.strides)
+            )
+        )
+        return (self.offset + sum(axes)).reshape(-1)
+
 
 def granule_elements(dtype) -> int:
     """Elements per 4-byte address granule for ``dtype`` (2 for bf16, 1 for i32)."""

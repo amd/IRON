@@ -50,8 +50,9 @@ the target, not a design being built.
 The package reads bottom-up: :mod:`.field` is what a class body writes,
 :mod:`.member` what it declares alongside its fields, :mod:`.bound` what an
 instance's attribute gives back, :mod:`.infer` how operand shapes reach a
-declaration's dimension fields, :mod:`.overlay` and :mod:`.operator` the two
-layers themselves, and :mod:`.decorator` the checks both go through at class
+declaration's dimension fields, :mod:`.order` which elements each slot of a
+stream carries, :mod:`.overlay` and :mod:`.operator` the two layers
+themselves, and :mod:`.decorator` the checks both go through at class
 creation. :mod:`.naming` is how either one spells its own label.
 """
 
@@ -88,6 +89,7 @@ from .member import (
     Xclbin,
 )
 from .operator import O, Operator
+from .order import Order
 from .overlay import Overlay, get_shim_dma_limit
 
 __all__ = [
@@ -104,6 +106,7 @@ __all__ = [
     "Incompatible",
     "O",
     "Operator",
+    "Order",
     "Out",
     "Overlay",
     "Resident",
