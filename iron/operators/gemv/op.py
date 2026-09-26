@@ -264,9 +264,9 @@ class GEMVOverlay(Overlay):
 
     # The core's inner trip count still depends on the extent M, through
     # _rows_per_column, which GEMV.design sets before the overlay's design runs.
-    # That makes this overlay extent-dependent, against the reuse discipline
-    # in OPERATOR_MODEL_PLAN.md §3; it is kept so the object stays
-    # byte-identical to today's, and moves to a Resident in step 2.
+    # That makes this overlay extent-dependent, against the rule that an
+    # overlay is reused across extents; it is kept so the object stays
+    # byte-identical to today's, and belongs in a Resident.
     _rows_per_column: int = field(default=0, init=False, repr=False, compare=False)
 
 
