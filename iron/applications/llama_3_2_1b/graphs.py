@@ -77,10 +77,12 @@ class _Parameters:
 class LlamaGraph:
     """The graph function and the state it closes over.
 
-    ``keys[i]`` and ``values[i]`` are the layer caches, each ``(n_kv_groups,
-    max_seq_len * head_dim)``: the flat per-group layout both phases write
-    and decode's repeat reads. ``scale`` is the attention scale as a tensor,
-    since the elementwise multiply takes one.
+    ``keys[i]`` and ``values[i]`` are the layer caches, each ``n_kv_groups``
+    rows of ``max_seq_len * head_dim``: the per-group layout both phases
+    write. Decode's scores read the keys as they lie, ``(n_kv_groups,
+    max_seq_len, head_dim)``, and its context reads the values through a
+    repeat, as ``(n_kv_groups, max_seq_len * head_dim)``. ``scale`` is the
+    attention scale as a tensor, since the elementwise multiply takes one.
 
     A prompt of ``rows`` rows needs ``rows`` a multiple of 64 times
     ``num_of_pipelines`` (MHA's) and of four times ``tile_m`` (the GEMMs'
@@ -110,7 +112,7 @@ class LlamaGraph:
         self.k_max = 64
         self.num_aie_columns = cols
         self.keys = [
-            iron.state((G, L * D), name=f"keys_cache_{i}") for i in range(len(W.layers))
+            iron.state((G, L, D), name=f"keys_cache_{i}") for i in range(len(W.layers))
         ]
         self.values = [
             iron.state((G, L * D), name=f"values_cache_{i}")
@@ -133,13 +135,14 @@ class LlamaGraph:
 
         # Matrices are read as the checkpoint ships them, (out, in): GEMV's
         # (M, K). Tile choices are the ones decode ran with before.
-        def gemv(weight, x, *, tile_in=4, tile_out):
+        def gemv(weight, x, *, tile_in=4, tile_out, repeat=1):
             return GEMV(
                 weight,
                 x,
                 num_aie_columns=cols,
                 tile_size_input=tile_in,
                 tile_size_output=tile_out,
+                repeat=repeat,
             )
 
         row_into_cache = dict(
@@ -186,10 +189,10 @@ class LlamaGraph:
             StridedCopy(
                 v.reshape(G, D), values[i], out_offset=cache_offset, **row_into_cache
             )
-            # Every head sees its group's keys and values.
-            k_all = Repeat(keys[i], repeat=H // G, transfer_size=D)
+            # Every head sees its group's keys and values. The scores read a
+            # group's keys straight from the cache, once per head of the group.
             v_all = Repeat(values[i], repeat=H // G, transfer_size=D)
-            scores = gemv(k_all.reshape(H, L, D), q, tile_out=L // cols)
+            scores = gemv(keys[i], q, tile_out=L // cols, repeat=H // G)
             scores = ElementwiseMul(
                 scores, scale, num_aie_columns=cols, tile_size=L // cols
             )

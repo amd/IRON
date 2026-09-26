@@ -323,7 +323,6 @@ def test_llama_decode_traces_and_tunes():
         "StridedCopy",
         "StridedCopy",
         "Repeat",
-        "Repeat",
         "GEMV",
         "ElementwiseMul",
         "DynamicSoftmax",
@@ -376,6 +375,15 @@ def test_llama_decode_traces_and_tunes():
         and s.op.ov.K == cfg.emb_dim
     }
     assert len(q_ovs) == 1
+    # The scores read each key group once per head of the group, straight
+    # from the cache: no repeated copy of the keys.
+    scores = [s for s in t.steps if type(s.op) is GEMV and s.op.repeat > 1]
+    assert [s.inputs[0].name for s in scores] == [
+        f"keys_cache_{i}" for i in range(cfg.n_layers)
+    ]
+    for s in scores:
+        assert s.op.repeat == cfg.n_heads // cfg.n_kv_groups
+        assert s.op.num_matrices == cfg.n_kv_groups
     # Every operator tunes and is compatible on an 8-column device.
     for op in t.operators:
         op.tuned(aie_utils.get_current_device())
