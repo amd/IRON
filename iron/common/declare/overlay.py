@@ -46,6 +46,10 @@ class Pointwise:
     apply: Callable[[Any, Any, Any], None]
 
 
+def _keyed(value):
+    return value.design_key() if isinstance(value, Overlay) else value
+
+
 def get_shim_dma_limit(dev) -> int:
     """Return the total number of ShimDMA output channels available on the device.
 
@@ -289,9 +293,10 @@ class Overlay:
         return None
 
     def design_key(self) -> tuple:
-        """Identity for sharing: the class and every compared field value."""
+        """Identity for sharing: the class and every compared field value (an
+        overlay a field holds, an epilogue, by its own key)."""
         return (type(self).__qualname__,) + tuple(
-            (f.name, getattr(self, f.name))
+            (f.name, _keyed(getattr(self, f.name)))
             for f in dataclasses.fields(self)
             if f.compare
         )

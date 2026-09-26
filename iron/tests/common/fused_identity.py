@@ -23,9 +23,12 @@ import pytest
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 
+from iron.common.design.build import generator_for
 from iron.common.image import OperatorSequence, build_fused_mlir
 from iron.common.image.fused import fused_identity, fused_plan
+from iron.common.image.jit_compile import design_identity
 from iron.operators.gemv.op import GEMV
+from iron.operators.silu import SiLUOverlay
 
 
 def _bind_npu2():
@@ -126,3 +129,23 @@ def test_identity_holds_across_processes():
         check=True,
     )
     assert other.stdout.strip().splitlines()[-1] == _identity(SHAPES)
+
+
+def test_a_field_left_out_of_the_repr_still_keys_the_design():
+    # GEMV's epilogue and kernel width are repr=False (names stay stable), but
+    # each changes the MLIR: two designs spelled alike would share one cache
+    # entry, and in a fused image one device, silently.
+    shape = dict(M=8192, K=2048, num_aie_columns=8, tile_size_input=4)
+    plain = GEMV(**shape, tile_size_output=1024)
+    ids = {
+        design_identity(generator_for(op))
+        for op in (
+            plain,
+            GEMV(**shape, tile_size_output=1024, epilogue=SiLUOverlay()),
+            GEMV(**shape, tile_size_output=1024, kernel_vector_size=32),
+        )
+    }
+    assert len(ids) == 3
+    assert design_identity(generator_for(plain)) == design_identity(
+        generator_for(GEMV(**shape, tile_size_output=1024))
+    )
