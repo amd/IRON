@@ -86,9 +86,11 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
 
 
 # KL(fp32 CPU || NPU) of the next-token distribution, teacher-forced over 40
-# steps. The graphs measure 0.026 on prefill and at most 0.015 on decode; the
-# llama_npu.py they replaced, on the same toolchain, 0.074 and 0.013. Decode
-# attention over unmasked KV-cache slots measured 9.2.
+# steps. With Llama 3's RoPE scaling the graphs measure 0.091 on prefill and
+# at most 0.023 on decode. The prefill figure is one position, and an unlucky
+# one: over 140 positions of prompt.txt the median is 0.006 with or without
+# the scaling, and this is one of two above 0.05. Without the scaling it
+# measured 0.035. Decode attention over unmasked KV-cache slots measured 9.2.
 MAX_PREFILL_KL = 0.1
 MAX_DECODE_KL = 0.05
 
