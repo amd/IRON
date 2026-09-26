@@ -224,6 +224,7 @@ def _fold(traced: TracedGraph, dev, i: int, kind: Kind, memo: dict) -> Fold:
     else:
         steps = [_writer(traced, i, gone.name)]
         _no_hazard(traced, steps[0], i, kept, reads=True, writes=True)
+        _not_read_by(traced, steps[0], kept)
     edits = []
     for j in steps:
         refold, reorder = _refold(
@@ -257,6 +258,7 @@ def _epilogue(traced: TracedGraph, dev, i: int, memo: dict) -> Fold:
         raise Unfoldable(f"{x_h.name} is a result of the graph")
     j = _writer(traced, i, x_h.name)
     _no_hazard(traced, j, i, y_h, reads=True, writes=True)
+    _not_read_by(traced, j, y_h)
     producer = traced.steps[j].op
     at = [k for k, h in enumerate(traced.steps[j].slots) if h.name == x_h.name]
     if len(at) != 1 or producer.buffers[at[0]].direction != "out":
@@ -348,6 +350,16 @@ def _no_hazard(
                 f"step {k} ({type(traced.steps[k].op).__name__}) touches {name} "
                 f"between the steps the fold would join"
             )
+
+
+def _not_read_by(traced: TracedGraph, j: int, h: Handle) -> None:
+    """Step ``j``, about to write ``h``, does not also read it: its reads and
+    its new writes would race within the step."""
+    if _touches(traced.steps[j], _named(h), reads=True, writes=False):
+        raise Unfoldable(
+            f"{type(traced.steps[j].op).__name__}@{j} reads {_named(h)}, which it "
+            f"would now write"
+        )
 
 
 def _walks(op: Operator) -> list[Reorder | None]:

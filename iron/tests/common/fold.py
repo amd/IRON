@@ -283,3 +283,29 @@ def test_an_elementwise_step_with_another_reader_stays(npu2):
     (epilogue,) = [c for c in candidates(t, npu2) if c.kind is Kind.EPILOGUE]
     assert isinstance(epilogue, Refused)
     assert "(output) must stay written" in epilogue.reason
+
+
+def test_a_write_into_what_the_writer_reads_is_refused(npu2):
+    # The copy's destination is also the projection's input: writing it from
+    # the projection would race the projection's own read of it.
+    w = np.zeros((G * D, G * D), dtype=bfloat16)
+    buf = iron.state((G * D,), name="buf")
+
+    @iron.graph
+    def step(x):
+        v = GEMV(w, buf, num_aie_columns=COLS, tile_size_output=D // 2)
+        StridedCopy(
+            v,
+            buf,
+            input_sizes=(G * D,),
+            input_strides=(1,),
+            input_offset=0,
+            output_sizes=(G * D,),
+            output_strides=(1,),
+            output_offset=0,
+        )
+        return GEMV(w, x, num_aie_columns=COLS, tile_size_output=D // 2)
+
+    t = step.trace(x=(G * D,))
+    write = next(c for c in candidates(t, npu2) if c.kind is Kind.WRITE)
+    assert isinstance(write, Refused) and "which it would now write" in write.reason
