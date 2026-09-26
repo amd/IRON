@@ -9,7 +9,9 @@ pair can share the array. Checked end to end at the MLIR level -- one pack
 device, one configure point for both steps, each step running its own named
 sequence -- and through aiecc to a full ELF. The placer-driven policy must
 find the same pack a caller would name by hand, and must decline a pair
-whose union needs more shim channels than the array has.
+whose union needs more shim channels than the array has, or two members
+pinning one shim DMA channel. A traced ``@iron.graph`` reaches the same
+packing through ``TracedGraph.sequence``.
 
 Compile-only: nothing here dispatches, so no NPU is needed, only the
 toolchain.
@@ -17,16 +19,22 @@ toolchain.
 
 import json
 import re
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 import aie.utils as aie_utils
-from aie.iron.device import from_name
+from aie.dialects import aie as aie_dialect
+from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron.device import NPU2, AnyShimTile, Tile, from_name
 
-from iron.common.image import OperatorSequence, build_fused_mlir
+import iron
+from iron.common.image import OperatorSequence, build_fused_mlir, coresidence, fusion
 from iron.common.image.coresidence import AdjacentPacking, Packing, fits
 from iron.common.image.fused import fused_plan
-from iron.operators import ElementwiseAdd, SiLU
+from iron.common.image.jit_compile import _GENERATOR_TREES
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 
 SIZE = 8192
 TILE = 256
@@ -43,6 +51,42 @@ aie.device(npu2) {
   }
 }
 """
+
+
+def _shim_pinned(col: int, channel: int) -> str:
+    """A pass-through design whose input enters on shim ``(col, 0)``, MM2S
+    ``channel``: the device text, as a generator would hand it to the merge."""
+    vec = np.ndarray[(1024,), np.dtype[np.int32]]
+    line = np.ndarray[(256,), np.dtype[np.int32]]
+    of_in = ObjectFifo(line, name="in")
+    of_out = of_in.cons().forward()
+
+    def sequence(a, c, in_h, out_h):
+        in_h.fill(a)
+        out_h.drain(c, wait=True)
+
+    rt = Runtime(
+        sequence,
+        [
+            vec,
+            vec,
+            of_in.prod(tile=Tile(col, 0), channel=channel),
+            of_out.cons(tile=AnyShimTile),
+        ],
+    )
+    module = Program(NPU2(), rt).resolve_program()
+    [device] = [
+        str(op) for op in module.body.operations if isinstance(op, aie_dialect.DeviceOp)
+    ]
+    return device
+
+
+@iron.graph
+def _chain(a, b):
+    narrow = dict(num_aie_columns=2, tile_size=TILE)
+    x = SiLU(ElementwiseAdd(a, b, **narrow), **narrow)
+    x = ElementwiseMul(x, b, **narrow)
+    return SiLU(ElementwiseAdd(x, b, **narrow), **narrow)
 
 
 @pytest.fixture(autouse=True)
@@ -140,3 +184,54 @@ def test_pack_compiles_to_a_full_elf():
         for instance in kernel["instance"]
     ]
     assert instances == list(generators)
+
+
+def test_two_pins_on_one_shim_channel_do_not_fit():
+    # Both members' logical shim tiles pinned to (0, 0), MM2S channel 1: the
+    # fifo lowering must refuse the second, not the merge (neither pins a
+    # physical aie.tile, so the merge sees nothing to share).
+    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1)})
+    assert reason is not None and "already in use" in reason
+
+
+@pytest.mark.parametrize("col, channel", [(0, 0), (1, 1)], ids=["channel", "column"])
+def test_pins_on_distinct_shim_channels_fit(col, channel):
+    assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(col, channel)}) is None
+
+
+def test_packing_is_in_the_fused_identity():
+    # The fused identity digests every source under the generator trees, so
+    # an edit to how a pack is merged or chosen rebuilds what was packed.
+    for module in (fusion, coresidence):
+        path = Path(module.__file__).resolve()
+        assert any(path.is_relative_to(root) for root in _GENERATOR_TREES)
+
+
+def test_traced_graph_packs_and_compiles():
+    # add, silu, mul, add, silu: three designs, add and silu recurring. The
+    # policy packs all three, so the whole graph is one configure.
+    traced = _chain.trace(a=(SIZE,), b=(SIZE,))
+    temporal = traced.sequence(name="graph_temporal", dispatch="fused")
+    packed = traced.sequence(
+        name="graph_packed", dispatch="fused", coresident=AdjacentPacking()
+    )
+    temporal.prepare()
+    packed.prepare()
+    generators, runlist, _ = fused_plan(packed)
+    assert len(generators) == 3 and len(runlist) == 5
+
+    # Temporal: a configure per step that changes design, and the reset.
+    temporal_text = build_fused_mlir(temporal)
+    packed_text = build_fused_mlir(packed)
+    assert len(re.findall(r"aiex\.configure", temporal_text)) == 6
+    # Packed: one pack named for all three designs, each step its own run.
+    pack = Packing.device_name(list(generators))
+    assert re.findall(r"aiex\.configure @(\w+)", packed_text) == [
+        pack,
+        "reset_device",
+    ]
+    assert re.findall(r"aiex\.run @(\w+)", packed_text) == [
+        name for name, *_ in runlist
+    ]
+    packed.compile()
+    assert packed.elf_path.is_file()

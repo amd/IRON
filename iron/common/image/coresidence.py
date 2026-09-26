@@ -28,8 +28,9 @@ What the merge has to settle:
   Logical tiles are left to ``aie-place-tiles``, which sees the union.
 - device type: every member is built for the same device.
 
-Whether the union *fits* -- cores, shim channels, routes -- is the placer's
-and the allocator's question; :func:`fits` asks them, and
+Whether the union *fits* -- cores, shim channels, routes -- is for the
+placer, the fifo lowering and the router to say, as they would in aiecc;
+:func:`fits` asks them, and
 :class:`AdjacentPacking` uses it to pack a runlist without being told what
 goes with what.
 """
@@ -51,9 +52,26 @@ DEFAULT_SEQUENCE = "sequence"
 # of these to the same tile cannot share it.
 _EXCLUSIVE_PER_TILE = ("aie.core", "aie.mem", "aie.memtile_dma", "aie.shim_dma")
 
-# What decides whether a merged device fits: placement, then the fifo
-# allocation that checks memory, locks and channels after it.
-_FIT_PIPELINE = "builtin.module(aie.device(aie-place-tiles,aie-objectfifo-allocate))"
+# What decides whether a merged device fits: the resource stages of aiecc's
+# own pipeline, in its order (tools/aiecc/IRTransforms.h: placement, then
+# getInputWithAddressesPipeline's fifo lowering and id/address assignment,
+# then routing). The fifo lowering is the whole stateful transform, not its
+# allocate pass alone: allocate on unsplit fifos checks nothing, which is how
+# two designs pinning one shim DMA channel once passed as fitting.
+_FIT_PIPELINE = (
+    "builtin.module("
+    "aie.device(aie-place-tiles),"
+    "aie-lower-scratchpad-parameters,"
+    "aie.device("
+    "aie-objectFifo-stateful-transform,"
+    "aie-assign-lock-ids,"
+    "aie-reserve-runtime-bd-ids,"
+    "aie-assign-bd-ids,"
+    "aie-prepare-buffers,"
+    "aie-assign-buffer-addresses,"
+    "aie-create-pathfinder-flows"
+    "))"
+)
 
 
 class CoResidenceError(ValueError):
