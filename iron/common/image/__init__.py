@@ -13,9 +13,18 @@ places the buffers it needs, and :mod:`.artifacts` records what came out.
 a caller finally invokes.
 """
 
-from .allocator import LiveRange, live_ranges, peak_live_bytes, place
+from .allocator import (
+    Allocation,
+    ArenaPlan,
+    LiveRange,
+    live_ranges,
+    peak_live_bytes,
+    place,
+    touch_ranges,
+)
 from .artifacts import Artifacts, Design, Step
 from .callable import (
+    ScratchArena,
     SequenceCallable,
     SequenceCompareCallable,
     SequenceFullELFCallable,
@@ -29,6 +38,8 @@ from .packaging import ELF, XCLBIN, each_step, plan
 from .sequence import OperatorSequence
 
 __all__ = [
+    "Allocation",
+    "ArenaPlan",
     "Artifacts",
     "Design",
     "DispatchStream",
@@ -36,6 +47,7 @@ __all__ = [
     "FusedImage",
     "LiveRange",
     "OperatorSequence",
+    "ScratchArena",
     "SequenceCallable",
     "SequenceCompareCallable",
     "SequenceFullELFCallable",
@@ -53,5 +65,6 @@ __all__ = [
     "peak_live_bytes",
     "place",
     "plan",
+    "touch_ranges",
     "xclbin_design",
 ]

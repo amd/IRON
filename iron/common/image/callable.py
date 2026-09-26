@@ -18,6 +18,7 @@ from aie.utils.verify import Tolerance, compare
 
 from ..declare import Operator
 
+from .allocator import ArenaPlan
 from .jit_compile import DispatchStream
 
 try:
@@ -53,6 +54,53 @@ def _require_xrt() -> None:
             "not installed. Use the reference mode, or run a single operator, which "
             "dispatches through aie.utils.DefaultNPURuntime and works on any backend."
         )
+
+
+class ScratchArena:
+    """The device buffer behind an :class:`ArenaPlan`: one scratch buffer every
+    full ELF placed in the plan runs against.
+
+    Made on first use, at the plan's size then. A plan that has grown since
+    -- an image placed after the first dispatch -- grows the buffer on the
+    next use, keeping its contents, so resident weights and states survive.
+    Views taken before a growth are views of the old buffer; each callable
+    rebinds on its next call (see :attr:`generation`).
+    """
+
+    def __init__(self, plan: ArenaPlan):
+        self.plan = plan
+        self._tensor: XRTTensor | None = None
+        self._generation = 0
+        # Residents whose contents are in the buffer, by storage key.
+        self.loaded: set = set()
+
+    @property
+    def generation(self) -> int:
+        """Bumped whenever :attr:`tensor` is replaced by a larger buffer."""
+        return self._generation
+
+    @property
+    def tensor(self) -> XRTTensor:
+        """The buffer, at least as large as the plan now is."""
+        _require_xrt()
+        n = _n_elements(self.plan.size)
+        if self._tensor is not None and self._tensor.shape[0] >= n:
+            return self._tensor
+        grown = XRTTensor((n,), dtype=ml_dtypes.bfloat16)
+        if self._tensor is not None:
+            old = self._tensor.numpy()  # pulls what the device wrote
+            grown.numpy_view()[: old.size] = old
+            logger.info(
+                "scratch arena grew from %d to %d bytes", old.nbytes, grown.nbytes
+            )
+        self._tensor = grown
+        self._generation += 1
+        return grown
+
+    def view(self, offset: int, nbytes: int, dtype=BF16) -> XRTTensor:
+        """``nbytes`` of the buffer from ``offset``, as ``dtype``."""
+        dtype = np.dtype(dtype)
+        return self.tensor.subview(offset, (nbytes // dtype.itemsize,), dtype)
 
 
 class SequenceCallable:
@@ -133,6 +181,10 @@ class SequenceFullELFCallable(SequenceCallable):
     """The full ELF (NPU2): every operator shares three consolidated
     input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
     sub-view into whichever consolidated buffer holds the named argument.
+
+    A sequence placed in a shared arena (``OperatorSequence(arena=...)``) runs
+    its scratch in the ``arena`` buffer given here, which every other image
+    placed in the same plan runs in too; otherwise it allocates its own.
     """
 
     # The buffer trace lowering appends, and the kernel argument it binds to;
@@ -140,8 +192,23 @@ class SequenceFullELFCallable(SequenceCallable):
     trace_buffer: XRTTensor | None
     _trace_arg: int | None
 
-    def __init__(self, seq, device_name="main", sequence_name="sequence"):
+    def __init__(
+        self,
+        seq,
+        device_name="main",
+        sequence_name="sequence",
+        arena: ScratchArena | None = None,
+    ):
         _require_xrt()
+        if (arena is None) != (seq.arena is None):
+            raise ValueError(
+                f"{seq.name} was placed in "
+                + ("an arena plan" if seq.arena is not None else "no arena plan")
+                + (", but no arena was given" if arena is None else ", but got one")
+            )
+        if arena is not None and arena.plan is not seq.arena:
+            raise ValueError(f"{seq.name} was placed in another arena plan")
+        self.arena = arena
         self.device_name = device_name
         self.sequence_name = sequence_name
 
@@ -190,9 +257,13 @@ class SequenceFullELFCallable(SequenceCallable):
         in_sz, out_sz, scratch_sz = self.op.buffer_sizes
         self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
         self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
-        self.scratch_buffer = XRTTensor(
-            (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
-        )
+        if self.arena is None:
+            self.scratch_buffer = XRTTensor(
+                (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
+            )
+        else:
+            self.scratch_buffer = self.arena.tensor
+            self._arena_generation = self.arena.generation
         # Trace lowering appends one buffer covering every configured design, after
         # the consolidated three. Its argument and size depend on how many channels
         # and sub-designs claim a share, so read them from the lowered module.
@@ -220,7 +291,7 @@ class SequenceFullELFCallable(SequenceCallable):
             )
         return path
 
-    def get_buffer(self, buffer_name):
+    def _get_buffer(self, buffer_name):
         if buffer_name in self._buffer_cache:
             return self._buffer_cache[buffer_name]
         buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
@@ -233,7 +304,21 @@ class SequenceFullELFCallable(SequenceCallable):
         self._buffer_cache[buffer_name] = sub
         return sub
 
+    def _follow_arena(self) -> None:
+        """Run against the arena's current buffer, if it grew since the last call."""
+        if self.arena is None or self.arena.generation == self._arena_generation:
+            return
+        self.scratch_buffer = self.arena.tensor
+        self._arena_generation = self.arena.generation
+        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
+        self._buffer_cache.clear()
+
+    def get_buffer(self, buffer_name):
+        self._follow_arena()
+        return self._get_buffer(buffer_name)
+
     def _sync_inputs(self):
+        self._follow_arena()
         # Sub-views handed out by get_buffer() share the parent's coherence map, so
         # a write through one (e.g. numpy_view()) marks its byte range host-dirty
         # there too, and `to("npu")` here syncs every dirty range in one pass.

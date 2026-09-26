@@ -4,17 +4,20 @@
 """OperatorSequence: what one run of several operators builds and dispatches."""
 
 import logging
+from collections.abc import Hashable, Mapping
 
 import numpy as np
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils import bfp
+from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
 from ..declare import Operator
-from .allocator import live_ranges, place
+from .allocator import Allocation, ArenaPlan, align_up, live_ranges, place
 from .artifacts import Artifacts, Design, Step
 from .callable import (
+    ScratchArena,
     SequenceCompareCallable,
     SequenceFullELFCallable,
     SequenceReferenceCallable,
@@ -23,6 +26,18 @@ from .callable import (
 from .fused import FusedImage, XclbinChain
 
 logger = logging.getLogger(__name__)
+
+# Where every buffer in an arena starts. The host reconciles a buffer with the
+# device a coherence granule (a cache line) at a time, so two buffers sharing
+# one cannot be synced independently -- XRTTensor.subview refuses such a view.
+# 64 bytes is also the DDR burst the shim DMA issues, so no transfer starts
+# mid-burst.
+ALIGNMENT = max(64, COHERENCE_GRANULE)
+
+
+def _base_name(buf: str) -> str:
+    """The buffer a runlist name refers to: ``"kv[0:64]"`` is part of ``"kv"``."""
+    return buf[: buf.index("[")] if "[" in buf else buf
 
 
 def _signature(op):
@@ -43,6 +58,11 @@ class OperatorSequence:
             after each step re-runs the reference on the NPU-produced inputs
             (``SequenceCompareCallable`` judges each step by its
             operator's kernel contract).
+        arena: Place the scratch buffers in this shared :class:`ArenaPlan`
+            rather than a private arena. Only the full ELF addresses its
+            scratch by offset in a buffer it is handed, so only it can share.
+        residents: With ``arena``, the scratch buffers that are residents
+            there, by storage key; every other scratch buffer is a transient.
     """
 
     def __init__(
@@ -58,10 +78,19 @@ class OperatorSequence:
         extra_flags=None,
         trace_size=0,
         share_designs=False,
+        arena: ArenaPlan | None = None,
+        residents: Mapping[str, Hashable] | None = None,
         *args,
         **kwargs,
     ):
         mode = self._coerce_dispatch(dispatch)
+        if arena is not None and mode not in (None, "fused", "reference"):
+            raise ValueError(
+                f"a shared arena needs the full ELF, which addresses scratch by "
+                f"offset; dispatch={dispatch!r} gives each buffer its own"
+            )
+        if residents and arena is None:
+            raise ValueError("residents are placed in an arena; pass arena= too")
         if not all(
             isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
@@ -98,6 +127,9 @@ class OperatorSequence:
         # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
         self.trace_size = trace_size
         self.share_designs = share_designs
+        self.arena = arena
+        self.residents = dict(residents or {})
+        self._arena_layout: dict[str, Allocation] | None = None
         self.mode = mode  # None until the device is known (prepare)
         self._image = None  # the mode's image builder, once resolved
 
@@ -171,8 +203,36 @@ class OperatorSequence:
         # is silent -- the slice simply reads the wrong memory.
         pinned |= {name for name in sizes if "[" in name}
         ranges = live_ranges(steps, pinned=pinned)
-        allocations, _ = place(ranges, sizes)
+        allocations, _ = place(ranges, sizes, ALIGNMENT)
         return {name: a.offset for name, a in allocations.items()}
+
+    def _place_in_arena(self, sizes: Mapping[str, int]) -> dict[str, Allocation]:
+        """This sequence's scratch buffers placed in the shared arena, once.
+
+        A slice's use is a use of its parent, so a parent only ever reached
+        through slices is live from the first to the last of them.
+        """
+        if self._arena_layout is not None:
+            return self._arena_layout
+        missing = set(self.residents) - set(sizes)
+        if missing:
+            raise ValueError(
+                f"residents {sorted(missing)} are not scratch buffers of {self.name}"
+            )
+        steps = []
+        for op, *bufs in self.runlist:
+            reads, writes = [], []
+            for buf, b in zip(bufs, op.buffers):
+                name = _base_name(buf)
+                if name not in sizes:
+                    continue
+                if b.direction in ("in", "inout"):
+                    reads.append(name)
+                if b.direction in ("out", "inout"):
+                    writes.append(name)
+            steps.append((reads, writes))
+        self._arena_layout = self.arena.place_image(steps, sizes, self.residents)
+        return self._arena_layout
 
     def calculate_buffer_layout(self):
         args = {}  # base_buffer_name -> the declared buffer
@@ -232,11 +292,6 @@ class OperatorSequence:
             # offsets from liveness instead, so buffers whose lifetimes do not
             # overlap share addresses; the arena still has to be large enough
             # for the highest byte any of them reaches.
-            offsets = self.buffer_offsets
-            if offsets is None and self.plan_scratch:
-                offsets = self.infer_buffer_offsets()
-            offsets = offsets or {}
-
             def length_of(arg):
                 if arg in self.explicit_buffer_sizes:
                     # Explicit size specified - this is a parent buffer for slices
@@ -245,8 +300,23 @@ class OperatorSequence:
                     return args[arg].nbytes
                 return None  # sliced buffers are handled separately
 
-            # Unplanned buffers first, packed back to back.
-            cursor = 0
+            if buffer_type == "scratch" and self.arena is not None:
+                lengths = {a: length_of(a) for a in args_list}
+                placed = self._place_in_arena(
+                    {a: n for a, n in lengths.items() if n is not None}
+                )
+                for arg, a in placed.items():
+                    subbuffer_layout[arg] = (buffer_type, a.offset, a.size)
+                # This image's own extent; the arena it runs in may be larger.
+                return max((a.end for a in placed.values()), default=0)
+
+            offsets = self.buffer_offsets
+            if offsets is None and self.plan_scratch:
+                offsets = self.infer_buffer_offsets()
+            offsets = offsets or {}
+
+            # Unplanned buffers first, packed back to back, each aligned.
+            cursor = end = 0
             planned = []
             for arg in args_list:
                 length = length_of(arg)
@@ -256,14 +326,14 @@ class OperatorSequence:
                     planned.append((arg, length))
                     continue
                 subbuffer_layout[arg] = (buffer_type, cursor, length)
-                cursor += length
+                end = cursor + length
+                cursor = align_up(end, ALIGNMENT)
 
             # Then the planned ones, rebased past everything unplanned. A plan
             # is relative to its own pool and starts at zero, so applying it
             # directly would drop the first planned buffer on top of the
             # weights -- an aliasing that is silent, because the arena simply
             # does not grow.
-            end = cursor
             for arg, length in planned:
                 at = cursor + offsets[arg]
                 subbuffer_layout[arg] = (buffer_type, at, length)
@@ -395,14 +465,22 @@ class OperatorSequence:
             buffers=dict(self.subbuffer_layout),
         )
 
-    def get_callable(self):
+    def get_callable(self, arena: ScratchArena | None = None):
         """The runtime callable of this sequence's mode, compiling first if
         that has not happened (``compile()`` beforehand is the ahead-of-time
-        path; the work is the same, only when it happens differs)."""
+        path; the work is the same, only when it happens differs).
+
+        A sequence placed in an arena plan runs its scratch in ``arena``, the
+        buffer behind that plan; made here if not given.
+        """
         if not hasattr(self, "subbuffer_layout"):
             self.compile()
         self.link()
-        return _MODES[self.mode][1](self)
+        if self.mode != "fused":
+            return _MODES[self.mode][1](self)
+        if self.arena is not None and arena is None:
+            arena = ScratchArena(self.arena)
+        return SequenceFullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
