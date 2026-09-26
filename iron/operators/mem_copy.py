@@ -27,8 +27,10 @@ import numpy as np
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    BoundBuffer,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     StreamIn,
@@ -266,90 +268,120 @@ class MemCopy(Operator[MemCopyOverlay]):
 
     # -- the runtime sequence --------------------------------------------------
 
-    def design(self, rt):
+    def _workload(self) -> tuple[List[Access] | None, PartialWorkloadConfig | None]:
+        """The whole partitions' taps, one per core, and how the remainder is
+        spread; ``None`` for either the extent does not have."""
         ov = self.ov
         size, num_cores, line_size = self.size, ov.num_cores, ov.line_size
-        s, d = ov.s, ov.d
-        x, y = self.x, self.y
-
-        # How much of the workload partitions evenly, and what remains.
         minimum_work_size = line_size * num_cores  # what the array is configured for
         num_whole_partitions = math.floor(size / minimum_work_size)
         whole_partition_size = minimum_work_size * num_whole_partitions
         partial_work_size = size - whole_partition_size
-
+        whole = None
         if num_whole_partitions > 0:
-            taps = create_whole_workload_taps(
+            whole = create_whole_workload_taps(
                 size, num_cores, line_size, whole_partition_size
             )
-            with rt.group():
-                for i in range(num_cores):
-                    rt.fill(s[i], (x, taps[i]))
-                for i in range(num_cores):
-                    rt.drain(d[i], (y, taps[i]), wait=True)
+        partial = None
+        if partial_work_size:
+            partial = create_partial_workload_config(
+                size,
+                num_cores,
+                line_size,
+                minimum_work_size,
+                whole_partition_size,
+                partial_work_size,
+            )
+        return whole, partial
 
-        if partial_work_size == 0:
-            return
-        partial = create_partial_workload_config(
-            size,
-            num_cores,
-            line_size,
-            minimum_work_size,
-            whole_partition_size,
-            partial_work_size,
-        )
-
-        def padded(verb, slot, buf):
-            """The padding repeats then the partial tile on one fifo, in
-            groups of TASK_GROUP_SIZE transfers, each group awaited."""
-            tg = rt.new_group()
-            count = 0
-            for repeats, tap in zip(partial.padding_tap_repeats, partial.padding_taps):
-                for _ in range(repeats):
-                    if count % TASK_GROUP_SIZE == 0:
-                        verb(slot, (buf, tap), wait=True, group=tg)
-                        tg.finish()
-                        tg = rt.new_group()
-                    else:
-                        verb(slot, (buf, tap), wait=False, group=tg)
-                    count += 1
-            return tg, count
-
-        # A while loop, so the cores with full lines are grouped together.
-        idx = 0
+    def _remainder(self, partial: PartialWorkloadConfig) -> list[range | int]:
+        """The remainder as the sequence walks the cores: a ``range`` of
+        cores with a full line each, or the one core with the padded partial
+        line. Cores with no work are skipped; the build places their fifos."""
+        steps: list[range | int] = []
+        idx, num_cores = 0, self.ov.num_cores
         while idx < num_cores:
             if idx < partial.num_cores_with_no_tiles:
-                # Cores with no work: their fifos are placed by the build.
                 idx += partial.num_cores_with_no_tiles
             elif idx == num_cores - 1 and partial.partial_tap is not None:
-                # Fill the last fifo with padding + real data
-                tg, count = padded(rt.fill, s[idx], x)
-                if count % TASK_GROUP_SIZE == 0:
-                    rt.fill(s[idx], (x, partial.partial_tap), wait=True, group=tg)
-                    tg.finish()
-                    tg = rt.new_group()
-                else:
-                    rt.fill(s[idx], (x, partial.partial_tap), wait=False, group=tg)
-                count += 1
-                # Drain it the same way, continuing the same count.
-                for repeats, tap in zip(
-                    partial.padding_tap_repeats, partial.padding_taps
-                ):
-                    for _ in range(repeats):
-                        if count % TASK_GROUP_SIZE == 0:
-                            rt.drain(d[idx], (y, tap), wait=True, group=tg)
-                            tg.finish()
-                            tg = rt.new_group()
-                        else:
-                            rt.drain(d[idx], (y, tap), wait=False, group=tg)
-                        count += 1
-                rt.drain(d[idx], (y, partial.partial_tap), wait=True, group=tg)
-                tg.finish()
+                steps.append(idx)
                 idx += 1
             else:
-                with rt.group():
-                    for j in range(partial.num_cores_with_full_tiles):
-                        rt.fill(s[idx + j], (x, partial.full_taps[j]))
-                    for j in range(partial.num_cores_with_full_tiles):
-                        rt.drain(d[idx + j], (y, partial.full_taps[j]), wait=True)
+                steps.append(range(idx, idx + partial.num_cores_with_full_tiles))
                 idx += partial.num_cores_with_full_tiles
+        return steps
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Per core: its share of the whole partitions, then its line of the
+        remainder. The core with the partial line re-reads already-copied
+        data to pad it to a full line, then takes the partial tile. The copy
+        reads and writes the same places, so ``x`` and ``y`` agree."""
+        whole, partial = self._workload()
+        slots: list[list[Access]] = [[] for _ in range(self.ov.num_cores)]
+        if whole is not None:
+            for core, tap in enumerate(whole):
+                slots[core].append(tap)
+        if partial is not None:
+            for step in self._remainder(partial):
+                if isinstance(step, range):
+                    for j, core in enumerate(step):
+                        slots[core].append(partial.full_taps[j])
+                else:
+                    for repeats, tap in zip(
+                        partial.padding_tap_repeats, partial.padding_taps
+                    ):
+                        slots[step].extend([tap] * repeats)
+                    slots[step].append(partial.partial_tap)
+        stream = self.ov.s if buffer is self.x else self.ov.d
+        return Order(stream, tuple(map(tuple, slots)))
+
+    def design(self, rt):
+        """The whole partitions in one group. Then the remainder: each run of
+        full-line cores in a group, and the padded core's fills and drains in
+        groups of TASK_GROUP_SIZE transfers, each group awaited."""
+        ov = self.ov
+        s, d, x, y = ov.s, ov.d, self.x, self.y
+        whole, partial = self._workload()
+        fills = [iter(taps) for taps in self.order(x).slots]
+        drains = [iter(taps) for taps in self.order(y).slots]
+
+        if whole is not None:
+            with rt.group():
+                for i in range(ov.num_cores):
+                    rt.fill(s[i], (x, next(fills[i])))
+                for i in range(ov.num_cores):
+                    rt.drain(d[i], (y, next(drains[i])), wait=True)
+        if partial is None:
+            return
+
+        def bounded(verb, slot, buf, taps, n, tg, count):
+            """``n`` transfers on one fifo, every TASK_GROUP_SIZE-th awaited
+            and its group closed; ``count`` carries on from the caller's."""
+            for _ in range(n):
+                wait = count % TASK_GROUP_SIZE == 0
+                verb(slot, (buf, next(taps)), wait=wait, group=tg)
+                if wait:
+                    tg.finish()
+                    tg = rt.new_group()
+                count += 1
+            return tg, count
+
+        for step in self._remainder(partial):
+            if isinstance(step, range):
+                with rt.group():
+                    for core in step:
+                        rt.fill(s[core], (x, next(fills[core])))
+                    for core in step:
+                        rt.drain(d[core], (y, next(drains[core])), wait=True)
+            else:
+                # The padding and the partial tile in, then the padding out,
+                # continuing the same count; the partial tile's drain closes.
+                padding = sum(partial.padding_tap_repeats)
+                tg, count = bounded(
+                    rt.fill, s[step], x, fills[step], padding + 1, rt.new_group(), 0
+                )
+                tg, count = bounded(
+                    rt.drain, d[step], y, drains[step], padding, tg, count
+                )
+                rt.drain(d[step], (y, next(drains[step])), wait=True, group=tg)
+                tg.finish()
