@@ -17,6 +17,7 @@ _OPERATOR_MODULES = {
     "AXPY": "axpy",
     "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
+    "Emit": "emit",
     "ElementwiseMul": "elementwise_mul",
     "GELU": "gelu",
     "GEMM": "gemm.op",
