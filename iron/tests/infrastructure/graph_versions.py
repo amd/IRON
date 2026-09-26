@@ -96,6 +96,23 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     assert f.arena.plan.size < private
 
 
+def test_load_hands_each_weight_to_release_once_it_is_uploaded():
+    """``release`` sees each weight once over every version, after which the
+    host copy is not read: overwriting it changes nothing on the device."""
+    f, w, w2, s = _function()
+    f.compile(x=(E,))
+    f.compile(x=(2 * E,))
+    released = []
+    for version in f.versions.values():
+        version.load(release=released.append)
+    assert sorted(map(id, released)) == sorted([id(w), id(w2)])
+
+    expect_w = _f32(w)
+    w[:] = 0
+    x1 = _numbers(E, 9)
+    np.testing.assert_array_equal(_f32(f(x1).numpy()), _f32(x1) + 2 * expect_w)
+
+
 def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state():
     """Compiling on first call at a new shape: the arena grows under the
     version that already ran, which keeps working."""

@@ -14,6 +14,7 @@ actual Llama-3.2-1B file and skips when it is absent. No NPU.
 import json
 import math
 import os
+import re
 import struct
 from pathlib import Path
 
@@ -133,6 +134,46 @@ def test_reader_views_the_mapping_without_copying(toy_path):
     assert not a.flags.writeable and not a.flags.owndata
     with pytest.raises(ValueError):
         a[0] = 0
+
+
+def _resident_bytes(path: Path) -> int:
+    """This process's resident bytes of its mappings of ``path``, per the kernel."""
+    total, inside = 0, False
+    for line in Path("/proc/self/smaps").read_text().splitlines():
+        fields = line.split()
+        if re.match(r"[0-9a-f]+-[0-9a-f]+ ", line):
+            inside = fields[-1] == str(path.resolve())
+        elif inside and fields[0] == "Rss:":
+            total += int(fields[1]) * 1024
+    return total
+
+
+def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
+    tree = LlamaWeights.load(toy_path)
+    before = {name: np.array(a) for name, a in tree.named_parameters()}
+    assert _resident_bytes(toy_path) > 0
+    for _, a in tree.named_parameters():
+        tree.release(a)
+    # The tensors cover the whole file, header page included.
+    assert _resident_bytes(toy_path) == 0
+    # Read again, each faults back in from the file, unchanged.
+    for name, a in tree.named_parameters():
+        assert bitwise_equal(a, before[name]), name
+    assert _resident_bytes(toy_path) > 0
+
+
+def test_release_is_only_for_views_of_the_mapping(toy_path):
+    file = SafetensorsFile(toy_path)
+    tree = LlamaWeights.from_file(file)
+    elsewhere = np.zeros(8, dtype=bfloat16)
+    assert not file.holds(elsewhere)
+    with pytest.raises(ValueError, match="not a contiguous view"):
+        file.release(elsewhere)
+    with pytest.raises(ValueError, match="not a contiguous view"):
+        file.release(tree.embedding[:, ::2])
+    # The tree releases what is its file's and leaves anything else alone.
+    tree.release(elsewhere)
+    assert not elsewhere.any()
 
 
 def test_reader_rejects_a_range_that_disagrees_with_the_shape(tmp_path):

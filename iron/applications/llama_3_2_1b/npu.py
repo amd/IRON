@@ -49,13 +49,15 @@ class AIELlama:
         """Trace, compile and load both versions, weights uploaded.
 
         Both before the first call, so the shared arena is made once at its
-        final size.
+        final size. Each weight's checkpoint pages are dropped once it is on
+        the device, so the process never holds the mapped checkpoint and the
+        buffers at once; the embedding's rows fault back in as it is read.
         """
         model = LlamaGraph(config, max_seq_len)
         for rows in (1, max_seq_len):
             model.compile(config, rows)
         for version in model.graph.versions.values():
-            version.load()
+            version.load(release=config.weights.release)
         return cls(config, model.graph, max_seq_len)
 
     # -- the forward pass ----------------------------------------------------

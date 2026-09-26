@@ -22,7 +22,7 @@ import json
 import mmap
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -76,6 +76,8 @@ class SafetensorsFile:
             # The mapping holds its own reference to the file; closing ours
             # does not unmap it.
             self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        # Where the mapping starts in memory, to tell a view's place in it.
+        self._address = np.frombuffer(self._map, dtype=np.uint8).ctypes.data
         self._data_start = 8 + header_len
         self.metadata: dict[str, str] = header.pop("__metadata__", None) or {}
         data_len = len(self._map) - self._data_start
@@ -127,6 +129,26 @@ class SafetensorsFile:
             offset=self._data_start + info.begin,
         )
         return flat.reshape(info.shape)
+
+    def holds(self, array: np.ndarray) -> bool:
+        """Whether ``array``'s bytes lie in this mapping's data section."""
+        begin = array.ctypes.data - self._address
+        return self._data_start <= begin and begin + array.nbytes <= len(self._map)
+
+    def release(self, view: np.ndarray) -> None:
+        """Drop this process's pages of ``view``, a view of this mapping.
+
+        Nothing is lost: the mapping is of the file, read-only, so a later
+        read faults the bytes back in, from the page cache or the disk. What
+        it saves is resident memory -- a weight read once, to upload it,
+        need not stay counted against the process. Pages the view shares
+        with its neighbours are dropped too, as harmlessly.
+        """
+        if not (view.flags.c_contiguous and self.holds(view)):
+            raise ValueError(f"not a contiguous view of {self.path}")
+        begin = view.ctypes.data - self._address
+        start = begin - begin % mmap.PAGESIZE
+        self._map.madvise(mmap.MADV_DONTNEED, start, begin + view.nbytes - start)
 
 
 # The model tree
@@ -200,6 +222,14 @@ class LlamaWeights:
     embedding: np.ndarray  # (vocab_size, emb_dim)
     norm: np.ndarray  # (emb_dim,)
     layers: tuple[LayerWeights, ...]
+    # The mapped checkpoint the arrays view, if they came from one.
+    file: SafetensorsFile | None = field(default=None, repr=False, compare=False)
+
+    def release(self, array: np.ndarray) -> None:
+        """Drop the host pages of ``array`` if it is a view of the mapped
+        checkpoint; anything else is left alone. It stays readable."""
+        if self.file is not None and self.file.holds(array):
+            self.file.release(array)
 
     @property
     def out_head(self) -> np.ndarray:
@@ -262,6 +292,7 @@ class LlamaWeights:
             embedding=file[_EMBEDDING],
             norm=file[_NORM],
             layers=tuple(LayerWeights(**by_layer[i]) for i in range(len(by_layer))),
+            file=file,
         )
         weights._check_shapes()
         return weights

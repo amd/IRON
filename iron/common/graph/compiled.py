@@ -15,6 +15,7 @@ arena its other versions already use.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -298,16 +299,25 @@ class CompiledGraph:
     def _copy_in(self, name, tensor) -> None:
         _store(self.callable.get_buffer(name).numpy_view(), tensor)
 
-    def upload(self) -> None:
-        """Copy every closed-over weight into its buffer, once per storage."""
+    def upload(self, release: Callable[[object], None] | None = None) -> None:
+        """Copy every closed-over weight into its buffer, once per storage.
+
+        ``release``, if given, is called with each weight as soon as it is
+        in its buffer, for its owner to drop the host copy's pages. In an
+        arena that is the last time the weight is read: a grown arena keeps
+        the device's contents.
+        """
         for key, (tensor, handle) in self.traced.weights.items():
             if key not in self._loaded:
                 self._copy_in(handle.name, tensor)
                 self._loaded.add(key)
+                if release is not None:
+                    release(tensor)
 
-    def load(self) -> "CompiledGraph":
-        """Load the image and upload its weights now, rather than on first call."""
-        self.upload()
+    def load(self, release: Callable[[object], None] | None = None) -> CompiledGraph:
+        """Load the image and upload its weights now, rather than on first
+        call; ``release`` as for :meth:`upload`."""
+        self.upload(release)
         return self
 
     # -- calling ---------------------------------------------------------------
