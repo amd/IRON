@@ -221,8 +221,9 @@ def run_test(
     ``inputs`` is a :class:`Vectors`, or the inputs by name with ``outputs``
     the expected outputs by name (an expected value of ``None`` is not
     checked); both are consumed in the order of the operator's declared
-    buffers. An ``inout`` buffer is given as an input and checked under that
-    name. The outputs are judged as :func:`verify_buffer` judges them, by
+    buffers. An ``inout`` buffer is given as an input, has its place among
+    the outputs as well (as :attr:`Operator.outputs` lists it), and is
+    checked under its input name. The outputs are judged as :func:`verify_buffer` judges them, by
     ``tolerance`` when given. Latency (the NPU's own time) and effective
     bandwidth are recorded for the CSV and returned.
     """
@@ -249,6 +250,8 @@ def run_test(
                 name, data = next(ins)
                 buf = tensor_class(data)
                 if b.direction == "inout":
+                    # It holds a place among the outputs too; skip past it.
+                    next(outs)
                     produced[name] = buf
         except StopIteration:
             raise ValueError(f"no {b.direction} given for buffer {b.name!r}") from None

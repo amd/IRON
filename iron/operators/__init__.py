@@ -30,6 +30,7 @@ _OPERATOR_MODULES = {
     "RMSNorm": "rms_norm",
     "WeightedRMSNorm": "rms_norm",
     "Repeat": "repeat",
+    "Sample": "sample",
     "RoPE": "rope.op",
     "Sigmoid": "sigmoid",
     "SiLU": "silu",
