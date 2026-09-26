@@ -9,8 +9,10 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    BoundBuffer,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Scratchpad,
@@ -259,26 +261,37 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         )
         return out if y is None else y
 
-    def design(self, rt):
-        ins = self._taps(
-            self.x, self.input_sizes, self.input_strides, self.input_offset
-        )
-        outs = self._taps(
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Per channel, its share of the gather (``x``) or the scatter
+        (``y``), shifted per call by the offset a graph binds, if any."""
+        if buffer is self.x:
+            taps = self._taps(
+                self.x, self.input_sizes, self.input_strides, self.input_offset
+            )
+            by = self.in_offset if self.uses_value("in_offset") else None
+            return Order(self.ov.s, tuple(map(tuple, taps)), offset_by=by)
+        taps = self._taps(
             self.y, self.output_sizes, self.output_strides, self.output_offset
         )
-        in_off = self.in_offset if self.uses_value("in_offset") else None
-        out_off = self.out_offset if self.uses_value("out_offset") else None
+        by = self.out_offset if self.uses_value("out_offset") else None
+        return Order(self.ov.d, tuple(map(tuple, taps)), offset_by=by)
+
+    def design(self, rt):
+        """One group; per channel its fills, then its drains, the last one waited."""
+        src, dst = self.order(self.x), self.order(self.y)
         with rt.group() as tg:
             for c in range(self.ov.num_aie_channels):
-                for acc in ins[c]:
-                    rt.fill(self.ov.s[c], (self.x, acc), group=tg, offset_by=in_off)
-                for acc in outs[c]:
+                for acc in src[c]:
+                    rt.fill(
+                        self.ov.s[c], (self.x, acc), group=tg, offset_by=src.offset_by
+                    )
+                for i, acc in enumerate(dst[c]):
                     rt.drain(
                         self.ov.d[c],
                         (self.y, acc),
                         group=tg,
-                        wait=acc is outs[c][-1],
-                        offset_by=out_off,
+                        wait=i == len(dst[c]) - 1,
+                        offset_by=dst.offset_by,
                     )
 
 

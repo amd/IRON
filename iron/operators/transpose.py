@@ -11,9 +11,11 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    BoundBuffer,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Resident,
@@ -263,37 +265,59 @@ class Transpose(Operator[TransposeOverlay]):
             "chan_tiles": self.M // ov.m // ov.num_channels,
         }
 
-    def design(self, rt):
-        """One task group per batch (a parallel fill+drain over all cores), so the
-        contiguous matrices stream through the same fifos in sequence."""
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Per core, one descriptor per batch over its (M / chans) x (N / cols)
+        block, in m x n tiles. The input is partially transposed on the way
+        in, so the kernel only transposes s x s sub-tiles."""
         ov = self.ov
         M, N, nb = self.M, self.N, self.num_batches
         m, n, cols, chans = ov.m, ov.n, ov.num_aie_columns, ov.num_channels
         elems = M * N
-        for batch in range(nb):
-            with rt.group() as tg:
-                for i in range(cols):
-                    for j in range(chans):
-                        k = i * chans + j
-                        # Partially transposes the input on the way in so the
-                        # kernel only transposes s x s sub-tiles.
-                        tap_in = Access(
+        if buffer is self.x:
+            return Order(
+                ov.x,
+                tuple(
+                    tuple(
+                        Access(
                             self.x.elements,
                             batch * elems + (M // chans) * j * N + (N // cols) * i,
                             (M // chans // m, N // cols // n, m, n),
                             (m * N, n, N, 1),
                         )
-                        rt.fill(ov.x[k], (self.x, tap_in), group=tg)
-                for i in range(cols):
-                    for j in range(chans):
-                        k = i * chans + j
-                        tap_out = Access(
-                            self.y.elements,
-                            batch * elems + (N // cols) * i * M + (M // chans) * j,
-                            (M // chans // m, N // cols // n, n, m),
-                            (m, n * M, M, 1),
-                        )
-                        rt.drain(ov.y[k], (self.y, tap_out), group=tg, wait=True)
+                        for batch in range(nb)
+                    )
+                    for i in range(cols)
+                    for j in range(chans)
+                ),
+            )
+        return Order(
+            ov.y,
+            tuple(
+                tuple(
+                    Access(
+                        self.y.elements,
+                        batch * elems + (N // cols) * i * M + (M // chans) * j,
+                        (M // chans // m, N // cols // n, n, m),
+                        (m, n * M, M, 1),
+                    )
+                    for batch in range(nb)
+                )
+                for i in range(cols)
+                for j in range(chans)
+            ),
+        )
+
+    def design(self, rt):
+        """One task group per batch (a parallel fill+drain over all cores), so the
+        contiguous matrices stream through the same fifos in sequence."""
+        ov = self.ov
+        src, dst = self.order(self.x), self.order(self.y)
+        for batch in range(self.num_batches):
+            with rt.group() as tg:
+                for k in range(len(src.slots)):
+                    rt.fill(ov.x[k], (self.x, src[k][batch]), group=tg)
+                for k in range(len(dst.slots)):
+                    rt.drain(ov.y[k], (self.y, dst[k][batch]), group=tg, wait=True)
 
     def reference(self, x):
         """CPU reference: 2D transpose of each (M, N) matrix stored row-major."""
