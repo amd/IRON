@@ -15,13 +15,15 @@ kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
 an error naming the member, the boundaries or the device.
 
 What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
-with ``each_step`` is the chained per-operator xclbin. A fused sequence
-in an xclbin (and dispatches of several steps on it) has no construction
-proven on a device yet, and is refused rather than built wrong; its
-construction is shelved on the branch ``claude/iron-pr215-step5-extras``.
-An xclbin run has no parameter scratchpad (XRT implements
-``get_ctrl_scratchpad_bo`` only for a full-ELF module), so on that image
-every per-call value is a dispatch-time scalar of its kernel: an offset use
+with ``each_step`` is the chained per-operator xclbin, and an xclbin a
+rule forces (NPU1, a ``DispatchTime`` value) takes ``each_step`` when no
+boundaries are given. A fused sequence in an xclbin (and dispatches of
+several steps on it) has no construction proven on a device yet, and is
+refused rather than built wrong; its construction is shelved on the branch
+``claude/iron-pr215-step5-extras``. An xclbin run has no parameter
+scratchpad (XRT implements ``get_ctrl_scratchpad_bo`` only for a full-ELF
+module), so on that image every per-call value is a dispatch-time scalar
+of its kernel: an offset use
 regenerates the kernel's stream per call, a core-read use is written into
 the array by the sequence.
 """
@@ -80,6 +82,12 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
     if image is not None:
         chosen = image
     reasons = forced or ["one sequence, one configuration set: a full ELF"]
+
+    # A forced xclbin with no boundary choice takes the one xclbin form that
+    # is built; asking for an xclbin outright still names what is missing.
+    if chosen == XCLBIN and boundaries is None and forced:
+        boundaries = each_step
+        reasons = forced + [f"boundaries={each_step}: the xclbin form that is built"]
 
     if chosen == ELF:
         dispatch = "fused"

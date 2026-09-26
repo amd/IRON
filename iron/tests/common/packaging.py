@@ -45,11 +45,21 @@ def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
     assert plan("npu2", t).values[0][2] == "patched through the parameter scratchpad"
 
 
+def test_a_forced_xclbin_defaults_to_each_step():
+    p = plan("npu1", _traced())
+    assert (p.image, p.dispatch) == (XCLBIN, "separate")
+    assert p.reasons == [
+        "npu1 has no full-ELF dispatch",
+        "boundaries=each_step: the xclbin form that is built",
+    ]
+    p = plan("npu2", _traced(Value("n", "dispatch", np.int32)))
+    assert (p.image, p.dispatch) == (XCLBIN, "separate")
+    assert plan("npu1", _traced(), image=XCLBIN).dispatch == "separate"
+
+
 def test_boundaries_force_xclbin_and_the_unbuilt_forms_are_named():
     with pytest.raises(NotImplementedError, match="no proven construction"):
         plan("npu2", _traced(), image=XCLBIN)  # one fused sequence in an xclbin
-    with pytest.raises(NotImplementedError, match="no proven construction"):
-        plan("npu1", _traced())  # the NPU1 default needs a boundary choice today
     p = plan("npu2", _traced(), boundaries=each_step)
     assert (p.image, p.dispatch) == (XCLBIN, "separate")
     assert p.reasons == ["boundaries=each_step: more than one dispatch"]
