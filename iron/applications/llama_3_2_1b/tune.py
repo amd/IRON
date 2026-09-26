@@ -32,8 +32,15 @@ import numpy as np
 
 from iron.common.graph.handle import Handle
 from iron.common.graph.narrowing import CostTable, Runlist, cost_key, variants
-from iron.common.graph.probe import Timing, calibrate, measure_steps, pmode
+from iron.common.graph.probe import (
+    Timing,
+    calibrate,
+    calibrate_each_step,
+    measure_steps,
+    pmode,
+)
 from iron.common.graph.trace import TracedGraph
+from iron.common.image.packaging import EACH_STEP, FUSED, modes
 
 from .graphs import LlamaGraph
 from .harness import SEED, LlamaConfig
@@ -107,7 +114,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    dev = aie_utils.get_current_device()
+    dev = aie_utils.ensure_current_device()
     print(f"power mode: {pmode()}")
     config = LlamaConfig(args.weights_path, args.tokenizer_path)
     graph = LlamaGraph(config, MAX_SEQ_LEN)
@@ -158,20 +165,29 @@ def main() -> None:
     for key in order:
         by_class.setdefault(type(first[key]).__name__, found[key][-1])
     pairs = [(by_class[a], by_class[b]) for a, b in CALIBRATION_PAIRS]
-    wanted = {f"{a.key}|{b.key}" for a, b in pairs}
+    # Every packaging the device runs has boundaries of its own to measure.
+    allowed = modes(dev.resolve().name, traced)
+    measure = {FUSED: calibrate, EACH_STEP: calibrate_each_step}
+    wanted = {
+        CostTable.calibration_key(mode, (a.key, b.key))
+        for mode in allowed
+        for a, b in pairs
+    }
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]
-    for (a, b), (name_a, name_b) in zip(pairs, CALIBRATION_PAIRS):
-        if not args.remeasure and f"{a.key}|{b.key}" in table.calibrations:
-            print(f"calibration {name_a}/{name_b}: in the table")
-            continue
-        cal = calibrate(table, a.op, b.op, timing)
-        table.save()
-        print(
-            f"calibration {name_a}/{name_b}: D0 {cal.dispatch_us:.1f}  "
-            f"R {cal.reset_us:.1f}  base {cal.base_us:.1f}  "
-            f"switch {cal.switch_us:.1f} us"
-        )
+    for mode in allowed:
+        for (a, b), (name_a, name_b) in zip(pairs, CALIBRATION_PAIRS):
+            key = CostTable.calibration_key(mode, (a.key, b.key))
+            if not args.remeasure and key in table.calibrations:
+                print(f"{mode.name} calibration {name_a}/{name_b}: in the table")
+                continue
+            cal = measure[mode](table, a.op, b.op, timing)
+            table.save()
+            print(
+                f"{mode.name} calibration {name_a}/{name_b}: dispatch "
+                f"{cal.dispatch_us:.1f}  R {cal.reset_us:.1f}  base "
+                f"{cal.base_us:.1f}  switch {cal.switch_us:.1f} us"
+            )
     table.save()
 
 

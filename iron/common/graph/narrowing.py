@@ -59,6 +59,7 @@ from ..declare import Operator
 from ..image.coresidence import fits
 from ..image.fusion import format_params, generate_design
 from ..image.jit_compile import design_identity
+from ..image.packaging import FUSED, Mode
 from .trace import TracedGraph
 
 
@@ -66,6 +67,14 @@ def cost_key(op: Operator) -> str:
     """What the cost table keys a design by: its class and its full identity
     (design code, parameters, device), as the fused image names it."""
     return f"{type(op).__name__}_{design_identity(op.generator())}"
+
+
+def unit_key(op: Operator) -> str:
+    """What the tuner treats as one design: a folded operator is its unfolded
+    twin's array with other addresses in its sequence, so the two share one
+    configuration (:meth:`~iron.common.image.coresidence.Packing.sharing`)
+    and one width."""
+    return cost_key(op.unfolded() if op.refolds or op.reorder else op)
 
 
 # -- candidates ------------------------------------------------------------
@@ -111,11 +120,8 @@ def _variant(op: Operator, tuned: Operator) -> Variant:
 
 def with_widths(op: Operator, widths: Mapping[str, int]) -> Operator:
     """``op`` on a copy of its overlay with ``widths`` set, still untuned,
-    carrying the per-call values a graph bound on it."""
-    new = dataclasses.replace(op, ov=dataclasses.replace(op.ov, **widths))
-    for name in op.used_values:
-        new.use_value(name)
-    return new
+    carrying the per-call values a graph bound on it and its folds."""
+    return op.replace(ov=dataclasses.replace(op.ov, **widths))
 
 
 def variants(op: Operator, dev) -> list[Variant]:
@@ -135,6 +141,14 @@ def variants(op: Operator, dev) -> list[Variant]:
             continue
         out.append(_variant(candidate, tuned))
     return out
+
+
+def _tunes(op: Operator, dev) -> bool:
+    try:
+        op.tuned(dev)
+    except ValueError:  # Untunable or Incompatible at this width
+        return False
+    return True
 
 
 def shim_budget(dev) -> tuple[int, int]:
@@ -178,10 +192,17 @@ class StepCost:
 
 @dataclasses.dataclass(frozen=True)
 class Calibration:
-    """A configure's cost split, measured on one pair of designs: the
-    dispatch ``D0``, the empty reset configure ``R``, the part of a
-    configure no design accounts for (``base``), and the pair's mean
-    configure (``switch``)."""
+    """What one packaging mode's boundaries cost, measured on one pair of
+    designs.
+
+    ``mode`` is the :class:`~iron.common.image.packaging.Mode` name. Under
+    ``elf`` (one dispatch): the dispatch ``D0``, the empty reset configure
+    ``R``, the part of a configure no design accounts for (``base``), and
+    the pair's mean configure (``switch``). Under ``each_step`` (a dispatch
+    per step): what a step's dispatch adds to its time (``dispatch``), and
+    what running another design than the step before adds (``base`` and
+    ``switch`` alike; there is no reset).
+    """
 
     dispatch_us: float
     reset_us: float
@@ -191,6 +212,16 @@ class Calibration:
     rounds: int
     calls: int
     measured: str
+    mode: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Boundary:
+    """One mode's calibrated boundary costs, the medians over its pairs."""
+
+    dispatch_us: float
+    reset_us: float
+    base_us: float
 
 
 class CostTable:
@@ -207,7 +238,6 @@ class CostTable:
         self.path = Path(path)
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
-        self._medians: dict[str, float] | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
             self.steps = {k: StepCost(**v) for k, v in data["steps"].items()}
@@ -228,32 +258,27 @@ class CostTable:
     def record_step(self, key: str, cost: StepCost) -> None:
         self.steps[key] = cost
 
+    @staticmethod
+    def calibration_key(mode: Mode, pair: tuple[str, str]) -> str:
+        return f"{mode.name}:" + "|".join(pair)
+
     def record_calibration(self, pair: tuple[str, str], cal: Calibration) -> None:
-        self.calibrations["|".join(pair)] = cal
-        self._medians = None
+        self.calibrations[f"{cal.mode}:" + "|".join(pair)] = cal
 
-    def _calibrated(self, figure: str) -> float:
-        if self._medians is None:
-            if not self.calibrations:
-                raise ValueError(f"{self.path}: no configure calibration measured")
-            rows = [dataclasses.asdict(c) for c in self.calibrations.values()]
-            self._medians = {
-                name: statistics.median(row[name] for row in rows)
+    def calibrated(self, mode: Mode) -> bool:
+        return any(c.mode == mode.name for c in self.calibrations.values())
+
+    def boundary(self, mode: Mode = FUSED) -> Boundary:
+        """``mode``'s boundary costs: the median of each figure over its pairs."""
+        rows = [c for c in self.calibrations.values() if c.mode == mode.name]
+        if not rows:
+            raise ValueError(f"{self.path}: no {mode.name} calibration measured")
+        return Boundary(
+            *(
+                statistics.median(getattr(c, name) for c in rows)
                 for name in ("dispatch_us", "reset_us", "base_us")
-            }
-        return self._medians[figure]
-
-    @property
-    def dispatch_us(self) -> float:
-        return self._calibrated("dispatch_us")
-
-    @property
-    def reset_us(self) -> float:
-        return self._calibrated("reset_us")
-
-    @property
-    def base_us(self) -> float:
-        return self._calibrated("base_us")
+            )
+        )
 
     def t_step(self, key: str) -> float:
         """A measured design's step time; zero for one not measured."""
@@ -261,12 +286,22 @@ class CostTable:
         return 0.0 if cost is None else cost.t_step_us
 
     def load(self, key: str) -> float:
-        """What configuring a measured design adds to a configure; zero for
-        one not measured."""
+        """What configuring a measured design adds to a configure (its full-ELF
+        run alone less the calibrated rest); zero for one not measured."""
         cost = self.steps.get(key)
         if cost is None:
             return 0.0
-        return cost.alone_us - self.dispatch_us - self.reset_us - self.base_us
+        b = self.boundary(FUSED)
+        return cost.alone_us - b.dispatch_us - b.reset_us - b.base_us
+
+    def with_steps(self, extra: Mapping[str, StepCost]) -> "CostTable":
+        """A copy in memory holding ``extra`` besides this table's steps: the
+        estimates a tuner prices a design it has not measured at."""
+        new = CostTable.__new__(CostTable)
+        new.path = self.path
+        new.steps = {**self.steps, **extra}
+        new.calibrations = dict(self.calibrations)
+        return new
 
     @staticmethod
     def today() -> str:
@@ -315,16 +350,36 @@ def model_us(
     keys: Sequence[str],
     groups: Sequence[Sequence[str]] = (),
     chosen: Mapping[str, str] | None = None,
+    mode: Mode = FUSED,
 ) -> tuple[float, int]:
-    """The model's time for a runlist of design keys, and its configures
-    (the reset included): ``chosen`` maps a design to the key of the width
-    it runs at, ``groups`` lists the designs sharing a device."""
+    """The model's time for a runlist of design keys packaged in ``mode``,
+    and its boundaries: ``chosen`` maps a design to the key of the width it
+    runs at, ``groups`` lists the designs sharing a device.
+
+    Fused (one dispatch): ``D0``, each step's time, a configure (``base``
+    plus the members' loads) per device entered, and the reset when the
+    configures are odd; the count is the configures. Separate (a dispatch
+    per step): each step's time and dispatch, and ``base`` whenever a step
+    runs another design than the one before; the count is the dispatches.
+    """
     chosen = chosen or {}
+    b = table.boundary(mode)
+    if not mode.packs:
+        if groups:
+            raise ValueError(f"{mode.name} dispatches every step alone: no packs")
+        total = 0.0
+        previous = None
+        for k in keys:
+            total += table.t_step(chosen.get(k, k)) + b.dispatch_us
+            if k != previous:
+                total += b.base_us
+                previous = k
+        return total, len(keys)
     device = {k: i for i, group in enumerate(groups) for k in group}
     members: dict[object, list[str]] = {}
     for k in dict.fromkeys(keys):
         members.setdefault(device.get(k, k), []).append(k)
-    total = table.dispatch_us
+    total = b.dispatch_us
     entries = 0
     previous = None
     for k in keys:
@@ -333,12 +388,12 @@ def model_us(
         here = device.get(k, k)
         if here != previous:
             entries += 1
-            total += table.base_us + sum(
+            total += b.base_us + sum(
                 table.load(chosen.get(m, m)) for m in members[here]
             )
             previous = here
     if entries % 2:
-        total += table.reset_us
+        total += b.reset_us
         entries += 1
     return total, entries
 
@@ -371,7 +426,7 @@ class Tuning:
             op = step.op
             if id(op) in keys:
                 continue
-            keys[id(op)] = key = cost_key(op)
+            keys[id(op)] = key = unit_key(op)
             variant = self.chosen.get(key)
             if variant is not None and variant.key != key:
                 replace[id(op)] = with_widths(op, dict(variant.widths))
@@ -484,14 +539,17 @@ class JointNarrowing:
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
         table = self.table
-        keys = [cost_key(s.op) for s in traced.steps]
+        keys = [unit_key(s.op) for s in traced.steps]
         runlist = Runlist(keys)
-        first: dict[str, Operator] = {}
+        members: dict[str, list[Operator]] = {}
         for key, step in zip(keys, traced.steps):
-            first.setdefault(key, step.op)
-        candidates = [self._candidates(first[k], dev) for k in runlist.order]
+            ops = members.setdefault(key, [])
+            if all(o is not step.op for o in ops):
+                ops.append(step.op)
+        candidates = [self._candidates(members[k], dev) for k in runlist.order]
         measured = [k in table.steps for k in runlist.order]
         budget = shim_budget(dev)
+        boundary = table.boundary(FUSED)
 
         def member_cost(i: int, v: Variant, entries: int) -> float:
             return entries * table.load(v.key) + runlist.occurrences[
@@ -503,7 +561,7 @@ class JointNarrowing:
         for i, key in enumerate(runlist.order):
             e = runlist.entries(frozenset([key]))
             best = min(candidates[i], key=lambda v: member_cost(i, v, e))
-            alone.append((e * table.base_us + member_cost(i, best, e), best, e))
+            alone.append((e * boundary.base_us + member_cost(i, best, e), best, e))
 
         packs: list[_Pack] = []
         for members in self._connected(runlist, measured, candidates, budget):
@@ -516,14 +574,14 @@ class JointNarrowing:
                 for i in members
             ]
             options = [
-                (entries * table.base_us + c, pick)
+                (entries * boundary.base_us + c, pick)
                 for c, pick in _cheapest(ranked, budget, self.fit_attempts)
             ]
             if not options:
                 continue
             pack = _Pack(members, entries, options)
             # The parity can move the total by one reset either way.
-            if self._gain(pack, alone) + table.reset_us > 0:
+            if self._gain(pack, alone) + boundary.reset_us > 0:
                 packs.append(pack)
 
         fitted: dict[tuple[str, ...], bool] = {}
@@ -535,7 +593,7 @@ class JointNarrowing:
             for p in refused:
                 while p.options and not self._fit(p.combo, fitted):
                     p.options.pop(0)
-                if not p.options or self._gain(p, alone) + table.reset_us <= 0:
+                if not p.options or self._gain(p, alone) + boundary.reset_us <= 0:
                     packs.remove(p)
 
         chosen: dict[str, Variant] = {
@@ -566,17 +624,20 @@ class JointNarrowing:
         """What ``pack`` saves over its members each alone, bar the parity."""
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
-    def _candidates(self, op: Operator, dev) -> list[Variant]:
-        """The widths the table allows: the default, first, and every
-        narrower one measured exact."""
-        found = variants(op, dev)
+    def _candidates(self, ops: Sequence[Operator], dev) -> list[Variant]:
+        """The widths the table allows for one design's operators: the
+        default, first, and every narrower one measured exact at which every
+        operator still tunes (a folded one's orders compose at it)."""
+        found = variants(ops[0], dev)
         default = found[0]
         if default.key not in self.table.steps:
             return [default]
         return [default] + [
             v
             for v in found[1:]
-            if v.key in self.table.steps and self.table.steps[v.key].exact
+            if v.key in self.table.steps
+            and self.table.steps[v.key].exact
+            and all(_tunes(with_widths(o, dict(v.widths)), dev) for o in ops[1:])
         ]
 
     @staticmethod
@@ -634,7 +695,7 @@ class JointNarrowing:
         """The cheapest partition into ``packs`` and single designs, exact,
         with the reset charged when the entries are odd."""
         n = len(runlist.order)
-        reset = self.table.reset_us
+        reset = self.table.boundary(FUSED).reset_us
         by_lowest: dict[int, list[_Pack]] = {}
         for p in packs:
             by_lowest.setdefault(min(p.members), []).append(p)

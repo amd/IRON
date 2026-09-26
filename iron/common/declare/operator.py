@@ -199,8 +199,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         new._bind()
         return new
 
-    def _own(self) -> "Operator":
-        """This operator without its folds: what its own ``order()`` describes."""
+    def unfolded(self) -> "Operator":
+        """This operator without its folds: what its own ``order()``
+        describes, and the array it runs (a fold moves addresses only)."""
         own = self.__dict__.get("_own_op")
         if own is None:
             own = dataclasses.replace(self)
@@ -219,7 +220,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         cache = self.__dict__.setdefault("_issued", {})
         if buffer.name in cache:
             return cache[buffer.name]
-        own = self._own()
+        own = self.unfolded()
         own_buffer = own._bound[buffer.name]
         order = own.order(own_buffer)
         keep = self.has_design_override() or self.ov.has_sequence()

@@ -35,6 +35,57 @@ XCLBIN = "xclbin"
 
 each_step = "each_step"
 
+# Whether a device runs a full ELF. npu1's answer is inferred from the
+# driver (the PREEMPT_ELF path needs AIE2_PREEMPT, which npu1_regs.c lacks),
+# not yet run on a Phoenix: phoenix-audit's check is the proof.
+FULL_ELF = {"npu1": False, "npu2": True}
+
+
+@dataclasses.dataclass(frozen=True)
+class Mode:
+    """One way to package a runlist: its image, and how its steps dispatch.
+
+    Each mode has its own boundary costs, measured per device (a
+    :class:`~iron.common.graph.narrowing.Calibration` of this ``name``):
+    under ``fused`` the whole runlist is one dispatch and a boundary is a
+    configure; under ``separate`` every step is a dispatch of its own.
+    """
+
+    image: str
+    dispatch: str
+
+    @property
+    def name(self) -> str:
+        return {ELF: "elf", XCLBIN: each_step}[self.image]
+
+    @property
+    def packs(self) -> bool:
+        """Whether designs may share a device configuration (co-residence):
+        only inside one dispatch."""
+        return self.dispatch == "fused"
+
+    @property
+    def boundaries(self) -> str | None:
+        """What ``compile(boundaries=)`` takes for this mode."""
+        return None if self.dispatch == "fused" else each_step
+
+
+FUSED = Mode(ELF, "fused")
+EACH_STEP = Mode(XCLBIN, "separate")
+
+
+def modes(device_name: str, traced) -> list[Mode]:
+    """The modes ``traced`` can be packaged in on the device, by the rules
+    :func:`plan` applies."""
+    out = []
+    for mode in (FUSED, EACH_STEP):
+        try:
+            plan(device_name, traced, mode.boundaries, mode.image)
+        except (ValueError, NotImplementedError):
+            continue
+        out.append(mode)
+    return out
+
 
 @dataclasses.dataclass
 class Plan:
@@ -67,8 +118,8 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    if device_name == "npu1":
-        forced.append("npu1 has no full-ELF dispatch")
+    if not FULL_ELF.get(device_name, False):
+        forced.append(f"{device_name} has no full-ELF dispatch")
     if boundaries is not None:
         forced.append(f"boundaries={boundaries}: more than one dispatch")
 

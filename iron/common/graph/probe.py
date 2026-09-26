@@ -41,6 +41,7 @@ from ..declare import BoundBuffer, BoundValue, Operator
 from ..design import device_symbol
 from ..image.callable import SequenceCallable
 from ..image.sequence import OperatorSequence
+from ..image.packaging import EACH_STEP, FUSED, Mode
 from .narrowing import Calibration, CostTable, StepCost, Variant, cost_key
 
 
@@ -93,7 +94,8 @@ class Standalone:
     means, so a design that takes one is measured at what its caller gives.
     ``inputs`` does the same for input buffers, by buffer name: random bytes
     are no representative content for a buffer whose values steer the work,
-    such as a draw row's temperature and top-k."""
+    such as a draw row's temperature and top-k. ``mode`` is how the
+    runlist is packaged (:mod:`iron.common.image.packaging`)."""
 
     def __init__(
         self,
@@ -104,6 +106,7 @@ class Standalone:
         seed: int = 0,
         distinct: bool = True,
         inputs: Mapping[str, np.ndarray] | None = None,
+        mode: Mode = FUSED,
     ):
         self.steps = list(runlist)
         firsts = {}
@@ -124,7 +127,7 @@ class Standalone:
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             in_names,
             out_names,
-            dispatch="fused",
+            dispatch=mode.dispatch,
             share_designs=True,
             coresident=coresident,
         ).compile()
@@ -290,6 +293,58 @@ def calibrate(
         rounds=timing.rounds,
         calls=timing.calls,
         measured=CostTable.today(),
+        mode=FUSED.name,
+    )
+    table.record_calibration((ka, kb), cal)
+    return cal
+
+
+def calibrate_each_step(
+    table: CostTable,
+    a: Operator,
+    b: Operator,
+    timing: Timing = Timing(),
+    pairs: int = 4,
+    repeats: int = 9,
+    values: Mapping[str, int] | None = None,
+) -> Calibration:
+    """The boundary costs of dispatching every step alone, for two measured
+    designs ``a`` and ``b``, recorded in ``table`` as an ``each_step``
+    calibration.
+
+    ``a`` once against ``a`` ``repeats`` times gives what a step's dispatch
+    adds to its full-ELF ``t_step``; ``A B A B ...`` against ``A A ... B B
+    ...`` (the same steps, 2p design changes against 2) gives what a change
+    of design between two dispatches adds.
+    """
+    ka, kb = cost_key(a), cost_key(b)
+    ta = table.steps[ka].t_step_us
+    tag = f"{ka}_{kb}"
+    runs = [
+        Standalone(f"es1_{tag}", [a], values=values, mode=EACH_STEP),
+        Standalone(f"es{repeats}_{tag}", [a] * repeats, values=values, mode=EACH_STEP),
+        Standalone(
+            f"es_alt{pairs}_{tag}", [a, b] * pairs, values=values, mode=EACH_STEP
+        ),
+        Standalone(
+            f"es_grp{pairs}_{tag}",
+            [a] * pairs + [b] * pairs,
+            values=values,
+            mode=EACH_STEP,
+        ),
+    ]
+    one, many, alt, grp = time_interleaved([r.callable for r in runs], timing)
+    switch = (alt - grp) / (2 * pairs - 2)
+    cal = Calibration(
+        dispatch_us=(many - one) / (repeats - 1) - ta,
+        reset_us=0.0,
+        base_us=switch,
+        switch_us=switch,
+        pmode=pmode(),
+        rounds=timing.rounds,
+        calls=timing.calls,
+        measured=CostTable.today(),
+        mode=EACH_STEP.name,
     )
     table.record_calibration((ka, kb), cal)
     return cal

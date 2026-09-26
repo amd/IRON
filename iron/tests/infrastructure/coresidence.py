@@ -25,13 +25,14 @@ import numpy as np
 import pytest
 
 import aie.utils as aie_utils
+from aie import ir
 from aie.dialects import aie as aie_dialect
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile, from_name
 
 import iron
 from iron.common.image import OperatorSequence, build_fused_mlir, coresidence, fusion
-from iron.common.image.coresidence import AdjacentPacking, Packing, fits
+from iron.common.image.coresidence import AdjacentPacking, Packing, fits, merge_devices
 from iron.common.image.fused import fused_plan
 from iron.common.image.jit_compile import _GENERATOR_TREES
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
@@ -39,25 +40,31 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 SIZE = 8192
 TILE = 256
 
-# Two cores pinned to one tile: a conflict no placer can resolve, which the
-# merge itself must refuse before placement is asked.
-_PINNED = """
-aie.device(npu2) {
+
+def _pinned(words: int) -> str:
+    """A design with a core pinned to tile (0, 2) and a buffer of ``words``
+    beside it. Two of different sizes are two arrays wanting one core: a
+    conflict no placer can resolve, which the merge itself must refuse
+    before placement is asked."""
+    return f"""
+aie.device(npu2) {{
   %t = aie.tile(0, 2)
-  %c = aie.core(%t) {
+  %b = aie.buffer(%t) : memref<{words}xi32>
+  %c = aie.core(%t) {{
     aie.end
-  }
-  aie.runtime_sequence @sequence() {
-  }
-}
+  }}
+  aie.runtime_sequence @sequence() {{
+  }}
+}}
 """
 
 
-def _shim_pinned(col: int, channel: int) -> str:
+def _shim_pinned(col: int, channel: int, words: int = 256) -> str:
     """A pass-through design whose input enters on shim ``(col, 0)``, MM2S
-    ``channel``: the device text, as a generator would hand it to the merge."""
+    ``channel``, in lines of ``words``: the device text, as a generator
+    would hand it to the merge."""
     vec = np.ndarray[(1024,), np.dtype[np.int32]]
-    line = np.ndarray[(256,), np.dtype[np.int32]]
+    line = np.ndarray[(words,), np.dtype[np.int32]]
     of_in = ObjectFifo(line, name="in")
     of_out = of_in.cons().forward()
 
@@ -159,8 +166,30 @@ def test_policy_declines_what_does_not_fit():
 
 
 def test_merge_refuses_two_cores_on_one_tile():
-    reason = fits({"x": _PINNED, "y": _PINNED})
+    reason = fits({"x": _pinned(16), "y": _pinned(32)})
     assert reason is not None and "aie.core" in reason and "(0, 2)" in reason
+
+
+def test_identical_arrays_share_one():
+    # Two designs whose arrays are the same text (a folded design and its
+    # twin; two extents on one overlay) configure one array: the pack keeps
+    # it once and both sequences, which fits wherever one design does.
+    assert fits({"x": _pinned(16), "y": _pinned(16)}) is None
+    shim = _shim_pinned(0, 1)
+    assert fits({"x": shim, "y": shim}) is None
+    with ir.Context(), ir.Location.unknown():
+        named = [
+            _pinned(16).replace("aie.device(npu2)", f"aie.device(npu2) @{n}")
+            for n in "xy"
+        ]
+        module = ir.Module.parse("module {\n" + "\n".join(named) + "\n}")
+        devices = [
+            op for op in module.body.operations if isinstance(op, aie_dialect.DeviceOp)
+        ]
+        pack = merge_devices("pack", dict(zip("xy", devices)))
+        text = str(pack)
+    assert text.count("aie.core(") == 1 and text.count("aie.buffer(") == 1
+    assert "aie.runtime_sequence @x" in text and "aie.runtime_sequence @y" in text
 
 
 def test_packing_rejects_a_design_in_two_groups():
@@ -192,7 +221,7 @@ def test_two_pins_on_one_shim_channel_do_not_fit():
     # Both members' logical shim tiles pinned to (0, 0), MM2S channel 1: the
     # fifo lowering must refuse the second, not the merge (neither pins a
     # physical aie.tile, so the merge sees nothing to share).
-    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1)})
+    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1, words=128)})
     assert reason is not None and "already in use" in reason
 
 

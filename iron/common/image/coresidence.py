@@ -126,6 +126,29 @@ class Packing:
         digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
         return f"pack{len(group)}_{digest}"
 
+    def sharing(self, arrays: Mapping[str, str]) -> "Packing":
+        """This packing with designs whose arrays are identical (``arrays``:
+        design -> its array text, :func:`array_text`) in one device: such a
+        pack configures one array and runs either design's sequence on it,
+        so it costs nothing and always fits. A set split over two packs
+        already is left as it is."""
+        groups = [list(g) for g in self.groups]
+        same: dict[str, list[str]] = {}
+        for design, text in arrays.items():
+            same.setdefault(text, []).append(design)
+        for designs in same.values():
+            if len(designs) < 2:
+                continue
+            homes = {i for i, g in enumerate(groups) for d in designs if d in g}
+            if len(homes) > 1:
+                continue
+            if homes:
+                home = groups[homes.pop()]
+                home.extend(d for d in designs if d not in home)
+            else:
+                groups.append(list(designs))
+        return Packing(tuple(tuple(g) for g in groups))
+
 
 def _symbol(op: ir.OpView) -> str | None:
     attrs = op.operation.attributes
@@ -145,6 +168,15 @@ def _body(device: aie.DeviceOp) -> list[ir.OpView]:
         for op in device.body_region.blocks[0].operations
         if not isinstance(op, aie.EndOp)
     ]
+
+
+def array_text(device: aie.DeviceOp) -> str:
+    """The device less its runtime sequence: what configuring it sets up.
+    Two designs with the same text differ only in what their sequences
+    move, so they can share one configuration."""
+    return "\n".join(
+        str(op) for op in _body(device) if not isinstance(op, aie.RuntimeSequenceOp)
+    )
 
 
 def _pinned_tile(op: ir.OpView) -> tuple[int, int] | None:
@@ -173,11 +205,26 @@ def _namespace(device: aie.DeviceOp, member: str) -> None:
         op.operation.attributes["sym_name"] = ir.StringAttr.get(new)
 
 
+def _ride(device: aie.DeviceOp, member: str, owner: str) -> None:
+    """Rename ``device``'s sequence to ``member`` and point it at ``owner``'s
+    namespaced symbols: its array is ``owner``'s, which the pack keeps."""
+    for op in _body(device):
+        old = _symbol(op)
+        if old is None or _is_kernel_declaration(op):
+            continue
+        is_sequence = isinstance(op, aie.RuntimeSequenceOp)
+        new = member if is_sequence else f"{owner}__{old}"
+        ir.SymbolTable.replace_all_symbol_uses(old, new, device.operation)
+        op.operation.attributes["sym_name"] = ir.StringAttr.get(new)
+
+
 def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceOp:
     """Merge ``members`` (design name -> its device op) into one device op.
 
     The first member's op becomes the pack, renamed ``name``; the others are
-    emptied into it and erased. Every member must be in the same module.
+    emptied into it and erased. Every member must be in the same module. A
+    member whose array (:func:`array_text`) an earlier one already brought
+    brings only its sequence, which runs on that array.
     """
     if len(members) < 2:
         raise ValueError(f"a pack needs two or more designs, got {list(members)}")
@@ -188,8 +235,28 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
             f"{list(members)} are built for different devices ({sorted(kinds)})"
         )
 
+    array_owner: dict[str, str] = {}
+    first: dict[str, str] = {}
     for member, device in members.items():
-        _namespace(device, member)
+        array_owner[member] = first.setdefault(array_text(device), member)
+    for member, device in members.items():
+        owner = array_owner[member]
+        if owner == member:
+            continue
+        # The rider's sequence names the array's tiles by value: point it at
+        # the owner's, op for op (the texts are the same, so the ops align).
+        arrays = [
+            [op for op in _body(d) if not isinstance(op, aie.RuntimeSequenceOp)]
+            for d in (device, members[owner])
+        ]
+        for mine, theirs in zip(*arrays):
+            for a, b in zip(mine.operation.results, theirs.operation.results):
+                a.replace_all_uses_with(b)
+    for member, device in members.items():
+        if array_owner[member] == member:
+            _namespace(device, member)
+        else:
+            _ride(device, member, array_owner[member])
 
     pack = devices[0]
     end = pack.body_region.blocks[0].operations[
@@ -200,6 +267,12 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
     exclusive: dict[tuple[str, tuple[int, int]], str] = {}
 
     for member, device in members.items():
+        if array_owner[member] != member:
+            for op in _body(device):
+                if isinstance(op, aie.RuntimeSequenceOp):
+                    op.operation.move_before(end)
+            device.operation.erase()
+            continue
         for op in _body(device):
             symbol = _symbol(op)
             if _is_kernel_declaration(op):
