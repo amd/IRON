@@ -26,9 +26,17 @@ from aie.utils import bfp
 from ..declare import ValueSpec
 from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
-from ..image.callable import ScratchArena
-from ..image.packaging import Plan, plan
+from ..image.callable import FullELFRun, ScratchArena
+from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
+from .carried import (
+    CARRY,
+    EmitSite,
+    Parameter,
+    attach_emit,
+    compose,
+    read_parameters,
+)
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
@@ -120,6 +128,11 @@ class GraphFunction:
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 raise TypeError(f"{fn.__name__}: *args/**kwargs are not traceable")
         self.carried = [n for n, spec in self.value_params.items() if spec.carried]
+        # The values a call started from and the elements it computed, which
+        # every full-ELF version's Emit reads (see :mod:`.carried`).
+        self._carry = (
+            State((2, len(self.carried)), np.int32, CARRY) if self.carried else None
+        )
         self._versions: dict[Signature, CompiledGraph] = {}
         self._arena = ScratchArena(ArenaPlan(ALIGNMENT))
 
@@ -253,6 +266,7 @@ class GraphFunction:
         image=None,
         verbose=False,
         record="memory",
+        feeds: CompiledGraph | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -266,6 +280,11 @@ class GraphFunction:
         states of every other version. Compile every version before the
         first call where you can: a version placed after the arena's buffer
         exists grows it, which copies it once.
+
+        A full-ELF version with carried values ends in an Emit step, which
+        writes the scratchpad of the version it ``feeds`` -- by default
+        itself -- so that one can run without the host
+        (:class:`~iron.common.graph.carried.CarriedLoop`).
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
@@ -288,8 +307,31 @@ class GraphFunction:
                 f"scratch arena, which only a full ELF addresses; this version "
                 f"dispatches {chosen.dispatch!r}"
             )
+        emit = None
+        if chosen.image == ELF and traced.carry:
+            if feeds is None:
+                slots = len({b.symbol for b in traced.bindings})
+            elif feeds.emit is None or not any(
+                feeds is v for v in self._versions.values()
+            ):
+                raise ValueError(
+                    f"{self.__name__}: feeds= takes a full-ELF version of this "
+                    f"function, got {feeds!r}"
+                )
+            else:
+                slots = len(feeds.parameters)
+            emit = attach_emit(traced, self.carried, self._carry, slots)
+        elif feeds is not None:
+            raise ValueError(
+                f"{self.__name__}: only a full-ELF version with carried values "
+                f"feeds another"
+            )
         version = CompiledGraph(
-            traced, chosen, record=record, arena=self._arena if shared else None
+            traced,
+            chosen,
+            record=record,
+            arena=self._arena if shared else None,
+            emit=emit,
         )
         self._versions[signature] = version
         return version
@@ -351,10 +393,14 @@ class CompiledGraph:
         plan: Plan,
         record="memory",
         arena: ScratchArena | None = None,
+        emit: EmitSite | None = None,
     ):
         self.traced = traced
         self.plan = plan
         self.arena = arena
+        # Where the Emit step ending a full ELF with carried values reads
+        # and writes; None without one.
+        self.emit = emit
         # (expression, device symbol) per binding: what is written where.
         self.symbols = [(b.expression, b.symbol) for b in traced.bindings]
         # Equal design keys are one build (two projections on one array).
@@ -383,35 +429,51 @@ class CompiledGraph:
         return self._callable
 
     @property
+    def parameters(self) -> list[Parameter]:
+        """The per-call values a full ELF's scratchpad holds, as its
+        ``params.txt`` lays them out; none on another image."""
+        path = self.artifacts.params
+        return [] if path is None else read_parameters(path)
+
+    @property
     def is_loaded(self) -> bool:
         """Whether the image is on the device, so a call pays no setup."""
         return self._callable is not None
 
     # -- buffers ---------------------------------------------------------------
 
+    def _buffer_name(self, x) -> str:
+        if isinstance(x, State):
+            return self.traced.states[id(x)][1].name
+        if isinstance(x, Handle):
+            return x.buffer_name
+        if id(x) in self.traced.weights:
+            return self.traced.weights[id(x)][1].name
+        raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
+
     def buffer(self, x):
         """The device buffer of a state, a weight tensor, or a handle."""
-        if isinstance(x, State):
-            name = self.traced.states[id(x)][1].name
-        elif isinstance(x, Handle):
-            name = x.buffer_name
-        elif id(x) in self.traced.weights:
-            name = self.traced.weights[id(x)][1].name
-        else:
-            raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
-        return self.callable.get_buffer(name)
+        return self.callable.get_buffer(self._buffer_name(x))
+
+    def _storage(self, x):
+        """A host-synchronizable flat view that starts with ``x``'s buffer
+        (a slice's own, which is aligned, else the whole of its lines)."""
+        name = self._buffer_name(x)
+        if isinstance(x, Handle) and x.parent is not None:
+            return self.callable.get_buffer(name)
+        return self.callable.get_storage(name)
 
     def write(self, x, tensor) -> None:
         """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
-        buf = self.buffer(x)
-        _store(buf.numpy_view(), tensor)
+        buf = self._storage(x)
+        _store(buf.numpy_view()[: int(np.prod(x.shape))], tensor)
         buf.to("npu")
 
     def read(self, x):
         """A state's or weight's current contents, as a host tensor of its shape."""
-        buf = self.buffer(x)
+        buf = self._storage(x)
         buf.to("cpu")
-        return buf.numpy().reshape(tuple(x.shape))
+        return buf.numpy()[: int(np.prod(x.shape))].reshape(tuple(x.shape))
 
     def _copy_in(
         self,
@@ -461,6 +523,34 @@ class CompiledGraph:
     # -- calling ---------------------------------------------------------------
 
     def __call__(self, *tensors, **values):
+        self._stage(tensors, values)
+        self.callable()
+        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
+        if not self.traced.carry:
+            return _results(outputs, None)
+        return _results(outputs, self._next_values(values))
+
+    def start(self, run: FullELFRun, /, *tensors, **values) -> None:
+        """Start a call of this full ELF on ``run`` (one of its callable's
+        :meth:`~iron.common.image.callable.SequenceFullELFCallable.new_run`),
+        without waiting for it."""
+        self._stage(tensors, values, run)
+        self.callable.start(run)
+
+    def emit_to(self, target: CompiledGraph) -> None:
+        """Program this version's Emit to start a call of ``target``: its
+        scratchpad words, and the carried values it starts from."""
+        if self.emit is None:
+            raise ValueError(f"{self.traced.name}: this version has no Emit step")
+        program = compose(
+            self.emit, self.traced.carry, target.symbols, target.parameters
+        )
+        self.write(self.emit.program, program)
+
+    def _stage(self, tensors, values, run: FullELFRun | None = None) -> None:
+        """Everything a call writes before it is dispatched: the weights not
+        yet uploaded, the inputs, and the per-call values, into ``run``'s
+        scratchpad (the callable's own by default)."""
         if len(tensors) != len(self.traced.inputs):
             raise TypeError(
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
@@ -475,27 +565,26 @@ class CompiledGraph:
                     f"new compile"
                 )
             self._copy_in(handle.name, tensor)
-        self._write_values(values)
-        self.callable()
-        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
-        if not self.traced.carry:
-            return _results(outputs, None)
-        return _results(outputs, self._next_values(values))
+        self._write_values(values, run)
 
     def _next_values(self, values) -> Carry:
         """The carried values' next values, after a call with ``values``: an
         expression evaluated here, a computed element read back."""
         nxt = {}
+        planes = None if self.emit is None else self.read(self.emit.carry)
         for name, expression in self.traced.carry.items():
             if isinstance(expression, Affine):
                 nxt[name] = expression.evaluate(values)
+            elif planes is not None:
+                # Computed into the carry's second plane (see .carried).
+                nxt[name] = int(planes[1, self.emit.carried.index(name)])
             else:
                 buf = self.callable.get_buffer(expression.name)
                 buf.to("cpu")
                 nxt[name] = int(buf.numpy().reshape(-1)[0])
         return Carry(**nxt)
 
-    def _write_values(self, values) -> None:
+    def _write_values(self, values, run: FullELFRun | None = None) -> None:
         expected = {v.name for v in self.traced.values}
         missing, unknown = expected - set(values), set(values) - expected
         if missing or unknown:
@@ -503,14 +592,18 @@ class CompiledGraph:
                 f"{self.traced.name}: per-call values {sorted(missing)} missing"
                 + (f"; {sorted(unknown)} unknown" if unknown else "")
             )
+        if self.emit is not None:
+            # The values this call starts from, for its Emit.
+            n = len(self.emit.carried)
+            head = self._storage(self.emit.carry).numpy_view()
+            head[:n] = [values[name] for name in self.emit.carried]
         if not self.symbols:
             return
-        self.callable.write_values(
-            {
-                symbol: np.dtype(expression.dtype).type(expression.evaluate(values))
-                for expression, symbol in self.symbols
-            }
-        )
+        words = {
+            symbol: np.dtype(expression.dtype).type(expression.evaluate(values))
+            for expression, symbol in self.symbols
+        }
+        (self.callable if run is None else run).write_values(words)
 
 
 def _rename(tracer: Tracer, handle: Handle, name: str) -> None:

@@ -35,6 +35,7 @@ the image (a fused ELF on NPU2, per-step xclbins on NPU1) and returns a
 tensors compiles for their shapes, says so once, and dispatches.
 """
 
+from .carried import CarriedLoop
 from .compiled import CompiledGraph, GraphFunction, graph
 from .handle import Affine, Carry, Handle, State, Value, carry, is_operand, state
 from .trace import TracedGraph, TracedStep, Tracer, current, handle_of
@@ -42,6 +43,7 @@ from .trace import TracedGraph, TracedStep, Tracer, current, handle_of
 __all__ = [
     "Affine",
     "Carry",
+    "CarriedLoop",
     "CompiledGraph",
     "GraphFunction",
     "Handle",

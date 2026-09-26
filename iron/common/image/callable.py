@@ -22,7 +22,7 @@ from aie.utils.verify import Tolerance, compare
 
 from ..declare import Operator
 
-from .allocator import ArenaPlan
+from .allocator import ALIGNMENT, ArenaPlan, align_up
 from .jit_compile import DispatchStream
 
 try:
@@ -129,6 +129,7 @@ class SequenceCallable:
         self.op = seq
         self.last_elapsed = 0.0
         self._buffer_cache = {}
+        self._storage_cache = {}
         self._allocate_buffers()
 
     def _make_buffer(self, n_elements, dtype):
@@ -158,6 +159,11 @@ class SequenceCallable:
         if buffer_name not in self._buffer_cache:
             self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
         return self._buffer_cache[buffer_name]
+
+    def get_storage(self, buffer_name):
+        """A flat view the host can synchronize that starts with the buffer:
+        here each buffer is a tensor of its own, so the buffer itself."""
+        return self.get_buffer(buffer_name)
 
     def _iter_steps(self):
         """Yield ``(op, in_names, in_buffers, out_name, out_buffer)`` per runlist step."""
@@ -448,6 +454,27 @@ class SequenceFullELFCallable(SequenceCallable):
         self._buffer_cache[buffer_name] = sub
         return sub
 
+    def get_storage(self, buffer_name):
+        """The buffer, and the rest of its last coherence line, as a flat view.
+
+        An exact view of a buffer that does not end on a line cannot be
+        synchronized (:meth:`XRTTensor.subview`). Every buffer starts at a
+        multiple of ``ALIGNMENT``, though, so the rest of its last line is
+        padding no other buffer holds, and a view may take it along.
+        """
+        self._follow_arena()
+        if buffer_name in self.op.slice_info:
+            raise ValueError(f"{buffer_name} is a slice; its parent has the storage")
+        if buffer_name not in self._storage_cache:
+            buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+            dtype = self.op.buffer_dtype(buffer_name)
+            arena = self._arenas()[buf_type]
+            stop = min(align_up(offset + length, ALIGNMENT), arena.nbytes)
+            self._storage_cache[buffer_name] = arena.subview(
+                offset, ((stop - offset) // dtype.itemsize,), dtype
+            )
+        return self._storage_cache[buffer_name]
+
     def _follow_arena(self) -> None:
         """Run against the arena's current buffer, if it grew since the last call."""
         if self.arena is None or self.arena.generation == self._arena_generation:
@@ -459,6 +486,7 @@ class SequenceFullELFCallable(SequenceCallable):
                 self._argument_index["scratch"], self.scratch_buffer.buffer_object()
             )
         self._buffer_cache.clear()
+        self._storage_cache.clear()
 
     def get_buffer(self, buffer_name):
         self._follow_arena()
@@ -486,6 +514,24 @@ class SequenceFullELFCallable(SequenceCallable):
             if buffer is not None:
                 buffer.device = "npu"
                 buffer.to("cpu")
+
+    def start(self, *runs: FullELFRun) -> None:
+        """Push what the host wrote, and start ``runs`` without waiting; the
+        caller waits on each and reads what it needs."""
+        self._sync_inputs()
+        for run in runs:
+            run.start()
+
+    def wait(self, *runs: FullELFRun) -> None:
+        """Wait on ``runs``, started with :meth:`start` or on their own.
+
+        Scratch is left marked device-resident, so a read of a scratch view
+        after them pulls what they wrote; a run restarted with
+        :meth:`FullELFRun.start` alone leaves nothing marked.
+        """
+        for run in runs:
+            run.wait()
+        self.scratch_buffer.to("npu")
 
     def __call__(self, *runs: FullELFRun):
         """Dispatch :attr:`run`, or ``runs`` in order. Every run is started

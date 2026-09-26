@@ -13,6 +13,7 @@ _LAZY = {
     "graph": "iron.common.graph",
     "state": "iron.common.graph",
     "carry": "iron.common.graph",
+    "CarriedLoop": "iron.common.graph",
     "GraphFunction": "iron.common.graph",
     "CompiledGraph": "iron.common.graph",
     "each_step": "iron.common.image.packaging",

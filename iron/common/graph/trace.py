@@ -104,6 +104,8 @@ class TracedGraph:
     bindings: list[Binding]
     returned: list = dataclasses.field(default_factory=list)  # Handles returned
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
+    # Buffers drained to the image's feedback argument (an Emit's image).
+    feedback: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def runlist(self) -> list:
@@ -133,6 +135,7 @@ class TracedGraph:
         """The :class:`OperatorSequence` this graph lowers to (the image builder)."""
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
         kwargs.setdefault("share_designs", True)
+        kwargs.setdefault("feedback_args", list(self.feedback))
         return OperatorSequence(
             name or self.name,
             self.runlist,

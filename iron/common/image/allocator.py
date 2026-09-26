@@ -46,8 +46,18 @@ around them, free to reuse the bytes of any other image's transients.
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
+
 # (reads, writes) buffer names of one step, in execution order.
 Steps = Sequence[tuple[Sequence[str], Sequence[str]]]
+
+
+# Where every buffer in an arena starts. The host reconciles a buffer with the
+# device a coherence granule (a cache line) at a time, so two buffers sharing
+# one cannot be synced independently -- XRTTensor.subview refuses such a view.
+# 64 bytes is also the DDR burst the shim DMA issues, so no transfer starts
+# mid-burst.
+ALIGNMENT = max(64, COHERENCE_GRANULE)
 
 
 def align_up(x: int, alignment: int) -> int:
