@@ -10,6 +10,7 @@ import numpy as np
 from aie.utils.verify import Tolerance
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Testing, channeled_unary_cases
 
 
@@ -19,6 +20,9 @@ class SigmoidOverlay(ChanneledUnaryOverlay):
 
     # The shortest line mlir-aie's LUT activations take.
     default_tile: ClassVar[int] = 1024
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         return activation.sigmoid(self.line_size)

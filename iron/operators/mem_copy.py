@@ -27,6 +27,8 @@ import numpy as np
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    Movement,
+    Semantics,
     BoundBuffer,
     In,
     Operator,
@@ -81,6 +83,9 @@ class MemCopyOverlay(Overlay):
         return dataclasses.replace(
             self, num_cores=cores, tile_size=tile_size, line_size=min(tile_size, 8192)
         )
+
+    def semantics(self) -> Semantics:
+        return Movement(has_cores=not self.bypass)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker

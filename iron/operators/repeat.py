@@ -10,6 +10,8 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    Movement,
+    Semantics,
     BoundBuffer,
     In,
     Operator,
@@ -45,6 +47,9 @@ class RepeatOverlay(Overlay):
 
     def tuning(self, dev) -> "RepeatOverlay":
         return dataclasses.replace(self, transfer_size=self.transfer_size or self.cols)
+
+    def semantics(self) -> Semantics:
+        return Movement(has_cores=False)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo

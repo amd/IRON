@@ -25,6 +25,8 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
+    Composite,
+    Semantics,
     BoundBuffer,
     select,
     Incompatible,
@@ -131,6 +133,9 @@ class MHAOverlay(Overlay):
         return ((seq_len + unit - 1) // unit) * unit
 
     # -- the array -------------------------------------------------------------
+
+    def semantics(self) -> Semantics:
+        return Composite()
 
     def design(self, target) -> list:
         import sys

@@ -6,12 +6,16 @@ from aie.iron.kernels import eltwise
 import numpy as np
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Testing, channeled_unary_cases
 
 
 @operator
 class ReLUOverlay(ChanneledUnaryOverlay):
     """The array for ReLU: the shared elementwise design over its kernel."""
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         return eltwise.relu_sized(self.line_size)

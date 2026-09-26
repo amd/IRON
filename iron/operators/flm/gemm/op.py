@@ -28,6 +28,8 @@ from aie.dialects.aie import get_target_model
 from aie.helpers.util import v8bfp16ebs8
 
 from iron.common.declare import (
+    Contraction,
+    Semantics,
     BoundBuffer,
     Incompatible,
     In,
@@ -308,6 +310,10 @@ class FLMGEMMOverlay(Overlay):
         return flags
 
     # -- the array -------------------------------------------------------------
+
+    def semantics(self) -> Semantics:
+        """Every K block is reduced on one core, then the epilogue runs, before release."""
+        return Contraction(final_at_release=True)
 
     def design(self, target) -> list:
         from aie.helpers.util import v8bfp16ebs8  # noqa: F401  (the array type)

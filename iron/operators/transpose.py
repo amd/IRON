@@ -11,6 +11,8 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    Movement,
+    Semantics,
     BoundBuffer,
     Incompatible,
     In,
@@ -82,6 +84,9 @@ class TransposeOverlay(Overlay):
         elif dev is not None:
             self.check_shim_columns(dev, cols, self.num_channels)
         return dataclasses.replace(self, num_aie_columns=cols)
+
+    def semantics(self) -> Semantics:
+        return Movement(has_cores=True)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker

@@ -9,6 +9,8 @@ from ml_dtypes import bfloat16
 from aie.utils.verify import Tolerance
 
 from iron.common.declare import (
+    Movement,
+    Semantics,
     BoundBuffer,
     In,
     Operator,
@@ -44,6 +46,9 @@ class StridedCopyOverlay(Overlay):
 
     s = StreamIn(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
     d = StreamOut(transfer_size, dtype=dtype, per=num_aie_channels, depth=1)
+
+    def semantics(self) -> Semantics:
+        return Movement(has_cores=False)
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo

@@ -12,6 +12,8 @@ from ml_dtypes import bfloat16
 
 from iron.common.kernels import target_arch
 from iron.common.declare import (
+    Contraction,
+    Semantics,
     BoundBuffer,
     Incompatible,
     In,
@@ -192,6 +194,10 @@ class GEMMOverlay(Overlay):
         return NPU2()
 
     # -- the array ----------------------------------------------------------
+
+    def semantics(self) -> Semantics:
+        """Every K block of an output tile is reduced on one core before it is released."""
+        return Contraction(final_at_release=True)
 
     def design(self, target) -> list:
         from aie.iron import Buffer, ObjectFifo, Worker

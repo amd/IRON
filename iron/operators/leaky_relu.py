@@ -6,6 +6,7 @@ from aie.iron.kernels import activation
 import numpy as np
 
 from iron.common import ChanneledUnaryOperator, ChanneledUnaryOverlay, operator
+from iron.common.declare import Local, Semantics
 from iron.common.testing import Case, Testing, channeled_unary_cases
 
 
@@ -14,6 +15,9 @@ class LeakyReLUOverlay(ChanneledUnaryOverlay):
     """The array for Leaky ReLU: the elementwise design with ``alpha`` as a kernel argument."""
 
     alpha: float = 0.01
+
+    def semantics(self) -> Semantics:
+        return Local(1)
 
     def kernel(self, target):
         # The factory holds what the line length must satisfy: a whole

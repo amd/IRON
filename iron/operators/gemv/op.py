@@ -10,6 +10,8 @@ from aie.iron.kernels import activation, linalg
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
+    Contraction,
+    Semantics,
     BoundBuffer,
     Incompatible,
     In,
@@ -151,6 +153,10 @@ class GEMVOverlay(Overlay):
             tile_size_output=self.tile_size_output or self.tile_size_input,
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
+
+    def semantics(self) -> Semantics:
+        """K is reduced inside one core, so a released C tile is final."""
+        return Contraction(final_at_release=True)
 
     def design(self, target):
         from aie.dialects.aie import T
