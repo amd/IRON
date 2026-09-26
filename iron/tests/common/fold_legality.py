@@ -15,17 +15,27 @@ import numpy as np
 import pytest
 from aie.iron.device import from_name
 
-from iron.common.dma import DmaFacts, Reason
+from iron.common.dma import (
+    Direction,
+    DmaFacts,
+    Endpoint,
+    Reason,
+    TileKind,
+    access_legal,
+)
 from iron.common.fold_legality import (
     UNWRITTEN,
     Blocked,
     Blocker,
+    Composed,
     Fold,
     check_order,
+    compose_read,
     element_map,
     fold_read,
     fold_write,
 )
+from iron.common.tiling import Access
 from iron.operators.gemv.op import GEMV
 from iron.operators.mem_copy import MemCopy
 from iron.operators.repeat import Repeat
@@ -148,6 +158,34 @@ def test_the_scores_gemv_reads_the_keys_straight_from_the_cache(facts):
         np.testing.assert_array_equal(
             keys[_read_through(got, k)], repeated[order.indices(k)]
         )
+
+
+def test_a_slot_preserving_candidate_is_checked_against_the_composition(facts):
+    """How a pass that keeps the neighbour's own slots uses this module: the
+    composition says which elements each slot must move, access_legal says
+    whether its candidate descriptor may move them. GEMV's one descriptor
+    per column, heads split as (group, repeat), moves the right elements but
+    re-reads outside the shim's iteration slot."""
+    repeat, gemv = _repeat_keys(), _scores()
+    composed = compose_read(gemv, gemv.A, element_map(repeat))
+    assert isinstance(composed, Composed)
+    fold = fold_read(gemv, gemv.A, element_map(repeat), facts)
+    assert all(composed.issues(k, fold.order[k]) for k in range(len(composed.slots)))
+    (run_hi, run_lo), _ = gemv._batch_split()
+    run = run_hi * run_lo
+    for k in range(len(composed.slots)):
+        candidate = Access(
+            repeat.x.elements,
+            k * run,
+            (KV, HEADS // KV, run_hi, run_lo),
+            (SEQ * D, 0, run_lo, 1),
+        )
+        assert composed.issues(k, [candidate])
+        got = access_legal(
+            candidate, Endpoint(TileKind.SHIM, Direction.READ), repeat.x.dtype, facts
+        )
+        assert got is not None and got.reason is Reason.INNER_REPEAT
+    assert not composed.issues(0, fold.order[1])
 
 
 def test_a_read_of_a_repeat_every_slot_shares_is_a_multicast(facts):

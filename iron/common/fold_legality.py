@@ -125,13 +125,32 @@ class Fold:
         return max(len(f.bds) for f in self.fits)
 
 
-def fold_read(
-    consumer: Operator,
-    buffer: BoundBuffer,
-    mover: ElementMap,
-    facts: DmaFacts,
-    kind: TileKind = TileKind.SHIM,
-) -> Fold | Blocked:
+@dataclass(frozen=True, eq=False)
+class Composed:
+    """A neighbour's order composed with a mover, before any descriptor is
+    chosen: slot ``k`` must move exactly the elements ``slots[k]`` of
+    ``buffer`` (one piece per descriptor the neighbour issued there), in
+    ``direction``, shifted per call by ``offset_by``. Every verdict but
+    whether descriptors hold it has been passed."""
+
+    order: Order
+    slots: list[list[np.ndarray]]
+    buffer: BoundBuffer
+    direction: Direction
+    offset_by: BoundValue | None
+
+    def issues(self, k: int, accesses) -> bool:
+        """Whether ``accesses``, issued in order, move slot ``k``'s elements."""
+        got = [acc.indices() for acc in accesses]
+        return np.array_equal(
+            np.concatenate(got) if got else np.empty(0, np.int64),
+            np.concatenate(self.slots[k]),
+        )
+
+
+def compose_read(
+    consumer: Operator, buffer: BoundBuffer, mover: ElementMap
+) -> Composed | Blocked:
     """``consumer`` reading ``mover``'s input where it read ``buffer``, the
     mover's output."""
     order = consumer.order(buffer)
@@ -156,17 +175,20 @@ def fold_read(
                 f"slot {k} reads {missing} elements "
                 f"{type(mover.op).__name__} does not write",
             )
+    whole = [np.concatenate(pieces) for pieces in slots]
+    if (
+        len(whole) > 1
+        and not order.stream.replicate
+        and all(np.array_equal(whole[0], w) for w in whole[1:])
+    ):
+        return Blocked(Blocker.MULTICAST, f"stream {order.stream.name!r}")
     by = order.offset_by if order.offset_by is not None else mover.in_by
-    return _fold(order, slots, mover.x, Direction.READ, facts, kind, by)
+    return Composed(order, slots, mover.x, Direction.READ, by)
 
 
-def fold_write(
-    producer: Operator,
-    buffer: BoundBuffer,
-    mover: ElementMap,
-    facts: DmaFacts,
-    kind: TileKind = TileKind.SHIM,
-) -> Fold | Blocked:
+def compose_write(
+    producer: Operator, buffer: BoundBuffer, mover: ElementMap
+) -> Composed | Blocked:
     """``producer`` writing ``mover``'s output where it wrote ``buffer``, the
     mover's input."""
     order = producer.order(buffer)
@@ -200,32 +222,54 @@ def fold_write(
                 f"slot {k} writes {dropped} elements "
                 f"{type(mover.op).__name__} drops",
             )
+    overlap = _overlap(slots, mover.y)
+    if overlap is not None:
+        return overlap
     by = order.offset_by if order.offset_by is not None else mover.out_by
-    return _fold(order, slots, mover.y, Direction.WRITE, facts, kind, by)
+    return Composed(order, slots, mover.y, Direction.WRITE, by)
 
 
-def _fold(
-    order: Order,
-    slots: list[list[np.ndarray]],
+def fold_read(
+    consumer: Operator,
     buffer: BoundBuffer,
-    direction: Direction,
+    mover: ElementMap,
     facts: DmaFacts,
-    kind: TileKind,
-    offset_by: BoundValue | None,
+    kind: TileKind = TileKind.SHIM,
 ) -> Fold | Blocked:
-    whole = [np.concatenate(pieces) for pieces in slots]
-    if (
-        direction is Direction.READ
-        and len(whole) > 1
-        and not order.stream.replicate
-        and all(np.array_equal(whole[0], w) for w in whole[1:])
-    ):
-        return Blocked(Blocker.MULTICAST, f"stream {order.stream.name!r}")
-    fits = fit_slots(slots, buffer, direction, facts, kind)
+    """:func:`compose_read`, with descriptors fitted to the composed elements."""
+    return _fold(compose_read(consumer, buffer, mover), facts, kind)
+
+
+def fold_write(
+    producer: Operator,
+    buffer: BoundBuffer,
+    mover: ElementMap,
+    facts: DmaFacts,
+    kind: TileKind = TileKind.SHIM,
+) -> Fold | Blocked:
+    """:func:`compose_write`, with descriptors fitted to the composed elements."""
+    return _fold(compose_write(producer, buffer, mover), facts, kind)
+
+
+def _fold(got: Composed | Blocked, facts: DmaFacts, kind: TileKind) -> Fold | Blocked:
+    if isinstance(got, Blocked):
+        return got
+    fits = fit_slots(got.slots, got.buffer, got.direction, facts, kind)
     if isinstance(fits, Blocked):
         return fits
-    folded = Order(order.stream, tuple(f.bds for f in fits), offset_by=offset_by)
+    folded = Order(
+        got.order.stream, tuple(f.bds for f in fits), offset_by=got.offset_by
+    )
     return Fold(folded, fits)
+
+
+def _overlap(slots: list[list[np.ndarray]], buffer: BoundBuffer) -> Blocked | None:
+    # Across slots, two channels race for an element; within one, the later
+    # write wins, which fit() rejects as not injective.
+    every = np.concatenate([np.unique(np.concatenate(pieces)) for pieces in slots])
+    if np.unique(every).size != every.size:
+        return Blocked(Blocker.OVERLAP, buffer.name)
+    return None
 
 
 def fit_slots(
@@ -240,11 +284,9 @@ def fit_slots(
     that fits, else piece by piece (on the shim, which chains descriptors). A
     write must also land no element twice, in a slot or across slots."""
     if direction is Direction.WRITE:
-        # Across slots, two channels race for the element; within one, the
-        # later write wins, which fit() rejects as not injective.
-        every = np.concatenate([np.unique(np.concatenate(pieces)) for pieces in slots])
-        if np.unique(every).size != every.size:
-            return Blocked(Blocker.OVERLAP, buffer.name)
+        overlap = _overlap(slots, buffer)
+        if overlap is not None:
+            return overlap
     limits = facts[kind]
     fits = []
     for k, pieces in enumerate(slots):
