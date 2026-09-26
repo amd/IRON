@@ -80,6 +80,13 @@ def element_map(op: Operator) -> ElementMap | Blocked:
             Blocker.NOT_MOVEMENT, f"{type(op).__name__} is not one input, one output"
         )
     (x,), (y,) = ins, outs
+    if np.dtype(x.dtype) != np.dtype(y.dtype):
+        # An element's bytes are what moves; a folded descriptor cannot
+        # convert them.
+        return Blocked(
+            Blocker.NOT_MOVEMENT,
+            f"{type(op).__name__} turns {np.dtype(x.dtype)} into {np.dtype(y.dtype)}",
+        )
     src, dst = op.order(x), op.order(y)
     if len(src.slots) != len(dst.slots):
         raise ValueError(

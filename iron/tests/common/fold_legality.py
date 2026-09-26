@@ -16,7 +16,7 @@ import pytest
 from aie.iron.device import from_name
 
 from iron.common.dma import DmaFacts, Reason
-from iron.common.fold import (
+from iron.common.fold_legality import (
     UNWRITTEN,
     Blocked,
     Blocker,
