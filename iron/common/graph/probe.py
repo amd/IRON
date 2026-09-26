@@ -71,9 +71,8 @@ def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
     dtype, small integers otherwise."""
     dtype = np.dtype(dtype)
     if dtype.kind == "f" or dtype.name == "bfloat16":
-        return (
-            rng.standard_normal(nbytes // dtype.itemsize).astype(dtype).view(np.uint8)
-        )
+        n = nbytes // dtype.itemsize
+        return rng.standard_normal(n, dtype=np.float32).astype(dtype).view(np.uint8)
     return rng.integers(0, 4, nbytes, dtype=np.uint8)
 
 
@@ -84,10 +83,14 @@ def _values(op: Operator) -> list[BoundValue]:
 
 class Standalone:
     """A runlist of operators built alone into a full ELF, loaded, with its
-    inputs filled with seeded random data: each distinct operator on its own
-    buffers. ``values`` sets every per-call value an operator drives, by the
-    value's name; the tuner cannot know what a value means, so a design that
-    takes one is measured at what its caller gives."""
+    inputs filled with seeded random data. With ``distinct`` every step runs
+    on buffers of its own, as a graph's steps do: a step repeated on the
+    buffers it just read finds them in whatever cache the SoC keeps, which no
+    graph step reading another layer's weights does. Without it, each
+    operator's steps share its buffers (for steps far larger than any
+    cache, whose copies would not fit the host). ``values`` sets every per-call value an
+    operator drives, by the value's name; the tuner cannot know what a value
+    means, so a design that takes one is measured at what its caller gives."""
 
     def __init__(
         self,
@@ -96,20 +99,25 @@ class Standalone:
         coresident: Sequence[Sequence[Operator]] = (),
         values: Mapping[str, int] | None = None,
         seed: int = 0,
+        distinct: bool = True,
     ):
-        self.ops: list[Operator] = []
-        for op in runlist:
-            if all(o is not op for o in self.ops):
-                self.ops.append(op)
-        self.prefix = {id(op): f"s{i}_" for i, op in enumerate(self.ops)}
-        steps = [(op, *self._names(op)) for op in runlist]
+        self.steps = list(runlist)
+        firsts = {}
+        for k, op in enumerate(self.steps):
+            firsts.setdefault(id(op), k)
+        # The buffers step k runs on are slot k's.
+        self._slot = [
+            k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
+        ]
+        self._filled = sorted(set(self._slot))
         inputs, outputs = [], []
-        for op in self.ops:
-            for buf, name_ in zip(op.buffers, self._names(op)):
+        for k in self._filled:
+            op = self.steps[k]
+            for buf, name_ in zip(op.buffers, self._names(k, op)):
                 (outputs if buf.direction == "out" else inputs).append(name_)
         self.sequence = OperatorSequence(
             name,
-            steps,
+            [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             inputs,
             outputs,
             dispatch="fused",
@@ -118,15 +126,17 @@ class Standalone:
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
-        for op in self.ops:
-            for buf, name_ in zip(op.buffers, self._names(op)):
+        for k in self._filled:
+            op = self.steps[k]
+            for buf, name_ in zip(op.buffers, self._names(k, op)):
                 if buf.direction in ("in", "inout"):
                     self._bytes(name_)[: buf.nbytes] = _sample(
                         buf.dtype, buf.nbytes, rng
                     )
+        ops = {id(op): op for op in self.steps}.values()
         symbols = {
             device_symbol(op, v): np.int32(self._value(values, v))
-            for op in self.ops
+            for op in ops
             for v in _values(op)
         }
         if symbols:
@@ -140,19 +150,20 @@ class Standalone:
             )
         return values[v.name]
 
-    def _names(self, op: Operator) -> list[str]:
-        return [self.prefix[id(op)] + b.name for b in op.buffers]
+    @staticmethod
+    def _names(k: int, op: Operator) -> list[str]:
+        return [f"s{k}_{b.name}" for b in op.buffers]
 
     def _bytes(self, name: str) -> np.ndarray:
         return self.callable.get_buffer(name).numpy_view().view(np.uint8)
 
     def output_bytes(self) -> bytes:
-        """What the operators wrote, after one run: every out and in-out buffer."""
+        """What the steps wrote, after one run: every out and in-out buffer."""
         self.callable()
         return b"".join(
             self._bytes(name)[: buf.nbytes].tobytes()
-            for op in self.ops
-            for buf, name in zip(op.buffers, self._names(op))
+            for k in self._filled
+            for buf, name in zip(self.steps[k].buffers, self._names(k, self.steps[k]))
             if buf.direction in ("out", "inout")
         )
 
@@ -173,6 +184,11 @@ def time_interleaved(runs: Sequence[SequenceCallable], timing: Timing) -> list[f
     return [statistics.median(m) for m in medians]
 
 
+# A step whose buffers exceed this runs its repeats on one copy of them:
+# nothing of that size stays in a cache, and the copies would not fit.
+DISTINCT_BYTES = 256 * 2**20
+
+
 def measure_steps(
     table: CostTable,
     found: Sequence[Variant],
@@ -183,9 +199,15 @@ def measure_steps(
     """Measure every width in ``found`` (a design's :func:`.variants`, the
     default first) and record each in ``table``."""
     mode = pmode()
+    distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
     short = [Standalone(f"probe1_{v.key}", [v.op], values=values) for v in found]
     long = [
-        Standalone(f"probe{repeats}_{v.key}", [v.op] * repeats, values=values)
+        Standalone(
+            f"probe{repeats}_{v.key}",
+            [v.op] * repeats,
+            values=values,
+            distinct=distinct,
+        )
         for v in found
     ]
     reference = short[0].output_bytes()

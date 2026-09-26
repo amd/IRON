@@ -16,9 +16,12 @@ reference, is its own entry point (:mod:`.accuracy`).
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
+
+from iron.common.graph.narrowing import CostTable, JointNarrowing
 
 from . import harness
 from .graphs import LlamaGraph
@@ -45,17 +48,29 @@ class AIELlama:
         self.angles = config.angles[:max_seq_len].astype(bfloat16)
 
     @classmethod
-    def compile(cls, config, max_seq_len=MAX_SEQ_LEN) -> "AIELlama":
+    def compile(
+        cls, config, max_seq_len=MAX_SEQ_LEN, cost_table: Path | None = None
+    ) -> "AIELlama":
         """Trace, compile and load both versions, weights uploaded.
 
         Both before the first call, so the shared arena is made once at its
         final size. The checkpoint's pages are dropped a piece at a time as
         they reach the device, so the process holds at most one piece of it
         beside the buffers; the embedding's rows fault back in as it is read.
+        With a ``cost_table`` the decode version's designs are narrowed and
+        packed by it (:class:`~iron.common.graph.narrowing.JointNarrowing`).
         """
         model = LlamaGraph(config, max_seq_len)
-        for rows in (1, max_seq_len):
-            model.compile(config, rows)
+        decode = model.compile(
+            config,
+            1,
+            coresident=(
+                None if cost_table is None else JointNarrowing(CostTable(cost_table))
+            ),
+        )
+        if decode.tuning is not None:
+            print("[Tuning] decode:\n" + decode.tuning.report(), flush=True)
+        model.compile(config, max_seq_len)
         for version in model.graph.versions.values():
             version.load(release=config.weights.release)
         return cls(config, model.graph, max_seq_len)
@@ -128,7 +143,7 @@ def setup(args):
             f"a {n_prompt}-token prompt and {args.num_tokens} generated tokens "
             f"exceed the model's {MAX_SEQ_LEN} rows"
         )
-    return config, state, prompt, AIELlama.compile(config)
+    return config, state, prompt, AIELlama.compile(config, cost_table=args.cost_table)
 
 
 def main():

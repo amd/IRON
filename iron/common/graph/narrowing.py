@@ -207,6 +207,7 @@ class CostTable:
         self.path = Path(path)
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
+        self._medians: dict[str, float] | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
             self.steps = {k: StepCost(**v) for k, v in data["steps"].items()}
@@ -229,13 +230,18 @@ class CostTable:
 
     def record_calibration(self, pair: tuple[str, str], cal: Calibration) -> None:
         self.calibrations["|".join(pair)] = cal
+        self._medians = None
 
     def _calibrated(self, figure: str) -> float:
-        if not self.calibrations:
-            raise ValueError(f"{self.path}: no configure calibration measured")
-        return statistics.median(
-            dataclasses.asdict(c)[figure] for c in self.calibrations.values()
-        )
+        if self._medians is None:
+            if not self.calibrations:
+                raise ValueError(f"{self.path}: no configure calibration measured")
+            rows = [dataclasses.asdict(c) for c in self.calibrations.values()]
+            self._medians = {
+                name: statistics.median(row[name] for row in rows)
+                for name in ("dispatch_us", "reset_us", "base_us")
+            }
+        return self._medians[figure]
 
     @property
     def dispatch_us(self) -> float:
@@ -400,28 +406,67 @@ class Tuning:
 @dataclasses.dataclass
 class _Pack:
     """A candidate device: a connected set of designs (indices into the
-    runlist's order), how often it is entered, and its widths, cheapest
-    first, as the placer has not yet refused them."""
+    runlist's order), how often it is entered, and its cheapest widths
+    within the shim budget, cheapest first; ``options[0]`` is the one the
+    search prices it at, and the placer's refusals drop options."""
 
     members: tuple[int, ...]
     entries: int
-    combos: Iterator[tuple[float, tuple[Variant, ...]]]
-    cost: float = 0.0
-    combo: tuple[Variant, ...] = ()
-    tried: int = 0
+    options: list[tuple[float, tuple[Variant, ...]]]
+
+    @property
+    def cost(self) -> float:
+        return self.options[0][0]
+
+    @property
+    def combo(self) -> tuple[Variant, ...]:
+        return self.options[0][1]
 
     @property
     def mask(self) -> int:
         return functools.reduce(lambda m, i: m | (1 << i), self.members, 0)
 
-    def advance(self) -> bool:
-        """Move to the next-cheapest widths; ``False`` when none are left."""
-        found = next(self.combos, None)
-        if found is None:
-            return False
-        self.cost, self.combo = found
-        self.tried += 1
-        return True
+
+def _cheapest(
+    ranked: Sequence[Sequence[tuple[float, Variant]]],
+    budget: tuple[int, int],
+    k: int,
+) -> list[tuple[float, tuple[Variant, ...]]]:
+    """The ``k`` cheapest picks of one ``(cost, variant)`` per member, each
+    member's ranked cheapest first, whose shim channels are within
+    ``budget``; cheapest first. Branch and bound: a partial pick is dropped
+    once its cost plus the cheapest rest cannot beat the k-th found, or its
+    channels plus the fewest the rest can take overrun the budget."""
+    n = len(ranked)
+    rest_cost = [0.0] * (n + 1)
+    rest_mm2s = [0] * (n + 1)
+    rest_s2mm = [0] * (n + 1)
+    for m in reversed(range(n)):
+        rest_cost[m] = rest_cost[m + 1] + ranked[m][0][0]
+        rest_mm2s[m] = rest_mm2s[m + 1] + min(v.mm2s for _, v in ranked[m])
+        rest_s2mm[m] = rest_s2mm[m + 1] + min(v.s2mm for _, v in ranked[m])
+    found: list[tuple[float, int, tuple[Variant, ...]]] = []  # max-heap by -cost
+    counter = itertools.count()
+
+    def dfs(m: int, cost: float, mm2s: int, s2mm: int, pick: tuple) -> None:
+        if m == n:
+            entry = (-cost, next(counter), pick)
+            if len(found) < k:
+                heapq.heappush(found, entry)
+            else:
+                heapq.heappushpop(found, entry)
+            return
+        for c, v in ranked[m]:
+            total = cost + c
+            if len(found) == k and total + rest_cost[m + 1] >= -found[0][0]:
+                break
+            a, b = mm2s + v.mm2s, s2mm + v.s2mm
+            if a + rest_mm2s[m + 1] > budget[0] or b + rest_s2mm[m + 1] > budget[1]:
+                continue
+            dfs(m + 1, total, a, b, pick + (v,))
+
+    dfs(0, 0.0, 0, 0, ())
+    return [(-c, pick) for c, _, pick in sorted(found, reverse=True)]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -460,45 +505,25 @@ class JointNarrowing:
             best = min(candidates[i], key=lambda v: member_cost(i, v, e))
             alone.append((e * table.base_us + member_cost(i, best, e), best, e))
 
-        def combos(members: tuple[int, ...], entries: int):
-            """Each member's widths, cheapest assignments first, within the
-            shim budget."""
-            ranked = [
-                sorted(candidates[i], key=lambda v, i=i: member_cost(i, v, entries))
-                for i in members
-            ]
-            fixed = entries * table.base_us
-
-            def cost(idx):
-                return fixed + sum(
-                    member_cost(i, ranked[n][j], entries)
-                    for n, (i, j) in enumerate(zip(members, idx))
-                )
-
-            start = (0,) * len(members)
-            heap = [(cost(start), start)]
-            seen = {start}
-            while heap:
-                c, idx = heapq.heappop(heap)
-                combo = tuple(ranked[n][j] for n, j in enumerate(idx))
-                if self._within(combo, budget):
-                    yield c, combo
-                for n in range(len(idx)):
-                    if idx[n] + 1 < len(ranked[n]):
-                        nxt = idx[:n] + (idx[n] + 1,) + idx[n + 1 :]
-                        if nxt not in seen:
-                            seen.add(nxt)
-                            heapq.heappush(heap, (cost(nxt), nxt))
-
         packs: list[_Pack] = []
         for members in self._connected(runlist, measured, candidates, budget):
             entries = runlist.entries(frozenset(runlist.order[i] for i in members))
-            pack = _Pack(members, entries, combos(members, entries))
-            if not pack.advance():
+            ranked = [
+                sorted(
+                    ((member_cost(i, v, entries), v) for v in candidates[i]),
+                    key=lambda cv: cv[0],
+                )
+                for i in members
+            ]
+            options = [
+                (entries * table.base_us + c, pick)
+                for c, pick in _cheapest(ranked, budget, self.fit_attempts)
+            ]
+            if not options:
                 continue
-            gain = sum(alone[i][0] for i in members) - pack.cost
+            pack = _Pack(members, entries, options)
             # The parity can move the total by one reset either way.
-            if gain + table.reset_us > 0:
+            if self._gain(pack, alone) + table.reset_us > 0:
                 packs.append(pack)
 
         fitted: dict[tuple[str, ...], bool] = {}
@@ -508,16 +533,10 @@ class JointNarrowing:
             if not refused:
                 break
             for p in refused:
-                while True:
-                    if p.tried >= self.fit_attempts or not p.advance():
-                        packs.remove(p)
-                        break
-                    gain = sum(alone[i][0] for i in p.members) - p.cost
-                    if gain + table.reset_us <= 0:
-                        packs.remove(p)
-                        break
-                    if self._fit(p.combo, fitted):
-                        break
+                while p.options and not self._fit(p.combo, fitted):
+                    p.options.pop(0)
+                if not p.options or self._gain(p, alone) + table.reset_us <= 0:
+                    packs.remove(p)
 
         chosen: dict[str, Variant] = {
             k: alone[i][1] for i, k in enumerate(runlist.order)
@@ -541,6 +560,11 @@ class JointNarrowing:
             baseline_us=baseline,
             unmeasured=tuple(k for k, m in zip(runlist.order, measured) if not m),
         )
+
+    @staticmethod
+    def _gain(pack: _Pack, alone: Sequence[tuple[float, Variant, int]]) -> float:
+        """What ``pack`` saves over its members each alone, bar the parity."""
+        return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
         """The widths the table allows: the default, first, and every
