@@ -17,6 +17,8 @@ import hashlib
 from abc import ABCMeta
 from typing import Any, ClassVar, Generic, TypeVar
 
+import numpy as np
+
 
 import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
@@ -386,7 +388,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
                 raise Unfoldable(
                     f"{type(self).__name__} already declares {r.value_name!r}"
                 )
-            member = Scratchpad(r.offset.dtype)
+            member = Scratchpad(np.dtype(r.offset.dtype).type)
             member.name = r.value_name
             member.owner = type(self)
             bound[r.value_name] = BoundValue(member, self)

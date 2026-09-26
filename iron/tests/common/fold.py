@@ -21,6 +21,7 @@ from aie.iron.device import from_name
 import iron
 from iron.common.declare import Scratchpad
 from iron.common.declare.refold import Reorder, Side
+from iron.common.design.build import generator_for
 from iron.common.graph.fold import Fold, FoldAll, Refused, apply, candidates
 from iron.common.tiling import legalize
 from iron.operators.gemv.op import GEMV
@@ -233,3 +234,18 @@ def test_fold_all_takes_one_fold_per_movement(npu2):
     assert [type(s.op).__name__ for s in FoldAll().fold(t, npu2).steps] == ["GEMV"]
     only_writes = FoldAll(sides=(Side.WRITE,))
     assert len(only_writes.fold(t, npu2).steps) == 2
+
+
+def test_folded_designs_generate(npu2):
+    # The folds' operators as the build sees them: the cache offset a copy
+    # carried becomes a scratchpad parameter of the projection.
+    keys = iron.state((G, L * D), name="keys")
+    cache = iron.state((G, L * D), name="cache")
+    w = np.zeros((G * D, 2 * D), dtype=bfloat16)
+    for t in (_scores_graph(keys), _cache_graph(cache, w)):
+        for step in FoldAll().fold(t, npu2).steps:
+            if step.op.refolds:
+                text = str(generator_for(step.op.tuned(npu2))())
+                assert "aie.runtime_sequence" in text
+                if step.op.values:
+                    assert "C_offset" in text
