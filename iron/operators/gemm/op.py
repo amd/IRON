@@ -6,14 +6,17 @@ from dataclasses import field
 
 import numpy as np
 
+from aie.helpers.taplib import TensorTiler2D
 from aie.iron import kernels
 from ml_dtypes import bfloat16
 
 from iron.common.kernels import target_arch
 from iron.common.declare import (
+    BoundBuffer,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Resident,
@@ -25,6 +28,7 @@ from iron.common.declare import (
     select,
     tunable,
 )
+from iron.common.tiling import Access, legalize
 
 
 def ceildiv(a, b):
@@ -510,69 +514,44 @@ class GEMM(Operator[GEMMOverlay]):
 
     # -- the runtime sequence --------------------------------------------------
 
-    def design(self, rt):
-        from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
+    def _fills(self) -> tuple[list[list[Access]], list[list[Access]]]:
+        """A's descriptors per A tile, and B's per column, from the tilers.
 
-        from iron.common.tiling import legalize
+        An A tile is one (m * n_A_tiles_per_shim)-row block with every
+        K-block, repeated once per column block of C a core produces so it
+        can be distributed across the whole column. Column ``c`` of B is
+        every ``n_aie_cols``-th n-wide block, all of K. Each tiler pattern is
+        legalized: one descriptor when it fits, else the outermost dimension
+        unrolled (a column-major B whose column-block stride is past the
+        20-bit step).
+        """
+        ov = self.ov
+        M, K, N = self.M, self.K, self.N
+        k, n = ov.tile_k, ov.tile_n
+        K_div_k = K // k
+        n_c_col_tiles_per_core = N // ov.mem_tile_n
 
         def legal(buffer, tap):
-            """The tiler's pattern as descriptors the shim holds: one when it
-            fits, else the outermost dimension unrolled (a column-major B
-            whose column-block stride is past the 20-bit step)."""
             return legalize(
                 buffer.elements, tap.offset, tap.sizes, tap.strides, buffer.dtype
             )
 
-        ov = self.ov
-        M, K, N = self.M, self.K, self.N
-        m, k, n = ov.tile_m, ov.tile_k, ov.tile_n
-        n_aie_cols, n_aie_rows = ov.num_aie_columns, N_AIE_ROWS
-        n_shim_mem_A = ov.n_shim_mem_a
-        mem_tile_m_A, mem_tile_m_C, mem_tile_n = (
-            ov.mem_tile_m_a,
-            ov.mem_tile_m_c,
-            ov.mem_tile_n,
-        )
-        c_col_maj, b_col_maj = ov.c_col_maj, ov.b_col_maj
-        dtype_out = ov.dtype_out
-
-        # A shim BD's outermost descriptor dimension lands in the ITERATION field,
-        # whose step is 20 bits wide (AIETargetModel::getDmaBdStepBits for
-        # ShimNOCTile). An element stride S is re-expressed as (S - 1) * itemsize
-        # / 4-byte address granularity before the check, so a wide N pushes C's row
-        # stride past it: M=1024 K=2560 N=10240 needs mem_tile_m_C * N = 2621440
-        # and aiecc rejects the build with "Stride 3 exceeds the [1:1048576]
-        # range". See the C drain below for how that is split, and flm_gemm's
-        # design.py for the same fix worked through in more detail.
-        def _hw_stride_ok(stride_elems, itemsize):
-            return (stride_elems - 1) * itemsize // 4 <= (1 << 20) - 1
-
-        K_div_k = K // k
-        n_c_col_tiles_per_core = N // mem_tile_n
-        n_c_row_tiles_per_core = M // mem_tile_m_C
-
-        # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
-        # We only transfer 6 rows of tiles at once before starting a new transfer block.
-        # tb = transfer block; block of transfers before sync call
-        tb_max_n_rows = 4 if not c_col_maj else 2
-
-        # Define tensor access patterns (tiling) for A, B, and C
         A_tiles = TensorTiler2D.group_tiler(
             (M, K),  # Size of A matrix
-            (mem_tile_m_A, k),  # Size of A (smallest) tile
+            (ov.mem_tile_m_a, k),  # Size of A (smallest) tile
             (1, K_div_k),  # Size of "group" of tiles
             # Repeat data so can distribute across whole column
             pattern_repeat=n_c_col_tiles_per_core,
             prune_step=False,
         )
-        if b_col_maj:
+        if ov.b_col_maj:
             B_tiles = TensorTiler2D.step_tiler(
                 (N, K),  # Size of B matrix
                 (n, k),  # Size of B tile
                 # Number of tiles per transfer in each dimension (whole col, partial row)
                 tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
                 # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-                tile_group_steps=(n_aie_cols, 1),
+                tile_group_steps=(ov.num_aie_columns, 1),
                 prune_step=False,
             )
         else:
@@ -582,37 +561,32 @@ class GEMM(Operator[GEMMOverlay]):
                 # Number of tiles per transfer in each dimension (whole col, partial row)
                 tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
                 # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-                tile_group_steps=(1, n_aie_cols),
+                tile_group_steps=(1, ov.num_aie_columns),
                 tile_group_col_major=True,  # Send all tiles in column before moving on to next column
                 prune_step=False,
             )
+        return [legal(self.A, tap) for tap in A_tiles], [
+            legal(self.B, tap) for tap in B_tiles
+        ]
 
-        A_fills = [legal(self.A, tap) for tap in A_tiles]
-        B_fills = [legal(self.B, tap) for tap in B_tiles]
-        # An unrolled B fill costs one descriptor per column block. The BD
-        # accounting below (12 of 16 with two transfer blocks in flight)
-        # assumes one; when B unrolls, the transfer blocks are not overlapped
-        # so that a shim never holds more than one block's descriptors.
-        b_unrolled = any(len(f) > 1 for f in B_fills)
+    def _a_tile(self, col: int, c_row: int, tiles: int) -> int:
+        """Which of the ``tiles`` A tiles shim ``col`` sends for row-block
+        ``c_row`` of C: each shim carries separate rows."""
+        return (c_row * self.ov.n_shim_mem_a + col) % tiles
 
-        def fill(col, c_row, tg):
-            # A input transfer: the smallest unit is a
-            # (m*n_A_tiles_per_shim)-sized sub-tile, one per column,
-            # repeated (N//n//n_aie_cols) times; each shim carries
-            # separate rows.
-            tile_offset = (c_row * n_shim_mem_A + col) % len(A_tiles)
-            # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
-            if col < n_aie_rows:
-                for acc in A_fills[tile_offset]:
-                    rt.fill(ov.a[col], (self.A, acc), group=tg)
-            # B input transfer: the first (n)-wide block of columns
-            # of B, then the (n_aie_columns)-th such block, and so
-            # on; each shim starts at a different column offset.
-            for acc in B_fills[col]:
-                rt.fill(ov.b[col], (self.B, acc), group=tg)
+    def _transfer_blocks(self) -> list[tuple[int, int, int, int]]:
+        """C's row-blocks in the order the sequence walks them:
+        ``(tb, pingpong, first row-block, row-blocks)``.
 
-        # Task groups determine when to sync, await and free DMA runtime ops.
-        tg = rt.new_group()
+        We are limited in the number of BDs. After synchronizing, we can
+        reuse BDs. We only transfer a few rows of tiles at once before
+        starting a new transfer block (tb): two halves of ``tb_max_n_rows``
+        row-blocks, ping and pong, each ending on a sync.
+        """
+        ov = self.ov
+        n_c_row_tiles_per_core = self.M // ov.mem_tile_m_c
+        tb_max_n_rows = 4 if not ov.c_col_maj else 2
+        blocks = []
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
@@ -622,83 +596,152 @@ class GEMM(Operator[GEMMOverlay]):
                 if current_tb_n_rows <= 0:
                     # For small input sizes, we may not even need a "pong" iteration
                     break
-                for col in range(n_aie_cols):
-                    # C Output Transfer for smaller N dimensions:
-                    # The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of the matrix.
-                    # Transfer one such tile for every (n_aie_cols)-th column, evenly spaced,
-                    # then repeat that (current_tb_n_rows) times for the next contiguous blocks of rows.
-                    # Each shim will start at a different column offset, transferring interleaved
-                    # columns.
-                    #
-                    # Normally one descriptor walks all current_tb_n_rows
-                    # row-blocks. When that outermost stride overflows the
-                    # shim's 20-bit iteration step (see _hw_stride_ok
-                    # above), issue one descriptor per row-block instead,
-                    # carrying the row jump in the OFFSET -- which has no
-                    # such limit -- and leaving the outer dimension
-                    # degenerate. Same bytes, same order, same number of
-                    # objects; only the descriptor is reshaped.
-                    #
-                    # These extra tasks are safe against the two shim
-                    # limits neither the toolchain nor the verifier models.
-                    # BD ids: all of a (tb, pingpong) iteration's tasks stay
-                    # live until tg.finish() below, so they stay distinct --
-                    # 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
-                    # task queue: the C channel goes from 2 outstanding to
-                    # current_tb_n_rows x 2 = 4, which is where A and B
-                    # already sit.
-                    C_rows = [(row_base, current_tb_n_rows)]
-                    if not c_col_maj:
-                        row_stride = mem_tile_m_C * N
-                        if current_tb_n_rows > 1 and not _hw_stride_ok(
-                            row_stride, np.dtype(dtype_out).itemsize
-                        ):
-                            C_rows = [
-                                (row_base + r, 1) for r in range(current_tb_n_rows)
-                            ]
-                    for c_row_base, c_n_rows in C_rows:
-                        if not c_col_maj:
-                            C_row_offset = c_row_base * mem_tile_m_C * N
-                            C_col_offset = col * n
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [c_n_rows, N // mem_tile_n, mem_tile_m_C, n]
-                            C_strides = [
-                                mem_tile_m_C * N if c_n_rows > 1 else 0,
-                                mem_tile_n,
-                                N,
-                                1,
-                            ]
-                        else:
-                            C_row_offset = c_row_base * mem_tile_m_C
-                            C_col_offset = col * n * M
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                            C_strides = [M * mem_tile_n, m, M, 1]
-                        C_tile = TensorAccessPattern(
-                            (N, M) if c_col_maj else (M, N),
-                            offset=C_offset,
-                            sizes=C_sizes,
-                            strides=C_strides,
-                        )
-                        rt.drain(ov.c[col], (self.C, C_tile), group=tg, wait=True)
-                    if not b_unrolled:
-                        for tile_row in range(current_tb_n_rows):
-                            fill(col, row_base + tile_row, tg)
-                if b_unrolled:
-                    # Row-block by row-block across every column, where a
-                    # single B descriptor issues column by column. A shim
-                    # channel queues only a few tasks, and a push past that
-                    # stalls the whole instruction stream until one retires.
-                    # Column by column, the second row-block's B descriptors
-                    # stall it on a column whose cores still wait for A from
-                    # the columns not yet issued: a hang (2048x8192x2048,
-                    # b_col_maj, on eight columns).
-                    for tile_row in range(current_tb_n_rows):
-                        for col in range(n_aie_cols):
-                            fill(col, row_base + tile_row, tg)
-                if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
-                    tg.finish()
-                    tg = rt.new_group()
+                blocks.append((tb, pingpong, row_base, current_tb_n_rows))
+        return blocks
+
+    def _c_drain(self, col: int, row_base: int, n_rows: int) -> list[Access]:
+        """C's descriptors for column ``col`` over ``n_rows`` row-blocks.
+
+        The smallest transfer unit is a (m*n_aie_rows)-x-(n)-sized sub-tile of
+        the matrix. Transfer one such tile for every (n_aie_cols)-th column,
+        evenly spaced, then repeat that ``n_rows`` times for the next
+        contiguous blocks of rows. Each shim starts at a different column
+        offset, transferring interleaved columns.
+
+        Normally one descriptor walks all ``n_rows`` row-blocks. When that
+        outermost stride overflows the shim's 20-bit iteration step, issue
+        one descriptor per row-block instead, carrying the row jump in the
+        OFFSET -- which has no such limit -- and leaving the outer dimension
+        degenerate. Same bytes, same order, same number of objects; only the
+        descriptor is reshaped.
+
+        A shim BD's outermost descriptor dimension lands in the ITERATION
+        field, whose step is 20 bits wide (AIETargetModel::getDmaBdStepBits
+        for ShimNOCTile). An element stride S is re-expressed as (S - 1) *
+        itemsize / 4-byte address granularity before the check, so a wide N
+        pushes C's row stride past it: M=1024 K=2560 N=10240 needs
+        mem_tile_m_C * N = 2621440 and aiecc rejects the build with "Stride 3
+        exceeds the [1:1048576] range". flm_gemm's design.py works the same
+        fix through in more detail.
+
+        These extra tasks are safe against the two shim limits neither the
+        toolchain nor the verifier models. BD ids: all of a (tb, pingpong)
+        iteration's tasks stay live until the group finishes, so they stay
+        distinct -- 2 iterations x (2 C + 2 A + 2 B) = 12 of 16. Channel
+        task queue: the C channel goes from 2 outstanding to
+        current_tb_n_rows x 2 = 4, which is where A and B already sit.
+        """
+        ov = self.ov
+        M, N = self.M, self.N
+        m, n = ov.tile_m, ov.tile_n
+        mem_tile_m_C, mem_tile_n = ov.mem_tile_m_c, ov.mem_tile_n
+        C_rows = [(row_base, n_rows)]
+        if not ov.c_col_maj:
+            row_stride = mem_tile_m_C * N
+            itemsize = np.dtype(ov.dtype_out).itemsize
+            if n_rows > 1 and (row_stride - 1) * itemsize // 4 > (1 << 20) - 1:
+                C_rows = [(row_base + r, 1) for r in range(n_rows)]
+        taps = []
+        for c_row_base, c_n_rows in C_rows:
+            if not ov.c_col_maj:
+                C_offset = col * n + c_row_base * mem_tile_m_C * N
+                C_sizes = (c_n_rows, N // mem_tile_n, mem_tile_m_C, n)
+                C_strides = (
+                    mem_tile_m_C * N if c_n_rows > 1 else 0,
+                    mem_tile_n,
+                    N,
+                    1,
+                )
+            else:
+                C_offset = col * n * M + c_row_base * mem_tile_m_C
+                C_sizes = (N // mem_tile_n, N_AIE_ROWS, n, m)
+                C_strides = (M * mem_tile_n, m, M, 1)
+            taps.append(Access(self.C.elements, C_offset, C_sizes, C_strides))
+        return taps
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """Per shim: A its tile for every row-block of C, B its column of
+        blocks once per row-block of C, C its column's sub-tiles, transfer
+        block by transfer block."""
+        ov = self.ov
+        rows = self.M // ov.mem_tile_m_c
+        if buffer is self.C:
+            blocks = self._transfer_blocks()
+            return Order(
+                ov.c,
+                tuple(
+                    tuple(
+                        acc
+                        for _, _, row_base, n_rows in blocks
+                        for acc in self._c_drain(col, row_base, n_rows)
+                    )
+                    for col in range(ov.num_aie_columns)
+                ),
+            )
+        a_fills, b_fills = self._fills()
+        if buffer is self.A:
+            return Order(
+                ov.a,
+                tuple(
+                    tuple(
+                        acc
+                        for c_row in range(rows)
+                        for acc in a_fills[self._a_tile(col, c_row, len(a_fills))]
+                    )
+                    for col in range(ov.n_shim_mem_a)
+                ),
+            )
+        return Order(
+            ov.b, tuple(tuple(b_fills[col]) * rows for col in range(ov.num_aie_columns))
+        )
+
+    def design(self, rt):
+        """C's drains and the fills they depend on, transfer block by transfer
+        block, each block's tasks in one group so its BDs can be reused."""
+        ov = self.ov
+        a_fills, b_fills = self._fills()
+        # An unrolled B fill costs one descriptor per column block. The BD
+        # accounting in _c_drain (12 of 16 with two transfer blocks in
+        # flight) assumes one; when B unrolls, the transfer blocks are not
+        # overlapped so that a shim never holds more than one block's
+        # descriptors.
+        b_unrolled = any(len(f) > 1 for f in b_fills)
+
+        def fill(col, c_row, tg):
+            # A: n_A_tiles_per_shim-row sub-tiles, one per shim that carries A.
+            if col < ov.n_shim_mem_a:
+                for acc in a_fills[self._a_tile(col, c_row, len(a_fills))]:
+                    rt.fill(ov.a[col], (self.A, acc), group=tg)
+            # B: the first (n)-wide block of columns of B, then the
+            # (n_aie_columns)-th such block, and so on; each shim starts at a
+            # different column offset.
+            for acc in b_fills[col]:
+                rt.fill(ov.b[col], (self.B, acc), group=tg)
+
+        # Task groups determine when to sync, await and free DMA runtime ops.
+        tg = rt.new_group()
+        for tb, pingpong, row_base, n_rows in self._transfer_blocks():
+            for col in range(ov.num_aie_columns):
+                for acc in self._c_drain(col, row_base, n_rows):
+                    rt.drain(ov.c[col], (self.C, acc), group=tg, wait=True)
+                if not b_unrolled:
+                    for tile_row in range(n_rows):
+                        fill(col, row_base + tile_row, tg)
+            if b_unrolled:
+                # Row-block by row-block across every column, where a
+                # single B descriptor issues column by column. A shim
+                # channel queues only a few tasks, and a push past that
+                # stalls the whole instruction stream until one retires.
+                # Column by column, the second row-block's B descriptors
+                # stall it on a column whose cores still wait for A from
+                # the columns not yet issued: a hang (2048x8192x2048,
+                # b_col_maj, on eight columns).
+                for tile_row in range(n_rows):
+                    for col in range(ov.num_aie_columns):
+                        fill(col, row_base + tile_row, tg)
+            if b_unrolled or tb > 0 or pingpong > 0:
+                tg.finish()
+                tg = rt.new_group()
         tg.finish()
 
     # -- host-side helpers ---------------------------------------------------
