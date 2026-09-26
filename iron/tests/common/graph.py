@@ -9,20 +9,26 @@ checked here is the image: that is OperatorSequence's job and the
 hardware tests' job.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
+from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 from iron.common.declare import Carried, DispatchTime, Scratchpad
 from iron.common.graph import Affine, Handle, TracedGraph
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV, GEMVOverlay
 from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.strided_copy import StridedCopy
-import aie.utils as aie_utils
+from iron.operators.swiglu_decode.op import swiglu_decode
+from iron.operators.swiglu_prefill.op import swiglu_prefill
+from iron.tests.common.llama_model import Config
 
 E, H = 2048, 8192
 
@@ -40,9 +46,6 @@ def device():
     device says the same thing without the stub, and an overlay that reads
     ``dev.cols`` gets an answer.
     """
-    import aie.utils as aie_utils
-    from aie.iron.device import from_name
-
     previous = aie_utils.get_current_device()
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
     yield
@@ -271,9 +274,7 @@ def test_returning_an_input_or_a_slice_is_refused():
 
 
 def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
-    import iron.operators.swiglu_decode.op as m
-
-    ffn = m.swiglu_decode(z(H, E), z(H, E), z(E, H))
+    ffn = swiglu_decode(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
     assert [type(op).__name__ for op, *_ in t.runlist] == [
         "GEMV",
@@ -288,14 +289,11 @@ def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
     assert (gate.ov.num_aie_columns, gate.ov.tile_size_output) == (8, H // 8)
     assert t.input_args == ["x"] and t.output_args == ["out"]
     with pytest.raises(ValueError, match="do not agree"):
-        m.swiglu_decode(z(H, E), z(H, E), z(H, E))
+        swiglu_decode(z(H, E), z(H, E), z(H, E))
 
 
 def test_swiglu_prefill_traces_over_a_sequence():
-    import iron.operators.swiglu_prefill.op as m
-    from iron.operators.gemm.op import GEMM
-
-    ffn = m.swiglu_prefill(z(E, H), z(E, H), z(H, E))
+    ffn = swiglu_prefill(z(E, H), z(E, H), z(H, E))
     t = ffn.trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
@@ -310,11 +308,7 @@ def test_swiglu_prefill_traces_over_a_sequence():
 
 
 def test_llama_decode_traces_and_tunes():
-    from iron.tests.common.llama_model import Config as _Config
-
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
-
-    cfg = _Config()
+    cfg = Config()
     L = 256
     t = LlamaGraph(cfg, L).trace(cfg, 1)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
@@ -388,11 +382,7 @@ def test_llama_decode_traces_and_tunes():
 
 
 def test_llama_prompt_traces_over_the_same_caches():
-    from iron.tests.common.llama_model import Config as _Config
-
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
-
-    cfg = _Config()
+    cfg = Config()
     L = cfg.context_length
     g = LlamaGraph(cfg, L, num_aie_columns=4, num_of_pipelines=1, tile_m=16)
     t = g.trace(cfg, L)

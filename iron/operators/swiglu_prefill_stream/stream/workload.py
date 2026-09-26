@@ -19,6 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import onnx
+import torch
+
 from iron.operators.swiglu_prefill_stream.stream.ops import (
     op_for_onnx_type,
     translation_table,
@@ -65,8 +68,6 @@ class StreamWorkload:
         stream-dse's parser loads the workload from a file, so the model is
         materialized at build time (under the build directory, never in the tree).
         """
-        import onnx
-
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         onnx.save(self.model, str(path))
@@ -133,8 +134,6 @@ def export_workload(
     * ``result_names`` -- node name -> the name of the tensor it produces
       (default ``out_{node_name}``). The final result is always ``output_name``.
     """
-    import torch
-
     program = torch.onnx.export(
         module,
         tuple(example_inputs),

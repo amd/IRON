@@ -26,6 +26,7 @@ import sys
 
 import pytest
 
+from iron import operators
 from iron.operators import _OPERATOR_MODULES
 
 
@@ -60,8 +61,6 @@ def _is_composite(name):
     is composition, not an eager catalog, and the two need different
     expectations.
     """
-    from iron import operators
-
     return not isinstance(getattr(operators, name), type)
 
 

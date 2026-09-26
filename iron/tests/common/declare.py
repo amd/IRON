@@ -39,6 +39,9 @@ from iron.common.declare import (
     optional,
     tunable,
 )
+from iron.operators.gemm.op import GEMM, GEMMOverlay
+from iron.operators.mha.op import MHA, MHAOverlay
+from iron.operators.repeat import Repeat
 
 
 class FakeDev:
@@ -308,8 +311,6 @@ def test_buffers_carry_direction_shape_and_dtype():
 def test_buffers_carry_the_declared_dtype_and_size():
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer."""
-    from iron.operators.repeat import Repeat
-
     x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32
     assert (x.direction, y.direction) == ("in", "out")
@@ -492,8 +493,6 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
 
 
 def test_gemm_layout_flags_transpose_rather_than_resize():
-    from iron.operators.gemm.op import GEMM, GEMMOverlay
-
     plain = GEMM(GEMMOverlay(), M=256, K=64, N=512).buffers
     b_major = GEMM(GEMMOverlay(b_col_maj=True), M=256, K=64, N=512).buffers
     c_major = GEMM(GEMMOverlay(c_col_maj=True), M=256, K=64, N=512).buffers
@@ -505,8 +504,6 @@ def test_gemm_layout_flags_transpose_rather_than_resize():
 
 
 def test_mha_pads_the_sequence_and_groups_kv():
-    from iron.operators.mha.op import MHA, MHAOverlay
-
     grouped = MHA(MHAOverlay(), num_heads=8, seq_len=100, num_KV_heads=2).buffers
     plain = MHA(MHAOverlay(), num_heads=8, seq_len=100).buffers
     # 100 rounds up to 128, so Q is 8 heads x 128 x 64.

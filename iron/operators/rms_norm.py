@@ -20,6 +20,8 @@ from iron.common.declare import (
     tunable,
 )
 import aie.utils as aie_utils
+from aie.iron import ObjectFifo, Worker
+from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 
 from iron.common.testing import Case, Testing
@@ -106,9 +108,6 @@ class WeightedRMSNormOverlay(RMSNormOverlay):
     )
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
         tile_ty = self.x.tile
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels

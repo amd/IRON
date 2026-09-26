@@ -22,6 +22,7 @@ from iron.common.tiling import (
     repeated,
     split,
     split_run,
+    view,
     whole,
 )
 from iron.common.tiling import DMA_BD_MAX_WRAP
@@ -188,8 +189,6 @@ def test_access_span_is_bounds_checked():
 
 
 def test_legalize_factors_an_oversize_outer_dim_when_a_slot_is_free():
-    from iron.common.tiling import legalize
-
     # mha's K_tiles case: a (2048, 64) tile of a 64-wide buffer is contiguous,
     # so it is one linear transfer: what mha's legalize_tap did by hand.
     (acc,) = legalize(2048 * 64, 0, [1, 1, 2048, 64], [0, 0, 64, 1], bfloat16)
@@ -202,8 +201,6 @@ def test_legalize_factors_an_oversize_outer_dim_when_a_slot_is_free():
 
 
 def test_legalize_unrolls_when_no_slot_is_free():
-    from iron.common.tiling import legalize
-
     # All four slots used and the iteration count past 64: unroll it. (The
     # outer stride is not the next dimension's extent, or the two would
     # merge into one slot and the rest fit.)
@@ -214,15 +211,11 @@ def test_legalize_unrolls_when_no_slot_is_free():
 
 
 def test_legalize_drops_unit_dims_and_keeps_legal_patterns():
-    from iron.common.tiling import legalize
-
     (acc,) = legalize(4096, 8, [1, 1, 4, 32], [0, 0, 64, 1], bfloat16)
     assert acc == Access(4096, 8, (1, 1, 4, 32), (0, 0, 64, 1))
 
 
 def test_legalize_rejects_granularity_violations():
-    from iron.common.tiling import legalize
-
     with pytest.raises(ValueError, match="granule"):
         legalize(4096, 1, [1, 1, 4, 32], [0, 0, 64, 1], bfloat16)
     with pytest.raises(ValueError, match="granule"):
@@ -230,8 +223,6 @@ def test_legalize_rejects_granularity_violations():
 
 
 def test_view_of_whole_rows_is_one_linear_run():
-    from iron.common.tiling import view
-
     # GEMV's design(rt): self.A[:, col*rows:(col+1)*rows, :] over (nb, M, K)
     nb, M, K, cols = 4, 256, 128, 8
     rows = M // cols
@@ -246,15 +237,11 @@ def test_view_of_whole_rows_is_one_linear_run():
 
 
 def test_view_with_an_integer_index_drops_the_axis():
-    from iron.common.tiling import view
-
     off, sizes, strides = view((3, 64, 8), (1, slice(16, 32)))
     assert off == 64 * 8 + 16 * 8 and sizes == [16 * 8] and strides == [1]
 
 
 def test_view_rejects_steps_and_empty_slices():
-    from iron.common.tiling import view
-
     with pytest.raises(ValueError, match="unit steps"):
         view((64,), (slice(0, 64, 2),))
     with pytest.raises(ValueError, match="empty"):
@@ -264,8 +251,6 @@ def test_view_rejects_steps_and_empty_slices():
 
 
 def test_view_then_legalize_round_trips_a_batched_block():
-    from iron.common.tiling import legalize, view
-
     nb, M, K = 100, 256, 128
     off, sizes, strides = view((nb, M, K), (slice(None), slice(0, 32), slice(None)))
     (acc,) = legalize(nb * M * K, off, sizes, strides, bfloat16)

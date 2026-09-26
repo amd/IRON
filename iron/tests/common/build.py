@@ -10,13 +10,18 @@ recorded calls are what upstream's ObjectFifoHandle.fill/drain accept; that
 is the toolchain's job and the operator tests' job.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
 from aie.helpers.util import v8bfp16ebs8
 
-from iron.common.design import Sequence
+import iron.operators.flm.gemm.design as flm_design
+import iron.operators.flm.gemm.op as flm_op
+from iron.common.design import Sequence, runtime
 from iron.common.declare import (
+    DeclarationError,
     In,
     Operator,
     Out,
@@ -28,8 +33,13 @@ from iron.common.declare import (
     operator,
     optional,
     tunable,
+    Xclbin,
 )
+from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
 from iron.common.tiling import Access
+from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.mem_copy import MemCopy
+from iron.operators.mha.op import MHA
 
 
 class FakeGroup:
@@ -43,8 +53,6 @@ class FakeGroup:
 def fake_task_group(monkeypatch):
     # Patched where it is looked up, not where it is defined: runtime.py
     # imports the name, so rebinding aie.iron's attribute would not reach it.
-    from iron.common.design import runtime
-
     monkeypatch.setattr(runtime, "TaskGroup", FakeGroup)
 
 
@@ -74,8 +82,6 @@ class UnaryOverlay(Overlay):
     y = StreamOut(tile, per=(cols, chans))
 
     def tuning(self, dev):
-        import dataclasses
-
         return dataclasses.replace(self, cols=self.cols or dev.columns())
 
 
@@ -242,8 +248,6 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
     # is one pattern over the group's heads and every block, K and V are the
     # head's slab re-read once per (head, block) from the iteration slot, and
     # the O drains mirror the Q fills and wait.
-    from iron.operators.mha.op import MHA
-
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
     class Dev:
@@ -300,8 +304,6 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
 def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch):
     # The (seq, heads, d) layout: a head's rows are strided by every head's
     # d, and the group's heads are d apart; the descriptor count is the same.
-    from iron.operators.mha.op import MHA
-
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
     class Dev:
@@ -347,8 +349,6 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
-    from iron.operators.mha.op import MHA
-
     op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
     with pytest.raises(ValueError, match="seq_pad=100"):
@@ -392,16 +392,12 @@ class _TargetModel:
 
 @pytest.fixture
 def flm(monkeypatch):
-    import iron.operators.flm.gemm.op as flm
-
-    monkeypatch.setattr(flm, "AIEArch", _Arch)
-    monkeypatch.setattr(flm, "get_target_model", lambda dev: _TargetModel())
-    monkeypatch.setattr(flm.aie_utils, "get_current_device", lambda: _NPU2())
-    import iron.operators.flm.gemm.design as design
-
-    monkeypatch.setattr(design, "get_target_model", lambda dev: _TargetModel())
+    monkeypatch.setattr(flm_op, "AIEArch", _Arch)
+    monkeypatch.setattr(flm_op, "get_target_model", lambda dev: _TargetModel())
+    monkeypatch.setattr(flm_op.aie_utils, "get_current_device", lambda: _NPU2())
+    monkeypatch.setattr(flm_design, "get_target_model", lambda dev: _TargetModel())
     monkeypatch.setattr(Access, "tap", lambda self: self)
-    return flm
+    return flm_op
 
 
 class _Recorder:
@@ -506,8 +502,6 @@ def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
     # mem_copy.py: whole partitions split evenly; the remainder is padded
     # to one line per core by re-reading copied data, in awaited groups of
     # four transfers on the last fifo.
-    from iron.operators.mem_copy import MemCopy
-
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
     class Dev:
@@ -566,9 +560,6 @@ class _ForeignRecorder:
 
 
 def test_external_overlay_declares_its_pins_and_parameter_block():
-    from iron.common.declare import DeclarationError, Xclbin
-    from iron.operators.flm.gemm.shipped import Shipped
-
     ov = Shipped()
     assert ov.external.filename == "flm_mm_f81eba71.xclbin"
     assert [(p.col, p.channel) for p in (ov.a.pin(r) for r in range(4))] == [
@@ -598,12 +589,8 @@ def test_external_overlay_declares_its_pins_and_parameter_block():
 
 
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
-    from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
-    from iron.operators.flm.gemm.op import GEMM
-    from iron.operators.flm.gemm.shipped import Shipped
-
     ov = Shipped()
-    op = GEMM(ov, M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
+    op = flm_op.GEMM(ov, M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's residents are hidden; the image's block is laid out from
     # the operator's values.
     assert list(ov.residents) == ["rtp"]

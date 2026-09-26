@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 import pytest
+import torch
 
 import aie.utils as aie_utils
 from aie.iron.device import from_name
@@ -114,8 +115,6 @@ def _run(sequence, inputs):
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
 def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time."""
-    import torch
-
     torch.manual_seed(0)
     x = torch.rand(SIZE, dtype=torch.float32)
     w = torch.rand(SIZE, dtype=torch.float32)

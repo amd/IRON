@@ -9,14 +9,17 @@ mlir-aie device IRON is building for, and is the only place that knows what a
 stream core id means, so operators never spell one out.
 """
 
+import os
+
 import pytest
 
-pytest.importorskip(
+stream = pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
 import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2  # noqa: E402
+import yaml  # noqa: E402
+from aie.iron.device import NPU1, NPU2  # noqa: E402
 
 aie_utils.set_current_device(NPU2())
 
@@ -77,11 +80,6 @@ def test_allocate_rejects_an_oversubscribed_array():
 def test_ids_agree_with_the_accelerator_stream_solves_against():
     """IRON derives core ids from the device; stream-dse reads them from its own
     accelerator description. A design is only correct while the two agree."""
-    import os
-
-    import stream
-    import yaml
-
     path = os.path.join(
         os.path.dirname(stream.__file__),
         "inputs",
@@ -103,8 +101,6 @@ def test_ids_agree_with_the_accelerator_stream_solves_against():
 
 
 def test_emitted_allocation_resolves_to_the_expected_cores(tmp_path):
-    import yaml
-
     _, mapping_path = stream_design.build_inputs(*DIMS, tmp_path / "design")
     emitted = {
         layer["name"]: layer["core_allocation"][0]
@@ -114,8 +110,6 @@ def test_emitted_allocation_resolves_to_the_expected_cores(tmp_path):
 
 
 def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
-    import yaml
-
     _, mapping_path = stream_design.build_inputs(
         *DIMS, tmp_path / "design_k5", k=stream_design.LAYER_BY_LAYER
     )
@@ -131,8 +125,6 @@ def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
 
 
 def test_devices_other_than_the_default_resolve():
-    from aie.iron.device import NPU1
-
     array = ComputeArray.from_device(NPU1())
     assert array.num_columns and array.num_rows
     assert array.cores(array.all_columns)

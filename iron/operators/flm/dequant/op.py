@@ -8,6 +8,7 @@ import numpy as np
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.util import v8bfp16ebs8
+from aie.iron import ObjectFifo, Worker
 from aie.iron.kernels import quant
 
 from iron.common.declare import (
@@ -51,6 +52,7 @@ from iron.operators.flm.dequant.design import (
     qw_bytes_for,
     run_geometry,
 )
+from iron.operators.flm.dequant.reference import reference as cpu_reference
 
 BFP16_GROUP_BYTES = 9
 
@@ -112,8 +114,6 @@ class FLMDequantOverlay(Overlay):
     # -- the array -------------------------------------------------------------
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-
         cols = self.cols
         qw_col_ty, out_half_ty = self.qw.tile, self.out.tile
         qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
@@ -426,6 +426,4 @@ class DequantBFP(Operator[FLMDequantOverlay]):
 
     def reference(self, qw):
         """CPU reference, bit-exact against the device."""
-        from iron.operators.flm.dequant.reference import reference
-
-        return reference(qw, self.K, self.N)
+        return cpu_reference(qw, self.K, self.N)

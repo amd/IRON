@@ -8,6 +8,9 @@ import numpy as np
 
 from aie.helpers.taplib import TensorTiler2D
 from aie.iron import kernels
+from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron.controlflow import range_
+from aie.iron.device import NPU1, NPU1Col1, NPU1Col2, NPU2, Tile
 from ml_dtypes import bfloat16
 
 from iron.common.kernels import target_arch
@@ -187,8 +190,6 @@ class GEMMOverlay(Overlay):
     # -- kernels ------------------------------------------------------------
 
     def device(self, target):
-        from aie.iron.device import NPU1, NPU1Col1, NPU1Col2, NPU2
-
         if target.dev.resolve().name == "npu1":
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()
@@ -200,10 +201,6 @@ class GEMMOverlay(Overlay):
         return Contraction(final_at_release=True)
 
     def design(self, target) -> list:
-        from aie.iron import Buffer, ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-        from aie.iron.device import Tile
-
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols = self.num_aie_columns
         n_aie_rows = N_AIE_ROWS

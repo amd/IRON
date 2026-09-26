@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 from pathlib import Path
 from typing import Callable
 
@@ -30,8 +31,6 @@ class DesignGenerator:
     def resolve(self) -> tuple[Callable, tuple, dict]:
         if self.fn is not None:
             return self.fn, self.args, self.kwargs
-        import importlib.util
-
         spec = importlib.util.spec_from_file_location(
             self.source_path.name, self.source_path
         )

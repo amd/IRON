@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABCMeta
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 
 import aie.utils as aie_utils
@@ -22,6 +22,7 @@ from aie.utils.npukernel import NPUKernel
 from aie.utils.verify import Tolerance
 
 
+from ..image.artifacts import Artifacts, Design, Step
 from ..kernels import kernels_dir
 from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
@@ -30,9 +31,6 @@ from .member import _Buffer, _Member, _Value
 from .naming import label_parts
 from .order import Order, derived
 from .overlay import Overlay
-
-if TYPE_CHECKING:
-    from ..image.artifacts import Artifacts
 
 O = TypeVar("O", bound=Overlay)
 
@@ -361,9 +359,8 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     def _build(self) -> Artifacts:
         """Compile to an xclbin and an instruction stream, or, on an external
         overlay, to the stream alone against the downloaded image."""
-        # image/ reads this package, so naming it at module scope would make
-        # the two import each other.
-        from ..image.artifacts import Artifacts, Design, Step
+        # jit_compile reads this package, so naming it at module scope would
+        # make the two import each other.
         from ..image.jit_compile import insts_design, xclbin_design
 
         image = self.ov.external

@@ -26,6 +26,8 @@ import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import get_target_model
 from aie.helpers.util import v8bfp16ebs8
+from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron.controlflow import range_
 
 from iron.common.declare import (
     Contraction,
@@ -47,6 +49,8 @@ from iron.common.declare import (
     tunable,
 )
 from iron.common.kernels import lut_sources
+from iron.common.image.artifacts import Artifacts, Design, Step
+from iron.common.image.jit_compile import insts_design, xclbin_design
 from iron.common.tiling import Access
 from iron.common.tiling import run_dims
 from iron.operators.flm.gemm.design import (
@@ -86,6 +90,7 @@ from iron.operators.flm.gemm.design import (
     rtp_layout,
 )
 from iron.operators.flm.packing import pack_b, packed_b_size
+from iron.operators.flm.gemm.reference import reference as cpu_reference
 
 
 def _clamp_bits(clamp) -> tuple[int, int]:
@@ -316,9 +321,6 @@ class FLMGEMMOverlay(Overlay):
         return Contraction(final_at_release=True)
 
     def design(self, target) -> list:
-        from aie.iron import Buffer, ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
         COLS, ROWS = self.cols, self.rows
         N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
             self.tile_n,
@@ -1005,9 +1007,6 @@ class GEMM(Operator[FLMGEMMOverlay]):
         instructions-only compile with no kernel built twice. On the shipped
         overlay there is no image to build at all.
         """
-        from iron.common.image.artifacts import Artifacts, Design, Step
-        from iron.common.image.jit_compile import insts_design, xclbin_design
-
         if self.ov.external is not None:
             return super()._build()  # the downloaded image, instructions only
         tuned = self.tuned(aie_utils.get_current_device())
@@ -1071,9 +1070,7 @@ class GEMM(Operator[FLMGEMMOverlay]):
 
     def reference(self, A, B):
         """CPU reference: ``C = epilogue(A @ B)``."""
-        from iron.operators.flm.gemm.reference import reference
-
-        return reference(A, B, self.epilogue, self.clamp)
+        return cpu_reference(A, B, self.epilogue, self.clamp)
 
 
 # Live descriptors on a shim tile under the split path: SHIM_TASK_QUEUE from

@@ -14,8 +14,11 @@ alone (pinning).
 import random
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import pytest
+from aie.iron.device import from_name
 
+from iron.common.image import OperatorSequence
 from iron.common.image.allocator import (
     Allocation,
     ArenaPlan,
@@ -25,6 +28,8 @@ from iron.common.image.allocator import (
     place,
     touch_ranges,
 )
+from iron.common.image.sequence import ALIGNMENT
+from iron.operators import ElementwiseAdd
 
 
 def _buf(direction):
@@ -193,9 +198,6 @@ def device():
     "'NoneType' object has no attribute 'resolve'" -- which reads like a bug in
     the code under test rather than a missing fixture.
     """
-    import aie.utils as aie_utils
-    from aie.iron.device import from_name
-
     previous = aie_utils.get_current_device()
     aie_utils.set_current_device(from_name("npu2", n_cols=8))
     yield
@@ -204,9 +206,6 @@ def device():
 
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     runlist = [(add, "w", "x", "t0"), (add, "w", "t0", "out")]
     seq = OperatorSequence(
@@ -256,9 +255,6 @@ def test_layout_is_unchanged_without_offsets():
 
 def _chain(n_intermediates, plan_scratch):
     """A chain where each intermediate dies as the next is produced."""
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     names = [f"t{i}" for i in range(n_intermediates)]
     runlist = [(add, "x", "w", names[0])]
@@ -290,8 +286,6 @@ def test_planned_buffers_never_share_bytes_while_both_live():
     This is the one failure mode in planning that does not announce itself:
     two buffers aliased while both are live produce wrong numbers, not a crash.
     """
-    from iron.common.image.allocator import LiveRange
-
     layout, _ = _chain(4, plan_scratch=True)
     scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
     # t_i is live from step i to step i+1, so consecutive ones overlap.
@@ -315,9 +309,6 @@ def test_slices_are_never_pooled():
     raises -- the slice simply reads the wrong memory. Found by probing the
     written-slice case, which the whole-buffer tests above cannot reach.
     """
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     seq = OperatorSequence(
         "slice_pooling_probe",
@@ -532,14 +523,10 @@ def test_random_images_keep_every_invariant(seed):
 
 
 def _add():
-    from iron.operators import ElementwiseAdd
-
     return ElementwiseAdd(size=1024, tile_size=128)
 
 
 def _arena_sequence(name, runlist, arena, residents, buffer_sizes=None, **kwargs):
-    from iron.common.image import OperatorSequence
-
     return OperatorSequence(
         name,
         runlist,
@@ -627,8 +614,6 @@ def test_residents_must_be_scratch_buffers():
 
 
 def test_an_arena_needs_an_image_that_addresses_scratch_by_offset():
-    from iron.common.image import OperatorSequence
-
     with pytest.raises(ValueError, match="full ELF"):
         OperatorSequence(
             "arena_xclbin",
@@ -651,9 +636,6 @@ def test_an_arena_needs_an_image_that_addresses_scratch_by_offset():
 def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
     """Without a plan, pinned buffers pack in order -- each still on a
     boundary a host view and a DMA burst can start at."""
-    from iron.common.image import OperatorSequence
-    from iron.common.image.sequence import ALIGNMENT
-
     add = _add()
     seq = OperatorSequence(
         "odd_pinned",

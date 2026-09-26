@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+import yaml
+
 from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray
 from iron.operators.swiglu_prefill_stream.stream.workload import StreamWorkload
 
@@ -157,8 +159,6 @@ def emit_mapping(
     path,
 ) -> str:
     """Write the mapping YAML to ``path`` and return it."""
-    import yaml
-
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:

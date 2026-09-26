@@ -24,10 +24,15 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import aie.utils as aie_utils
 import stream
 import torch
+from aie import ir
+from aie.extras.context import mlir_mod_ctx
 from stream.api import optimize_allocation_co
 
+from iron.common.kernels import target_arch
+from iron.operators.swiglu_prefill_stream.stream import ops
 from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray
 from iron.operators.swiglu_prefill_stream.stream.mapping import (
     FusedGroup,
@@ -107,8 +112,6 @@ def gemm_tiles(k):
 @lru_cache(maxsize=None)
 def array() -> ComputeArray:
     """The compute grid of the device being built for."""
-    import aie.utils as aie_utils
-
     return ComputeArray.from_device(aie_utils.get_current_device())
 
 
@@ -352,9 +355,6 @@ def region_module(mlir_text: str, renames: dict | None = None):
     here already carries what distinguishes its recipe (``mm_<m>_<k>_<n>.o``),
     and groups that name one object build it identically, so they share it.
     """
-    from aie import ir
-    from aie.extras.context import mlir_mod_ctx
-
     with mlir_mod_ctx():
         return ir.Module.parse(_renamed(mlir_text, renames))
 
@@ -427,16 +427,13 @@ def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
     The registry is the single place a kernel's source, compile flags and
     symbol names are declared, so the object and the generated design agree.
     """
-    from iron.common.kernels import target_arch
-    from iron.operators.swiglu_prefill_stream.stream.ops import ELTWISE_MUL, GEMM, SILU
-
     tiles = gemm_tiles(k)
     per_layer = {
-        GATE: (GEMM, tiles[GATE]),
-        UP: (GEMM, tiles[UP]),
-        DOWN: (GEMM, tiles[DOWN]),
-        SILU: (SILU, None),
-        MUL: (ELTWISE_MUL, None),
+        GATE: (ops.GEMM, tiles[GATE]),
+        UP: (ops.GEMM, tiles[UP]),
+        DOWN: (ops.GEMM, tiles[DOWN]),
+        SILU: (ops.SILU, None),
+        MUL: (ops.ELTWISE_MUL, None),
     }
     kernels_dir = Path(kernels_dir)
     kernel_dir = target_arch()

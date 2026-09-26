@@ -4,6 +4,8 @@
 
 import numpy as np
 from aie.iron import kernels
+from aie.iron import ObjectFifo, Worker
+from aie.iron.controlflow import range_
 from ml_dtypes import bfloat16
 
 from aie.utils.verify import Tolerance
@@ -54,9 +56,6 @@ class RoPEOverlay(Overlay):
             raise ValueError(f"method_type must be 0 or 1, got {self.method_type}")
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
         tile = self.x.tile
         n = self.num_aie_columns
         # method_type 0 = two-halves (HF), 1 = interleaved (Llama paper).

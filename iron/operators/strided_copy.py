@@ -4,6 +4,7 @@
 from dataclasses import field
 
 import numpy as np
+from aie.iron import ObjectFifo
 from ml_dtypes import bfloat16
 
 from aie.utils.verify import Tolerance
@@ -12,6 +13,7 @@ from iron.common.declare import (
     Movement,
     Semantics,
     BoundBuffer,
+    Incompatible,
     In,
     Operator,
     Order,
@@ -51,8 +53,6 @@ class StridedCopyOverlay(Overlay):
         return Movement(has_cores=False)
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo
-
         for c in range(self.num_aie_channels):
             fifo_in = ObjectFifo(self.s.tile, name=f"fifo_in_{c}", depth=1)
             fifo_out = fifo_in.cons().forward(name=f"fifo_out_{c}", depth=1)
@@ -198,8 +198,6 @@ class StridedCopy(Operator[StridedCopyOverlay]):
             )
 
     def compatible(self) -> None:
-        from iron.common.declare import Incompatible
-
         channels = self.ov.num_aie_channels
         for label, sizes in (
             ("input_sizes", self.input_sizes),

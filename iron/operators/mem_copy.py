@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from typing import List
 
 from aie.iron.kernels import eltwise
+from aie.iron import ObjectFifo, Worker
+from aie.iron.controlflow import range_
 import numpy as np
 
 from aie.utils.verify import Tolerance
@@ -88,9 +90,6 @@ class MemCopyOverlay(Overlay):
         return Movement(has_cores=not self.bypass)
 
     def design(self, target) -> list:
-        from aie.iron import ObjectFifo, Worker
-        from aie.iron.controlflow import range_
-
         line_type = self.s.tile
         line_size, num_cores = self.line_size, self.num_cores
         # A line spanning more than one bank cannot be double-buffered in
