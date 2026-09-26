@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from ..declare import BoundValue, Operator
+from ..declare import BoundBuffer, BoundValue, Operator
 from ..design import device_symbol
 from ..image.callable import SequenceCallable
 from ..image.sequence import OperatorSequence
@@ -90,7 +90,10 @@ class Standalone:
     operator's steps share its buffers (for steps far larger than any
     cache, whose copies would not fit the host). ``values`` sets every per-call value an
     operator drives, by the value's name; the tuner cannot know what a value
-    means, so a design that takes one is measured at what its caller gives."""
+    means, so a design that takes one is measured at what its caller gives.
+    ``inputs`` does the same for input buffers, by buffer name: random bytes
+    are no representative content for a buffer whose values steer the work,
+    such as a draw row's temperature and top-k."""
 
     def __init__(
         self,
@@ -100,6 +103,7 @@ class Standalone:
         values: Mapping[str, int] | None = None,
         seed: int = 0,
         distinct: bool = True,
+        inputs: Mapping[str, np.ndarray] | None = None,
     ):
         self.steps = list(runlist)
         firsts = {}
@@ -110,16 +114,16 @@ class Standalone:
             k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
         ]
         self._filled = sorted(set(self._slot))
-        inputs, outputs = [], []
+        in_names, out_names = [], []
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
-                (outputs if buf.direction == "out" else inputs).append(name_)
+                (out_names if buf.direction == "out" else in_names).append(name_)
         self.sequence = OperatorSequence(
             name,
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
-            inputs,
-            outputs,
+            in_names,
+            out_names,
             dispatch="fused",
             share_designs=True,
             coresident=coresident,
@@ -130,9 +134,7 @@ class Standalone:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
                 if buf.direction in ("in", "inout"):
-                    self._bytes(name_)[: buf.nbytes] = _sample(
-                        buf.dtype, buf.nbytes, rng
-                    )
+                    self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
         ops = {id(op): op for op in self.steps}.values()
         symbols = {
             device_symbol(op, v): np.int32(self._value(values, v))
@@ -149,6 +151,21 @@ class Standalone:
                 f"per-call value {v.name!r} needs a representative value to be measured"
             )
         return values[v.name]
+
+    @staticmethod
+    def _content(
+        buf: BoundBuffer,
+        inputs: Mapping[str, np.ndarray] | None,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if inputs is None or buf.name not in inputs:
+            return _sample(buf.dtype, buf.nbytes, rng)
+        content = np.ascontiguousarray(inputs[buf.name], dtype=buf.dtype)
+        if content.nbytes != buf.nbytes:
+            raise ValueError(
+                f"input {buf.name!r} is {content.nbytes} bytes, its buffer {buf.nbytes}"
+            )
+        return content.reshape(-1).view(np.uint8)
 
     @staticmethod
     def _names(k: int, op: Operator) -> list[str]:
@@ -195,18 +212,24 @@ def measure_steps(
     timing: Timing = Timing(),
     repeats: int = 9,
     values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (a design's :func:`.variants`, the
-    default first) and record each in ``table``."""
+    default first) and record each in ``table``. ``values`` and ``inputs``
+    are :class:`Standalone`'s."""
     mode = pmode()
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
-    short = [Standalone(f"probe1_{v.key}", [v.op], values=values) for v in found]
+    short = [
+        Standalone(f"probe1_{v.key}", [v.op], values=values, inputs=inputs)
+        for v in found
+    ]
     long = [
         Standalone(
             f"probe{repeats}_{v.key}",
             [v.op] * repeats,
             values=values,
             distinct=distinct,
+            inputs=inputs,
         )
         for v in found
     ]

@@ -24,17 +24,21 @@ Run with XRT sourced and the NPU otherwise idle::
 
 import argparse
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import aie.utils as aie_utils
+import numpy as np
 
+from iron.common.graph.handle import Handle
 from iron.common.graph.narrowing import CostTable, Runlist, cost_key, variants
 from iron.common.graph.probe import Timing, calibrate, measure_steps, pmode
 from iron.common.graph.trace import TracedGraph
 
 from .graphs import LlamaGraph
-from .harness import LlamaConfig
+from .harness import SEED, LlamaConfig
 from .npu import MAX_SEQ_LEN
+from .sampling import Sampler
 
 DEFAULT_TABLE = Path(__file__).parent / "decode_costs_npu2.json"
 
@@ -55,6 +59,20 @@ def per_call_values(traced: TracedGraph, op, graph_values: dict[str, int]):
         b.member.name: b.expression.evaluate(graph_values)
         for b in traced.bindings
         if b.op is op
+    }
+
+
+def per_call_inputs(
+    traced: TracedGraph, op, contents: Mapping[Handle, np.ndarray]
+) -> dict[str, np.ndarray]:
+    """What ``op``'s buffers hold in a call where the graph's buffers hold
+    ``contents``, by buffer name: what the probe fills them with."""
+    return {
+        buf.name: contents[handle]
+        for step in traced.steps
+        if step.op is op
+        for buf, handle in zip(op.buffers, step.slots)
+        if handle in contents
     }
 
 
@@ -92,8 +110,14 @@ def main() -> None:
     dev = aie_utils.get_current_device()
     print(f"power mode: {pmode()}")
     config = LlamaConfig(args.weights_path, args.tokenizer_path)
-    traced = LlamaGraph(config, MAX_SEQ_LEN).trace(config, 1)
+    graph = LlamaGraph(config, MAX_SEQ_LEN)
+    traced = graph.trace(config, 1)
     graph_values = dict(position=args.position, token=args.token)
+    # Sample's work follows its draw row's temperature and top-k: measure it
+    # at the rows generation writes, not at random words.
+    sampler = Sampler(config.temperature, config.top_k, np.random.default_rng(SEED))
+    _, draws = traced.states[id(graph.draws)]
+    contents = {draws: sampler.rows(MAX_SEQ_LEN, graph.k_max)}
     keys = [cost_key(s.op) for s in traced.steps]
     first = {}
     for key, step in zip(keys, traced.steps):
@@ -117,8 +141,9 @@ def main() -> None:
             print(f"[{i}] {name}: in the table")
             continue
         values = per_call_values(traced, op, graph_values)
+        inputs = per_call_inputs(traced, op, contents)
         start = time.time()
-        costs = measure_steps(table, found[key], timing, args.repeats, values)
+        costs = measure_steps(table, found[key], timing, args.repeats, values, inputs)
         table.save()
         print(f"[{i}] {name} ({time.time() - start:.0f}s) at {values}")
         for v in found[key]:
