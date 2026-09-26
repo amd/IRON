@@ -16,6 +16,7 @@ from math import prod
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.dialects.aie import get_target_model
 from aie.iron.device import from_name
 from aie.utils import NPUKernel
 from aie.utils.compile import compile_mlir_module
@@ -31,6 +32,7 @@ from iron.common.dma import (
     Unfit,
     fit,
 )
+from iron.common import tiling
 from iron.common.tiling import Access
 
 N = 64
@@ -60,6 +62,18 @@ def test_facts_are_the_target_models(name, shims):
     assert facts[CORE] == BdLimits(
         CORE, 3, 255, 1 << 13, (1 << 14) - 1, 64, 255, 16, 16, 2, 2, 4
     )
+
+
+@pytest.mark.parametrize("name", ["npu1", "npu2"])
+def test_the_derived_sequence_uses_the_shims_limits(name):
+    """tiling's shim constants are the target model's, on both devices."""
+    dev = from_name(name, n_cols=None)
+    shim = DmaFacts.of(dev)[SHIM]
+    assert tiling.DMA_BD_MAX_WRAP == shim.wrap
+    assert tiling._ITER_MAX == shim.iteration
+    assert 1 << tiling._STRIDE_BITS == shim.step
+    tm = get_target_model(dev.resolve())
+    assert tiling._ADDR_GRANULE_BYTES * 8 == tm.get_address_gen_granularity()
 
 
 @pytest.fixture(scope="module")
