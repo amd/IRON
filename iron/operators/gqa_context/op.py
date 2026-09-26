@@ -61,15 +61,18 @@ class GQAContextOverlay(Overlay):
     heads_per_group: int = dim()
     seq_len: int = dim()
     head_dim: int = dim(64)
-    # Positions per kernel call. A core holds two chunks of values (16 KB
-    # each at 128) beside its 16 KB of partial sums.
-    chunk: int = tunable(128)
+    # Positions per kernel call: 128 unless given, or 64 when that does not
+    # divide seq_len. A core holds two chunks of values (16 KB each at 128)
+    # beside its 16 KB of partial sums.
+    chunk: int | None = tunable(None)
 
     v = StreamIn(chunk, head_dim, per=groups, depth=2)
     p = StreamIn(heads_per_group, chunk, per=groups, depth=2)
     ctx = StreamOut(heads_per_group, head_dim, per=groups, depth=1)
 
     def validate(self) -> None:
+        if self.chunk is None:
+            self.chunk = 2 * LANES if self.seq_len % (2 * LANES) == 0 else LANES
         if not 1 <= self.heads_per_group <= _ROWS:
             raise ValueError(
                 f"heads_per_group ({self.heads_per_group}) must be 1 to {_ROWS}: "
@@ -176,6 +179,7 @@ class GQAContext(Operator[GQAContextOverlay]):
                 id="one_call_per_chunk",
             ),
             Case(dict(groups=1, heads_per_group=1, seq_len=128), id="single_call"),
+            Case(dict(groups=4, heads_per_group=4, seq_len=64), id="shortest"),
             Case(dict(groups=8, heads_per_group=4, seq_len=2048), id="llama"),
         ],
         tolerance=Tolerance.exact(),

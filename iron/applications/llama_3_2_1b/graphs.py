@@ -47,6 +47,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
+from iron.operators.gqa_context.op import GQAContext
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
@@ -55,7 +56,6 @@ from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 from iron.operators.strided_copy import StridedCopy
-from iron.operators.transpose import Transpose
 
 from .weights import LlamaWeights
 
@@ -77,12 +77,11 @@ class _Parameters:
 class LlamaGraph:
     """The graph function and the state it closes over.
 
-    ``keys[i]`` and ``values[i]`` are the layer caches, each ``n_kv_groups``
-    rows of ``max_seq_len * head_dim``: the per-group layout both phases
-    write. Decode's scores read the keys as they lie, ``(n_kv_groups,
-    max_seq_len, head_dim)``, and its context reads the values through a
-    repeat, as ``(n_kv_groups, max_seq_len * head_dim)``. ``scale`` is the
-    attention scale as a tensor, since the elementwise multiply takes one.
+    ``keys[i]`` and ``values[i]`` are the layer caches, one row of
+    ``head_dim`` per group and position, which both phases write: each is
+    ``(n_kv_groups, max_seq_len, head_dim)``, as decode's scores and its
+    attention context read them. ``scale`` is the attention scale as a
+    tensor, since the elementwise multiply takes one.
 
     A prompt of ``rows`` rows needs ``rows`` a multiple of 64 times
     ``num_of_pipelines`` (MHA's) and of four times ``tile_m`` (the GEMMs'
@@ -115,7 +114,7 @@ class LlamaGraph:
             iron.state((G, L, D), name=f"keys_cache_{i}") for i in range(len(W.layers))
         ]
         self.values = [
-            iron.state((G, L * D), name=f"values_cache_{i}")
+            iron.state((G, L, D), name=f"values_cache_{i}")
             for i in range(len(W.layers))
         ]
         # The draws, one four-word row per position (``Sampler.rows``), and
@@ -189,9 +188,8 @@ class LlamaGraph:
             StridedCopy(
                 v.reshape(G, D), values[i], out_offset=cache_offset, **row_into_cache
             )
-            # Every head sees its group's keys and values. The scores read a
-            # group's keys straight from the cache, once per head of the group.
-            v_all = Repeat(values[i], repeat=H // G, transfer_size=D)
+            # Every head sees its group's keys: the scores read a group's keys
+            # straight from the cache, once per head of the group.
             scores = gemv(keys[i], q, tile_out=L // cols, repeat=H // G)
             scores = ElementwiseMul(
                 scores, scale, num_aie_columns=cols, tile_size=L // cols
@@ -200,15 +198,8 @@ class LlamaGraph:
             # every column from there on, so the cache's unwritten tail
             # contributes nothing.
             weights = Softmax(scores, vector_size=vector_size)
-            v_t = Transpose(
-                v_all.reshape(H, L, D),
-                num_aie_columns=2,
-                num_channels=1,
-                m=256,
-                n=32,
-                s=8,
-            )
-            ctx = gemv(v_t, weights, tile_out=4)
+            # Each head's context, read from its group's values in place.
+            ctx = GQAContext(values[i], weights.reshape(G, H // G, L))
             o = gemv(lw.o, ctx.reshape(H * D), tile_out=E // cols)
             # </grouped query attention>
             x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E // cols)
