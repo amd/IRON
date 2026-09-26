@@ -10,38 +10,46 @@ Operators are re-exported lazily (PEP 562):
 
 import importlib
 
+# Operator name -> the module that defines it, relative to this package. A
+# small operator is one file (``relu``); one with a design, a reference or a
+# test of its own keeps a directory (``gemm.op``).
 _OPERATOR_MODULES = {
+    "AXPY": "axpy",
+    "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",
-    "GEMM": "gemm",
-    "GEMV": "gemv",
-    "MHA": "mha",
+    "GELU": "gelu",
+    "GEMM": "gemm.op",
+    "GEMV": "gemv.op",
+    "LayerNorm": "layer_norm",
+    "LeakyReLU": "leaky_relu",
+    "MHA": "mha.op",
+    "MemCopy": "mem_copy",
+    "ReLU": "relu",
     "RMSNorm": "rms_norm",
-    "RoPE": "rope",
+    "WeightedRMSNorm": "rms_norm",
+    "Repeat": "repeat",
+    "RoPE": "rope.op",
+    "Sigmoid": "sigmoid",
     "SiLU": "silu",
     "Softmax": "softmax",
-    "SwiGLUDecode": "swiglu_decode",
-    "SwiGLUPrefill": "swiglu_prefill",
+    "Copy": "copy",
+    "SwiGLUDecode": "swiglu_decode.op",
+    "SwiGLUPrefill": "swiglu_prefill.op",
+    "Tanh": "tanh",
     "Transpose": "transpose",
-    "StridedCopy": "strided_copy",
-    "Repeat": "repeat",
 }
 
-# Sub-packages whose operator names would collide with the table above.
-_SUBPACKAGES = ("flm",)
-
-__all__ = sorted(set(_OPERATOR_MODULES) | set(_SUBPACKAGES))
+__all__ = sorted(_OPERATOR_MODULES)  # pyright: ignore[reportUnsupportedDunderAll]
 
 
 def __getattr__(name):
     """Import the operator that defines `name`, on first access."""
-    if name in _SUBPACKAGES:
-        return importlib.import_module(f".{name}", __name__)
     module = _OPERATOR_MODULES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}.op", __name__), name)
+    return getattr(importlib.import_module(f".{module}", __name__), name)
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_OPERATOR_MODULES) | set(_SUBPACKAGES))
+    return sorted(set(globals()) | set(_OPERATOR_MODULES))

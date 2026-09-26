@@ -43,7 +43,8 @@ def test_golden_weights_load_into_the_module():
 
 def test_module_computes_the_golden_reference():
     """The design is generated from this module and the result is checked against
-    the golden reference, so the two have to be the same computation."""
+    the golden reference, so the two have to be the same computation.
+    """
     golden = generate_golden_reference(**SHAPE)
     module = reference.swiglu_module(SHAPE["K"], SHAPE["N"], golden)
     assert module(golden[reference.INPUT]).equal(golden[reference.OUTPUT])

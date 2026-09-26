@@ -4,7 +4,7 @@
 
 """Placements are written in array columns and resolved to stream's core ids.
 
-:class:`~iron.common.stream.hardware.ComputeArray` reads the grid from the
+:class:`~iron.operators.swiglu_prefill_stream.stream.hardware.ComputeArray` reads the grid from the
 mlir-aie device IRON is building for, and is the only place that knows what a
 stream core id means, so operators never spell one out.
 """
@@ -18,10 +18,12 @@ pytest.importorskip(
 import aie.utils as aie_utils  # noqa: E402
 from aie.iron.device import NPU2  # noqa: E402
 
-aie_utils.set_current_device(NPU2())
+aie_utils.set_current_device(NPU2())  # pyright: ignore[reportCallIssue]
 
-from iron.common.stream.hardware import ComputeArray  # noqa: E402
 from iron.operators.swiglu_prefill_stream import stream_design  # noqa: E402
+from iron.operators.swiglu_prefill_stream.stream.hardware import (  # noqa: E402
+    ComputeArray,
+)
 
 ARRAY = stream_design.array()
 
@@ -74,14 +76,15 @@ def test_allocate_rejects_an_oversubscribed_array():
 
 def test_ids_agree_with_the_accelerator_stream_solves_against():
     """IRON derives core ids from the device; stream-dse reads them from its own
-    accelerator description. A design is only correct while the two agree."""
+    accelerator description. A design is only correct while the two agree.
+    """
     import os
 
     import stream
     import yaml
 
     path = os.path.join(
-        os.path.dirname(stream.__file__),
+        os.path.dirname(str(stream.__file__)),
         "inputs",
         "aie",
         "hardware",
@@ -131,6 +134,6 @@ def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
 def test_devices_other_than_the_default_resolve():
     from aie.iron.device import NPU1
 
-    array = ComputeArray.from_device(NPU1())
+    array = ComputeArray.from_device(NPU1())  # pyright: ignore[reportCallIssue]
     assert array.num_columns and array.num_rows
     assert array.cores(array.all_columns)

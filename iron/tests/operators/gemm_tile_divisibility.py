@@ -26,13 +26,13 @@ def _construct(tile_m=64, tile_k=64, tile_n=64, emulate_bf16_mmul_with_bfp16=Tru
         tile_k=tile_k,
         tile_n=tile_n,
         emulate_bf16_mmul_with_bfp16=emulate_bf16_mmul_with_bfp16,
-        context=None,
     )
 
 
 def test_tile_m_not_a_multiple_of_16_is_rejected_under_emulation():
     """mm.cc needs m % 16 == 0 under the default emulate_bf16_mmul_with_bfp16
-    (r=8), which tile_m=8 satisfies as a bound but not as a divisor."""
+    (r=8), which tile_m=8 satisfies as a bound but not as a divisor.
+    """
     with pytest.raises(ValueError, match="tile_m .* multiple of 16"):
         _construct(tile_m=8)
 
@@ -57,7 +57,8 @@ def test_tile_n_not_a_multiple_of_16_is_rejected_regardless_of_emulation():
 
 def test_tile_m_not_a_multiple_of_8_is_rejected_without_emulation():
     """mm.cc needs m % 8 == 0 without emulation (r=4), which tile_m=4
-    satisfies as a bound but not as a divisor."""
+    satisfies as a bound but not as a divisor.
+    """
     with pytest.raises(ValueError, match="tile_m .* multiple of 8"):
         _construct(tile_m=4, emulate_bf16_mmul_with_bfp16=False)
 

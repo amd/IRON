@@ -92,9 +92,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mlir-artifacts
+          # Builds land in mlir-aie's JIT cache, keyed on content; nothing is
+          # written beside the application any more.
           path: |
-            iron/applications/llama_3.2_1b/build/*.mlir
-            iron/applications/llama_3.2_1b/build_elf/*.mlir
+            ~/.npu/cache/*/*.mlir
           retention-days: 14
           if-no-files-found: warn
 
