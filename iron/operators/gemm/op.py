@@ -27,6 +27,7 @@ from iron.common.declare import (
     Untunable,
     dim,
     operator,
+    optional,
     select,
     tunable,
 )
@@ -459,15 +460,21 @@ class GEMM(Operator[GEMMOverlay]):
     M: int = dim()
     K: int = dim()
     N: int = dim()
+    # Independent products, each batch its own A, B and C: attention's scores
+    # and context, one per key group. A single batch carries no batch
+    # dimension at all, so the unbatched shapes stay exactly as they were.
+    num_batches: int = dim(1)
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
-    A = In(M, K, dtype=GEMMOverlay.dtype_in, to=GEMMOverlay.a)
+    A = In(optional(num_batches), M, K, dtype=GEMMOverlay.dtype_in, to=GEMMOverlay.a)
     B = In(
+        optional(num_batches),
         select(GEMMOverlay.b_col_maj, (N, K), (K, N)),
         dtype=GEMMOverlay.dtype_in,
         to=GEMMOverlay.b,
     )
     C = Out(
+        optional(num_batches),
         select(GEMMOverlay.c_col_maj, (N, M), (M, N)),
         dtype=GEMMOverlay.dtype_out,
         from_=GEMMOverlay.c,
@@ -510,36 +517,51 @@ class GEMM(Operator[GEMMOverlay]):
         ):
             if value % unit != 0:
                 raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
+        # Batches stack: the row-major As and Cs of consecutive batches are
+        # one taller matrix each, which a column-major C is not.
+        if self.num_batches > 1 and ov.c_col_maj:
+            raise ValueError("a batched GEMM needs a row-major C (c_col_maj=False)")
+
+    @property
+    def row_blocks(self) -> int:
+        """C's (m * n_aie_rows)-row blocks over every batch, stacked."""
+        return self.num_batches * self.M // self.ov.mem_tile_m_c
 
     def residents(self) -> dict[str, int]:
         ov = self.ov
         return {
             "k_div_k": self.K // ov.tile_k,
-            "n_tiles": (self.M // ov.mem_tile_m_c) * (self.N // ov.mem_tile_n),
+            "n_tiles": self.row_blocks * (self.N // ov.mem_tile_n),
         }
 
     # -- the runtime sequence --------------------------------------------------
 
-    def _fills(self) -> tuple[list[list[Access]], list[list[Access]]]:
-        """A's descriptors per A tile, and B's per column, from the tilers.
+    def _fills(self) -> tuple[list[list[Access]], list[list[list[Access]]]]:
+        """A's descriptors per A tile, and B's per batch per column, from the
+        tilers.
 
         An A tile is one (m * n_A_tiles_per_shim)-row block with every
         K-block, repeated once per column block of C a core produces so it
-        can be distributed across the whole column. Column ``c`` of B is
-        every ``n_aie_cols``-th n-wide block, all of K. Each tiler pattern is
-        legalized: one descriptor when it fits, else the outermost dimension
-        unrolled (a column-major B whose column-block stride is past the
-        20-bit step).
+        can be distributed across the whole column; the batches' As stack
+        into one taller matrix, so its tiles run on through every batch.
+        Column ``c`` of B is every ``n_aie_cols``-th n-wide block, all of K,
+        of the batch's own B. Each tiler pattern is legalized: one descriptor
+        when it fits, else the outermost dimension unrolled (a column-major B
+        whose column-block stride is past the 20-bit step).
         """
         ov = self.ov
-        M, K, N = self.M, self.K, self.N
+        M, K, N = self.num_batches * self.M, self.K, self.N
         k, n = ov.tile_k, ov.tile_n
         K_div_k = K // k
         n_c_col_tiles_per_core = N // ov.mem_tile_n
 
-        def legal(buffer, tap):
+        def legal(buffer, tap, offset=0):
             return legalize(
-                buffer.elements, tap.offset, tap.sizes, tap.strides, buffer.dtype
+                buffer.elements,
+                tap.offset + offset,
+                tap.sizes,
+                tap.strides,
+                buffer.dtype,
             )
 
         A_tiles = TensorTiler2D.group_tiler(
@@ -572,13 +594,19 @@ class GEMM(Operator[GEMMOverlay]):
                 prune_step=False,
             )
         return [legal(self.A, tap) for tap in A_tiles], [
-            legal(self.B, tap) for tap in B_tiles
+            [legal(self.B, tap, batch * N * K) for tap in B_tiles]
+            for batch in range(self.num_batches)
         ]
 
     def _a_tile(self, col: int, c_row: int, tiles: int) -> int:
         """Which of the ``tiles`` A tiles shim ``col`` sends for row-block
         ``c_row`` of C: each shim carries separate rows."""
         return (c_row * self.ov.n_shim_mem_a + col) % tiles
+
+    def _b_fill(self, b_fills, col: int, c_row: int) -> list[Access]:
+        """B's descriptors for column ``col`` of row-block ``c_row`` of the
+        stacked C: those of the batch the row-block is in."""
+        return b_fills[c_row // (self.M // self.ov.mem_tile_m_c)][col]
 
     def _transfer_blocks(self) -> list[tuple[int, int, int, int]]:
         """C's row-blocks in the order the sequence walks them:
@@ -590,7 +618,7 @@ class GEMM(Operator[GEMMOverlay]):
         row-blocks, ping and pong, each ending on a sync.
         """
         ov = self.ov
-        n_c_row_tiles_per_core = self.M // ov.mem_tile_m_c
+        n_c_row_tiles_per_core = self.row_blocks
         tb_max_n_rows = 4 if not ov.c_col_maj else 2
         blocks = []
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
@@ -670,7 +698,7 @@ class GEMM(Operator[GEMMOverlay]):
         blocks once per row-block of C, C its column's sub-tiles, transfer
         block by transfer block."""
         ov = self.ov
-        rows = self.M // ov.mem_tile_m_c
+        rows = self.row_blocks
         if buffer is self.C:
             blocks = self._transfer_blocks()
             return Order(
@@ -698,7 +726,15 @@ class GEMM(Operator[GEMMOverlay]):
                 ),
             )
         return Order(
-            ov.b, tuple(tuple(b_fills[col]) * rows for col in range(ov.num_aie_columns))
+            ov.b,
+            tuple(
+                tuple(
+                    acc
+                    for c_row in range(rows)
+                    for acc in self._b_fill(b_fills, col, c_row)
+                )
+                for col in range(ov.num_aie_columns)
+            ),
         )
 
     def design(self, rt):
@@ -711,7 +747,7 @@ class GEMM(Operator[GEMMOverlay]):
         # flight) assumes one; when B unrolls, the transfer blocks are not
         # overlapped so that a shim never holds more than one block's
         # descriptors.
-        b_unrolled = any(len(f) > 1 for f in b_fills)
+        b_unrolled = any(len(f) > 1 for f in b_fills[0])
 
         def fill(col, c_row, tg):
             # A: n_A_tiles_per_shim-row sub-tiles, one per shim that carries A.
@@ -721,7 +757,7 @@ class GEMM(Operator[GEMMOverlay]):
             # B: the first (n)-wide block of columns of B, then the
             # (n_aie_columns)-th such block, and so on; each shim starts at a
             # different column offset.
-            for acc in b_fills[col]:
+            for acc in self._b_fill(b_fills, col, c_row):
                 rt.fill(ov.b[col], (self.B, acc), group=tg)
 
         # Task groups determine when to sync, await and free DMA runtime ops.
@@ -753,7 +789,8 @@ class GEMM(Operator[GEMMOverlay]):
     # -- host-side helpers ---------------------------------------------------
 
     def reference(self, A, B):
-        """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
+        """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``,
+        one product per batch."""
         return reference(A, B, self.ov.b_col_maj, self.ov.c_col_maj)
 
 
@@ -767,13 +804,14 @@ def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
 
     ``input_b`` is in the operator's storage layout: it is transposed back to
     ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
-    transposed to ``(N, M)`` when ``c_col_maj`` is set.
+    transposed to ``(N, M)`` when ``c_col_maj`` is set. Leading axes are
+    batches, one product each.
     """
-    B = input_b.T if b_col_maj else input_b
+    B = np.swapaxes(input_b, -1, -2) if b_col_maj else input_b
     # float32 accumulate, rounded once, as the kernel's f32 accumulator does.
     C = np.matmul(input_a.astype(np.float32), B.astype(np.float32)).astype(
         input_a.dtype
     )
     if c_col_maj:
-        C = C.T
+        C = np.swapaxes(C, -1, -2)
     return C

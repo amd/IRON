@@ -58,10 +58,12 @@ def _kv_slot():
 
 # One construction per operator that writes its own sequence, at shapes that
 # reach its irregular paths: GEMV's coalesced batches, GEMM's split C drain,
-# a copy's padded remainder, flm.GEMM's split C and its shipped overlay.
+# a copy's padded remainder, flm.GEMM's split C and its shipped overlay,
+# and GEMM's batches, whose transfer blocks span two of them.
 OVERRIDES = [
     lambda: GEMV(M=256, K=128, num_aie_columns=2, tile_size_output=64, num_batches=4),
     lambda: GEMM(M=1024, K=2560, N=10240, tile_m=64, tile_k=64, tile_n=64),
+    lambda: GEMM(M=768, K=128, N=512, num_batches=3, b_col_maj=True),
     lambda: MHA(num_heads=8, seq_len=128, d=64, num_KV_heads=2, num_of_pipelines=1),
     lambda: Transpose(M=128, N=128, num_aie_columns=2, num_channels=1, num_batches=2),
     lambda: StridedCopy(**_kv_slot()),
@@ -81,6 +83,7 @@ OVERRIDES = [
     ids=[
         "GEMV",
         "GEMM",
+        "GEMM-batched",
         "MHA",
         "Transpose",
         "StridedCopy",

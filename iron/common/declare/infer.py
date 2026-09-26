@@ -66,17 +66,10 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
         dims = list(m.dims)
         leading = dims[0] if dims and isinstance(dims[0], _Optional) else None
         if leading is not None:
-            if len(shape) == len(dims):
-                bind(leading.ref, shape[0], f"{m.name}.shape[0]")
-                shape = shape[1:]
-            elif len(shape) == len(dims) - 1:
-                bind(leading.ref, 1, f"{m.name} (rank {len(shape)})")
-            else:
-                raise ValueError(
-                    f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
-                    f"declared {m!r}"
-                )
             dims = dims[1:]
+        # A select() expands before the rank is read: it stands for as many
+        # dimensions as its branch, so an optional leading one ahead of it
+        # (a batched GEMM's B) is told apart by the expanded rank.
         expanded: list = []
         for d in dims:
             if isinstance(d, _Select):
@@ -102,6 +95,17 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
             else:
                 expanded.append(d)
         dims = expanded
+        if leading is not None:
+            if len(shape) == len(dims) + 1:
+                bind(leading.ref, shape[0], f"{m.name}.shape[0]")
+                shape = shape[1:]
+            elif len(shape) == len(dims):
+                bind(leading.ref, 1, f"{m.name} (rank {len(shape)})")
+            else:
+                raise ValueError(
+                    f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
+                    f"declared {m!r}"
+                )
         if len(dims) == 1 and len(shape) != 1:
             # A flat buffer takes an operand of any rank: its one
             # dimension is the element count.
