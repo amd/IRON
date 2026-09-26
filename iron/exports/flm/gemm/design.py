@@ -17,12 +17,13 @@ The constants below are the single source of truth: ``op.py`` passes them to
 the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
 
 The array itself is ``GEMM.array`` and the runtime sequence is
-``FLMGEMM.design`` in ``op.py``; this module keeps the geometry, the L1
-budget helpers and the parameter-buffer layout they and ``shipped.py``
-share.
+``GEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
+memtile budget helpers and the parameter-buffer layout they and
+``shipped.py`` share.
 """
 
 from enum import StrEnum
+from typing import NamedTuple
 
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import (
@@ -58,7 +59,7 @@ def compute_rows(dev):
 
 CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
-B_DEPTH = 2  # B fifo depth; also the core-body unroll
+B_DEPTH = 2  # the deepest L1 B ring the budget below tries
 A_DEPTH = 2
 # L1 bytes reserved for the core's stack, which the buffer budget below must
 # not hand out. The device default is 1024 and aiecc measures what a build
@@ -82,15 +83,35 @@ def l1_budget(dev):
 
 
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
-# at the cost of that many L1 accumulators and forcing a_split. Off everywhere
+# at the cost of that many L1 accumulators. Off everywhere
 # for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
 # the overlay this replaces takes any multiple of 256, so a shape that cannot
 # use it forks config_name. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
-# How many column-blocks the runtime sequence keeps in flight. A block costs 3
-# shim buffer descriptors on a column (A + B + C) of the 16 available, so the
-# ceiling is 5. 2 is enough to keep the fills ahead of the cores.
-OVERLAP_DEFAULT = 2
+
+# --- B's explicit memtile path ---------------------------------------------
+#
+# B does not go through an ObjectFifo. A fifo's memtile BDs are part of the
+# device configuration, so holding a column-block there would put K (the buffer
+# size) and M (the replay count) into the one xclbin every shape shares.
+# Instead the memtile holds a fixed pool of k-block slots and the runtime
+# sequence, which is per shape, programs both of its B channels.
+#
+# Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
+# parity half has left after the static objectfifo BDs, and, below that, by
+# what the memtile has left after A and C; see GEMM.array().
+B_MAX_SLOTS = 8
+
+
+class _Slab(NamedTuple):
+    """A run of row-block units the sequence arms B for at once; see
+    GEMM.sequence()."""
+
+    first: int  # the first unit
+    units: int
+    b_resident: bool
+    b_slots: int  # memtile slots walked
+    b_uses: int  # units served per fill
 
 
 class Epilogue(StrEnum):
@@ -171,24 +192,13 @@ MIN_K = K_TILE  # 512
 BFP16_GROUP, BFP16_GROUP_BYTES = 8, 9
 
 
-# --- Shim DMA limits ------------------------------------------------------
-#
-# Hardware facts the Python bindings do not expose: getDmaBdStepBits and
-# getDmaBdWrapSizeBits are unbound, and nothing models the channel task queue.
-# gemv/design.py and repeat/design.py hardcode the same fields. An IR-level
-# bf16 stride S is re-expressed as (S-1)*2 bytes / 4-byte granularity before
-# AIEXDialect.cpp checks it.
-_SHIM_STEP_BITS = 20
-_BF16_BYTES = 2
-_ADDR_GRANULARITY_BYTES = 4
-# Entries in a shim DMA channel's task queue. NpuPushQueueOp pushes
-# unconditionally, so overrunning this hangs silently. Measured: 4 run, 8 hang.
-SHIM_TASK_QUEUE = 4
-
-
-def _hw_stride_ok(stride_elems):
-    hw_stride = (stride_elems - 1) * _BF16_BYTES // _ADDR_GRANULARITY_BYTES
-    return hw_stride <= (1 << _SHIM_STEP_BITS) - 1
+def _b_bytes(elems, bfp16_b):
+    """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
+    plus one shared exponent; bf16 is a plain 2 bytes each."""
+    if not bfp16_b:
+        return elems * 2
+    assert elems % BFP16_GROUP == 0
+    return elems // BFP16_GROUP * BFP16_GROUP_BYTES
 
 
 def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):

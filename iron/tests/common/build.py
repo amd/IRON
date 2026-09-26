@@ -337,9 +337,6 @@ class _TargetModel:
     def get_local_memory_size(self):
         return 65536
 
-    def get_num_bds(self, col, row):
-        return 16
-
 
 @pytest.fixture
 def flm(monkeypatch):
@@ -417,36 +414,6 @@ def test_flm_gemm_layout_of_b_follows_the_device(flm):
     with pytest.raises(flm.Incompatible):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
     assert untuned.resolved(_NPU2()).B.shape == (512 * 512 // 8,)
-
-
-def test_flm_gemm_unsplit_sequence_issues_c_then_a_then_b_per_block(flm):
-    op = flm.GEMM(M=512, K=1024, N=1024).resolved(_NPU2())
-    log = _record(op)
-    op.sequence(Sequence(op, {"A": "dA", "B": "dB", "C": "dC"}))
-    verbs = [v for v, *_ in log]
-    # Two column-blocks (N = 2 * 8 * 64): each drains C on eight columns,
-    # then fills A on four rows and B on eight columns.
-    block = ["drain"] * 8 + ["fill"] * 4 + ["fill"] * 8
-    assert verbs == block * 2
-    drains = [e for e in log if e[0] == "drain"]
-    assert drains[1] == ("drain", "C1", 64, (1, 2, 256, 64), True)
-    assert drains[8] == ("drain", "C0", 8 * 64, (1, 2, 256, 64), True)
-    a_fills = [e for e in log if e[1].startswith("A")]
-    assert a_fills[1] == ("fill", "A1", 64 * 1024, (2, 2, 64, 512), False)
-    b_fills = [e for e in log if e[1].startswith("B")]
-    # B's offsets are in v8bfp16ebs8 elements: values // 8.
-    assert b_fills[1] == ("fill", "B1", 64 * 1024 // 8, (2, 2, 1, 512 * 64 // 8), False)
-
-
-def test_flm_gemm_split_sequence_drains_one_row_block_at_a_time(flm):
-    # N = 10240 puts C's row-block stride past the 20-bit step: c_split.
-    op = flm.GEMM(M=512, K=1024, N=10240).resolved(_NPU2())
-    assert op._c_split and not op._a_split
-    log = _record(op)
-    op.sequence(Sequence(op, {"A": "dA", "B": "dB", "C": "dC"}))
-    drains = [e for e in log if e[0] == "drain"]
-    assert len(drains) == 20 * 8 * 2  # blocks x columns x row-blocks
-    assert all(sizes == (1, 1, 256, 64) for _, _, _, sizes, _ in drains)
 
 
 def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
