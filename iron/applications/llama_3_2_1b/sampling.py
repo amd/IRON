@@ -11,12 +11,13 @@ import numpy as np
 class Sampler:
     """Temperature, then top-k, then a draw from the softmax.
 
-    The steps are :func:`.harness.generate_token`'s: logits are divided by
-    the temperature, every logit below the ``top_k``-th largest is dropped
-    (ties with it are kept, as ``torch.where(logits < kth, -inf, ...)``
-    keeps them), and a token is drawn from the softmax of what is left.
+    The steps the harness took in torch before this replaced them: logits
+    are divided by the temperature, every logit below the ``top_k``-th
+    largest is dropped (ties with it are kept, as ``torch.where(logits <
+    kth, -inf, ...)`` kept them), and a token is drawn from the softmax of
+    what is left.
 
-    Two differences from that function, both deliberate. The arithmetic is
+    Two differences from that pipeline, both deliberate. The arithmetic is
     float32 over the (bf16) logits and the draw float64, where torch stayed
     in bf16 throughout; and a temperature of 0 is greedy (the argmax), where
     torch skipped the scaling and still sampled. The draw comes from ``rng``,

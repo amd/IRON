@@ -309,7 +309,7 @@ def test_swiglu_prefill_traces_over_a_sequence():
 # --------------------------------------------------------------------------
 
 
-def test_llama_decode_traces_and_tunes(monkeypatch):
+def test_llama_decode_traces_and_tunes():
     from iron.tests.common.llama_model import Config as _Config
 
     from iron.applications.llama_3_2_1b.graphs import DecodeGraph

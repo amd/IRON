@@ -40,14 +40,14 @@ requires_weights = pytest.mark.skipif(
 )
 
 
-def run_llama_npu(prompt_len, num_tokens, *extra_args, figures):
+def run_llama_npu(prompt_len, num_tokens, *extra_args, figures, entry_point="npu"):
     """Run the application to completion; record each of ``figures`` it prints."""
     # As a module, so the package's relative imports resolve and nothing
     # needs the repository on sys.path.
     command = [
         sys.executable,
         "-m",
-        "iron.applications.llama_3_2_1b.npu",
+        f"iron.applications.llama_3_2_1b.{entry_point}",
         str(weights_dir / "llama3.2-1b" / "model.safetensors"),
         str(weights_dir / "llama3.2-1b" / "tokenizer.model"),
         "--num-tokens",
@@ -102,7 +102,9 @@ ACCURACY = {
 @requires_weights
 @pytest.mark.supported_devices("npu2")
 def test_llama_3_2_1b_accuracy():
-    result = run_llama_npu(1024, 40, "--check-accuracy", figures=ACCURACY)
+    # The reference is torch; the application under test is not.
+    pytest.importorskip("torch")
+    result = run_llama_npu(1024, 40, figures=ACCURACY, entry_point="accuracy")
 
     prefill_kl = float(re.search(r"Prefill KL:\s*(\S+)", result.stdout).group(1))
     decode_kl = float(re.search(r"Decode max KL:\s*(\S+)", result.stdout).group(1))

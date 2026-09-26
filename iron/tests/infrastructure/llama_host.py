@@ -186,6 +186,20 @@ def test_tree_names_are_the_module_trees(toy_path):
         assert bitwise_equal(ours[name], as_numpy(p)), name
 
 
+def test_the_reference_tree_is_built_from_the_tree_bitwise(toy_path):
+    """model.Llama.from_weights, the CPU reference's constructor, holds the
+    tree's values exactly as from_hf holds the checkpoint's."""
+    weights = LlamaWeights.load(toy_path)
+    ckpt = safetensors_torch.load_file(toy_path)
+    ours = dict(model.Llama.from_weights(ToyConfig, weights).named_parameters())
+    theirs = dict(model.Llama.from_hf(ToyConfig, ckpt).named_parameters())
+    assert list(ours) == list(theirs)
+    for name, p in theirs.items():
+        assert ours[name].dtype is torch.bfloat16, name
+        assert bitwise_equal(as_numpy(ours[name]), as_numpy(p)), name
+    assert not any(p.requires_grad for p in ours.values())
+
+
 def test_tree_arrays_keep_their_identity(toy_path):
     """The tracer names a weight by id(); a fresh array per read would unname it."""
     weights = LlamaWeights.load(toy_path)
@@ -321,8 +335,8 @@ def test_top_k_keeps_ties_with_the_kth():
 
 
 def test_probabilities_are_the_harness_pipeline():
-    """Temperature, top-k and softmax as harness.generate_token computes them,
-    here in float32 on both sides. bf16 logits tie often, so more than k
+    """Temperature, top-k and softmax as the torch pipeline Sampler replaced
+    computed them, here in float32 on both sides. bf16 logits tie often, so more than k
     survive: both sides keep every tie with the k-th."""
     logits = random_logits(128256, seed=4)
     sampler = Sampler(0.7, 50, np.random.default_rng(0))

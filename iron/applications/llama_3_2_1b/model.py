@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2: its parameters as a module tree, and the plain forward pass.
+"""Llama 3.2 in torch: the CPU reference the NPU is judged against.
 
-A checkpoint is a ``state_dict``, so the thing that reads one is an
-``nn.Module``. Declaring the tree once buys the whole surface for free:
-``load_state_dict`` to fill it, ``named_parameters()`` to walk it, and a
-*name* for every weight that is the same string on the checkpoint, in the
-tree, and on the device buffer (the graphs in :mod:`.graphs`
-close over the tree and name their weight buffers from it).
+Nothing on the NPU path imports this module: the graphs close over
+:class:`.weights.LlamaWeights` and name their buffers from it. The tree here
+carries the same names (:meth:`Llama.from_weights` fills it from those
+arrays), and :meth:`Llama.from_hf` fills it from a Hugging Face
+``state_dict``, which is what pins the names to the checkpoint's.
 
 :meth:`Llama.forward` is the model as torch computes it: a stateless causal
 pass over one token sequence. It is the second opinion the graphs are
-checked against on the host (``iron/tests/common/llama_reference.py``): the
+checked against on the host (``iron/tests/common/llama_reference.py``) and
+the oracle of the accuracy check (:mod:`.reference`): the
 graph references define what the graphs compute, so only an independent
 forward can catch a wiring mistake, a transposed layout or a softmax over
 the wrong length. It needs no cache, because the logits at position ``t``
@@ -20,9 +20,13 @@ of a causal pass over ``t + 1`` tokens are what a cached decode produces at
 step ``t``.
 """
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from ml_dtypes import bfloat16
 from torch import nn
+
+from .weights import LlamaWeights
 
 
 class Attention(nn.Module):
@@ -119,6 +123,32 @@ class Llama(nn.Module):
         # host ``F.linear``; grad tracking would only cost memory and surprise.
         model.requires_grad_(False)
         return model
+
+    @classmethod
+    def from_weights(cls, cfg, weights: LlamaWeights, dtype=torch.bfloat16):
+        """Build the tree over a :class:`.weights.LlamaWeights`.
+
+        Its names are already the tree's, so nothing is translated. A bf16
+        tree over writable bf16 arrays shares their storage; anything else
+        (a float32 reference, the read-only views of a mapped checkpoint)
+        is a copy.
+        """
+        with torch.device("meta"):
+            model = cls(cfg, dtype)
+        state = {name: _tensor(a, dtype) for name, a in weights.named_parameters()}
+        model.load_state_dict(state, assign=True)
+        model.requires_grad_(False)
+        return model
+
+
+def _tensor(a: np.ndarray, dtype) -> torch.Tensor:
+    """``a`` as a torch tensor of ``dtype``, sharing storage where it can."""
+    if dtype is torch.bfloat16 and a.dtype == bfloat16:
+        bits = a.view(np.uint16)
+        if not bits.flags.writeable:
+            bits = bits.copy()
+        return torch.from_numpy(bits).view(torch.bfloat16)
+    return torch.from_numpy(np.array(a, dtype=np.float32)).to(dtype)
 
 
 def rope_angles(head_dim, context_length, rope_base=500000.0):

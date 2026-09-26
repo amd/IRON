@@ -109,8 +109,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
     from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
 
-    cfg = Llama1B()
-    cfg.n_layers, cfg.model.layers = 1, cfg.model.layers[:1]
+    cfg = Llama1B(n_layers=1)
     decode = DecodeGraph(cfg, cfg.context_length)
     traced = PrefillGraph(cfg, decode).trace(cfg)
     assert len(traced.runlist) == 18 + 3

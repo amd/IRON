@@ -5,22 +5,25 @@
 
 :class:`DecodeGraph` runs one token through every transformer block, the
 final norm and the output head, with the KV caches as device-resident
-state and the weights closed over from the module tree; the cache position
+state and the weights closed over from ``config.weights``; the cache position
 and the softmax's valid row length are per-call scratchpad values.
 :class:`PrefillGraph` runs the prompt, at the compile-time maximum length
 with the prompt in a prefix, writes the caches and returns the last
 prompt token's logits. Both are traced here on handles; compiled by
 ``npu.py`` against a device, or by a
-test against nothing. ``config`` is the model's shape (``n_layers``,
-``n_heads``, ``n_kv_groups``, ``head_dim``, ``emb_dim``, ``hidden_dim``)
-with the parameter tree as ``config.model`` (:class:`.model.Llama`).
+test against nothing. ``config`` is the model's shape (``n_heads``,
+``n_kv_groups``, ``head_dim``, ``emb_dim``, ``hidden_dim``)
+with the parameters as ``config.weights`` (:class:`.weights.LlamaWeights`);
+the depth is the number of layers it holds. Each array is closed over
+as-is, so the tracer names and pins it by identity.
 """
 
 import math
 
 import numpy as np
-import torch
 from ml_dtypes import bfloat16
+
+import aie.utils as aie_utils
 
 import iron
 from iron.common.declare import Scratchpad
@@ -38,49 +41,6 @@ from iron.operators.strided_copy import StridedCopy
 from iron.operators.transpose import Transpose
 
 
-def _np(t):
-    """A torch tensor as numpy, bf16 preserved."""
-    t = t.detach()
-    if t.dtype is torch.bfloat16:
-        return t.view(torch.uint16).numpy().view(bfloat16)
-    return t.numpy()
-
-
-def _torch(a):
-    """A numpy array as torch, bf16 preserved and memory shared: the inverse of _np."""
-    if a.dtype == bfloat16:
-        return torch.from_numpy(a.view(np.uint16)).view(torch.bfloat16)
-    return torch.from_numpy(a)
-
-
-class Weights:
-    """A module tree's parameters as numpy, each converted exactly once.
-
-    The graph layer and every operator reference are numpy; the tree these
-    come from is torch, because that is how the checkpoint ships and how
-    :mod:`.model` computes the CPU forward. This is the one boundary.
-
-    Converting once matters beyond the cost: the tracer pins a weight and
-    names it by the identity of the array the graph closed over, so a fresh
-    array per trace would leave every weight unnamed and unpinned.
-    """
-
-    def __init__(self, module):
-        self._by_id, self._named = {}, []
-        for name, p in module.named_parameters():
-            array = _np(p)
-            self._by_id[id(p)] = array
-            self._named.append((name, array))
-
-    def __call__(self, parameter):
-        """The numpy array standing for ``parameter``, the same one each time."""
-        return self._by_id[id(parameter)]
-
-    def named_parameters(self):
-        """What ``iron.graph(names_from=...)`` reads, over the numpy arrays."""
-        return iter(self._named)
-
-
 class DecodeGraph:
     """The decode graph function and the state it closes over.
 
@@ -91,27 +51,23 @@ class DecodeGraph:
     """
 
     def __init__(self, config, max_seq_len, *, num_aie_columns=None):
-        model = config.model
-        W = Weights(model)
+        W = config.weights
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
         if num_aie_columns is None:
             # The device's width: eight on NPU2, four on NPU1. The tile sizes
             # below divide by it, so it is fixed when the graph is written.
-            import aie.utils as aie_utils
-
             dev = aie_utils.get_current_device()
             num_aie_columns = dev.cols if dev is not None else 8
         L, cols = max_seq_len, num_aie_columns
         self.max_seq_len = L
         self.num_aie_columns = cols
         self.keys = [
-            iron.state((G, L * D), name=f"keys_cache_{i}")
-            for i in range(config.n_layers)
+            iron.state((G, L * D), name=f"keys_cache_{i}") for i in range(len(W.layers))
         ]
         self.values = [
             iron.state((G, L * D), name=f"values_cache_{i}")
-            for i in range(config.n_layers)
+            for i in range(len(W.layers))
         ]
         # 1/sqrt(head_dim) over every score, as the elementwise multiply wants it.
         self.scale = np.full((H, L), 1.0 / math.sqrt(D), dtype=bfloat16)
@@ -146,13 +102,13 @@ class DecodeGraph:
             cache_offset: Scratchpad[np.int32],
             vector_size: Scratchpad[np.int32],
         ):
-            for i, blk in enumerate(model.layers):
+            for i, lw in enumerate(W.layers):
                 # <transformer block>
-                h = RMSNorm(x, W(blk.norm1.weight))
+                h = RMSNorm(x, lw.norm1)
                 # <grouped query attention>
-                q = proj(W(blk.attn.q.weight), h, tile_out=D // 2)
-                k = proj(W(blk.attn.k.weight), h, tile_out=D // 2)
-                v = proj(W(blk.attn.v.weight), h, tile_out=D // 2)
+                q = proj(lw.q, h, tile_out=D // 2)
+                k = proj(lw.k, h, tile_out=D // 2)
+                v = proj(lw.v, h, tile_out=D // 2)
                 q = RoPE(q.reshape(H, D), angles)
                 k = RoPE(k.reshape(G, D), angles)
                 StridedCopy(k, keys[i], out_offset=cache_offset, **copy_into_cache)
@@ -179,23 +135,23 @@ class DecodeGraph:
                     s=8,
                 )
                 ctx = proj(v_t, weights, tile_out=4)
-                o = proj(W(blk.attn.o.weight), ctx.reshape(H * D), tile_out=E // cols)
+                o = proj(lw.o, ctx.reshape(H * D), tile_out=E // cols)
                 # </grouped query attention>
                 x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E // cols)
-                h = RMSNorm(x, W(blk.norm2.weight))
-                gate = proj(W(blk.ffn.gate.weight), h, tile_out=F // cols)
-                up = proj(W(blk.ffn.up.weight), h, tile_out=F // cols)
+                h = RMSNorm(x, lw.norm2)
+                gate = proj(lw.gate, h, tile_out=F // cols)
+                up = proj(lw.up, h, tile_out=F // cols)
                 act = ElementwiseMul(
                     SiLU(gate, num_aie_columns=cols, tile_size=F // cols),
                     up,
                     num_aie_columns=cols,
                     tile_size=F // cols,
                 )
-                down = proj(W(blk.ffn.down.weight), act, tile_in=1, tile_out=E // cols)
+                down = proj(lw.down, act, tile_in=1, tile_out=E // cols)
                 x = ElementwiseAdd(x, down, num_aie_columns=cols, tile_size=E // cols)
                 # </transformer block>
-            x = RMSNorm(x, W(model.norm.weight))
-            return proj(W(model.out_head.weight), x, tile_out=32)
+            x = RMSNorm(x, W.norm)
+            return proj(W.out_head, x, tile_out=32)
 
         self.graph = decode
 
@@ -226,8 +182,7 @@ class PrefillGraph:
     """
 
     def __init__(self, config, decode, *, num_of_pipelines=8, tile_m=64):
-        model = config.model
-        W = Weights(model)
+        W = config.weights
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E, F = config.emb_dim, config.hidden_dim
         L, cols = decode.max_seq_len, decode.num_aie_columns
@@ -275,13 +230,13 @@ class PrefillGraph:
 
         @iron.graph(names_from=W)
         def prefill(x, angles, *, last: Scratchpad[np.int32]):
-            for i, blk in enumerate(model.layers):
+            for i, lw in enumerate(W.layers):
                 # <transformer block>
-                h = norm(x, W(blk.norm1.weight))
+                h = norm(x, lw.norm1)
                 # <grouped query attention>
-                q = proj(h, W(blk.attn.q.weight))  # (L, H*D)
-                k = proj(h, W(blk.attn.k.weight))  # (L, G*D)
-                v = proj(h, W(blk.attn.v.weight))
+                q = proj(h, lw.q)  # (L, H*D)
+                k = proj(h, lw.k)  # (L, G*D)
+                v = proj(h, lw.v)
                 # One angle row per position, applied to that position's heads.
                 q = RoPE(q.reshape(L * H, D), angles, num_aie_columns=cols)
                 k = RoPE(k.reshape(L * G, D), angles, num_aie_columns=cols)
@@ -294,25 +249,25 @@ class PrefillGraph:
                     heads_interleaved=True,
                     num_of_pipelines=num_of_pipelines,
                 )
-                o = proj(o.reshape(L, H * D), W(blk.attn.o.weight))
+                o = proj(o.reshape(L, H * D), lw.o)
                 # </grouped query attention>
                 x = ElementwiseAdd(x, o, num_aie_columns=cols, tile_size=E)
-                h = norm(x, W(blk.norm2.weight))
-                gate = proj(h, W(blk.ffn.gate.weight))
-                up = proj(h, W(blk.ffn.up.weight))
+                h = norm(x, lw.norm2)
+                gate = proj(h, lw.gate)
+                up = proj(h, lw.up)
                 act = ElementwiseMul(
                     SiLU(gate, num_aie_columns=cols, tile_size=F),
                     up,
                     num_aie_columns=cols,
                     tile_size=F,
                 )
-                down = proj(act, W(blk.ffn.down.weight))
+                down = proj(act, lw.down)
                 x = ElementwiseAdd(x, down, num_aie_columns=cols, tile_size=E)
                 # </transformer block>
             x_last = StridedCopy(x, in_offset=last, **last_row).reshape(1, E)
-            h = RMSNorm(x_last, W(model.norm.weight))
+            h = RMSNorm(x_last, W.norm)
             return GEMV(
-                W(model.out_head.weight),
+                W.out_head,
                 h,
                 num_aie_columns=cols,
                 tile_size_input=4,

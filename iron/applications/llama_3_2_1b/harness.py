@@ -5,23 +5,30 @@
 
 """
 Inference harness -- all the necessary code _other_ than the actual model (forward pass).
-``init`` loads the weights, the tokenizer and the RoPE table and tokenizes
-the prompt; ``generate`` runs the generation loop, calling the given
-``forward_pass(config, state)`` for the prompt and then per token, and
+``init`` maps the weights, loads the tokenizer, builds the RoPE table and
+tokenizes the prompt; ``generate`` runs the generation loop, calling the
+given ``forward_pass(config, state)`` for the prompt and then per token, and
 decodes and prints each token.
+
+A forward pass takes the token ids as an ``int64`` array ``(1, n)`` and
+returns the logits as an array ``(1, 1, vocab_size)``: numpy throughout, so
+nothing here needs torch. Only the CPU reference does (:mod:`.reference`).
 """
 
-import torch
-import sys
-from pathlib import Path
-import time
 import argparse
+import sys
+import time
+from pathlib import Path
 
-import safetensors.torch
+import numpy as np
 import tiktoken
 import tiktoken.load
 
-from .model import Llama, rope_angles
+from .sampling import Sampler
+from .weights import LlamaWeights, rope_angles
+
+#: Seeds the sampler, so a run's text is reproducible.
+SEED = 1608560892
 
 # Configuration
 # ##########################################################################
@@ -61,16 +68,42 @@ class LlamaConfig:
             }
         )
 
-        # Load model weights and tokenizer. The module tree names every weight
-        # once, and load_state_dict is strict, so a checkpoint that disagrees
-        # with this config on any key or shape fails here rather than at the
-        # first dispatch. The parameters share storage with self.weights.
-        self.weights = safetensors.torch.load_file(weights_path)
-        self.model = Llama.from_hf(self, self.weights)
+        # Map the weights and load the tokenizer. The mapping is read as the
+        # weights are uploaded, not here; the tree is strict about keys and
+        # shapes, and _check_weights about this config, so a checkpoint that
+        # disagrees with either fails here rather than at the first dispatch.
+        self.weights = LlamaWeights.load(weights_path)
+        self._check_weights()
         self.tokenizer = get_tokenizer(tokenizer_path, self.special_tokens)
 
-        # The RoPE angle look-up table
+        # The RoPE angle look-up table, float32; the NPU and the CPU reference
+        # both read this one.
         self.angles = rope_angles(self.head_dim, self.context_length, self.rope_base)
+
+    def _check_weights(self):
+        layer = self.weights.layers[0]
+        found = {
+            "n_layers": len(self.weights.layers),
+            "vocab_size": self.weights.vocab_size,
+            "emb_dim": self.weights.emb_dim,
+            "n_heads * head_dim": layer.q.shape[0],
+            "n_kv_groups * head_dim": layer.k.shape[0],
+            "hidden_dim": layer.gate.shape[0],
+        }
+        expected = {
+            "n_layers": self.n_layers,
+            "vocab_size": self.vocab_size,
+            "emb_dim": self.emb_dim,
+            "n_heads * head_dim": self.n_heads * self.head_dim,
+            "n_kv_groups * head_dim": self.n_kv_groups * self.head_dim,
+            "hidden_dim": self.hidden_dim,
+        }
+        wrong = {k: (found[k], v) for k, v in expected.items() if found[k] != v}
+        if wrong:
+            raise ValueError(
+                "checkpoint disagrees with the config: "
+                + ", ".join(f"{k} is {f}, expected {e}" for k, (f, e) in wrong.items())
+            )
 
 
 class LlamaModelState:
@@ -79,7 +112,7 @@ class LlamaModelState:
     The KV cache itself lives on the device."""
 
     def __init__(self, config):
-        self.token_ids = torch.empty(0, dtype=torch.long)
+        self.token_ids = np.empty((1, 0), dtype=np.int64)
         self.num_preceding_tokens = 0
 
 
@@ -107,61 +140,16 @@ def get_tokenizer(tokenizer_path, special_tokens):
 # ##########################################################################
 
 
-def generate_token(config, forward_pass, state):
-    # Step 1: Forward pass
+def generate_token(config, forward_pass, state, sampler):
+    """Run one forward pass and draw the next token from its last logits."""
     logits, state = forward_pass(config, state)
-
-    # Step 2: Get logits for last token
-    last_token_logits = logits[:, -1, :]  # (batch, vocab_size)
-
-    # Step 3: Temperature scaling
-    if config.temperature > 0:
-        last_token_logits = last_token_logits / config.temperature
-
-    # Step 4: Top-k filtering
-    if config.top_k is not None:
-        top_logits, _ = torch.topk(last_token_logits, config.top_k)
-        min_val = top_logits[:, -1:]
-        last_token_logits = torch.where(
-            last_token_logits < min_val, torch.tensor(float("-inf")), last_token_logits
-        )
-
-    # Step 5: Sample
-    probs = torch.nn.functional.softmax(last_token_logits, dim=-1)
-    next_token = torch.multinomial(probs, num_samples=1)
-
-    return next_token.item(), state
+    return sampler(logits[0, -1]), state
 
 
-class ReferenceForward:
-    """:meth:`Llama.forward` in float32, as a ``forward_pass``: the oracle
-    :func:`check_accuracy` judges the NPU against.
-
-    The plain forward keeps no cache, so this keeps the token history
-    instead and runs all of it each call: a prompt starts a new history, a
-    single token extends it. The logits at the last position of a causal
-    pass are what a cached decode produces for that token.
-    """
-
-    def __init__(self, config: LlamaConfig):
-        self.model = Llama.from_hf(
-            config,
-            {k: v.float() for k, v in config.weights.items()},
-            dtype=torch.float32,
-        )
-        self.angles = config.angles
-        self.tokens = torch.empty(0, dtype=torch.long)
-
-    def __call__(
-        self, config: LlamaConfig, state: LlamaModelState
-    ) -> tuple[torch.Tensor, LlamaModelState]:
-        batch, seq_len = state.token_ids.shape
-        assert batch == 1
-        new = state.token_ids.reshape(-1)
-        self.tokens = new if seq_len > 1 else torch.cat([self.tokens, new])
-        state.num_preceding_tokens = self.tokens.shape[0]
-        logits = self.model(self.tokens, self.angles)[-1]
-        return logits.reshape(1, 1, -1), state
+def _log_softmax(logits):
+    x = np.asarray(logits, dtype=np.float64).reshape(-1)
+    x = x - x.max()
+    return x - np.log(np.exp(x).sum())
 
 
 def check_accuracy(
@@ -181,14 +169,14 @@ def check_accuracy(
     for step in range(num_tokens):
         logits, state = forward_pass(config, state)
         ref_logits, ref_state = ref_forward_pass(ref_config, ref_state)
-        cand = torch.log_softmax(logits[0, -1].float(), dim=0)
-        ref = torch.log_softmax(ref_logits[0, -1].float(), dim=0)
-        kl = torch.sum(ref.exp() * (ref - cand)).item()
+        cand = _log_softmax(logits[0, -1])
+        ref = _log_softmax(ref_logits[0, -1])
+        kl = float(np.sum(np.exp(ref) * (ref - cand)))
         next_token = int(ref.argmax())
         top1 = int(cand.argmax()) == next_token
         results.append((kl, top1))
         print(f"step {step:3d}  KL {kl:.5f}  top-1 {'match' if top1 else 'MISMATCH'}")
-        state.token_ids = torch.tensor([[next_token]], dtype=torch.long)
+        state.token_ids = np.array([[next_token]], dtype=np.int64)
         ref_state.token_ids = state.token_ids
     return results
 
@@ -210,21 +198,23 @@ def check_determinism(config, prompts, forward_pass, num_tokens, rounds):
         logits = []
         for _ in range(num_tokens):
             out, state = forward_pass(config, state)
-            logits.append(out[0, -1].clone())
-            state.token_ids = out[:, -1:].argmax(dim=-1)
-        logits = torch.stack(logits).view(torch.int16)
+            logits.append(np.array(out[0, -1]))
+            state.token_ids = out[:, -1:].argmax(axis=-1).astype(np.int64)
+        # Bitwise, as 16-bit words: bf16 logits, NaNs and signed zeros included.
+        logits = np.stack(logits).view(np.int16)
         if first[p] is None:
             first[p] = logits
             continue
-        steps = (logits != first[p]).any(dim=1).nonzero().flatten().tolist()
+        steps = np.flatnonzero((logits != first[p]).any(axis=1)).tolist()
         if steps:
             n_differ += 1
             print(f"round {r} (prompt {p}): logits differ at steps {steps}")
     return n_differ
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="LLaMA 3.2 1B Inference Harness")
+def argument_parser(description="LLaMA 3.2 1B Inference Harness"):
+    """The arguments every entry point takes; each adds its own."""
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "weights_path", type=str, help="Path to the model weights (safetensors file)"
     )
@@ -243,20 +233,7 @@ def parse_args():
         default=40,
         help="Number of tokens to generate (default: 40)",
     )
-    parser.add_argument(
-        "--check-accuracy",
-        action="store_true",
-        help="Instead of sampling, compare each step's logits against an fp32 CPU "
-        "reference, feeding both the reference's greedy token",
-    )
-    parser.add_argument(
-        "--check-determinism",
-        type=int,
-        metavar="ROUNDS",
-        help="Instead of sampling, run two prompts ROUNDS times each, alternating, "
-        "and count the runs whose logits differ bitwise from the first run",
-    )
-    return parser.parse_args()
+    return parser
 
 
 def get_prompt(prompt_len):
@@ -274,42 +251,40 @@ def init(
     config = LlamaConfig(weights_path, tokenizer_path)
     state = LlamaModelState(config)
 
-    seed = 1608560892
-    torch.manual_seed(seed)
-
     # Tokenize prompt
     prompt_token_ids = [config.special_tokens["<|begin_of_text|>"]]
     prompt_token_ids += config.tokenizer.encode(prompt)
     assert (
         len(prompt_token_ids) <= config.context_length
     ), f"Prompt length ({len(prompt_token_ids)} tokens) exceeds model context length ({config.context_length})"
-    prompt_token_ids = torch.tensor([prompt_token_ids], dtype=torch.long)
+    prompt_token_ids = np.array([prompt_token_ids], dtype=np.int64)
 
     state.token_ids = prompt_token_ids
 
     return config, state
 
 
-def generate(config, state, forward_pass, num_tokens=100):
+def generate(config, state, forward_pass, num_tokens=100, seed=SEED):
+    sampler = Sampler(config.temperature, config.top_k, np.random.default_rng(seed))
     # Generate tokens
     # First token (prefill)
     n_tokens_generated = 0
     t_prefill_start = time.perf_counter()
-    first_token, state = generate_token(config, forward_pass, state)
+    first_token, state = generate_token(config, forward_pass, state, sampler)
     token_text = config.tokenizer.decode([first_token])
     n_tokens_generated += 1
     print(token_text, end="", flush=True)
     t_prefill_stop = time.perf_counter()
 
     # Remaining tokens (decode)
-    state.token_ids = torch.tensor([[first_token]], dtype=torch.long)
+    state.token_ids = np.array([[first_token]], dtype=np.int64)
     t_decode_start = time.perf_counter()
     for _ in range(num_tokens - 1):
-        next_token, state = generate_token(config, forward_pass, state)
+        next_token, state = generate_token(config, forward_pass, state, sampler)
         token_text = config.tokenizer.decode([next_token])
         n_tokens_generated += 1
         print(token_text, end="", flush=True)
-        state.token_ids = torch.tensor([[next_token]], dtype=torch.long)
+        state.token_ids = np.array([[next_token]], dtype=np.int64)
     t_decode_end = time.perf_counter()
 
     t_prefill = t_prefill_stop - t_prefill_start

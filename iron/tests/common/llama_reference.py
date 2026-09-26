@@ -22,30 +22,29 @@ agree to bf16 tolerance and the argmax exactly.
 
 import pytest
 import numpy as np
-import torch
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b import npu as llama_npu
 from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+from iron.applications.llama_3_2_1b import harness
 from iron.applications.llama_3_2_1b.harness import LlamaModelState
+from iron.applications.llama_3_2_1b.npu import AIELlama
 from iron.tests.common.llama_model import Config as _Config
+
+# The oracle is torch; the graphs and the application are not.
+torch = pytest.importorskip("torch")
+model = pytest.importorskip("iron.applications.llama_3_2_1b.model")
+reference = pytest.importorskip("iron.applications.llama_3_2_1b.reference")
 
 
 def oracle(config, tokens):
     """The plain forward's logits at every position, in float."""
-    return config.model(tokens, config.angles).float()
-
-
-def _np(t):
-    """A torch tensor as numpy, bf16 preserved: what a graph reference takes."""
-    t = t.detach()
-    if t.dtype is torch.bfloat16:
-        return t.view(torch.uint16).numpy().view(bfloat16)
-    return t.numpy()
+    tree = model.Llama.from_weights(config, config.weights)
+    angles = torch.from_numpy(config.angles.view(np.uint16)).view(torch.bfloat16)
+    return tree(tokens, angles).float()
 
 
 def _embed(config, tokens):
-    return _np(torch.nn.functional.embedding(tokens, config.model.out_head.weight))
+    return config.weights.embed(tokens.numpy())
 
 
 def decode_graph(config):
@@ -64,7 +63,7 @@ def graph_prefill(config, graph, prompt):
     x = np.zeros((L, E), dtype=bfloat16)
     x[:n] = _embed(config, prompt)
     pre = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
-    logits = pre.graph.reference(x, _np(config.angles)[:L], last=(n - 1) * E)
+    logits = pre.graph.reference(x, config.angles[:L], last=(n - 1) * E)
     return torch.from_numpy(logits.reshape(-1).astype(np.float32))
 
 
@@ -75,7 +74,7 @@ def graph_decode(config, graph, tokens, pos, *, vector_size=None):
     out = []
     for step, token in enumerate(tokens):
         x = _embed(config, token.reshape(1)).reshape(1, config.emb_dim)
-        angles = _np(config.angles)[pos : pos + 1]
+        angles = config.angles[pos : pos + 1]
         n = pos + 1 if vector_size is None else vector_size(step, pos)
         logits = graph.graph.reference(x, angles, cache_offset=pos * D, vector_size=n)
         out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
@@ -167,6 +166,16 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
     assert max(drift) > 0.05 * expected[1].abs().max(), drift
 
 
+class _Output:
+    """What an image returns: a buffer read with ``numpy()``."""
+
+    def __init__(self, array):
+        self.array = array
+
+    def numpy(self):
+        return self.array
+
+
 class _Image:
     """A compiled graph stood in by its reference: the application's view of one."""
 
@@ -174,8 +183,7 @@ class _Image:
         self.graph = graph
 
     def __call__(self, *tensors, **values):
-        out = self.graph.reference(*tensors, **values)
-        return type("Out", (), {"numpy": lambda _: out})()
+        return _Output(self.graph.reference(*tensors, **values))
 
     def read(self, state):
         return state.host.copy()
@@ -184,32 +192,72 @@ class _Image:
         state.host = np.asarray(tensor).reshape(state.shape).astype(bfloat16)
 
 
-def test_the_application_runs_both_phases_through_its_images(cpu, monkeypatch):
+def application(config):
+    """npu.py's AIELlama with its two images stood in by the graph references."""
+    graph = decode_graph(config)
+    prefill = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
+    return AIELlama(
+        config,
+        graph,
+        _Image(graph.graph),
+        _Image(prefill.graph),
+        config.context_length,
+    )
+
+
+def test_the_application_runs_both_phases_through_its_images(cpu):
     """npu.py's own forward pass, its two images stood in by the graph
     references: the embedding, the prompt's padding and its last-row offset,
     the angles, the cache handoff and decode's values are the application's."""
     config, prompt, first, expected = cpu
-    graph = decode_graph(config)
-    prefill = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
-    npu = llama_npu.AIELlama.__new__(llama_npu.AIELlama)
-    npu.decode_graph = graph
-    npu.decode, npu.prefill = _Image(graph.graph), _Image(prefill.graph)
-    monkeypatch.setattr(llama_npu, "npu", npu)
-    monkeypatch.setattr(llama_npu, "max_seq_len", config.context_length)
+    npu = application(config)
 
     state = LlamaModelState(config)
-    state.token_ids = prompt.reshape(1, -1)
-    logits, state = llama_npu.llama_forward_pass(config, state)
+    state.token_ids = prompt.numpy().reshape(1, -1)
+    logits, state = npu.forward(config, state)
     assert logits.shape == (1, 1, config.vocab_size)
 
-    # The images return numpy; llama_forward_pass hands the harness torch,
-    # which it samples and scores in.
-    assert isinstance(logits, torch.Tensor)
-    _assert_close([logits[0, -1].float()], [first])
+    # The images return numpy, and so does the forward pass: the harness
+    # samples and scores in numpy.
+    assert isinstance(logits, np.ndarray)
+    as_torch = lambda a: torch.from_numpy(a[0, -1].astype(np.float32))
+    _assert_close([as_torch(logits)], [first])
     got, token = [], int(logits[0, -1].argmax())
     for _ in range(len(expected)):
-        state.token_ids = torch.tensor(token).reshape(1, 1)
-        logits, state = llama_npu.llama_forward_pass(config, state)
-        got.append(logits[0, -1].float())
+        state.token_ids = np.array([[token]], dtype=np.int64)
+        logits, state = npu.forward(config, state)
+        got.append(as_torch(logits))
         token = int(logits[0, -1].argmax())
     _assert_close(got, expected)
+
+
+def test_the_accuracy_check_scores_the_application_against_the_reference(cpu):
+    """What ``python -m iron.applications.llama_3_2_1b.accuracy`` runs, with
+    the graph references for the images: the numpy harness against the
+    float32 torch reference, teacher-forced."""
+    config, prompt, _, expected = cpu
+    npu = application(config)
+    state = LlamaModelState(config)
+    state.token_ids = prompt.numpy().reshape(1, -1)
+    results = harness.check_accuracy(
+        config,
+        state,
+        npu.forward,
+        config,
+        LlamaModelState(config),
+        reference.ReferenceForward(config),
+        len(expected) + 1,
+    )
+    assert all(top1 for _, top1 in results), results
+    # bf16 graphs against a float32 forward: close, not equal.
+    assert all(0 <= kl < 0.05 for kl, _ in results), results
+    assert any(kl > 0 for kl, _ in results), results
+
+
+def test_the_determinism_check_finds_the_references_deterministic(cpu):
+    """What ``--check-determinism`` runs: two prompts, alternated, through
+    the application's forward pass; no run differs from the first."""
+    config, prompt, _, _ = cpu
+    npu = application(config)
+    prompts = [prompt.numpy().reshape(1, -1), prompt.numpy()[::-1].reshape(1, -1)]
+    assert harness.check_determinism(config, prompts, npu.forward, 3, 3) == 0
