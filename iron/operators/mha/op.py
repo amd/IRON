@@ -25,10 +25,12 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
+    BoundBuffer,
     select,
     Incompatible,
     In,
     Operator,
+    Order,
     Out,
     Overlay,
     Resident,
@@ -40,6 +42,7 @@ from iron.common.declare import (
     operator,
     tunable,
 )
+from iron.common.tiling import Access, legalize
 
 _I32x4 = np.ndarray[(4,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -705,6 +708,66 @@ class MHA(Operator[MHAOverlay]):
 
     # -- the runtime sequence --------------------------------------------------
 
+    def _strides(self, buffer: BoundBuffer) -> tuple[int, int]:
+        """(head, row) element strides of a (heads, seq, d) or, interleaved
+        per token, (seq, heads, d) buffer."""
+        S, d = self.seq_pad, self.ov.d
+        if self.heads_interleaved:
+            return d, buffer.shape[1] * d
+        return S * d, d
+
+    def _blocks(self) -> int:
+        """Q blocks per pipeline."""
+        ov = self.ov
+        return self.seq_pad // (ov.join_rows * ov.q_shims)
+
+    def _q_rows(self, buffer: BoundBuffer, kv_head: int, shim: int) -> list[Access]:
+        """One shim's Q (or O) rows for one KV group: the group's heads, each
+        block's ``join_rows`` rows for this shim."""
+        ov = self.ov
+        group = self.num_heads // self.num_KV_heads
+        rows = ov.join_rows
+        head_s, row_s = self._strides(buffer)
+        return legalize(
+            buffer.elements,
+            kv_head * group * head_s + shim * rows * row_s,
+            (group, self._blocks(), rows, ov.d),
+            (head_s, ov.q_shims * rows * row_s, row_s, 1),
+            buffer.dtype,
+        )
+
+    def _kv_rows(self, buffer: BoundBuffer, kv_head: int) -> list[Access]:
+        """One KV head's K (or V) rows, re-read once per (head, block) of its
+        group."""
+        group = self.num_heads // self.num_KV_heads
+        head_s, row_s = self._strides(buffer)
+        return legalize(
+            buffer.elements,
+            kv_head * head_s,
+            (group * self._blocks(), self.seq_pad, self.ov.d),
+            (0, row_s, 1),
+            buffer.dtype,
+        )
+
+    def order(self, buffer: BoundBuffer) -> Order:
+        """KV group by KV group: each shim's Q or O rows, and K or V re-read
+        for every head and block of the group."""
+        ov = self.ov
+        groups = range(self.num_KV_heads)
+        if buffer is self.K or buffer is self.V:
+            stream = ov.k if buffer is self.K else ov.v
+            return Order(
+                stream, (tuple(a for g in groups for a in self._kv_rows(buffer, g)),)
+            )
+        stream = ov.q if buffer is self.Q else ov.o
+        return Order(
+            stream,
+            tuple(
+                tuple(a for g in groups for a in self._q_rows(buffer, g, shim))
+                for shim in range(ov.q_shims)
+            ),
+        )
+
     def design(self, rt):
         """One descriptor set per KV group.
 
@@ -717,54 +780,17 @@ class MHA(Operator[MHAOverlay]):
         re-read once per (head, block) from the descriptor's iteration
         slot: the same bytes in the same order, six descriptors a group.
         """
-        from iron.common.tiling import legalize
-
         ov = self.ov
-        heads, kv_heads = self.num_heads, self.num_KV_heads
-        group = heads // kv_heads
-        rows = ov.join_rows  # Q rows each shim carries per block
-        blocks = self.seq_pad // (rows * ov.q_shims)  # per pipeline
-        S, d = self.seq_pad, ov.d
-
-        def strides_of(buffer):
-            # (head, row) element strides of a (heads, seq, d) or, interleaved
-            # per token, (seq, heads, d) buffer.
-            n_heads = buffer.shape[1] if self.heads_interleaved else buffer.shape[0]
-            return (d, n_heads * d) if self.heads_interleaved else (S * d, d)
-
-        def q_rows(buffer, head0, shim):
-            # The group's heads, each block's `rows` rows for this shim.
-            head_s, row_s = strides_of(buffer)
-            return legalize(
-                buffer.elements,
-                head0 * head_s + shim * rows * row_s,
-                (group, blocks, rows, d),
-                (head_s, ov.q_shims * rows * row_s, row_s, 1),
-                buffer.dtype,
-            )
-
-        def kv_rows(buffer, kv_head):
-            # The head's rows, re-read once per (head, block) of the group.
-            head_s, row_s = strides_of(buffer)
-            return legalize(
-                buffer.elements,
-                kv_head * head_s,
-                (group * blocks, S, d),
-                (0, row_s, 1),
-                buffer.dtype,
-            )
-
-        for kv_head in range(kv_heads):
-            head0 = kv_head * group
+        for kv_head in range(self.num_KV_heads):
             with rt.group():
                 for shim in range(ov.q_shims):
-                    for acc in q_rows(self.Q, head0, shim):
+                    for acc in self._q_rows(self.Q, kv_head, shim):
                         rt.fill(ov.q[shim], (self.Q, acc))
-                for acc in kv_rows(self.K, kv_head):
+                for acc in self._kv_rows(self.K, kv_head):
                     rt.fill(ov.k, (self.K, acc))
-                for acc in kv_rows(self.V, kv_head):
+                for acc in self._kv_rows(self.V, kv_head):
                     rt.fill(ov.v, (self.V, acc))
                 for shim in range(ov.q_shims):
-                    accs = q_rows(self.O, head0, shim)
-                    for acc in accs:
-                        rt.drain(ov.o[shim], (self.O, acc), wait=acc is accs[-1])
+                    accs = self._q_rows(self.O, kv_head, shim)
+                    for i, acc in enumerate(accs):
+                        rt.drain(ov.o[shim], (self.O, acc), wait=i == len(accs) - 1)
