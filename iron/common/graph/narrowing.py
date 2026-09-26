@@ -45,20 +45,24 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import functools
+import hashlib
 import heapq
 import itertools
 import json
+import os
 import statistics
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from aie.dialects.aie import WireBundle, get_target_model
+from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
 from ..image.coresidence import fits
+from ..image.fused import _design_sources
 from ..image.fusion import format_params, generate_design
-from ..image.jit_compile import design_identity
+from ..image.jit_compile import design_identity, source_digest
 from .trace import TracedGraph
 
 
@@ -476,11 +480,15 @@ class JointNarrowing:
     Pass as ``coresident=`` to :meth:`GraphFunction.compile`. ``max_members``
     caps a pack; ``fit_attempts`` is how many of a pack's cheapest widths
     within the shim budget are put to the placer before it is given up.
+    ``fit_cache`` is where the placer's verdicts are kept across processes.
     """
 
     table: CostTable = dataclasses.field(compare=False)
     max_members: int = 8
     fit_attempts: int = 3
+    fit_cache: Path = dataclasses.field(
+        default=Path(NPU_CACHE_HOME) / "iron" / "fits", compare=False
+    )
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
         table = self.table
@@ -660,14 +668,43 @@ class JointNarrowing:
         by_id = {id(p): p for p in packs}
         return [by_id[k] for k in picks]
 
-    @staticmethod
-    def _fit(combo: Sequence[Variant], fitted: dict[tuple[str, ...], bool]) -> bool:
+    def _fit(
+        self, combo: Sequence[Variant], fitted: dict[tuple[str, ...], bool]
+    ) -> bool:
         key = tuple(sorted(v.key for v in combo))
         if key not in fitted:
-            texts, params = {}, {}
-            for v in combo:
-                generated = generate_design(v.op.generator())
-                texts[v.key] = str(generated.device)
-                params.update({n: str(t) for n, t in generated.params.items()})
-            fitted[key] = fits(texts, format_params(params)) is None
+            record = self._fit_record(combo)
+            if record.exists():
+                verdict = record.read_text()
+            else:
+                texts, params = {}, {}
+                for v in combo:
+                    generated = generate_design(v.op.generator())
+                    texts[v.key] = str(generated.device)
+                    params.update({n: str(t) for n, t in generated.params.items()})
+                diagnostic = fits(texts, format_params(params))
+                verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
+                record.parent.mkdir(parents=True, exist_ok=True)
+                partial = record.with_suffix(f".{os.getpid()}")
+                partial.write_text(verdict)
+                partial.replace(record)
+            fitted[key] = verdict == "fits"
         return fitted[key]
+
+    def _fit_record(self, combo: Sequence[Variant]) -> Path:
+        """The file holding the placer's verdict on ``combo``: ``fits``, or
+        ``refused:`` and the diagnostic.
+
+        Keyed as the fused image is (:func:`..image.fused.fused_identity`),
+        on each design's identity and the source that generates and places
+        it -- the placer's pipeline is in IRON's common tree, the placer in
+        mlir-aie's bindings -- so a verdict is reused exactly when the build
+        it predicts would be. Generating and placing a pack costs about 50 ms,
+        and every process that tunes would otherwise ask again.
+        """
+        files = set()
+        for v in combo:
+            files.update(_design_sources(v.op.generator()))
+        h = hashlib.sha256(repr(sorted(v.key for v in combo)).encode())
+        h.update(source_digest(tuple(sorted(files))).encode())
+        return self.fit_cache / h.hexdigest()[:24]

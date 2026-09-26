@@ -91,10 +91,10 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     return table
 
 
-def test_packs_designs_apart_in_first_use_order(tmp_path):
-    # add, gelu, silu, then silu and add alternating. gelu is wide and has
-    # no narrower width in the table, so it cannot pack; add and silu are
-    # first used apart but adjacent five times, so they share a device.
+def _add_silu(tmp_path):
+    """add, gelu, silu, then silu and add alternating; the table holds every
+    width of add and silu, and none of gelu."""
+
     @iron.graph
     def fn(a, b):
         x = ElementwiseAdd(a, b, tile_size=TILE)
@@ -111,8 +111,15 @@ def test_packs_designs_apart_in_first_use_order(tmp_path):
         for v in variants(ops[name], NPU2()):
             cols = dict(v.widths)["num_aie_columns"]
             steps[v.key] = (4.0 + cols, 8.0 * cols)
-    table = _table(tmp_path / "costs.json", steps)
-    tuning = JointNarrowing(table).tune(traced, NPU2())
+    return traced, ops, _table(tmp_path / "costs.json", steps)
+
+
+def test_packs_designs_apart_in_first_use_order(tmp_path):
+    # gelu is wide and has no narrower width in the table, so it cannot
+    # pack; add and silu are first used apart but adjacent five times, so
+    # they share a device.
+    traced, ops, table = _add_silu(tmp_path)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, NPU2())
     add, silu = cost_key(ops["ElementwiseAdd"]), cost_key(ops["SiLU"])
     assert tuning.groups == ((add, silu),) or tuning.groups == ((silu, add),)
     assert tuning.unmeasured == (cost_key(ops["GELU"]),)
@@ -125,6 +132,25 @@ def test_packs_designs_apart_in_first_use_order(tmp_path):
         )[0]
     )
     assert tuning.predicted_us < tuning.baseline_us
+
+
+def test_placer_verdicts_are_kept_across_tunings(tmp_path):
+    traced, _, table = _add_silu(tmp_path)
+    fit_cache = tmp_path / "fits"
+    first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, NPU2())
+    records = sorted(fit_cache.iterdir())
+    assert records and all(r.read_text() == "fits" for r in records)
+    widths = {k: v.widths for k, v in first.chosen.items()}
+
+    # A second tuning reads the verdicts rather than asking the placer: one
+    # recorded as refused is taken as refused, and the pack moves to its
+    # next-cheapest widths, which the placer is then asked about.
+    for r in records:
+        r.write_text("refused: recorded by the test")
+    second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, NPU2())
+    assert len(list(fit_cache.iterdir())) > len(records)
+    assert second.groups == first.groups
+    assert {k: v.widths for k, v in second.chosen.items()} != widths
 
 
 @pytest.mark.supported_devices("npu2")
