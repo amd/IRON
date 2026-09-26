@@ -39,9 +39,10 @@ class AIELlama:
         self.config = config
         self.forward_graph = forward_graph
         self.max_seq_len = max_seq_len
-        # The RoPE table as the images read it. A float32 table would be
-        # another input signature, and so another compile.
-        self.angles = config.angles.astype(bfloat16)
+        # The RoPE table as the images read it, as far as they reach. A
+        # float32 table would be another input signature, and so another
+        # compile.
+        self.angles = config.angles[:max_seq_len].astype(bfloat16)
 
     @classmethod
     def compile(cls, config, max_seq_len=MAX_SEQ_LEN) -> "AIELlama":
