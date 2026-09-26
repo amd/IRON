@@ -91,7 +91,7 @@ def test_shipped_external_sequence_lowers(tmp_path):
 
 
 def test_instructions_compile_alone_against_an_external_image():
-    """The §11 instructions-only compile: the shipped image is downloaded,
+    """The instructions-only compile: the shipped image is downloaded,
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit."""
 

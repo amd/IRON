@@ -130,7 +130,7 @@ class AIELlama:
         # the softmax's valid length, position + 1 (it used to be written as
         # a running sum of context lengths, which
         # iron/tests/common/llama_reference.py shows drifting from the CPU
-        # reference from the second token on, §18). The token the device
+        # reference from the second token on). The token the device
         # drew, which the call also returns, is the host's to redraw.
         logits, _ = self.forward_graph(token=token_id, position=position)
         return logits.numpy()

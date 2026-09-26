@@ -59,7 +59,7 @@ def build_design(
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by the overlay's design.
     # On a full ELF they are scratchpad parameters; on an xclbin, which has
-    # no scratchpad (spike S2), every one is a dispatch-time scalar of the
+    # no scratchpad, every one is a dispatch-time scalar of the
     # sequence, handed in by the generator's keyword parameters (see
     # ``mlir_artifact_for``), and DispatchTime members are always that.
     values = list(ov.values) + list(op.values)
@@ -73,7 +73,7 @@ def build_design(
             raise ValueError(
                 f"{type(op).__name__}.{value.name} is a DispatchTime value, which a "
                 f"full ELF cannot carry (its stream is fixed at build time); "
-                f"package as xclbin (OPERATOR_MODEL_PLAN.md §6, §8)"
+                f"package as xclbin"
             )
         else:
             if value.symbol not in dispatch:

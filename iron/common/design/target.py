@@ -35,7 +35,7 @@ class Target:
         self.arch = target_arch(dev)  # "aie2" | "aie2p"
         self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
-        # scratchpad. "xclbin": there is none (spike S2); they are dispatch-
+        # scratchpad. "xclbin": there is none; they are dispatch-
         # time scalars of the sequence, and a core-read value is a resident
         # the sequence writes (bind it to the runtime-parameter buffer).
         self.image = image

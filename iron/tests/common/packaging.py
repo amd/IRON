@@ -37,18 +37,18 @@ def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
     t = _traced(Value("pos", "scratchpad", np.int32))
     with pytest.raises(ValueError, match="npu1 has no full-ELF dispatch"):
         plan("npu1", t, image=ELF)
-    # An xclbin run has no parameter scratchpad (S2): the value is a dispatch-
+    # An xclbin run has no parameter scratchpad: the value is a dispatch-
     # time scalar of its kernel, and the report says which way it lowers.
     p = plan("npu1", t, boundaries=each_step)
     assert p.image == XCLBIN and "dispatch-time scalar" in p.values[0][2]
-    assert "spike S3" in p.values[0][2]
+    assert "written into the array by the sequence" in p.values[0][2]
     assert plan("npu2", t).values[0][2] == "patched through the parameter scratchpad"
 
 
 def test_boundaries_force_xclbin_and_the_unbuilt_forms_are_named():
-    with pytest.raises(NotImplementedError, match="spike S1"):
+    with pytest.raises(NotImplementedError, match="no proven construction"):
         plan("npu2", _traced(), image=XCLBIN)  # one fused sequence in an xclbin
-    with pytest.raises(NotImplementedError, match="spike S1"):
+    with pytest.raises(NotImplementedError, match="no proven construction"):
         plan("npu1", _traced())  # the NPU1 default needs a boundary choice today
     p = plan("npu2", _traced(), boundaries=each_step)
     assert (p.image, p.dispatch) == (XCLBIN, "separate")

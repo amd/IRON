@@ -15,7 +15,7 @@ so a subclass with a third input needs no new code here.
 
 The core's trip count is a :class:`~iron.common.declare.Resident` the
 sequence writes before the first transfer, so the array does not depend on
-the extent and one overlay serves every size (OPERATOR_MODEL_PLAN.md §3).
+the extent and one overlay serves every size.
 This is where the template parts company with upstream's
 :func:`aie.iron.algorithms.transform_parallel`, which is otherwise the same
 design: that one takes the tensor at build time and folds the trip count
