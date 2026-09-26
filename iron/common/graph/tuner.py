@@ -31,9 +31,8 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Sequence
 
-from ..declare import Operator
 from ..image.packaging import FUSED, Mode
-from .fold import Fold, apply, candidates
+from .fold import Fold, Kind, apply, candidates, edited
 from .narrowing import (
     CostTable,
     JointNarrowing,
@@ -85,19 +84,19 @@ class Choice:
 
 
 def _kind(traced: TracedGraph, f: Fold) -> tuple:
-    """What makes two folds one decision: the movement's design, the side,
-    and the designs it folds into."""
+    """What makes two folds one decision: the removed step's design, the
+    kind, and the designs it folds into."""
     return (
-        cost_key(traced.steps[f.movement].op),
-        f.side,
+        cost_key(traced.steps[f.removed].op),
+        f.kind,
         tuple(cost_key(traced.steps[j].op) for j in f.neighbours),
     )
 
 
 def _kind_label(traced: TracedGraph, f: Fold) -> str:
-    what = type(traced.steps[f.movement].op).__name__
+    what = type(traced.steps[f.removed].op).__name__
     into = ",".join(type(traced.steps[j].op).__name__ for j in f.neighbours)
-    return f"{what} {f.side.value} into {into}"
+    return f"{what} {f.kind.value} into {into}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,10 +135,10 @@ class Tuner:
         kinds: dict[tuple, list[Fold]] = {}
         for f in legal:
             kinds.setdefault(_kind(traced, f), []).append(f)
-        # Per movement kind, its sides: one decision covers every layer.
+        # Per removed design, its kinds of fold: one decision covers every layer.
         decisions: dict[tuple, dict] = {}
-        for (movement, side, into), folds in kinds.items():
-            decisions.setdefault((movement, into), {})[side] = folds
+        for (removed, kind, into), folds in kinds.items():
+            decisions.setdefault((removed, into), {})[kind] = folds
         narrowing = JointNarrowing(self.table, self.max_members, self.fit_attempts)
         considered: list[tuple[str, str, float, int]] = []
         best: Choice | None = None
@@ -147,8 +146,8 @@ class Tuner:
             taken: dict[tuple, list[Fold]] = {}
             current = self._evaluate(traced, dev, mode, [], narrowing)
             considered.append((mode.name, "", current.predicted_us, current.boundaries))
-            for key, sides in decisions.items():
-                for side, folds in sides.items():
+            for key, options in decisions.items():
+                for kind, folds in options.items():
                     trial = {**taken, key: folds}
                     chosen = [f for fs in trial.values() for f in fs]
                     try:
@@ -178,7 +177,7 @@ class Tuner:
         narrowing: JointNarrowing,
     ) -> Choice:
         folded = apply(traced, folds, dev) if folds else traced
-        table, estimated = self._priced(folded, dev)
+        table, estimated = self._priced(traced, folds, folded, dev)
         if mode.packs:
             tuning = dataclasses.replace(narrowing, table=table).tune(folded, dev)
             return Choice(
@@ -194,29 +193,44 @@ class Tuner:
         predicted, dispatches = model_us(table, keys, mode=mode)
         return Choice(mode, tuple(folds), None, predicted, dispatches, estimated, [])
 
-    def _priced(self, traced: TracedGraph, dev) -> tuple[CostTable, tuple[str, ...]]:
-        """The table with every folded design's widths priced at its twin's."""
+    def _priced(
+        self, traced: TracedGraph, folds: Sequence[Fold], folded: TracedGraph, dev
+    ) -> tuple[CostTable, tuple[str, ...]]:
+        """The table with every design a fold made priced, width by width.
+
+        A design that runs an epilogue is priced at its producer's step plus
+        the removed step's (the same work, now on the producer's cores) and
+        at its producer's configure; a folded design at its unfolded twin.
+        """
         extra: dict[str, StepCost] = {}
+        for f in folds:
+            if f.kind is not Kind.EPILOGUE:
+                continue
+            gone = self.table.steps.get(cost_key(traced.steps[f.removed].op))
+            for e in f.edits:
+                producer = traced.steps[e.step].op
+                hosting = edited(producer, [e])
+                for v in variants(hosting, dev):
+                    twin = with_widths(producer, dict(v.widths))
+                    base = self.table.steps.get(cost_key(twin))
+                    if gone is None or base is None or v.key in extra:
+                        continue
+                    extra[v.key] = dataclasses.replace(
+                        base, t_step_us=base.t_step_us + gone.t_step_us
+                    )
+        priced = self.table.with_steps(extra)
         seen: set[str] = set()
-        for step in traced.steps:
+        for step in folded.steps:
             op = step.op
             if not (op.refolds or op.reorder is not None):
                 continue
             key = cost_key(op)
-            if key in seen or key in self.table.steps:
+            if key in seen or key in priced.steps:
                 continue
             seen.add(key)
-            twin = _twin(op)
+            twin = op.unfolded()
             for v in variants(op, dev):
                 twin_key = cost_key(with_widths(twin, dict(v.widths)))
-                if twin_key in self.table.steps:
-                    extra[v.key] = self.table.steps[twin_key]
+                if twin_key in priced.steps:
+                    extra[v.key] = priced.steps[twin_key]
         return self.table.with_steps(extra), tuple(sorted(extra))
-
-
-def _twin(op: Operator) -> Operator:
-    """``op`` without its folds: the array it runs, with its own addresses."""
-    twin = dataclasses.replace(op)
-    for name in op.used_values:
-        twin.use_value(name)
-    return twin

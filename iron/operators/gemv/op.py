@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import ClassVar
 
 import numpy as np
-from aie.iron.kernels import activation, linalg
+from aie.iron.kernels import linalg
 from ml_dtypes import bfloat16
 
 from iron.common.declare import (
@@ -70,10 +70,11 @@ class GEMVOverlay(Overlay):
     tile_size_output: int | None = tunable(None)
     # None picks the widest legal size for K (see validate).
     kernel_vector_size: int | None = tunable(None, repr=False)
-    # Optional fused activation applied to each output tile in the producing core.
-    # "none" (default) leaves the output unchanged; "gelu" applies GELU(tanh approx).
-    # repr=False keeps operator/artifact names stable for the default path.
-    epilogue: str = field(default="none", repr=False)
+    # An elementwise array whose kernel each core runs on every output tile
+    # before releasing it (Overlay.pointwise): GELU's overlay, say. None, the
+    # default, leaves the output as computed. repr=False keeps names stable
+    # for the default path.
+    epilogue: Overlay | None = field(default=None, repr=False)
 
     # One fifo per column for each of A, B and C. B is the whole vector, sent
     # to every column's own fifo.
@@ -94,13 +95,9 @@ class GEMVOverlay(Overlay):
         ):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
         self._legal_kernel_vector_size()
-        if self.epilogue not in ("none", "gelu"):
-            raise ValueError(
-                f"unknown epilogue {self.epilogue!r} (expected 'none' or 'gelu')"
-            )
-        if self.epilogue == "gelu" and tso is not None and tso % 16 != 0:
-            raise ValueError(
-                f"gelu epilogue needs tile_size_output % 16 == 0 (got {tso})"
+        if self.epilogue is not None and not isinstance(self.epilogue, Overlay):
+            raise TypeError(
+                f"epilogue must be an elementwise overlay, got {self.epilogue!r}"
             )
 
     def _legal_kernel_vector_size(self) -> int:
@@ -158,11 +155,18 @@ class GEMVOverlay(Overlay):
         """K is reduced inside one core, so a released C tile is final."""
         return Contraction(final_at_release=True)
 
+    def with_epilogue(self, epilogue: Overlay) -> "GEMVOverlay | None":
+        """Every released C tile is final, so any pointwise kernel can run on
+        it there; one epilogue at a time."""
+        if self.epilogue is not None:
+            return None
+        return dataclasses.replace(self, epilogue=epilogue)
+
     def design(self, target):
         from aie.dialects.aie import T
         import aie.dialects.index as index
         from aie.helpers.dialects.scf import _for as range_
-        from aie.iron import ObjectFifo, Worker
+        from aie.iron import Buffer, ObjectFifo, Worker
 
         K = self.K
         num_aie_columns = self.num_aie_columns
@@ -187,25 +191,18 @@ class GEMVOverlay(Overlay):
             vec_size=self.kernel_vector_size,
             output_rows=tile_size_output,
         )
-        # Optional fused activation over the full tile_size_output C-tile, applied
-        # once per tile in core_body (after the matvec inner-loop has filled all
-        # rows) rather than per matvec call, whose tile_size_input tile can be
-        # smaller than the 16-wide activation vector.
-        gelu_kernel = None
-        if self.epilogue == "gelu":
-            if target.arch != "aie2p":
-                raise NotImplementedError(
-                    "gemv gelu epilogue is only available on NPU2 (aie2p); "
-                    f"current kernel dir is {target.arch!r}"
+        # The epilogue runs over the full tile_size_output C tile once the
+        # matvec calls have filled it, out of place: the products go to a
+        # tile of their own and the epilogue's kernel writes the C object, as
+        # the epilogue's own array would have from a C it read back.
+        epilogue = None
+        if self.epilogue is not None:
+            epilogue = self.epilogue.pointwise(target, tile_size_output)
+            if epilogue is None:
+                raise ValueError(
+                    f"{type(self.epilogue).__name__} has no pointwise kernel to "
+                    f"run on GEMV's output"
                 )
-            # gelu.cc's in-place gelu_tile_bf16, which only aie2p's gelu.cc
-            # exports; it rides in the object the gelu factory builds. A second
-            # object, not an archive bundled with the first: each func.func
-            # carries its own link_with and aie-assign-core-link-files
-            # aggregates them onto the core.
-            gelu_kernel = activation.gelu().object_file.bind(
-                "gelu_tile_bf16", [np.int32, L1_C_ty]
-            )
 
         A_L3L1_fifos = [
             ObjectFifo(L1_A_ty, name=f"A_L3L1_{i}", depth=self.a.depth)
@@ -220,7 +217,9 @@ class GEMVOverlay(Overlay):
             for i in range(num_aie_columns)
         ]
 
-        def core_body(A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, gelu_kernel=None):
+        def core_body(
+            A_L3L1_fifo, B_L3L1_fifo, C_L1L3_fifo, matvec, epilogue_fn=None, acc=None
+        ):
             one_idx = index.constant(1)
             for _ in range_(0xFFFFFFFF):  # batch dim handled as part of this loop
                 b = B_L3L1_fifo.acquire(1)
@@ -229,15 +228,16 @@ class GEMVOverlay(Overlay):
                 # kernel (M/num_aie_columns)/m times.
                 for i_idx in range_(self._rows_per_column // tile_size_output):
                     c = C_L1L3_fifo.acquire(1)
+                    rows = c if acc is None else acc
                     i_i32 = index.casts(T.i32(), i_idx)
                     for j_idx in range_(tile_size_output // tile_size_input):
                         j_i32 = index.casts(T.i32(), j_idx)
                         output_row_offset = j_i32 * tile_size_input
                         a = A_L3L1_fifo.acquire(1)
-                        matvec(tile_size_input, output_row_offset, a, b, c)
+                        matvec(tile_size_input, output_row_offset, a, b, rows)
                         A_L3L1_fifo.release(1)
-                    if gelu_kernel is not None:
-                        gelu_kernel(tile_size_output, c)
+                    if epilogue is not None:
+                        epilogue.apply(epilogue_fn, acc, c)
                     C_L1L3_fifo.release(1)
                 B_L3L1_fifo.release(1)
 
@@ -250,7 +250,11 @@ class GEMVOverlay(Overlay):
                     C_L1L3_fifos[i].prod(),
                     matvec,
                 ]
-                + ([gelu_kernel] if self.epilogue == "gelu" else []),
+                + (
+                    []
+                    if epilogue is None
+                    else [epilogue.kernel, Buffer(type=L1_C_ty, name=f"C_acc_{i}")]
+                ),
             )
             for i in range(num_aie_columns)
         ]
@@ -314,9 +318,9 @@ class GEMV(Operator[GEMVOverlay]):
         # same shape: both would emit the same .mlir/.xclbin, and in a shared build
         # dir a cached unfused build can then satisfy the fused op.
         base = super().name
-        if self.ov.epilogue == "none":
+        if self.ov.epilogue is None:
             return base
-        return f"{base}_epi{self.ov.epilogue}"
+        return f"{base}_epi{type(self.ov.epilogue).__name__}"
 
     # -- the runtime sequence --------------------------------------------------
 

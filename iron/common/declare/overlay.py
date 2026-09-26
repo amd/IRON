@@ -15,6 +15,7 @@ binary.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -32,6 +33,17 @@ from .semantics import Local, Semantics, Undeclared
 if TYPE_CHECKING:
     from ..design.target import Target
     from .operator import Operator
+
+
+@dataclasses.dataclass(frozen=True)
+class Pointwise:
+    """An array's computation as one call another core makes on one of its
+    own objects, out of place: ``apply(kernel_fn, src, dst)`` inside that
+    core's body, with ``kernel`` among the core's arguments (where
+    ``kernel_fn`` arrives)."""
+
+    kernel: Any
+    apply: Callable[[Any, Any, Any], None]
 
 
 def get_shim_dma_limit(dev) -> int:
@@ -210,6 +222,19 @@ class Overlay:
         if odd:
             return Undeclared(f"{name}'s shared streams {odd} are not {shape} inputs")
         return Local(prod(shape))
+
+    def pointwise(self, target: Target, elements: int) -> Pointwise | None:
+        """What this array computes, as a call another core can make on an
+        object of ``elements`` of its own: only an array that is
+        :class:`Local` over single elements, one stream in and one out, has
+        one. ``None`` by default."""
+        return None
+
+    def with_epilogue(self, epilogue: "Overlay") -> "Overlay | None":
+        """A copy whose cores also run ``epilogue``'s :meth:`pointwise` on
+        every output object before releasing it, or ``None`` if this array
+        cannot host one. ``None`` by default."""
+        return None
 
     def tolerance(self, target: Target) -> Tolerance | None:
         """How close this array's output comes to the operator's reference:

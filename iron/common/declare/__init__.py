@@ -92,7 +92,7 @@ from .member import (
 )
 from .operator import O, Operator
 from .order import Order
-from .overlay import Overlay, get_shim_dma_limit
+from .overlay import Overlay, Pointwise, get_shim_dma_limit
 from .semantics import (
     Composite,
     Contraction,
@@ -103,6 +103,7 @@ from .semantics import (
 )
 
 __all__ = [
+    "Pointwise",
     "BoundBuffer",
     "BoundResident",
     "BoundStream",

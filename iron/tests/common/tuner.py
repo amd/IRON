@@ -101,7 +101,7 @@ def test_a_fold_is_taken_when_it_saves_its_step(tmp_path, npu2):
     choice = Tuner(table).tune(t, npu2, [FUSED, EACH_STEP])
     assert choice.mode == FUSED  # the only calibrated one
     (fold,) = choice.folds
-    assert isinstance(fold, Fold) and fold.movement == 0
+    assert isinstance(fold, Fold) and fold.removed == 0
     # The folded GEMV is priced at the GEMV it was: one step at 100 us,
     # one configure, the reset, the dispatch.
     assert choice.predicted_us == pytest.approx(50 + 100 + 30 + 40 + 30)

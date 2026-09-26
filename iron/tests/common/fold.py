@@ -20,12 +20,13 @@ from aie.iron.device import from_name
 
 import iron
 from iron.common.declare import Scratchpad
-from iron.common.declare.refold import Reorder, Side
+from iron.common.declare.refold import Reorder
 from iron.common.design.build import generator_for
-from iron.common.graph.fold import Fold, FoldAll, Refused, apply, candidates
+from iron.common.graph.fold import Fold, FoldAll, Kind, Refused, apply, candidates
 from iron.common.tiling import legalize
 from iron.operators.gemv.op import GEMV
 from iron.operators.repeat import Repeat
+from iron.operators.silu import SiLU, SiLUOverlay
 from iron.operators.strided_copy import StridedCopy
 
 G, REP, L, D, COLS = 2, 4, 128, 64, 2
@@ -95,11 +96,11 @@ def test_a_repeat_folds_into_the_gemv_that_reads_it(npu2):
     found = candidates(t, npu2)
     (read,) = [c for c in found if isinstance(c, Fold)]
     (write,) = [c for c in found if isinstance(c, Refused)]
-    assert read.side is Side.READ and read.neighbours == (1,)
+    assert read.kind is Kind.READ and read.neighbours == (1,)
     # The zero-stride half of the heads can only be the iteration slot, so
     # the GEMV walks each group's heads outermost.
-    assert read.reorders == (Reorder(G, REP),)
-    assert write.side is Side.WRITE and "state" in write.reason
+    assert [e.reorder for e in read.edits] == [Reorder(G, REP)]
+    assert write.kind is Kind.WRITE and "state" in write.reason
 
     folded = apply(t, [read], npu2)
     assert [type(s.op).__name__ for s in folded.steps] == ["GEMV"]
@@ -156,7 +157,7 @@ def test_a_write_between_the_repeat_and_its_reader_refuses_the_fold(npu2):
         )
 
     t = _scores_graph(keys, write_between=overwrite)
-    read = next(c for c in candidates(t, npu2) if c.side is Side.READ)
+    read = next(c for c in candidates(t, npu2) if c.kind is Kind.READ)
     assert isinstance(read, Refused)
     assert "touches keys" in read.reason
 
@@ -170,7 +171,7 @@ def test_a_repeat_cannot_fold_into_the_write_before_it(npu2):
         return Repeat(k.reshape(G, D), repeat=REP, transfer_size=D)
 
     t = heads.trace(x=(2 * D,))
-    write = next(c for c in candidates(t, npu2) if c.side is Side.WRITE)
+    write = next(c for c in candidates(t, npu2) if c.kind is Kind.WRITE)
     assert isinstance(write, Refused)
     assert "more than once" in write.reason
 
@@ -203,9 +204,9 @@ def test_a_cache_copy_folds_into_the_projection_before_it(npu2):
     t = _cache_graph(cache, w)
     found = candidates(t, npu2)
     write = next(c for c in found if isinstance(c, Fold))
-    assert write.side is Side.WRITE and write.neighbours == (0,)
-    read = next(c for c in found if c.side is Side.READ)
-    assert isinstance(read, Refused) and "state" in read.reason
+    assert write.kind is Kind.WRITE and write.neighbours == (0,)
+    read = next(c for c in found if c.kind is Kind.READ)
+    assert isinstance(read, Refused) and "(state)" in read.reason
 
     folded = apply(t, [write], npu2)
     assert [type(s.op).__name__ for s in folded.steps] == ["GEMV", "GEMV"]
@@ -232,7 +233,7 @@ def test_fold_all_takes_one_fold_per_movement(npu2):
     keys = iron.state((G, L * D), name="keys")
     t = _scores_graph(keys)
     assert [type(s.op).__name__ for s in FoldAll().fold(t, npu2).steps] == ["GEMV"]
-    only_writes = FoldAll(sides=(Side.WRITE,))
+    only_writes = FoldAll(kinds=(Kind.WRITE,))
     assert len(only_writes.fold(t, npu2).steps) == 2
 
 
@@ -249,3 +250,36 @@ def test_folded_designs_generate(npu2):
                 assert "aie.runtime_sequence" in text
                 if step.op.values:
                     assert "C_offset" in text
+
+
+def test_an_elementwise_step_folds_into_the_gemv_before_it(npu2):
+    w = np.zeros((G * D, 2 * D), dtype=bfloat16)
+
+    @iron.graph
+    def gate(x):
+        h = GEMV(w, x, num_aie_columns=COLS, tile_size_output=D // 2)
+        return SiLU(h, num_aie_columns=COLS, tile_size=D // 2)
+
+    t = gate.trace(x=(2 * D,))
+    (epilogue,) = [c for c in candidates(t, npu2) if c.kind is Kind.EPILOGUE]
+    assert isinstance(epilogue, Fold) and epilogue.neighbours == (0,)
+    folded = apply(t, [epilogue], npu2)
+    (step,) = folded.steps
+    assert isinstance(step.op.ov.epilogue, SiLUOverlay)
+    assert step.outputs[0].name == t.steps[1].outputs[0].name
+    text = str(generator_for(step.op.tuned(npu2))())
+    assert "silu_bf16_size" in text and "C_acc_0" in text
+
+
+def test_an_elementwise_step_with_another_reader_stays(npu2):
+    w = np.zeros((G * D, 2 * D), dtype=bfloat16)
+
+    @iron.graph
+    def gate(x):
+        h = GEMV(w, x, num_aie_columns=COLS, tile_size_output=D // 2)
+        return SiLU(h, num_aie_columns=COLS, tile_size=D // 2), h
+
+    t = gate.trace(x=(2 * D,))
+    (epilogue,) = [c for c in candidates(t, npu2) if c.kind is Kind.EPILOGUE]
+    assert isinstance(epilogue, Refused)
+    assert "(output) must stay written" in epilogue.reason

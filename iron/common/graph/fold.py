@@ -1,25 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Folds of a traced graph: every DMA-only movement step, and the ways its
-neighbours could do it instead.
+"""Folds of a traced graph: steps whose work a neighbour can do instead.
 
 A step whose overlay is :class:`~iron.common.declare.Movement` without
 cores computes nothing, so it can go (:mod:`iron.common.declare.refold`):
 
-- **into its readers** (:attr:`Side.READ`): every step that reads its output
+- **into its readers** (:attr:`Kind.READ`): every step that reads its output
   reads its input through the composed order. A read may repeat, so this is
   how a repeat goes. The output must be an intermediate: a state or a
   graph output has to be written.
-- **into its writer** (:attr:`Side.WRITE`): the step that wrote its input
+- **into its writer** (:attr:`Kind.WRITE`): the step that wrote its input
   writes its output instead, at the movement's per-call offset if it had
   one. A write must be injective, so a repeat cannot go this way; a copy
   into a cache can. The input must be an intermediate the movement alone
   reads.
 
-Both keep every transfer where it happened relative to the others it could
-race with: a read moved later must not pass a write of what it reads, a
-write moved earlier must not pass a read or write of what it writes.
+A step whose array is elementwise, one input to one output
+(:meth:`~iron.common.declare.Overlay.pointwise`), can go **into its
+producer's cores** (:attr:`Kind.EPILOGUE`), when the producer's array hosts
+an epilogue (:meth:`~iron.common.declare.Overlay.with_epilogue`): each
+output object is final when released, and the kernel runs on it there.
+
+Every kind keeps each transfer where it happened relative to the others it
+could race with: a read moved later must not pass a write of what it
+reads, a write moved earlier must not pass a read or write of what it
+writes.
 
 :func:`candidates` lists every fold, legal or not (with the reason), without
 choosing: which to take is a cost question. :func:`apply` takes a set of
@@ -29,54 +35,82 @@ them; :class:`FoldAll` is the policy that takes every one it can.
 from __future__ import annotations
 
 import dataclasses
+import enum
 from collections.abc import Iterator, Sequence
 from typing import Protocol
 
 import numpy as np
 
-from ..declare import Movement, Operator
+from ..declare import Local, Movement, Operator, Overlay
 from ..declare.field import Incompatible
 from ..declare.refold import Adopted, Refold, Relation, Reorder, Side, Unfoldable
+from ..design.target import Target
+from ..kernels import kernels_dir
 from .handle import Affine, Handle
 from .trace import Binding, TracedGraph, TracedStep
 
 
+class Kind(enum.Enum):
+    """How a step's work goes to a neighbour."""
+
+    READ = "read"  # a movement done by its readers' reads
+    WRITE = "write"  # a movement done by its writer's write
+    EPILOGUE = "epilogue"  # an elementwise step run by its producer's cores
+
+    @property
+    def side(self) -> Side:
+        """The DMA side a movement fold of this kind composes."""
+        return {Kind.READ: Side.READ, Kind.WRITE: Side.WRITE}[self]
+
+
+@dataclasses.dataclass(frozen=True)
+class Edit:
+    """What a fold changes on one neighbouring step: a buffer retargeted
+    through a movement, the batch walk that needs, an epilogue its cores
+    now run."""
+
+    step: int
+    refold: Refold | None = None
+    reorder: Reorder | None = None
+    epilogue: Overlay | None = None
+
+
 @dataclasses.dataclass(frozen=True)
 class Fold:
-    """A legal fold: movement step ``movement`` done by the steps in
-    ``neighbours``, each taking its ``refolds`` entry and walking its batches
-    as its ``reorders`` entry says."""
+    """A legal fold: step ``removed`` done by its neighbours, as ``edits``
+    say. ``offset`` is what the removed step's per-call offset on the side
+    kept was bound to; the neighbours' transfers move by it now."""
 
-    movement: int
-    side: Side
-    neighbours: tuple[int, ...]
-    refolds: tuple[Refold, ...]
-    reorders: tuple[Reorder | None, ...]
-    # What the movement's per-call offset on the side kept was bound to; the
-    # neighbours' transfers move by it now.
+    removed: int
+    kind: Kind
+    edits: tuple[Edit, ...]
     offset: Affine | None = None
 
+    @property
+    def neighbours(self) -> tuple[int, ...]:
+        return tuple(e.step for e in self.edits)
+
     def describe(self, traced: TracedGraph) -> str:
-        what = type(traced.steps[self.movement].op).__name__
+        what = type(traced.steps[self.removed].op).__name__
         into = ", ".join(
-            f"{type(traced.steps[i].op).__name__}@{i}"
-            + (f" {r.outer}x{r.inner}" if r is not None else "")
-            for i, r in zip(self.neighbours, self.reorders)
+            f"{type(traced.steps[e.step].op).__name__}@{e.step}"
+            + (f" {e.reorder.outer}x{e.reorder.inner}" if e.reorder else "")
+            for e in self.edits
         )
-        return f"{what}@{self.movement} {self.side.value} into {into}"
+        return f"{what}@{self.removed} {self.kind.value} into {into}"
 
 
 @dataclasses.dataclass(frozen=True)
 class Refused:
     """A fold that is not legal, and why."""
 
-    movement: int
-    side: Side
+    removed: int
+    kind: Kind
     reason: str
 
     def describe(self, traced: TracedGraph) -> str:
-        what = type(traced.steps[self.movement].op).__name__
-        return f"{what}@{self.movement} {self.side.value}: {self.reason}"
+        what = type(traced.steps[self.removed].op).__name__
+        return f"{what}@{self.removed} {self.kind.value}: {self.reason}"
 
 
 def _named(h: Handle) -> str:
@@ -105,10 +139,20 @@ def movements(traced: TracedGraph, dev) -> Iterator[int]:
             yield i
 
 
+def pointwise_steps(traced: TracedGraph, dev) -> Iterator[int]:
+    """The steps an epilogue fold could remove: elementwise, one in, one out."""
+    for i, step in enumerate(traced.steps):
+        tuned = step.op.tuned(dev)
+        if tuned.ov.semantics() != Local(1):
+            continue
+        if sorted(b.direction for b in tuned.buffers) == ["in", "out"]:
+            yield i
+
+
 def candidates(
     traced: TracedGraph, dev, memo: dict | None = None
 ) -> list[Fold | Refused]:
-    """Every fold of every movement step, each side, legal or refused.
+    """Every fold of every step that could go, each kind, legal or refused.
 
     ``memo`` caches whether an operator takes a fold, across calls: every
     layer of a model asks the same question of the same design.
@@ -116,11 +160,16 @@ def candidates(
     memo = {} if memo is None else memo
     out: list[Fold | Refused] = []
     for i in movements(traced, dev):
-        for side in (Side.READ, Side.WRITE):
+        for kind in (Kind.READ, Kind.WRITE):
             try:
-                out.append(_fold(traced, dev, i, side, memo))
+                out.append(_fold(traced, dev, i, kind, memo))
             except Unfoldable as e:
-                out.append(Refused(i, side, str(e)))
+                out.append(Refused(i, kind, str(e)))
+    for i in pointwise_steps(traced, dev):
+        try:
+            out.append(_epilogue(traced, dev, i, memo))
+        except Unfoldable as e:
+            out.append(Refused(i, Kind.EPILOGUE, str(e)))
     return out
 
 
@@ -140,7 +189,8 @@ def _ends(traced: TracedGraph, i: int) -> tuple[Handle, Handle]:
     return step.slots[names.index(x.name)], step.slots[names.index(y.name)]
 
 
-def _fold(traced: TracedGraph, dev, i: int, side: Side, memo: dict) -> Fold:
+def _fold(traced: TracedGraph, dev, i: int, kind: Kind, memo: dict) -> Fold:
+    side = kind.side
     step = traced.steps[i]
     tuned = step.op.tuned(dev)
     x_buf = next(b for b in tuned.buffers if b.direction == "in")
@@ -153,7 +203,7 @@ def _fold(traced: TracedGraph, dev, i: int, side: Side, memo: dict) -> Fold:
     else:
         kept, gone, kept_order, gone_order = y_h, x_h, oy, ox
     if gone.role != "intermediate" or gone.parent is not None:
-        raise Unfoldable(f"{gone.name} is a {gone.role}, which must stay written")
+        raise Unfoldable(f"{gone.name} ({gone.role}) must stay written")
     if gone.name in _graph_results(traced):
         raise Unfoldable(f"{gone.name} is a result of the graph")
     if gone_order.offset_by is not None:
@@ -172,14 +222,72 @@ def _fold(traced: TracedGraph, dev, i: int, side: Side, memo: dict) -> Fold:
     else:
         steps = [_writer(traced, i, gone.name)]
         _no_hazard(traced, steps[0], i, kept, reads=True, writes=True)
-    refolds, reorders = [], []
+    edits = []
     for j in steps:
         refold, reorder = _refold(
             traced, dev, j, gone, kept, side, relation, offset, memo
         )
-        refolds.append(refold)
-        reorders.append(reorder)
-    return Fold(i, side, tuple(steps), tuple(refolds), tuple(reorders), expression)
+        edits.append(Edit(j, refold=refold, reorder=reorder))
+    return Fold(i, kind, tuple(edits), expression)
+
+
+def _epilogue(traced: TracedGraph, dev, i: int, memo: dict) -> Fold:
+    """Elementwise step ``i`` run by the cores of the step that wrote its input."""
+    step = traced.steps[i]
+    tuned = step.op.tuned(dev)
+    x_buf = next(b for b in tuned.buffers if b.direction == "in")
+    y_buf = next(b for b in tuned.buffers if b.direction == "out")
+    x_h, y_h = _ends(traced, i)
+    if any(b.op is step.op for b in traced.bindings):
+        raise Unfoldable(f"{type(step.op).__name__} is written a per-call value")
+    ox, oy = tuned.issued_order(x_buf), tuned.issued_order(y_buf)
+    if ox.offset_by is not None or oy.offset_by is not None:
+        raise Unfoldable("its transfers move at a per-call offset")
+    for slot in range(len(ox.slots)):
+        if not np.array_equal(ox.indices(slot), oy.indices(slot)):
+            raise Unfoldable(
+                "it does not write each element where it read it, so its "
+                "kernel cannot run in place of the store"
+            )
+    if x_h.role != "intermediate" or x_h.parent is not None:
+        raise Unfoldable(f"{x_h.name} ({x_h.role}) must stay written")
+    if x_h.name in _graph_results(traced):
+        raise Unfoldable(f"{x_h.name} is a result of the graph")
+    j = _writer(traced, i, x_h.name)
+    _no_hazard(traced, j, i, y_h, reads=True, writes=True)
+    producer = traced.steps[j].op
+    at = [k for k, h in enumerate(traced.steps[j].slots) if h.name == x_h.name]
+    if len(at) != 1 or producer.buffers[at[0]].direction != "out":
+        raise Unfoldable(f"{type(producer).__name__}@{j} does not write it alone")
+    epilogue = step.op.ov
+    key = ("epilogue", producer.design_key(), epilogue.design_key())
+    if key not in memo:
+        memo[key] = _hosts(producer, epilogue, at[0], dev)
+    if memo[key] is not None:
+        raise Unfoldable(f"{type(producer).__name__}@{j}: {memo[key]}")
+    return Fold(i, Kind.EPILOGUE, (Edit(j, epilogue=epilogue),))
+
+
+def _hosts(producer: Operator, epilogue: Overlay, slot: int, dev) -> str | None:
+    """Why ``producer``'s array cannot run ``epilogue`` on the objects of its
+    buffer ``slot``; ``None`` if it can."""
+    ov = producer.ov.with_epilogue(epilogue)
+    if ov is None:
+        return f"{type(producer.ov).__name__} hosts no epilogue"
+    try:
+        tuned = producer.replace(ov=ov).tuned(dev)
+    except (Unfoldable, Incompatible) as e:
+        return str(e)
+    stream = tuned.buffers[slot].stream(tuned.ov)
+    if stream is None:
+        return "its output names no stream"
+    try:
+        pointwise = epilogue.pointwise(Target(dev, kernels_dir()), stream.elements)
+    except ValueError as e:  # the kernel's own size rules
+        return str(e)
+    if pointwise is None:
+        return f"{type(epilogue).__name__} has no pointwise kernel"
+    return None
 
 
 def _readers(traced: TracedGraph, i: int, name: str) -> list[int]:
@@ -300,24 +408,48 @@ def _refold(
     raise Unfoldable(f"{type(op).__name__}@{j}: {reasons[0]}")
 
 
+def edited(op: Operator, edits: Sequence[Edit]) -> Operator:
+    """``op`` with ``edits`` (every one on its step) made: its refolds and
+    batch walk, then its epilogue."""
+    refolds = tuple(e.refold for e in edits if e.refold is not None)
+    walks = {e.reorder for e in edits} - {None}
+    if len(walks) > 1:
+        raise Unfoldable(f"its folds need different batch walks {walks}")
+    if refolds or walks:
+        op = op.refolded(refolds, next(iter(walks), None))
+    epilogues = [e.epilogue for e in edits if e.epilogue is not None]
+    if len(epilogues) > 1:
+        raise Unfoldable("two epilogues on one array")
+    if epilogues:
+        ov = op.ov.with_epilogue(epilogues[0])
+        if ov is None:
+            raise Unfoldable(f"{type(op.ov).__name__} hosts no epilogue")
+        op = op.replace(ov=ov)
+    return op
+
+
+def _renames(traced: TracedGraph, f: Fold) -> tuple[Handle, Handle]:
+    """What the fold's neighbours hold instead: (gone, kept)."""
+    x_h, y_h = _ends(traced, f.removed)
+    return (y_h, x_h) if f.kind is Kind.READ else (x_h, y_h)
+
+
 def apply(traced: TracedGraph, folds: Sequence[Fold], dev) -> TracedGraph:
-    """``traced`` with every fold in ``folds`` taken: their movement steps
-    gone, their neighbours on refolded operators, the movements' per-call
-    values bound on those. Raises :class:`Unfoldable` if two folds cannot
-    share a neighbour."""
-    removed = {f.movement for f in folds}
+    """``traced`` with every fold in ``folds`` taken: their steps gone, their
+    neighbours on edited operators, a removed step's per-call values bound on
+    those. Raises :class:`Unfoldable` if two folds cannot share a neighbour."""
+    removed = {f.removed for f in folds}
     if len(removed) != len(folds):
-        raise Unfoldable("two folds remove the same movement")
-    edits: dict[int, list[tuple[Fold, int]]] = {}
+        raise Unfoldable("two folds remove the same step")
+    edits: dict[int, list[Edit]] = {}
     for f in folds:
-        for n, j in enumerate(f.neighbours):
-            if j in removed:
-                raise Unfoldable(f"step {j} is folded into and folded away")
-            edits.setdefault(j, []).append((f, n))
+        for e in f.edits:
+            if e.step in removed:
+                raise Unfoldable(f"step {e.step} is folded into and folded away")
+            edits.setdefault(e.step, []).append(e)
     renamed: dict[str, Handle] = {}
     for f in folds:
-        x_h, y_h = _ends(traced, f.movement)
-        kept, gone = (x_h, y_h) if f.side is Side.READ else (y_h, x_h)
+        gone, kept = _renames(traced, f)
         renamed[gone.name] = kept
     swapped: dict[int, Operator] = {}  # id(step) -> its new operator
     steps: list[TracedStep] = []
@@ -327,11 +459,10 @@ def apply(traced: TracedGraph, folds: Sequence[Fold], dev) -> TracedGraph:
         if k not in edits:
             steps.append(s)
             continue
-        refolds = tuple(f.refolds[n] for f, n in edits[k])
-        walks = {f.reorders[n] for f, n in edits[k]} - {None}
-        if len(walks) > 1:
-            raise Unfoldable(f"step {k}: its folds need different batch walks {walks}")
-        op = s.op.refolded(refolds, next(iter(walks), None))
+        try:
+            op = edited(s.op, edits[k])
+        except Unfoldable as e:
+            raise Unfoldable(f"step {k}: {e}") from None
         op.tuned(dev)  # every order composes, together
         swapped[id(s)] = op
 
@@ -340,7 +471,7 @@ def apply(traced: TracedGraph, folds: Sequence[Fold], dev) -> TracedGraph:
 
         steps.append(TracedStep(op, move(s.slots), move(s.inputs), move(s.outputs)))
     by_old_op = {id(s.op): swapped[id(s)] for s in traced.steps if id(s) in swapped}
-    gone_ops = {id(traced.steps[f.movement].op) for f in folds}
+    gone_ops = {id(traced.steps[f.removed].op) for f in folds}
     bindings: list[Binding] = []
     for b in traced.bindings:
         if id(b.op) in gone_ops:
@@ -357,9 +488,9 @@ def apply(traced: TracedGraph, folds: Sequence[Fold], dev) -> TracedGraph:
     for f in folds:
         if f.offset is None:
             continue
-        for j, refold in zip(f.neighbours, f.refolds):
-            op = swapped[id(traced.steps[j])]
-            member = next(v for v in op.values if v.name == refold.value_name)
+        for e in f.edits:
+            op = swapped[id(traced.steps[e.step])]
+            member = next(v for v in op.values if v.name == e.refold.value_name)
             bindings.append(Binding(op, member, f.offset))
     return dataclasses.replace(traced, steps=steps, bindings=bindings)
 
@@ -372,19 +503,19 @@ class Folding(Protocol):
 
 @dataclasses.dataclass(frozen=True)
 class FoldAll:
-    """Take every fold that is legal, one per movement, preferring ``sides``
-    in order where both are. What a device where every step costs a
-    dispatch wants; elsewhere a cost model chooses."""
+    """Take every fold that is legal, one per removed step, preferring
+    ``kinds`` in order where several are. What a device where every step
+    costs a dispatch wants; elsewhere a cost model chooses."""
 
-    sides: tuple[Side, ...] = (Side.READ, Side.WRITE)
-    # When given, only movements of these classes, and only into these.
+    kinds: tuple[Kind, ...] = (Kind.READ, Kind.WRITE, Kind.EPILOGUE)
+    # When given, only steps of these classes, and only into these.
     only: tuple[type[Operator], ...] = ()
     into: tuple[type[Operator], ...] = ()
 
     def _wanted(self, traced: TracedGraph, f: Fold) -> bool:
-        if f.side not in self.sides:
+        if f.kind not in self.kinds:
             return False
-        if self.only and not isinstance(traced.steps[f.movement].op, self.only):
+        if self.only and not isinstance(traced.steps[f.removed].op, self.only):
             return False
         return not self.into or all(
             isinstance(traced.steps[j].op, self.into) for j in f.neighbours
@@ -396,24 +527,24 @@ class FoldAll:
             for c in candidates(traced, dev)
             if isinstance(c, Fold) and self._wanted(traced, c)
         ]
-        rank = {side: n for n, side in enumerate(self.sides)}
+        rank = {kind: n for n, kind in enumerate(self.kinds)}
         chosen: dict[int, Fold] = {}
-        for f in sorted(found, key=lambda f: (f.movement, rank[f.side])):
-            chosen.setdefault(f.movement, f)
-        # A neighbour may take folds from several movements, but not two batch
-        # walks; the earlier movement keeps its walk.
+        for f in sorted(found, key=lambda f: (f.removed, rank[f.kind])):
+            chosen.setdefault(f.removed, f)
+        # A neighbour may take folds from several steps, as long as they
+        # compose; the earlier step's fold keeps its place.
         taken: list[Fold] = []
-        walks: dict[int, Reorder] = {}
+        on: dict[int, list[Edit]] = {}
         for f in chosen.values():
-            clash = any(
-                r is not None and walks.get(j, r) != r
-                for j, r in zip(f.neighbours, f.reorders)
-            )
-            if clash or any(j in chosen for j in f.neighbours):
+            if any(j in chosen for j in f.neighbours):
                 continue
-            for j, r in zip(f.neighbours, f.reorders):
-                if r is not None:
-                    walks[j] = r
+            trial = {j: on.get(j, []) + [e] for j, e in zip(f.neighbours, f.edits)}
+            try:
+                for j, es in trial.items():
+                    edited(traced.steps[j].op, es).tuned(dev)
+            except (Unfoldable, Incompatible):
+                continue
+            on.update(trial)
             taken.append(f)
         return taken
 
