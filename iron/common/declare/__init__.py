@@ -99,6 +99,7 @@ from .semantics import (
     Local,
     Movement,
     Semantics,
+    Transposed,
     Undeclared,
 )
 
@@ -130,6 +131,7 @@ __all__ = [
     "Shim",
     "StreamIn",
     "StreamOut",
+    "Transposed",
     "Undeclared",
     "Untunable",
     "ValueSpec",

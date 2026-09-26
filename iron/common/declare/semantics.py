@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class Local:
@@ -36,13 +38,28 @@ class Contraction:
 
 
 @dataclass(frozen=True)
+class Transposed:
+    """Each object, ``rows`` x ``cols`` row-major, leaves as its transpose."""
+
+    rows: int
+    cols: int
+
+    def permutation(self) -> np.ndarray:
+        """Output object element ``q`` is input object element ``permutation()[q]``."""
+        return (
+            np.arange(self.rows * self.cols).reshape(self.rows, self.cols).T.reshape(-1)
+        )
+
+
+@dataclass(frozen=True)
 class Movement:
     """Re-indexing only: every output element is an input element, and the
-    orders (with, on a core, a permutation inside each object) say which.
-    ``has_cores`` is False for a DMA-only overlay, which has no core to host
-    another kernel."""
+    orders say which, with ``within`` permuting each object on a core on the
+    way (``None``: objects pass through unchanged). ``has_cores`` is False
+    for a DMA-only overlay, which has no core to host another kernel."""
 
     has_cores: bool
+    within: Transposed | None = None
 
 
 @dataclass(frozen=True)
