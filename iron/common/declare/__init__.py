@@ -75,6 +75,7 @@ from .field import (
 )
 from .infer import infer, infer_kwargs
 from .member import (
+    Carried,
     DispatchTime,
     In,
     InOut,
@@ -96,6 +97,7 @@ __all__ = [
     "BoundStream",
     "BoundValue",
     "BufferView",
+    "Carried",
     "DeclarationError",
     "DimRef",
     "DispatchTime",

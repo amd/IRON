@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from math import prod
 
 import numpy as np
@@ -113,13 +113,15 @@ class Value:
 
     Integer arithmetic on one makes an :class:`Affine`: ``position * 64`` or
     ``position + 1`` is what an operator is bound to, and the graph computes
-    it from ``position`` on every call.
+    it from ``position`` on every call. A ``carried`` one is computed by the
+    graph for its next call (:class:`~iron.common.declare.Carried`).
     """
 
-    __slots__ = ("name", "kind", "dtype")
+    __slots__ = ("name", "kind", "dtype", "carried")
 
-    def __init__(self, name, kind, dtype):
+    def __init__(self, name, kind, dtype, carried=False):
         self.name, self.kind, self.dtype = name, kind, dtype
+        self.carried = carried
 
     def affine(self) -> Affine:
         """This value, as the identity expression of itself."""
@@ -139,7 +141,8 @@ class Value:
         return self.affine() - k
 
     def __repr__(self) -> str:
-        return f"Value({self.name!r}, {self.kind}[{np.dtype(self.dtype).name}])"
+        kind = f"carried {self.kind}" if self.carried else self.kind
+        return f"Value({self.name!r}, {kind}[{np.dtype(self.dtype).name}])"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -193,6 +196,43 @@ class Affine:
         if self.bias:
             text = f"{text} {'+' if self.bias > 0 else '-'} {abs(self.bias)}"
         return f"Affine({text})"
+
+
+class Carry(Mapping):
+    """The next values of a graph's carried values, by name: what
+    :func:`carry` returns.
+
+    Traced, each is an :class:`Affine` of the current values or a
+    one-element integer :class:`Handle` the graph computed. Returned from a
+    call, each is the number the next call takes.
+    """
+
+    __slots__ = ("_next",)
+
+    def __init__(self, **next_values: Handle | Affine | Value | int):
+        self._next = {
+            name: v.affine() if isinstance(v, Value) else v
+            for name, v in next_values.items()
+        }
+
+    def __getitem__(self, name: str) -> Handle | Affine | int:
+        return self._next[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._next)
+
+    def __len__(self) -> int:
+        return len(self._next)
+
+    def __repr__(self) -> str:
+        items = ", ".join(f"{k}={v!r}" for k, v in self._next.items())
+        return f"Carry({items})"
+
+
+def carry(**next_values: Handle | Affine | Value | int) -> Carry:
+    """Return with a graph's outputs the next value of each carried value:
+    ``return logits, iron.carry(token=sampled, position=position + 1)``."""
+    return Carry(**next_values)
 
 
 def is_operand(x) -> bool:

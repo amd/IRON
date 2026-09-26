@@ -7,8 +7,11 @@ Inputs are its positional parameters, outputs its return values, weights
 what it closes over, state an :func:`state` object created outside, and
 per-call scalars its keyword-only parameters annotated ``Scratchpad[T]`` or
 ``DispatchTime[T]`` (an operator may be bound to an integer expression of
-one, ``pos * head_dim``, which is computed per call). An input defaulting
-to ``None`` may be left out; the version without it sees ``None``. Operators are called on handles: ``GEMV(w, h)`` infers
+one, ``pos * head_dim``, which is computed per call). A ``Carried[T]`` value
+is one the graph computes for its own next call: it returns the next values
+last, ``return logits, iron.carry(pos=pos + 1)``, and a call returns them as
+numbers. An input defaulting to ``None`` may be left out; the version
+without it sees ``None``. Operators are called on handles: ``GEMV(w, h)`` infers
 its overlay and extent from its arguments (deduplicating overlays by
 ``design_key``), and an explicit instance ``q(w, h)`` is applied the same way.
 
@@ -33,11 +36,12 @@ tensors compiles for their shapes, says so once, and dispatches.
 """
 
 from .compiled import CompiledGraph, GraphFunction, graph
-from .handle import Affine, Handle, State, Value, is_operand, state
+from .handle import Affine, Carry, Handle, State, Value, carry, is_operand, state
 from .trace import TracedGraph, TracedStep, Tracer, current, handle_of
 
 __all__ = [
     "Affine",
+    "Carry",
     "CompiledGraph",
     "GraphFunction",
     "Handle",
@@ -46,6 +50,7 @@ __all__ = [
     "TracedGraph",
     "Tracer",
     "Value",
+    "carry",
     "current",
     "graph",
     "handle_of",

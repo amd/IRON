@@ -14,7 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.declare import DispatchTime, Scratchpad
+from iron.common.declare import Carried, DispatchTime, Scratchpad
 from iron.common.graph import Affine, Handle, TracedGraph
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -507,3 +507,105 @@ def test_an_optional_input_gives_a_version_without_it():
     x = np.full(64, 2, dtype=bfloat16)
     np.testing.assert_array_equal(f.reference(r=1), table[1])
     np.testing.assert_array_equal(f.reference(x, r=1), table[1] + x)
+
+
+def _successor_walk(successor):
+    """A graph that walks a linked list one node per call: the next node is
+    gathered from the successor table on the device, the step count is an
+    expression of the current one. It takes no tensor."""
+    n = successor.shape[0]
+    gather = StridedCopy(
+        input_sizes=(1,),
+        input_strides=(1,),
+        input_offset=0,
+        output_sizes=(1,),
+        output_strides=(1,),
+        output_offset=0,
+        input_buffer_size=n,
+        output_buffer_size=1,
+        dtype=np.int32,
+    )
+
+    @iron.graph
+    def walk(*, node: Carried[np.int32], steps: Carried[np.int32]):
+        return iron.carry(node=gather(successor, in_offset=node), steps=steps + 1)
+
+    return walk
+
+
+def test_a_graph_carries_its_next_values():
+    successor = np.random.default_rng(0).permutation(16).astype(np.int32)
+    walk = _successor_walk(successor)
+    t = walk.trace()
+    assert [(v.name, v.carried) for v in t.values] == [
+        ("node", True),
+        ("steps", True),
+    ]
+    assert t.input_args == [] and t.returned == []
+    # The gathered node is an output buffer, so the host can read it back.
+    assert t.output_args == ["carry_node"] and t.carry["node"] is t.outputs[0]
+    assert t.runlist[0][-1] == "carry_node"
+    assert t.carry["steps"] == Affine(t.values[1], 1, 1)
+    node, steps = 3, 0
+    for _ in range(5):
+        nxt = walk.reference(node=node, steps=steps)
+        assert dict(nxt) == {"node": successor[node], "steps": steps + 1}
+        node, steps = nxt["node"], nxt["steps"]
+
+
+def test_a_carried_handle_may_also_be_returned():
+    successor = np.arange(1, 9, dtype=np.int32) % 8
+    gather = _successor_walk(successor).trace().steps[0].op
+
+    @iron.graph
+    def walk(*, node: Carried[np.int32]):
+        nxt = gather(successor, in_offset=node)
+        return nxt, iron.carry(node=nxt)
+
+    t = walk.trace()
+    assert t.output_args == ["out"] and t.carry["node"] is t.returned[0]
+    out, nxt = walk.reference(node=7)
+    assert out.reshape(-1)[0] == 0 and nxt["node"] == 0
+
+
+def test_every_carried_value_is_carried_and_nothing_else():
+    table = np.zeros(8, dtype=np.int32)
+    gather = _successor_walk(table).trace().steps[0].op
+
+    @iron.graph
+    def forgets(*, a: Carried[np.int32], b: Carried[np.int32]):
+        return iron.carry(a=a + 1)
+
+    with pytest.raises(TypeError, match=r"return iron.carry\(b=\.\.\.\)"):
+        forgets.trace()
+
+    @iron.graph
+    def carries_a_plain_value(*, a: Scratchpad[np.int32]):
+        return iron.carry(a=a + 1)
+
+    with pytest.raises(TypeError, match="Carried values are"):
+        carries_a_plain_value.trace()
+
+    @iron.graph
+    def carries_a_constant(*, a: Carried[np.int32]):
+        return iron.carry(a=5)
+
+    with pytest.raises(TypeError, match="expression of the values"):
+        carries_a_constant.trace()
+
+    wide = _row_copy(64, 4)
+    rows = np.zeros((4, 64), dtype=bfloat16)
+
+    @iron.graph
+    def carries_a_row(*, a: Carried[np.int32]):
+        return iron.carry(a=wide(rows, in_offset=a * 64))
+
+    with pytest.raises(TypeError, match="one whole element"):
+        carries_a_row.trace()
+
+    @iron.graph
+    def carries_the_wrong_dtype(*, a: Carried[np.int16]):
+        return iron.carry(a=gather(table, in_offset=a))
+
+    with pytest.raises(TypeError, match="but a is int16"):
+        carries_the_wrong_dtype.trace()

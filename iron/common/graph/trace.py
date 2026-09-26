@@ -18,7 +18,7 @@ from ..declare import BoundValue, Operator, Resident, infer, infer_kwargs
 from ..declare.member import _Buffer as _Buffer_, _Value
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
-from .handle import Affine, Handle, State, Value, _tensor_dtype, is_operand
+from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 
 _STACK: list = []
 
@@ -89,17 +89,21 @@ class TracedGraph:
 
     ``weights`` and ``states`` are keyed by the identity of the object the
     function closed over, and hold that object, so the key stays its own.
+    ``carry`` is the next value of each carried value, by name; a handle
+    there is an output buffer too, so the host can read it back.
     """
 
     name: str
     steps: list
     inputs: list  # Handles, in parameter order
-    outputs: list  # Handles returned
+    outputs: list  # Handles returned, then carried handles not returned
     values: list  # Values, in parameter order
     pinned: dict  # buffer name -> nbytes, for weights, states and slice parents
     weights: dict[int, tuple[object, Handle]]  # id(tensor) -> (tensor, Handle)
     states: dict[int, tuple[State, Handle]]  # id(State) -> (State, Handle)
     bindings: list[Binding]
+    returned: list = dataclasses.field(default_factory=list)  # Handles returned
+    carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
 
     @property
     def runlist(self) -> list:
@@ -361,7 +365,16 @@ class Tracer:
 
     # -- the result ----------------------------------------------------------
 
-    def finish(self, inputs, outputs, values) -> TracedGraph:
+    def finish(
+        self, inputs, outputs, values, carry: Carry | None = None
+    ) -> TracedGraph:
+        carry = dict(carry or {})
+        returned = list(outputs)
+        outputs = returned + [
+            h
+            for h in carry.values()
+            if isinstance(h, Handle) and not any(h is o for o in returned)
+        ]
         pinned = {}
         for _, h in self.weights.values():
             pinned[h.name] = h.nbytes
@@ -382,6 +395,8 @@ class Tracer:
             self.weights,
             self.states,
             self.bindings,
+            returned,
+            carry,
         )
 
 
