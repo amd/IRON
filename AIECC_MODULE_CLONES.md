@@ -113,7 +113,7 @@ live together.
    carriage returns; `tr '\r' '\n'`). The table above is the baseline.
 3. The sixteen-layer image is the target: `Llama1B` in
    `iron/tests/common/llama_model.py` at its full depth, through
-   `PrefillGraph(cfg, DecodeGraph(cfg, cfg.context_length)).trace(cfg)`
+   `LlamaGraph(cfg, cfg.context_length).trace(cfg, cfg.context_length)`
    and `traced.sequence(...).compile()`. It should build in a few GB, and
    its ELF should be byte-identical to one built without the prune (the
    prune changes what is held, not what is emitted).

@@ -4,15 +4,16 @@
 """The graphs' references against the model's plain forward pass.
 
 ``Llama.forward`` is a stateless causal pass in torch, the oracle the NPU
-application is judged against. ``PrefillGraph`` and ``DecodeGraph`` are the
-same computation as graph functions, and ``GraphFunction.reference`` runs
-each operator by operator through its ``reference()`` on host tensors, with
-the per-call values modelled (the last prompt row selects the logits, the
-cache offset moves the copy, the vector size masks the softmax) and the
-caches as state. So the two can be compared without a device, from the
-same prompt: that checks the graphs' wiring (layouts, reshapes, the scale,
-the repeat, the transposes, the cache handoff between the phases) against
-the model, leaving only the kernels' arithmetic for hardware.
+application is judged against. ``LlamaGraph.graph`` is the same
+computation as one graph function, called at a prompt's shape and at one
+token's, and ``GraphFunction.reference`` runs it operator by operator
+through each ``reference()`` on host tensors, with the per-call values
+modelled (the last prompt row selects the logits, the cache offset moves the
+copy, the vector size masks the softmax) and the caches as state. So the two
+can be compared without a device, from the same prompt: that checks the
+graph's wiring (layouts, reshapes, the scale, the repeat, the transposes,
+the caches the prompt leaves for decode) against the model, leaving only
+the kernels' arithmetic for hardware.
 
 The oracle needs no cache: the logits at position ``t`` of a causal pass
 over ``t + 1`` tokens are what a cached decode produces at step ``t``. Both
@@ -24,7 +25,7 @@ import pytest
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 from iron.applications.llama_3_2_1b import harness
 from iron.applications.llama_3_2_1b.harness import LlamaModelState
 from iron.applications.llama_3_2_1b.npu import AIELlama
@@ -47,28 +48,36 @@ def _embed(config, tokens):
     return config.weights.embed(tokens.numpy())
 
 
-def decode_graph(config):
-    """The decode graph at the test's context length, four columns wide so the
-    prefill graph's tiles divide the scaled model."""
-    return DecodeGraph(config, config.context_length, num_aie_columns=4)
+def llama_graph(config):
+    """The graph at the test's context length, four columns wide and with
+    small prompt tiles so they divide the scaled model."""
+    return LlamaGraph(
+        config,
+        config.context_length,
+        num_aie_columns=4,
+        num_of_pipelines=1,
+        tile_m=16,
+    )
 
 
 def graph_prefill(config, graph, prompt):
-    """Run the prompt through the prefill graph's reference; the logits of its last token.
+    """Run the prompt through the graph's reference; the logits of its last token.
 
     The graph runs at the context length: the prompt fills the first rows
     of ``x`` and the rest are zero; ``last`` picks the last prompt row."""
-    L, E = config.context_length, config.emb_dim
+    rows = config.context_length
+    E = config.emb_dim
     n = prompt.shape[0]
-    x = np.zeros((L, E), dtype=bfloat16)
+    x = np.zeros((rows, E), dtype=bfloat16)
     x[:n] = _embed(config, prompt)
-    pre = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
-    logits = pre.graph.reference(x, config.angles[:L], last=(n - 1) * E)
+    logits = graph.graph.reference(
+        x, config.angles[:rows], cache_offset=0, vector_size=n, last=(n - 1) * E
+    )
     return torch.from_numpy(logits.reshape(-1).astype(np.float32))
 
 
 def graph_decode(config, graph, tokens, pos, *, vector_size=None):
-    """Feed ``tokens`` one at a time through the decode graph's reference from
+    """Feed ``tokens`` one at a time through the graph's reference from
     position ``pos``, its caches as they are; the logits after each."""
     D = config.head_dim
     out = []
@@ -76,7 +85,9 @@ def graph_decode(config, graph, tokens, pos, *, vector_size=None):
         x = _embed(config, token.reshape(1)).reshape(1, config.emb_dim)
         angles = config.angles[pos : pos + 1]
         n = pos + 1 if vector_size is None else vector_size(step, pos)
-        logits = graph.graph.reference(x, angles, cache_offset=pos * D, vector_size=n)
+        logits = graph.graph.reference(
+            x, angles, cache_offset=pos * D, vector_size=n, last=0
+        )
         out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
         pos += 1
     return out
@@ -123,22 +134,22 @@ def _assert_close(got, expected):
 
 
 def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
-    """The decode graph alone: the prompt fed one token at a time from an
+    """One token at a time only: the prompt fed a token at a time from an
     empty cache, then the generated tokens."""
     config, prompt, first, expected = cpu
-    graph = decode_graph(config)
+    graph = llama_graph(config)
     over_prompt = graph_decode(config, graph, prompt, 0)
     _assert_close([over_prompt[-1]], [first])
     got = greedy(config, graph, over_prompt[-1], prompt.shape[0], len(expected))
     _assert_close(got, expected)
 
 
-def test_prefill_matches_the_forward_and_hands_decode_its_caches(cpu):
+def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     config, prompt, first, expected = cpu
-    graph = decode_graph(config)
+    graph = llama_graph(config)
     got_first = graph_prefill(config, graph, prompt)
     _assert_close([got_first], [first])
-    # Decode continues from the caches prefill wrote.
+    # Decode continues from the caches the prompt wrote: the same states.
     got = greedy(config, graph, got_first, prompt.shape[0], len(expected))
     _assert_close(got, expected)
 
@@ -150,7 +161,7 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
     Modelled here: it drifts from the forward where the correct context
     length does not."""
     config, prompt, first, expected = cpu
-    graph = decode_graph(config)
+    graph = llama_graph(config)
     graph_prefill(config, graph, prompt)
     cum = {"total": 0}
 
@@ -176,39 +187,21 @@ class _Output:
         return self.array
 
 
-class _Image:
-    """A compiled graph stood in by its reference: the application's view of one."""
-
-    def __init__(self, graph):
-        self.graph = graph
-
-    def __call__(self, *tensors, **values):
-        return _Output(self.graph.reference(*tensors, **values))
-
-    def read(self, state):
-        return state.host.copy()
-
-    def write(self, state, tensor):
-        state.host = np.asarray(tensor).reshape(state.shape).astype(bfloat16)
-
-
 def application(config):
-    """npu.py's AIELlama with its two images stood in by the graph references."""
-    graph = decode_graph(config)
-    prefill = PrefillGraph(config, graph, num_of_pipelines=1, tile_m=16)
-    return AIELlama(
-        config,
-        graph,
-        _Image(graph.graph),
-        _Image(prefill.graph),
-        config.context_length,
-    )
+    """npu.py's AIELlama with its graph function stood in by its reference,
+    which runs at whatever shape it is called with."""
+    graph = llama_graph(config)
+
+    def forward(*tensors, **values):
+        return _Output(graph.graph.reference(*tensors, **values))
+
+    return AIELlama(config, forward, config.context_length)
 
 
 def test_the_application_runs_both_phases_through_its_images(cpu):
-    """npu.py's own forward pass, its two images stood in by the graph
-    references: the embedding, the prompt's padding and its last-row offset,
-    the angles, the cache handoff and decode's values are the application's."""
+    """npu.py's own forward pass, its graph stood in by the reference: the
+    embedding, the prompt's padding and its last-row offset, the angles and
+    decode's values are the application's."""
     config, prompt, first, expected = cpu
     npu = application(config)
 

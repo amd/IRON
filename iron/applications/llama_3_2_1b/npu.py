@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2 1B on the NPU: the prefill and decode graphs as two fused images.
+"""Llama 3.2 1B on the NPU: one graph function, one image per input shape.
+
+The prompt and each decode step are calls of the one ``forward``
+(:class:`.graphs.LlamaGraph`) at two shapes: a prompt runs padded to
+``max_seq_len`` rows, a decode step at one row. Every version shares the function's scratch arena, so
+the weights are uploaded once and the caches a prompt writes are the caches
+decode reads.
 
 No torch: the weights are the mapped checkpoint, the embedding a numpy
 gather, the logits numpy. The accuracy check, which needs the torch CPU
@@ -9,46 +15,47 @@ reference, is its own entry point (:mod:`.accuracy`).
 """
 
 import logging
+from collections.abc import Callable
 
 import numpy as np
 from ml_dtypes import bfloat16
 
 from . import harness
-from .graphs import DecodeGraph, PrefillGraph
+from .graphs import LlamaGraph
 
 MAX_SEQ_LEN = 2048
 
 
 class AIELlama:
-    """Both phases as fused images over one set of weights and caches.
+    """The model as one graph function called at the prompt's and a token's shape.
 
-    The prefill image runs the prompt at ``max_seq_len`` and writes the
-    caches in the layout the decode image reads; ``prefill_to_decode``
-    hands them over. Each image owns a copy of the weights it reads.
-
-    ``decode`` and ``prefill`` are the compiled images (:meth:`compile`
-    builds them); :meth:`forward` is the ``forward_pass`` the harness calls.
+    ``forward_graph`` is that function -- a compiled
+    :class:`~iron.common.graph.compiled.GraphFunction`, or anything called
+    the same way and returning a buffer with ``numpy()``. :meth:`forward`
+    is the ``forward_pass`` the harness calls.
     """
 
-    def __init__(self, config, decode_graph, decode, prefill, max_seq_len):
+    def __init__(self, config, forward_graph: Callable, max_seq_len: int):
         self.config = config
-        self.decode_graph = decode_graph
-        self.decode = decode
-        self.prefill = prefill
+        self.forward_graph = forward_graph
         self.max_seq_len = max_seq_len
+        # The RoPE table as the images read it. A float32 table would be
+        # another input signature, and so another compile.
+        self.angles = config.angles.astype(bfloat16)
 
     @classmethod
     def compile(cls, config, max_seq_len=MAX_SEQ_LEN) -> "AIELlama":
-        """Trace, compile and load both images, weights uploaded."""
-        decode_graph = DecodeGraph(config, max_seq_len)
-        decode = decode_graph.compile(config).load()
-        prefill = PrefillGraph(config, decode_graph).compile(config).load()
-        return cls(config, decode_graph, decode, prefill, max_seq_len)
+        """Trace, compile and load both versions, weights uploaded.
 
-    def prefill_to_decode(self):
-        graph = self.decode_graph
-        for cache in (*graph.keys, *graph.values):
-            self.decode.write(cache, self.prefill.read(cache))
+        Both before the first call, so the shared arena is made once at its
+        final size.
+        """
+        model = LlamaGraph(config, max_seq_len)
+        for rows in (1, max_seq_len):
+            model.compile(config, rows)
+        for version in model.graph.versions.values():
+            version.load()
+        return cls(config, model.graph, max_seq_len)
 
     # -- the forward pass ----------------------------------------------------
 
@@ -68,19 +75,23 @@ class AIELlama:
         return np.array(logits).reshape(1, 1, config.vocab_size), state
 
     def _prefill(self, token_ids):
-        config, L = self.config, self.max_seq_len
+        config, rows = self.config, self.max_seq_len
         n = token_ids.shape[0]
-        assert 0 < n <= L
+        assert 0 < n <= rows
         # The prompt fills the first rows; the rest are never read (attention is
         # causal, and decode masks the cache's tail by its vector size).
-        x = np.zeros((L, config.emb_dim), dtype=bfloat16)
+        x = np.zeros((rows, config.emb_dim), dtype=bfloat16)
         x[:n] = config.weights.embed(token_ids)
-        # The last prompt row's logits only, selected by its element offset.
-        logits = self.prefill(
-            x, config.angles[:L], last=(n - 1) * config.emb_dim
+        # Every call passes every per-call value; a version reads the ones
+        # its operators bind. Here: the last prompt row's logits only,
+        # selected by its element offset.
+        return self.forward_graph(
+            x,
+            self.angles[:rows],
+            cache_offset=0,
+            vector_size=n,
+            last=(n - 1) * config.emb_dim,
         ).numpy()
-        self.prefill_to_decode()
-        return logits
 
     def _decode(self, token_id, position):
         config = self.config
@@ -90,11 +101,12 @@ class AIELlama:
         # tail contributes nothing. It used to be written as a running sum of
         # context lengths, which iron/tests/common/llama_reference.py shows
         # drifting from the CPU reference from the second token on (§18).
-        return self.decode(
+        return self.forward_graph(
             config.weights.embed([token_id]).reshape(1, config.emb_dim),
-            config.angles[position : position + 1],
+            self.angles[position : position + 1],
             cache_offset=position * config.head_dim,
             vector_size=position + 1,
+            last=0,
         ).numpy()
 
 

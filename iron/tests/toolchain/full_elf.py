@@ -90,10 +90,10 @@ def _assert_values_in_table(traced, artifacts):
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.applications.llama_3_2_1b.graphs import DecodeGraph
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 
     cfg = _Config()
-    traced = DecodeGraph(cfg, 256).trace(cfg)
+    traced = LlamaGraph(cfg, 256).trace(cfg, 1)
     artifacts = build_elf(traced, "decode")
     _assert_values_in_table(traced, artifacts)
 
@@ -107,11 +107,10 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     430), past this gate's memory at the full depth."""
     from iron.tests.common.llama_model import Llama1B
 
-    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 
     cfg = Llama1B(n_layers=1)
-    decode = DecodeGraph(cfg, cfg.context_length)
-    traced = PrefillGraph(cfg, decode).trace(cfg)
+    traced = LlamaGraph(cfg, cfg.context_length).trace(cfg, cfg.context_length)
     assert len(traced.runlist) == 18 + 3
     artifacts = build_elf(traced, "prefill_1b")
     _assert_values_in_table(traced, artifacts)
@@ -120,11 +119,12 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 
     cfg = _Config()
-    decode = DecodeGraph(cfg, cfg.context_length, num_aie_columns=4)
-    traced = PrefillGraph(cfg, decode, num_of_pipelines=1, tile_m=16).trace(cfg)
+    L = cfg.context_length
+    graph = LlamaGraph(cfg, L, num_aie_columns=4, num_of_pipelines=1, tile_m=16)
+    traced = graph.trace(cfg, L)
     artifacts = build_elf(traced, "prefill")
     _assert_values_in_table(traced, artifacts)
 

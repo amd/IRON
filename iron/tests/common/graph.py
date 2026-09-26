@@ -312,12 +312,11 @@ def test_swiglu_prefill_traces_over_a_sequence():
 def test_llama_decode_traces_and_tunes():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.applications.llama_3_2_1b.graphs import DecodeGraph
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 
     cfg = _Config()
     L = 256
-    dg = DecodeGraph(cfg, L)
-    t = dg.trace(cfg)
+    t = LlamaGraph(cfg, L).trace(cfg, 1)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "WeightedRMSNorm",
@@ -347,7 +346,9 @@ def test_llama_decode_traces_and_tunes():
     ]
     assert kinds == per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
     assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    assert [v.name for v in t.values] == ["cache_offset", "vector_size"]
+    # One function, so every version takes every value; one token binds two.
+    assert [v.name for v in t.values] == ["cache_offset", "vector_size", "last"]
+    assert {b.value.name for b in t.bindings} == {"cache_offset", "vector_size"}
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.attn.q.weight" in t.pinned and "keys_cache_0" in t.pinned
     assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
@@ -374,16 +375,15 @@ def test_llama_decode_traces_and_tunes():
         op.tuned(aie_utils.get_current_device())
 
 
-def test_llama_prefill_traces_over_the_decode_caches():
+def test_llama_prompt_traces_over_the_same_caches():
     from iron.tests.common.llama_model import Config as _Config
 
-    from iron.applications.llama_3_2_1b.graphs import DecodeGraph, PrefillGraph
+    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
 
     cfg = _Config()
     L = cfg.context_length
-    dg = DecodeGraph(cfg, L, num_aie_columns=4)
-    pg = PrefillGraph(cfg, dg, num_of_pipelines=1, tile_m=16)
-    t = pg.trace(cfg)
+    g = LlamaGraph(cfg, L, num_aie_columns=4, num_of_pipelines=1, tile_m=16)
+    t = g.trace(cfg, L)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "WeightedRMSNorm",
@@ -408,9 +408,13 @@ def test_llama_prefill_traces_over_the_decode_caches():
     tail = ["StridedCopy", "WeightedRMSNorm", "GEMV"]
     assert kinds == per_block * cfg.n_layers + tail
     assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    assert [v.name for v in t.values] == ["last"]
-    # The caches are decode's own states, so the handoff is by name.
-    assert t.pinned["keys_cache_0"] == dg.trace(cfg).pinned["keys_cache_0"]
+    assert [v.name for v in t.values] == ["cache_offset", "vector_size", "last"]
+    # The caches are the states a token's version reads: the same objects,
+    # so one arena holds them once for both.
+    token = g.trace(cfg, 1)
+    assert set(t.states) == set(token.states)
+    assert t.residents["keys_cache_0"] == token.residents["keys_cache_0"]
+    assert set(t.weights) == set(token.weights) - {id(g.scale)}
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
     gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
