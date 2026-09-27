@@ -153,7 +153,7 @@ All available operators can be found in `iron/operators`. These each contain:
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
 - `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/operators/test.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
-Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/applications/llama_3_2_1b/npu.py` is the worked example, its tuned knobs a `Profile` the graph carries rather than keywords at every call).
+Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/applications/llama3/model.py` is the worked example, its tuned knobs a `Profile` the graph carries rather than keywords at every call).
 
 > NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`
@@ -200,11 +200,11 @@ To bypass the hook if needed: `git push --no-verify`
 
 IRON includes a complete LLM inference example demonstrating NPU acceleration:
 
-- **Location**: `iron/applications/llama_3_2_1b/`
+- **Location**: `iron/applications/llama3/`
 - **Model**: Meta Llama 3.2 1B
 - **Features**: Multi-head attention, fused operators, bfloat16 quantization
 
-See [iron/applications/llama_3_2_1b/README.md](./iron/applications/llama_3_2_1b/README.md) for setup and usage instructions.
+See [iron/applications/llama3/README.md](./iron/applications/llama3/README.md) for setup and usage instructions.
 
 ## Architecture
 

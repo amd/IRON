@@ -63,7 +63,7 @@ def check_accuracy(runner, model, bounds: dict[str, float], num_tokens: int = 40
     bound a drift across many steps, the max a single broken step.
     """
     tokens = prompt(runner, 1024, num_tokens)
-    # Built here alone: a float32 reference is twice the weights.
+    # Built here alone: a float32 oracle is twice the weights.
     results = accuracy(model, runner.cpu(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():

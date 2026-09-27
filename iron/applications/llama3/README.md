@@ -3,27 +3,30 @@ SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Llama 3.2 1B on the NPU
+# Llama 3 on the NPU
 
-Prefill and decode of Llama 3.2 1B as one IRON graph, `Llama`, a version
-compiled per input shape (`npu.py`), and the float32 numpy forward pass it
-is checked against (`cpu.py`). Both are built from the same config and
-weights by `runner.py`; nothing here needs torch.
+Prefill and decode of Llama 3 as one IRON graph, `Llama`, a version
+compiled per input shape, and the float32 numpy forward pass it is checked
+against, `LlamaOracle`, its `oracle`. Both are built from the same config
+and weights, Llama 3.2 1B's here; nothing here needs torch.
 
-What is Llama's own is short: its layer and head (`npu.py`), its shape,
-where its checkpoint keeps each weight and its tokenizer (`runner.py`), its
-reference (`cpu.py`) and its knobs (`profiles/`). The rest is
+What is Llama's own is short, and all of it is in `model.py`: its layer
+and head on the NPU and in numpy, its shape, where its checkpoint keeps
+each weight and its tokenizer; its knobs are in `profiles/`. The rest is
 `iron.applications.common`, which a new model reuses the same way:
 
 - `CausalLM`: the body over prefill and decode, the key and value caches,
   attention over them (`attend`) and `logits(tokens)`; a model subclasses
   it with `layer(step, i, weights, x)` and `head(x)`
+- `Oracle`: the same model's float32 forward pass on the host, attention
+  and RoPE shared; a model subclasses it with `layer(angles, weights, x)`
+  and `head(x)` in numpy, and names it as its `CausalLM`'s `oracle`
 - `Config`, and a checkpoint `Layout`: each weight's place in the model,
   its name in the checkpoint and its shape, which `load_weights` checks
   strictly
-- `Runner`: the checkpoint, the tokenizer, the model and its reference,
-  and `main`, the command line below; a model names its `config`,
-  `layout`, `model`, `reference`, `open_tokenizer` and `bos`
+- `Runner`: the checkpoint, the tokenizer, the model and its oracle, and
+  `main`, the command line below; a model names its `config`, `layout`,
+  `model`, `open_tokenizer` and `bos`
 - `generation`: sampling, the generation loop and the accuracy and
   determinism checks; `testing`: what `test.py` checks with them
 
@@ -51,7 +54,7 @@ python3 -m pip install -r requirements_examples.txt
 From the repository root:
 
 ```bash
-python -m iron.applications.llama_3_2_1b.runner \
+python -m iron.applications.llama3.model \
     /path/to/model.safetensors /path/to/tokenizer.model \
     --prompt-len 2048 --num-tokens 40
 ```
@@ -60,11 +63,11 @@ python -m iron.applications.llama_3_2_1b.runner \
 - `--num-tokens`: tokens to generate (default 40)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with a
-  float32 numpy forward pass (`cpu.Reference`) and print the KL divergence
+  float32 numpy forward pass (`LlamaOracle`) and print the KL divergence
   and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
 
-`pytest iron/applications/llama_3_2_1b/` loads the model once and runs
-all three in-process through `runner.Runner`, recording the throughput and
+`pytest iron/applications/llama3/` loads the model once and runs
+all three in-process through `model.Runner`, recording the throughput and
 accuracy figures.

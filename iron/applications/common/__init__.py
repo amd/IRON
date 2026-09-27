@@ -5,20 +5,21 @@
 
 * :mod:`.model` -- :class:`CausalLM`, a decoder as one graph: prefill and
   decode, the caches, attention over them and ``logits(tokens)``; a model
-  gives its ``layer`` and ``head``. :func:`project` is a weight's
-  projection at either row count.
+  gives its ``layer`` and ``head``, and its :class:`Oracle`, the float32
+  forward pass on the host it is judged by, its ``layer`` and ``head`` in
+  numpy. :func:`project` is a weight's projection at either row count.
 * :mod:`.checkpoint` -- the mapped ``.safetensors`` file and the weight
   tree a model's layout places its tensors in.
 * :mod:`.generation` -- sampling, and the generation, accuracy and
   determinism loops over any model with ``logits(tokens)``.
-* :mod:`.runner` -- :class:`Runner`, which builds a model and its CPU
-  reference from a checkpoint, and the command line.
+* :mod:`.runner` -- :class:`Runner`, which builds a model and its oracle
+  from a checkpoint, and the command line.
 * :mod:`.testing` -- what an application's device test checks.
 """
 
 from .checkpoint import Checkpoint, Layout, checkpoint_shapes, load_weights
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
-from .model import CausalLM, Config, Step, project, prompt_rows
+from .model import CausalLM, Config, Oracle, Step, project, prompt_rows
 from .runner import Runner, main
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "Checkpoint",
     "Config",
     "Layout",
+    "Oracle",
     "Runner",
     "Sampler",
     "Step",

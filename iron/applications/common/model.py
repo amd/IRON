@@ -20,10 +20,15 @@ Each shape compiles its own version, and every version runs in the graph's
 one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
 caches are uploaded once, and the caches a prompt writes are the ones the
 next decode step reads.
+
+:class:`Oracle` is the same model's float32 forward pass on the host, the
+reference it is judged by; a model subclasses it too, with a numpy
+``layer`` and ``head``, and names it as its ``oracle``.
 """
 
 import dataclasses
 import math
+from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -96,11 +101,13 @@ class CausalLM(iron.Graph):
     ``keys[i]`` and ``values[i]`` are each layer's cache, ``(n_kv_groups,
     max_seq_len, head_dim)``.
 
-    A subclass gives :meth:`layer` and :meth:`head`, and its ``profile``.
+    A subclass gives :meth:`layer` and :meth:`head`, its ``profile``, and
+    its ``oracle``, the :class:`Oracle` it is checked against.
     """
 
     embedding: np.ndarray
     layers: list
+    oracle: "type[Oracle]"
 
     def __init__(self, config: Config, weights):
         self.config = config
@@ -247,3 +254,93 @@ def project(x, weight, **gemv):
     if len(x.shape) == 2 and x.shape[0] > 1:
         return GEMM(x, weight, b_col_maj=True)
     return GEMV(weight, x, **gemv)
+
+
+class Oracle:
+    """A decoder's forward pass in float32 on the host, on ``config``'s
+    shape and RoPE table and ``weights``, as its :class:`CausalLM` takes
+    them: the oracle the model is judged by.
+
+    A plain causal pass over one token sequence, with no cache: the logits
+    at position ``t`` of a causal pass over ``t + 1`` tokens are what a
+    cached decode produces at step ``t``. It is numpy, not composed from the
+    operators' references, on purpose: the graph's reference
+    (``Graph.reference``) defines what the graph computes, so only an
+    independent forward can catch a wiring mistake, a transposed layout or
+    a softmax over the wrong length.
+
+    A model subclasses it beside its :class:`CausalLM` with :meth:`layer`
+    and :meth:`head`; the pass, RoPE (:meth:`rotate`) and attention
+    (:meth:`attend`) are shared, as the graph's are. The weights are widened
+    to float32 once, here (exactly: every bf16 is a float32), which is
+    twice the checkpoint (5 GB for a 1B model), so an oracle is built to
+    check with and dropped. The NPU's bf16 RoPE table is rounded from the
+    same float32 one.
+    """
+
+    embedding: np.ndarray
+    layers: list
+
+    def __init__(self, config: Config, weights):
+        self.config = config
+        vars(self).update(vars(_widen(weights)))
+        self.angles = config.angles()
+
+    def layer(self, angles, w, x):
+        """Layer ``w`` over ``x``, ``(n, emb_dim)``, whose positions' RoPE
+        rows are ``angles``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} defines no layer()")
+
+    def head(self, x):
+        """The logits of ``x``, one row."""
+        raise NotImplementedError(f"{type(self).__name__} defines no head()")
+
+    def logits(self, tokens) -> np.ndarray:
+        """The logits after the last of ``tokens`` (``(n,)``), ``(vocab_size,)``,
+        each token attending to itself and those before it.
+        """
+        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
+        angles = self.angles[: tokens.size]
+        x = self.embedding[tokens]
+        for w in self.layers:
+            x = self.layer(angles, w, x)
+        return self.head(x[-1])
+
+    @staticmethod
+    def rotate(x, angles):
+        """The two halves of each ``(n, heads, head_dim)`` row rotated by its
+        position's ``angles``, the table's cosines and sines interleaved.
+        """
+        cos, sin = angles[:, None, ::2], angles[:, None, 1::2]
+        x1, x2 = np.split(x, 2, axis=-1)
+        return np.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
+
+    def attend(self, q, k, v):
+        """Causal attention of ``q``, ``(n, n_heads, head_dim)``, over ``k``
+        and ``v``, ``(n, n_kv_groups, head_dim)``. Returns ``(n, n_heads *
+        head_dim)``.
+        """
+        n, H, D = q.shape
+        # Each key and value head serves H // G consecutive query heads.
+        k, v = (np.repeat(a, H // self.config.n_kv_groups, axis=1) for a in (k, v))
+        # The softmax in place: the scores are (H, n, n), and a temporary
+        # freed per layer is paid for again in page faults by the next.
+        p = np.einsum("qhd,khd->hqk", q, k)
+        p *= np.float32(1 / np.sqrt(D))
+        p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
+        p -= p.max(axis=-1, keepdims=True)
+        np.exp(p, out=p)
+        p /= p.sum(axis=-1, keepdims=True)
+        return np.einsum("hqk,khd->qhd", p, v).reshape(n, H * D)
+
+
+def _widen(value):
+    """``value``'s arrays in float32, through its namespaces and lists."""
+    if isinstance(value, np.ndarray):
+        return value.astype(np.float32)
+    if isinstance(value, list):
+        return [_widen(v) for v in value]
+    if isinstance(value, SimpleNamespace):
+        return SimpleNamespace(**{k: _widen(v) for k, v in vars(value).items()})
+    return value

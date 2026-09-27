@@ -26,7 +26,7 @@ from safetensors.numpy import load_file, save_file
 from iron.applications import common
 from iron.applications.common import Checkpoint, Sampler
 from iron.applications.common.testing import weights_dir
-from iron.applications.llama_3_2_1b.runner import LLAMA_3_2_1B, layout
+from iron.applications.llama3.model import LLAMA_3_2_1B, layout
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:

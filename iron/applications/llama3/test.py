@@ -16,7 +16,7 @@ from iron.applications.common.testing import (
     requires,
     weights_dir,
 )
-from iron.applications.llama_3_2_1b.runner import Runner
+from iron.applications.llama3.model import Runner
 
 WEIGHTS = weights_dir("llama3.2-1b") / "model.safetensors"
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"

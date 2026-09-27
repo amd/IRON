@@ -19,7 +19,7 @@ from .generation import (
     generate,
     kl_stats,
 )
-from .model import CausalLM, Config
+from .model import CausalLM, Config, Oracle
 
 
 class Runner:
@@ -27,10 +27,9 @@ class Runner:
 
     A subclass names the model: its ``config``; ``layout(config)``, where
     each weight is in the checkpoint (:mod:`.checkpoint`); ``model``, the
-    :class:`~.model.CausalLM` on the NPU; ``reference``, the CPU model it
-    is checked against, built from the same config and weights;
-    ``open_tokenizer(path)``, with ``encode`` and ``decode``; and ``bos``,
-    the token every prompt starts with.
+    :class:`~.model.CausalLM` on the NPU, whose ``oracle`` is the CPU model
+    it is checked against; ``open_tokenizer(path)``, with ``encode`` and
+    ``decode``; and ``bos``, the token every prompt starts with.
 
     The checkpoint is mapped, not read: :meth:`npu` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
@@ -38,7 +37,6 @@ class Runner:
 
     config: Config
     model: type[CausalLM]
-    reference: type
     bos: int
 
     @staticmethod
@@ -63,9 +61,9 @@ class Runner:
         model = self.model(self.config, self.weights)
         return model.load(self.checkpoint.release)
 
-    def cpu(self):
-        """The reference, which may widen the weights (float32 is twice bf16)."""
-        return self.reference(self.config, self.weights)
+    def cpu(self) -> Oracle:
+        """The model's oracle, its weights widened (float32 is twice bf16)."""
+        return self.model.oracle(self.config, self.weights)
 
     def encode(self, text: str) -> list[int]:
         return [self.bos, *self.tokenizer.encode(text)]

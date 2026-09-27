@@ -22,4 +22,4 @@ include = ["iron*"]
 
 [tool.setuptools.package-data]
 "iron.applications.common" = ["prompt.txt"]
-"iron.applications.llama_3_2_1b" = ["profiles/*.json"]
+"iron.applications.llama3" = ["profiles/*.json"]

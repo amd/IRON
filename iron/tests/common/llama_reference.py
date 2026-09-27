@@ -3,8 +3,8 @@
 
 """The graph's reference against the model's plain forward pass.
 
-``cpu.Reference`` is a stateless causal pass in float32 numpy, the oracle
-the NPU application is judged against. ``Llama`` is the same
+``Llama.oracle`` (``LlamaOracle``) is a stateless causal pass in float32
+numpy, the oracle the NPU application is judged against. ``Llama`` is the same
 computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
@@ -30,13 +30,13 @@ import pytest
 
 from iron.applications.common import (
     Config,
+    Oracle,
     accuracy,
     determinism,
     greedy,
     prompt_rows,
 )
-from iron.applications.llama_3_2_1b.cpu import Reference
-from iron.applications.llama_3_2_1b.npu import Llama
+from iron.applications.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
 
@@ -65,7 +65,7 @@ class OnHost(Llama):
 class Case:
     config: Config
     weights: SimpleNamespace
-    oracle: Reference
+    oracle: Oracle
     prompt: np.ndarray
     first: np.ndarray
     expected: list
@@ -78,7 +78,7 @@ def cpu():
     """
     config = SMALL
     weights = random_weights(config)
-    oracle = Reference(config, weights)
+    oracle = Llama.oracle(config, weights)
     prompt = np.random.default_rng(1).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
     first = logits = oracle.logits(tokens)
@@ -194,7 +194,7 @@ def test_a_short_prompt_runs_at_its_own_rows():
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     weights = random_weights(config)
-    model, oracle = OnHost(config, weights), Reference(config, weights)
+    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
     assert prompt_rows(8, config.max_seq_len) == 512 < config.max_seq_len
     first = oracle.logits(prompt)

@@ -10,8 +10,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.applications.common import checkpoint_shapes, load_weights
-from iron.applications.llama_3_2_1b.npu import Llama
-from iron.applications.llama_3_2_1b.runner import LLAMA_3_2_1B, layout
+from iron.applications.llama3.model import LLAMA_3_2_1B, Llama, layout
 from iron.common import Profile
 
 # The knobs the graph runs with at :data:`SMALL`'s shape on NPU2: decode
