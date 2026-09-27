@@ -25,6 +25,7 @@ memtile budget helpers and the parameter-buffer layout they and
 from enum import StrEnum
 from typing import NamedTuple
 
+import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import (
     get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
@@ -131,6 +132,30 @@ class Epilogue(StrEnum):
     def mode(self) -> int:
         """The integer the kernel and the shipped overlay both select on."""
         return list(Epilogue).index(self)
+
+    def apply(self, C, clamp=None):
+        """This output stage alone, on an already-accumulated ``C``: what a
+        test of the epilogue without the accumulation compares against
+        (test.py's, on the shipped image's own accumulator).
+
+        ``gelu`` is the sigmoid approximation ``x * sigmoid(1.702x)``, the
+        kernel's: not torch's erf-exact gelu, and not the tanh approximation
+        the standalone GELU operator uses.
+        """
+        match self:
+            case Epilogue.GELU:
+                C = C * _sigmoid(np.float32(1.702) * C)
+            case Epilogue.SILU:
+                C = C * _sigmoid(C)
+            case Epilogue.SIGMOID:
+                C = _sigmoid(C)
+        return C if clamp is None else np.clip(C, clamp[0], clamp[1])
+
+
+def _sigmoid(x):
+    """``1 / (1 + exp(-x))`` in float32, rounded once back to ``x``'s dtype."""
+    f = x.astype(np.float32)
+    return (1 / (1 + np.exp(-f))).astype(x.dtype)
 
 
 # The parameter buffer each core reads once its barrier opens. These six are

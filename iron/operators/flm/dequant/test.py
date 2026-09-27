@@ -12,19 +12,59 @@ from aie.iron.device import from_name
 
 from iron.common import Incompatible
 from iron.common.harness import run_test
-from iron.operators.flm.dequant.op import DequantBFP
-from iron.operators.flm.dequant.reference import (
-    dequantize,
-    f32_to_bf16_floor,
-    random_q4nx,
-    reference,
-    scatter_runs,
+from iron.operators.flm.dequant.design import (
+    GROUP,
+    K_TILE,
+    M_TILE,
+    N_TILE,
+    qw_bytes_for,
 )
+from iron.operators.flm.dequant.op import DequantBFP, dequantize, f32_to_bf16_floor
 from iron.operators.flm.gemm.op import GEMM
 
 # K = 512 is one k-tile, where flm.GEMM at tile_n = 128 wins on NPU2. It
 # defaults to 64 regardless, which is the order this operator emits.
 SHAPES = [(512, 128), (1024, 128), (1024, 512), (1536, 640), (2048, 256)]
+
+
+def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
+    """Place a matrix's column blocks at their offsets in an interleaved
+    buffer. The gaps hold noise, so an operator that reads them fails.
+    """
+    cb_bytes = N_TILE * K * 5 // 8
+    run_blocks = run_out_features // N_TILE
+    period_blocks = run_period_out_features // N_TILE
+
+    total = qw_bytes_for(K, N, run_out_features, run_period_out_features)
+    out = np.random.default_rng(seed + 1).integers(0, 256, total, dtype=np.uint8)
+    src = np.asarray(qw, dtype=np.uint8).reshape(-1, cb_bytes)
+    for cb in range(N // N_TILE):
+        at = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
+        out[at : at + cb_bytes] = src[cb]
+    return out
+
+
+def random_q4nx(K, N, seed=0):
+    """A random q4nx blob. Scales and mins are bf16 in the file, so they are
+    generated there and widened.
+    """
+    rng = np.random.default_rng(seed)
+    n_blocks = (K // K_TILE) * (N // M_TILE)
+    sm = (K_TILE // GROUP) * M_TILE
+
+    scales = f32_to_bf16_floor(
+        rng.uniform(0.002, 0.05, (n_blocks, sm)).astype(np.float32)
+    )
+    mins = f32_to_bf16_floor(rng.uniform(-0.4, 0.4, (n_blocks, sm)).astype(np.float32))
+    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
+    return np.concatenate(
+        [
+            scales.view(np.uint8).reshape(n_blocks, -1),
+            mins.view(np.uint8).reshape(n_blocks, -1),
+            codes,
+        ],
+        axis=1,
+    ).ravel()
 
 
 def _on_aie2p():
@@ -56,7 +96,7 @@ def test_matches_reference(K, N, npu_runtime):
     """
     qw = random_q4nx(K, N, seed=0)
     op = DequantBFP(K=K, N=N)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
 @requires_aie2p
@@ -89,7 +129,7 @@ def test_gate_up_interleaved_blob(npu_runtime):
         run_period_out_features=period,
     )
     assert op.quantized_size() == blob.size
-    _check(op, blob, reference(qw, K, N), "gate/up interleave")
+    _check(op, blob, op.reference(qw), "gate/up interleave")
 
 
 @requires_aie2p
@@ -107,7 +147,7 @@ def test_large_k_shapes(K, N, npu_runtime):
     """
     qw = random_q4nx(K, N, seed=21)
     op = DequantBFP(K=K, N=N)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
 @requires_aie2p
@@ -126,7 +166,7 @@ def test_e4b_shapes(K, N, npu_runtime):
     """
     qw = random_q4nx(K, N, seed=33)
     op = DequantBFP(K=K, N=N)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
 @requires_aie2p
@@ -144,7 +184,7 @@ def test_e4b_gate_up_interleaved(npu_runtime):
         run_period_out_features=period,
     )
     assert op.quantized_size() == blob.size
-    _check(op, blob, reference(qw, K, N), "E4B gate/up interleave")
+    _check(op, blob, op.reference(qw), "E4B gate/up interleave")
 
 
 @requires_aie2p
@@ -178,7 +218,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
             blob = scatter_runs(
                 blob, K, N, case["run_out_features"], case["run_period_out_features"], 7
             )
-        _check(op, blob, reference(qw, K, N), str(case))
+        _check(op, blob, op.reference(qw), str(case))
 
         image = op.artifacts.image
         stamp = (str(image), os.path.getmtime(image))

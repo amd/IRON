@@ -79,6 +79,8 @@ class Testing:
     other tolerance there also accepts a wrong permutation.
     """
 
+    __test__ = False  # pytest: a declaration, not a test class
+
     cases: Iterable[Case | dict] | Callable[[type], Iterable[Case | dict]]
     tolerance: Tolerance | None = None
     draw: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None
@@ -100,7 +102,6 @@ def channeled_unary_cases(
     tile_cap=None,
     channels=(1, 2),
     regular: int | None = 2048,
-    tile_floor=1,
     **extra,
 ):
     """Cases for a channeled unary operator, resolved against the device.
@@ -108,9 +109,7 @@ def channeled_unary_cases(
     Every column count the class's shim budget allows by every channel
     count, at each length, with the tile capped at what one core holds
     (the class's ``tile_cap`` unless given); only the ``regular`` length is
-    in the default suite, every one when it is ``None``. ``tile_floor``
-    drops the splits that leave a core a shorter line than its kernel
-    takes. ``channels=None`` leaves the channel count out, for an operator
+    in the default suite, every one when it is ``None``. ``channels=None`` leaves the channel count out, for an operator
     without one. Returned as a callable of the class: the sweep needs the
     device, which is not bound when a class body runs.
     """
@@ -124,7 +123,7 @@ def channeled_unary_cases(
                 for cols in range(1, cls.shim_columns(dev, chans) + 1):
                     cores = cols * chans
                     tile = min(length // cores, cap)
-                    if tile * cores != length or tile < tile_floor:
+                    if tile * cores != length:
                         continue
                     kwargs = dict(size=length, num_aie_columns=cols)
                     if channels is not None:

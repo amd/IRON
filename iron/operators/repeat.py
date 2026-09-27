@@ -185,16 +185,6 @@ class Repeat(Operator):
             )
 
     def reference(self, x):
-        """CPU reference: repeat-interleave along the leading dimension."""
+        """Each row of the leading dimension repeated ``repeat`` times in place."""
         # A DMA pattern: no kernel, so no contract to take it from.
-        return reference(x, self.repeat)
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(x, repeat):
-    """CPU reference: repeat-interleave along the leading dimension (ground truth)."""
-    return np.repeat(x, repeat, axis=0)
+        return np.repeat(x, self.repeat, axis=0)

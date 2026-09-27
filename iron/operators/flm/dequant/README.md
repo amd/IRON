@@ -112,7 +112,7 @@ right size that the GEMM reads wrongly.
 
 The cores never call `set_rounding`, so both conversions run in the power-up
 `floor` mode: f32 to bf16 rounds toward negative infinity, and bf16 to
-bfp16ebs8 truncates onto the shared exponent. `reference.py` reproduces both,
+bfp16ebs8 truncates onto the shared exponent. `DequantBFP.reference` reproduces both,
 so the tests compare bytes.
 
 ## Validation

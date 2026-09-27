@@ -29,7 +29,6 @@ from iron.operators.flm.gemm.design import (
     l1_budget,
 )
 from iron.operators.flm.gemm.op import GEMM
-from iron.operators.flm.gemm.reference import apply_epilogue
 from iron.operators.flm.gemm.shipped import Shipped
 
 # Unpacked so the parameter tables below stay column-aligned.
@@ -495,7 +494,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
 
     acc = run(NONE, None)
     got = run(epilogue, clamp)
-    expected = apply_epilogue(acc, epilogue, clamp)
+    expected = Epilogue(epilogue).apply(acc, clamp)
 
     # Both sides see the same accumulator, so what is left is the epilogue.
     # Two terms, and they are different in kind.

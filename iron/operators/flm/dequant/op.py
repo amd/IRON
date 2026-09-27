@@ -44,8 +44,63 @@ from iron.operators.flm.dequant.design import (
     qw_bytes_for,
     run_geometry,
 )
+from iron.operators.flm.packing import pack_b
 
 BFP16_GROUP_BYTES = 9
+# Out-features one run of code bytes spans.
+PARALLEL = 16
+
+
+def _bf16_to_f32(u16):
+    return (u16.astype(np.uint32) << 16).view(np.float32)
+
+
+def f32_to_bf16_floor(x):
+    """Round f32 to bf16 toward negative infinity, as the cores do."""
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    inexact = (u & 0xFFFF) != 0
+    negative = (u >> 31) != 0
+    return ((u >> 16) + (inexact & negative)).astype(np.uint16)
+
+
+def dequantize(qw, K, N):
+    """q4nx blob to f32, shaped (N out-features, K in-features)."""
+    k_tiles = K // K_TILE_B
+    n_blocks = qw.size // BLOCK_BYTES
+    if n_blocks * BLOCK_BYTES != qw.size:
+        raise ValueError(
+            f"q4nx blob of {qw.size} bytes is not a whole number of blocks"
+        )
+    b = qw.reshape(n_blocks, BLOCK_BYTES)
+
+    n_groups = K_TILE // GROUP
+    sm = n_groups * M_TILE * 2
+    scales = _bf16_to_f32(b[:, :sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE))
+    mins = _bf16_to_f32(
+        b[:, sm : 2 * sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE)
+    )
+
+    qs = b[:, 2 * sm :].reshape(n_blocks, M_TILE // PARALLEL, K_TILE, PARALLEL // 2)
+    q = np.empty((n_blocks, M_TILE // PARALLEL, K_TILE, PARALLEL), dtype=np.float32)
+    q[..., 0::2] = (qs & 0xF).astype(np.float32)
+    q[..., 1::2] = (qs >> 4).astype(np.float32)
+    q = q.transpose(0, 1, 3, 2).reshape(n_blocks, M_TILE, K_TILE)
+
+    grp = np.arange(K_TILE) // GROUP
+    s = scales[:, grp, :].transpose(0, 2, 1)
+    m = mins[:, grp, :].transpose(0, 2, 1)
+    vals = m + s * q
+
+    # Block i of the blob is the i'th the cores consume: README.md layers 6-9.
+    out = np.empty((N, K), dtype=np.float32)
+    for i in range(n_blocks):
+        cb, rest = divmod(i, 4 * k_tiles)
+        kb, rest = divmod(rest, 4)
+        k_half, n_half = divmod(rest, 2)
+        r0 = (2 * cb + n_half) * M_TILE
+        c0 = (2 * kb + k_half) * K_TILE
+        out[r0 : r0 + M_TILE, c0 : c0 + K_TILE] = vals[i]
+    return out
 
 
 class DequantBFP(Operator):
@@ -347,10 +402,21 @@ class DequantBFP(Operator):
             buffers=self.buffer_map(),
         )
 
-    # -- host-side helpers -------------------------------------------------------
-
     def reference(self, qw):
-        """CPU reference, bit-exact against the device."""
-        from iron.operators.flm.dequant.reference import reference
-
-        return reference(qw, self.K, self.N)
+        """The bytes the operator must produce from the compact q4nx blob
+        ``qw``, as a flat uint8 array: bit-exact against the device, as the
+        cores round to bf16 toward negative infinity. See README.md for the
+        layout and the rounding.
+        """
+        w = dequantize(np.asarray(qw, dtype=np.uint8).ravel(), self.K, self.N)
+        w = _bf16_to_f32(f32_to_bf16_floor(w))
+        return pack_b(
+            np.ascontiguousarray(w.T),
+            K_TILE_B,
+            N_TILE,
+            S,
+            T,
+            CT_K,
+            bfp16=True,
+            round_conv_even=False,
+        )

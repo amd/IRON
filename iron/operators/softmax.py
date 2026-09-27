@@ -98,10 +98,6 @@ class Softmax(Operator):
         return self.num_aie_columns * self.num_channels
 
     def compatible(self) -> None:
-        if self.rows % self.num_aie_columns:
-            raise Incompatible(
-                f"rows ({self.rows}) must be a multiple of num_aie_columns ({self.num_aie_columns})"
-            )
         if self.rows % self.cores:
             raise Incompatible(
                 f"rows ({self.rows}) must be a multiple of the {self.cores} cores"

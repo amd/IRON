@@ -28,8 +28,6 @@ def test_the_unary_sweep_reads_the_class_it_is_resolved_for():
         )
     assert {c.kwargs["size"] for c in cases if not c.extensive} == {2048}
     assert "num_channels" not in channeled_unary_cases(channels=None)(SiLU)[0].kwargs
-    floored = channeled_unary_cases(tile_floor=1024)(GELU)
-    assert floored and all(c.kwargs["tile_size"] >= 1024 for c in floored)
 
 
 def test_the_binary_sweep_and_an_all_extensive_sweep():

@@ -695,30 +695,13 @@ class GEMM(Operator):
     # -- host-side helpers ---------------------------------------------------
 
     def reference(self, A, B):
-        """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
+        """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
+        ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
+        """
         # Not linalg.mm's contract: that is one tile's product, and the design
         # accumulates K tiles in f32; mm_ref's float64 would double the host
-        # copy of the largest weight a graph reference multiplies.
-        return reference(A, B, self.b_col_maj, self.c_col_maj)
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(input_a, input_b, b_col_maj=False, c_col_maj=False):
-    """CPU reference GEMM ``C = A @ B`` from *stored* inputs (ground truth).
-
-    ``input_b`` is in the operator's storage layout: it is transposed back to
-    ``(K, N)`` when ``b_col_maj`` is set before the matmul, and the result is
-    transposed to ``(N, M)`` when ``c_col_maj`` is set.
-    """
-    B = input_b.T if b_col_maj else input_b
-    # float32 accumulate, rounded once, as the kernel's f32 accumulator does.
-    C = np.matmul(input_a.astype(np.float32), B.astype(np.float32)).astype(
-        input_a.dtype
-    )
-    if c_col_maj:
-        C = C.T
-    return C
+        # copy of the largest weight a graph reference multiplies. In float32
+        # and rounded once, as the kernel's f32 accumulator does.
+        b = B.T if self.b_col_maj else B
+        C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
+        return C.T if self.c_col_maj else C

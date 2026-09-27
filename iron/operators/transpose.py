@@ -280,21 +280,7 @@ class Transpose(Operator):
                         rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
 
     def reference(self, x):
-        """CPU reference: 2D transpose of each (M, N) matrix stored row-major."""
+        """Each (M, N) matrix transposed."""
         # Not datamovement.transpose's contract: the kernel transposes each
         # subtile in place, and the DMA places the subtiles.
-        if self.num_batches > 1:
-            return reference(x.reshape(self.num_batches, self.M, self.N))
-        return reference(x.reshape(self.M, self.N))
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(x):
-    """CPU reference: 2D transpose of an ``(rows, cols)`` matrix (ground truth);
-    of each matrix when a batch dimension leads.
-    """
-    return np.swapaxes(x, -2, -1)
+        return np.swapaxes(x, -2, -1)

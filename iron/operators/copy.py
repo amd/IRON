@@ -77,6 +77,32 @@ def _shares(walk: Walk, num_channels: int) -> list[tuple[int, list[int], list[in
     ]
 
 
+def _at(walk: Walk, valid: int) -> Walk:
+    """The walk with its bounded axis at ``valid``: what one call moves."""
+    if walk.bounded is None:
+        raise ValueError(f"{walk} has no bounded axis to set to {valid}")
+    sizes = list(walk.sizes)
+    sizes[walk.bounded] = valid
+    return dataclasses.replace(walk, sizes=tuple(sizes), bounded=None)
+
+
+def _walk_offsets(sizes, strides, offset):
+    """Flat element offsets a walk visits, in issue order."""
+    grids = np.meshgrid(*[np.arange(s) for s in sizes], indexing="ij")
+    flat = np.full(grids[0].shape, offset, dtype=np.int64)
+    for grid, stride in zip(grids, strides):
+        flat = flat + grid * stride
+    return flat.reshape(-1)
+
+
+def _channel_offsets(walk: Walk, addend: int, num_channels: int):
+    """Per channel, the flat offsets of its share, split as the design splits it."""
+    return [
+        _walk_offsets(sizes, strides, start + addend)
+        for start, sizes, strides in _shares(walk, num_channels)
+    ]
+
+
 class Copy(Operator):
     """AIE-accelerated copy between two views of two buffers.
 
@@ -261,22 +287,30 @@ class Copy(Operator):
         of ``output_buffer_size``. The offsets are the per-call values, in
         elements.
         """
-        # A DMA pattern: no kernel, so no contract to take it from.
+        # A DMA pattern: no kernel, so no contract to take it from. The
+        # offsets are element counts, not bytes: the firmware multiplies the
+        # scratchpad word by the element size before adding it into the BD
+        # address register.
         src, dst = self.src, self.dst
         if src_valid is not None:
             src = _at(src, int(src_valid))
         if dst_valid is not None:
             dst = _at(dst, int(dst_valid))
-        out = reference(
-            x.reshape(-1),
-            src,
-            self.output_buffer_size,
-            dst,
-            self.num_channels,
-            input_offset_addend=int(in_offset),
-            output_offset_addend=int(out_offset),
-            into=None if y is None else y.reshape(-1),
+        gather = _channel_offsets(src, int(in_offset), self.num_channels)
+        scatter = _channel_offsets(dst, int(out_offset), self.num_channels)
+        out = (
+            np.zeros(self.output_buffer_size, dtype=x.dtype)
+            if y is None
+            else y.reshape(-1)
         )
+        flat = x.reshape(-1)
+        for src_c, dst_c in zip(gather, scatter):
+            if len(src_c) != len(dst_c):
+                raise ValueError(
+                    f"walk element counts differ ({len(src_c)} vs {len(dst_c)}); "
+                    "src and dst must move the same number of elements"
+                )
+            out[dst_c] = flat[src_c]
         return out if y is None else y
 
     def sequence(self, rt):
@@ -308,69 +342,3 @@ class Copy(Operator):
                         offset_by=out_off,
                         size_by=size_by(dim, "dst_valid"),
                     )
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def _at(walk: Walk, valid: int) -> Walk:
-    """The walk with its bounded axis at ``valid``: what one call moves."""
-    if walk.bounded is None:
-        raise ValueError(f"{walk} has no bounded axis to set to {valid}")
-    sizes = list(walk.sizes)
-    sizes[walk.bounded] = valid
-    return dataclasses.replace(walk, sizes=tuple(sizes), bounded=None)
-
-
-def _walk_offsets(sizes, strides, offset):
-    """Flat element offsets a walk visits, in issue order."""
-    grids = np.meshgrid(*[np.arange(s) for s in sizes], indexing="ij")
-    flat = np.full(grids[0].shape, offset, dtype=np.int64)
-    for grid, stride in zip(grids, strides):
-        flat = flat + grid * stride
-    return flat.reshape(-1)
-
-
-def _channel_offsets(walk: Walk, addend: int, num_channels: int):
-    """Per channel, the flat offsets of its share, split as the design splits it."""
-    return [
-        _walk_offsets(sizes, strides, start + addend)
-        for start, sizes, strides in _shares(walk, num_channels)
-    ]
-
-
-def reference(
-    input_flat,
-    src: Walk,
-    output_buffer_size,
-    dst: Walk,
-    num_channels=1,
-    input_offset_addend=0,
-    output_offset_addend=0,
-    into=None,
-):
-    """Gather by ``src``, scatter by ``dst``, one channel at a time.
-
-    The addends are the per-call offsets. They are element counts, not byte
-    offsets: the firmware multiplies the scratchpad word by the element size
-    before adding it into the BD address register. ``into`` is an existing
-    flat output buffer to scatter into in place; without it the output
-    starts zeroed.
-    """
-    gather = _channel_offsets(src, input_offset_addend, num_channels)
-    scatter = _channel_offsets(dst, output_offset_addend, num_channels)
-    out = (
-        np.zeros(int(output_buffer_size), dtype=input_flat.dtype)
-        if into is None
-        else into
-    )
-    for src_c, dst_c in zip(gather, scatter):
-        if len(src_c) != len(dst_c):
-            raise ValueError(
-                f"walk element counts differ ({len(src_c)} vs {len(dst_c)}); "
-                "src and dst must move the same number of elements"
-            )
-        out[dst_c] = input_flat[src_c]
-    return out
