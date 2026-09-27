@@ -735,16 +735,19 @@ class MHA(Operator):
         # Against torch's FLASH backend this differs by under 1e-6, which is
         # less than torch's own FLASH and MATH backends differ from each other.
         q, k, v = (t.astype(np.float32) for t in (Q, K, V))
-        scores = np.matmul(q, np.swapaxes(k, -2, -1)) / np.sqrt(np.float32(self.d))
-        seq = scores.shape[-1]
-        scores += np.triu(np.full((seq, seq), -np.inf, dtype=np.float32), 1)
+        seq = k.shape[1]
+        mask = np.triu(np.full((seq, seq), -np.inf, dtype=np.float32), 1)
         if keys is not None and keys < seq:
-            scores[..., keys:] = -np.inf  # keys past the call's length
-        e = np.exp(scores - scores.max(axis=-1, keepdims=True))
-        out = np.matmul(e / e.sum(axis=-1, keepdims=True), v).astype(Q.dtype)
-        if seq_len < out.shape[1]:
-            out = out.copy()
-            out[:, seq_len:] = 0
+            mask[:, keys:] = -np.inf  # keys past the call's length
+        scale = np.sqrt(np.float32(self.d))
+        out = np.empty(Q.shape, dtype=Q.dtype)
+        # A head at a time: at 16K rows one head's scores are 1 GiB of
+        # float32, and all of them at once more than a test host has.
+        for h in range(q.shape[0]):
+            scores = q[h] @ k[h].T / scale + mask
+            e = np.exp(scores - scores.max(axis=-1, keepdims=True))
+            out[h] = (e / e.sum(axis=-1, keepdims=True)) @ v[h]
+        out[:, seq_len:] = 0
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))
         return out
