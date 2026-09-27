@@ -5,12 +5,27 @@ SPDX-License-Identifier: Apache-2.0
 
 # Llama 3.2 1B on the NPU
 
-Prefill and decode of Llama 3.2 1B as one IRON graph, `Llama3_2_1b`, a
-version compiled per input shape (`npu.py`), and the float32 numpy forward
-pass it is checked against (`cpu.py`). Both are built from the same config
-and weights by `runner.py`, which maps the safetensors checkpoint, runs the
-tokenizer and sampling, and holds the generation loop and the accuracy and
-determinism checks; nothing here needs torch.
+Prefill and decode of Llama 3.2 1B as one IRON graph, `Llama`, a version
+compiled per input shape (`npu.py`), and the float32 numpy forward pass it
+is checked against (`cpu.py`). Both are built from the same config and
+weights by `runner.py`; nothing here needs torch.
+
+What is Llama's own is short: its layer and head (`npu.py`), its shape,
+where its checkpoint keeps each weight and its tokenizer (`runner.py`), its
+reference (`cpu.py`) and its knobs (`profiles/`). The rest is
+`iron.applications.common`, which a new model reuses the same way:
+
+- `CausalLM`: the body over prefill and decode, the key and value caches,
+  attention over them (`attend`) and `logits(tokens)`; a model subclasses
+  it with `layer(step, i, weights, x)` and `head(x)`
+- `Config`, and a checkpoint `Layout`: each weight's place in the model,
+  its name in the checkpoint and its shape, which `load_weights` checks
+  strictly
+- `Runner`: the checkpoint, the tokenizer, the model and its reference,
+  and `main`, the command line below; a model names its `config`,
+  `layout`, `model`, `reference`, `open_tokenizer` and `bos`
+- `generation`: sampling, the generation loop and the accuracy and
+  determinism checks; `testing`: what `test.py` checks with them
 
 ## Weights and tokenizer
 
@@ -41,7 +56,7 @@ python -m iron.applications.llama_3_2_1b.runner \
     --prompt-len 2048 --num-tokens 40
 ```
 
-- `--prompt-len`: characters of `prompt.txt` to use as the prompt (default 2048)
+- `--prompt-len`: characters of `common/prompt.txt` to use as the prompt (default 2048)
 - `--num-tokens`: tokens to generate (default 40)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with a

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama's host side: the checkpoint, the weight tree, the RoPE table and
-sampling (``runner.Checkpoint``, ``runner.load_weights``, ``rope/op.py``,
-``runner.Sampler``).
+"""A language model's host side: the checkpoint, the weight tree a layout
+places it in and sampling (``iron.applications.common``'s ``Checkpoint``,
+``load_weights`` and ``Sampler``), at Llama's layout.
 
 The oracle is the safetensors library itself: tier 1 writes small
 checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
@@ -12,9 +12,8 @@ view with what ``load_file`` reads; tier 2 reads the actual Llama-3.2-1B
 file and skips when it is absent. No NPU.
 """
 
+import dataclasses
 import json
-import math
-import os
 import re
 import struct
 from pathlib import Path
@@ -24,13 +23,10 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.applications.llama_3_2_1b.runner import (
-    Checkpoint,
-    Config,
-    Sampler,
-    load_weights,
-)
-from iron.operators.rope.op import LLAMA_3_2, rope_angles
+from iron.applications import common
+from iron.applications.common import Checkpoint, Sampler
+from iron.applications.common.testing import weights_dir
+from iron.applications.llama_3_2_1b.runner import LLAMA_3_2_1B, layout
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -42,7 +38,8 @@ def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
 
 
 #: Llama-3.2-1B's proportions at toy size: GQA, a wider FFN, a tied head.
-TOY = Config(
+TOY = dataclasses.replace(
+    LLAMA_3_2_1B,
     vocab_size=32,
     emb_dim=64,
     n_layers=2,
@@ -52,6 +49,12 @@ TOY = Config(
     hidden_dim=128,
     max_seq_len=16,
 )
+
+
+def load_weights(tensors, config=TOY):
+    """``tensors`` in the tree of Llama's layout at ``config``."""
+    return common.load_weights(tensors, layout(config), config.n_layers)
+
 
 # Each layer field under its Hugging Face name, spelled out here rather
 # than read from the runner.
@@ -154,7 +157,7 @@ def _resident_bytes(path: Path) -> int:
 
 def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
     checkpoint = Checkpoint(toy_path)
-    weights = arrays(load_weights(checkpoint.tensors, TOY))
+    weights = arrays(load_weights(checkpoint.tensors))
     before = {name: np.array(a) for name, a in weights.items()}
     assert _resident_bytes(toy_path) > 0
     for a in weights.values():
@@ -206,7 +209,7 @@ def test_each_checkpoint_tensor_lands_on_its_field_bitwise(toy_path):
     """Every tensor is distinct, so a mapping that crosses two same-shaped
     weights over (k and v, gate and up) is caught.
     """
-    weights = load_weights(Checkpoint(toy_path).tensors, TOY)
+    weights = load_weights(Checkpoint(toy_path).tensors)
     ckpt = load_file(toy_path)
     assert len(weights.layers) == TOY.n_layers
     assert bitwise_equal(weights.embedding, ckpt["model.embed_tokens.weight"])
@@ -221,7 +224,7 @@ def test_each_checkpoint_tensor_lands_on_its_field_bitwise(toy_path):
 def test_tree_arrays_are_the_checkpoints(toy_path):
     """The tracer names a weight by id(), so each is one array, as read."""
     tensors = Checkpoint(toy_path).tensors
-    weights = load_weights(tensors, TOY)
+    weights = load_weights(tensors)
     assert weights.layers[1].v is tensors["model.layers.1.self_attn.v_proj.weight"]
     ids = [id(a) for a in arrays(weights).values()]
     assert len(set(ids)) == len(ids)
@@ -231,7 +234,7 @@ def test_tree_rejects_a_missing_key():
     ckpt = toy_checkpoint()
     del ckpt["model.layers.1.mlp.up_proj.weight"]
     with pytest.raises(ValueError, match=r"model\.layers\.1\.mlp\.up_proj\.weight"):
-        load_weights(ckpt, TOY)
+        load_weights(ckpt)
 
 
 def test_tree_rejects_a_missing_layer():
@@ -242,14 +245,14 @@ def test_tree_rejects_a_missing_layer():
         k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
     }
     with pytest.raises(ValueError, match=r"model\.layers\.0\.input_layernorm\.weight"):
-        load_weights(ckpt, TOY)
+        load_weights(ckpt)
 
 
 def test_tree_rejects_an_untied_head():
     ckpt = toy_checkpoint()
     ckpt["lm_head.weight"] = ckpt["model.embed_tokens.weight"].copy()
     with pytest.raises(ValueError, match="lm_head.weight"):
-        load_weights(ckpt, TOY)
+        load_weights(ckpt)
 
 
 def test_tree_rejects_a_misshapen_layer():
@@ -258,109 +261,7 @@ def test_tree_rejects_a_misshapen_layer():
     good = ckpt[name]
     ckpt[name] = np.zeros((good.shape[0], good.shape[1] + 1), dtype=bfloat16)
     with pytest.raises(ValueError, match=re.escape(f"{name} is (16, 65)")):
-        load_weights(ckpt, TOY)
-
-
-# Tier 1 -- RoPE
-# ##########################################################################
-
-
-def test_rope_is_the_formula_rounded_once():
-    """Each entry is cos or sin, in float64, of the float32 frequency times
-    the float32 position, rounded once; and within float32 rounding of the
-    formula evaluated in float64 throughout.
-    """
-    D, L, base = 64, 2048, 500000.0
-    angles = rope_angles(D, L, base)
-    assert angles.dtype == np.float32 and angles.shape == (L, D)
-
-    exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)
-    inv_freq = (1.0 / base ** exponents.astype(np.float64)).astype(np.float32)
-    freqs = np.outer(np.arange(L, dtype=np.float32), inv_freq).astype(np.float64)
-    assert np.array_equal(angles[:, ::2], np.cos(freqs).astype(np.float32))
-    assert np.array_equal(angles[:, 1::2], np.sin(freqs).astype(np.float32))
-
-    exact_freqs = np.outer(np.arange(L), 1.0 / base ** (np.arange(0, D, 2) / D))
-    exact = np.empty((L, D))
-    exact[:, ::2], exact[:, 1::2] = np.cos(exact_freqs), np.sin(exact_freqs)
-    # float32 frequencies at position 2047 are off by up to 2047 ulps of the
-    # frequency: about 2e-4 at the fastest one.
-    assert np.abs(angles - exact).max() < 5e-4
-
-
-def test_rope_is_correctly_rounded_at_position_zero_and_one():
-    """Row 0 is exactly (1, 0) per frequency; row 1 is cos/sin of inv_freq."""
-    D, base = 64, 500000.0
-    angles = rope_angles(D, 2, base)
-    assert np.array_equal(angles[0, ::2], np.ones(D // 2, np.float32))
-    assert np.array_equal(angles[0, 1::2], np.zeros(D // 2, np.float32))
-    inv = (1.0 / base ** (np.arange(0, D, 2, dtype=np.float32) / np.float32(D))).astype(
-        np.float32
-    )
-    assert np.array_equal(
-        angles[1, ::2], np.cos(inv.astype(np.float64)).astype(np.float32)
-    )
-
-
-def _published_llama3_scaling(freqs, factor, low, high, original):
-    """``apply_scaling`` from Meta's llama-models reference, as published:
-    one frequency at a time, in float64.
-    """
-    low_wavelen, high_wavelen = original / low, original / high
-    scaled = []
-    for freq in freqs:
-        wavelen = 2 * math.pi / freq
-        if wavelen < high_wavelen:
-            scaled.append(freq)
-        elif wavelen > low_wavelen:
-            scaled.append(freq / factor)
-        else:
-            smooth = (original / wavelen - low) / (high - low)
-            scaled.append((1 - smooth) * freq / factor + smooth * freq)
-    return np.array(scaled)
-
-
-def test_llama3_scaling_is_the_published_formula():
-    """Every frequency of Llama 3.2 1B's (head_dim 64, base 500000) matches
-    Meta's reference, and all three bands are exercised: the fastest fifteen
-    kept, three interpolated, the slowest fourteen divided by 32.
-    """
-    D, base = 64, 500000.0
-    inv_freq = 1.0 / base ** (np.arange(0, D, 2) / D)
-    ours = LLAMA_3_2(inv_freq)
-    published = _published_llama3_scaling(inv_freq, 32.0, 1.0, 4.0, 8192)
-    np.testing.assert_allclose(ours, published, rtol=1e-15, atol=0)
-
-    kept = ours == inv_freq
-    divided = np.isclose(ours, inv_freq / 32.0, rtol=1e-15, atol=0)
-    between = ~kept & ~divided
-    assert (kept.sum(), between.sum(), divided.sum()) == (15, 3, 14)
-    # The bands are contiguous, fastest to slowest, and the interpolation
-    # moves each frequency part of the way to its divided value.
-    assert list(np.flatnonzero(kept)) == list(range(15))
-    assert list(np.flatnonzero(between)) == [15, 16, 17]
-    assert np.all(inv_freq[between] / 32.0 < ours[between])
-    assert np.all(ours[between] < inv_freq[between])
-
-
-def test_scaled_rope_table_rotates_by_the_scaled_frequencies():
-    """The scaled table is the unscaled table's formula over the scaled
-    frequencies, rounded once; the kept band is the unscaled table's.
-    """
-    D, L, base = 64, 2048, 500000.0
-    exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)
-    inv_freq = 1.0 / base ** exponents.astype(np.float64)
-    scaled = LLAMA_3_2(inv_freq).astype(np.float32)
-    freqs = np.outer(np.arange(L, dtype=np.float32), scaled).astype(np.float64)
-
-    angles = rope_angles(D, L, base, LLAMA_3_2)
-    assert angles.dtype == np.float32 and angles.shape == (L, D)
-    assert np.array_equal(angles[:, ::2], np.cos(freqs).astype(np.float32))
-    assert np.array_equal(angles[:, 1::2], np.sin(freqs).astype(np.float32))
-
-    unscaled = rope_angles(D, L, base)
-    assert np.array_equal(angles[:, :30], unscaled[:, :30]), "the kept band moved"
-    assert not np.array_equal(angles[:, 30:], unscaled[:, 30:])
+        load_weights(ckpt)
 
 
 # Tier 1 -- sampling
@@ -411,8 +312,7 @@ def test_draws_follow_the_distribution():
 # Tier 2 -- the real checkpoint (no NPU), gated on its presence
 # ##########################################################################
 
-weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
-real_checkpoint = weights_dir / "llama3.2-1b" / "model.safetensors"
+real_checkpoint = weights_dir("llama3.2-1b") / "model.safetensors"
 requires_checkpoint = pytest.mark.skipif(
     not real_checkpoint.exists(),
     reason=f"llama3.2-1b checkpoint not found at {real_checkpoint}",
@@ -433,6 +333,6 @@ def test_real_checkpoint_is_llama_3_2_1b():
     """The real key spelling and shapes are the default config's, and
     nothing is left over.
     """
-    weights = load_weights(Checkpoint(real_checkpoint).tensors, Config())
+    weights = load_weights(Checkpoint(real_checkpoint).tensors, LLAMA_3_2_1B)
     assert weights.embedding.dtype == bfloat16
-    assert len(weights.layers) == Config().n_layers
+    assert len(weights.layers) == LLAMA_3_2_1B.n_layers

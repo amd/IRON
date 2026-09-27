@@ -461,7 +461,7 @@ It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama_3_2_1b/npu.py` is the worked example
-(`Llama3_2_1b`, called through `logits(tokens)`; `runner.py` builds it
+(`Llama`, called through `logits(tokens)`; `runner.py` builds it
 and the CPU reference alike and checks one against the other);
 `iron/tests/common/graph.py` traces it device-free,
 `iron/tests/common/llama_reference.py` runs its reference against the CPU

@@ -4,7 +4,7 @@
 """The graph's reference against the model's plain forward pass.
 
 ``cpu.Reference`` is a stateless causal pass in float32 numpy, the oracle
-the NPU application is judged against. ``Llama3_2_1b`` is the same
+the NPU application is judged against. ``Llama`` is the same
 computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
@@ -28,9 +28,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from iron.applications.llama_3_2_1b import runner
+from iron.applications.common import (
+    Config,
+    accuracy,
+    determinism,
+    greedy,
+    prompt_rows,
+)
 from iron.applications.llama_3_2_1b.cpu import Reference
-from iron.applications.llama_3_2_1b.npu import Llama3_2_1b, prompt_rows
+from iron.applications.llama_3_2_1b.npu import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
 
@@ -44,7 +50,7 @@ class _Output:
         return self.array
 
 
-class OnHost(Llama3_2_1b):
+class OnHost(Llama):
     """The model with its images stood in by its reference, which runs at
     whatever shape it is called with.
     """
@@ -57,7 +63,7 @@ class OnHost(Llama3_2_1b):
 
 @dataclasses.dataclass
 class Case:
-    config: runner.Config
+    config: Config
     weights: SimpleNamespace
     oracle: Reference
     prompt: np.ndarray
@@ -89,7 +95,7 @@ def _greedy(model, tokens, logits, n):
     """
     history, out = list(tokens), []
     for _ in range(n):
-        history.append(runner.greedy(logits))
+        history.append(greedy(logits))
         logits = model.logits(history)
         out.append(logits)
     return out
@@ -140,7 +146,7 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
     """
     model = OnHost(cpu.config, cpu.weights)
     model.logits(cpu.prompt)
-    tokens = [runner.greedy(cpu.first)] + [runner.greedy(e) for e in cpu.expected]
+    tokens = [greedy(cpu.first)] + [greedy(e) for e in cpu.expected]
     got, total = [], 0
     for pos, token in enumerate(tokens[:-1], start=len(cpu.prompt)):
         total += pos + 1
@@ -165,7 +171,7 @@ def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
     """
     model = OnHost(cpu.config, cpu.weights)
     steps = len(cpu.expected) + 1
-    results = runner.accuracy(model, cpu.oracle, cpu.prompt, steps)
+    results = accuracy(model, cpu.oracle, cpu.prompt, steps)
     assert all(top1 for _, top1 in results), results
     # bf16 graphs against a float32 forward: close, not equal.
     assert all(0 <= kl < 0.05 for kl, _ in results), results
@@ -178,7 +184,7 @@ def test_the_determinism_check_finds_the_reference_deterministic(cpu):
     """
     model = OnHost(cpu.config, cpu.weights)
     prompts = [cpu.prompt, cpu.prompt[::-1]]
-    assert runner.determinism(model, prompts, 3, 3) == 0
+    assert determinism(model, prompts, 3, 3) == 0
 
 
 def test_a_short_prompt_runs_at_its_own_rows():

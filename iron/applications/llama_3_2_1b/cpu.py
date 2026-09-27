@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3.2 on the CPU: the forward pass the NPU is judged by.
+"""Llama 3 on the CPU: the forward pass the NPU is judged by.
 
 :class:`Reference` is the model as a plain float32 causal pass over one
 token sequence, with no cache: the logits at position ``t`` of a causal pass
@@ -11,7 +11,7 @@ purpose: the graph's reference defines what the graph computes, so only an
 independent forward can catch a wiring mistake, a transposed layout or a
 softmax over the wrong length. It is the oracle of the graph on the host
 (``iron/tests/common/llama_reference.py``) and of the accuracy check
-(:func:`.runner.accuracy`).
+(:func:`iron.applications.common.accuracy`).
 """
 
 from types import SimpleNamespace
@@ -23,8 +23,8 @@ EPS = np.float32(1e-5)
 
 
 class Reference:
-    """Llama 3.2's forward pass in float32, on ``config``'s shape and RoPE
-    table and ``weights``, as :class:`.npu.Llama3_2_1b` takes them.
+    """Llama 3's forward pass in float32, on ``config``'s shape and RoPE
+    table and ``weights``, as :class:`.npu.Llama` takes them.
 
     The NPU's bf16 table is rounded from the same float32 one. The weights
     are widened to float32 once, here (exactly: every bf16 is a float32),

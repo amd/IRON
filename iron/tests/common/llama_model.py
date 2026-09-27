@@ -9,12 +9,9 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b.npu import Llama3_2_1b
-from iron.applications.llama_3_2_1b.runner import (
-    Config,
-    checkpoint_shapes,
-    load_weights,
-)
+from iron.applications.common import checkpoint_shapes, load_weights
+from iron.applications.llama_3_2_1b.npu import Llama
+from iron.applications.llama_3_2_1b.runner import LLAMA_3_2_1B, layout
 from iron.common import Profile
 
 # The knobs the graph runs with at :data:`SMALL`'s shape on NPU2: decode
@@ -23,7 +20,8 @@ from iron.common import Profile
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
 #: Llama's shape, small, and its RoPE table unscaled.
-SMALL = Config(
+SMALL = dataclasses.replace(
+    LLAMA_3_2_1B,
     vocab_size=1024,
     emb_dim=256,
     n_layers=2,
@@ -48,28 +46,29 @@ def random_weights(config, seed=0):
         bound = 1.0 / np.sqrt(shape[1])
         return rng.uniform(-bound, bound, shape).astype(bfloat16)
 
-    shapes = checkpoint_shapes(config)
-    return load_weights({k: draw(s) for k, s in shapes.items()}, config)
+    shapes = checkpoint_shapes(layout(config), config.n_layers)
+    tensors = {k: draw(s) for k, s in shapes.items()}
+    return load_weights(tensors, layout(config), config.n_layers)
 
 
-def small(seed=0, **config) -> Llama3_2_1b:
+def small(seed=0, **config) -> Llama:
     """The model at :data:`SMALL`'s shape, as changed by ``config``, under
     :data:`PROFILE`.
     """
     config = dataclasses.replace(SMALL, **config)
-    model = Llama3_2_1b(config, random_weights(config, seed))
+    model = Llama(config, random_weights(config, seed))
     model.profile = PROFILE
     return model
 
 
-def llama_1b(n_layers=16) -> Llama3_2_1b:
+def llama_1b(n_layers=16) -> Llama:
     """Llama 3.2 1B's real shape with unset weights: for builds, not numbers.
 
     Each array is ``np.empty``, so the 2.5 GB is reserved and never
     touched. ``n_layers`` below 16 builds a shallower model of the same
     layer: the designs are the same at any depth.
     """
-    config = Config(n_layers=n_layers)
-    shapes = checkpoint_shapes(config)
+    config = dataclasses.replace(LLAMA_3_2_1B, n_layers=n_layers)
+    shapes = checkpoint_shapes(layout(config), n_layers)
     tensors = {k: np.empty(s, dtype=bfloat16) for k, s in shapes.items()}
-    return Llama3_2_1b(config, load_weights(tensors, config))
+    return Llama(config, load_weights(tensors, layout(config), n_layers))
