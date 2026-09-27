@@ -2,95 +2,76 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Llama 3.2 1B on the NPU, from the real checkpoint: speed, accuracy
+against the float32 reference, and determinism. The model is compiled and
+loaded once for the module and every test calls it in-process.
+"""
+
 import os
-import re
-import subprocess
-import sys
 from pathlib import Path
 
+import aie.utils as aie_utils
+import numpy as np
 import pytest
 
+from iron.applications.llama_3_2_1b.runner import (
+    SEED,
+    Runner,
+    Sampler,
+    accuracy,
+    determinism,
+    generate,
+)
 from iron.common.harness import record_metric
 
-repo_root = Path(__file__).resolve().parents[3]
-weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
-
-
-def _figure(pattern: str, text: str) -> str:
-    """The ``value`` group of ``pattern`` in ``text``, which must be there."""
-    match = re.search(pattern, text)
-    assert match is not None, f"no {pattern!r} in the output"
-    return match.group("value")
-
-
-def generate_test_params():
-    prompt_lengths = [1024, 13]
-    num_tokens_list = [40, 1]
-
-    params = []
-    names = []
-    for prompt_len in prompt_lengths:
-        for num_tokens in num_tokens_list:
-            params.append((prompt_len, num_tokens))
-            names.append(f"llama_3.2_1b_prompt_{prompt_len}_tokens_{num_tokens}")
-    return params, names
-
-
-params, names = generate_test_params()
+weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / "llama3.2-1b"
 
 requires_weights = pytest.mark.skipif(
     not os.environ.get("CI")
     and not (
-        (weights_dir / "llama3.2-1b" / "model.safetensors").exists()
-        and (weights_dir / "llama3.2-1b" / "tokenizer.model").exists()
+        (weights_dir / "model.safetensors").exists()
+        and (weights_dir / "tokenizer.model").exists()
     ),
     reason="llama3.2-1b weights not found outside CI",
 )
 
-
-def run_llama_npu(prompt_len, num_tokens, *extra_args, figures):
-    """Run the application to completion; record each of ``figures`` it prints."""
-    # As a module, so the package's relative imports resolve and nothing
-    # needs the repository on sys.path.
-    command = [
-        sys.executable,
-        "-m",
-        "iron.applications.llama_3_2_1b.runner",
-        str(weights_dir / "llama3.2-1b" / "model.safetensors"),
-        str(weights_dir / "llama3.2-1b" / "tokenizer.model"),
-        "--num-tokens",
-        str(num_tokens),
-        "--prompt-len",
-        str(prompt_len),
-        *extra_args,
-    ]
-    result = subprocess.run(command, cwd=repo_root, capture_output=True, text=True)
-
-    print(result.stdout)
-    print(result.stderr)
-    # The harness prints its timings to stderr and the checks to stdout.
-    for name, pattern in figures.items():
-        match = re.search(pattern, result.stdout + result.stderr)
-        if match:
-            record_metric(name, float(match.group("value")))
-
-    assert (
-        result.returncode == 0
-    ), f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
-    return result
+pytestmark = [requires_weights, pytest.mark.supported_devices("npu2")]
 
 
-PERFORMANCE = {
-    "TTFT": r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
-    "TPS": r"\[Decode\]\s*Tokens per second:\s*(?P<value>[\d\.e\+-]+)",
-}
+@pytest.fixture(scope="module")
+def runner():
+    return Runner(weights_dir / "model.safetensors", weights_dir / "tokenizer.model")
 
 
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
-def test_llama_3_2_1b(prompt_len, num_tokens):
-    run_llama_npu(prompt_len, num_tokens, figures=PERFORMANCE)
+@pytest.fixture(scope="module")
+def model(runner):
+    """The model, loaded once; the runtime is released after the module's
+    last test, as ``npu_runtime`` does after each of the others.
+    """
+    yield runner.npu()
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
+def prompt(runner, chars, num_tokens, skip=0):
+    tokens = runner.prompt(chars, skip=skip)
+    assert len(tokens) + num_tokens <= runner.config.max_seq_len
+    return tokens
+
+
+@pytest.mark.parametrize(
+    "prompt_len,num_tokens",
+    [(p, n) for p in (1024, 13) for n in (40, 1)],
+    ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
+)
+def test_llama_3_2_1b(runner, model, prompt_len, num_tokens):
+    tokens = prompt(runner, prompt_len, num_tokens)
+    sample = Sampler(0.7, 50, np.random.default_rng(SEED))
+    drawn, first, later = generate(model, tokens, num_tokens, sample)
+    print(runner.tokenizer.decode(drawn))
+    record_metric("TTFT", first)
+    if num_tokens > 1:
+        record_metric("TPS", 1 / later)
 
 
 # KL(fp32 CPU || NPU) of the next-token distribution, teacher-forced over 40
@@ -102,39 +83,26 @@ def test_llama_3_2_1b(prompt_len, num_tokens):
 # Decode attention over unmasked KV-cache slots measured 9.2.
 MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
-ACCURACY = {
-    **{
-        f"{stat}KL": rf"\[Accuracy\] {stat} KL:\s*(?P<value>[\d\.e\+-]+)"
-        for stat in MAX_KL
-    },
-    "Top1Mismatches": r"\[Accuracy\] Top-1 mismatches:\s*(?P<value>\d+)",
-}
 
-
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-def test_llama_3_2_1b_accuracy():
-    result = run_llama_npu(1024, 40, "--check-accuracy", figures=ACCURACY)
-
+def test_llama_3_2_1b_accuracy(runner, model):
+    tokens = prompt(runner, 1024, 40)
+    # Built here alone: the float32 weights are 5 GB.
+    results = accuracy(model, runner.cpu(), tokens, 40)
+    kl = np.array([k for k, _ in results])
+    stats = {"Mean": kl.mean(), "P90": np.percentile(kl, 90), "Max": kl.max()}
+    for stat, value in stats.items():
+        record_metric(f"{stat}KL", float(value))
+    record_metric("Top1Mismatches", sum(not t for _, t in results))
     for stat, bound in MAX_KL.items():
-        kl = float(_figure(ACCURACY[f"{stat}KL"], result.stdout))
-        assert kl <= bound, f"{stat.lower()} KL {kl} > {bound}"
+        assert stats[stat] <= bound, f"{stat.lower()} KL {stats[stat]} > {bound}"
 
 
 # Repeated runs must produce bit-identical logits. A prefill KV hand-off that
 # was never flushed to the device made 12% of runs diverge. Alternating
 # two prompts makes such a missing flush fail every run: 38/38 in each of three
 # trials.
-DETERMINISM = {
-    "DifferingRuns": r"\[Determinism\] Differing runs:\s*(?P<value>\d+)/",
-}
-
-
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-def test_llama_3_2_1b_determinism():
-    result = run_llama_npu(1024, 4, "--check-determinism", "5", figures=DETERMINISM)
-
-    differing = re.search(r"Differing runs:\s*(\d+)/(\d+)", result.stdout)
-    assert differing is not None, "no determinism figure in the output"
-    assert int(differing.group(1)) == 0, f"{differing.group(0)} (bitwise logits)"
+def test_llama_3_2_1b_determinism(runner, model):
+    prompts = [prompt(runner, 1024, 4), prompt(runner, 1024, 4, skip=1024)]
+    differing = determinism(model, prompts, 4, rounds=5)
+    record_metric("DifferingRuns", differing)
+    assert differing == 0, f"{differing}/8 runs' logits differ bitwise"

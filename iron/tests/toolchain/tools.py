@@ -44,9 +44,9 @@ DEVICES = {
 
 
 def swiglu_decode():
-    """The swiglu decode graph function at Llama 3.2 1B's width, and that width."""
-    from iron.operators.swiglu_decode.op import swiglu_decode
+    """The swiglu decode graph at Llama 3.2 1B's width, and that width."""
+    from iron.operators.swiglu_decode.op import SwiGLUDecode
 
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
     E, H = 2048, 8192
-    return swiglu_decode(z(H, E), z(H, E), z(E, H)), E
+    return SwiGLUDecode(z(H, E), z(H, E), z(E, H)), E

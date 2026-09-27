@@ -10,7 +10,7 @@ from iron.common.harness import record_metric, verify_buffer
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV
 from iron.operators.silu import SiLU
-from iron.operators.swiglu_decode.op import swiglu_decode
+from iron.operators.swiglu_decode.op import SwiGLUDecode
 from iron.operators.swiglu_decode.reference import (
     as_numpy,
     bf16_matmul,
@@ -38,7 +38,7 @@ def test_swiglu_decode(embedding_dim, hidden_dim, npu_runtime):
 
     # GEMV takes its matrix in (M, K) layout, so the projections go in
     # transposed. The graph closes over them: uploaded once, on first call.
-    ffn = swiglu_decode(
+    ffn = SwiGLUDecode(
         np.ascontiguousarray(golden_ref["w_gate"].T),
         np.ascontiguousarray(golden_ref["w_up"].T),
         np.ascontiguousarray(golden_ref["w_down"].T),

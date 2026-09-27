@@ -214,7 +214,7 @@ class StreamOut(_Stream):
 
 
 class ValueSpec:
-    """``Scratchpad[np.int32]``: the annotation of a graph function's per-call parameter."""
+    """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter."""
 
     __slots__ = ("kind", "dtype")
 

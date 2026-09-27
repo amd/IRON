@@ -35,9 +35,11 @@ def _graph(name, **kwargs):
     """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
     add = _operator()
 
-    @iron.graph
-    def f(x, w):
-        return add(add(add(x, w), w), w)
+    class F(iron.Graph):
+        def body(self, x, w):
+            return add(add(add(x, w), w), w)
+
+    f = F()
 
     traced = f.trace(x=(SIZE,), w=(SIZE,))
     kwargs.setdefault("dispatch", "reference")

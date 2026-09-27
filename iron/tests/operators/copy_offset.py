@@ -32,9 +32,11 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 def test_the_cache_offset_is_applied_per_call(npu_runtime):
     cache = iron.state((N_KV, SEQ, HEAD_DIM), name="cache")
 
-    @iron.graph
-    def write(x, *, pos: Scratchpad[np.int32]):
-        Copy(x, cache[:, pos])
+    class Write(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            Copy(x, cache[:, pos])
+
+    write = Write()
 
     net = write.compile(x=(N_KV, HEAD_DIM))
     assert net.plan.image == "elf", "only the full ELF carries a scratchpad"

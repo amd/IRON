@@ -36,11 +36,13 @@ def _captured(name, trace_size=0, adds=2):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128)
 
-    @iron.graph
-    def f(x, w):
-        for _ in range(adds):
-            x = add(x, w)
-        return x
+    class F(iron.Graph):
+        def body(self, x, w):
+            for _ in range(adds):
+                x = add(x, w)
+            return x
+
+    f = F()
 
     sequence = f.trace(x=(1024,), w=(1024,)).sequence(
         name, dispatch="fused", trace_size=trace_size

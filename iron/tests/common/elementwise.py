@@ -59,9 +59,11 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
     """
     from iron.common import Scratchpad
 
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32]):
-        return ReLU(x[:n], tile_size=256, num_aie_columns=2)
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return ReLU(x[:n], tile_size=256, num_aie_columns=2)
+
+    g = G()
 
     t = g.trace(x=(4096,))
     (op,) = t.operators

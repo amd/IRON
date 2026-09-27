@@ -28,9 +28,11 @@ def test_every_dispatch_returns_its_own_output(calls, npu_runtime):
     add = ElementwiseAdd(size=SIZE, tile_size=128)
     w = np.ones(SIZE, dtype=bfloat16)
 
-    @iron.graph
-    def f(x):
-        return add(x, w)
+    class F(iron.Graph):
+        def body(self, x):
+            return add(x, w)
+
+    f = F()
 
     net = f.compile(boundaries=iron.each_step, image=iron.XCLBIN, x=(SIZE,))
     assert net.plan.dispatch == "separate"

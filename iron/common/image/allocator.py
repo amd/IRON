@@ -36,7 +36,7 @@ inputs and outputs -- are *pinned*: they need private, stable addresses, so
 they are never pooled. TorchInductor keeps the same exclusion list in
 ``can_reuse``: graph inputs, constants, and explicitly never-reused buffers.
 
-:class:`ArenaPlan` carries this across images. One graph function compiled
+:class:`ArenaPlan` carries this across images. One graph compiled
 for several input shapes is several images, and one runs at a time, so they
 can share a single scratch arena: *residents* (weights, states) get one
 offset, the same in every image, and each image's *transients* are planned

@@ -31,12 +31,14 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 @pytest.mark.supported_devices("npu2")
 def test_rows_past_the_valid_length_are_zero(npu_runtime):
-    @iron.graph
-    def attend(q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
-        q, k, v = q[:rows], k[:rows], v[:rows]
-        return MHA(
-            q, k, v, heads_interleaved=True, s_q=n, s_kv=n, num_pipelines=PIPELINES
-        )
+    class Attend(iron.Graph):
+        def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
+            q, k, v = q[:rows], k[:rows], v[:rows]
+            return MHA(
+                q, k, v, heads_interleaved=True, s_q=n, s_kv=n, num_pipelines=PIPELINES
+            )
+
+    attend = Attend()
 
     rng = np.random.default_rng(0)
     q = rng.standard_normal((SEQ, HEADS, D)).astype(bfloat16)

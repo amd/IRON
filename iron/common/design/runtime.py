@@ -18,7 +18,6 @@ from typing import Any
 from aie.extras.dialects import arith
 from aie.ir import IntegerType
 from aie.iron import TaskGroup, sync_parameters
-from aie.iron.dataflow.objectfifo import ObjectFifoHandle
 
 from ..declare import Operator
 from ..declare.bound import (
@@ -39,17 +38,6 @@ from ..tiling import (
     whole,
 )
 from .target import Target
-
-
-def has_size_kind() -> bool:
-    """Whether this toolchain patches a descriptor's size per call on a full ELF.
-
-    That is mlir-aie's size-kind scratchpad parameter,
-    ``fill``/``drain(size_parameters={dim: param})`` (LENGTH_FREE_PLAN.md).
-    Without it a transfer bounded per call (``size_by``) builds only on the
-    dispatch-time path; a graph that wants a full ELF leaves the bound out.
-    """
-    return "size_parameters" in inspect.signature(ObjectFifoHandle.fill).parameters
 
 
 class Transfers:

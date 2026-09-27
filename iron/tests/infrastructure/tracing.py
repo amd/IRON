@@ -33,9 +33,11 @@ def _layer_norm_run(name, trace_size):
         trace_size=trace_size,
     )
 
-    @iron.graph
-    def f(x):
-        return layer_norm(x)
+    class F(iron.Graph):
+        def body(self, x):
+            return layer_norm(x)
+
+    f = F()
 
     traced = f.trace(x=(SIZE,))
     seq = traced.sequence(name, dispatch="fused", trace_size=trace_size).compile()

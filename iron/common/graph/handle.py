@@ -200,7 +200,7 @@ class Handle:
 class State:
     """A tensor that persists on the device across calls (a KV cache).
 
-    Created outside the graph function with :func:`state` and closed over.
+    Created with :func:`state` and held by the graph.
     Zero when the graph is first uploaded; read and written through
     :meth:`CompiledGraph.buffer`.
     """
@@ -217,7 +217,7 @@ class State:
     def __repr__(self) -> str:
         return f"State({self.name or ''}{list(self.shape)})"
 
-    # Inside a graph function a state is viewed like a handle: the tracer
+    # Inside a graph's body a state is viewed like a handle: the tracer
     # decides what stands for it (a handle when tracing, its host tensor
     # when the reference runs).
     def _as_operand(self):
@@ -225,7 +225,7 @@ class State:
 
         tracer = current()
         if tracer is None:
-            raise TypeError(f"{self!r} is viewed inside a graph function")
+            raise TypeError(f"{self!r} is viewed inside a graph's body")
         return tracer.state_as(self)
 
     def __getitem__(self, key):
@@ -239,7 +239,7 @@ class State:
 
 
 def state(shape, dtype=bfloat16, name=None) -> State:
-    """Declare device-resident state a graph function closes over."""
+    """Declare device-resident state a graph holds."""
     return State(shape, dtype, name)
 
 
@@ -272,7 +272,7 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, tuple["Value", int]]:
 
 
 class Value:
-    """A per-call scalar parameter of a graph function."""
+    """A per-call scalar parameter of a graph's body."""
 
     __slots__ = ("name", "kind", "dtype")
 

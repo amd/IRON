@@ -434,12 +434,14 @@ def test_a_derived_value_is_written_once_per_build():
 
 
 def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
-    @iron.graph
-    def g(a, b, *, pos: Scratchpad[np.int32], n: Scratchpad[np.int32]):
-        # A per-call value at a call site is not a field a checker knows (yet).
-        return MV(
-            a, b, columns=8, start=pos, count=n
-        )  # pyright: ignore[reportCallIssue]
+    class G(iron.Graph):
+        def body(self, a, b, *, pos: Scratchpad[np.int32], n: Scratchpad[np.int32]):
+            # A per-call value at a call site is not a field a checker knows (yet).
+            return MV(
+                a, b, columns=8, start=pos, count=n
+            )  # pyright: ignore[reportCallIssue]
+
+    g = G()
 
     t = g.trace(a=(1024, 128), b=(128,))
     (op,) = t.operators
@@ -705,10 +707,12 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
 
 
 def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32]):
-        y = Rows(x[:n])  # bounds this instance
-        return Rows(y)  # and, through its output, the next
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            y = Rows(x[:n])  # bounds this instance
+            return Rows(y)  # and, through its output, the next
+
+    g = G()
 
     t = g.trace(x=(64, 8))
     a, b = t.operators
@@ -734,23 +738,29 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
 
 
 def test_a_bound_is_refused_where_no_extent_takes_it():
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32]):
-        return MV(x[:n], x[0])  # M is not an Extent of MV
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return MV(x[:n], x[0])  # M is not an Extent of MV
+
+    g = G()
 
     with pytest.raises(TypeError, match="MV.A cannot be bounded per call on axis 0"):
         g.trace(x=(64, 128))
 
-    @iron.graph
-    def h(x, *, n: DispatchTime[np.int32]):
-        return Rows(x[:n])
+    class H(iron.Graph):
+        def body(self, x, *, n: DispatchTime[np.int32]):
+            return Rows(x[:n])
+
+    h = H()
 
     with pytest.raises(ValueError, match="only a Scratchpad value can bound"):
         h.trace(x=(64, 8))
 
-    @iron.graph
-    def k(x, *, n: Scratchpad[np.int32]):
-        return Rows(x[:, :n])  # cols is not an Extent
+    class K(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return Rows(x[:, :n])  # cols is not an Extent
+
+    k = K()
 
     with pytest.raises(TypeError, match="axis 1"):
         k.trace(x=(64, 8))

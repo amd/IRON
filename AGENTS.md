@@ -200,7 +200,7 @@ reuse lint
    - `design/`, `tiling.py`, `external.py`: the library-owned build: the
      `Target` a design declares kernels against, the derived runtime
      sequence, legal DMA descriptors, the shipped-image path
-   - `graph/`: graph functions (`iron.graph`, `iron.state`) and
+   - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
      allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
@@ -392,35 +392,45 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
    the name, and the module that defines it)
 
-## Graph Functions
+## Graphs
 
-Operators compose into a graph function: a Python function called on
-handles, traced once for its shapes, compiled to one image and called per
-token. Inputs are its positional parameters, outputs its return values,
-weights whatever tensors it closes over, `iron.state(...)` device-resident
-state it closes over, and keyword-only parameters annotated
-`Scratchpad[T]` per-call values:
+Operators compose into a graph: a subclass of `iron.Graph` whose `body()`
+is called on handles, traced once per input shape, compiled to one image
+per shape (a version) and called per token. Inputs are `body`'s positional
+parameters, outputs its return values, per-call values its keyword-only
+parameters annotated `Scratchpad[T]`, and weights and `iron.state(...)`
+device-resident state what the instance holds, named by attribute path
+(`self.layers[3].q` is `layers.3.q`):
 
 ```python
 import iron
 from iron.common import Scratchpad
 
-kv = iron.state((n_kv_groups, max_len, head_dim))
+class Decode(iron.Graph):
+    def __init__(self, weights):
+        self.weights = weights                   # a namespace of arrays: weights
+        self.kv = iron.state((n_kv_groups, max_len, head_dim))
 
-@iron.graph(names_from=model)
-def decode(x, angles, *, pos: Scratchpad[np.int32]):
-    h = RMSNorm(x, model.norm.weight)             # a bare tensor is a weight
-    k = RoPE(GEMV(model.wk, h), angles)          # class calls infer the extents
-    Copy(k, kv[:, pos])                          # a state passed as an output is written
-    return GEMV(model.wo, h)
+    def body(self, x, angles, *, pos: Scratchpad[np.int32]):
+        w = self.weights
+        h = RMSNorm(x, w.norm)                   # class calls infer the extents
+        k = RoPE(GEMV(w.wk, h), angles)
+        Copy(k, self.kv[:, pos])                 # a state passed as an output is written
+        return GEMV(w.wo, h)
 
-net = decode.compile(dev, x=(1, emb), angles=(1, head_dim))
-logits = net(x_tok, ang_tok, pos=n)
+graph = Decode(weights)
+graph.compile(x=(1, emb), angles=(1, head_dim))  # or on the first call
+logits = graph(x_tok, ang_tok, pos=n)
 ```
 
+The versions of one graph share its weights and states: a full ELF
+version is placed in the graph's one scratch arena. `graph.reference(...)` runs the body through each operator's
+`reference()` on host tensors, per-call values and state modelled.
+
 The knobs a graph's operators run with can be a `Profile` rather than
-keywords at every call: entries keyed by operator class and shape, given to
-`iron.graph(profile=...)` (or applied in a `with profile:` scope). A call
+keywords at every call: entries keyed by operator class and shape, the
+graph's `profile` attribute (or applied in a `with profile:` scope); a
+directory there holds one per device, `<device>.json`. A call
 that leaves a knob open takes the most specific entry's value; a call that
 gives one keeps it. An entry matches on the fields the operator is
 constructed with, the call's keywords and the extents inferred from its
@@ -444,14 +454,18 @@ graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
 `design_key()` they are one build; `op.explain()` prints which fields are
-which and how each value reaches the device. `compile(dev, boundaries=, image=)` derives the image (a
-fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
-`verbose=True` prints why. It links the image (`net.image`) and stops
+which and how each value reaches the device. `compile(dev, boundaries=,
+image=, **shapes)` derives the image (a fused ELF on NPU2, per-step
+xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
+It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/applications/llama_3_2_1b/npu.py` is the worked example;
-`iron/tests/common/graph.py` traces it device-free and
-`iron/tests/toolchain/` builds it.
+`iron/applications/llama_3_2_1b/npu.py` is the worked example
+(`Llama3_2_1b`, called through `logits(tokens)`; `runner.py` builds it
+and the CPU reference alike and checks one against the other);
+`iron/tests/common/graph.py` traces it device-free,
+`iron/tests/common/llama_reference.py` runs its reference against the CPU
+one and `iron/tests/toolchain/` builds it.
 
 ## Common Patterns
 

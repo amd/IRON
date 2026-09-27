@@ -32,24 +32,23 @@ from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
 import iron
-from iron.operators.swiglu_prefill.op import swiglu_prefill
+from iron.common.declare.member import Extent
+from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu_decode
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
 
-def build_elf(traced, name):
-    """Fuse a traced graph and build its full ELF; return its record.
-
-    The one build the application does: ``compile()`` builds the image into
-    the JIT cache and records what it consists of.
+def build_elf(graph, **shapes):
+    """Build ``graph``'s full ELF at ``shapes``, as the application does;
+    return the version.
     """
-    seq = traced.sequence(name, dispatch="fused").compile()
-    artifacts = seq.artifacts
+    version = graph.compile(image=iron.ELF, **shapes)
+    artifacts = version.artifacts
     elf = Path(artifacts.image)
     assert elf.exists() and elf.stat().st_size > 0, f"no ELF at {elf}"
     assert artifacts.kind == "elf"
-    return artifacts
+    return version
 
 
 def _params(artifacts):
@@ -80,24 +79,27 @@ def test_swiglu_decode_graph_compiles_to_a_full_elf():
     assert artifacts.params.read_text().split("\n", 1)[0].strip() == "0"
 
 
-def _assert_values_in_table(traced, artifacts):
-    table = _params(artifacts)
-    # Every value the graph bound is a parameter the host can write.
-    for b in traced.bindings:
+def _assert_values_in_table(version):
+    table = _params(version.artifacts)
+    # The host writes every parameter the image declares ...
+    assert {symbol for symbol, *_ in version.words} == set(table)
+    # ... and every per-call index the graph bound is one, in the word it
+    # shares with the symbols that always hold its number. A bound extent
+    # the designs read only through its derivations has none of its own.
+    for b in version.traced.bindings:
+        if isinstance(b.member.member, Extent):
+            continue
+        word = version.shared.get(b.symbol, b.symbol)
         assert (
-            b.symbol in table
+            word in table
         ), f"{b.symbol} ({b.value.name}) missing from {sorted(table)}"
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import PROFILE
-    from iron.tests.common.llama_model import Config as _Config
+    from iron.tests.common.llama_model import small
 
-    cfg = _Config()
-    traced = LlamaGraph(cfg, 256, profile=PROFILE).trace(cfg, 1)
-    artifacts = build_elf(traced, "decode")
-    _assert_values_in_table(traced, artifacts)
+    model = small(max_seq_len=256)
+    _assert_values_in_table(build_elf(model, **model.shapes(1)))
 
 
 @pytest.mark.extensive
@@ -108,27 +110,19 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     sequence grows with its DMA tasks (about 1,800 per layer against decode's
     430), past this gate's memory at the full depth.
     """
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import Llama1B
+    from iron.tests.common.llama_model import llama_1b
 
-    cfg = Llama1B(n_layers=1)
-    traced = LlamaGraph(cfg, cfg.context_length).trace(cfg, cfg.context_length)
-    assert len(traced.runlist) == 18 + 3
-    artifacts = build_elf(traced, "prefill_1b")
-    _assert_values_in_table(traced, artifacts)
+    model = llama_1b(n_layers=1)
+    version = build_elf(model, **model.shapes(model.config.max_seq_len))
+    assert len(version.traced.runlist) == 18 + 3
+    _assert_values_in_table(version)
 
 
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import PROFILE
-    from iron.tests.common.llama_model import Config as _Config
+    from iron.tests.common.llama_model import small
 
-    cfg = _Config()
-    L = cfg.context_length
-    graph = LlamaGraph(cfg, L, profile=PROFILE)
-    traced = graph.trace(cfg, L)
-    artifacts = build_elf(traced, "prefill")
-    _assert_values_in_table(traced, artifacts)
+    model = small()
+    _assert_values_in_table(build_elf(model, **model.shapes(model.config.max_seq_len)))
 
 
 def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
@@ -145,7 +139,7 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
     def build(b_col_maj):
         shape = (H, E) if b_col_maj else (E, H)
         z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-        fn = swiglu_prefill(z(*shape), z(*shape), z(*shape[::-1]), b_col_maj=b_col_maj)
+        fn = SwiGLUPrefill(z(*shape), z(*shape), z(*shape[::-1]), b_col_maj=b_col_maj)
         return fn.compile(DEVICES["npu2"](), image=iron.ELF, x=(M, E))
 
     build(False)

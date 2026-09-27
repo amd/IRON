@@ -36,11 +36,13 @@ def _graph():
     R, C, L = 16, 256, 4
     cache = iron.state((R, L, C), name="cache")
 
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
-        y = Softmax(x, vector_size=n)
-        Copy(y, cache[:, pos])
-        return y
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
+            y = Softmax(x, vector_size=n)
+            Copy(y, cache[:, pos])
+            return y
+
+    g = G()
 
     return g, (R, C)
 

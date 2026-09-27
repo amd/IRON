@@ -1,24 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph function, and the images it compiles to.
+"""A graph, and the images it compiles to.
 
-A graph function is compiled once per input signature (shapes and dtypes):
-each is a *version*, its own image. Every version reads the same weights
-and states, and on a full ELF they share one scratch arena
+A graph is compiled once per input signature (shapes and dtypes): each is a
+*version*, its own image. Every version reads the same weights and states,
+and on a full ELF they share one scratch arena
 (:class:`~iron.common.image.ArenaPlan`), so a weight is on the device once
 and a state one version writes is where the next reads it. This needs no
-setup: calling the function with a new shape compiles a version into the
-arena its other versions already use.
+setup: calling the graph with a new shape compiles a version into the arena
+its other versions already use.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import functools
 import inspect
 from collections.abc import Callable, Mapping
 from fractions import Fraction
-from typing import Any, overload
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import aie.utils as aie_utils
 import numpy as np
@@ -34,7 +38,7 @@ from ..image.allocator import ArenaPlan
 from ..image.callable import ScratchArena
 from ..image.packaging import Plan, plan
 from ..image.sequence import ALIGNMENT
-from .handle import Handle, State, Value, _tensor_dtype
+from .handle import Handle, State, Value, _tensor_dtype, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
 # One (parameter, shape, dtype name) per input: what picks a version.
@@ -83,38 +87,71 @@ def _store(
         release(piece)
 
 
-class GraphFunction:
-    """A function decorated with :func:`graph`."""
+class Graph:
+    """A graph: a subclass whose :meth:`body` is traced on handles.
 
-    def __init__(self, fn, names_from=None, profile=None):
-        self.fn = fn
-        self.names_from = names_from
-        self.profile = profile
-        self.__name__ = fn.__name__
-        self.__doc__ = fn.__doc__
-        sig = inspect.signature(fn)
-        self.params = [
+    ``body``'s positional parameters are the inputs, its keyword-only ones
+    (annotated ``Scratchpad[T]`` or ``DispatchTime[T]``) the per-call values,
+    and what it returns the outputs. The weights and states are what the
+    instance holds: a tensor or an :func:`~.handle.state` in an attribute,
+    or in a list, tuple, dict, dataclass or namespace there, named by its
+    path (``self.layers[3].q`` is ``layers.3.q``). A tensor ``body`` reaches
+    any other way is a weight too, named ``w<n>``.
+
+    ``profile`` is the :class:`~iron.common.declare.Profile` applied
+    whenever ``body`` runs -- traced, compiled or as a reference -- or a
+    directory of them, ``<device>.json``, of which the bound device's is
+    read. A subclass or an instance sets it.
+    """
+
+    profile: Profile | Path | None = None
+
+    # (name) per input, (name -> spec) per per-call value: body's signature.
+    _inputs: list[str] = []
+    _values: dict[str, ValueSpec] = {}
+
+    def body(self, *inputs: Any, **values: Any) -> Any:
+        raise NotImplementedError(f"{type(self).__name__} defines no body()")
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "body" not in cls.__dict__:
+            return  # its parent's inputs and values
+        params = list(inspect.signature(cls.body).parameters.values())[1:]
+        cls._inputs = [
             p.name
-            for p in sig.parameters.values()
+            for p in params
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
-        self.value_params = {}
-        for p in sig.parameters.values():
+        cls._values = {}
+        for p in params:
             if p.kind is p.KEYWORD_ONLY:
                 ann = p.annotation
                 if isinstance(ann, type) and issubclass(ann, _Value):
                     ann = ValueSpec(ann.kind, np.int32)
                 if not isinstance(ann, ValueSpec):
                     raise TypeError(
-                        f"{fn.__name__}: keyword-only parameter {p.name!r} is a "
-                        f"per-call value and must be annotated Scratchpad[T] or "
-                        f"DispatchTime[T]"
+                        f"{cls.__name__}.body: keyword-only parameter {p.name!r} "
+                        f"is a per-call value and must be annotated Scratchpad[T] "
+                        f"or DispatchTime[T]"
                     )
-                self.value_params[p.name] = ann
+                cls._values[p.name] = ann
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-                raise TypeError(f"{fn.__name__}: *args/**kwargs are not traceable")
-        self._versions: dict[Signature, CompiledGraph] = {}
-        self._arena = ScratchArena(ArenaPlan(ALIGNMENT))
+                raise TypeError(
+                    f"{cls.__name__}.body: *args/**kwargs are not traceable"
+                )
+
+    @property
+    def name(self) -> str:
+        return type(self).__name__
+
+    @functools.cached_property
+    def _versions(self) -> dict[Signature, CompiledGraph]:
+        return {}
+
+    @functools.cached_property
+    def _arena(self) -> ScratchArena:
+        return ScratchArena(ArenaPlan(ALIGNMENT))
 
     @property
     def versions(self) -> dict[Signature, CompiledGraph]:
@@ -132,24 +169,52 @@ class GraphFunction:
 
     # -- tracing ---------------------------------------------------------------
 
+    def names(self) -> dict[int, str]:
+        """The name of each tensor and state the instance holds, by identity."""
+        names: dict[int, str] = {}
+        seen: set[int] = set()
+
+        def walk(x, path):
+            if isinstance(x, State) or (is_operand(x) and not isinstance(x, Handle)):
+                names.setdefault(id(x), path)
+                return
+            if isinstance(x, (list, tuple)):
+                items = enumerate(x)
+            elif isinstance(x, dict):
+                items = x.items()
+            elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+                items = ((f.name, getattr(x, f.name)) for f in dataclasses.fields(x))
+            elif isinstance(x, SimpleNamespace):
+                items = vars(x).items()
+            else:
+                return
+            if id(x) in seen:
+                return
+            seen.add(id(x))
+            for key, item in items:
+                walk(item, f"{path}.{key}")
+
+        for key, x in vars(self).items():
+            if not key.startswith("_"):
+                walk(x, key)
+        return names
+
     def trace(self, **shapes) -> TracedGraph:
-        """Run the function on handles of the given shapes; return the graph."""
-        missing = [p for p in self.params if p not in shapes]
-        unknown = [k for k in shapes if k not in self.params]
+        """Run :meth:`body` on handles of the given shapes; return the graph."""
+        missing = [p for p in self._inputs if p not in shapes]
+        unknown = [k for k in shapes if k not in self._inputs]
         if missing or unknown:
             raise TypeError(
-                f"{self.__name__}: shapes for {missing} missing"
+                f"{self.name}: shapes for {missing} missing"
                 + (f"; {unknown} are not inputs" if unknown else "")
             )
         inputs = []
-        for name in self.params:
+        for name in self._inputs:
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
-        values = [
-            Value(n, spec.kind, spec.dtype) for n, spec in self.value_params.items()
-        ]
-        with self._scope(), Tracer(self.__name__, self.names_from) as tracer:
-            result = self.fn(*inputs, **{v.name: v for v in values})
+        values = [Value(n, spec.kind, spec.dtype) for n, spec in self._values.items()]
+        with self._scope(), Tracer(self.name, self.names()) as tracer:
+            result = self.body(*inputs, **{v.name: v for v in values})
         outputs = self._outputs(result, tracer)
         return tracer.finish(inputs, outputs, values)
 
@@ -161,12 +226,12 @@ class GraphFunction:
         for i, item in enumerate(items):
             if not isinstance(item, Handle) or item.parent is not None:
                 raise TypeError(
-                    f"{self.__name__} returned {item!r}; a graph returns whole "
+                    f"{self.name} returned {item!r}; a graph returns whole "
                     f"handles produced inside it"
                 )
             if item.role == "input":
                 raise TypeError(
-                    f"{self.__name__} returns its input {item.name!r} unchanged"
+                    f"{self.name} returns its input {item.name!r} unchanged"
                 )
             if item.role == "intermediate":
                 item.name = f"out{i}" if len(items) > 1 else "out"
@@ -206,17 +271,17 @@ class GraphFunction:
         npu = device_name(bound)
         chosen = plan(npu, traced, boundaries, image)
         if verbose:
-            print(chosen.report(self.__name__))
+            print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
         shared = chosen.dispatch == "fused"
         # Versions see one state only through the arena. Weights alone could
-        # be copied per version, so a stateless function still compiles.
+        # be copied per version, so a stateless graph still compiles.
         others = [v for k, v in self._versions.items() if k != signature]
         apart = not shared or any(v.arena is None for v in others)
         stateful = traced.states or any(v.traced.states for v in others)
         if others and apart and stateful:
             raise NotImplementedError(
-                f"{self.__name__}: versions share their states through one "
+                f"{self.name}: versions share their states through one "
                 f"scratch arena, which only a full ELF addresses; this version "
                 f"dispatches {chosen.dispatch!r}"
             )
@@ -227,34 +292,39 @@ class GraphFunction:
         return version
 
     def __call__(self, *tensors, **values) -> Any:
-        if len(tensors) != len(self.params):
+        if len(tensors) != len(self._inputs):
             raise TypeError(
-                f"{self.__name__} takes {len(self.params)} input(s), got "
-                f"{len(tensors)}"
+                f"{self.name} takes {len(self._inputs)} input(s), got {len(tensors)}"
             )
         signature = tuple(
             (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
-            for name, t in zip(self.params, tensors)
+            for name, t in zip(self._inputs, tensors)
         )
         version = self._versions.get(signature)
         if version is None:
             shapes = {
                 name: (tuple(t.shape), _tensor_dtype(t))
-                for name, t in zip(self.params, tensors)
+                for name, t in zip(self._inputs, tensors)
             }
-            print(f"{self.__name__}: compiling for {shapes}")
+            print(f"{self.name}: compiling for {shapes}")
             # A checker matches **shapes against compile()'s named parameters.
             version = self.compile(**shapes)  # pyright: ignore[reportArgumentType]
         return version(*tensors, **values)
 
     def reference(self, *tensors, **values):
-        """The same function, each operator run through its ``reference()``."""
-        with self._scope(), _ReferenceTracer(self.__name__):
-            return self.fn(*tensors, **{k: values.get(k) for k in self.value_params})
+        """:meth:`body` on host tensors, each operator run through its ``reference()``."""
+        with self._scope(), _ReferenceTracer(self.name):
+            return self.body(*tensors, **{k: values.get(k) for k in self._values})
 
     def _scope(self):
-        """The profile applied while the function's body runs, if it has one."""
-        return self.profile if self.profile is not None else contextlib.nullcontext()
+        """The profile applied while :meth:`body` runs, if there is one."""
+        profile = self.profile
+        if isinstance(profile, (str, Path)):
+            path = Path(profile) / f"{device_name()}.json"
+            if not path.exists():
+                raise ValueError(f"{self.name}: no profile {path}")
+            profile = Profile.load(path)
+        return profile if profile is not None else contextlib.nullcontext()
 
 
 class CompiledGraph:
@@ -278,8 +348,9 @@ class CompiledGraph:
         # each bound value (a per-call index on a view scaled to an element
         # offset), and each value derived from a bounded extent, computed by
         # the operator from the call's bound.
-        # On a full ELF, symbols that always hold one number share a word.
-        self.words, shared = _words(traced, share=plan.dispatch == "fused")
+        # On a full ELF, symbols that always hold one number share a word:
+        # ``shared`` maps each such design symbol to its word.
+        self.words, self.shared = _words(traced, share=plan.dispatch == "fused")
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
@@ -287,7 +358,7 @@ class CompiledGraph:
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
         self.sequence = traced.sequence(
-            dispatch=plan.dispatch, shared_words=shared, **placement
+            dispatch=plan.dispatch, shared_words=self.shared, **placement
         ).compile(record=record)
         self.image = self.sequence.image
         # What the image consists of, by identity: its designs, which step
@@ -510,25 +581,3 @@ def _words(
             written.add(symbol)
             out.append((symbol, dtype, word))
     return out, shared
-
-
-@overload
-def graph(fn: Callable[..., Any], /) -> GraphFunction: ...
-@overload
-def graph(
-    *, names_from: Any = None, profile: Profile | None = None
-) -> Callable[[Callable[..., Any]], GraphFunction]: ...
-def graph(
-    fn: Callable[..., Any] | None = None,
-    *,
-    names_from: Any = None,
-    profile: Profile | None = None,
-) -> Any:
-    """Declare a graph function; see the module docstring.
-
-    ``profile`` is a :class:`~iron.common.declare.Profile` applied whenever
-    the function's body runs: traced, compiled or run as a reference.
-    """
-    if fn is None:
-        return lambda f: GraphFunction(f, names_from, profile)
-    return GraphFunction(fn, names_from, profile)

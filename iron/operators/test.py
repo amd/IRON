@@ -41,8 +41,7 @@ def _declared():
     params = []
     for name in sorted(catalog._OPERATOR_MODULES):
         cls = getattr(catalog, name)
-        # A composite (SwiGLUDecode) is a function returning a sequence, and
-        # tested by its own test.py.
+        # A composite (SwiGLUDecode) is a graph, tested by its own test.py.
         if not (isinstance(cls, type) and issubclass(cls, Operator)):
             continue
         declaration = cls.test

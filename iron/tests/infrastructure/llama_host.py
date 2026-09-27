@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama's host side: checkpoint reader, weight tree, RoPE table and
-sampling (``weights.py``, ``rope/op.py``, ``runner.Sampler``).
+"""Llama's host side: the checkpoint, the weight tree, the RoPE table and
+sampling (``runner.Checkpoint``, ``runner.load_weights``, ``rope/op.py``,
+``runner.Sampler``).
 
 The oracle is the safetensors library itself: tier 1 writes small
 checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
@@ -21,11 +22,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
-from safetensors import SafetensorError
 from safetensors.numpy import load_file, save_file
 
-from iron.applications.llama_3_2_1b.runner import Sampler
-from iron.applications.llama_3_2_1b.weights import LlamaWeights, SafetensorsFile
+from iron.applications.llama_3_2_1b.runner import (
+    Checkpoint,
+    Config,
+    Sampler,
+    load_weights,
+)
 from iron.operators.rope.op import LLAMA_3_2, rope_angles
 
 
@@ -37,34 +41,34 @@ def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
     )
 
 
-class ToyConfig:
-    """Llama-3.2-1B's proportions at toy size: GQA, a wider FFN, a tied head."""
+#: Llama-3.2-1B's proportions at toy size: GQA, a wider FFN, a tied head.
+TOY = Config(
+    vocab_size=32,
+    emb_dim=64,
+    n_layers=2,
+    n_heads=8,
+    n_kv_groups=2,
+    head_dim=8,
+    hidden_dim=128,
+    max_seq_len=16,
+)
 
-    n_layers = 2
-    emb_dim = 64
-    hidden_dim = 128
-    n_heads = 8
-    n_kv_groups = 2
-    head_dim = 8
-    vocab_size = 32
-
-
-# Each LayerWeights field under its Hugging Face name and its graph name,
-# spelled out here rather than read from weights.py.
+# Each layer field under its Hugging Face name, spelled out here rather
+# than read from the runner.
 LAYER_NAMES = {
-    "norm1": ("input_layernorm.weight", "norm1.weight"),
-    "q": ("self_attn.q_proj.weight", "attn.q.weight"),
-    "k": ("self_attn.k_proj.weight", "attn.k.weight"),
-    "v": ("self_attn.v_proj.weight", "attn.v.weight"),
-    "o": ("self_attn.o_proj.weight", "attn.o.weight"),
-    "norm2": ("post_attention_layernorm.weight", "norm2.weight"),
-    "gate": ("mlp.gate_proj.weight", "ffn.gate.weight"),
-    "up": ("mlp.up_proj.weight", "ffn.up.weight"),
-    "down": ("mlp.down_proj.weight", "ffn.down.weight"),
+    "norm1": "input_layernorm.weight",
+    "q": "self_attn.q_proj.weight",
+    "k": "self_attn.k_proj.weight",
+    "v": "self_attn.v_proj.weight",
+    "o": "self_attn.o_proj.weight",
+    "norm2": "post_attention_layernorm.weight",
+    "gate": "mlp.gate_proj.weight",
+    "up": "mlp.up_proj.weight",
+    "down": "mlp.down_proj.weight",
 }
 
 
-def toy_checkpoint(cfg=ToyConfig):
+def toy_checkpoint(cfg=TOY):
     """A Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
     head, kv = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
     E, F = cfg.emb_dim, cfg.hidden_dim
@@ -86,7 +90,7 @@ def toy_checkpoint(cfg=ToyConfig):
     }
     for i in range(cfg.n_layers):
         for f, shape in shapes.items():
-            ckpt[f"model.layers.{i}.{LAYER_NAMES[f][0]}"] = rng.normal(size=shape)
+            ckpt[f"model.layers.{i}.{LAYER_NAMES[f]}"] = rng.normal(size=shape)
     return {k: v.astype(bfloat16) for k, v in ckpt.items()}
 
 
@@ -97,43 +101,40 @@ def toy_path(tmp_path):
     return path
 
 
-# Tier 1 -- the reader, on files safetensors itself wrote
+def arrays(weights):
+    """Every array of the tree, by a name for it."""
+    out = {"embedding": weights.embedding, "norm": weights.norm}
+    for i, layer in enumerate(weights.layers):
+        out.update({f"layers.{i}.{f}": a for f, a in vars(layer).items()})
+    return out
+
+
+# Tier 1 -- the checkpoint, on files safetensors itself wrote
 # ##########################################################################
 
 
-def test_reader_matches_safetensors_for_every_dtype(tmp_path):
+def test_checkpoint_matches_safetensors_for_every_dtype(tmp_path):
     rng = np.random.default_rng(1)
     tensors = {
         "bf16": rng.normal(size=(3, 5)).astype(bfloat16),
         "f16": rng.normal(size=7).astype(np.float16),
         "f32": rng.normal(size=(2, 3, 4)).astype(np.float32),
-        "f64": rng.normal(size=4),
-        "i64": np.arange(-5, 6, dtype=np.int64),
-        "i32": np.arange(9, dtype=np.int32).reshape(3, 3),
-        "i16": np.array([-2, 7], dtype=np.int16),
-        "i8": np.array([-128, 0, 127], dtype=np.int8),
-        "u8": np.array([0, 255], dtype=np.uint8),
-        "bool": np.array([True, False, True]),
         "scalar": np.array(3.5, dtype=np.float32),
         "empty": np.empty((0, 4), dtype=np.float32),
     }
     path = tmp_path / "dtypes.safetensors"
     save_file(tensors, path, metadata={"format": "np"})
 
-    file = SafetensorsFile(path)
+    checkpoint = Checkpoint(path)
     expected = load_file(path)
-    assert set(file.keys()) == set(expected)
-    assert file.metadata == {"format": "np"}
+    assert set(checkpoint.tensors) == set(expected)
     for name, t in expected.items():
-        assert bitwise_equal(file[name], t), name
-        assert bitwise_equal(file[name], tensors[name]), name
+        assert bitwise_equal(checkpoint.tensors[name], t), name
+        assert bitwise_equal(checkpoint.tensors[name], tensors[name]), name
 
 
-def test_reader_views_the_mapping_without_copying(toy_path):
-    file = SafetensorsFile(toy_path)
-    a = file["model.norm.weight"]
-    b = file["model.norm.weight"]
-    assert a is not b and np.shares_memory(a, b)
+def test_checkpoint_views_the_mapping_without_copying(toy_path):
+    a = Checkpoint(toy_path).tensors["model.norm.weight"]
     assert not a.flags.writeable and not a.flags.owndata
     with pytest.raises(ValueError):
         a[0] = 0
@@ -152,58 +153,49 @@ def _resident_bytes(path: Path) -> int:
 
 
 def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
-    tree = LlamaWeights.load(toy_path)
-    before = {name: np.array(a) for name, a in tree.named_parameters()}
+    checkpoint = Checkpoint(toy_path)
+    weights = arrays(load_weights(checkpoint.tensors, TOY))
+    before = {name: np.array(a) for name, a in weights.items()}
     assert _resident_bytes(toy_path) > 0
-    for _, a in tree.named_parameters():
-        tree.release(a)
+    for a in weights.values():
+        checkpoint.release(a)
     # The tensors cover the whole file, header page included.
     assert _resident_bytes(toy_path) == 0
     # Read again, each faults back in from the file, unchanged.
-    for name, a in tree.named_parameters():
+    for name, a in weights.items():
         assert bitwise_equal(a, before[name]), name
     assert _resident_bytes(toy_path) > 0
 
 
-def test_release_is_only_for_views_of_the_mapping(toy_path):
-    file = SafetensorsFile(toy_path)
-    tree = LlamaWeights.from_file(file)
+def test_release_leaves_anything_else_alone(toy_path):
+    checkpoint = Checkpoint(toy_path)
     elsewhere = np.zeros(8, dtype=bfloat16)
-    assert not file.holds(elsewhere)
-    with pytest.raises(ValueError, match="not a contiguous view"):
-        file.release(elsewhere)
-    with pytest.raises(ValueError, match="not a contiguous view"):
-        file.release(tree.embedding[:, ::2])
-    # The tree releases what is its file's and leaves anything else alone.
-    tree.release(elsewhere)
-    assert not elsewhere.any()
+    checkpoint.release(elsewhere)
+    checkpoint.release(checkpoint.tensors["model.embed_tokens.weight"][:, ::2])
+    assert not elsewhere.any() and _resident_bytes(toy_path) > 0
 
 
 @pytest.mark.parametrize(
-    "end, data",
-    [(12, 12), (16, 8), (16, 24)],
-    ids=["range-disagrees-with-shape", "range-past-the-end", "trailing-bytes"],
+    "end, data", [(12, 12), (16, 8)], ids=["range-not-the-shape", "range-past-the-end"]
 )
-def test_reader_rejects_a_malformed_file(tmp_path, end, data):
-    """The header is safetensors' to check: a byte range that is not the
-    shape's, or data that is not exactly the tensors, is refused on open.
-    """
+def test_checkpoint_rejects_a_malformed_file(tmp_path, end, data):
+    """A byte range that is not the shape's is refused on open."""
     header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": [0, end]}}
     blob = json.dumps(header).encode()
     path = tmp_path / "bad.safetensors"
     path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(data))
-    with pytest.raises(SafetensorError):
-        SafetensorsFile(path)
+    with pytest.raises(ValueError):
+        Checkpoint(path)
 
 
-def test_reader_rejects_an_unsupported_dtype(tmp_path):
-    """One safetensors knows and the reader does not map: complex64."""
+def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
+    """One safetensors knows and a model's weights never are: complex64."""
     header = {"x": {"dtype": "C64", "shape": [4], "data_offsets": [0, 32]}}
     blob = json.dumps(header).encode()
     path = tmp_path / "c64.safetensors"
     path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(32))
-    with pytest.raises(ValueError, match="unsupported dtype"):
-        SafetensorsFile(path)
+    with pytest.raises(ValueError, match="C64"):
+        Checkpoint(path)
 
 
 # Tier 1 -- the tree
@@ -214,95 +206,59 @@ def test_each_checkpoint_tensor_lands_on_its_field_bitwise(toy_path):
     """Every tensor is distinct, so a mapping that crosses two same-shaped
     weights over (k and v, gate and up) is caught.
     """
-    weights = LlamaWeights.load(toy_path)
+    weights = load_weights(Checkpoint(toy_path).tensors, TOY)
     ckpt = load_file(toy_path)
-    assert len(weights.layers) == ToyConfig.n_layers
+    assert len(weights.layers) == TOY.n_layers
     assert bitwise_equal(weights.embedding, ckpt["model.embed_tokens.weight"])
     assert bitwise_equal(weights.norm, ckpt["model.norm.weight"])
     for i, layer in enumerate(weights.layers):
-        for f, (hf, _) in LAYER_NAMES.items():
+        assert list(vars(layer)) == list(LAYER_NAMES)
+        for f, hf in LAYER_NAMES.items():
             expected = ckpt[f"model.layers.{i}.{hf}"]
             assert bitwise_equal(getattr(layer, f), expected), (i, f)
 
 
-def test_tree_names_are_the_graphs(toy_path):
-    """named_parameters() is what ``iron.graph(names_from=...)`` reads: each
-    layer's weights in field order, then the norm and the tied head.
-    """
-    weights = LlamaWeights.load(toy_path)
-    expected = [
-        f"layers.{i}.{graph}"
-        for i in range(ToyConfig.n_layers)
-        for _, graph in LAYER_NAMES.values()
-    ] + ["norm.weight", "out_head.weight"]
-    assert [name for name, _ in weights.named_parameters()] == expected
-    named = dict(weights.named_parameters())
-    assert named["layers.1.attn.v.weight"] is weights.layers[1].v
-    assert named["out_head.weight"] is weights.embedding
+def test_tree_arrays_are_the_checkpoints(toy_path):
+    """The tracer names a weight by id(), so each is one array, as read."""
+    tensors = Checkpoint(toy_path).tensors
+    weights = load_weights(tensors, TOY)
+    assert weights.layers[1].v is tensors["model.layers.1.self_attn.v_proj.weight"]
+    ids = [id(a) for a in arrays(weights).values()]
+    assert len(set(ids)) == len(ids)
 
 
-def test_tree_arrays_keep_their_identity(toy_path):
-    """The tracer names a weight by id(); a fresh array per read would unname it."""
-    weights = LlamaWeights.load(toy_path)
-    first = [id(a) for _, a in weights.named_parameters()]
-    again = [id(a) for _, a in weights.named_parameters()]
-    assert first == again and len(set(first)) == len(first)
-    assert weights.out_head is weights.embedding
-    assert weights.layers[0].q is weights.layers[0].q
-
-
-def test_tree_rejects_a_missing_key(tmp_path):
+def test_tree_rejects_a_missing_key():
     ckpt = toy_checkpoint()
     del ckpt["model.layers.1.mlp.up_proj.weight"]
-    path = tmp_path / "missing.safetensors"
-    save_file(ckpt, path)
     with pytest.raises(ValueError, match=r"model\.layers\.1\.mlp\.up_proj\.weight"):
-        LlamaWeights.load(path)
+        load_weights(ckpt, TOY)
 
 
-def test_tree_rejects_a_missing_layer(tmp_path):
+def test_tree_rejects_a_missing_layer():
     """Layer 0 gone and layer 1 whole: the tree is still two layers, one
     of them missing, not one layer renumbered.
     """
     ckpt = {
         k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
     }
-    path = tmp_path / "gap.safetensors"
-    save_file(ckpt, path)
     with pytest.raises(ValueError, match=r"model\.layers\.0\.input_layernorm\.weight"):
-        LlamaWeights.load(path)
+        load_weights(ckpt, TOY)
 
 
-def test_tree_rejects_an_untied_head(tmp_path):
+def test_tree_rejects_an_untied_head():
     ckpt = toy_checkpoint()
     ckpt["lm_head.weight"] = ckpt["model.embed_tokens.weight"].copy()
-    path = tmp_path / "untied.safetensors"
-    save_file(ckpt, path)
     with pytest.raises(ValueError, match="lm_head.weight"):
-        LlamaWeights.load(path)
+        load_weights(ckpt, TOY)
 
 
-def test_tree_rejects_a_misshapen_layer(tmp_path):
+def test_tree_rejects_a_misshapen_layer():
     ckpt = toy_checkpoint()
-    good = ckpt["model.layers.1.self_attn.k_proj.weight"]
-    ckpt["model.layers.1.self_attn.k_proj.weight"] = np.zeros(
-        (good.shape[0], good.shape[1] + 1), dtype=bfloat16
-    )
-    path = tmp_path / "misshapen.safetensors"
-    save_file(ckpt, path)
-    with pytest.raises(ValueError, match="layer 1 k"):
-        LlamaWeights.load(path)
-
-
-def test_embed_gathers_rows(toy_path):
-    weights = LlamaWeights.load(toy_path)
-    table = load_file(toy_path)["model.embed_tokens.weight"]
-    ids = [[0, 31, 7, 7, 12]]
-    got = weights.embed(ids)
-    assert got.shape == (1, 5, ToyConfig.emb_dim)
-    for j, token in enumerate(ids[0]):
-        assert bitwise_equal(got[0, j], table[token])
-    assert got.flags.writeable  # a copy, not a view of the read-only map
+    name = "model.layers.1.self_attn.k_proj.weight"
+    good = ckpt[name]
+    ckpt[name] = np.zeros((good.shape[0], good.shape[1] + 1), dtype=bfloat16)
+    with pytest.raises(ValueError, match=re.escape(f"{name} is (16, 65)")):
+        load_weights(ckpt, TOY)
 
 
 # Tier 1 -- RoPE
@@ -463,56 +419,20 @@ requires_checkpoint = pytest.mark.skipif(
 )
 
 
-class RealConfig:
-    vocab_size = 128256
-    emb_dim = 2048
-    n_layers = 16
-    n_heads = 32
-    n_kv_groups = 8
-    head_dim = 64
-    hidden_dim = 8192
-
-
 @requires_checkpoint
 def test_real_checkpoint_every_tensor_bitwise():
-    file = SafetensorsFile(real_checkpoint)
+    tensors = Checkpoint(real_checkpoint).tensors
     expected = load_file(real_checkpoint)
-    assert set(file.keys()) == set(expected)
+    assert set(tensors) == set(expected)
     for name, t in expected.items():
-        assert bitwise_equal(file[name], t), name
+        assert bitwise_equal(tensors[name], t), name
 
 
 @requires_checkpoint
-def test_real_checkpoint_tree():
-    """The real key spelling fills every field, and nothing is left over."""
-    weights = LlamaWeights.load(real_checkpoint)
-    c = RealConfig
-    head, kv = c.n_heads * c.head_dim, c.n_kv_groups * c.head_dim
-    assert weights.embedding.shape == (c.vocab_size, c.emb_dim)
+def test_real_checkpoint_is_llama_3_2_1b():
+    """The real key spelling and shapes are the default config's, and
+    nothing is left over.
+    """
+    weights = load_weights(Checkpoint(real_checkpoint).tensors, Config())
     assert weights.embedding.dtype == bfloat16
-    assert weights.norm.shape == (c.emb_dim,)
-    assert len(weights.layers) == c.n_layers
-    for layer in weights.layers:
-        assert layer.norm1.shape == layer.norm2.shape == (c.emb_dim,)
-        assert layer.q.shape == (head, c.emb_dim)
-        assert layer.k.shape == layer.v.shape == (kv, c.emb_dim)
-        assert layer.o.shape == (c.emb_dim, head)
-        assert layer.gate.shape == layer.up.shape == (c.hidden_dim, c.emb_dim)
-        assert layer.down.shape == (c.emb_dim, c.hidden_dim)
-    expected = {"model.embed_tokens.weight", "model.norm.weight"} | {
-        f"model.layers.{i}.{hf}"
-        for i in range(c.n_layers)
-        for hf, _ in LAYER_NAMES.values()
-    }
-    assert set(SafetensorsFile(real_checkpoint).keys()) == expected
-
-
-@requires_checkpoint
-def test_real_checkpoint_embedding():
-    weights = LlamaWeights.load(real_checkpoint)
-    file = SafetensorsFile(real_checkpoint)
-    table = file["model.embed_tokens.weight"]
-    ids = [128000, 791, 6864, 315, 9822, 374, 220, 128255, 0]
-    got = weights.embed([ids])
-    for j, token in enumerate(ids):
-        assert bitwise_equal(got[0, j], table[token])
+    assert len(weights.layers) == Config().n_layers

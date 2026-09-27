@@ -20,7 +20,7 @@ from iron.operators.swiglu_decode.reference import (
     bf16_matmul,
     generate_golden_reference,
 )
-from iron.operators.swiglu_prefill.op import swiglu_prefill
+from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 
 
 def get_params():
@@ -50,7 +50,7 @@ def test_swiglu_prefill(
     def _as_stored(w):
         return np.ascontiguousarray(w.T) if b_col_maj else w
 
-    ffn = swiglu_prefill(
+    ffn = SwiGLUPrefill(
         _as_stored(golden_ref["w_gate"]),
         _as_stored(golden_ref["w_up"]),
         _as_stored(golden_ref["w_down"]),
@@ -104,7 +104,7 @@ def test_weight_layout_reaches_every_gemm(b_col_maj):
     E, H = 2048, 1024
     w = np.zeros((H, E) if b_col_maj else (E, H), dtype=bfloat16)
     down = np.zeros((E, H) if b_col_maj else (H, E), dtype=bfloat16)
-    t = swiglu_prefill(w, w, down, b_col_maj=b_col_maj).trace(x=(256, E))
+    t = SwiGLUPrefill(w, w, down, b_col_maj=b_col_maj).trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
     assert [g.b_col_maj for g in gemms] == [b_col_maj] * 3
     assert [(g.K, g.N) for g in gemms] == [(E, H), (E, H), (H, E)]

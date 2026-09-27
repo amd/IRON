@@ -24,7 +24,7 @@ function that puts the three together.
 
 from .build import device_symbol, generator_for
 from .generator import DesignGenerator
-from .runtime import Sequence, Transfers, has_size_kind, transfers
+from .runtime import Sequence, Transfers, transfers
 from .target import Target
 
 __all__ = [
@@ -34,6 +34,5 @@ __all__ = [
     "Transfers",
     "device_symbol",
     "generator_for",
-    "has_size_kind",
     "transfers",
 ]

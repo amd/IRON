@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""swiglu_prefill does not pad: a seq_len its inner GEMM cannot tile is an
+"""SwiGLUPrefill does not pad: a seq_len its inner GEMM cannot tile is an
 error at trace time, and an aligned one traces with the extents it was given.
 """
 
@@ -11,14 +11,14 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.operators.gemm.op import GEMM
-from iron.operators.swiglu_prefill.op import swiglu_prefill
+from iron.operators.swiglu_prefill.op import SwiGLUPrefill
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def _trace(seq_len, embedding_dim=2048, hidden_dim=2048):
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-    ffn = swiglu_prefill(
+    ffn = SwiGLUPrefill(
         z(embedding_dim, hidden_dim),
         z(embedding_dim, hidden_dim),
         z(hidden_dim, embedding_dim),

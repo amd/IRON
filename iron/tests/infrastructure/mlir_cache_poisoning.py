@@ -66,9 +66,11 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     """
     add = _operator()
 
-    @iron.graph
-    def probe(x, w):
-        return add(x, w)
+    class Probe(iron.Graph):
+        def body(self, x, w):
+            return add(x, w)
+
+    probe = Probe()
 
     seq = probe.trace(x=(SIZE,), w=(SIZE,)).sequence(
         "poisoning_probe", dispatch="fused"

@@ -1,19 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The graphs' references against the model's plain forward pass.
+"""The graph's reference against the model's plain forward pass.
 
 ``cpu.Reference`` is a stateless causal pass in float32 numpy, the oracle
-the NPU application is judged against. ``LlamaGraph.graph`` is the same
-computation as one graph function, called at a prompt's shape and at one
-token's, and ``GraphFunction.reference`` runs it operator by operator
-through each ``reference()`` on host tensors, with the per-call values
-modelled (the last prompt row selects the logits, the cache offset moves the
-copy, the vector size masks the softmax) and the caches as state. So the two
-can be compared without a device, from the same prompt: that checks the
-graph's wiring (layouts, reshapes, the scale, the repeat, the transposes,
-the caches the prompt leaves for decode) against the model, leaving only
-the kernels' arithmetic for hardware.
+the NPU application is judged against. ``Llama3_2_1b`` is the same
+computation as one graph, called at a prompt's shape and at one token's,
+and ``Graph.reference`` runs it operator by operator through each
+``reference()`` on host tensors, with the per-call values modelled (the
+last prompt row selects the logits, the cache offset moves the copy, the
+vector size masks the softmax) and the caches as state. :class:`OnHost` is
+the model with its images stood in by that reference, so the two can be
+compared without a device, through the application's own ``logits``:
+that checks the graph's wiring (layouts, reshapes, the scale, the repeat,
+the transposes, the caches the prompt leaves for decode) against the model,
+leaving only the kernels' arithmetic for hardware.
 
 The oracle needs no cache: the logits at position ``t`` of a causal pass
 over ``t + 1`` tokens are what a cached decode produces at step ``t``. The
@@ -21,101 +22,82 @@ graph computes in bfloat16 and the oracle in float32, so the logits agree
 to bf16 tolerance and the argmax exactly.
 """
 
+import dataclasses
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
 from iron.applications.llama_3_2_1b import runner
 from iron.applications.llama_3_2_1b.cpu import Reference
-from iron.applications.llama_3_2_1b.npu import AIELlama, LlamaGraph, prompt_rows
-from iron.applications.llama_3_2_1b.runner import LlamaModelState
-from iron.tests.common.llama_model import PROFILE
-from iron.tests.common.llama_model import Config as _Config
+from iron.applications.llama_3_2_1b.npu import Llama3_2_1b, prompt_rows
+from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
 
-def _embed(config, tokens):
-    return config.weights.embed(tokens)
+class _Output:
+    """What an image returns: a buffer read with ``numpy()``."""
+
+    def __init__(self, array):
+        self.array = array
+
+    def numpy(self):
+        return self.array
 
 
-def llama_graph(config, bounded=None):
-    """The graph at the test's context length; its profile fits the scaled model."""
-    return LlamaGraph(config, config.context_length, profile=PROFILE, bounded=bounded)
-
-
-def graph_prefill(config, graph, prompt):
-    """Run the prompt through the graph's reference; the logits of its last token.
-
-    The graph runs at the context length: the prompt fills the first rows
-    of ``x`` and the rest are zero; ``last`` picks the last prompt row.
+class OnHost(Llama3_2_1b):
+    """The model with its images stood in by its reference, which runs at
+    whatever shape it is called with.
     """
-    rows = config.context_length
-    E = config.emb_dim
-    n = prompt.shape[0]
-    x = np.zeros((rows, E), dtype=bfloat16)
-    x[:n] = _embed(config, prompt)
-    logits = graph.graph.reference(
-        x,
-        config.angles[:rows],
-        rows=prompt_rows(n, rows),
-        cache_offset=0,
-        vector_size=n,
-        last=n - 1,
-    )
-    return logits.reshape(-1).astype(np.float32)
+
+    profile = PROFILE
+
+    def __call__(self, *tensors, **values):
+        return _Output(self.reference(*tensors, **values))
 
 
-def graph_decode(config, graph, tokens, pos, *, vector_size=None):
-    """Feed ``tokens`` one at a time through the graph's reference from
-    position ``pos``, its caches as they are; the logits after each.
-    """
-    out = []
-    for step, token in enumerate(tokens):
-        x = _embed(config, token.reshape(1)).reshape(1, config.emb_dim)
-        angles = config.angles[pos : pos + 1]
-        n = pos + 1 if vector_size is None else vector_size(step, pos)
-        logits = graph.graph.reference(
-            x,
-            angles,
-            rows=1,
-            cache_offset=pos,
-            vector_size=n,
-            last=0,
-        )
-        out.append(logits.reshape(-1).astype(np.float32))
-        pos += 1
-    return out
-
-
-def greedy(config, graph, first_logits, pos, n_tokens):
-    """Generate ``n_tokens`` greedily through the decode reference from ``pos``."""
-    out, token = [], np.array(first_logits.argmax())
-    for _ in range(n_tokens):
-        (logits,) = graph_decode(config, graph, token.reshape(1), pos)
-        out.append(logits)
-        token = logits.argmax()
-        pos += 1
-    return out
+@dataclasses.dataclass
+class Case:
+    config: runner.Config
+    weights: SimpleNamespace
+    oracle: Reference
+    prompt: np.ndarray
+    first: np.ndarray
+    expected: list
 
 
 @pytest.fixture(scope="module")
 def cpu():
-    """A prompt, the oracle's logits for it, and six greedy tokens' logits."""
-    config = _Config()
-    oracle = Reference(config)
+    """The config, its weights, the oracle, a prompt, the oracle's logits
+    for it and six greedy tokens' logits.
+    """
+    config = SMALL
+    weights = random_weights(config)
+    oracle = Reference(config, weights)
     prompt = np.random.default_rng(1).integers(0, config.vocab_size, 8)
-    n_tokens = 6
     tokens, expected = prompt, []
-    first = oracle(tokens)
-    logits = first
-    for _ in range(n_tokens):
+    first = logits = oracle.logits(tokens)
+    for _ in range(6):
         tokens = np.append(tokens, logits.argmax())
-        logits = oracle(tokens)
+        logits = oracle.logits(tokens)
         expected.append(logits)
-    return config, prompt, first, expected
+    return Case(config, weights, oracle, prompt, first, expected)
+
+
+def _greedy(model, tokens, logits, n):
+    """The logits of ``n`` greedy decode steps after ``tokens``, whose own
+    are ``logits``.
+    """
+    history, out = list(tokens), []
+    for _ in range(n):
+        history.append(runner.greedy(logits))
+        logits = model.logits(history)
+        out.append(logits)
+    return out
 
 
 def _assert_close(got, expected):
     for step, (a, b) in enumerate(zip(got, expected)):
+        a = np.asarray(a, dtype=np.float32)
         scale = np.abs(b).max()
         err = np.abs(a - b).max()
         assert (
@@ -130,26 +112,24 @@ def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
     """One token at a time only: the prompt fed a token at a time from an
     empty cache, then the generated tokens.
     """
-    config, prompt, first, expected = cpu
-    graph = llama_graph(config)
-    over_prompt = graph_decode(config, graph, prompt, 0)
-    _assert_close([over_prompt[-1]], [first])
-    got = greedy(config, graph, over_prompt[-1], prompt.shape[0], len(expected))
-    _assert_close(got, expected)
+    model = OnHost(cpu.config, cpu.weights)
+    last = model.logits(cpu.prompt[:1])
+    for n in range(2, len(cpu.prompt) + 1):
+        last = model.logits(cpu.prompt[:n])
+    _assert_close([last], [cpu.first])
+    got = _greedy(model, cpu.prompt, last, len(cpu.expected))
+    _assert_close(got, cpu.expected)
 
 
-@pytest.mark.parametrize("bounded", [True, False], ids=["bounded", "unbounded"])
-def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu, bounded):
-    """At its own rows or at every row: the padding rows are masked and
-    past the prompt in the caches, so the logits are the same either way.
+def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
+    """The prompt at its own rows: the padding rows are masked and past the
+    prompt in the caches, and decode continues from the caches it wrote.
     """
-    config, prompt, first, expected = cpu
-    graph = llama_graph(config, bounded)
-    got_first = graph_prefill(config, graph, prompt)
-    _assert_close([got_first], [first])
-    # Decode continues from the caches the prompt wrote: the same states.
-    got = greedy(config, graph, got_first, prompt.shape[0], len(expected))
-    _assert_close(got, expected)
+    model = OnHost(cpu.config, cpu.weights)
+    first = model.logits(cpu.prompt)
+    _assert_close([first], [cpu.first])
+    got = _greedy(model, cpu.prompt, first, len(cpu.expected))
+    _assert_close(got, cpu.expected)
 
 
 def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
@@ -158,98 +138,47 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
     keys from the second token on. Modelled here: it drifts from the forward
     where the correct context length does not.
     """
-    config, prompt, first, expected = cpu
-    graph = llama_graph(config)
-    graph_prefill(config, graph, prompt)
-    cum = {"total": 0}
-
-    def cumulative(step, pos):
-        cum["total"] += pos + 1
-        return min(cum["total"], config.context_length)
-
-    tokens = np.array([first.argmax()] + [e.argmax() for e in expected[:-1]])
-    got = graph_decode(config, graph, tokens, prompt.shape[0], vector_size=cumulative)
+    model = OnHost(cpu.config, cpu.weights)
+    model.logits(cpu.prompt)
+    tokens = [runner.greedy(cpu.first)] + [runner.greedy(e) for e in cpu.expected]
+    got, total = [], 0
+    for pos, token in enumerate(tokens[:-1], start=len(cpu.prompt)):
+        total += pos + 1
+        out = model(
+            model.embedding[[token]],
+            model.angles[pos : pos + 1],
+            rows=1,
+            cache_offset=pos,
+            vector_size=min(total, cpu.config.max_seq_len),
+            last=0,
+        )
+        got.append(out.numpy().reshape(-1))
     # The first token is right (a sum of one term), later ones are not.
-    _assert_close(got[:1], expected[:1])
-    drift = [np.abs(a - b).max() for a, b in zip(got[1:], expected[1:])]
-    assert max(drift) > 0.05 * np.abs(expected[1]).max(), drift
+    _assert_close(got[:1], cpu.expected[:1])
+    drift = [np.abs(a - b).max() for a, b in zip(got[1:], cpu.expected[1:])]
+    assert max(drift) > 0.05 * np.abs(cpu.expected[1]).max(), drift
 
 
-class _Output:
-    """What an image returns: a buffer read with ``numpy()``."""
-
-    def __init__(self, array):
-        self.array = array
-
-    def numpy(self):
-        return self.array
-
-
-def application(config):
-    """npu.AIELlama with its graph function stood in by its reference,
-    which runs at whatever shape it is called with.
+def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
+    """What ``--check-accuracy`` runs, the images stood in by the graph's
+    reference: the model against the float32 reference, teacher-forced.
     """
-    graph = llama_graph(config)
-
-    def forward(*tensors, **values):
-        return _Output(graph.graph.reference(*tensors, **values))
-
-    return AIELlama(config, forward, config.context_length)
-
-
-def test_the_application_runs_both_phases_through_its_images(cpu):
-    """The application's own forward pass, its graph stood in by the reference: the
-    embedding, the prompt's padding and its last-row offset, the angles and
-    decode's values are the application's.
-    """
-    config, prompt, first, expected = cpu
-    npu = application(config)
-
-    state = LlamaModelState(config)
-    state.token_ids = prompt.reshape(1, -1)
-    logits, state = npu.forward(config, state)
-    assert logits.shape == (1, 1, config.vocab_size)
-
-    # The images return numpy, and so does the forward pass: the runner
-    # samples and scores in numpy.
-    assert isinstance(logits, np.ndarray)
-
-    def last(a):
-        return a[0, -1].astype(np.float32)
-
-    _assert_close([last(logits)], [first])
-    got, token = [], int(logits[0, -1].argmax())
-    for _ in range(len(expected)):
-        state.token_ids = np.array([[token]], dtype=np.int64)
-        logits, state = npu.forward(config, state)
-        got.append(last(logits))
-        token = int(logits[0, -1].argmax())
-    _assert_close(got, expected)
-
-
-def test_the_accuracy_check_scores_the_application_against_the_reference(cpu):
-    """What ``--check-accuracy`` runs, with the graph references for the
-    images: the application against the float32 reference, teacher-forced.
-    """
-    config, prompt, _, expected = cpu
-    npu = application(config)
-    state = LlamaModelState(config)
-    state.token_ids = prompt.reshape(1, -1)
-    results = runner.check_accuracy(config, state, npu.forward, len(expected) + 1)
+    model = OnHost(cpu.config, cpu.weights)
+    steps = len(cpu.expected) + 1
+    results = runner.accuracy(model, cpu.oracle, cpu.prompt, steps)
     assert all(top1 for _, top1 in results), results
     # bf16 graphs against a float32 forward: close, not equal.
     assert all(0 <= kl < 0.05 for kl, _ in results), results
     assert any(kl > 0 for kl, _ in results), results
 
 
-def test_the_determinism_check_finds_the_references_deterministic(cpu):
-    """What ``--check-determinism`` runs: two prompts, alternated, through
-    the application's forward pass; no run differs from the first.
+def test_the_determinism_check_finds_the_reference_deterministic(cpu):
+    """What ``--check-determinism`` runs: two prompts, alternated, each
+    rerun from a prefill; no run differs from the first.
     """
-    config, prompt, _, _ = cpu
-    npu = application(config)
-    prompts = [prompt.reshape(1, -1), prompt[::-1].reshape(1, -1)]
-    assert runner.check_determinism(config, prompts, npu.forward, 3, 3) == 0
+    model = OnHost(cpu.config, cpu.weights)
+    prompts = [cpu.prompt, cpu.prompt[::-1]]
+    assert runner.determinism(model, prompts, 3, 3) == 0
 
 
 def test_a_short_prompt_runs_at_its_own_rows():
@@ -257,18 +186,12 @@ def test_a_short_prompt_runs_at_its_own_rows():
     rows (``prompt_rows``), not the context, and its logits are the oracle's;
     decode continues from the caches it wrote.
     """
-
-    class Longer(_Config):
-        context_length = 1024
-
-    config = Longer()
-    oracle = Reference(config)
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    weights = random_weights(config)
+    model, oracle = OnHost(config, weights), Reference(config, weights)
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
-    assert prompt_rows(8, config.context_length) == 512 < config.context_length
-    graph = llama_graph(config)
-    first = oracle(prompt)
-    got_first = graph_prefill(config, graph, prompt)
-    _assert_close([got_first], [first])
-    token = first.argmax().reshape(1)
-    (got_next,) = graph_decode(config, graph, token, 8)
-    _assert_close([got_next], [oracle(np.append(prompt, token))])
+    assert prompt_rows(8, config.max_seq_len) == 512 < config.max_seq_len
+    first = oracle.logits(prompt)
+    _assert_close([model.logits(prompt)], [first])
+    tokens = np.append(prompt, first.argmax())
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])

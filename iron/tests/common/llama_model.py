@@ -3,95 +3,73 @@
 
 """Llama 3.2's shape at a size a host test runs in seconds, as numpy weights."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b.weights import LayerWeights, LlamaWeights
+from iron.applications.llama_3_2_1b.npu import Llama3_2_1b
+from iron.applications.llama_3_2_1b.runner import (
+    Config,
+    checkpoint_shapes,
+    load_weights,
+)
 from iron.common import Profile
-from iron.operators.rope.op import rope_angles
 
-# The knobs the graphs run with at :class:`Config`'s shape on NPU2: decode
+# The knobs the graph runs with at :data:`SMALL`'s shape on NPU2: decode
 # at 256 and 64 rows of context, the prompt at 64. The application's own
-# profiles are for Llama 1B's shape; :class:`Llama1B` runs under those.
+# profiles are for Llama 1B's shape, which :func:`llama_1b` runs under.
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
-
-def _shapes(cfg):
-    """Each LayerWeights field's shape, ``(out, in)`` for a matrix."""
-    E, F = cfg.emb_dim, cfg.hidden_dim
-    Q, KV = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
-    return {
-        "norm1": (E,),
-        "q": (Q, E),
-        "k": (KV, E),
-        "v": (KV, E),
-        "o": (E, Q),
-        "norm2": (E,),
-        "gate": (F, E),
-        "up": (F, E),
-        "down": (E, F),
-    }
+#: Llama's shape, small, and its RoPE table unscaled.
+SMALL = Config(
+    vocab_size=1024,
+    emb_dim=256,
+    n_layers=2,
+    n_heads=16,
+    n_kv_groups=4,
+    head_dim=64,
+    hidden_dim=512,
+    max_seq_len=64,
+    rope_scaling=None,
+)
 
 
-class Config:
-    """Llama's shape, small, with the weights drawn at a seed.
-
-    ``weights`` is the :class:`LlamaWeights` the graphs close over and the
-    float32 reference (``cpu.Reference``) reads; ``angles`` is the RoPE
-    table for ``context_length``, in bf16. Each projection is drawn uniform
-    in ``+-1/sqrt(in)``, each norm weight is one.
+def random_weights(config, seed=0):
+    """``config``'s weights through the checkpoint's names, drawn at ``seed``:
+    each matrix uniform in ``+-1/sqrt(in)``, each norm weight one.
     """
+    rng = np.random.default_rng(seed)
 
-    n_layers, n_heads, n_kv_groups, head_dim = 2, 16, 4, 64
-    emb_dim, hidden_dim, vocab_size = 256, 512, 1024
-    context_length = 64
+    def draw(shape):
+        if len(shape) == 1:
+            return np.ones(shape, dtype=bfloat16)
+        bound = 1.0 / np.sqrt(shape[1])
+        return rng.uniform(-bound, bound, shape).astype(bfloat16)
 
-    def __init__(self, seed=0):
-        rng = np.random.default_rng(seed)
-
-        def draw(shape):
-            if len(shape) == 1:
-                return np.ones(shape, dtype=bfloat16)
-            bound = 1.0 / np.sqrt(shape[1])
-            return rng.uniform(-bound, bound, shape).astype(bfloat16)
-
-        shapes = _shapes(self)
-        self.weights = LlamaWeights(
-            embedding=draw((self.vocab_size, self.emb_dim)),
-            norm=draw((self.emb_dim,)),
-            layers=tuple(
-                LayerWeights(**{f: draw(s) for f, s in shapes.items()})
-                for _ in range(self.n_layers)
-            ),
-        )
-        self.angles = rope_angles(self.head_dim, self.context_length).astype(bfloat16)
+    shapes = checkpoint_shapes(config)
+    return load_weights({k: draw(s) for k, s in shapes.items()}, config)
 
 
-class Llama1B(Config):
+def small(seed=0, **config) -> Llama3_2_1b:
+    """The model at :data:`SMALL`'s shape, as changed by ``config``, under
+    :data:`PROFILE`.
+    """
+    config = dataclasses.replace(SMALL, **config)
+    model = Llama3_2_1b(config, random_weights(config, seed))
+    model.profile = PROFILE
+    return model
+
+
+def llama_1b(n_layers=16) -> Llama3_2_1b:
     """Llama 3.2 1B's real shape with unset weights: for builds, not numbers.
 
     Each array is ``np.empty``, so the 2.5 GB is reserved and never
     touched. ``n_layers`` below 16 builds a shallower model of the same
     layer: the designs are the same at any depth.
     """
-
-    n_layers, n_heads, n_kv_groups, head_dim = 16, 32, 8, 64
-    emb_dim, hidden_dim, vocab_size = 2048, 8192, 128256
-    context_length = 2048
-
-    def __init__(self, n_layers=16):
-        self.n_layers = n_layers
-        shapes = _shapes(self)
-        self.weights = LlamaWeights(
-            embedding=np.empty((self.vocab_size, self.emb_dim), dtype=bfloat16),
-            norm=np.empty((self.emb_dim,), dtype=bfloat16),
-            layers=tuple(
-                LayerWeights(
-                    **{f: np.empty(s, dtype=bfloat16) for f, s in shapes.items()}
-                )
-                for _ in range(n_layers)
-            ),
-        )
-        self.angles = rope_angles(self.head_dim, self.context_length).astype(bfloat16)
+    config = Config(n_layers=n_layers)
+    shapes = checkpoint_shapes(config)
+    tensors = {k: np.empty(s, dtype=bfloat16) for k, s in shapes.items()}
+    return Llama3_2_1b(config, load_weights(tensors, config))

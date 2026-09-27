@@ -53,7 +53,7 @@ _T = TypeVar("_T")
 
 
 class _OperatorMeta(type):
-    """``GEMV(w, h)`` inside a graph function records a step; anything else constructs.
+    """``GEMV(w, h)`` inside a graph's body records a step; anything else constructs.
 
     A call with graph handles (or host tensors, which a graph closes over as
     weights) records a step; see :mod:`iron.common.graph`. Any other call
@@ -79,7 +79,7 @@ class _OperatorMeta(type):
         if args:
             raise TypeError(
                 f"{cls.__name__} is constructed by keyword ({cls.__name__}(M=..., "
-                f"K=...)); operands are given inside an @iron.graph function"
+                f"K=...)); operands are given inside a graph's body"
             )
         profile = current_profile()
         if profile is not None:
@@ -628,7 +628,7 @@ class Operator(metaclass=_OperatorMeta):
         """Per-call value name -> the graph value it is bound to."""
         return dict(self.__dict__.get("_used_values", {}))
 
-    # -- graph functions ---------------------------------------------------
+    # -- graphs ---------------------------------------------------------
 
     @classmethod
     def resolve_class(cls, n_operands: int, kwargs: dict) -> type:
@@ -647,7 +647,7 @@ class Operator(metaclass=_OperatorMeta):
         if tracer is None:
             raise TypeError(
                 f"{type(self).__name__} instances are called on graph handles inside "
-                f"an @iron.graph function; outside one, compile() and get_callable()"
+                f"a graph's body; outside one, compile() and get_callable()"
             )
         return tracer.call(self, args, kwargs)
 

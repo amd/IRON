@@ -43,13 +43,15 @@ def _function():
     w2 = _numbers(2 * E, 2)
     s = iron.state((E,), name="line")
 
-    @iron.graph
-    def f(x):
-        if x.shape[0] == E:
-            ElementwiseAdd(x, w, s, tile_size=TILE)
-            return ElementwiseAdd(s, w, tile_size=TILE)
-        y = ElementwiseAdd(x, w2, tile_size=TILE)
-        return ElementwiseAdd(y[E:], s, tile_size=TILE)
+    class F(iron.Graph):
+        def body(self, x):
+            if x.shape[0] == E:
+                ElementwiseAdd(x, w, s, tile_size=TILE)
+                return ElementwiseAdd(s, w, tile_size=TILE)
+            y = ElementwiseAdd(x, w2, tile_size=TILE)
+            return ElementwiseAdd(y[E:], s, tile_size=TILE)
+
+    f = F()
 
     return f, w, w2, s
 
@@ -127,13 +129,15 @@ def test_load_loads_a_version_whose_weights_are_already_uploaded():
     """
     w = _numbers(E, 1)
 
-    @iron.graph
-    def f(x):
-        if x.shape[0] == E:
-            return ElementwiseAdd(x, w, tile_size=TILE)
-        # An input is not sliced in place; an intermediate is.
-        y = ElementwiseAdd(x, x, tile_size=TILE)
-        return ElementwiseAdd(y[E:], w, tile_size=TILE)
+    class F(iron.Graph):
+        def body(self, x):
+            if x.shape[0] == E:
+                return ElementwiseAdd(x, w, tile_size=TILE)
+            # An input is not sliced in place; an intermediate is.
+            y = ElementwiseAdd(x, x, tile_size=TILE)
+            return ElementwiseAdd(y[E:], w, tile_size=TILE)
+
+    f = F()
 
     one = f.compile(x=(E,))
     two = f.compile(x=(2 * E,))

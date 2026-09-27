@@ -42,20 +42,22 @@ def _ffn():
     w_gate, w_up, w_down, norm_w = z(H, E), z(H, E), z(E, H), z(E)
     cache = iron.state((4, 1024, 64))
 
-    @iron.graph
-    def ffn(x, *, pos: Scratchpad[np.int32]):
-        h = RMSNorm(x, norm_w)  # a bare tensor is a weight
-        gate = GEMV(
-            w_gate, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
-        )
-        up = GEMV(
-            w_up, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
-        )
-        act = ElementwiseMul(SiLU(gate), up)
-        Copy(
-            act[: 4 * 64].reshape(4, 64), cache[:, pos]
-        )  # writes state; returns nothing
-        return GEMV(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
+    class Ffn(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            h = RMSNorm(x, norm_w)  # a bare tensor is a weight
+            gate = GEMV(
+                w_gate, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
+            )
+            up = GEMV(
+                w_up, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
+            )
+            act = ElementwiseMul(SiLU(gate), up)
+            Copy(
+                act[: 4 * 64].reshape(4, 64), cache[:, pos]
+            )  # writes state; returns nothing
+            return GEMV(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
+
+    ffn = Ffn()
 
     refs: dict[str, Any] = dict(
         w_gate=w_gate, w_up=w_up, w_down=w_down, norm_w=norm_w, cache=cache
@@ -167,11 +169,13 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
 
     c1, c2, c3 = (iron.state((4, 64, 16)) for _ in range(3))
 
-    @iron.graph
-    def f(x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
-        Copy(x, c1[:, a])
-        Copy(x, c2[:, b])
-        Copy(x, c3[:, a])
+    class F(iron.Graph):
+        def body(self, x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
+            Copy(x, c1[:, a])
+            Copy(x, c2[:, b])
+            Copy(x, c3[:, a])
+
+    f = F()
 
     t = f.trace(x=(4, 16))
     by_value = {b.value.name: b for b in t.bindings}
@@ -189,9 +193,11 @@ def test_an_explicit_instance_checks_its_operands_shapes():
     q = GEMV(M=256, K=E, num_aie_columns=8, tile_size_input=4, tile_size_output=32)
     w_t = z(E, 256)  # the weight transposed: the same element count
 
-    @iron.graph
-    def step(x):
-        return q(w_t, x)
+    class Step(iron.Graph):
+        def body(self, x):
+            return q(w_t, x)
+
+    step = Step()
 
     with pytest.raises(ValueError, match=r"GEMV.A is \(256, 2048\)"):
         step.trace(x=(E,))
@@ -200,17 +206,19 @@ def test_an_explicit_instance_checks_its_operands_shapes():
 def test_binding_two_handles_to_one_instance_is_an_error():
     copy = Copy(input_buffer_size=64, output_buffer_size=64)
 
-    @iron.graph
-    def two(x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
-        y = copy(x, out_offset=a)
-        return copy(y, out_offset=b)
+    class Two(iron.Graph):
+        def body(self, x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
+            y = copy(x, out_offset=a)
+            return copy(y, out_offset=b)
+
+    two = Two()
 
     with pytest.raises(ValueError, match="bound to Value\\('a'"):
         two.trace(x=(64,))
 
 
-def test_a_graph_function_carries_its_profile():
-    """A profile given to ``iron.graph`` reaches every run of the body: the
+def test_a_graph_carries_its_profile():
+    """A graph's profile reaches every run of the body: the
     trace and the host reference alike, with a call's own keyword kept.
     """
     profile = Profile()
@@ -218,9 +226,12 @@ def test_a_graph_function_carries_its_profile():
     profile.add(GEMV, M=E, tile_size_output=E // 8)
     w_a, w_b = z(256, E), z(E, 256)
 
-    @iron.graph(profile=profile)
-    def two(x):
-        return GEMV(w_b, GEMV(w_a, x, tile_size_output=32))
+    class Two(iron.Graph):
+        def body(self, x):
+            return GEMV(w_b, GEMV(w_a, x, tile_size_output=32))
+
+    two = Two()
+    two.profile = profile
 
     a, b = (s.op for s in two.trace(x=(E,)).steps)
     assert (a.tile_size_input, a.tile_size_output) == (4, 32)  # the call's own
@@ -233,30 +244,36 @@ def test_an_explicit_instance_is_applied_like_the_class():
     q = GEMV(M=256, K=E, num_aie_columns=8, tile_size_input=4, tile_size_output=32)
     w = z(256, E)
 
-    @iron.graph
-    def step(x):
-        return q(w, x)
+    class Step(iron.Graph):
+        def body(self, x):
+            return q(w, x)
+
+    step = Step()
 
     t = step.trace(x=(E,))
     assert t.runlist[0][0] is q and t.output_args == ["out"]
-    with pytest.raises(TypeError, match="inside an @iron.graph function"):
+    with pytest.raises(TypeError, match="inside a graph's body"):
         q(w, z(E))
 
 
 def test_shape_mismatch_and_rank_rules():
     w = z(256, E)
 
-    @iron.graph
-    def bad(x):
-        return GEMV(w, x)
+    class Bad(iron.Graph):
+        def body(self, x):
+            return GEMV(w, x)
+
+    bad = Bad()
 
     with pytest.raises(ValueError, match=r"K is 1024 from B.shape\[0\] but 2048"):
         bad.trace(x=(E // 2,))
     add = ElementwiseAdd
 
-    @iron.graph
-    def flat(x, y):
-        return add(x, y)  # a flat operator takes any rank
+    class Flat(iron.Graph):
+        def body(self, x, y):
+            return add(x, y)  # a flat operator takes any rank
+
+    flat = Flat()
 
     t = flat.trace(x=(4, 512), y=(4, 512))
     assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
@@ -265,43 +282,49 @@ def test_shape_mismatch_and_rank_rules():
 def test_keyword_only_parameters_must_be_annotated_as_values():
     with pytest.raises(TypeError, match="annotated Scratchpad"):
 
-        @iron.graph
-        def f(x, *, n):
-            return x
+        class F(iron.Graph):  # noqa: F841
+            def body(self, x, *, n):
+                return x
 
-    @iron.graph
-    def g(x, *, n: DispatchTime[np.int32]):
-        return SiLU(x)
+    class G(iron.Graph):
+        def body(self, x, *, n: DispatchTime[np.int32]):
+            return SiLU(x)
+
+    g = G()
 
     t = g.trace(x=(1024,))
     assert [(v.name, v.kind) for v in t.values] == [("n", "dispatch")]
 
 
 def test_returning_an_input_or_a_slice_is_refused():
-    @iron.graph
-    def ident(x):
-        return x
+    class Ident(iron.Graph):
+        def body(self, x):
+            return x
+
+    ident = Ident()
 
     with pytest.raises(TypeError, match="returns its input"):
         ident.trace(x=(64,))
 
-    @iron.graph
-    def part(x):
-        return SiLU(x)[:8]
+    class Part(iron.Graph):
+        def body(self, x):
+            return SiLU(x)[:8]
+
+    part = Part()
 
     with pytest.raises(TypeError, match="whole handles"):
         part.trace(x=(64,))
 
 
 # --------------------------------------------------------------------------
-# The two swiglu composites, as graph functions
+# The two swiglu composites, as graphs
 # --------------------------------------------------------------------------
 
 
 def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
     import iron.operators.swiglu_decode.op as m
 
-    ffn = m.swiglu_decode(z(H, E), z(H, E), z(E, H))
+    ffn = m.SwiGLUDecode(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
     assert [type(op).__name__ for op, *_ in t.runlist] == [
         "GEMV",
@@ -316,7 +339,7 @@ def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
     assert (gate.num_aie_columns, gate.tile_size_output) == (8, H // 8)
     assert t.input_args == ["x"] and t.output_args == ["out"]
     with pytest.raises(ValueError, match="do not agree"):
-        m.swiglu_decode(z(H, E), z(H, E), z(H, E))
+        m.SwiGLUDecode(z(H, E), z(H, E), z(H, E))
 
 
 def test_two_spellings_of_one_array_are_one_design():
@@ -350,7 +373,7 @@ def test_swiglu_prefill_traces_over_a_sequence():
     import iron.operators.swiglu_prefill.op as m
     from iron.operators.gemm.op import GEMM
 
-    ffn = m.swiglu_prefill(z(E, H), z(E, H), z(H, E))
+    ffn = m.SwiGLUPrefill(z(E, H), z(E, H), z(H, E))
     t = ffn.trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
@@ -365,13 +388,12 @@ def test_swiglu_prefill_traces_over_a_sequence():
 
 
 def test_llama_decode_traces_and_tunes():
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import PROFILE
-    from iron.tests.common.llama_model import Config as _Config
+    from iron.tests.common.llama_model import small
 
-    cfg = _Config()
     L = 256
-    t = LlamaGraph(cfg, L, profile=PROFILE).trace(cfg, 1)
+    model = small(max_seq_len=L)
+    cfg = model.config
+    t = model.trace(**model.shapes(1))
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "WeightedRMSNorm",
@@ -405,8 +427,8 @@ def test_llama_decode_traces_and_tunes():
     assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]
     assert {b.value.name for b in t.bindings} == {"cache_offset", "vector_size"}
     # The weights are named from the model; the caches are pinned state.
-    assert "layers.1.attn.q.weight" in t.pinned and "keys_cache_0" in t.pinned
-    assert t.pinned["keys_cache_0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
+    assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
+    assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
     # One strided copy instance per layer is bound to cache_offset on both of
     # its call sites; every softmax binds vector_size.
     copies = [
@@ -449,14 +471,12 @@ def test_llama_decode_traces_and_tunes():
 
 
 def test_llama_prompt_traces_over_the_same_caches():
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import PROFILE
-    from iron.tests.common.llama_model import Config as _Config
+    from iron.tests.common.llama_model import small
 
-    cfg = _Config()
-    L = cfg.context_length
-    g = LlamaGraph(cfg, L, profile=PROFILE, bounded=True)
-    t = g.trace(cfg, L)
+    g = small()
+    cfg = g.config
+    L = cfg.max_seq_len
+    t = g.trace(**g.shapes(L))
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "WeightedRMSNorm",
@@ -495,9 +515,9 @@ def test_llama_prompt_traces_over_the_same_caches():
     }
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
-    token = g.trace(cfg, 1)
+    token = g.trace(**g.shapes(1))
     assert set(t.states) == set(token.states)
-    assert t.residents["keys_cache_0"] == token.residents["keys_cache_0"]
+    assert t.residents["keys.0"] == token.residents["keys.0"]
     assert set(t.weights) == set(token.weights) - {id(g.scale)}
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
@@ -514,26 +534,6 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert offsets == [("Copy", "in_offset")]
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
-
-
-def test_an_unbounded_llama_prompt_runs_every_row():
-    """Without the size kind the prompt is not sliced: the same operators,
-    none bound by the rows, and MHA masked causally alone (its per-call
-    lengths are read only by a bounded build).
-    """
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
-    from iron.tests.common.llama_model import PROFILE
-    from iron.tests.common.llama_model import Config as _Config
-
-    cfg = _Config()
-    L = cfg.context_length
-    bounded = LlamaGraph(cfg, L, profile=PROFILE, bounded=True).trace(cfg, L)
-    t = LlamaGraph(cfg, L, profile=PROFILE, bounded=False).trace(cfg, L)
-    kinds = [type(op).__name__ for op, *_ in t.runlist]
-    assert kinds == [type(op).__name__ for op, *_ in bounded.runlist]
-    assert {b.value.name for b in t.bindings} == {"last"}
-    mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
-    assert mha.bound_values == {}
 
 
 def _resolved_fields(settings):
@@ -601,21 +601,16 @@ def test_llama_names_only_the_knobs_that_matter(monkeypatch):
     """
     from aie.iron.device import from_name
 
-    from iron.applications.llama_3_2_1b.npu import MAX_SEQ_LEN, LlamaGraph
-    from iron.tests.common.llama_model import PROFILE, Llama1B
-    from iron.tests.common.llama_model import Config as _Config
+    from iron.tests.common.llama_model import llama_1b, small
 
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
-    real, small = Llama1B(n_layers=1), _Config()
-    L = small.context_length
+    real, scaled = llama_1b(n_layers=1), small()
+    L, S = real.config.max_seq_len, scaled.config.max_seq_len
     settings = [
-        (npu2, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, 1)),
-        (npu1, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, 1)),
-        (npu2, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, MAX_SEQ_LEN)),
-        (
-            npu2,
-            lambda: LlamaGraph(small, L, profile=PROFILE).trace(small, L),
-        ),
+        (npu2, lambda: real.trace(**real.shapes(1))),
+        (npu1, lambda: real.trace(**real.shapes(1))),
+        (npu2, lambda: real.trace(**real.shapes(L))),
+        (npu2, lambda: scaled.trace(**scaled.shapes(S))),
     ]
     _every_keyword_is_load_bearing(monkeypatch, settings)
 
@@ -623,9 +618,11 @@ def test_llama_names_only_the_knobs_that_matter(monkeypatch):
 def test_a_bound_value_survives_tuning():
     copy = Copy(input_buffer_size=64, output_buffer_size=64)
 
-    @iron.graph
-    def f(x, *, a: Scratchpad[np.int32]):
-        return copy(x, out_offset=a)
+    class F(iron.Graph):
+        def body(self, x, *, a: Scratchpad[np.int32]):
+            return copy(x, out_offset=a)
+
+    f = F()
 
     f.trace(x=(64,))
     assert [v.name for v in copy.resolved(aie_utils.get_current_device()).values] == [
@@ -665,9 +662,11 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     from iron.common.graph.compiled import _words
     from iron.tests.common.declare import Rows
 
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32]):
-        return Rows(x[:n].reshape(64 * 8, 1))  # rows x 8 seen as rows*8 x 1
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return Rows(x[:n].reshape(64 * 8, 1))  # rows x 8 seen as rows*8 x 1
+
+    g = G()
 
     t = g.trace(x=(64, 8))
     (op,) = t.operators
@@ -686,9 +685,11 @@ def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
     it to ``n * 512`` elements, not ``n``.
     """
 
-    @iron.graph
-    def g(x, y, *, n: Scratchpad[np.int32]):
-        return ElementwiseAdd(x[:n], y[:n])
+    class G(iron.Graph):
+        def body(self, x, y, *, n: Scratchpad[np.int32]):
+            return ElementwiseAdd(x[:n], y[:n])
+
+    g = G()
 
     (b,) = g.trace(x=(64, 512), y=(64, 512)).bindings
     assert (b.member.name, b.value.name, b.scale) == ("valid", "n", 512)
@@ -703,9 +704,11 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     """
     from iron.common.graph.compiled import _words
 
-    @iron.graph
-    def g(x, y, *, n: Scratchpad[np.int32]):
-        return ElementwiseMul(ElementwiseAdd(x[:n], y[:n]), y[:n])
+    class G(iron.Graph):
+        def body(self, x, y, *, n: Scratchpad[np.int32]):
+            return ElementwiseMul(ElementwiseAdd(x[:n], y[:n]), y[:n])
+
+    g = G()
 
     t = g.trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
@@ -729,11 +732,13 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     G, D, L = 4, 8, 32  # traced at the cache's full length, as a prompt is
     keys = iron.state((G, L, D), name="keys")
 
-    @iron.graph
-    def g(x, *, n: Scratchpad[np.int32], c: Scratchpad[np.int32]):
-        k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
-        Copy(k, keys[:, :n])
-        return Repeat(keys[:, :c], repeat=2)
+    class Cached(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32], c: Scratchpad[np.int32]):
+            k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
+            Copy(k, keys[:, :n])
+            return Repeat(keys[:, :c], repeat=2)
+
+    g = Cached()
 
     t = g.trace(x=(L, G * D))
     copy, rep = t.operators
@@ -759,16 +764,18 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
     from iron.operators.gemm.op import GEMM
     from iron.operators.mha.op import MHA
 
-    @iron.graph
-    def g(x, w, *, n: Scratchpad[np.int32]):
-        h = GEMM(x[:n], w, b_col_maj=True)  # (512, 64) x (256, 64)^T
-        return MHA(
-            h.reshape(512, 4, 64),
-            h.reshape(512, 4, 64),
-            h.reshape(512, 4, 64),
-            heads_interleaved=True,
-            num_pipelines=2,
-        )
+    class G(iron.Graph):
+        def body(self, x, w, *, n: Scratchpad[np.int32]):
+            h = GEMM(x[:n], w, b_col_maj=True)  # (512, 64) x (256, 64)^T
+            return MHA(
+                h.reshape(512, 4, 64),
+                h.reshape(512, 4, 64),
+                h.reshape(512, 4, 64),
+                heads_interleaved=True,
+                num_pipelines=2,
+            )
+
+    g = G()
 
     t = g.trace(x=(512, 64), w=(256, 64))
     gemm, mha = t.operators

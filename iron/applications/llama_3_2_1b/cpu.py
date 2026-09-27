@@ -7,51 +7,47 @@
 token sequence, with no cache: the logits at position ``t`` of a causal pass
 over ``t + 1`` tokens are what a cached decode produces at step ``t``. It
 is written here rather than composed from the operators' references on
-purpose: the graph references define what the graphs compute, so only an
+purpose: the graph's reference defines what the graph computes, so only an
 independent forward can catch a wiring mistake, a transposed layout or a
-softmax over the wrong length. It is the oracle of the graphs on the host
+softmax over the wrong length. It is the oracle of the graph on the host
 (``iron/tests/common/llama_reference.py``) and of the accuracy check
-(:func:`.runner.check_accuracy`).
+(:func:`.runner.accuracy`).
 """
 
-import numpy as np
+from types import SimpleNamespace
 
-from .weights import LayerWeights
+import numpy as np
 
 # Llama's RMSNorm epsilon.
 EPS = np.float32(1e-5)
 
 
 class Reference:
-    """Llama 3.2's forward pass in float32, on ``config``'s weights and RoPE
-    table: the oracle the graphs and the NPU are judged against.
+    """Llama 3.2's forward pass in float32, on ``config``'s shape and RoPE
+    table and ``weights``, as :class:`.npu.Llama3_2_1b` takes them.
 
-    ``config`` is the model's shape (``n_heads``, ``n_kv_groups``,
-    ``head_dim``) with ``weights`` and ``angles``, the float32 table the
-    NPU's bf16 one is rounded from, so a difference between the two is the
-    NPU's arithmetic and nothing else.
-    The weights are widened to float32 once, here (exactly: every bf16 is a
-    float32), which for the 1B model is 5 GB.
+    The NPU's bf16 table is rounded from the same float32 one. The weights
+    are widened to float32 once, here (exactly: every bf16 is a float32),
+    which for the 1B model is 5 GB.
     """
 
-    def __init__(self, config):
-        weights = config.weights
-        self.n_heads, self.n_kv_groups = config.n_heads, config.n_kv_groups
-        self.head_dim = config.head_dim
+    def __init__(self, config, weights):
+        self.config = config
         self.embedding = weights.embedding.astype(np.float32)
         self.norm = weights.norm.astype(np.float32)
         self.layers = [
-            LayerWeights(**{f: a.astype(np.float32) for f, a in lw.arrays().items()})
+            SimpleNamespace(**{f: a.astype(np.float32) for f, a in vars(lw).items()})
             for lw in weights.layers
         ]
-        self.angles = np.asarray(config.angles, dtype=np.float32)
+        self.angles = config.angles()
 
-    def __call__(self, tokens) -> np.ndarray:
+    def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens`` (``(n,)``), ``(vocab_size,)``,
         each token attending to itself and those before it.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        (n,), H, G, D = tokens.shape, self.n_heads, self.n_kv_groups, self.head_dim
+        c = self.config
+        (n,), H, G, D = tokens.shape, c.n_heads, c.n_kv_groups, c.head_dim
         cos = self.angles[:n, None, ::2]
         sin = self.angles[:n, None, 1::2]
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tracing a graph function: the handles it threads and the steps it records."""
+"""Tracing a graph: the handles it threads and the steps it records."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ _STACK: list = []
 
 
 def current():
-    """The tracer a graph function is being traced under, or ``None``."""
+    """The tracer a graph is being traced under, or ``None``."""
     return _STACK[-1] if _STACK else None
 
 
@@ -122,7 +122,7 @@ def _take_views(cls, operands, kwargs, values, scales):
 
 @dataclasses.dataclass
 class TracedGraph:
-    """What tracing a graph function for given shapes produced.
+    """What tracing a graph for given shapes produced.
 
     ``weights`` and ``states`` are keyed by the identity of the object the
     function closed over, and hold that object, so the key stays its own.
@@ -193,9 +193,9 @@ class TracedGraph:
 
 
 class Tracer:
-    """Records operator calls on handles while a graph function runs."""
+    """Records operator calls on handles while a graph's body runs."""
 
-    def __init__(self, name: str, names_from=None):
+    def __init__(self, name: str, names: dict[int, str] | None = None):
         self.name = name
         self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
@@ -203,9 +203,8 @@ class Tracer:
         self.bindings: list[Binding] = []
         self._bound: dict[int, dict] = {}  # id(op) -> {member: Value}
         self._counter = itertools.count()
-        self._names = {}
-        if names_from is not None:
-            self._names = {id(p): n for n, p in names_from.named_parameters()}
+        # A name per tensor and state the graph holds, by identity.
+        self._names = names or {}
 
     def __enter__(self):
         _STACK.append(self)
@@ -217,7 +216,7 @@ class Tracer:
     # -- operands ---------------------------------------------------------
 
     def state_as(self, state: State):
-        """What stands for a state viewed inside the graph function: its handle."""
+        """What stands for a state viewed inside the graph's body: its handle."""
         return self.operand(state)
 
     def operand(self, x) -> Handle:
@@ -226,7 +225,7 @@ class Tracer:
         if isinstance(x, State):
             key = id(x)
             if key not in self.states:
-                x.name = x.name or f"state{len(self.states)}"
+                x.name = x.name or self._names.get(key) or f"state{len(self.states)}"
                 self.states[key] = (x, Handle(x.shape, x.dtype, x.name, "state"))
             return self.states[key][1]
         if is_operand(x):
@@ -315,7 +314,7 @@ class Tracer:
         if not isinstance(value, Value):
             raise TypeError(
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
-                f"keyword-only parameter of the graph function), got {value!r}"
+                f"keyword-only parameter of the graph's body), got {value!r}"
             )
         bound = self._bound.setdefault(id(op), {})
         if name in bound and bound[name] is not value:
