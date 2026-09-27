@@ -6,7 +6,7 @@
 An operator knows its own valid shapes: which column counts divide its
 size, how large a line its kernel holds, which layout flags change what is
 built. So it declares them beside itself, as :class:`Testing` on the class,
-and ``iron/operators/test.py`` runs every declaration against the
+and ``iron/tests/operators/catalog.py`` runs every declaration against the
 operator's ``reference()`` on a device.
 
 ``iron/tests/common/cases.py`` is a separate matrix: one small pinned case

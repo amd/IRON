@@ -63,20 +63,20 @@ written to the working directory, and `compile(record="disk")` writes the
 ### Run All Operators (non-extensive tests)
 
 ```bash
-pytest iron/operators/ -m "not extensive" --iterations 1
+pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive" --iterations 1
 ```
 
 ### Run Extensive Test Suite
 
 ```bash
-pytest iron/operators/
+pytest iron/operators/ iron/tests/operators/catalog.py
 ```
 
 ### Run Single Operator Test
 
 ```bash
-pytest iron/operators/test.py -k AXPY   # a declared Testing
-pytest iron/operators/swiglu/           # an operator with a test of its own
+pytest iron/tests/operators/catalog.py -k AXPY   # a declared Testing
+pytest iron/operators/flm/              # an operator with a test of its own
 ```
 
 ### Run Language Model Tests
@@ -88,14 +88,14 @@ pytest iron/lm/
 ### Run Specific Test Function
 
 ```bash
-pytest iron/operators/test.py -k relu
-pytest iron/operators/test.py -k GEMM
+pytest iron/tests/operators/catalog.py -k relu
+pytest iron/tests/operators/catalog.py -k GEMM
 ```
 
 ### Parallel Testing (faster)
 
 ```bash
-pytest iron/operators/ -n auto -m "not extensive"
+pytest iron/operators/ iron/tests/operators/catalog.py -n auto -m "not extensive"
 ```
 
 ## Code Style and Linting
@@ -152,7 +152,7 @@ reuse lint
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
-     device test of its own (`swiglu/`, `swiglu_prefill_stream/`). `flm/` is a catalog of its
+     device test of its own (`swiglu_prefill_stream/`). `flm/` is a catalog of its
      own: the FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they
      are measured against and their weight packing; its GEMM is not
      `iron.operators.GEMM`.
@@ -180,7 +180,7 @@ reuse lint
        (`iron/common/testing.py`): the shapes it is checked at on a device,
        any `draw=` its inputs need, and a `tolerance=` where the contract
        of the kernel it runs is not the gate. One module,
-       `iron/operators/test.py`, runs every declaration against
+       `iron/tests/operators/catalog.py`, runs every declaration against
        `reference()`. An operator whose device test is more than that (a
        composite compared step by step, a shipped binary against its own
        accumulator) keeps a `test.py` beside it.
@@ -393,7 +393,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
      tensor or shape per input), or a callable of the operator for an input
      with preconditions (a packed quantization, an angle table)
-   - `iron/operators/test.py` runs it; a test with a body of its own goes
+   - `iron/tests/operators/catalog.py` runs it; a test with a body of its own goes
      beside the operator and calls `run_test(op, vectors(op), ...)`, with
      `record_metric()` for any figure beyond latency, bandwidth and
      throughput
@@ -732,8 +732,11 @@ shared layer, plus its tokenizer and profiles:
 - `CausalLM` (`decoder.py`): a decoder as one graph, prefill and decode, the
   key and value caches, attention over them (`attend`) and
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
-  x)` and `head(x)`; `project(x, w)` is a weight's projection at either
-  row count (GEMV for one row, GEMM for more)
+  x)` and `head(x)`, built from `layers.py`: `project(x, w)`, a weight's
+  projection at either row count (GEMV for one row, GEMM for more), and
+  `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
+  device-tested by `iron/lm/test.py`). `rope_angles` (`decoder.py`) is the
+  RoPE table a `Config` names the base and scaling of
 - `Oracle` (`decoder.py`): the same decoder's float32 forward pass on the
   host, the reference the model is judged by, as an operator's is its
   `reference()` (not composed from the operators' references, so it catches

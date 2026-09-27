@@ -207,7 +207,7 @@ class Operator(metaclass=_OperatorMeta):
     _auto_fields: ClassVar[tuple[str, ...]] = ()
     _array_fields: ClassVar[tuple[str, ...]] = ()
     _external: ClassVar[Any] = None
-    # The cases iron/operators/test.py runs this operator at; None for an
+    # The cases iron/tests/operators/catalog.py runs this operator at; None for an
     # operator tested by its own test.py, or not on its own.
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself rather than having the

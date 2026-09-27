@@ -15,18 +15,29 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
 from iron.common import DispatchTime, Profile, Scratchpad
+from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
+from iron.common.graph.compiled import _words
+from iron.common.graph.handle import Value
+from iron.common.image import OperatorSequence
+from iron.lm.layers import SwiGLU
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
+from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.transpose import Transpose
+from iron.tests.common.declare import Rows
+from iron.tests.common.llama_model import llama_1b, small
 
 E, H = 2048, 8192
 
@@ -165,8 +176,6 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
     """Two copies alike in every field, one indexed by ``a`` and one by ``b``,
     write through two symbols and build twice; two bound to one value share.
     """
-    from iron.common.design.build import device_symbol
-
     c1, c2, c3 = (iron.state((4, 64, 16)) for _ in range(3))
 
     class F(iron.Graph):
@@ -322,7 +331,6 @@ def test_returning_an_input_or_a_slice_is_refused():
 
 
 def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
-    from iron.operators.swiglu.op import SwiGLU
 
     ffn = SwiGLU(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
@@ -348,8 +356,6 @@ def test_two_spellings_of_one_array_are_one_design():
     once. Every operator of a traced graph goes through the same point, so
     the design counts here are the gate on it.
     """
-    from iron.common.image import OperatorSequence
-
     a = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2)
     b = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2, tile_size_output=2)
     assert a.design_key() != b.design_key()  # as given
@@ -370,8 +376,6 @@ def test_two_spellings_of_one_array_are_one_design():
 
 
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
-    from iron.operators.gemm import GEMM
-    from iron.operators.swiglu.op import SwiGLU
 
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
@@ -388,7 +392,6 @@ def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
 
 def test_llama_decode_traces_and_tunes():
-    from iron.tests.common.llama_model import small
 
     L = 256
     model = small(max_seq_len=L)
@@ -471,7 +474,6 @@ def test_llama_decode_traces_and_tunes():
 
 
 def test_llama_prompt_traces_over_the_same_caches():
-    from iron.tests.common.llama_model import small
 
     g = small()
     cfg = g.config
@@ -599,10 +601,6 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     step and on NPU2 (MHA's) for a prompt; and the scaled-down shape the
     host tests trace, with the parameters that shape needs.
     """
-    from aie.iron.device import from_name
-
-    from iron.tests.common.llama_model import llama_1b, small
-
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
     real, scaled = llama_1b(n_layers=1), small()
     L, S = real.config.max_seq_len, scaled.config.max_seq_len
@@ -636,7 +634,6 @@ def test_a_bound_value_survives_tuning():
 
 
 def test_a_bound_travels_through_reshape_and_transpose():
-    from iron.common.graph.handle import Value
 
     n = Value("n", "scratchpad", np.int32)
     x = Handle((64, 8, 4), bfloat16, "x", "input")
@@ -659,8 +656,6 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     """Each bound value is a word, and so is every value an operator derives
     from a bounded extent, computed by the operator from the call's bound.
     """
-    from iron.common.graph.compiled import _words
-    from iron.tests.common.declare import Rows
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
@@ -702,7 +697,6 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     there. A derivation the library cannot see through (``count``) keeps
     its own word.
     """
-    from iron.common.graph.compiled import _words
 
     class G(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):
@@ -726,9 +720,6 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     walk; ``keys[:, :n]`` on axis 1 of its destination; ``keys[:, :c]`` on the
     stack axis of a Repeat, whose output carries the bound on.
     """
-    from iron.operators.copy import Copy
-    from iron.operators.repeat import Repeat
-
     G, D, L = 4, 8, 32  # traced at the cache's full length, as a prompt is
     keys = iron.state((G, L, D), name="keys")
 
@@ -761,8 +752,6 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
     length (a select shape): each derives the counts its cores compute per
     call, makes no word of tiles per lane, and keeps every descriptor.
     """
-    from iron.operators.gemm import GEMM
-    from iron.operators.mha import MHA
 
     class G(iron.Graph):
         def body(self, x, w, *, n: Scratchpad[np.int32]):

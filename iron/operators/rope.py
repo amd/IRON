@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """RoPE, rotary position embedding, over the mlir-aie ``datamovement.rope``
-kernel, with its angle table (:func:`rope_angles`) and Llama 3's frequency
-scaling (:data:`LLAMA_3_2`).
+kernel. The angle table is the caller's: ``(positions, cols)``, cos and sin
+of each rotation interleaved (a decoder's is :func:`iron.lm.rope_angles`).
 
 The kernel rotates in one of two conventions, ``method_type``: the two
 halves of each row (0, the default) or interleaved pairs (1). Hugging
@@ -14,7 +14,6 @@ for the halves, so with those weights it must be the halves
 """
 
 import dataclasses
-from collections.abc import Callable
 
 import numpy as np
 from aie.iron import ObjectFifo, Worker, kernels
@@ -67,9 +66,15 @@ def _cases(cls):
 
 
 def _angles(op):
-    # One angle row per position, applied to rows // angle_rows consecutive
-    # rows of x (the heads of one position, in the design's layout).
-    return dict(angles=angle_table(op.angle_rows, op.cols))
+    """An angle table of random rotations: one row per position, applied to
+    ``rows // angle_rows`` consecutive rows of x (the heads of one position,
+    in the design's layout), cos and sin of each angle interleaved.
+    """
+    rng = np.random.default_rng(0)
+    theta = rng.uniform(-np.pi, np.pi, (op.angle_rows, op.cols // 2))
+    table = np.empty((op.angle_rows, op.cols), dtype=np.float32)
+    table[:, ::2], table[:, 1::2] = np.cos(theta), np.sin(theta)
+    return dict(angles=table.astype(bfloat16))
 
 
 class RoPE(Operator):
@@ -243,90 +248,3 @@ class RoPE(Operator):
             two_halves=self.method_type == 0,
         )
         return y.reshape(x.shape, copy=False)
-
-
-# --------------------------------------------------------------------------
-# The angle table the kernel reads.
-# --------------------------------------------------------------------------
-
-
-#: A RoPE frequency scaling: the frequencies (radians per position, float64)
-#: in, scaled out. :class:`Llama3RopeScaling` is Llama 3's.
-RopeScaling = Callable[[np.ndarray], np.ndarray]
-
-
-@dataclasses.dataclass(frozen=True)
-class Llama3RopeScaling:
-    """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``).
-
-    How Llama 3.1 and later stretch a model trained at
-    ``original_max_position_embeddings`` to a longer context, by frequency:
-    one whose wavelength is under ``original / high_freq_factor`` positions
-    is kept, one over ``original / low_freq_factor`` is divided by
-    ``factor``, and one between is interpolated between the two by where its
-    wavelength falls. The fields are the checkpoint's ``rope_scaling``.
-    """
-
-    factor: float
-    low_freq_factor: float
-    high_freq_factor: float
-    original_max_position_embeddings: int
-
-    def __call__(self, inv_freq: np.ndarray) -> np.ndarray:
-        """``inv_freq`` (radians per position, per frequency), scaled."""
-        original = self.original_max_position_embeddings
-        wavelen = 2 * np.pi / inv_freq
-        smooth = (original / wavelen - self.low_freq_factor) / (
-            self.high_freq_factor - self.low_freq_factor
-        )
-        between = (1 - smooth) * inv_freq / self.factor + smooth * inv_freq
-        return np.where(
-            wavelen < original / self.high_freq_factor,
-            inv_freq,
-            np.where(
-                wavelen > original / self.low_freq_factor,
-                inv_freq / self.factor,
-                between,
-            ),
-        )
-
-
-#: Llama 3.2's scaling, as its checkpoints' ``rope_scaling`` gives it.
-LLAMA_3_2 = Llama3RopeScaling(
-    factor=32.0,
-    low_freq_factor=1.0,
-    high_freq_factor=4.0,
-    original_max_position_embeddings=8192,
-)
-
-
-def rope_angles(
-    head_dim: int,
-    context_length: int,
-    rope_base: float = 500000.0,
-    scaling: RopeScaling | None = None,
-) -> np.ndarray:
-    """The RoPE table, ``(context_length, head_dim)`` float32: cos and sin
-    interleaved per frequency, as the kernel reads it.
-
-    ``inv_freq`` and each ``position * inv_freq`` are rounded to float32;
-    ``scaling``, if given, is applied to the frequencies in float64 before
-    that rounding, and each transcendental is evaluated in float64 and
-    rounded once, so every entry is the correctly rounded float32 of the
-    formula.
-    """
-    exponents = np.arange(0, head_dim, 2, dtype=np.float32) / np.float32(head_dim)
-    inv_freq = 1.0 / np.power(rope_base, exponents.astype(np.float64))
-    if scaling is not None:
-        inv_freq = scaling(inv_freq)
-    inv_freq = inv_freq.astype(np.float32)
-    freqs = np.outer(np.arange(context_length, dtype=np.float32), inv_freq)
-    angles = np.empty((context_length, head_dim), dtype=np.float32)
-    angles[:, ::2] = np.cos(freqs.astype(np.float64))
-    angles[:, 1::2] = np.sin(freqs.astype(np.float64))
-    return angles
-
-
-def angle_table(rows, cols):
-    """The ``angles`` buffer for ``rows`` positions, bf16: Llama 3.2's table."""
-    return rope_angles(cols, rows, scaling=LLAMA_3_2).astype(bfloat16)

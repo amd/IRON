@@ -28,6 +28,7 @@ reference it is judged by; a model subclasses it too, with a numpy
 
 import dataclasses
 import math
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import numpy as np
@@ -41,16 +42,46 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
-from iron.operators.rope import RopeScaling, rope_angles
 from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
+
+#: A RoPE frequency scaling: the frequencies (radians per position, float64)
+#: in, scaled out (Llama 3's is :class:`~iron.lm.llama3.model.Llama3RopeScaling`).
+RopeScaling = Callable[[np.ndarray], np.ndarray]
+
+
+def rope_angles(
+    head_dim: int,
+    context_length: int,
+    rope_base: float = 500000.0,
+    scaling: RopeScaling | None = None,
+) -> np.ndarray:
+    """The RoPE table, ``(context_length, head_dim)`` float32: cos and sin
+    interleaved per frequency, as the RoPE kernel reads it.
+
+    ``inv_freq`` and each ``position * inv_freq`` are rounded to float32;
+    ``scaling``, if given, is applied to the frequencies in float64 before
+    that rounding, and each transcendental is evaluated in float64 and
+    rounded once, so every entry is the correctly rounded float32 of the
+    formula.
+    """
+    exponents = np.arange(0, head_dim, 2, dtype=np.float32) / np.float32(head_dim)
+    inv_freq = 1.0 / np.power(rope_base, exponents.astype(np.float64))
+    if scaling is not None:
+        inv_freq = scaling(inv_freq)
+    inv_freq = inv_freq.astype(np.float32)
+    freqs = np.outer(np.arange(context_length, dtype=np.float32), inv_freq)
+    angles = np.empty((context_length, head_dim), dtype=np.float32)
+    angles[:, ::2] = np.cos(freqs.astype(np.float64))
+    angles[:, 1::2] = np.sin(freqs.astype(np.float64))
+    return angles
 
 
 @dataclasses.dataclass(frozen=True)
 class Config:
     """A decoder's shape. ``max_seq_len`` is the rows the caches hold,
     prompt and generated tokens together; ``rope_scaling`` rescales the RoPE
-    frequencies (Llama 3.2's is ``LLAMA_3_2``).
+    frequencies (:data:`RopeScaling`).
     """
 
     vocab_size: int

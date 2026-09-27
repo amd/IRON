@@ -10,9 +10,8 @@ runs each: construct, draw inputs with :func:`vectors`, dispatch, and
 judge every output element against ``reference()`` by the declared
 tolerance, or else by the contract of the kernel the operator runs.
 
-An operator whose device test is more than that (a composite compared step
-by step, a shipped binary checked against its own accumulator) has its own
-``test.py`` beside it.
+An operator whose device test is more than that (a shipped binary checked
+against its own accumulator, say) has its own ``test.py`` beside it.
 """
 
 import aie.utils as aie_utils
@@ -42,9 +41,6 @@ def _declared():
     params = []
     for name in sorted(catalog._OPERATOR_MODULES):
         cls = getattr(catalog, name)
-        # A composite (SwiGLU) is a graph, tested by its own test.py.
-        if not (isinstance(cls, type) and issubclass(cls, Operator)):
-            continue
         declaration = cls.test
         if declaration is None:
             continue

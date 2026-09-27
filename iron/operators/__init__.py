@@ -13,9 +13,9 @@ The FastFlowLM ports, and the binary they are measured against, are
 
 import importlib
 
-# Operator name -> the module that defines it, relative to this package. A
-# small operator is one file (``relu``); one with a design, a reference or a
-# test of its own keeps a directory (``swiglu.op``).
+# Operator name -> the module that defines it, relative to this package: one
+# file (``relu``), or ``<directory>.op`` for one that keeps a design, a
+# reference or a test of its own beside it.
 _OPERATOR_MODULES = {
     "AXPY": "axpy",
     "Dequant": "dequant",
@@ -36,7 +36,6 @@ _OPERATOR_MODULES = {
     "SiLU": "silu",
     "Softmax": "softmax",
     "Copy": "copy",
-    "SwiGLU": "swiglu.op",
     "Tanh": "tanh",
     "Transpose": "transpose",
 }

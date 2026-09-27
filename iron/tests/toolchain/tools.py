@@ -16,6 +16,8 @@ aie = pytest.importorskip("aie")
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
+from iron.lm.layers import SwiGLU  # noqa: E402
+
 AIECC = Path(shutil.which("aiecc") or Path(aie.__file__).parents[2] / "bin" / "aiecc")
 AIEBU = shutil.which("aiebu-asm")
 XCLBINUTIL = shutil.which("xclbinutil")
@@ -45,8 +47,6 @@ DEVICES = {
 
 def swiglu():
     """The SwiGLU graph at Llama 3.2 1B's width, and that width."""
-    from iron.operators.swiglu.op import SwiGLU
-
     z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
     E, H = 2048, 8192
     return SwiGLU(z(H, E), z(H, E), z(E, H)), E

@@ -140,9 +140,8 @@ CASES = [
     ),
     ("silu", "SiLU", [dict(size=1024, num_aie_columns=1, tile_size=256)]),
     ("softmax", "Softmax", [dict(rows=16, cols=64)]),
-    # SwiGLU is a graph and SwiGLUPrefillStream an OperatorSequence:
-    # neither declares buffers of its own. Only the leaf
-    # operator of that family does, the per-group stream operator, covered here.
+    # SwiGLUPrefillStream is an OperatorSequence and declares no buffers of
+    # its own; its per-group stream operator does, covered here.
     (
         "copy",
         "Copy",

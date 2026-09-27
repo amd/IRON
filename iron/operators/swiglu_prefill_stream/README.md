@@ -45,7 +45,7 @@ holds. The groups are `stream_design.GROUP_LAYERS`.
 | 5 | one per layer | layer by layer, each taking the whole array in turn |
 
 k=1 and k=2 fuse several layers onto each core, so intermediates stay on chip. k=5 is
-the shape [`SwiGLU`](../swiglu/op.py) takes, every layer its own design.
+the shape [`SwiGLU`](../../lm/layers.py) takes, every layer its own design.
 
 A core holds the operands of every layer in its group, so the kernel tile a group can
 afford shrinks as more layers fuse onto it. That is why the tile is chosen per `k`

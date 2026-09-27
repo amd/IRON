@@ -53,7 +53,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope.py](./iron/operators/rope.py) |
 | [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu.py](./iron/operators/silu.py) |
 | [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax.py](./iron/operators/softmax.py) |
-| SwiGLU | The gated feed-forward block, a graph of GEMV or GEMM (by row count), SiLU and element-wise multiplication | bfloat16 | | ✓ | 🟢 | [iron/operators/swiglu/](./iron/operators/swiglu/) |
+| SwiGLU | The gated feed-forward block, a graph of GEMV or GEMM (by row count), SiLU and element-wise multiplication | bfloat16 | | ✓ | 🟢 | [iron/lm/layers.py](./iron/lm/layers.py) |
 | [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
 | Copy | A copy between two views, moved by the DMAs alone (no kernel) | any | ✓ | ✓ | 🟢 | [iron/operators/copy.py](./iron/operators/copy.py) |
 | [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |
@@ -143,7 +143,7 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 1. To test your installation, you can try to build and run the example below:
    ```bash
-   pytest iron/operators/test.py -k AXPY
+   pytest iron/tests/operators/catalog.py -k AXPY
    ```
 
 ### Building/Using & Testing Operators
@@ -152,7 +152,7 @@ All available operators can be found in `iron/operators`. These each contain:
 
 - `op.py` (or `<name>.py` for a small operator): The operator, one declared class (see `iron/common/declare/` and the Architecture section of `AGENTS.md`): its tunables, its operands declared by shape with the tile each streams into the array in, the values the cores read, and `array()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The library derives the runtime sequence from that declaration, or the operator writes it by hand. One array serves every extent, so one build of it serves many shapes.
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
-- `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/operators/test.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
+- `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/tests/operators/catalog.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
 Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/lm/llama3/model.py` is the worked example, its tunables a `Profile` the graph carries rather than keywords at every call).
 
@@ -163,19 +163,19 @@ Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is call
 To build and test all the operators:
 
 ``` bash
-pytest iron/operators/ -m "not extensive"
+pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive"
 ```
 
 To run the extensive test suite:
 
 ``` bash
-pytest iron/operators/
+pytest iron/operators/ iron/tests/operators/catalog.py
 ```
 
 To run a specific operator's tests:
 
 ``` bash
-pytest iron/operators/test.py -k AXPY
+pytest iron/tests/operators/catalog.py -k AXPY
 ```
 
 ### Git Hooks (Optional but Recommended)
@@ -212,7 +212,7 @@ See [iron/lm/llama3/README.md](./iron/lm/llama3/README.md) for setup and usage i
 IRON uses a three-layer architecture:
 
 1. **Operators** (`iron/operators/`): High-level Python API for NPU operations
-   - Each operator is one declared class with its array and its CPU reference (a file at the root, or `op.py` in a package), and a `test = Testing(...)` that `iron/operators/test.py` runs; a few keep a `test.py` beside them for a device test of their own
+   - Each operator is one declared class with its array and its CPU reference (a file at the root, or `op.py` in a package), and a `test = Testing(...)` that `iron/tests/operators/catalog.py` runs; a few keep a `test.py` beside them for a device test of their own
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)): Low-level C++ compute kernels
    - Organized by family (`activation/`, `eltwise/`, `linalg/`, `norm/`, ...); architecture-specific
@@ -237,7 +237,7 @@ Run benchmarks:
 
 ```bash
 # Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ -m "not extensive" -v
+pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive" -v
 ```
 
 ## Community and Support

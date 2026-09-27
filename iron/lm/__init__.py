@@ -9,8 +9,9 @@ A model is five things over this package:
 * its :class:`Config`, the shape;
 * a :class:`CausalLM`, the decoder on the NPU as one graph (prefill and
   decode, the caches, attention over them and ``logits(tokens)``), to
-  which it gives its ``layer`` and ``head``; :func:`project` is a weight's
-  projection at either row count;
+  which it gives its ``layer`` and ``head``, built from :mod:`.layers`
+  (:func:`project`, a weight's projection at either row count, and
+  :func:`swiglu`, the SwiGLU feed-forward);
 * an :class:`Oracle`, the same decoder's float32 forward pass on the host
   that it is judged by, to which it gives the same ``layer`` and ``head``
   in numpy;
@@ -28,11 +29,18 @@ its profiles. Nothing in the library imports a model, so one can be
 replaced or deleted on its own.
 """
 
-from iron.operators.projection import project
-
 from .checkpoint import Checkpoint, Layout, checkpoint_shapes, load_weights
-from .decoder import CausalLM, Config, Oracle, Step, prompt_rows
+from .decoder import (
+    CausalLM,
+    Config,
+    Oracle,
+    RopeScaling,
+    Step,
+    prompt_rows,
+    rope_angles,
+)
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
+from .layers import SwiGLU, project, swiglu
 from .runner import Runner, main
 
 __all__ = [
@@ -42,9 +50,11 @@ __all__ = [
     "Config",
     "Layout",
     "Oracle",
+    "RopeScaling",
     "Runner",
     "Sampler",
     "Step",
+    "SwiGLU",
     "accuracy",
     "checkpoint_shapes",
     "determinism",
@@ -54,4 +64,6 @@ __all__ = [
     "main",
     "project",
     "prompt_rows",
+    "rope_angles",
+    "swiglu",
 ]

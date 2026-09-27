@@ -16,8 +16,8 @@ from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
 from iron.common.harness import record_metric, verify_buffer
+from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.swiglu.op import SwiGLU
 
 # (rows, embedding_dim, hidden_dim). Qwen3.5-0.8B's FFN is 1024 by 3584.
 SHAPES = [(1, 2048, 2048), (1, 1024, 3584), (256, 2048, 2048)]

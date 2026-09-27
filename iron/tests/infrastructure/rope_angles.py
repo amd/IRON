@@ -11,7 +11,8 @@ import math
 
 import numpy as np
 
-from iron.operators.rope import LLAMA_3_2, rope_angles
+from iron.lm import rope_angles
+from iron.lm.llama3.model import LLAMA_3_2
 
 
 def test_rope_is_the_formula_rounded_once():
