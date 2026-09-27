@@ -12,6 +12,7 @@ validated against.
 
 import numpy as np
 import pytest
+from aie.utils import bfp
 
 from iron.operators.flm.dequant.design import (
     CORE_JOIN_OFFSETS,
@@ -26,7 +27,7 @@ from iron.operators.flm.dequant.design import (
     S,
     T,
 )
-from iron.operators.flm.packing import f32_to_bfp16ebs8, pack_b
+from iron.operators.flm.packing import pack_b
 
 # Every distinct (K in-features, N out-features) Gemma4 E2B needs, from
 # hidden_size 1536, intermediate_size 6144, DQ/DK/DV 4096/512/512 and the SWA
@@ -117,7 +118,7 @@ def test_bytes_match_pack_b(K, N):
     slot = np.broadcast_to(np.arange(K)[None, :] % S, blk.shape)
     flat = np.empty(K * N, dtype=np.float32)
     flat[(blk * S + slot).ravel()] = B.T.ravel()
-    mine = f32_to_bfp16ebs8(flat.reshape(-1, 8), round_conv_even=False)
+    mine = bfp.encode(flat, rounding="floor")
 
     assert np.array_equal(mine, golden)
 
