@@ -304,7 +304,8 @@ Common operator parameters and their constraints:
   - `True` (default): 8×8×8 minimum
   - `False`: 4×8×8 minimum
 - Matrix dimensions must be multiples of `tile × num_rows/columns`
-  - `M % (tile_m * 4) == 0`
+  - `M % (tile_m * n_aie_rows) == 0`, the rows the bound device's
+    `core_rows` names (4 on NPU1 and NPU2)
   - `K % tile_k == 0`
   - `N % (tile_n * num_aie_columns) == 0`
 
@@ -330,7 +331,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      by `resolve(dev)` from the device and the extents
    - `In`/`Out` operands by shape, each with its `tile=` in the units a
      core reads (`per=` a column count): an operand with a tile is its own
-     stream, `op.x.lane(i)` a shim endpoint, `op.x.tile` the fifo type
+     stream, `op.x.lane(i)` a shim endpoint, `op.x.tile` the fifo type;
+     `when=flag`, a bool `param()`, makes an operand (and its stream) exist
+     only where the flag is true, and a graph call sets an open flag from
+     the operands it gives (`RMSNorm(x, w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
      `param(..., array=True)`
@@ -507,7 +511,8 @@ code before relying on a line here; it is the authority.
   array-tier). A per-call size needs mlir-aie's size-kind scratchpad
   parameter, `fill/drain(size_parameters=)`, on its iron-next branch.
 - **DMA descriptors** (mlir-aie's `verifyStridesWraps`, enforced by
-  `tiling.legalize`): the innermost dimension holds at most 1023 granules
+  `tiling.legalize`, the fields read from the device's target model by
+  `tiling.limits()`): the innermost dimension holds at most 1023 granules
   unless the transfer is linear, the next at most 1023 elements, the third
   has no wrap field, and the outermost is the iteration count (at most 64)
   and the only one whose stride may be 0.
