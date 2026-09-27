@@ -119,6 +119,13 @@ class RoPE(Operator):
         if not (self.angle_rows >= n and self.angle_rows % n == 0):
             raise Incompatible("angle_rows must be divisible by num_aie_columns")
 
+    def extent_unit(self, buffer: str) -> int | None:
+        """Under a bound the rows go round-robin over the columns, the input
+        and output a position at a time (the rows one angle row serves), so
+        each core gets the angle row of every position it rotates.
+        """
+        return self.rows // self.angle_rows if buffer in ("x", "y") else None
+
     def array(self, target) -> list:
 
         tile = self.x.tile

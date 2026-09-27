@@ -666,6 +666,38 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     assert dim == 1 and (batched.M // (2 * 64)) == 2
 
 
+def _elements(acc: Access) -> np.ndarray:
+    """The flat offsets an access reads, in the order it reads them."""
+    idx = np.indices(acc.sizes).reshape(4, -1).T
+    return acc.offset + idx @ np.array(acc.strides)
+
+
+def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles(npu2):
+    """Under a bound RoPE's input goes round-robin a position at a time (the
+    rows one angle row serves), so the lane that rotates a position's heads
+    is the one that reads its angle row, and in the same order.
+    """
+    from aie.iron.device import from_name
+
+    from iron.common.design.runtime import bounded_transfers
+    from iron.operators.rope.op import RoPE
+
+    heads, positions, cols = 4, 16, 64
+    op = RoPE(
+        rows=heads * positions, cols=cols, angle_rows=positions, num_aie_columns=4
+    )
+    op = op.resolved(from_name("npu2", n_cols=8))
+    lanes = op.num_aie_columns
+    x = bounded_transfers(op.x, op.streams["x"], 0)
+    angles = bounded_transfers(op.angles, op.streams["angles"], 0)
+    for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
+        assert xs.index == as_.index
+        rows = _elements(xa)[::cols] // cols
+        angle_rows = _elements(aa)[::cols] // cols
+        assert list(angle_rows) == list(range(xs.index, positions, lanes))
+        assert list(rows // heads) == list(np.repeat(angle_rows, heads))
+
+
 def test_the_derived_sequence_patches_a_bounded_operand():
     log = []
     op = _bounded_unary()
