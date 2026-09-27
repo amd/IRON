@@ -57,4 +57,4 @@ def test_an_inline_kernel_lowers(device, tmp_path):
 def test_its_reference_is_the_contracts(device):
     op = VectorAdd(size=1024, num_aie_columns=2, tile_size=256).resolved(device)
     a, b = (np.arange(1024).astype(bfloat16) for _ in range(2))
-    np.testing.assert_array_equal(op.reference(a, b), a + b)
+    np.testing.assert_array_equal(op.reference(a, b), np.add(a, b))

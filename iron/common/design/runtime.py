@@ -382,6 +382,8 @@ class Sequence(Transfers):
         """
         op = self.op
         target = target or self.target
+        if target is None:
+            raise ValueError("preamble() needs the Target the array was built on")
         values = {**op.resident_values(), **values}
         writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
         for name, res in op.residents.items():

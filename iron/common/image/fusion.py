@@ -13,7 +13,6 @@ import ml_dtypes
 import numpy as np
 from aie import ir
 from aie.dialects import aie, aiex, memref
-from aie.extras.context import mlir_mod_ctx
 
 from ..design.generator import DesignGenerator
 
@@ -159,9 +158,11 @@ def fuse_mlir(
             hoisted_params[sym_name] = param_type
 
     # Build fused MLIR module
-    with mlir_mod_ctx() as ctx:
+    loc = ir.Location.unknown(ir.Context())
+    module = ir.Module.create(loc)
+    with loc.context, loc, ir.InsertionPoint(module.body):
         # Emit hoisted parameters first.
-        with ir.InsertionPoint.at_block_begin(ctx.module.body):
+        with ir.InsertionPoint.at_block_begin(module.body):
             for sym_name, param_type in hoisted_params.items():
                 aiex.scratchpad_parameter(sym_name, param_type)
 
@@ -183,7 +184,7 @@ def fuse_mlir(
                 dev_op is not None
             ), f"DeviceOp missing after re-parse for operator '{op_name}'"
             dev_op.sym_name = ir.StringAttr.get(op_name)
-            ctx.module.body.append(dev_op)
+            module.body.append(dev_op)
 
         needs_reset = needs_additional_reset(runlist)
         if needs_reset:
@@ -313,4 +314,4 @@ def fuse_mlir(
                     reset_op = aiex.ConfigureOp(ir.FlatSymbolRefAttr.get(RESET_DEVICE))
                     reset_op.body.blocks.append()
 
-        return str(ctx.module)
+        return str(module)

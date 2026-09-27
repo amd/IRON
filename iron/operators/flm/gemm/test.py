@@ -8,7 +8,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron.device import NPU2
+from aie.iron.device import from_name
 
 from iron.common.design.build import build_design
 from iron.common.device import device_name
@@ -268,11 +268,12 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N):
     the memtile locks are armed per dispatch, and one slab awaits one C per
     column.
     """
-    mlir = str(build_design(NPU2(), kernels_dir(), GEMM(M=M, K=K, N=N)))
+    npu2 = from_name("npu2", n_cols=8)
+    mlir = str(build_design(npu2, kernels_dir(), GEMM(M=M, K=K, N=N)))
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir
-    assert mlir.count("aiex.dma_await_task") == NPU2().cols
+    assert mlir.count("aiex.dma_await_task") == npu2.cols
 
 
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())

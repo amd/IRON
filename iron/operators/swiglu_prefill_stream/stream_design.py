@@ -26,6 +26,7 @@ from pathlib import Path
 
 import stream
 import torch
+from aie import ir
 from stream.api import optimize_allocation_co
 
 from iron.operators.swiglu_prefill_stream import reference
@@ -352,10 +353,7 @@ def region_module(mlir_text: str, renames: dict | None = None):
     here already carries what distinguishes its recipe (``mm_<m>_<k>_<n>.o``),
     and groups that name one object build it identically, so they share it.
     """
-    from aie import ir
-    from aie.extras.context import mlir_mod_ctx
-
-    with mlir_mod_ctx():
+    with ir.Context():
         return ir.Module.parse(_renamed(mlir_text, renames))
 
 

@@ -32,8 +32,16 @@ from aie.dialects.aie import (
     DMAChannelDir,
     get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
 )
-from aie.extras.context import mlir_mod_ctx
-from aie.ir import BF16Type, F32Type, IntegerType, MemRefType
+from aie.ir import (
+    BF16Type,
+    Context,
+    F32Type,
+    InsertionPoint,
+    IntegerType,
+    Location,
+    MemRefType,
+    Module,
+)
 from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
@@ -278,7 +286,9 @@ def build_external(dev, op: Operator):
     ]
     buffers = op.buffers
 
-    with mlir_mod_ctx() as ctx:
+    loc = Location.unknown(Context())
+    module = Module.create(loc)
+    with loc.context, loc, InsertionPoint(module.body):
         types = [MemRefType.get((b.elements,), _elem_type(b.dtype)) for b in buffers]
 
         npu: Any = dev.resolve()  # Device.resolve() is annotated -> None upstream
@@ -312,4 +322,4 @@ def build_external(dev, op: Operator):
                 rt_data = {b.name: a for b, a in zip(buffers, args)}
                 run_sequence(op, rt_data, core_tiles, _MLIREmitter(allocations))
 
-        return ctx.module
+        return module

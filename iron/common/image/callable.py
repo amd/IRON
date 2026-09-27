@@ -239,7 +239,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.run_handle.set_arg(0, self.input_buffer.buffer_object())
         self.run_handle.set_arg(1, self.output_buffer.buffer_object())
         self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
-        if self.trace_buffer is not None:
+        if self.trace_buffer is not None and self._trace_arg is not None:
             self.run_handle.set_arg(self._trace_arg, self.trace_buffer.buffer_object())
 
         self._params = None
