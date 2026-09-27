@@ -453,11 +453,32 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     # The flag decides the streams, so it is of the array tier.
     assert "scaled" in Scaled._array_fields
     assert plain.array_key() != scaled.array_key()
-    # Inference sets an open flag from the operands a call has to spare.
+    # A call gives the optional input by keyword, which sets its flag.
     assert not Scaled.from_operands((64,)).scaled
-    assert Scaled.from_operands((64,), (64,)).scaled
-    with pytest.raises(TypeError, match="takes 1 operand"):
-        Scaled.from_operands((64,), (64,), scaled=False)
+    assert Scaled.from_operands((64,), s=(64,)).scaled
+    assert Scaled.from_operands((64,), s=(64,), scaled=True).scaled
+    with pytest.raises(TypeError, match="only where scaled is true"):
+        Scaled.from_operands((64,), s=(64,), scaled=False)
+    with pytest.raises(TypeError, match=r"Scaled\(scaled=True\) takes s="):
+        Scaled.from_operands((64,), scaled=True)
+
+
+def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one():
+    class G(iron.Graph):
+        def body(self, x, y):
+            Scaled(x, y)  # y is written: an output, never the scale
+
+    (step,) = G().trace(x=(64,), y=(64,)).steps
+    assert not step.op.scaled
+    assert [b.name for b in step.op.buffers] == ["x", "y"]
+
+    class H(iron.Graph):
+        def body(self, x, s, y):
+            Scaled(x, y, s=s)
+
+    (step,) = H().trace(x=(64,), s=(64,), y=(64,)).steps
+    assert step.op.scaled
+    assert [b.name for b in step.op.buffers] == ["x", "s", "y"]
 
 
 def test_when_names_a_param():

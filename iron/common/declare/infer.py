@@ -28,26 +28,50 @@ def _operands(cls, directions) -> list[_Buffer]:
     ]
 
 
-def operand_flags(cls, n_operands: int, given: dict[str, Any]) -> dict[str, bool]:
-    """The ``when=`` flags a call with ``n_operands`` operands sets, for the
-    optional inputs whose flag ``given`` leaves open.
+def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, Any]]:
+    """Bind a call's operands to ``cls``'s, as a signature
+    ``(x, ..., [outputs...], *, weight=None, ...)`` would.
 
-    Operands fill the inputs in declaration order before any output, so an
-    optional input is present when the call has an operand to spare for
-    it; a call that passes an output instead gives the flag.
+    The positional operands are the required inputs, in declaration order,
+    then any outputs; an optional input (``when=`` a flag) is a keyword,
+    its name, so an output is never taken for it. Returns the inputs by
+    name, in declaration order, the outputs, and the other keywords.
     """
     ins = _operands(cls, ("in", "inout"))
-    open_flags = [
-        m.when.name for m in ins if m.when is not None and m.when.name not in given
-    ]
-    spare = n_operands - sum(
-        present(m, given) for m in ins if m.when is None or m.when.name in given
-    )
+    required = [m.name for m in ins if m.when is None]
+    optional = {m.name for m in ins if m.when is not None}
+    given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
+    if len(args) < len(required):
+        raise TypeError(
+            f"{cls.__name__} takes {len(required)} positional operand(s) "
+            f"({', '.join(required)}), got {len(args)}"
+        )
+    bound = {**dict(zip(required, args)), **given}
+    inputs = {m.name: bound[m.name] for m in ins if m.name in bound}
+    rest = {k: v for k, v in kwargs.items() if k not in optional}
+    return inputs, list(args[len(required) :]), rest
+
+
+def operand_flags(cls, names, given: dict[str, Any]) -> dict[str, bool]:
+    """The ``when=`` flags of a call that gives the inputs ``names``: a flag
+    is true where its operand is given. A flag ``given`` states must agree.
+    """
     flags: dict[str, bool] = {}
-    for name in dict.fromkeys(open_flags):
-        needs = open_flags.count(name)  # the operands one flag brings
-        flags[name] = spare >= needs
-        spare -= needs if flags[name] else 0
+    for m in _operands(cls, ("in", "inout")):
+        if m.when is None:
+            continue
+        flag, has = m.when.name, m.name in names
+        if flags.setdefault(flag, has) != has:
+            raise TypeError(
+                f"{cls.__name__}: the operands {flag}= brings are given together"
+            )
+        if flag in given and bool(given[flag]) != has:
+            raise TypeError(
+                f"{cls.__name__}({flag}=True) takes {m.name}="
+                if has is False
+                else f"{cls.__name__}: {m.name}= is an operand only where {flag} "
+                f"is true"
+            )
     return flags
 
 
@@ -64,10 +88,9 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
     Each declared dimension is a field or a literal, so this is a lookup.
     Returns ``{field: value}``; ``given`` pins values and is checked for
     agreement. ``outputs`` are the shapes of caller-supplied ``Out`` buffers,
-    in declaration order, which bind the same way. An optional operand's
-    flag, left open, is set from the operands given (:func:`operand_flags`).
+    in declaration order, which bind the same way. An optional operand is
+    among ``operand_shapes`` where its flag is in ``given`` and true.
     """
-    given = {**operand_flags(cls, len(operand_shapes), given), **given}
     ins = inputs_of(cls, given)
     if len(operand_shapes) != len(ins):
         raise TypeError(

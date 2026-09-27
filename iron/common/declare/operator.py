@@ -39,7 +39,7 @@ from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
 from .field import DeclarationError, Unresolvable, _tier_of, param
-from .infer import infer, infer_kwargs
+from .infer import call_operands, infer, infer_kwargs, operand_flags
 from .member import (
     Extent,
     Value,
@@ -700,8 +700,16 @@ class Operator(metaclass=_OperatorMeta):
 
     @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> Self:
-        """Construct an operator from operand shapes."""
-        values = infer(cls, *operand_shapes, **infer_kwargs(cls, overrides))
+        """Construct an operator from operand shapes, given as a graph call
+        gives its operands: an optional input's by keyword.
+        """
+        inputs, outputs, overrides = call_operands(cls, operand_shapes, overrides)
+        values = infer(
+            cls,
+            *inputs.values(),
+            outputs=outputs,
+            **{**infer_kwargs(cls, overrides), **operand_flags(cls, inputs, overrides)},
+        )
         return cls(**{**overrides, **values})
 
     def reference_tolerance(self) -> Tolerance | None:

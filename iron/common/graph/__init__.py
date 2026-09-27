@@ -17,7 +17,7 @@ applied the same way.
             self.kv = iron.state((n_kv, MAX, head_dim))
 
         def body(self, x, angles, *, pos: Scratchpad[np.int32]):
-            h = RMSNorm(x, self.w.norm)
+            h = RMSNorm(x, weight=self.w.norm)
             k = RoPE(GEMV(self.w.k, h), angles)
             Copy(k, self.kv[:, pos])
             return GEMV(self.w.o, h)

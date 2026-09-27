@@ -55,7 +55,7 @@ def _ffn():
 
     class Ffn(iron.Graph):
         def body(self, x, *, pos: Scratchpad[np.int32]):
-            h = RMSNorm(x, norm_w)  # a bare tensor is a weight
+            h = RMSNorm(x, weight=norm_w)  # a bare tensor is a weight
             gate = GEMV(
                 w_gate, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
             )

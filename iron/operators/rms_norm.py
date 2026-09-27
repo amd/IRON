@@ -20,8 +20,8 @@ class RMSNorm(Rowwise):
     learned weight row.
 
     Unweighted, one core per (column, channel) runs the norm, as any
-    elementwise operator. Weighted (``RMSNorm(x, w)`` in a graph, or
-    ``weighted=True``), two cores per (column, channel) are pipelined: one
+    elementwise operator. Weighted (``RMSNorm(x, weight=w)`` in a graph,
+    or ``weighted=True``), two cores per (column, channel) are pipelined: one
     normalizes, the next multiplies by the weight. The weight fifo is one
     per channel, shared by every column in that channel, and each receives
     the whole weight row, which halves the line a core holds.
@@ -44,7 +44,7 @@ class RMSNorm(Rowwise):
     )
     # The weight row is one line, shared by every column of a channel; the
     # shim budget counts a replicate= stream once per channel.
-    w = In(
+    weight = In(
         Rowwise.tile_size,
         tile=(Rowwise.tile_size,),
         per=(Rowwise.num_channels,),
@@ -69,14 +69,14 @@ class RMSNorm(Rowwise):
     def kernel(self, target):
         return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
 
-    def reference(self, x, w=None):
+    def reference(self, x, weight=None):
         """The kernels' references in turn: the normalized row rounded to
         bf16, as the first core stores it, then times the weight.
         """
         normed = super().reference(x)
-        if w is None:
+        if weight is None:
             return normed
-        y = eltwise.mul_sized(self.tile_size).contract.reference(normed, w)
+        y = eltwise.mul_sized(self.tile_size).contract.reference(normed, weight)
         return y.astype(normed.dtype)
 
     def tolerance(self, target) -> Tolerance | None:
@@ -95,7 +95,7 @@ class RMSNorm(Rowwise):
         if not self.weighted:
             return super().array(target)
         tile_ty = self.x.tile
-        weights_ty = self.w.tile
+        weights_ty = self.weight.tile
         cols, chans = self.num_aie_columns, self.num_channels
         depth = fifo_depth(self.tile_size, self.x.dtype)
         rms_norm = self.kernel(target)
@@ -189,7 +189,7 @@ class RMSNorm(Rowwise):
             self.x.lane(k).bind(of_ins[k].prod())
             self.y.lane(k).bind(of_outs[k].cons())
         for j in range(chans):
-            self.w.lane(j).bind(of_ws[j].prod())
+            self.weight.lane(j).bind(of_ws[j].prod())
         if not dynamic:
             self.count.bind(counts)
         return workers

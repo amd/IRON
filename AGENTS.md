@@ -333,8 +333,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      core reads (`per=` a column count): an operand with a tile is its own
      stream, `op.x.lane(i)` a shim endpoint, `op.x.tile` the fifo type;
      `when=flag`, a bool `param()`, makes an operand (and its stream) exist
-     only where the flag is true, and a graph call sets an open flag from
-     the operands it gives (`RMSNorm(x, w)` is `weighted=True`)
+     only where the flag is true; a call gives it by keyword, its name,
+     which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
      `param(..., array=True)`
@@ -427,7 +427,7 @@ class Decode(iron.Graph):
 
     def body(self, x, angles, *, pos: Scratchpad[np.int32]):
         w = self.weights
-        h = RMSNorm(x, w.norm)                   # class calls infer the extents
+        h = RMSNorm(x, weight=w.norm)            # class calls infer the extents
         k = RoPE(GEMV(w.wk, h), angles)
         Copy(k, self.kv[:, pos])                 # a state passed as an output is written
         return GEMV(w.wo, h)

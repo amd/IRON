@@ -125,8 +125,9 @@ class _Buffer(_Member["BoundBuffer"]):
     hand (:meth:`Operator.sequence`).
 
     ``when=`` a boolean ``param()`` makes the operand optional: it, and its
-    stream, exist only on an instance where the field is true. A graph call
-    sets the field from the operands it gives (see :func:`.infer.operand_flags`).
+    stream, exist only on an instance where the field is true. A call gives
+    it by keyword, its name (``RMSNorm(x, weight=w)``), which sets the field
+    (see :func:`.infer.call_operands`).
     """
 
     direction: ClassVar[str] = ""

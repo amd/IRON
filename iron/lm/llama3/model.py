@@ -133,7 +133,7 @@ class Llama(CausalLM):
     def layer(self, step, i, w, x):
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        h = RMSNorm(x, w.norm1)
+        h = RMSNorm(x, weight=w.norm1)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (project(h, p, tile_size_output=D // 2) for p in (w.q, w.k, w.v))
@@ -141,11 +141,11 @@ class Llama(CausalLM):
         q = RoPE(q.reshape(n * H, D), step.angles)
         k = RoPE(k.reshape(n * G, D), step.angles)
         x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), w.o))
-        h = RMSNorm(x, w.norm2)
+        h = RMSNorm(x, weight=w.norm2)
         return ElementwiseAdd(x, swiglu(h, w.gate, w.up, w.down))
 
     def head(self, x):
-        return GEMV(self.embedding, RMSNorm(x, self.norm))
+        return GEMV(self.embedding, RMSNorm(x, weight=self.norm))
 
 
 def layout(config: Config) -> Layout:
