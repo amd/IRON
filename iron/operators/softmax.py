@@ -60,7 +60,7 @@ class Softmax(Operator):
     call.
     """
 
-    test = Testing(_cases, tolerance=Tolerance.relative(0.04, 1e-6))
+    test = Testing(_cases)
 
     rows: int = param()
     cols: int = param()
@@ -166,7 +166,7 @@ class Softmax(Operator):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
                 mask_kernel(elem_in, vector_size, per_tile)
-                softmax_kernel(elem_in, elem_out, per_tile)
+                softmax_kernel(elem_in, elem_out)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -194,33 +194,17 @@ class Softmax(Operator):
             self.vector_size.bind(rtps, static.index("vector_size"))
         return workers
 
+    def tolerance(self, target) -> Tolerance | None:
+        return activation.softmax(self.cols).contract.tolerance
+
     def reference(self, x, vector_size=None):
-        """CPU reference: row-wise softmax over the first ``vector_size`` of ``cols``.
-
-        The kernel fills ``[vector_size, cols)`` with the lowest bf16 before
-        the softmax, so the masked tail comes out as exact zeros. Without a
-        per-call value the whole row is valid.
+        """The softmax kernel's contract reference, a row per call, after the
+        mask: ``mask_bf16`` fills ``[vector_size, cols)`` with the lowest bf16,
+        so the masked tail comes out as exact zeros. Without a per-call value
+        the whole row is valid.
         """
-        if vector_size is None:
-            vector_size = self.cols
-        return reference(x.reshape(self.rows, self.cols), int(vector_size))
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(x, vector_size=None):
-    """CPU reference: row-wise softmax over the last dim (ground truth).
-
-    ``vector_size`` masks every column from there on to the lowest value of
-    the dtype first, as the device kernel does, so those come out as zeros.
-    """
-    if vector_size is not None and vector_size < x.shape[-1]:
-        x = x.copy()
-        x[..., vector_size:] = ml_dtypes.finfo(x.dtype).min
-    # In float32 and rounded once, as torch does internally for a bf16 input.
-    f = x.astype(np.float32)
-    e = np.exp(f - f.max(axis=-1, keepdims=True))
-    return (e / e.sum(axis=-1, keepdims=True)).astype(x.dtype)
+        x = x.reshape(self.rows, self.cols, copy=False)
+        if vector_size is not None and int(vector_size) < self.cols:
+            x = x.copy()
+            x[:, int(vector_size) :] = ml_dtypes.finfo(x.dtype).min
+        return activation.softmax(self.cols).contract.reference(x)

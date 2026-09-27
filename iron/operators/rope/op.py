@@ -7,6 +7,7 @@ import dataclasses
 import numpy as np
 from aie.iron import ObjectFifo, Worker, kernels
 from aie.iron.controlflow import range_
+from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -146,7 +147,6 @@ class RoPE(Operator):
             if d
         ]
         barriers = [target.barrier() for _ in range(n)]
-        cols = self.cols
 
         def core_body(of_in, of_lut, of_out, rope_kernel, counts, barrier, *words):
             barrier.wait_for_value(1)
@@ -164,7 +164,7 @@ class RoPE(Operator):
                 for _ in range_(rows_per_lut):
                     elem_in = of_in.acquire(1)
                     elem_out = of_out.acquire(1)
-                    rope_kernel(elem_in, elem_lut, elem_out, cols)
+                    rope_kernel(elem_in, elem_lut, elem_out)
                     of_in.release(1)
                     of_out.release(1)
                 of_lut.release(1)
@@ -302,31 +302,24 @@ def reference(x, angles, method_type=0):
     ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the last
     dim, the bf16 table the device reads. ``method_type`` 0 rotates the two
     halves of each row (HF transformers); 1 rotates its interleaved even/odd
-    pairs (the Llama paper). The rotation is computed in fp32 and rounded once.
+    pairs (the Llama paper). It is the rope kernel's contract reference,
+    ``datamovement.rope_ref``: computed in fp32 and rounded once.
 
     ``angles`` may have fewer rows than ``x``; each angle row then applies to
     ``rows / angles.shape[0]`` *consecutive* rows of ``x``, matching the device
     kernel (``core_body`` acquires one angle row and applies it to that many
     consecutive input rows before moving on).
     """
-    rows = x.shape[0]
-    if rows % angles.shape[0] != 0:
-        raise ValueError(
-            f"{rows} rows cannot share {angles.shape[0]} angle rows evenly"
-        )
-    rep = rows // angles.shape[0]
-    cos = np.repeat(angles[..., 0::2].astype(np.float32), rep, axis=0)
-    sin = np.repeat(angles[..., 1::2].astype(np.float32), rep, axis=0)
-    x32 = x.astype(np.float32)
-    if method_type == 0:
-        half = x.shape[-1] // 2
-        x1, x2 = x32[..., :half], x32[..., half:]
-        y = np.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
-    elif method_type == 1:
-        xe, xo = x32[..., 0::2], x32[..., 1::2]
-        y = np.empty_like(x32)
-        y[..., 0::2] = xe * cos - xo * sin
-        y[..., 1::2] = xe * sin + xo * cos
-    else:
+    if method_type not in (0, 1):
         raise ValueError(f"method_type must be 0 or 1, got {method_type}")
-    return y.astype(bfloat16)
+    rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
+    if rows % lut_rows != 0:
+        raise ValueError(f"{rows} rows cannot share {lut_rows} angle rows evenly")
+    # x viewed as (angle row, the rows it serves, cols) and the table
+    # broadcast over the middle axis: no copy of either.
+    y = datamovement.rope_ref(
+        x.reshape(lut_rows, -1, cols, copy=False),
+        angles.reshape(lut_rows, 1, cols, copy=False),
+        two_halves=method_type == 0,
+    )
+    return y.reshape(x.shape, copy=False)
