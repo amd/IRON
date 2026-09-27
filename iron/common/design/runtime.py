@@ -141,9 +141,12 @@ class Sequence(Transfers):
     exit.
     """
 
-    def __init__(self, op: Operator, rt_data: dict[str, Any]):
+    def __init__(
+        self, op: Operator, rt_data: dict[str, Any], target: Target | None = None
+    ):
         self.op = op
         self._rt_data = rt_data
+        self.target = target
         self._group = None
         # The shim handles this sequence issued a transfer on; the build
         # places the declared ones it did not touch (see build_design).
@@ -152,23 +155,55 @@ class Sequence(Transfers):
     # -- transfers ---------------------------------------------------------
 
     def fill(
-        self, stream, source, *, group=None, wait=False, offset_by=None, size_by=None
+        self,
+        stream,
+        source,
+        *,
+        group=None,
+        wait=False,
+        offset_by=None,
+        size_by=None,
+        managed=True,
     ):
         """Fill ``stream`` from ``source``. ``offset_by`` moves the transfer's
         base address by a per-call value; ``size_by`` (``{dim: value}``)
         patches the descriptor's size on those dimensions per call, the
         outermost being 0. Both take scratchpad-kind values.
+
+        ``managed=False`` hands the transfer's queue slot and descriptors to
+        the compiler, which frees them once a later wait proves it done; it
+        joins no group, and only a ``wait`` one returns a token.
         """
-        return self._transfer("fill", stream, source, group, wait, offset_by, size_by)
+        return self._transfer(
+            "fill", stream, source, group, wait, offset_by, size_by, managed
+        )
 
     def drain(
-        self, stream, dest, *, group=None, wait=True, offset_by=None, size_by=None
+        self,
+        stream,
+        dest,
+        *,
+        group=None,
+        wait=True,
+        offset_by=None,
+        size_by=None,
+        managed=True,
     ):
-        """Drain ``stream`` into ``dest``; see :meth:`fill` for the per-call forms."""
-        return self._transfer("drain", stream, dest, group, wait, offset_by, size_by)
+        """Drain ``stream`` into ``dest``; see :meth:`fill` for the other forms."""
+        return self._transfer(
+            "drain", stream, dest, group, wait, offset_by, size_by, managed
+        )
 
     def _transfer(
-        self, verb: str, stream, what, group, wait: bool, offset_by=None, size_by=None
+        self,
+        verb: str,
+        stream,
+        what,
+        group,
+        wait: bool,
+        offset_by=None,
+        size_by=None,
+        managed=True,
     ):
         handle = self._handle(stream)
         self.used.add(id(handle))
@@ -190,10 +225,15 @@ class Sequence(Transfers):
         for i, acc in enumerate(accesses):
             last = i == len(accesses) - 1
             fn = getattr(handle, verb)
-            common = dict(
-                wait=wait and last,
-                group=group if group is not None else self._group,
-            )
+            if managed:
+                common = dict(
+                    wait=wait and last,
+                    group=group if group is not None else self._group,
+                )
+            else:
+                if group is not None:
+                    raise ValueError("an unmanaged transfer joins no group")
+                common = dict(wait=wait and last, managed=False)
             if dynamic:
                 # The dispatch-time form: the same pattern with the per-call
                 # scalars in place of the constants, regenerated per call.
@@ -237,7 +277,7 @@ class Sequence(Transfers):
                 tasks.append(
                     fn(
                         data,
-                        acc.tap() if isinstance(acc, Access) else acc,
+                        tap=acc.tap() if isinstance(acc, Access) else acc,
                         offset_parameter=offset_parameter,
                         **patched,
                         **common,
@@ -344,10 +384,17 @@ class Sequence(Transfers):
         """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""
         return self._rt_data[buffer.name]
 
-    def preamble(self, target: Target) -> None:
-        """Residents, then barriers, then the parameter sync, before any DMA."""
+    def preamble(self, target: Target | None = None, **values) -> None:
+        """Residents, then barriers, then the parameter sync, before any DMA.
+
+        The build runs it ahead of the sequence unless the operator sets
+        ``own_preamble``; such a sequence calls it itself, where and as often
+        as it needs, and may override resident values by name for that
+        writing (a slab of a larger dispatch, say).
+        """
         op = self.op
-        values = op.resident_values()
+        target = target or self.target
+        values = {**op.resident_values(), **values}
         writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
         for name, res in op.residents.items():
             if res.optional and not res.targets:

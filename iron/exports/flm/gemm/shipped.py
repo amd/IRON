@@ -107,7 +107,6 @@ class Shipped(
     bfp16_b: bool = auto(False, repr=False, init=False)
     b_dtype: object = auto(bfloat16, repr=False, init=False)
     l1_b_depth: int = auto(QUEUE_DEPTH, repr=False, init=False)
-    shim_bds: int = auto(16, repr=False, init=False)
     a_l2: int = auto(M_TILE * K_TILE, repr=False, init=False)
     b_l2: int = auto(K_TILE * N_TILE, repr=False, init=False)
     c_l2: int = auto(ROWS * M_TILE * N_TILE, repr=False, init=False)

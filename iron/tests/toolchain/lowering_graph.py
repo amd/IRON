@@ -56,7 +56,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
 @pytest.mark.parametrize(
     "M,K,N",
     [(512, 1024, 1024), (512, 1024, 10240), (256, 512, 512)],
-    ids=["unsplit", "c_split", "tn128"],
+    ids=["base", "n10240", "tn128"],
 )
 def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
     import iron.exports.flm.gemm.op as flm

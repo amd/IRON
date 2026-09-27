@@ -203,6 +203,10 @@ class Operator(metaclass=_OperatorMeta):
     # The cases iron/operators/test.py runs this operator at; None for an
     # operator tested by its own test.py, or not on its own.
     test: ClassVar[Testing | None] = None
+    # True when sequence() calls rt.preamble() itself rather than having the
+    # build run it first: to issue it behind the first fills, or once per
+    # slab of a dispatch.
+    own_preamble: ClassVar[bool] = False
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -359,7 +363,9 @@ class Operator(metaclass=_OperatorMeta):
 
         ``rt`` is an :class:`iron.common.design.Sequence`: ``rt.fill(stream,
         view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
-        (residents, barriers, parameter sync) has already run.
+        (residents, barriers, parameter sync) has already run, unless the
+        class sets ``own_preamble``, when calling ``rt.preamble()`` is up to
+        this.
         """
         raise NotImplementedError
 

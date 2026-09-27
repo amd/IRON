@@ -8,19 +8,18 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.dialects.aie import (
-    get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
-)
+from aie.iron.device import NPU2
 
-from iron.common.device import bound_device, device_name
+from iron.common.design.build import build_design
+from iron.common.device import device_name
 from iron.common.harness import record_metric, run_test, vectors
+from iron.common.kernels import kernels_dir
 from iron.exports.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
     M_CHUNK_FOR_N,
     M_TILE,
-    SHIM_TASK_QUEUE,
     Epilogue,
     R,
     Rounding,
@@ -194,32 +193,15 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
     assert not errors, "Test failed"
 
 
-def test_gemm_split_leg_bounds(npu_runtime):
-    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so that leg
-    goes out one transfer per mega_row. Two unmodelled shim resources bound how
-    many may be live -- BD ids and the channel task queue -- and overrunning
-    either hangs silently. The live set is 4 + 2 + 2 = 8 of 16 descriptors;
-    assert that here, since retuning SHIM_TASK_QUEUE could break it silently.
-    """
-    dev = bound_device()
-    available = get_target_model(dev.resolve()).get_num_bds(0, 0)
-    worst = SHIM_TASK_QUEUE + 2 + 2
-    assert worst <= available, (
-        f"a fully split block needs {worst} shim BDs of {available}; "
-        "the split shapes will hang"
-    )
-
-    # The square case splits both legs, which the real Gemma shapes never do
-    # (E4B's down overflows on K and its gate/up on N, never both), so it is
-    # the only cover for the two-sided path.
-    GEMM(M=512, K=10240, N=10240).compile()
-
-
 def test_gemm_split_leg_bounds_runs(npu_runtime):
-    """Execute the two-sided split path, not just compile it.
+    """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
+    compiler cuts that leg into pieces, bounded by its queue polls and BD
+    reclaim. Overrunning either hangs or corrupts silently, which only running
+    can show.
 
-    The failure the sibling test guards against is a runtime hang or silent
-    corruption, which compiling cannot exercise. Regular rather than extensive
+    The square case splits both legs, which the real Gemma shapes never do
+    (E4B's down overflows on K and its gate/up on N, never both), so it is
+    the only cover for the two-sided path. Regular rather than extensive
     despite the size: ~8s against the suite's ~13s.
     """
     M, K, N = 512, 10240, 10240
@@ -275,6 +257,21 @@ def tile_option_params():
                 )
             )
     return params
+
+
+@pytest.mark.parametrize(
+    "M,K,N", [(512, 1024, 1024), (512, 6144, 1024), (512, 1024, 10240)]
+)
+def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N):
+    """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
+    the compiler cuts (N=10240); in each, B has no fifo, nothing is pinned,
+    the memtile locks are armed per dispatch, and one slab awaits one C per
+    column."""
+    mlir = str(build_design(NPU2(), kernels_dir(), GEMM(M=M, K=K, N=N)))
+    assert "aie.objectfifo @B" not in mlir
+    assert "bd_id" not in mlir
+    assert "aiex.set_lock" in mlir
+    assert mlir.count("aiex.dma_await_task") == NPU2().cols
 
 
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())

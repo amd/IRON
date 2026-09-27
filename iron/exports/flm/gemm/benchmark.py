@@ -46,6 +46,7 @@ import numpy as np
 import pytest
 import torch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from ml_dtypes import bfloat16
 
 from iron.common.device import bound_device, device_name
 from iron.common.harness import record_metric
@@ -101,8 +102,8 @@ BUDGET_FLOOR = 2e-2
 def get_params():
     # No shape is skipped. The four E4B projections with a 10240-wide dimension
     # at M > 256 once overflowed the shim BD's 20-bit mega_row iteration step,
-    # but flm.GEMM and IRON's GEMM both split that leg into per-mega_row
-    # transfers now (design.py's a_split/c_split, test_gemm_split_leg_bounds).
+    # but IRON's GEMM splits that leg into per-mega_row transfers now, and for
+    # flm.GEMM the compiler does (test_gemm_split_leg_bounds_runs).
     params = []
     for model, projections in (("E2B", E2B_PROJ), ("E4B", E4B_PROJ)):
         for M in PREFILL_LENGTHS:
@@ -139,12 +140,13 @@ class Candidate:
         run = op.get_callable()
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        packed_b = op.pack_B(B) if hasattr(op, "pack_B") else B
-        args = [
-            XRTTensor.from_torch(A.flatten()),
-            XRTTensor.from_torch(packed_b.flatten()),
-            self.c_bo,
-        ]
+        # pack_B takes numpy; torch has no bfloat16 view to hand it.
+        if hasattr(op, "pack_B"):
+            b_np = B.view(torch.int16).numpy().view(bfloat16)
+            b_bo = XRTTensor(op.pack_B(b_np).reshape(-1))
+        else:
+            b_bo = XRTTensor.from_torch(B.flatten())
+        args = [XRTTensor.from_torch(A.flatten()), b_bo, self.c_bo]
         self.run = lambda: run(*args)
 
     def verify(self, M, N, expected, mass):
