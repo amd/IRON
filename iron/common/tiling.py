@@ -39,7 +39,7 @@ any tap, from a tiler or by hand, and returns descriptors that fit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import prod
 from typing import Iterator, Sequence
 
@@ -522,6 +522,38 @@ class Walk:
         """One dense run: what a sub-buffer is."""
         merged = _merged(list(zip(self.sizes, self.strides))) or [(1, 1)]
         return len(merged) == 1 and merged[0][1] == 1
+
+    def shares(self, count: int) -> list[Walk]:
+        """The walk's innermost axis split into ``count`` equal shares, in order."""
+        share, remainder = divmod(self.sizes[-1], count)
+        if remainder:
+            raise ValueError(
+                f"the innermost axis of {self} ({self.sizes[-1]}) does not "
+                f"split into {count}"
+            )
+        return [
+            replace(
+                self,
+                offset=self.offset + c * share * self.strides[-1],
+                sizes=(*self.sizes[:-1], share),
+            )
+            for c in range(count)
+        ]
+
+    def at(self, valid: int) -> Walk:
+        """The walk with its bounded axis at ``valid``: what one call moves."""
+        if self.bounded is None:
+            raise ValueError(f"{self} has no bounded axis to set to {valid}")
+        sizes = list(self.sizes)
+        sizes[self.bounded] = valid
+        return replace(self, sizes=tuple(sizes), bounded=None)
+
+    def offsets(self) -> np.ndarray:
+        """The flat element offsets the walk visits, in order."""
+        index = np.full((), self.offset, dtype=np.int64)
+        for n, s in zip(self.sizes, self.strides):
+            index = index[..., None] + np.arange(n) * s
+        return index.reshape(-1)
 
     def __str__(self) -> str:
         return (

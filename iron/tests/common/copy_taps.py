@@ -16,7 +16,7 @@ import pytest
 
 from iron.common import Incompatible
 from iron.common.tiling import Walk
-from iron.operators.copy import Copy, _kv_slot
+from iron.operators.copy import Copy
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -49,6 +49,9 @@ LAST_ROW = dict(
     output_buffer_size=E,
     num_channels=1,
 )
+# The same row at slot 5, on one channel and on two.
+SLOT5 = dict(ROW_INTO_CACHE, dst=Walk.slice((G, L, D), (slice(None), 5)))
+SLOT5_TWO_CHANNELS = dict(SLOT5, num_channels=2)
 
 PINNED: dict[str, tuple[dict[str, Any], list, list]] = {
     "row_into_cache": (
@@ -66,13 +69,13 @@ PINNED: dict[str, tuple[dict[str, Any], list, list]] = {
         [[(0, (1, 1, 1, 2048), (0, 0, 0, 1))]],
         [[(0, (1, 1, 1, 2048), (0, 0, 0, 1))]],
     ),
-    "kv_slot5": (
-        _kv_slot(128, 5),
+    "slot5": (
+        SLOT5,
         [[(0, (1, 1, 1, 512), (0, 0, 0, 1))]],
         [[(320, (1, 1, 8, 64), (0, 0, 8192, 1))]],
     ),
-    "kv_slot5_two_channels": (
-        _kv_slot(128, 5, num_channels=2),
+    "slot5_two_channels": (
+        SLOT5_TWO_CHANNELS,
         [[(0, (1, 1, 8, 32), (0, 0, 64, 1))], [(32, (1, 1, 8, 32), (0, 0, 64, 1))]],
         [
             [(320, (1, 1, 8, 32), (0, 0, 8192, 1))],

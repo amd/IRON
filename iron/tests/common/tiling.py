@@ -8,6 +8,8 @@ elementwise, GEMV) so the derivation is pinned to behaviour the hardware has
 already run, not to a fresh reading of the descriptor format.
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
@@ -16,6 +18,7 @@ from iron.common.tiling import (
     Access,
     Block,
     Limits,
+    Walk,
     contiguous,
     encode,
     granule_elements,
@@ -297,3 +300,30 @@ def test_view_then_legalize_round_trips_a_batched_block():
     assert hi_lo is not None
     hi, lo = hi_lo
     assert acc.sizes == (1, nb, hi, lo) and acc.strides == (0, M * K, lo, 1)
+
+
+def test_a_walks_offsets_are_what_numpy_indexes():
+    """A slice's walk visits the elements numpy's view of it holds, in order."""
+    buffer = np.arange(8 * 16 * 4).reshape(8, 16, 4)
+    for key in [(slice(None), 5), (slice(2, 6), slice(None), 1), (3,)]:
+        walk = Walk.slice(buffer.shape, key)
+        assert (walk.offsets() == buffer[key].reshape(-1)).all()
+    permuted = Walk.permuted(buffer.shape, (1, 0, 2))
+    assert (permuted.offsets() == buffer.transpose(1, 0, 2).reshape(-1)).all()
+
+
+def test_shares_split_the_innermost_axis_in_order():
+    walk = Walk.slice((8, 16, 64), (slice(None), 5))
+    shares = walk.shares(4)
+    assert [s.sizes for s in shares] == [(8, 16)] * 4
+    together = np.stack([s.offsets().reshape(8, 16) for s in shares], axis=1)
+    assert (together.reshape(-1) == walk.offsets()).all()
+    with pytest.raises(ValueError, match="does not split into 3"):
+        walk.shares(3)
+
+
+def test_a_bounded_walk_at_a_size_moves_that_many():
+    walk = replace(Walk.slice((8, 16, 64), (slice(None), slice(0, 16))), bounded=1)
+    assert walk.at(3).sizes == (8, 3, 64) and walk.at(3).bounded is None
+    with pytest.raises(ValueError, match="no bounded axis"):
+        walk.at(3).at(2)

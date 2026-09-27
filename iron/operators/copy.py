@@ -22,85 +22,18 @@ from iron.common import In, Incompatible, Operator, Out, Scratchpad, auto, param
 from iron.common.testing import Case, Testing
 from iron.common.tiling import Walk, granule_elements, legalize, place
 
-# Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim)
-# and one token's keys land in slot t of every group. SEQ is 128 rather than
-# the real 2048 to keep the output buffer at 128 KB; the full-size arm is
-# extensive.
-_N_KV, _HEAD_DIM, _SEQ = 8, 64, 128
 
-
-def _kv_slot(seq, slot, num_channels=1) -> dict[str, Any]:
-    """Kwargs writing one (N_KV, HEAD_DIM) token into cache slot ``slot``."""
-    return dict(
-        src=Walk.of((_N_KV, _HEAD_DIM)),
-        dst=Walk.slice((_N_KV, seq, _HEAD_DIM), (slice(None), slot)),
-        input_buffer_size=_N_KV * _HEAD_DIM,
-        output_buffer_size=_N_KV * seq * _HEAD_DIM,
-        num_channels=num_channels,
-    )
-
-
-def _flat(size, num_channels=1, tile_size=None) -> dict[str, Any]:
-    """Kwargs for a contiguous copy of ``size`` elements."""
-    return dict(
-        input_buffer_size=size,
-        output_buffer_size=size,
-        num_channels=num_channels,
-        tile_size=tile_size,
-    )
-
-
-def _pad4(sizes, strides):
-    """Pad to 4-D: dropping leading dimensions leaves BD registers uninitialised."""
-    sizes, strides = list(sizes), list(strides)
-    return [1] * (4 - len(sizes)) + sizes, [0] * (4 - len(strides)) + strides
-
-
-def _shares(walk: Walk, num_channels: int) -> list[tuple[int, list[int], list[int]]]:
-    """Per channel, the (offset, sizes, strides) of its share of a walk.
-
-    The walk is padded to 4-D and its innermost axis split evenly; channel
-    ``c`` starts ``c`` shares along that axis. The one place the split is
-    defined: the descriptors, the reference and the check all read it.
+def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
+    """Kwargs scattering an (8, 64) block into slot ``slot`` of an (8, seq, 64)
+    buffer: each of its rows lands ``seq * 64`` elements after the last.
     """
-    sizes, strides = _pad4(walk.sizes, walk.strides)
-    share, remainder = divmod(sizes[-1], num_channels)
-    if remainder:
-        raise Incompatible(
-            f"the innermost axis of {walk} ({sizes[-1]}) must be divisible by "
-            f"num_channels ({num_channels})"
-        )
-    split = sizes[:-1] + [share]
-    return [
-        (walk.offset + c * share * strides[-1], split, strides)
-        for c in range(num_channels)
-    ]
-
-
-def _at(walk: Walk, valid: int) -> Walk:
-    """The walk with its bounded axis at ``valid``: what one call moves."""
-    if walk.bounded is None:
-        raise ValueError(f"{walk} has no bounded axis to set to {valid}")
-    sizes = list(walk.sizes)
-    sizes[walk.bounded] = valid
-    return dataclasses.replace(walk, sizes=tuple(sizes), bounded=None)
-
-
-def _walk_offsets(sizes, strides, offset):
-    """Flat element offsets a walk visits, in issue order."""
-    grids = np.meshgrid(*[np.arange(s) for s in sizes], indexing="ij")
-    flat = np.full(grids[0].shape, offset, dtype=np.int64)
-    for grid, stride in zip(grids, strides):
-        flat = flat + grid * stride
-    return flat.reshape(-1)
-
-
-def _channel_offsets(walk: Walk, addend: int, num_channels: int):
-    """Per channel, the flat offsets of its share, split as the design splits it."""
-    return [
-        _walk_offsets(sizes, strides, start + addend)
-        for start, sizes, strides in _shares(walk, num_channels)
-    ]
+    return dict(
+        src=Walk.of((8, 64)),
+        dst=Walk.slice((8, seq, 64), (slice(None), slot)),
+        input_buffer_size=8 * 64,
+        output_buffer_size=8 * seq * 64,
+        num_channels=num_channels,
+    )
 
 
 class Copy(Operator):
@@ -127,23 +60,22 @@ class Copy(Operator):
     # Copy moves data and computes nothing, so the gate is exact.
     test = Testing(
         [
-            Case(_flat(1024), id="contiguous"),
-            Case(_flat(1024, num_channels=2), id="two_channels"),
-            Case(_flat(1024, num_channels=4), id="four_channels"),
+            Case(dict(input_buffer_size=1024), id="contiguous"),
+            Case(dict(input_buffer_size=1024, num_channels=2), id="two_channels"),
+            Case(dict(input_buffer_size=1024, num_channels=4), id="four_channels"),
             Case(
-                _flat(1024, num_channels=2, tile_size=256),
+                dict(input_buffer_size=1024, num_channels=2, tile_size=256),
                 id="two_channels_chunked",
             ),
-            Case(_flat(1024, tile_size=256), id="chunked_transfer"),
-            Case(_kv_slot(_SEQ, 0), id="kv_slot0"),
-            Case(_kv_slot(_SEQ, 5), id="kv_slot5"),
-            Case(_kv_slot(_SEQ, _SEQ - 1), id="kv_slot_last"),
-            # num_channels exists to widen the KV-cache write, so the
-            # strided arms cover it too: the flat cases split a stride-1
-            # run, these split head_dim.
-            Case(_kv_slot(_SEQ, 5, num_channels=2), id="kv_slot5_two_channels"),
-            Case(_kv_slot(_SEQ, 5, num_channels=4), id="kv_slot5_four_channels"),
-            Case(_kv_slot(2048, 1000), id="kv_llama_full", extensive=True),
+            Case(dict(input_buffer_size=1024, tile_size=256), id="chunked_transfer"),
+            Case(_into_slot(0), id="slot0"),
+            Case(_into_slot(5), id="slot5"),
+            Case(_into_slot(127), id="slot_last"),
+            # The flat cases split a stride-1 run across the channels; these
+            # split the rows of a strided scatter.
+            Case(_into_slot(5, num_channels=2), id="slot5_two_channels"),
+            Case(_into_slot(5, num_channels=4), id="slot5_four_channels"),
+            Case(_into_slot(1000, seq=2048), id="slot1000_of_2048", extensive=True),
         ],
         tolerance=Tolerance.exact(),
     )
@@ -207,14 +139,17 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        src, dst = self.src, self.dst
-        for walk in (src, dst):
-            _shares(walk, channels)  # raises when the axis does not split
-        per_channel = src.elements // channels
+        for walk in (self.src, self.dst):
+            if walk.sizes[-1] % channels:
+                raise Incompatible(
+                    f"the innermost axis of {walk} ({walk.sizes[-1]}) must be "
+                    f"divisible by num_channels ({channels})"
+                )
+        per_channel = self.src.elements // channels
         if per_channel % self.tile_size:
             raise Incompatible(
                 f"tile_size {self.tile_size} must divide the per-channel "
-                f"transfer {per_channel} (= {src.elements} / {channels} channels)"
+                f"transfer {per_channel} (= {self.src.elements} / {channels} channels)"
             )
 
     def _taps(self, buffer, walk: Walk, offset: int = 0):
@@ -230,16 +165,20 @@ class Copy(Operator):
         A bound on the innermost axis, the one the channels split, takes one
         channel.
         """
-        shares = _shares(walk, self.num_channels)
+        shares = walk.shares(self.num_channels)
         if walk.bounded is None:
             return [
                 [
                     (acc, None)
                     for acc in legalize(
-                        buffer.elements, start + offset, sizes, strides, buffer.dtype
+                        buffer.elements,
+                        share.offset + offset,
+                        share.sizes,
+                        share.strides,
+                        buffer.dtype,
                     )
                 ]
-                for start, sizes, strides in shares
+                for share in shares
             ]
         rank, bounded = len(walk.sizes), walk.bounded
         dim = 4 - rank + bounded
@@ -252,8 +191,8 @@ class Copy(Operator):
         # two inside it (D1, D0) put the bound on D2.
         on_d2 = bounded <= 1 and 1 <= rank - bounded - 1 <= 2
         out = []
-        for start, sizes, strides in shares:
-            dims = list(zip(sizes, strides))[4 - rank :]
+        for share in shares:
+            dims = list(zip(share.sizes, share.strides))
             if on_d2:
                 lead, inner = dims[:bounded], dims[bounded + 1 :]
                 dims = (
@@ -264,7 +203,7 @@ class Copy(Operator):
                 )
             acc = place(
                 buffer.elements,
-                start + offset,
+                share.offset + offset,
                 dims,
                 granule_elements(buffer.dtype),
             )
@@ -296,11 +235,12 @@ class Copy(Operator):
         # address register.
         src, dst = self.src, self.dst
         if src_valid is not None:
-            src = _at(src, int(src_valid))
+            src = src.at(int(src_valid))
         if dst_valid is not None:
-            dst = _at(dst, int(dst_valid))
-        gather = _channel_offsets(src, int(in_offset), self.num_channels)
-        scatter = _channel_offsets(dst, int(out_offset), self.num_channels)
+            dst = dst.at(int(dst_valid))
+        # Channel by channel, as the design splits the walks.
+        gather = [c.offsets() + int(in_offset) for c in src.shares(self.num_channels)]
+        scatter = [c.offsets() + int(out_offset) for c in dst.shares(self.num_channels)]
         out = (
             np.zeros(self.output_buffer_size, dtype=x.dtype)
             if y is None
@@ -323,9 +263,6 @@ class Copy(Operator):
         in_off = self.in_offset if self.uses_value("in_offset") else None
         out_off = self.out_offset if self.uses_value("out_offset") else None
 
-        def size_by(dim, name):
-            return {dim: self.value(name)} if dim is not None else None
-
         with rt.group() as tg:
             for c in range(self.num_channels):
                 for acc, dim in ins[c]:
@@ -334,7 +271,7 @@ class Copy(Operator):
                         acc,
                         group=tg,
                         offset_by=in_off,
-                        size_by=size_by(dim, "src_valid"),
+                        size_by=None if dim is None else {dim: self.value("src_valid")},
                     )
                 for acc, dim in outs[c]:
                     rt.drain(
@@ -343,5 +280,5 @@ class Copy(Operator):
                         group=tg,
                         wait=acc is outs[c][-1][0],
                         offset_by=out_off,
-                        size_by=size_by(dim, "dst_valid"),
+                        size_by=None if dim is None else {dim: self.value("dst_valid")},
                     )
