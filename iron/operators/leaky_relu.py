@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 from aie.iron.kernels import activation
 
 from iron.common import UnaryElementwise, param
@@ -10,7 +9,7 @@ from iron.common.testing import Case, Testing, channeled_unary_cases
 
 class LeakyReLU(UnaryElementwise):
     """AIE-accelerated Leaky ReLU operator: the elementwise design with
-    ``alpha`` as a kernel argument.
+    ``alpha`` bound into the kernel.
     """
 
     test = Testing(
@@ -40,12 +39,4 @@ class LeakyReLU(UnaryElementwise):
     def kernel(self, target):
         # The factory holds what the line length must satisfy: a whole
         # number of the architecture's vectors (16 on aie2, 32 on aie2p).
-        return activation.leaky_relu(self.tile_size)
-
-    def kernel_call(self, kernel, elem_in, elem_out) -> None:
-        kernel(elem_in, elem_out, self.tile_size, self.alpha)
-
-    def reference(self, x):
-        """CPU reference: ``x`` where positive, ``alpha * x`` where not."""
-        f = x.astype(np.float32)
-        return np.where(f > 0, f, np.float32(self.alpha) * f).astype(x.dtype)
+        return activation.leaky_relu(self.tile_size, alpha=self.alpha)

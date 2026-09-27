@@ -11,6 +11,3 @@ class ElementwiseAdd(BinaryElementwise):
 
     def kernel(self, target):
         return eltwise.add_sized(self.tile_size)
-
-    def reference(self, a, b):
-        return a + b

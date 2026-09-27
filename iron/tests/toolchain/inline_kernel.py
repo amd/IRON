@@ -5,11 +5,16 @@
 
 The elementwise template owns the array and the sequence; the operator
 names the kernel each core calls, here written inline rather than taken from
-a shipped factory, and its reference. It lowers through the toolchain like
+a shipped factory. Its contract says what a factory's would: the line
+length is bound, so a core passes the elements alone, and the reference is
+what the operator is tested against. It lowers through the toolchain like
 any other, the kernel compiled from the text.
 """
 
 import numpy as np
+from aie.iron.kernels import KernelContract, Param
+from aie.utils.compile.jit.markers import In, Out
+from ml_dtypes import bfloat16
 
 from iron.common import BinaryElementwise
 from iron.tests.toolchain.lowering import lower
@@ -32,13 +37,24 @@ class VectorAdd(BinaryElementwise):
 
     def kernel(self, target):
         tiles = [self.a.tile, self.b.tile, self.y.tile, np.int32]
-        return target.kernel("vadd", tiles, source_text=VADD)
-
-    def reference(self, a, b):
-        return a + b
+        contract = KernelContract(
+            roles=(In, In, Out, Param),
+            parameter_bindings=((3, self.tile_size),),
+            reference=lambda a, b: a + b,
+        )
+        return target.kernel("vadd", tiles, source_text=VADD, contract=contract)
 
 
 def test_an_inline_kernel_lowers(device, tmp_path):
     op = VectorAdd(size=1024, num_aie_columns=2, tile_size=256).resolved(device)
     src, insts = lower(op, tmp_path)
-    assert "vadd" in src.read_text()
+    mlir = src.read_text()
+    assert "vadd" in mlir
+    # A core passes the elements; the contract's binding is the line length.
+    assert "arith.constant 256 : i32" in mlir
+
+
+def test_its_reference_is_the_contracts(device):
+    op = VectorAdd(size=1024, num_aie_columns=2, tile_size=256).resolved(device)
+    a, b = (np.arange(1024).astype(bfloat16) for _ in range(2))
+    np.testing.assert_array_equal(op.reference(a, b), a + b)

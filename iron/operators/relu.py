@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 from aie.iron.kernels import eltwise
 
 from iron.common import UnaryElementwise
@@ -15,7 +14,3 @@ class ReLU(UnaryElementwise):
 
     def kernel(self, target):
         return eltwise.relu_sized(self.tile_size)
-
-    def reference(self, x):
-        """CPU reference: ``max(x, 0)``."""
-        return np.maximum(x, 0)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 from collections.abc import Hashable
 
 import numpy as np
@@ -500,6 +501,17 @@ class _ReferenceTracer(Tracer):
             n_in = sum(1 for b in op.buffers if b.direction != "out")
         values = {k: v for k, v in values.items() if v is not None}
         result = op.reference(*tensors, **values)
+        # A flat-declared output the call did not give keeps the shape of the
+        # operand it is the size of, as the traced handle does
+        # (:meth:`Tracer._record`): a view, never a copy.
+        outs = [b for b in op.buffers if b.direction == "out"]
+        fresh = len(tensors) == n_in and len(outs) == 1
+        if fresh and result is not None and len(outs[0].shape) == 1:
+            like = next(
+                (t for t in tensors if math.prod(t.shape) == outs[0].elements), None
+            )
+            if like is not None:
+                result = result.reshape(like.shape, copy=False)
         # A state written in place keeps its host tensor; a result returned
         # for a given output lands in it.
         for state, given in zip(states[n_in:], tensors[n_in:]):

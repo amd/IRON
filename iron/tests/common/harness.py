@@ -5,6 +5,7 @@
 
 import numpy as np
 import pytest
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common.harness import vectors, verify_buffer
@@ -28,7 +29,7 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
     op = ReLU(size=64, num_aie_columns=1, tile_size=64)
     given = np.arange(64, dtype=bfloat16)
     assert vectors(op, x=given)["x"] is given
-    assert vectors(op, x=(32,))["x"].shape == (32,)
+    assert vectors(op, x=(2, 32))["x"].shape == (2, 32)  # the declared 64, as given
     plain, centred = vectors(op)["x"], vectors(op, centered=("x",))["x"]
     assert plain.dtype == centred.dtype == bfloat16
     assert 0 <= plain.min() and plain.max() < 4.0 and not (plain == plain.round()).all()
@@ -46,3 +47,17 @@ def test_verify_buffer_returns_the_indices_outside_tolerance():
     assert verify_buffer(out, "y", ref, rel_tol=0.04, abs_tol=1e-6) == [3]
     assert verify_buffer(out, "y", ref, rel_tol=0.0, abs_tol=0.0) == [3, 5]
     assert verify_buffer(ref[:6].copy(), "y", ref) == [6, 7]  # short: the rest
+
+
+def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
+    ref = np.arange(8, dtype=np.float32)
+    out = ref + np.float32(0.25)
+
+    def eighth(x):
+        return np.abs(x) / 8
+
+    judge = Tolerance.bounded(eighth)
+    limit = eighth(ref)  # 0.25 from x = 2 on
+    assert verify_buffer(out, "y", ref, tolerance=judge, bound=limit) == [0, 1]
+    with pytest.raises(ValueError, match="needs its bound="):
+        verify_buffer(out, "y", ref, tolerance=judge)

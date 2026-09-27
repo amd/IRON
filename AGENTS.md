@@ -169,7 +169,9 @@ reuse lint
      - The operator's `reference(*inputs)` is the CPU reference the tests
        and the graph reference run; `vectors(op)` in `iron/common/harness`
        draws random inputs for its declared buffers and takes the outputs
-       from it.
+       from it. An `Elementwise` operator has none of its own: its kernel's
+       contract is the reference. A composite builds its reference from its
+       kernels' contract references where it can, and says why where not.
      - `test = Testing(cases, ...)` on the operator class
        (`iron/common/testing.py`): the shapes it is checked at on a device,
        any `draw=` its inputs need, and a `tolerance=` where the contract
@@ -184,7 +186,8 @@ reuse lint
      (`iron.common.kernels.kernels_dir()`), not from this repo. Operators get
      them from mlir-aie's kernel factories (`aie.iron.kernels`), each of which
      returns an `ExternalFunction` carrying its source, flags, symbol and
-     argument types, and in `.contract` the tolerance its output is held to
+     argument types, and in `.contract` the reference it computes, the
+     tolerance its output is held to and the scalars it binds
    - Grouped by family (`activation/`, `eltwise/`, `linalg/`, `norm/`,
      `fused/`, `common/`, ...), not by architecture: a kernel's `.cc` includes
      its `*_aie2.h` or `*_aie2p.h` header, chosen by `aie_arch.h`
@@ -340,13 +343,21 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 4. Name the kernel with a factory from `aie.iron.kernels`
    (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
    the symbol, the source, the argument types, aie2's LUT tables and the
-   tolerance contract. Bind a further symbol of the same object with
+   contract: the reference, the tolerance and the scalar bindings. The
+   factory binds the line length and any scalar the operator gives it
+   (`activation.leaky_relu(tile, alpha=)`, `datamovement.axpy(tile, a=)`,
+   `norm.rms_norm_eps(tile, epsilon=)`), so a core calls the kernel with
+   its elements alone and the operator declares no `kernel_call` or
+   `reference` of its own; a field it passes is `param(..., array=True)`.
+   Bind a further symbol of the same object with
    `fn.object_file.bind(symbol, arg_types)`. `target.kernel(...)` declares
    a kernel the factories do not cover (one whose compile flags are the
    operator's own, like flm's `fused_mm_tile.cc`) and, with `source_text=`, one
    written in the operator's own file (the hello-world in
    `iron/tests/toolchain/inline_kernel.py`: a `vadd` in C++ text, the
-   argument types the operands' tiles). An operator running one kernel
+   argument types the operands' tiles). Give such a kernel its
+   `contract=KernelContract(roles=, parameter_bindings=, reference=)` and
+   it is used like a factory's. An operator running one kernel
    reports its contract from `tolerance(target)` (`Elementwise` does this
    from `kernel(target)`). If a new C++ compute kernel is needed, add it
    to the
@@ -356,8 +367,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      put architecture-specific code in `*_aie2.h` / `*_aie2p.h` headers
    - Use AIE API for portable vectorization when possible
    - Add `event0()` and `event1()` for performance profiling
-5. Give the operator a `reference(*inputs)` (numpy, on the declared shapes:
-   upcast to float32, compute, round once)
+5. Give the operator a `reference(*inputs)` only where its kernel's contract
+   is not already it (numpy, on the declared shapes: upcast to float32,
+   compute, round once; from the contract references of the kernels it
+   runs where it can)
 6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
    operator class, from `iron.common.testing`
    - leave `tolerance` out to be judged by the contract of the kernel the

@@ -78,6 +78,7 @@ def declare_kernel(
     object_file_name=None,
     bundled_sources=(),
     symbol_prefix=None,
+    contract=None,
 ):
     """Declare the kernel a design calls, and how it is built.
 
@@ -118,6 +119,11 @@ def declare_kernel(
     single design -- stream's GEMMs, one per tile shape, all from mm.cc. The
     digest composes with it rather than replacing it:
     "<digest>_mm128_64_64_matmul_bf16_bf16".
+
+    ``contract`` is what the kernel computes, an
+    ``aie.iron.kernels.KernelContract``, as a factory gives one: its
+    ``parameter_bindings`` fill the scalars a call leaves out (the line
+    length), its ``reference`` and ``tolerance`` judge the operator.
     """
     if (source is None) == (source_text is None):
         raise TypeError(f"{name}: a kernel names its source, or gives its text")
@@ -149,6 +155,7 @@ def declare_kernel(
             include_dirs=dirs,
             compile_flags=list(compile_flags),
             symbol_prefix=prefix,
+            contract=contract,
         )
     if not bundled_sources:
         return ExternalFunction(
@@ -159,6 +166,7 @@ def declare_kernel(
             include_dirs=dirs,
             compile_flags=list(compile_flags),
             symbol_prefix=prefix,
+            contract=contract,
         )
 
     # Included by bare name against the search path rather than by absolute
@@ -182,4 +190,5 @@ def declare_kernel(
         include_dirs=dirs,
         compile_flags=list(compile_flags),
         symbol_prefix=prefix,
+        contract=contract,
     )

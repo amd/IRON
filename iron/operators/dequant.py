@@ -6,7 +6,6 @@ from typing import ClassVar
 
 import numpy as np
 from aie.iron.kernels import datamovement
-from aie.iron.kernels.datamovement import expand_ref
 from ml_dtypes import bfloat16
 
 from iron.common import In, UnaryElementwise, Unresolvable, auto, param
@@ -75,14 +74,10 @@ class Dequant(UnaryElementwise):
     def kernel(self, target):
         return datamovement.expand(self.tile_size, self.group_size)
 
-    def kernel_call(self, kernel, elem_in, elem_out) -> None:
-        # The line length is a compile flag, not an argument.
-        kernel(elem_in, elem_out)
-
     def pack(self, values, scales):
         """Quantize ``values`` (bf16, ``size``) by ``scales`` (bf16, one per
         ``group_size``, zero point 0) into the kernel's packed uint8 layout;
-        the inverse of :meth:`reference`. Values are rounded half to even
+        the inverse of the kernel's reference. Values are rounded half to even
         and clipped to the int4 range.
         """
         tile, group = self.tile_size, self.group_size
@@ -100,17 +95,3 @@ class Dequant(UnaryElementwise):
         return np.concatenate(
             [nibbles, scale_bytes.reshape(n_tiles, -1)], axis=1
         ).reshape(-1)
-
-    def reference(self, x):
-        """CPU reference: int4 values times their group's bf16 scale, in f32.
-
-        The packed tile is ``tile_size // 2`` bytes of nibbles (element ``2k``
-        in the low nibble of byte ``k``, ``2k + 1`` in the high) followed by
-        one little-endian bf16 scale per ``group_size`` values; the zero point
-        is 0. Results are exact in f32.
-        """
-        tile, group = self.tile_size, self.group_size
-        if tile is None:
-            raise ValueError("Dequant.reference needs tile_size (resolve first)")
-        tiles = x.reshape(self.size // tile, -1)
-        return expand_ref(tiles, tile_size=tile, group_size=group).reshape(self.size)

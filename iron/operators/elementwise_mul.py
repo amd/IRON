@@ -11,6 +11,3 @@ class ElementwiseMul(BinaryElementwise):
 
     def kernel(self, target):
         return eltwise.mul_sized(self.tile_size)
-
-    def reference(self, a, b):
-        return a * b

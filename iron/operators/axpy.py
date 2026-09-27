@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 from aie.iron.kernels import datamovement
 
 from iron.common import BinaryElementwise, param
@@ -10,7 +9,7 @@ from iron.common.testing import Testing, binary_elementwise_cases
 
 class AXPY(BinaryElementwise):
     """AIE-accelerated aX + Y operator: the elementwise design with the
-    scalar as a kernel argument.
+    scalar bound into the kernel.
     """
 
     # Every split at the default scalar and at a non-integer one that bf16
@@ -25,20 +24,4 @@ class AXPY(BinaryElementwise):
     scalar_factor: float = param(default=3.0, array=True)
 
     def kernel(self, target):
-        return datamovement.axpy(self.tile_size)
-
-    def kernel_call(self, kernel, elem_a, elem_b, elem_out) -> None:
-        # saxpy takes the scalar between its inputs and its output.
-        kernel(elem_a, elem_b, self.scalar_factor, elem_out, self.tile_size)
-
-    def reference(self, a, b):
-        """CPU reference: ``scalar_factor * a + b`` in fp32, rounded once, as
-        the kernel computes it.
-
-        The vectorized kernel accepts the scalar as fp32 but broadcasts
-        ``bfloat16(a)`` internally. The product stays in an fp32 accumulator
-        until after adding ``b``; only the coefficient and the final result
-        round to bf16.
-        """
-        scalar = np.float32(np.asarray(self.scalar_factor, dtype=a.dtype))
-        return (scalar * a.astype(np.float32) + b.astype(np.float32)).astype(a.dtype)
+        return datamovement.axpy(self.tile_size, a=self.scalar_factor)

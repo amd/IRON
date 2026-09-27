@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-
 from typing import ClassVar
 
 import numpy as np
@@ -54,7 +52,7 @@ class RMSNorm(Elementwise):
     declares.
     """
 
-    test = Testing(_cases, tolerance=Tolerance.relative(0.04, 1e-6))
+    test = Testing(_cases)
 
     rows: int = param()
     valid = Extent(rows)  # rows, or fewer per call
@@ -97,14 +95,7 @@ class RMSNorm(Elementwise):
         return self.valid * self.tile_size
 
     def kernel(self, target):
-        return norm.rms_norm_eps(self.tile_size)
-
-    def kernel_call(self, kernel, elem_in, elem_out) -> None:
-        kernel(elem_in, elem_out, self.tile_size, self.epsilon)
-
-    def reference(self, x, w=None):
-        """CPU reference: row-wise RMS normalization, optionally weighted."""
-        return reference(x, w=w, weighted=self.weighted, eps=self.epsilon)
+        return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
 
 
 class WeightedRMSNorm(RMSNorm):
@@ -144,13 +135,30 @@ class WeightedRMSNorm(RMSNorm):
     def weighted(self) -> bool:
         return True
 
-    def array(self, target) -> list:
+    def reference(self, x, w):
+        """The two kernels' references in turn: the normalized row rounded to
+        bf16, as the first core stores it, then times the weight.
+        """
+        normed = super().reference(x)
+        y = eltwise.mul_sized(self.tile_size).contract.reference(normed, w)
+        return y.astype(normed.dtype)
 
+    def tolerance(self, target) -> Tolerance:
+        # Each kernel is within one ulp of its reference; the product of a
+        # row one ulp off is itself up to one ulp off before its own rounding.
+        return Tolerance.bf16_ulps(
+            2,
+            atol=2.0**-126,
+            note="rms_norm_eps then mul_sized, one ulp each; atol is the "
+            "smallest normal bf16",
+        )
+
+    def array(self, target) -> list:
         tile_ty = self.x.tile
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels
         depth = fifo_depth(self.tile_size, self.x.dtype)
-        rms_norm = norm.rms_norm_eps(self.tile_size)
+        rms_norm = self.kernel(target)
         eltwise_mul = eltwise.mul_sized(self.tile_size)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
@@ -179,7 +187,6 @@ class WeightedRMSNorm(RMSNorm):
             else [target.rtp(_I32, name=f"count_{k}") for k in range(2 * n_cores)]
         )
         barriers = [target.barrier() for _ in range(2 * n_cores)]
-        tile_size, epsilon = self.tile_size, self.epsilon
 
         def core_norm(of_in, of_out, rms, count, barrier):
             barrier.wait_for_value(1)
@@ -187,7 +194,7 @@ class WeightedRMSNorm(RMSNorm):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                rms(elem_in, elem_out, tile_size, epsilon)
+                rms(elem_in, elem_out)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -198,7 +205,7 @@ class WeightedRMSNorm(RMSNorm):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                mul(elem_in, elem_w, elem_out, tile_size)
+                mul(elem_in, elem_w, elem_out)
                 of_in.release(1)
                 of_out.release(1)
             of_w.release(1)
@@ -243,21 +250,3 @@ class WeightedRMSNorm(RMSNorm):
         if not dynamic:
             self.count.bind(counts)
         return workers
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(x, w=None, weighted=False, eps=1e-5):
-    """CPU reference: row-wise RMS normalization, optionally weighted (ground truth).
-
-    Matches the AIE kernel: normalize by 1/sqrt(mean(x^2) + eps).
-    """
-    f = x.astype(np.float32)
-    rms = np.sqrt(np.mean(f**2, axis=-1, keepdims=True) + eps)
-    out = (f / rms).astype(x.dtype)
-    if weighted:
-        out = out * w
-    return out

@@ -30,21 +30,20 @@ calls::
         def kernel(self, target):
             return eltwise.relu_sized(self.tile_size)
 
-        def reference(self, x):
-            return np.maximum(x, 0)
-
 Kernels come from :mod:`aie.iron.kernels`: its factories return the
-``ExternalFunction`` for a symbol, its source and its argument types, and
-handle aie2's LUT tables. An operator whose kernel takes more than the line
-length (leaky_relu's alpha) or takes its arguments in another order (axpy's
-scalar) overrides :meth:`Elementwise.kernel_call`; a field read there is
-declared ``param(..., array=True)``, since the array bakes it in.
+``ExternalFunction`` for a symbol, its source and its argument types, handle
+aie2's LUT tables, and carry the contract the operator is tested by: the
+reference and the tolerance. A core calls the kernel with its acquired
+elements alone; the factory binds every scalar (the line length, and
+leaky_relu's alpha or axpy's factor when given), so the operator and the
+kernel agree by construction. A field passed to the factory is declared
+``param(..., array=True)``, since the array bakes it in.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import ClassVar, Self
 
 import numpy as np
 from aie.iron import ObjectFifo, Worker
@@ -63,11 +62,10 @@ from .declare import (
     auto,
     param,
 )
+from .design.target import Target
+from .kernels import kernels_dir
 from .testing import Testing, binary_elementwise_cases, channeled_unary_cases
 from .tiling import fifo_depth
-
-if TYPE_CHECKING:
-    from .design.target import Target
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.
@@ -155,7 +153,8 @@ class Elementwise(Operator):
         """The ``ExternalFunction`` each core calls, over one line.
 
         Usually a factory from :mod:`aie.iron.kernels` at ``self.tile_size``;
-        ``target.kernel(...)`` declares one upstream does not offer.
+        ``target.kernel(...)`` declares one upstream does not offer. Either
+        way the kernel takes the elements alone: its contract binds the rest.
         """
         raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
 
@@ -166,11 +165,21 @@ class Elementwise(Operator):
         contract = self.kernel(target).contract
         return None if contract is None else contract.tolerance
 
-    def kernel_call(self, kernel, *elements) -> None:
-        """Call the kernel on this core's acquired elements: inputs, then the
-        output, then the line length.
-        """
-        kernel(*elements, self.tile_size)
+    def reference(self, *inputs):
+        """The kernel contract's reference, line by line: what the cores compute."""
+        op = self.resolved(self.dev)
+        contract = op.kernel(Target(op.dev, kernels_dir())).contract
+        if contract is None or contract.reference is None:
+            raise NotImplementedError(
+                f"{type(self).__name__}: its kernel declares no reference; "
+                f"define reference()"
+            )
+        (out,) = op.outputs
+        # Views of the operands as the kernel's (calls, n) lines, never copies;
+        # the one pass over the data is the cast, the store's bf16 rounding.
+        y = contract.reference(*(x.reshape(op.lines, -1, copy=False) for x in inputs))
+        y = np.asarray(y).astype(out.host_dtype, copy=False)
+        return y.reshape(out.host_shape, copy=False)
 
     # -- the array ----------------------------------------------------------
 
@@ -217,7 +226,7 @@ class Elementwise(Operator):
             n = count.read() if dynamic else count[0]
             for _ in range_(n):
                 elements = [f.acquire(1) for f in fifos_in + fifos_out]
-                self.kernel_call(kernel_fn, *elements)
+                kernel_fn(*elements)
                 for f in fifos_in + fifos_out:
                     f.release(1)
 

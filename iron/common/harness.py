@@ -92,6 +92,7 @@ def verify_buffer(
     abs_tol: float = 1e-6,
     max_error_rate: float = 0.0,
     tolerance: Tolerance | None = None,
+    bound=None,
 ) -> list[int]:
     """The indices where ``output`` is outside tolerance of ``reference``.
 
@@ -105,17 +106,18 @@ def verify_buffer(
 
     ``tolerance`` judges by that instead of the three numbers: typically the
     contract of the kernel the operator runs. It must be judgeable element by
-    element: no ``range_frac`` and not a bound.
+    element, so it has no ``range_frac``; a bound tolerance's limit is
+    ``bound``, evaluated on the inputs as ``compare`` takes it.
     """
     judge = (
         Tolerance.relative(rel_tol, abs_tol, max_mismatch_frac=max_error_rate)
         if tolerance is None
         else tolerance
     )
-    if judge.kind == "bound" or judge.range_frac is not None:
+    if judge.range_frac is not None:
         raise ValueError(
-            f"{buf_name}: a {judge.kind} tolerance with range_frac="
-            f"{judge.range_frac} depends on more than the element it judges"
+            f"{buf_name}: a tolerance with range_frac={judge.range_frac} "
+            f"depends on more than the element it judges"
         )
     expected = np.asarray(reference).reshape(-1)
     got = np.asarray(output).reshape(-1)
@@ -126,7 +128,11 @@ def verify_buffer(
         return list(range(len(got), len(expected)))
     got = got[: len(expected)]
 
-    verdict = compare(got, expected, judge)
+    if judge.kind == "bound":
+        if bound is None:
+            raise ValueError(f"{buf_name}: a bound tolerance needs its bound=")
+        bound = np.broadcast_to(np.asarray(bound, np.float64), expected.shape)
+    verdict = compare(got, expected, judge, bound=bound)
     allowed = judge.max_mismatch_frac
     if verdict.n_mismatch and allowed > 0.0:
         within = "within" if verdict else "exceeds"
@@ -151,7 +157,12 @@ def verify_buffer(
         each = dataclasses.replace(judge, max_mismatch_frac=0.0)
         bad = np.array(
             [
-                not compare(got[i : i + 1], expected[i : i + 1], each)
+                not compare(
+                    got[i : i + 1],
+                    expected[i : i + 1],
+                    each,
+                    bound=None if bound is None else bound[i : i + 1],
+                )
                 for i in range(len(got))
             ],
             dtype=bool,
@@ -222,7 +233,9 @@ def run_test(
     checked); both are consumed in the order of the operator's declared
     buffers. An ``inout`` buffer is given as an input and checked under that
     name. The outputs are judged as :func:`verify_buffer` judges them, by
-    ``tolerance`` when given. Latency (the NPU's own time) and effective
+    ``tolerance`` when given; a bound tolerance's limit is its bound on the
+    inputs, which holds for an elementwise kernel's contract whatever shape
+    the operator gives its operands. Latency (the NPU's own time) and effective
     bandwidth are recorded for the CSV and returned.
     """
     if isinstance(inputs, Vectors):
@@ -261,6 +274,10 @@ def run_test(
         raise RuntimeError("Operator callable did not report NPU execution time")
     latency_us = benchmark.npu.avg_us
 
+    bound = None
+    if tolerance is not None and tolerance.kind == "bound":
+        assert tolerance.bound is not None
+        bound = np.asarray(tolerance.bound(*inputs.values())).reshape(-1)
     errors = {}
     for name, expected in outputs.items():
         if expected is None:
@@ -276,6 +293,7 @@ def run_test(
             abs_tol,
             max_error_rate,
             tolerance=tolerance,
+            bound=bound,
         )
         if bad:
             errors[name] = bad
