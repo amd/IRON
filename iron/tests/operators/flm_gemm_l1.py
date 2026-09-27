@@ -25,15 +25,15 @@ from iron.operators.flm.gemm.design import (
 @pytest.mark.parametrize(
     "device,b_bytes,tile_n,expected",
     [
-        (from_name("npu1", n_cols=4), 2, 64, (32, 1)),
-        (from_name("npu1", n_cols=4), 2, 128, (32, 2)),
-        (from_name("npu2", n_cols=8), BFP16_GROUP_BYTES / BFP16_GROUP, 64, (32, 2)),
-        (from_name("npu2", n_cols=8), BFP16_GROUP_BYTES / BFP16_GROUP, 128, (64, 2)),
+        ("npu1", 2, 64, (32, 1)),
+        ("npu1", 2, 128, (32, 2)),
+        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 64, (32, 2)),
+        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 128, (64, 2)),
     ],
 )
 def test_default_tiles_account_for_static_memory(device, b_bytes, tile_n, expected):
     ct_k = CT_MAX_K_FOR_N[tile_n]
-    budget = l1_budget(device)
+    budget = l1_budget(from_name(device, n_cols={"npu1": 4, "npu2": 8}[device]))
     assert _default_l1(tile_n, ct_k, b_bytes, budget) == expected
     tile_ma, b_depth = expected
     assert _b_depth_for(tile_ma, tile_n, ct_k, b_bytes, budget) == b_depth
