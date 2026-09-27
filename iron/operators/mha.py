@@ -22,6 +22,7 @@ import dataclasses
 import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, kernels
 from aie.iron.controlflow import range_
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -36,6 +37,7 @@ from iron.common import (
     param,
     select,
 )
+from iron.common.testing import Case, Testing
 
 _I32x4 = np.ndarray[(4,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -53,6 +55,21 @@ class MHA(Operator):
     ``q_shims`` lanes, each carrying ``join_rows = B_q * pipelines_per_shim``
     rows per block.
     """
+
+    # Several kernels and no one contract to judge by: 4% or 0.15, with
+    # 0.5% of the outputs allowed past it.
+    test = Testing(
+        [
+            Case(dict(num_heads=1, seq_len=16384, num_pipelines=8)),
+            # Grouped-query: 8 query heads over 2 KV heads.
+            Case(
+                dict(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8),
+                extensive=True,
+            ),
+            Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
+        ],
+        tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005),
+    )
 
     num_heads: int = param()
     # The K/V head count: fewer than num_heads is grouped-query attention;

@@ -19,7 +19,8 @@ import aie.utils as aie_utils
 import pytest
 
 import iron.operators as catalog
-from iron.common import Operator
+from iron.common import Operator, Unresolvable
+from iron.common.device import bound_device
 from iron.common.harness import run_test, vectors
 from iron.common.testing import Case, Testing
 
@@ -62,7 +63,10 @@ def _declared():
 
 @pytest.mark.parametrize("cls,declaration,case", _declared())
 def test_operator(cls: type[Operator], declaration: Testing, case: Case, npu_runtime):
-    op = cls(**case.kwargs)
+    try:
+        op = cls(**case.kwargs).resolved(bound_device())
+    except Unresolvable as e:  # more columns than this device has, say
+        pytest.skip(str(e))
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
     tolerance = declaration.tolerance or op.reference_tolerance()

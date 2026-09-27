@@ -23,7 +23,7 @@ from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv.op import GEMV
+from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.transpose import Transpose
@@ -370,7 +370,7 @@ def test_two_spellings_of_one_array_are_one_design():
 
 
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
-    from iron.operators.gemm.op import GEMM
+    from iron.operators.gemm import GEMM
     from iron.operators.swiglu.op import SwiGLU
 
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
@@ -761,8 +761,8 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
     length (a select shape): each derives the counts its cores compute per
     call, makes no word of tiles per lane, and keeps every descriptor.
     """
-    from iron.operators.gemm.op import GEMM
-    from iron.operators.mha.op import MHA
+    from iron.operators.gemm import GEMM
+    from iron.operators.mha import MHA
 
     class G(iron.Graph):
         def body(self, x, w, *, n: Scratchpad[np.int32]):

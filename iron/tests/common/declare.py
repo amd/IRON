@@ -639,7 +639,7 @@ def test_inference_binds_the_fields_from_the_operands():
 
 
 def test_gemm_layout_flags_transpose_rather_than_resize():
-    from iron.operators.gemm.op import GEMM
+    from iron.operators.gemm import GEMM
 
     plain = GEMM(M=256, K=64, N=512).buffers
     b_major = GEMM(M=256, K=64, N=512, b_col_maj=True).buffers
@@ -652,7 +652,7 @@ def test_gemm_layout_flags_transpose_rather_than_resize():
 
 
 def test_mha_pads_the_sequence_and_groups_kv():
-    from iron.operators.mha.op import MHA
+    from iron.operators.mha import MHA
 
     grouped = MHA(num_heads=8, seq_len=100, num_KV_heads=2).buffers
     plain = MHA(num_heads=8, seq_len=100).buffers

@@ -5,7 +5,7 @@
 
 Operators are re-exported lazily (PEP 562):
 
-    from iron.operators import GEMM  # imports iron.operators.gemm.op, nothing else
+    from iron.operators import GEMM  # imports iron.operators.gemm, nothing else
 
 The FastFlowLM ports, and the binary they are measured against, are
 :mod:`.flm`'s, a catalog of their own: its GEMM is not this one.
@@ -15,18 +15,18 @@ import importlib
 
 # Operator name -> the module that defines it, relative to this package. A
 # small operator is one file (``relu``); one with a design, a reference or a
-# test of its own keeps a directory (``gemm.op``).
+# test of its own keeps a directory (``swiglu.op``).
 _OPERATOR_MODULES = {
     "AXPY": "axpy",
     "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",
     "GELU": "gelu",
-    "GEMM": "gemm.op",
-    "GEMV": "gemv.op",
+    "GEMM": "gemm",
+    "GEMV": "gemv",
     "LayerNorm": "layer_norm",
     "LeakyReLU": "leaky_relu",
-    "MHA": "mha.op",
+    "MHA": "mha",
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "WeightedRMSNorm": "rms_norm",

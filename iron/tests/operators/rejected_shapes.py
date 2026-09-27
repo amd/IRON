@@ -95,7 +95,7 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
-    from iron.operators.gemm.op import GEMM
+    from iron.operators.gemm import GEMM
     from iron.operators.softmax import Softmax
 
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)

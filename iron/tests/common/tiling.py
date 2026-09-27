@@ -62,7 +62,7 @@ def test_whole_buffer_is_one_linear_transfer():
 
 
 def test_gemv_unbatched_taps_are_reproduced():
-    # gemv/op.py A_taps for num_batches == 1: offset col*(M//cols)*K, sizes [1,1,1,(M//cols)*K].
+    # gemv.py A_taps for num_batches == 1: offset col*(M//cols)*K, sizes [1,1,1,(M//cols)*K].
     M, K, cols = 2048, 8192, 8
     blocks = split((M, K), cols, axis=0)
     for col, block in enumerate(blocks):

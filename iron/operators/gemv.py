@@ -25,9 +25,46 @@ from iron.common import (
     param,
 )
 from iron.common.kernels import target_arch
+from iron.common.testing import Case, Testing
 from iron.common.tiling import DMA_BD_MAX_WRAP, Access, bank_elements
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
+
+
+def _cases():
+    # M, K, columns, tile_size_input, tile_size_output
+    plain = [
+        (128, 128, 1, 32, 128),
+        (2048, 8192, 1, 1, 2048),
+        (8192, 2048, 1, 4, 1024),
+        (2048, 8192, 2, 1, 1024),
+        (8192, 2048, 2, 4, 1024),
+        (2048, 8192, 4, 1, 512),
+        (8192, 2048, 4, 4, 1024),
+        (2048, 8192, 8, 1, 256),
+        (8192, 2048, 8, 4, 1024),
+    ]
+    # ... and num_batches: the coalesced batch path and its fallback.
+    batched = [
+        (256, 128, 1, 1, 256, 4),  # tiny, coalesced
+        (256, 128, 8, 1, 32, 100),  # large num_batches: the size-uncapped dim
+        (448, 64, 8, 1, 56, 192),  # a multi-dim run split, and many batches
+        (64, 1536, 1, 1, 64, 8),  # large K
+        (1026, 64, 1, 1, 2, 2),  # a run that needs an even (granule) split
+        (1024, 1024, 1, 1, 64, 2),  # batch stride > 2**20: per-batch fallback
+        (512, 64, 8, 4, 64, 32),  # attention's: several rows, a batch per head
+    ]
+
+    def case(M, K, cols, tsi, tso, **extra):
+        kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
+        return Case(dict(kwargs, tile_size_output=tso, **extra))
+
+    return (
+        [case(*p) for p in plain]
+        + [case(*p, num_batches=batches) for *p, batches in batched]
+        # The fused GELU epilogue, aie2p's alone.
+        + [case(*p, epilogue="gelu") for p in plain[:3]]
+    )
 
 
 class GEMV(Operator):
@@ -43,6 +80,8 @@ class GEMV(Operator):
     - tile_size_input: rows of A stored on each core per acquire (chunk size of A)
     - tile_size_output: rows of C stored on each core per acquire (chunk size of C)
     """
+
+    test = Testing(_cases(), draw=dict(normal=("A", "B")))
 
     M: int = param()
     K: int = param()

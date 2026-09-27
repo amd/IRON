@@ -38,8 +38,8 @@ from iron.common import Scratchpad
 from iron.common.graph import Handle
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv.op import GEMV
-from iron.operators.mha.op import MHA
+from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rope import RopeScaling, rope_angles
 from iron.operators.softmax import Softmax

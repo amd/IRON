@@ -14,7 +14,7 @@ compile time, from a file this class never names.
 
 import pytest
 
-from iron.operators.gemm.op import GEMM
+from iron.operators.gemm import GEMM
 
 
 def _construct(tile_m=64, tile_k=64, tile_n=64, emulate_bf16_mmul_with_bfp16=True):

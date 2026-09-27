@@ -24,7 +24,7 @@ from aie.iron.device import from_name
 
 from iron.common.image import OperatorSequence, build_fused_mlir
 from iron.common.image.fused import fused_identity, fused_plan
-from iron.operators.gemv.op import GEMV
+from iron.operators.gemv import GEMV
 
 
 def _bind_npu2():

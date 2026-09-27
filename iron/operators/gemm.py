@@ -24,10 +24,72 @@ from iron.common import (
     select,
 )
 from iron.common.kernels import target_arch
+from iron.common.testing import Case, Testing
 
 
 def ceildiv(a, b):
     return (a + b - 1) // b
+
+
+# fmt: off
+# The rounding configuration that tracks the reference most closely (an f32
+# accumulator, native bf16 mmul), over shapes, layouts and tiles:
+#   M,     K,     N, columns, b_col_maj, c_col_maj,   m,   k,   n
+_REGULAR = [
+    (2048,  2048,  2048,       1,     False,     False,  64,  64,  64),
+    (2048,  2048,  2048,       2,      True,     False,  64,  64,  64),
+    (2048,  2048,  2048,       8,      True,      True,  64,  64,  64),
+    ( 384,  1536,  1792,       4,      True,     False,  32,  48,  64),
+    (1792,   896,  1152,       8,     False,      True,  64,  32,  48),
+    ( 896,  1792,   640,       8,     False,      True,  32,  64,  80),
+    ( 192,   384,    64,       4,     False,     False,  48,  96,  16),
+    ( 192,   384,    64,       4,      True,      True,  48,  96,  16),
+]
+_EXTENSIVE = [
+    (2048,  2048,  2048,       8,     False,     False,  32,  32, 128),
+    (2048,  2048,  8192,       2,     False,     False,  64,  64,  64),
+    (2048,  8192,  2048,       2,     False,     False,  64,  64,  64),
+    (2048,    64,  2048,       2,     False,     False,  64,  64,  64),
+    (2048,    64,  8192,       2,     False,     False,  64,  64,  64),
+    (2048,  2048,  2048,       8,      True,     False, 128,  32,  32),
+    (2048,  2048,  8192,       2,      True,     False,  64,  64,  64),
+    (2048,  8192,  2048,       2,      True,     False,  64,  64,  64),
+    # Llama 3.2 1B prefill's down projection, as the graph runs it.
+    (2048,  8192,  2048,       8,      True,     False,  64,  64,  64),
+    (2048,    64,  2048,       2,      True,     False,  64,  64,  64),
+    (2048,    64,  8192,       2,      True,     False,  64,  64,  64),
+    (2048,  2048,  2048,       2,     False,      True,   8,  16,  32),
+    (2048,  2048,  8192,       2,     False,      True,  64,  64,  64),
+    (2048,  8192,  2048,       2,     False,      True,  64,  64,  64),
+    (2048,    64,  2048,       2,     False,      True,  64,  64,  64),
+    (2048,    64,  8192,       2,     False,      True,  64,  64,  64),
+    # N wide enough that C's row stride (mem_tile_m_C * N) overflows the
+    # shim BD's 20-bit iteration step, so the drain is issued as one
+    # descriptor per row-block. Cover for that split.
+    (1024,  2560, 10240,       8,     False,     False,  64,  64,  64),
+    (2048,  2560, 10240,       8,     False,     False,  64,  64,  64),
+]
+# fmt: on
+
+
+def _cases(cls):
+    # aie2's mm kernels block m by 4 r (mm_aie2.h), not aie2p's 2 r: an
+    # 8-row tile does not compile there.
+    min_tile_m = 16 if target_arch() == "aie2" else 1
+    out = []
+    for rows, extensive in ((_REGULAR, False), (_EXTENSIVE, True)):
+        for M, K, N, cols, b_col_maj, c_col_maj, m, k, n in rows:
+            if m < min_tile_m:
+                continue
+            kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
+            kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
+            kwargs.update(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
+            out.append(Case(kwargs, extensive=extensive))
+    # The defaults, which a graph's projections run: bfp16 inputs, and C
+    # rounded to bf16 between K tiles.
+    for K, extensive in ((2048, False), (8192, True)):
+        out.append(Case(dict(M=2048, K=K, N=2048, b_col_maj=True), extensive))
+    return out
 
 
 N_AIE_ROWS = 4
@@ -47,6 +109,8 @@ class GEMM(Operator):
     reduction and tile counts are values the sequence writes, so the array
     does not depend on the extents.
     """
+
+    test = Testing(_cases, draw=dict(normal=("A",)))
 
     M: int = param()
     K: int = param()

@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
-from iron.operators.mha.op import MHA
+from iron.operators.mha import MHA
 
 # Llama 3.2 1B's heads, at half its context; eight pipelines as its profile.
 HEADS, KV_HEADS, D, SEQ, PIPELINES = 32, 8, 64, 1024, 8

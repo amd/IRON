@@ -24,7 +24,7 @@ import tiktoken.load
 from iron import lm
 from iron.lm import CausalLM, Config, Layout, Oracle, project
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.gemv.op import GEMV
+from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import LLAMA_3_2, RoPE
 from iron.operators.swiglu.op import swiglu

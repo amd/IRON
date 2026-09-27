@@ -133,7 +133,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
     "make",
     [
         pytest.param(
-            lambda p: __import__("iron.operators.gemm.op", fromlist=["GEMM"]).GEMM(
+            lambda p: __import__("iron.operators.gemm", fromlist=["GEMM"]).GEMM(
                 M=p["S"],
                 K=p["F"],
                 N=p["E"],
@@ -155,7 +155,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
             id="kv_into_cache",
         ),
         pytest.param(
-            lambda p: __import__("iron.operators.mha.op", fromlist=["MHA"]).MHA(
+            lambda p: __import__("iron.operators.mha", fromlist=["MHA"]).MHA(
                 num_heads=p["H"],
                 seq_len=p["S"],
                 d=p["D"],

@@ -42,7 +42,7 @@ CASES = [
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
-        "gemm.op",
+        "gemm",
         "GEMM",
         [
             # M must be a multiple of 256 and N of 512.
@@ -65,7 +65,7 @@ CASES = [
         ],
     ),
     (
-        "gemv.op",
+        "gemv",
         "GEMV",
         [
             dict(M=256, K=64),
@@ -84,7 +84,7 @@ CASES = [
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
-        "mha.op",
+        "mha",
         "MHA",
         [
             # Left out, plain MHA; fewer KV heads is grouped-query, and

@@ -124,7 +124,7 @@ def test_shipped_fetches_its_image(npu2):
 
 
 def test_a_declared_operator_compiles_to_an_xclbin_on_npu1():
-    from iron.operators.gemv.op import GEMV
+    from iron.operators.gemv import GEMV
 
     previous = aie_utils.get_current_device()
     aie_utils.set_current_device(DEVICES["npu1"]())

@@ -3,8 +3,8 @@
 
 """A weight's projection at either row count, for a graph's body."""
 
-from iron.operators.gemm.op import GEMM
-from iron.operators.gemv.op import GEMV
+from iron.operators.gemm import GEMM
+from iron.operators.gemv import GEMV
 
 
 def project(x, weight, **gemv):

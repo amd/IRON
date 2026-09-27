@@ -187,12 +187,12 @@ def test_preamble_writes_residents_and_rejects_unbound_ones():
 
 
 def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
-    # mha/op.py with eight pipelines: Q and O go through two shims, each
+    # mha.py with eight pipelines: Q and O go through two shims, each
     # carrying four pipelines' (256-row) block. Per KV group, each shim's Q
     # is one pattern over the group's heads and every block, K and V are the
     # head's slab re-read once per (head, block) from the iteration slot, and
     # the O drains mirror the Q fills and wait.
-    from iron.operators.mha.op import MHA
+    from iron.operators.mha import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
@@ -252,7 +252,7 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
 def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch):
     # The (seq, heads, d) layout: a head's rows are strided by every head's
     # d, and the group's heads are d apart; the descriptor count is the same.
-    from iron.operators.mha.op import MHA
+    from iron.operators.mha import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
 
@@ -298,7 +298,7 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
-    from iron.operators.mha.op import MHA
+    from iron.operators.mha import MHA
 
     op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
@@ -662,7 +662,7 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin(npu2):
     """
     from aie.iron.device import from_name
 
-    from iron.operators.gemv.op import GEMV
+    from iron.operators.gemv import GEMV
 
     op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
     op.use_value("valid", "n")

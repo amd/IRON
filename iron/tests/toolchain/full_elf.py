@@ -33,7 +33,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare.member import Extent
-from iron.operators.gemm.op import GEMM
+from iron.operators.gemm import GEMM
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]

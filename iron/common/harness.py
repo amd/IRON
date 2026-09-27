@@ -131,7 +131,9 @@ def verify_buffer(
     if judge.kind == "bound":
         if bound is None:
             raise ValueError(f"{buf_name}: a bound tolerance needs its bound=")
-        bound = np.broadcast_to(np.asarray(bound, np.float64), np.shape(reference))
+        bound = np.asarray(bound, np.float64)
+        if bound.size != expected.size:  # a scalar, or one per row
+            bound = np.broadcast_to(bound, np.shape(reference))
         bound = bound.reshape(-1)
     verdict = compare(got, expected, judge, bound=bound)
     allowed = judge.max_mismatch_frac
@@ -279,7 +281,7 @@ def run_test(
     bound = None
     if tolerance is not None and tolerance.kind == "bound":
         assert tolerance.bound is not None
-        bound = np.asarray(tolerance.bound(*inputs.values())).reshape(-1)
+        bound = tolerance.bound(*inputs.values())
     errors = {}
     for name, expected in outputs.items():
         if expected is None:

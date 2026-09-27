@@ -75,7 +75,8 @@ pytest iron/operators/
 ### Run Single Operator Test
 
 ```bash
-pytest iron/operators/axpy/
+pytest iron/operators/test.py -k AXPY   # a declared Testing
+pytest iron/operators/swiglu/           # an operator with a test of its own
 ```
 
 ### Run Language Model Tests
@@ -88,7 +89,7 @@ pytest iron/lm/
 
 ```bash
 pytest iron/operators/test.py -k relu
-pytest iron/operators/gemm/test.py::test_gemm
+pytest iron/operators/test.py -k GEMM
 ```
 
 ### Parallel Testing (faster)
@@ -151,7 +152,7 @@ reuse lint
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
-     device test of its own (`gemm/`, `mha/`). `flm/` is a catalog of its
+     device test of its own (`swiglu/`, `swiglu_prefill_stream/`). `flm/` is a catalog of its
      own: the FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they
      are measured against and their weight packing; its GEMM is not
      `iron.operators.GEMM`.
@@ -341,7 +342,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - `sequence(rt)` only if the derived sequence is not the one you want:
      `rt.fill(self.A.lane(i), access)`, `rt.drain(self.C.lane(i), access)`
    - see `iron/common/elementwise.py` for the elementwise families, and
-     `gemm/op.py` or `mha/op.py` for hand-written sequences
+     `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
    Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
    redeclares the operands with `via=` and lays the image's parameter block
