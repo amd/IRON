@@ -217,7 +217,7 @@ def tile_option_params():
     """Every (tile_n, tile_ma) the design accepts on this device.
 
     The shape parameters above only exercise the default geometry, since
-    __post_init__ resolves both knobs. These cover the knobs themselves, which
+    __post_init__ resolves both tunables. These cover the tunables themselves, which
     change the blocked L1 layout, and a mismatch is silently wrong output
     rather than a build error, so each has to run on hardware. The defaults
     stay in the regular suite; the overrides are extensive, since each is its

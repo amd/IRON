@@ -4,7 +4,7 @@
 """Field specifiers and the dimension references a class body writes.
 
 A compile-time parameter is a dataclass field declared with :func:`param`, a
-knob the library resolves one declared with :func:`auto`. Naming either in a
+tunable the library resolves one declared with :func:`auto`. Naming either in a
 shape expression yields a :class:`DimRef`, which class creation resolves
 against the class it lands on.
 """
@@ -26,7 +26,7 @@ class Unresolvable(ValueError):
 
 
 class Incompatible(ValueError):
-    """An operator's extents do not fit its resolved knobs."""
+    """An operator's extents do not fit its resolved tunables."""
 
 
 class DeclarationError(TypeError):
@@ -75,7 +75,7 @@ def auto(
     repr: bool = True,
     init: bool = True,
 ) -> Any:
-    """Declare a knob the library resolves for the device when the caller
+    """Declare a tunable the library resolves for the device when the caller
     does not: a compile-time value that starts at ``default`` (``None``:
     :meth:`~iron.common.declare.Operator.resolve` must fill it) and that
     ``resolve`` may replace. Annotate it with the resolved type: the field
@@ -84,8 +84,8 @@ def auto(
 
     An ``auto()`` never appears in a host shape (inference would cycle
     through resolution); a stream tile may name one. ``choices`` and ``legal``
-    describe the knob for a tuner and are recorded, not yet read.
-    ``init=False`` fixes a subclass's value of an inherited knob (a kernel
+    describe the tunable for a tuner and are recorded, not yet read.
+    ``init=False`` fixes a subclass's value of an inherited tunable (a kernel
     that only works with one channel per column).
     """
     return _specifier(

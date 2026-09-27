@@ -343,8 +343,8 @@ def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
 
 
 def test_two_spellings_of_one_array_are_one_design():
-    """Identity is taken after resolution: a knob left to resolve and the same
-    knob given its resolved value name one array, and a sequence builds it
+    """Identity is taken after resolution: a tunable left to resolve and the same
+    tunable given its resolved value name one array, and a sequence builds it
     once. Every operator of a traced graph goes through the same point, so
     the design counts here are the gate on it.
     """
@@ -592,7 +592,7 @@ def _every_keyword_is_load_bearing(monkeypatch, settings):
     assert not redundant, f"resolution picks these anyway: {redundant}"
 
 
-def test_llama_names_only_the_knobs_that_matter(monkeypatch):
+def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     """Every keyword the llama graph passes is a choice resolution would not
     have made in some setting the graph is written for: the model's real
     shape at the graph's own defaults, on either NPU generation for a decode

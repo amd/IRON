@@ -13,7 +13,7 @@ from iron.common import Profile
 from iron.lm import checkpoint_shapes, load_weights
 from iron.lm.llama3.model import LLAMA_3_2_1B, Llama, layout
 
-# The knobs the graph runs with at :data:`SMALL`'s shape on NPU2: decode
+# The tunables the graph runs with at :data:`SMALL`'s shape on NPU2: decode
 # at 256 and 64 rows of context, the prompt at 64. The application's own
 # profiles are for Llama 1B's shape, which :func:`llama_1b` runs under.
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))

@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Profiles: knob values for operator shapes, applied as an operator is made.
+"""Profiles: tunable values for operator shapes, applied as an operator is made.
 
 A :class:`Profile` is data: entries that name a class, some of its
-dimensions and values for its knobs. Applied in a ``with`` scope, it fills
-the knobs a call leaves open as the operator is constructed, before
+dimensions and values for its tunables. Applied in a ``with`` scope, it fills
+the tunables a call leaves open as the operator is constructed, before
 :meth:`~.operator.Operator.resolve` sees it, so the precedence is the
-explicit call-site value, then the profile, then the knob's declared
+explicit call-site value, then the profile, then the tunable's declared
 default or the value resolution proposes. A tuner writes a profile and a
 graph applies it; operator classes know nothing about profiles.
 
 On disk a profile is JSON, one object per entry holding what :meth:`Profile.add`
 takes: ``"operator"``, the class's name in :mod:`iron.operators`, then its
-dimensions and knobs as keywords::
+dimensions and tunables as keywords::
 
     {"entries": [
       {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
@@ -54,11 +54,11 @@ def current() -> Profile | None:
 
 @dataclasses.dataclass(frozen=True)
 class Entry:
-    """One line of a profile: the knobs for the operators ``dims`` selects."""
+    """One line of a profile: the tunables for the operators ``dims`` selects."""
 
     cls: type
     dims: dict[str, Any]  # param() values to match; a dimension left out matches any
-    knobs: dict[str, Any]  # auto() values to give
+    tunables: dict[str, Any]  # auto() values to give
 
     def matches(self, cls: type, dims: Mapping[str, Any]) -> bool:
         return issubclass(cls, self.cls) and all(
@@ -82,16 +82,16 @@ def _dims_of(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class Profile:
-    """Knob values for operators, keyed by their shape.
+    """Tunable values for operators, keyed by their shape.
 
     :meth:`add` takes a class and keyword fields: its ``param()`` fields
     select the operators the entry is for (one left out matches any value),
     its ``auto()`` fields are the values given. Within ``with profile:``, a
-    call that constructs an operator and leaves a knob open takes it from
+    call that constructs an operator and leaves a tunable open takes it from
     the most specific entry that matches the class and the dimensions and
-    names that knob, whether the knob has a declared default or not; a knob
+    names that tunable, whether the tunable has a declared default or not; a tunable
     the call gives is never touched. Two entries of equal specificity that
-    name one knob for one operator and disagree are an error, raised at
+    name one tunable for one operator and disagree are an error, raised at
     that call. A subclass matches its base's entries.
     """
 
@@ -99,25 +99,25 @@ class Profile:
         self._entries: list[Entry] = []
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: dimensions to match and knobs to give."""
+        """Add an entry for ``cls``: dimensions to match and tunables to give."""
         tiers = {f.name: _tier_of(f) for f in dataclasses.fields(cls)}
-        dims, knobs, unknown = {}, {}, []
+        dims, tunables, unknown = {}, {}, []
         for name, value in fields.items():
             tier = tiers.get(name)
             if tier == "param":
                 dims[name] = value
             elif tier == "auto":
-                knobs[name] = value
+                tunables[name] = value
             else:
                 unknown.append(name)
         if unknown:
             raise TypeError(f"{cls.__name__} declares no field {unknown}")
-        if not knobs:
-            raise TypeError(f"an entry for {cls.__name__} must give a knob")
-        self._entries.append(Entry(cls, dims, knobs))
+        if not tunables:
+            raise TypeError(f"an entry for {cls.__name__} must give a tunable")
+        self._entries.append(Entry(cls, dims, tunables))
 
-    def knobs_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-        """The knobs for the ``cls`` a call with ``given`` keywords makes,
+    def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
+        """The tunables for the ``cls`` a call with ``given`` keywords makes,
         each from the most specific entry naming it.
         """
         dims = _dims_of(cls, given)
@@ -126,7 +126,7 @@ class Profile:
             if not entry.matches(cls, dims):
                 continue
             rank = len(entry.dims)
-            for name, value in entry.knobs.items():
+            for name, value in entry.tunables.items():
                 if name not in chosen or rank > chosen[name][0]:
                     chosen[name] = (rank, value)
                 elif rank == chosen[name][0] and chosen[name][1] != value:
@@ -138,8 +138,8 @@ class Profile:
         return {name: value for name, (_, value) in chosen.items()}
 
     def lookup(self, op) -> dict[str, Any]:
-        """The knobs the profile gives an operator of ``op``'s class and shape."""
-        return self.knobs_for(
+        """The tunables the profile gives an operator of ``op``'s class and shape."""
+        return self.tunables_for(
             type(op), {f.name: getattr(op, f.name) for f in dataclasses.fields(op)}
         )
 
@@ -168,7 +168,7 @@ class Profile:
             name = entry.cls.__name__
             if getattr(operators, name, None) is not entry.cls:
                 raise ValueError(f"{name} is not iron.operators.{name}")
-            lines.append(json.dumps({"operator": name, **entry.dims, **entry.knobs}))
+            lines.append(json.dumps({"operator": name, **entry.dims, **entry.tunables}))
         with open(path, "w") as f:
             f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
 

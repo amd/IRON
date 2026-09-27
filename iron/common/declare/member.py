@@ -102,7 +102,7 @@ class _Buffer(_Member["BoundBuffer"]):
 
     With ``tile=`` the buffer is its own stream into (or out of) the array:
     ``tile`` is what one fifo element holds, in the units a core reads
-    (its dimensions may be knobs), ``per=`` the field the stream is
+    (its dimensions may be tunables), ``per=`` the field the stream is
     replicated over, ``depth`` the fifo depth, ``via=`` a pinned shim
     endpoint. Without it the buffer is an argument of a sequence written by
     hand (:meth:`Operator.sequence`).

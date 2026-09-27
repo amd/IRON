@@ -28,7 +28,7 @@ class BoundStream:
     """An operand's stream on an operator instance: concrete tile, count, and
     fifo handles.
 
-    Resolved lazily, because a tile or a ``per=`` count may name a knob that
+    Resolved lazily, because a tile or a ``per=`` count may name a tunable that
     is ``None`` until :meth:`Operator.resolved` fills it.
     """
 
@@ -174,7 +174,7 @@ class BoundBuffer:
             self.lanes.buffer = self
 
     # Resolved on use rather than at construction: a shape or dtype may
-    # depend on a knob the device fills (flm/gemm's B layout), and an
+    # depend on a tunable the device fills (flm/gemm's B layout), and an
     # unresolved operator must still be usable as a value.
     @property
     def shape(self) -> tuple[int, ...]:

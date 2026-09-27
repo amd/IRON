@@ -83,8 +83,8 @@ class _OperatorMeta(type):
             )
         profile = current_profile()
         if profile is not None:
-            # The knobs this call leaves open, where the profile names them.
-            kwargs = {**profile.knobs_for(cls, kwargs), **kwargs}
+            # The tunables this call leaves open, where the profile names them.
+            kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
         return super().__call__(*args, **kwargs)
 
 
@@ -231,7 +231,7 @@ class Operator(metaclass=_OperatorMeta):
         self._derive_params()
         self.validate()
         self._bind()
-        # Once every knob is known the extents can be checked, so the check
+        # Once every tunable is known the extents can be checked, so the check
         # runs at construction rather than at resolution.
         if not any(getattr(self, n) is None for n in self._auto_fields):
             self.compatible()
@@ -269,14 +269,14 @@ class Operator(metaclass=_OperatorMeta):
         """Check the sequence-tier fields on their own. Runs at construction."""
 
     def compatible(self) -> None:
-        """Check the extents against the resolved knobs; raise :class:`Incompatible`."""
+        """Check the extents against the resolved tunables; raise :class:`Incompatible`."""
 
     def resolve(self, dev) -> Self:
         """Return a copy resolved for ``dev``: every ``auto()`` filled, from
         the device and from this operator's extents; raise :class:`Unresolvable`.
 
         This is the only hook that sees both. The default fills nothing. A
-        knob left ``None`` is an error once this returns::
+        tunable left ``None`` is an error once this returns::
 
             def resolve(self, dev):
                 cols = self.columns or self.shim_columns(dev)
@@ -423,7 +423,7 @@ class Operator(metaclass=_OperatorMeta):
 
     def resolved(self, dev) -> Self:
         """This operator resolved for ``dev``: itself if it already is, else
-        :meth:`resolve`'s copy, every knob filled and :meth:`validate` and
+        :meth:`resolve`'s copy, every tunable filled and :meth:`validate` and
         :meth:`compatible` checked. Nothing else calls :meth:`resolve`.
         """
         if self._resolved:
@@ -775,7 +775,7 @@ class Operator(metaclass=_OperatorMeta):
     def buffer_map(self) -> dict[str, tuple[str, int, int]]:
         """Each buffer as ``(arena, position, nbytes)``, for an image's record.
 
-        Taken from the resolved operator, since a shape may depend on a knob
+        Taken from the resolved operator, since a shape may depend on a tunable
         the device fills (flm/gemm's B layout) and the built image's buffers
         are the resolved ones. A standalone operator has no arena plan; its
         buffers are the kernel's positional arguments.

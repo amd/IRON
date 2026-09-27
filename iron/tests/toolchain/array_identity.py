@@ -5,7 +5,7 @@
 
 One array serves every extent: the core
 programs an array compiles to must be the same bytes whether the operator
-is built for one extent or twice it, with the same knobs. Each case
+is built for one extent or twice it, with the same tunables. Each case
 compiles an operator at two extents (the real build: an insts-only
 lowering compiles no core) and compares the per-core ELFs the build
 leaves, byte for byte. Compiles are cheap enough for this to run
@@ -21,7 +21,7 @@ from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("aiecc")
 
-# (module, class, knobs, the extent doubled). Every knob the array could
+# (module, class, tunables, the extent doubled). Every tunable the array could
 # resolve from the extent is given, so only the extent differs. Repeat and
 # Copy are memtile pass-throughs with no core, so nothing of theirs is
 # compiled per extent.
@@ -63,12 +63,12 @@ def _core_elfs(op) -> dict[str, bytes]:
 
 
 @pytest.mark.parametrize(
-    "module,cls_name,knobs,extent",
+    "module,cls_name,tunables,extent",
     PAIRS,
     ids=lambda v: v if isinstance(v, str) else "",
 )
 def test_the_array_is_the_same_at_two_extents(
-    device, module, cls_name, knobs, extent, tmp_path, monkeypatch
+    device, module, cls_name, tunables, extent, tmp_path, monkeypatch
 ):
     # A cache of its own: an entry another test left for the same design,
     # an insts-only lowering's say, holds no core ELF.
@@ -80,7 +80,7 @@ def test_the_array_is_the_same_at_two_extents(
     elfs = []
     for size in (n, 2 * n):
         try:
-            op = cls(**knobs, **{name: size}).resolved(device)
+            op = cls(**tunables, **{name: size}).resolved(device)
         except (ValueError, Unresolvable, Incompatible) as e:
             pytest.skip(f"not for {device.resolve().name}: {e}")
         elfs.append(_core_elfs(op))

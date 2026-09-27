@@ -149,11 +149,11 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
 
 All available operators can be found in `iron/operators`. These each contain:
 
-- `op.py` (or `<name>.py` for a small operator): The operator, one declared class (see `iron/common/declare/` and the Architecture section of `AGENTS.md`): its knobs, its operands declared by shape with the tile each streams into the array in, the values the cores read, and `array()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The library derives the runtime sequence from that declaration, or the operator writes it by hand. One array serves every extent, so one build of it serves many shapes.
+- `op.py` (or `<name>.py` for a small operator): The operator, one declared class (see `iron/common/declare/` and the Architecture section of `AGENTS.md`): its tunables, its operands declared by shape with the tile each streams into the array in, the values the cores read, and `array()`, which builds the array with ObjectFIFOs and Workers around a C++ kernel from the [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels). The library derives the runtime sequence from that declaration, or the operator writes it by hand. One array serves every extent, so one build of it serves many shapes.
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
 - `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/operators/test.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
-Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/lm/llama3/model.py` is the worked example, its tuned knobs a `Profile` the graph carries rather than keywords at every call).
+Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/lm/llama3/model.py` is the worked example, its tunables a `Profile` the graph carries rather than keywords at every call).
 
 > NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`

@@ -8,7 +8,7 @@ subclass is processed and none can forget to be. It applies ``dataclass``,
 resolves the field objects the class body captured in its shapes to names,
 re-attaches every field as a :class:`DimRef`, checks the shape rule, and
 records the members in declaration order. Checking an operator's extents
-against its resolved knobs needs an instance, so that is left to
+against its resolved tunables needs an instance, so that is left to
 :meth:`Operator.compatible`.
 """
 

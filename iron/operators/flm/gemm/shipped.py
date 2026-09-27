@@ -97,7 +97,7 @@ class Shipped(
 ):
     """The shipped 4x8 NPU2 ``mm`` binary: its pins and its parameter block."""
 
-    # The port's knobs, fixed by the binary. B is bf16 (no bfp16 on this
+    # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
     tile_n: int = auto(N_TILE, repr=False, init=False)
     tile_ma: int = auto(M_TILE, repr=False, init=False)

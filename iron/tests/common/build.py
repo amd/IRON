@@ -374,9 +374,9 @@ def _record(op):
 
 
 def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
-    # Keyword construction leaves every knob to resolution, which reads the
+    # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
-    # knobs by compatible(), not folded into its defaults.
+    # tunables by compatible(), not folded into its defaults.
     assert flm.GEMM(M=512, K=1024, N=1024).tile_n is None
     op = flm.GEMM(M=512, K=1024, N=1024).resolved(_NPU2())
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)

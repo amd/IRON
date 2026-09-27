@@ -157,8 +157,9 @@ reuse lint
      `iron.operators.GEMM`.
    - An operator module holds:
      - the operator, one class (`iron/common/declare/`): `param()` fields for what a host shape
-       names, `auto()` knobs `resolve(dev)` fills from the device and the
-       extents, `In`/`Out` operands declared by shape whose `tile=` makes
+       names, `auto()` tunables `resolve(dev)` fills from the device and the
+       extents (a tunable is an `auto()` field: the caller or a profile may
+       give it, and the library resolves it when neither does), `In`/`Out` operands declared by shape whose `tile=` makes
        each its own stream into the array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
        array never depends on them), `array(target)`, which builds
@@ -324,7 +325,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    if it needs more than one module: a hand-written design, its own
    reference, a README, a device test of its own)
 2. Declare the operator (`class X(Operator)`):
-   - `param()` fields for what a host shape names; `auto()` knobs, filled
+   - `param()` fields for what a host shape names; `auto()` tunables, filled
      by `resolve(dev)` from the device and the extents
    - `In`/`Out` operands by shape, each with its `tile=` in the units a
      core reads (`per=` a column count): an operand with a tile is its own
@@ -336,13 +337,13 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `target.rtp(...)`, `target.barrier()`), `range_()` for loops, and
      `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
      member. It sees the array tier alone: reading an extent raises
-   - `compatible()` for divisibility against the resolved knobs
+   - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:
      `rt.fill(self.A.lane(i), access)`, `rt.drain(self.C.lane(i), access)`
    - see `iron/common/elementwise.py` for the elementwise families, and
      `gemm/op.py` or `mha/op.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
-   Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the knobs,
+   Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
    redeclares the operands with `via=` and lays the image's parameter block
    out as a `Value(address=, lock=)`; nothing builds its array
 4. Name the kernel with a factory from `aie.iron.kernels`
@@ -432,17 +433,17 @@ The versions of one graph share its weights and states: a full ELF
 version is placed in the graph's one scratch arena. `graph.reference(...)` runs the body through each operator's
 `reference()` on host tensors, per-call values and state modelled.
 
-The knobs a graph's operators run with can be a `Profile` rather than
+The tunables a graph's operators run with can be a `Profile` rather than
 keywords at every call: entries keyed by operator class and shape, the
 graph's `profile` attribute (or applied in a `with profile:` scope); a
 directory there holds one per device, `<device>.json`. A call
-that leaves a knob open takes the most specific entry's value; a call that
+that leaves a tunable open takes the most specific entry's value; a call that
 gives one keeps it. An entry matches on the fields the operator is
 constructed with, the call's keywords and the extents inferred from its
 operands: key MHA by `seq_pad`, which its shape gives, not `seq_len`, which
 follows from it later. A profile is a JSON file, `Profile.load(path)` and
 `profile.save(path)`, one entry to a line naming the class in
-`iron.operators`, then its dimensions and knobs:
+`iron.operators`, then its dimensions and tunables:
 
 ```json
 {"entries": [
@@ -454,7 +455,7 @@ follows from it later. A profile is a JSON file, `Profile.load(path)` and
 `iron/lm/llama3/profiles/<device>.json` is the worked
 example (a test at the small shape loads
 `iron/tests/common/llama_small_profile.json`), and
-`test_llama_names_only_the_knobs_that_matter` checks that each keyword the
+`test_llama_names_only_the_tunables_that_matter` checks that each keyword the
 graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
@@ -487,7 +488,7 @@ code before relying on a line here; it is the authority.
   extent and one build serves many shapes.
   `iron/tests/toolchain/array_identity.py` compiles operators at two
   extents and compares the core ELFs byte for byte.
-- **Knob precedence.** A call site's value, then the graph's profile, then
+- **Tunable precedence.** A call site's value, then the graph's profile, then
   `resolve(dev)`, then the `auto()` default. Identity (`array_key`,
   `design_key`) is taken after resolution, so two calls that resolve alike
   share a build.
@@ -757,7 +758,7 @@ Their dependencies (safetensors, tiktoken, ...) are in
 
 Full LLM inference example at `iron/lm/llama3/`, on the shared
 layer: `model.py` (Llama 3's layer and head on the NPU and in numpy,
-Llama 3.2 1B's shape, the layout, the tokenizer), `profiles/` (knobs):
+Llama 3.2 1B's shape, the layout, the tokenizer), `profiles/` (tunables):
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)

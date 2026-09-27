@@ -12,7 +12,7 @@ and weights, Llama 3.2 1B's here; nothing here needs torch.
 
 What is Llama's own is short, and all of it is in `model.py`: its layer
 and head on the NPU and in numpy, its shape, where its checkpoint keeps
-each weight and its tokenizer; its knobs are in `profiles/`. The rest is
+each weight and its tokenizer; its tunables are in `profiles/`. The rest is
 `iron.lm`, which a new model reuses the same way:
 
 - `CausalLM`: the body over prefill and decode, the key and value caches,

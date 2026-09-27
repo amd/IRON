@@ -48,7 +48,7 @@ class RMSNorm(Elementwise):
     ``rows`` rows of ``tile_size`` elements; :class:`WeightedRMSNorm` is the
     form with a learned weight row, which a graph call with a weight picks.
     ``tile_size`` is the row length and appears in the host shape (``rows x
-    tile_size``), so it is a ``param()`` here rather than the knob the base
+    tile_size``), so it is a ``param()`` here rather than the tunable the base
     declares.
     """
 

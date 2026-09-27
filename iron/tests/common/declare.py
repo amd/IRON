@@ -145,7 +145,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 # --------------------------------------------------------------------------
 
 
-def test_a_knob_may_name_a_tile_but_not_a_buffer_shape():
+def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
     assert MV.A.stream is not None and MV.A.stream.dims[0] is MV.tile_out
     with pytest.raises(DeclarationError, match="host shape may not depend on tuning"):
 
@@ -479,7 +479,7 @@ def test_array_sees_the_array_tier_alone():
         Leaky(M=1024, K=128).resolved(FakeDev(cols=8)).build_array(None)
 
 
-def test_resolution_fills_every_knob_or_says_which_it_left():
+def test_resolution_fills_every_tunable_or_says_which_it_left():
     with pytest.raises(Unresolvable, match="no vector width"):
         MV(M=1024, K=24).resolved(FakeDev())
     with pytest.raises(Incompatible, match="not a multiple"):
@@ -491,7 +491,7 @@ def test_resolution_fills_every_knob_or_says_which_it_left():
     assert ok.columns == 2 and ok.vec is None  # the original is untouched
 
 
-def test_a_profile_fills_the_knobs_a_call_leaves_open():
+def test_a_profile_fills_the_tunables_a_call_leaves_open():
     p = Profile()
     p.add(MV, columns=4, tile_out=32)  # any MV: a declared default (64) counts as open
     p.add(MV, K=256, tile_out=16)  # more specific: its shape names K
@@ -542,7 +542,7 @@ def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
     p = Profile()
     with pytest.raises(TypeError, match="declares no field"):
         p.add(MV, rows=4, columns=2)
-    with pytest.raises(TypeError, match="must give a knob"):
+    with pytest.raises(TypeError, match="must give a tunable"):
         p.add(MV, M=1024)
     p.add(MV, M=1024, columns=2)
     p.add(MV, K=128, columns=8)  # as specific as the first: a clash for (1024, 128)
@@ -612,10 +612,10 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     assert infer(Rep, (2, 8), outputs=[(6, 8)]) == {"rows": 2, "out_rows": 6}
 
 
-def test_compatible_runs_at_construction_once_every_knob_is_known():
+def test_compatible_runs_at_construction_once_every_tunable_is_known():
     with pytest.raises(Incompatible, match="not a multiple"):
         MV(M=1000, K=128, columns=8, tile_out=64, vec=64)  # nothing left to resolve
-    MV(M=1000, K=128)  # a knob is open: compatible() waits for resolution
+    MV(M=1000, K=128)  # a tunable is open: compatible() waits for resolution
 
 
 def test_inference_binds_the_fields_from_the_operands():

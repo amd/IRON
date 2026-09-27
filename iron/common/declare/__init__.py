@@ -11,7 +11,7 @@ sequence. Values a graph binds per call are :class:`Value`,
 :class:`Scratchpad` or :class:`DispatchTime` members.
 
 Declarations are class-level. :func:`param` declares a dimension field,
-:func:`auto` declares a knob the library resolves, and a shape in the class
+:func:`auto` declares a tunable the library resolves, and a shape in the class
 body uses the field's bare name. An operand with ``tile=`` is its own
 stream into the array::
 
@@ -28,11 +28,11 @@ stream into the array::
         tiles = Value(np.int32, derive=lambda op: op.M // (op.num_aie_columns * op.tile_size_output))
 
 A host buffer's dimension is a ``param()`` field or an integer literal:
-never a knob, a per-call value or an expression. This keeps inference a
+never a tunable, a per-call value or an expression. This keeps inference a
 lookup (:mod:`.infer`) and lets :mod:`.creation` check a class once, as its
-body finishes. A tile's dimension may also be a knob, since resolution
+body finishes. A tile's dimension may also be a tunable, since resolution
 chooses the tile and inference never reads one. A :class:`Profile` applied
-in a scope fills the knobs a call site leaves open, by operator shape,
+in a scope fills the tunables a call site leaves open, by operator shape,
 before resolution runs.
 
 :mod:`iron.common.design` generates MLIR from these declarations; this

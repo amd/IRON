@@ -4,7 +4,7 @@
 """Construction cases for every declared operator, as keyword arguments.
 
 One matrix, reused: the shapes each operator reads, varied over the shape
-and dtype decisions it makes, with the tuning knobs at one valid value.
+and dtype decisions it makes, with the tunables at one valid value.
 Every case constructs on a device-free host; ``iron/tests/toolchain/lowering.py``
 runs the same table through the real lowering, to an instruction stream.
 """

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 NPU2 = from_name("npu2", n_cols=8)
 
 
-def test_a_knob_free_operator_takes_the_widest_split_that_leaves_whole_lines():
+def test_a_tunable_free_operator_takes_the_widest_split_that_leaves_whole_lines():
     for size, cols in ((256, 1), (1024, 4), (2048, 8), (3072, 6), (8192, 8)):
         op = ReLU(size=size).resolved(NPU2)
         assert (op.num_aie_columns, op.num_channels, op.tile_size) == (cols, 1, 256)

@@ -9,9 +9,9 @@ layer and head on the NPU (:class:`Llama`) and on the CPU in float32
 checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
 Run it with ``python -m iron.lm.llama3.model``.
 
-The operators' knobs are the graph's profile, ``profiles/<device>.json``,
+The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Llama 3.2 1B's shape and a ``max_seq_len`` of
-2048. A call site gives a knob only where two operators of one shape want
+2048. A call site gives a tunable only where two operators of one shape want
 different ones.
 """
 

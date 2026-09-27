@@ -248,7 +248,7 @@ class CausalLM(iron.Graph):
 def project(x, weight, **gemv):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight: a GEMV for
     one row (a GEMV's output is a vector), else a GEMM reading it
-    column-major. ``gemv`` are the GEMV's knobs, where the profile cannot
+    column-major. ``gemv`` are the GEMV's tunables, where the profile cannot
     tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:

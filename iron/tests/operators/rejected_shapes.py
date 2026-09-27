@@ -48,7 +48,7 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
     no diagnostic.
     """
     with pytest.raises(Incompatible, match="must divide the per-channel transfer"):
-        Copy(**_flat(1024, num_channels=4, tile_size=512))  # every knob given
+        Copy(**_flat(1024, num_channels=4, tile_size=512))  # every tunable given
 
 
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not
@@ -64,7 +64,7 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
 def test_transpose_dimension_that_does_not_tile_is_refused_by_name(
     M, N, aie_columns, channels, m, n, bad
 ):
-    with pytest.raises(Incompatible, match=bad):  # every knob given: at construction
+    with pytest.raises(Incompatible, match=bad):  # every tunable given: at construction
         Transpose(
             M=M, N=N, num_aie_columns=aie_columns, num_channels=channels, m=m, n=n, s=8
         )
@@ -92,7 +92,7 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split():
 
 
 def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
-    """A knob-free operator resolves on either device to the widest count
+    """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
     from iron.operators.gemm.op import GEMM
