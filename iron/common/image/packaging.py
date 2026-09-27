@@ -3,8 +3,7 @@
 
 """How a traced graph is packaged: the image and the boundaries.
 
-Two arguments, both optional, and everything else derived and reported
-(OPERATOR_MODEL_PLAN.md §8):
+Two arguments, both optional, and everything else derived and reported:
 
     net = decode.compile(dev)                          # full ELF on NPU2, per-step xclbin on NPU1
     net = decode.compile(dev, boundaries=each_step)    # one dispatch per step
@@ -17,13 +16,14 @@ an error naming the member, the boundaries or the device.
 
 What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
 with ``each_step`` is the chained per-operator xclbin. A fused sequence
-in an xclbin (and dispatches of several steps on it) waits on spike S1
-and is refused rather than built wrong; its construction is shelved on
-the branch ``claude/iron-pr215-step5-extras``. An xclbin run has no parameter
-scratchpad (spike S2, from XRT's source), so on that image every per-call
-value is a dispatch-time scalar of its kernel (§6): an offset use
-regenerates the kernel's stream per call, a core-read use is written into
-the array by the sequence (spike S3).
+in an xclbin (and dispatches of several steps on it) has no proven
+construction and is refused rather than built wrong; a draft is shelved on
+the branch ``claude/iron-pr215-step5-extras``. An xclbin run has no
+parameter scratchpad (XRT's ``get_ctrl_scratchpad_bo`` serves a module run
+only), so on that image every per-call value is a dispatch-time scalar of
+its kernel: an offset use regenerates the kernel's stream per call, a
+core-read use is written into the array by the sequence (an ``rtp_write``
+of the scalar).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
     else:
         raise NotImplementedError(
             f"{traced.name}: one fused sequence in an xclbin has no proven "
-            f"construction yet (OPERATOR_MODEL_PLAN.md spike S1); pass "
+            f"construction yet; pass "
             f"boundaries=each_step, or package for NPU2 as an ELF"
         )
 
@@ -98,9 +98,9 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
             lowering = "patched through the parameter scratchpad"
         elif v.kind == "scratchpad":
             lowering = (
-                "no scratchpad on an xclbin (spike S2): a dispatch-time scalar; "
+                "no scratchpad on an xclbin: a dispatch-time scalar; "
                 "an offset use regenerates the stream, a core-read use is "
-                "written into the array by the sequence (spike S3)"
+                "written into the array by the sequence"
             )
         else:
             lowering = "sizes, strides and offsets regenerated per call"

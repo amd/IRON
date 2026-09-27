@@ -325,8 +325,7 @@ def _resolved(generator):
 def insts_design(generator, extra_flags=()) -> CompilableDesign:
     """One design's instruction stream alone, against an image built elsewhere.
 
-    The instructions-only compile of OPERATOR_MODEL_PLAN.md §11: an operator
-    whose array is already built (a configuration's image at the reference
+    An operator whose array is already built (a configuration's image at the reference
     shape, a shipped image's download) needs only its runtime
     sequence lowered. No core is compiled, so no kernel and no Peano.
     """

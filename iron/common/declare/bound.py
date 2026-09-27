@@ -340,7 +340,7 @@ class BoundValue:
     """A value on an operator: per call, or written once per build.
 
     On a full ELF ``param`` is the upstream ``ScratchpadParameter`` the
-    build creates. On an image without a scratchpad (xclbin, spike S2) the
+    build creates. On an image without a scratchpad (an xclbin run has none) the
     value is lowered as a dispatch-time scalar of the sequence: ``param`` is
     the dispatch parameter, ``ssa`` its live value inside the sequence body,
     an offset use adds it to the transfer's offset, and a core-read use is a

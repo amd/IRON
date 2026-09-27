@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An operator's array does not depend on its extents (C11).
+"""An operator's array does not depend on its extents.
 
-One array serves every extent (OPERATOR_MODEL_PLAN.md §3): the core
+One array serves every extent: the core
 programs an array compiles to must be the same bytes whether the operator
 is built for one extent or twice it, with the same knobs. Each case
 compiles an operator at two extents (the real build: an insts-only

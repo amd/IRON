@@ -257,7 +257,7 @@ class Sequence(Transfers):
                             f"{type(self.op).__name__}: a per-call size on a full ELF "
                             f"needs mlir-aie's size-kind scratchpad parameter "
                             f"(fill/drain(size_parameters={{dim: param}})), which this "
-                            f"toolchain does not have (LENGTH_FREE_PLAN.md)"
+                            f"toolchain does not have; build mlir-aie's iron-next"
                         )
                     patched["size_parameters"] = {
                         dim: value.param for dim, value in sizes_by.items()

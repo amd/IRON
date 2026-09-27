@@ -151,10 +151,12 @@ reuse lint
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
-     device test of its own (`gemm/`, `mha/`, `flm/gemm/`).
+     device test of its own (`gemm/`, `mha/`). `flm/` is a catalog of its
+     own: the FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they
+     are measured against and their weight packing; its GEMM is not
+     `iron.operators.GEMM`.
    - An operator module holds:
-     - the operator, one class (`iron/common/declare/`,
-       `OPERATOR_API_PLAN.md`): `param()` fields for what a host shape
+     - the operator, one class (`iron/common/declare/`): `param()` fields for what a host shape
        names, `auto()` knobs `resolve(dev)` fills from the device and the
        extents, `In`/`Out` operands declared by shape whose `tile=` makes
        each its own stream into the array (`per=` a column count), `Value`
@@ -246,7 +248,10 @@ operator that needs a different order overrides `sequence(rt)`:
 **Per-call values**: `Scratchpad(T)` members are patched into descriptors
 or read by cores without a rebuild; `DispatchTime(T)` regenerates the
 sequence per call (xclbin only). A graph binds them to keyword-only
-parameters.
+parameters. The parameter scratchpad exists on a full ELF only (XRT's
+`get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
+`Scratchpad` value lowers to a dispatch-time scalar: an offset use
+regenerates the stream, a core-read use is an `rtp_write` of the scalar.
 
 **Compilation Flow**:
 
@@ -461,11 +466,66 @@ It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama_3_2_1b/npu.py` is the worked example
-(`Llama`, called through `logits(tokens)`; `runner.py` builds it
-and the CPU reference alike and checks one against the other);
+(`Llama`, a `CausalLM` from `iron.applications.common`, called through
+`logits(tokens)`; `runner.py` builds it and the CPU reference alike and
+checks one against the other);
 `iron/tests/common/graph.py` traces it device-free,
 `iron/tests/common/llama_reference.py` runs its reference against the CPU
 one and `iron/tests/toolchain/` builds it.
+
+## Design rationale and known limits
+
+Why the pieces are shaped as they are, and what is not built. Check the
+code before relying on a line here; it is the authority.
+
+### Rationale
+
+- **One class per operator, tiers by declaration.** The array tier is
+  what a `tile=`/`per=` names plus what says `array=True`; `array()` sees
+  that tier alone, so an extent cannot leak into a core program. Trip
+  counts are `Value`s the sequence writes, so one array serves every
+  extent and one build serves many shapes.
+  `iron/tests/toolchain/array_identity.py` compiles operators at two
+  extents and compares the core ELFs byte for byte.
+- **Knob precedence.** A call site's value, then the graph's profile, then
+  `resolve(dev)`, then the `auto()` default. Identity (`array_key`,
+  `design_key`) is taken after resolution, so two calls that resolve alike
+  share a build.
+- **Packaging is derived** (`iron/common/image/packaging.py`, reported with
+  `verbose=True`): a `DispatchTime` value, NPU1, or more than one boundary
+  each force xclbin; otherwise the image is one full ELF. Full-ELF streams
+  have DDR address folding off, so a sequence cannot move between images.
+- **Length-free extents.** `Extent(field)` and `x[:n]` bounds are carried
+  through reshape and transpose; under a bound a buffer is split
+  round-robin by tile. GEMM and MHA bound their compute, not their DMA.
+  Decode reads the key and value caches in full (the context GEMV's K is
+  array-tier). A per-call size needs mlir-aie's size-kind scratchpad
+  parameter, `fill/drain(size_parameters=)`, on its iron-next branch.
+- **DMA descriptors** (mlir-aie's `verifyStridesWraps`, enforced by
+  `tiling.legalize`): the innermost dimension holds at most 1023 granules
+  unless the transfer is linear, the next at most 1023 elements, the third
+  has no wrap field, and the outermost is the iteration count (at most 64)
+  and the only one whose stride may be 0.
+- **Placement.** Operator order is the final tiebreak for shim tile and
+  channel, so a per-column stream is not guaranteed to sit in physical
+  column `c`; pin it with `via=` where that matters.
+- **`Elementwise` is not upstream's `transform_parallel`.** They differ in
+  the trip count (a `Value` here, folded into the core there), in who
+  owns the sequence (the library here, so operators fuse into one image),
+  and in the column budget. Splitting upstream's
+  `_transform_parallel_gen` would let IRON reuse it.
+
+### Not built, or limited
+
+- A fused sequence in an xclbin (several steps in one dispatch) is refused;
+  so are modules. NPU1 therefore needs `boundaries=iron.each_step`.
+- MHA is NPU2-only, so prefill on NPU1 is not planned.
+- Tuning: `auto(choices=, legal=)` is recorded but nothing reads it, and
+  there is no per-kernel L1 budget.
+- Open upstream asks in mlir-aie: a builder for `aiex.configure` /
+  `aiex.run`; an accessor for L1 banking; per-split whole-module clones in
+  aiecc (a sixteen-layer fused prefill needs about 12 GB for aiecc; the
+  pruning draft was reverted); hrx-xclbinutil's empty-path patch.
 
 ## Common Patterns
 
@@ -657,14 +717,42 @@ logging.basicConfig(level=logging.DEBUG)
 
 ## Applications
 
+### The shared language-model layer
+
+`iron/applications/common/` is what every language model shares; a new
+model is its own layer, head, shape, checkpoint layout, tokenizer, CPU
+reference and profile over it:
+
+- `CausalLM` (`model.py`): a decoder as one graph, prefill and decode, the
+  key and value caches, attention over them (`attend`) and
+  `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
+  x)` and `head(x)`; `project(x, w)` is a weight's projection at either
+  row count (GEMV for one row, GEMM for more)
+- `Config`, and a checkpoint `Layout` (`checkpoint.py`): each weight's
+  place in the model, its name in the checkpoint and its shape, which
+  `load_weights` checks strictly against the mapped `.safetensors`
+- `Runner` and `main` (`runner.py`): the checkpoint, the tokenizer, the
+  model and its reference, and the command line. A model's runner names
+  its `config`, `layout`, `model`, `reference`, `open_tokenizer` and `bos`
+- `generation.py`: sampling, the generation loop and the accuracy and
+  determinism checks over any model with `logits(tokens)`
+- `testing.py`: what an application's device test checks with them, and
+  where it finds the files (`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`)
+
+Their dependencies (safetensors, tiktoken, ...) are in
+`requirements_examples.txt`.
+
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama_3_2_1b/`:
+Full LLM inference example at `iron/applications/llama_3_2_1b/`, on the
+shared layer: `npu.py` (layer and head), `runner.py` (shape, layout,
+tokenizer), `cpu.py` (reference), `profiles/` (knobs):
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama_3_2_1b/`
+- **Run**: `pytest iron/applications/llama_3_2_1b/`, or
+  `python -m iron.applications.llama_3_2_1b.runner model.safetensors tokenizer.model`
 
 ### AIE Kernel Reference
 

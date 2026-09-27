@@ -3,15 +3,14 @@
 
 """Per-call values on an image without a scratchpad build as dispatch-time kernels.
 
-An xclbin run has no parameter scratchpad (spike S2), so on that image a
-graph's per-call values become dispatch-time scalars of the kernels that
-use them (§6): an offset use adds the scalar to the transfer's offset and
+An xclbin run has no parameter scratchpad (XRT gives one to a module run
+only), so on that image a graph's per-call values become dispatch-time
+scalars of the kernels that use them: an offset use adds the scalar to the transfer's offset and
 the kernel's stream is regenerated per call by the host library aiecc's
 ``--get-npu-cpp`` output compiles to; a core-read use is a resident the
-sequence writes from the scalar before the barrier (spike S3's toolchain
-half: the dialect takes the RTP write's value as an operand). Both are
-built here at ``each_step`` on both devices; running them is the device's
-half of S3, and of the regenerated-stream path itself.
+sequence writes from the scalar before the barrier (the dialect takes the
+RTP write's value as an operand). Both are built here at ``each_step`` on
+both devices; running them on a device is the other half.
 """
 
 from pathlib import Path

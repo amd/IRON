@@ -415,7 +415,7 @@ class SequenceXclbinCallable(SequenceCallable):
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         """Each kernel takes its values as dispatch-time scalars and
-        regenerates its stream (§6).
+        regenerates its stream.
         """
         self.dispatch_values = dict(values)
 
