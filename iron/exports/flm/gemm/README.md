@@ -446,15 +446,16 @@ This needs mlir-aie's `tile_dma_chain`, `Task.start(repeat_count=...)`,
 on mlir-aie's iron-next branch. Every hardware limit the design uses comes
 from the target model.
 
-Measured on NPU2 (Strix, power mode `default`) against the fifo version over
+Measured on NPU2 (Strix, power mode `turbo`) against the fifo version over
 the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:
-median **-17.4%**, best -32.0% (E4B gateup M2048).
+median **-21.5%**, best -36.4% (E4B o M2048). A same-binary control run
+alongside moved the median by -0.4%, and no shape by more than 7.6%.
 
 | shapes | change |
 |---|---|
-| resident, M ≥ 1024 | -15% to -32% |
-| M = 256 (one row-block, nothing to replay) | -0.7% to -7.1%, from the setup ordering |
-| down projections (streamed), M ≥ 1024 | -1.4% to +0.3%, i.e. noise |
+| resident, M ≥ 1024 | -20% to -36% |
+| M = 256 (one row-block, nothing to replay) | -1.1% to -12.3%, from the setup ordering |
+| down projections (streamed), M ≥ 1024 | -2.2% to +0.5%, i.e. noise |
 
 ### The compiler bounds what is outstanding
 
