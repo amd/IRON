@@ -6,9 +6,11 @@ from dataclasses import field
 from typing import Any
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
+from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU1Col2, Tile
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -18,6 +20,7 @@ from iron.common import (
     Incompatible,
     Operator,
     Out,
+    Unresolvable,
     Value,
     auto,
     param,
@@ -25,7 +28,7 @@ from iron.common import (
 )
 from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
-from iron.common.tiling import limits
+from iron.common.tiling import legalize, limits
 
 # fmt: off
 # The rounding configuration that tracks the reference most closely (an f32
@@ -50,7 +53,7 @@ _EXTENSIVE = [
     (2048,  2048,  2048,       8,      True,     False, 128,  32,  32),
     (2048,  2048,  8192,       2,      True,     False,  64,  64,  64),
     (2048,  8192,  2048,       2,      True,     False,  64,  64,  64),
-    # Llama 3.2 1B prefill's down projection, as the graph runs it.
+    # A down projection of a 2048-wide model with an 8192-wide feed-forward.
     (2048,  8192,  2048,       8,      True,     False,  64,  64,  64),
     (2048,    64,  2048,       2,      True,     False,  64,  64,  64),
     (2048,    64,  8192,       2,      True,     False,  64,  64,  64),
@@ -88,20 +91,14 @@ def _cases(cls):
     return out
 
 
-N_AIE_ROWS = 4
-# The mm factory's geometry query: a MatrixKernel attribute upstream's typing
-# does not show on the factory.
-_mac_dims = kernels.mm.mac_dims  # pyright: ignore[reportFunctionMemberAccess]
-
-
 class GEMM(Operator):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer.
 
-    ``C = A @ B`` on a 4-row grid of cores, one column of B per AIE column,
+    ``C = A @ B`` on the device's rows of cores, one column of B per AIE column,
     tiled m x k x n. A is broadcast across columns and distributed across
     rows in (m * n_A_tiles_per_shim, k) blocks; B is distributed across
     columns and broadcast across rows in (k, n) blocks; C is joined across
-    rows and distributed across columns in (m * 4, n) blocks. The core's
+    rows and distributed across columns in (m * n_aie_rows, n) blocks. The core's
     reduction and tile counts are values the sequence writes, so the array
     does not depend on the extents.
     """
@@ -127,7 +124,9 @@ class GEMM(Operator):
     dtype_in: Any = field(default=bfloat16, repr=False)
     dtype_out: Any = field(default=bfloat16, repr=False)
     use_scalar: bool = param(default=False, repr=False, array=True)
-    # Filled by resolve: the L2 tile of each stream and how many shims carry A.
+    # Filled by resolve: the device's rows of cores, the L2 tile of each
+    # stream and how many shims carry A.
+    n_aie_rows: int = auto(repr=False, array=True)
     n_shim_mem_a: int = auto(repr=False)
     a_l2: int = auto(repr=False)
     b_l2: int = auto(repr=False)
@@ -171,10 +170,11 @@ class GEMM(Operator):
 
     @property
     def n_a_tiles_per_shim(self) -> int:
-        # Integer division when n_aie_cols < 4, otherwise 1: with more columns
-        # than rows only n_aie_rows shim/mem tiles carry A, distributed by rows.
-        c = self.num_aie_columns
-        return N_AIE_ROWS // c if c < 4 else 1
+        # Integer division when there are fewer columns than rows, otherwise
+        # 1: with more columns than rows only n_aie_rows shim/mem tiles carry
+        # A, distributed by rows.
+        c, rows = self.num_aie_columns, self.n_aie_rows
+        return rows // c if c < rows else 1
 
     @property
     def mem_tile_m_a(self) -> int:
@@ -182,7 +182,7 @@ class GEMM(Operator):
 
     @property
     def mem_tile_m_c(self) -> int:
-        return self.tile_m * N_AIE_ROWS
+        return self.tile_m * self.n_aie_rows
 
     @property
     def mem_tile_n(self) -> int:
@@ -195,7 +195,7 @@ class GEMM(Operator):
         belongs to the kernel linalg/mm.cc compiles, and upstream's table is the one
         its ``combos(X) X(..., r, s, t)`` macros are kept in step with.
         """
-        return _mac_dims(
+        return kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
             arch=target_arch(dev),
@@ -214,7 +214,7 @@ class GEMM(Operator):
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
-        r, s, t = _mac_dims(
+        r, s, t = kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
             arch="aie2p",
@@ -249,48 +249,48 @@ class GEMM(Operator):
             raise ValueError(
                 f"Output dtype ({dout}) must be equal or larger to input dtype ({din})"
             )
-        # The extents that need no device, at construction, so a bad shape
-        # is reported where it is written; N waits for the column count.
-        for name, value, unit in (
-            ("M", self.M, self.tile_m * N_AIE_ROWS),
-            ("K", self.K, self.tile_k),
-        ):
-            if value % unit != 0:
-                raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
+        # The extents that need no tunable, at construction, so a bad shape is
+        # reported where it is written: K, and M once the rows of cores are
+        # known (resolved, or the bound device's). N waits for the columns.
+        if self.K % self.tile_k != 0:
+            raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
+        rows = self.n_aie_rows or (self.dev and len(self.dev.core_rows))
+        if rows and self.M % (self.tile_m * rows) != 0:
+            raise ValueError(
+                f"M ({self.M}) must be a multiple of {self.tile_m * rows}: C is "
+                f"tiled into (m * n_aie_rows, n)-sized blocks"
+            )
 
     def resolve(self, dev):
+        if dev is None:
+            raise Unresolvable(
+                "GEMM: the rows of cores are the device's; none is bound"
+            )
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.N % (self.tile_n * c) == 0
         )
-        new = dataclasses.replace(self, num_aie_columns=cols)
+        rows = len(dev.core_rows)
+        new = dataclasses.replace(self, num_aie_columns=cols, n_aie_rows=rows)
         return dataclasses.replace(
             new,
-            n_shim_mem_a=min(cols, N_AIE_ROWS),
+            n_shim_mem_a=min(cols, rows),
             a_l2=new.mem_tile_m_a * self.tile_k,
             b_l2=self.tile_k * self.tile_n,
             c_l2=new.mem_tile_m_c * self.tile_n,
         )
 
     def compatible(self) -> None:
-        min_N = self.tile_n * self.num_aie_columns
-        if self.N % min_N != 0:
-            raise Incompatible(f"N ({self.N}) must be a multiple of {min_N}")
+        if self.N % self.mem_tile_n != 0:
+            raise Incompatible(
+                f"N ({self.N}) must be a multiple of {self.mem_tile_n}: B is "
+                f"tiled into (k, n * num_aie_columns)-sized blocks"
+            )
         if self.M % self.mem_tile_m_a != 0:
             raise Incompatible(
                 "A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"
             )
-        if self.N % self.mem_tile_n != 0:
-            raise Incompatible(
-                "B must be tileable into (k, n * n_aie_cols)-sized blocks"
-            )
-        if self.M % self.mem_tile_m_c != 0:
-            raise Incompatible(
-                "C must be tileable into (m * n_aie_rows, n)-sized blocks"
-            )
 
     def device(self, target):
-        from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU1Col2
-
         if target.dev.resolve().name == "npu1":
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[
                 self.num_aie_columns
@@ -300,11 +300,9 @@ class GEMM(Operator):
     # -- the array ----------------------------------------------------------
 
     def array(self, target) -> list:
-        from aie.iron.device import Tile
-
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols = self.num_aie_columns
-        n_aie_rows = N_AIE_ROWS
+        n_aie_rows = self.n_aie_rows
         n_shim_mem_A = self.n_shim_mem_a
         n_A_tiles_per_shim = self.n_a_tiles_per_shim
         b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
@@ -563,10 +561,6 @@ class GEMM(Operator):
     # -- the runtime sequence --------------------------------------------------
 
     def sequence(self, rt):
-        from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
-
-        from iron.common.tiling import legalize
-
         def legal(buffer, tap):
             """The tiler's pattern as descriptors the shim holds: one when it
             fits, else the outermost dimension unrolled (a column-major B
@@ -578,7 +572,7 @@ class GEMM(Operator):
 
         M, K, N = self.M, self.K, self.N
         m, k, n = self.tile_m, self.tile_k, self.tile_n
-        n_aie_cols, n_aie_rows = self.num_aie_columns, N_AIE_ROWS
+        n_aie_cols, n_aie_rows = self.num_aie_columns, self.n_aie_rows
         n_shim_mem_A = self.n_shim_mem_a
         mem_tile_m_A, mem_tile_m_C, mem_tile_n = (
             self.mem_tile_m_a,
