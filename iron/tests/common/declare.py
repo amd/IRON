@@ -429,6 +429,46 @@ def test_an_operand_with_a_tile_is_its_own_stream():
     assert op.B.handle == "hb"
 
 
+class Scaled(Operator):
+    """``x`` times a scale row when ``scaled``, else a copy of it."""
+
+    N: int = param()
+    scaled: bool = param(default=False)
+
+    x = In(N, tile=(N,))
+    s = In(N, tile=(N,), when=scaled)
+    y = Out(N, tile=(N,))
+
+    def array(self, target):
+        return [self.scaled]
+
+
+def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
+    plain, scaled = Scaled(N=64), Scaled(N=64, scaled=True)
+    assert [b.name for b in plain.buffers] == list(plain.streams) == ["x", "y"]
+    assert [b.name for b in scaled.buffers] == list(scaled.streams) == ["x", "s", "y"]
+    assert scaled.s.shape == (64,)
+    with pytest.raises(AttributeError, match="declared when=scaled"):
+        plain.s
+    # The flag decides the streams, so it is of the array tier.
+    assert "scaled" in Scaled._array_fields
+    assert plain.array_key() != scaled.array_key()
+    # Inference sets an open flag from the operands a call has to spare.
+    assert not Scaled.from_operands((64,)).scaled
+    assert Scaled.from_operands((64,), (64,)).scaled
+    with pytest.raises(TypeError, match="takes 1 operand"):
+        Scaled.from_operands((64,), (64,), scaled=False)
+
+
+def test_when_names_a_param():
+    with pytest.raises(DeclarationError, match="must be a param"):
+
+        class Bad(Operator):
+            N: int = param()
+            flag: bool = auto(False)
+            s = In(N, when=flag)
+
+
 def test_a_derived_value_is_written_once_per_build():
     op = MV(M=1024, K=128).resolved(FakeDev(cols=8))
     assert list(op.residents) == ["count"] and op.values == []

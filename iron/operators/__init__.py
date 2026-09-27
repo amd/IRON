@@ -29,7 +29,6 @@ _OPERATOR_MODULES = {
     "MHA": "mha",
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
-    "WeightedRMSNorm": "rms_norm",
     "Repeat": "repeat",
     "RoPE": "rope",
     "Sigmoid": "sigmoid",

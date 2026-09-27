@@ -194,6 +194,13 @@ def declare(cls: type) -> None:
                     f"{cls.__name__}.{m.name}: at most one optional() dimension, "
                     f"since the rank tells whether it is present"
                 )
+            if m.when is not None:
+                (m.when,) = _rewrite_refs((m.when,), cls, fields_by_obj)
+                if not isinstance(m.when, DimRef) or m.when.tier != "param":
+                    raise DeclarationError(
+                        f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
+                        f"param() field, the flag the operand exists under"
+                    )
         if isinstance(m, Extent):
             (ref,) = _rewrite_refs((m.field,), cls, fields_by_obj)
             if not isinstance(ref, DimRef) or ref.tier != "param":
@@ -218,8 +225,8 @@ def declare(cls: type) -> None:
         f.name: f.metadata[_DERIVE] for f in fields.values() if _DERIVE in f.metadata
     }
     cls._auto_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "auto")  # type: ignore[attr-defined]
-    # The array tier: what a stream's tile, its dtype or its replication
-    # names, and what declares itself array=True.
+    # The array tier: what a stream's tile, its dtype, its replication or
+    # its presence names, and what declares itself array=True.
     named: set[str] = set()
     for m in members:
         if isinstance(m, _Stream):
@@ -228,6 +235,8 @@ def declare(cls: type) -> None:
                 named.update(_named_fields(m.per))
             if isinstance(m.dtype, DimRef):
                 named.add(m.dtype.name)
+            if m.when is not None:
+                named.add(m.when.name)
     cls._array_fields = tuple(  # type: ignore[attr-defined]
         f.name for f in fields.values() if f.name in named or _declares_array(f)
     )

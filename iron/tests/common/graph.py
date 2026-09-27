@@ -33,7 +33,7 @@ from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
-from iron.operators.rms_norm import RMSNorm, WeightedRMSNorm
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.transpose import Transpose
 from iron.tests.common.declare import Rows
@@ -81,9 +81,9 @@ def test_tracing_records_the_runlist_with_names_from_roles():
     t = ffn.trace(x=(1, E))
     assert isinstance(t, TracedGraph)
     assert [(type(op).__name__, *names) for op, *names in t.runlist] == [
-        ("WeightedRMSNorm", "x", "w0", "weightedrmsnorm0"),
-        ("GEMV", "w1", "weightedrmsnorm0", "gemv1"),
-        ("GEMV", "w2", "weightedrmsnorm0", "gemv2"),
+        ("RMSNorm", "x", "w0", "rmsnorm0"),
+        ("GEMV", "w1", "rmsnorm0", "gemv1"),
+        ("GEMV", "w2", "rmsnorm0", "gemv2"),
         ("SiLU", "gemv1", "silu3"),
         ("ElementwiseMul", "silu3", "gemv2", "elementwisemul4"),
         ("Copy", "elementwisemul4[0:512]", "state0"),
@@ -110,7 +110,7 @@ def test_arrays_are_shared_by_array_key_and_extents_are_not():
     )  # one array, two operators
     assert down.array_key() != gate.array_key()  # a different K is a different array
     assert [type(o).__name__ for o in t.arrays] == [
-        "WeightedRMSNorm",
+        "RMSNorm",
         "GEMV",
         "SiLU",
         "ElementwiseMul",
@@ -142,9 +142,9 @@ def test_every_traced_operator_tunes_from_the_device_alone():
         aie_utils.get_current_device()
     )
     assert (silu.num_aie_columns, silu.num_channels, silu.tile_size) == (8, 1, 256)
-    norm = next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).resolved(
-        aie_utils.get_current_device()
-    )
+    norm = next(
+        s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
+    ).resolved(aie_utils.get_current_device())
     assert norm.num_aie_columns == 1  # one row: one core
 
 
@@ -399,7 +399,7 @@ def test_llama_decode_traces_and_tunes():
     t = model.trace(**model.shapes(1))
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
-        "WeightedRMSNorm",
+        "RMSNorm",
         "GEMV",
         "GEMV",
         "GEMV",
@@ -416,7 +416,7 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "GEMV",
         "ElementwiseAdd",
-        "WeightedRMSNorm",
+        "RMSNorm",
         "GEMV",
         "GEMV",
         "SiLU",
@@ -424,7 +424,7 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "ElementwiseAdd",
     ]
-    assert kinds == per_block * cfg.n_layers + ["WeightedRMSNorm", "GEMV"]
+    assert kinds == per_block * cfg.n_layers + ["RMSNorm", "GEMV"]
     assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
     # One function, so every version takes every value; one token binds two.
     assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]
@@ -468,7 +468,9 @@ def test_llama_decode_traces_and_tunes():
     transpose = next(s.op for s in t.steps if type(s.op) is Transpose)
     assert (transpose.num_aie_columns, transpose.m, transpose.n) == (2, 256, 32)
     assert (
-        next(s.op for s in t.steps if type(s.op) is WeightedRMSNorm).num_aie_columns
+        next(
+            s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
+        ).num_aie_columns
         == 1
     )
 
@@ -481,7 +483,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     t = g.trace(**g.shapes(L))
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
-        "WeightedRMSNorm",
+        "RMSNorm",
         "GEMM",
         "GEMM",
         "GEMM",
@@ -492,7 +494,7 @@ def test_llama_prompt_traces_over_the_same_caches():
         "MHA",
         "GEMM",
         "ElementwiseAdd",
-        "WeightedRMSNorm",
+        "RMSNorm",
         "GEMM",
         "GEMM",
         "SiLU",
@@ -500,7 +502,7 @@ def test_llama_prompt_traces_over_the_same_caches():
         "GEMM",
         "ElementwiseAdd",
     ]
-    tail = ["Copy", "WeightedRMSNorm", "GEMV"]
+    tail = ["Copy", "RMSNorm", "GEMV"]
     assert kinds == per_block * cfg.n_layers + tail
     assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
     assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]

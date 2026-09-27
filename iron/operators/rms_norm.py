@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-from typing import ClassVar
-
 import numpy as np
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
@@ -9,74 +7,81 @@ from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
 from iron.common import In, Out, Rowwise, param
+from iron.common.testing import Testing, row_cases
 from iron.common.tiling import fifo_depth
 
-_I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
+# The longest weighted row: the multiplying core holds the weight row beside
+# each line, which halves the line a core holds.
+WEIGHTED_TILE_CAP = 4096
 
 
 class RMSNorm(Rowwise):
-    """AIE-accelerated RMS Normalization of each row (unweighted).
+    """AIE-accelerated RMS Normalization of each row, optionally times a
+    learned weight row.
 
-    :class:`WeightedRMSNorm` is the form with a learned weight row, which a
-    graph call with a weight picks.
+    Unweighted, one core per (column, channel) runs the norm, as any
+    elementwise operator. Weighted (``RMSNorm(x, w)`` in a graph, or
+    ``weighted=True``), two cores per (column, channel) are pipelined: one
+    normalizes, the next multiplies by the weight. The weight fifo is one
+    per channel, shared by every column in that channel, and each receives
+    the whole weight row, which halves the line a core holds.
     """
 
-    # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
+    test = Testing(
+        lambda cls: row_cases()(cls)
+        + row_cases(tile_cap=WEIGHTED_TILE_CAP, weighted=True)(cls)
+    )
+
+    # The epsilon under the root: 1e-5 by default; a model states its own.
     epsilon: float = param(default=1e-5, array=True)
-
-    @classmethod
-    def resolve_class(cls, n_operands, kwargs):
-        # RMSNorm(x, w) in a graph: a bare weight tensor selects the weighted form.
-        if cls is RMSNorm and n_operands == 2:
-            return WeightedRMSNorm
-        return cls
-
-    def kernel(self, target):
-        return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
-
-
-class WeightedRMSNorm(RMSNorm):
-    """AIE-accelerated RMS Normalization layer with a learned weight row.
-
-    Two cores per (column, channel), pipelined: one normalizes, the next
-    multiplies by the weight. The weight fifo is one per channel, shared by
-    every column in that channel, and each receives the whole weight row,
-    which halves the line a core holds. The pipeline is why this class owns
-    its array: the elementwise template places one core per slot.
-    """
-
-    tile_cap: ClassVar[int] = 4096
+    weighted: bool = param(default=False, array=True)
 
     x = In(
-        RMSNorm.rows,
-        RMSNorm.tile_size,
-        tile=(RMSNorm.tile_size,),
-        per=(RMSNorm.num_aie_columns, RMSNorm.num_channels),
+        Rowwise.rows,
+        Rowwise.tile_size,
+        tile=(Rowwise.tile_size,),
+        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     # The weight row is one line, shared by every column of a channel; the
     # shim budget counts a replicate= stream once per channel.
     w = In(
-        RMSNorm.tile_size,
-        tile=(RMSNorm.tile_size,),
-        per=(RMSNorm.num_channels,),
+        Rowwise.tile_size,
+        tile=(Rowwise.tile_size,),
+        per=(Rowwise.num_channels,),
         replicate=True,
+        when=weighted,
     )
     y = Out(
-        RMSNorm.rows,
-        RMSNorm.tile_size,
-        tile=(RMSNorm.tile_size,),
-        per=(RMSNorm.num_aie_columns, RMSNorm.num_channels),
+        Rowwise.rows,
+        Rowwise.tile_size,
+        tile=(Rowwise.tile_size,),
+        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
-    def reference(self, x, w):
-        """The two kernels' references in turn: the normalized row rounded to
+    def validate(self) -> None:
+        if self.weighted and self.tile_size > WEIGHTED_TILE_CAP:
+            raise ValueError(
+                f"tile_size={self.tile_size}: a weighted row is at most "
+                f"{WEIGHTED_TILE_CAP} elements, since the multiplying core holds "
+                f"the weight row beside each line"
+            )
+
+    def kernel(self, target):
+        return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
+
+    def reference(self, x, w=None):
+        """The kernels' references in turn: the normalized row rounded to
         bf16, as the first core stores it, then times the weight.
         """
         normed = super().reference(x)
+        if w is None:
+            return normed
         y = eltwise.mul_sized(self.tile_size).contract.reference(normed, w)
         return y.astype(normed.dtype)
 
-    def tolerance(self, target) -> Tolerance:
+    def tolerance(self, target) -> Tolerance | None:
+        if not self.weighted:
+            return super().tolerance(target)
         # Each kernel is within one ulp of its reference; the product of a
         # row one ulp off is itself up to one ulp off before its own rounding.
         return Tolerance.bf16_ulps(
@@ -87,6 +92,8 @@ class WeightedRMSNorm(RMSNorm):
         )
 
     def array(self, target) -> list:
+        if not self.weighted:
+            return super().array(target)
         tile_ty = self.x.tile
         weights_ty = self.w.tile
         cols, chans = self.num_aie_columns, self.num_channels
@@ -117,7 +124,10 @@ class WeightedRMSNorm(RMSNorm):
         counts = (
             [self.count.param] * (2 * n_cores)
             if dynamic
-            else [target.rtp(_I32, name=f"count_{k}") for k in range(2 * n_cores)]
+            else [
+                target.rtp(np.ndarray[(1,), np.dtype[np.int32]], name=f"count_{k}")
+                for k in range(2 * n_cores)
+            ]
         )
         barriers = [target.barrier() for _ in range(2 * n_cores)]
 

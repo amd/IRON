@@ -120,7 +120,7 @@ def channeled_unary_cases(
         out = []
         for length in input_lengths:
             for chans in [1] if channels is None else channels:
-                for cols in range(1, cls.shim_columns(dev, chans) + 1):
+                for cols in range(1, cls.shim_columns(dev, chans, extra) + 1):
                     cores = cols * chans
                     tile = min(length // cores, cap)
                     if tile * cores != length:
@@ -145,7 +145,7 @@ def binary_elementwise_cases(
         cap = cls.tile_cap if tile_cap is None else tile_cap
         out = []
         for length in input_lengths:
-            for cols in range(1, cls.shim_columns(dev) + 1):
+            for cols in range(1, cls.shim_columns(dev, 1, extra) + 1):
                 tile = min(length // cols, cap)
                 if tile * cols != length:
                     continue
@@ -162,13 +162,17 @@ def binary_elementwise_cases(
     return cases
 
 
-def row_cases(input_lengths=LENGTHS, regular: int | None = 2048):
+def row_cases(
+    input_lengths=LENGTHS, tile_cap=None, regular: int | None = 2048, **extra
+):
     """Cases for a :class:`~iron.common.elementwise.Rowwise` operator: each
     length split into rows over every column and channel count the class's
     shim budget allows, one row per core at most ``tile_cap`` long, as
     :func:`channeled_unary_cases` splits a flat buffer.
     """
-    flat = channeled_unary_cases(input_lengths, regular=regular)
+    flat = channeled_unary_cases(
+        input_lengths, tile_cap=tile_cap, regular=regular, **extra
+    )
 
     def cases(cls):
         out = []

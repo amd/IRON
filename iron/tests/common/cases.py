@@ -113,13 +113,13 @@ CASES = [
     (
         "rms_norm",
         "RMSNorm",
-        [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
-    ),
-    (
-        "rms_norm",
-        "WeightedRMSNorm",
-        # The weight row sits between the input and the output.
-        [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [
+            dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256),
+            # The weight row sits between the input and the output.
+            dict(
+                rows=4, num_aie_columns=1, num_channels=1, tile_size=256, weighted=True
+            ),
+        ],
     ),
     (
         "rope",

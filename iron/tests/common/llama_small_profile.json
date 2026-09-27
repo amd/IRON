@@ -1,5 +1,5 @@
 {"entries": [
-  {"operator": "WeightedRMSNorm", "rows": 1, "tile_size": 256, "num_aie_columns": 1},
+  {"operator": "RMSNorm", "weighted": true, "rows": 1, "tile_size": 256, "num_aie_columns": 1},
   {"operator": "GEMV", "M": 1024, "K": 256, "num_batches": 1, "tile_size_input": 4, "tile_size_output": 32},
   {"operator": "GEMV", "M": 256, "K": 256, "num_batches": 1, "tile_size_input": 4},
   {"operator": "GEMV", "M": 256, "K": 64, "num_batches": 16, "tile_size_input": 4, "tile_size_output": 32},
@@ -15,7 +15,7 @@
   {"operator": "GEMV", "M": 64, "K": 64, "num_batches": 16, "tile_size_input": 4, "tile_size_output": 8},
   {"operator": "ElementwiseMul", "size": 1024, "tile_size": 512},
   {"operator": "Transpose", "M": 64, "N": 64, "num_batches": 16, "num_aie_columns": 2, "m": 64, "n": 32},
-  {"operator": "WeightedRMSNorm", "rows": 64, "tile_size": 256, "num_aie_columns": 8},
+  {"operator": "RMSNorm", "weighted": true, "rows": 64, "tile_size": 256, "num_aie_columns": 8},
   {"operator": "GEMM", "M": 64, "K": 256, "N": 1024, "tile_m": 16},
   {"operator": "GEMM", "M": 64, "K": 256, "N": 256, "tile_m": 16},
   {"operator": "MHA", "num_heads": 16, "num_KV_heads": 4, "d": 64, "seq_pad": 64, "num_pipelines": 1},

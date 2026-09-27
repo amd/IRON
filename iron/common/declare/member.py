@@ -13,7 +13,16 @@ and a :class:`Scratchpad` or :class:`DispatchTime` written per call.
 from __future__ import annotations
 
 import contextvars
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Generic, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Generic,
+    Mapping,
+    TypeVar,
+    overload,
+)
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -77,6 +86,9 @@ class _Member(Generic[B]):
 
     name: str = ""
     owner: type | None = None
+    # The flag an optional operand and its stream are declared when=; None
+    # for a member every instance has.
+    when: _DimSpec | None = None
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
@@ -92,6 +104,11 @@ class _Member(Generic[B]):
         try:
             return instance._bound[self.name]
         except (AttributeError, KeyError):
+            if self.when is not None and not getattr(instance, self.when.name, True):
+                raise AttributeError(
+                    f"{type(instance).__name__}.{self.name} is declared when="
+                    f"{self.when.name}, which is False on this instance"
+                ) from None
             raise AttributeError(
                 f"{type(instance).__name__}.{self.name} is not bound yet"
             ) from None
@@ -106,6 +123,10 @@ class _Buffer(_Member["BoundBuffer"]):
     replicated over, ``depth`` the fifo depth, ``via=`` a pinned shim
     endpoint. Without it the buffer is an argument of a sequence written by
     hand (:meth:`Operator.sequence`).
+
+    ``when=`` a boolean ``param()`` makes the operand optional: it, and its
+    stream, exist only on an instance where the field is true. A graph call
+    sets the field from the operands it gives (see :func:`.infer.operand_flags`).
     """
 
     direction: ClassVar[str] = ""
@@ -120,9 +141,11 @@ class _Buffer(_Member["BoundBuffer"]):
         via: "Shim | list[Shim] | None" = None,
         replicate: bool = False,
         broadcast: bool = False,
+        when: _DimSpec | None = None,
     ) -> None:
         self.dims = tuple(dims)
         self.dtype = dtype
+        self.when = when
         self.stream: _Stream | None = None
         if tile is not None:
             tile = tuple(tile) if isinstance(tile, (tuple, list)) else (tile,)
@@ -136,6 +159,7 @@ class _Buffer(_Member["BoundBuffer"]):
                 replicate=replicate,
                 broadcast=broadcast,
             )
+            self.stream.when = when
 
     def __set_name__(self, owner: type, name: str) -> None:
         super().__set_name__(owner, name)
@@ -211,6 +235,15 @@ class StreamOut(_Stream):
     """A stream leaving the array; its shim end is a consumer (S2MM)."""
 
     direction = "out"
+
+
+def present(member: _Member, flags: Mapping[str, Any]) -> bool:
+    """Whether an operand (or its stream) exists under ``flags``, the field
+    values an instance holds or a call gives; a ``when=`` flag left out
+    reads as its default.
+    """
+    when = member.when
+    return when is None or bool(flags.get(when.name, when.default))
 
 
 class ValueSpec:

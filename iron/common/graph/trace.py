@@ -16,9 +16,8 @@ from ml_dtypes import bfloat16
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
-from ..declare.infer import infer, infer_kwargs
+from ..declare.infer import infer, infer_kwargs, inputs_of, operand_flags
 from ..declare.member import Extent, _Value
-from ..declare.member import _Buffer as _Buffer_
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
 from ..tiling import Walk
@@ -251,21 +250,19 @@ class Tracer:
         """
         operands = [self.operand(a) for a in args]
         kwargs = dict(kwargs)
-        # A keyword whose value is a per-call handle binds a value member of
-        # the class resolve_class picks.
+        # A keyword whose value is a per-call handle binds a value member.
         values = {
             k: kwargs.pop(k) for k in list(kwargs) if isinstance(kwargs[k], Value)
         }
         if isinstance(target, type):
-            cls = target.resolve_class(len(operands), {**kwargs, **values})
+            cls = target
             own = self._split_values(cls, values)
             scales: dict[str, int] = {}
             operands = _take_views(cls, operands, kwargs, own, scales)
-            n_in = sum(
-                1
-                for m in cls._members
-                if isinstance(m, _Buffer_) and m.direction != "out"
-            )
+            # An optional input is present if the call has an operand to
+            # spare for it; inference reads its flag off the inputs again.
+            flags = operand_flags(cls, len(operands), kwargs)
+            n_in = len(inputs_of(cls, {**kwargs, **flags}))
             op = self._construct(cls, operands[:n_in], operands[n_in:], kwargs)
         else:
             op = target
@@ -487,18 +484,15 @@ class _ReferenceTracer(Tracer):
             keys.append(key)
         kwargs = dict(kwargs)
         if isinstance(target, type):
-            cls = target.resolve_class(len(tensors), kwargs)
+            cls = target
             # A per-call value's number goes to the reference, not to
             # construction.
             values = self._split_values(cls, kwargs)
             shapes = [Handle(t.shape, _tensor_dtype(t), "", "input") for t in tensors]
             shapes = [h if k is None else h[k] for h, k in zip(shapes, keys)]
             shapes = _take_views(cls, shapes, kwargs, {}, {})
-            n_in = sum(
-                1
-                for m in cls._members
-                if isinstance(m, _Buffer_) and m.direction != "out"
-            )
+            flags = operand_flags(cls, len(shapes), kwargs)
+            n_in = len(inputs_of(cls, {**kwargs, **flags}))
             op = self._construct(cls, shapes[:n_in], shapes[n_in:], kwargs)
         else:
             op = target

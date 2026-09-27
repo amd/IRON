@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from aie.dialects.aie import (
     WireBundle,
     get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
 )
 
 from .field import Unresolvable
-from .member import _Stream
+from .member import _Stream, present
 
 
 def get_shim_dma_limit(dev) -> int:
@@ -29,16 +32,18 @@ def get_shim_dma_limit(dev) -> int:
     )
 
 
-def shim_columns(cls, dev, num_channels: int = 1) -> int:
+def shim_columns(cls, dev, num_channels: int = 1, flags: Mapping[str, Any] = {}) -> int:
     """How many of ``dev``'s columns a class's streams leave within the shim budget.
 
     One core per (column, channel) fills one fifo per input stream from the
     shim and drains one per output, so a column costs
     ``max(inputs, outputs) * num_channels`` channels in the busier
     direction. A ``replicate`` stream is shared by every column of a
-    channel, so it is paid once per channel rather than per column.
+    channel, so it is paid once per channel rather than per column. An
+    optional operand's stream counts when ``flags`` (field values) make it
+    present.
     """
-    streams = [m for m in cls._members if isinstance(m, _Stream)]
+    streams = [m for m in cls._members if isinstance(m, _Stream) and present(m, flags)]
     shared = [m for m in streams if m.replicate]
     per_core = [m for m in streams if not m.replicate]
     directions = [m.direction for m in per_core]
@@ -52,7 +57,7 @@ def shim_columns(cls, dev, num_channels: int = 1) -> int:
 
 def check_shim_columns(obj, dev, cols: int, num_channels: int = 1) -> None:
     """Raise :class:`Unresolvable` if ``cols`` exceeds ``obj``'s shim budget."""
-    allowed = shim_columns(type(obj), dev, num_channels)
+    allowed = shim_columns(type(obj), dev, num_channels, vars(obj))
     if cols > allowed:
         raise Unresolvable(
             f"{type(obj).__name__} with {cols} columns x {num_channels} "

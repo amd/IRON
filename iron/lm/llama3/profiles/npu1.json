@@ -1,5 +1,5 @@
 {"entries": [
-  {"operator": "WeightedRMSNorm", "rows": 1, "tile_size": 2048, "num_aie_columns": 1},
+  {"operator": "RMSNorm", "weighted": true, "rows": 1, "tile_size": 2048, "num_aie_columns": 1},
   {"operator": "GEMV", "M": 2048, "K": 2048, "num_batches": 1, "tile_size_input": 4, "tile_size_output": 512},
   {"operator": "GEMV", "M": 512, "K": 2048, "num_batches": 1, "tile_size_input": 4},
   {"operator": "GEMV", "M": 2048, "K": 64, "num_batches": 32, "tile_size_input": 4, "tile_size_output": 512},

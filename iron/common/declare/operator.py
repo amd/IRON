@@ -40,7 +40,15 @@ from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
 from .field import DeclarationError, Unresolvable, _tier_of, param
 from .infer import infer, infer_kwargs
-from .member import Extent, Value, _Buffer, _extent_reads, _Member, _Stream, _Value
+from .member import (
+    Extent,
+    Value,
+    _Buffer,
+    _extent_reads,
+    _Member,
+    _Stream,
+    _Value,
+)
 from .naming import label_parts
 from .profile import current as current_profile
 from .shim import check_shim_columns, shim_columns
@@ -335,9 +343,11 @@ class Operator(metaclass=_OperatorMeta):
         return fetch(self.external)
 
     @classmethod
-    def shim_columns(cls, dev, num_channels: int = 1) -> int:
-        """How many of ``dev``'s columns this operator's shim budget allows."""
-        return shim_columns(cls, dev, num_channels)
+    def shim_columns(cls, dev, num_channels: int = 1, flags=None) -> int:
+        """How many of ``dev``'s columns this operator's shim budget allows,
+        with the optional operands ``flags`` (field values) make present.
+        """
+        return shim_columns(cls, dev, num_channels, flags or {})
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
         check_shim_columns(self, dev, cols, num_channels)
@@ -367,7 +377,7 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}: the column count defaults from the "
                 f"device; none is bound and none was given"
             )
-        budget = self.shim_columns(dev, num_channels)
+        budget = self.shim_columns(dev, num_channels, vars(self))
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def reference(self, *inputs):
@@ -481,7 +491,10 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def buffers(self) -> list[BoundBuffer]:
-        return [self._bound[m.name] for m in self._members if isinstance(m, _Buffer)]
+        """The operands this instance has: every declared one but an
+        optional one whose ``when=`` flag is false.
+        """
+        return [self._bound[m.name] for m in self._members_io()]
 
     @property
     def inputs(self) -> list[BoundBuffer]:
@@ -503,8 +516,8 @@ class Operator(metaclass=_OperatorMeta):
         """Every operand's own stream, by the operand's name."""
         return {
             m.name: self._bound[m.name].lanes
-            for m in self._members
-            if isinstance(m, _Buffer) and m.stream is not None
+            for m in self._members_io()
+            if m.stream is not None
         }
 
     @property
@@ -640,15 +653,6 @@ class Operator(metaclass=_OperatorMeta):
 
     # -- graphs ---------------------------------------------------------
 
-    @classmethod
-    def resolve_class(cls, n_operands: int, kwargs: dict) -> type:
-        """The class a graph call with ``n_operands`` operands constructs.
-
-        The default is the class itself; a family that picks a subclass from
-        its arguments (RMSNorm with a weight) overrides.
-        """
-        return cls
-
     def __call__(self, *args, **kwargs):
         """An explicit instance applied to graph handles records a step."""
         from .. import graph as _graph  # as above
@@ -663,10 +667,10 @@ class Operator(metaclass=_OperatorMeta):
 
     def _bind(self) -> None:
         bound: dict[str, Any] = {}
+        for m in self._members_io():
+            bound[m.name] = BoundBuffer(m, self)  # its own stream with it
         for m in self._members:
-            if isinstance(m, _Buffer):
-                bound[m.name] = BoundBuffer(m, self)  # its own stream with it
-            elif isinstance(m, _Value):
+            if isinstance(m, _Value):
                 bound[m.name] = BoundValue(m, self)
         self._bound = bound
         # One word per (extent, operand it sizes): the tiles per lane a
@@ -676,8 +680,8 @@ class Operator(metaclass=_OperatorMeta):
         for e in self._members:
             if not isinstance(e, Extent):
                 continue
-            for b in self._members:
-                if isinstance(b, _Buffer) and b.stream is not None:
+            for b in self._members_io():
+                if b.stream is not None:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None and self.extent_unit(b.name) != 0:
                         word = _ExtentWord(type(self), e, b.name, axis)
@@ -780,9 +784,14 @@ class Operator(metaclass=_OperatorMeta):
             )
         return artifacts
 
-    def _members_io(self):
-        """The declared buffers, without resolving a shape: their names alone."""
-        return [m for m in self._members if isinstance(m, _Buffer)]
+    def _members_io(self) -> list[_Buffer]:
+        """The declared buffers this instance has, without resolving a shape."""
+        # getattr rather than vars(): array() runs this on its view.
+        return [
+            m
+            for m in self._members
+            if isinstance(m, _Buffer) and (m.when is None or getattr(self, m.when.name))
+        ]
 
     def buffer_map(self) -> dict[str, tuple[str, int, int]]:
         """Each buffer as ``(arena, position, nbytes)``, for an image's record.

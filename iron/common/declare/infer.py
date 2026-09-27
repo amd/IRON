@@ -19,7 +19,43 @@ from typing import Any
 import numpy as np
 
 from .field import DimRef, _Optional, _Select
-from .member import _Buffer
+from .member import _Buffer, present
+
+
+def _operands(cls, directions) -> list[_Buffer]:
+    return [
+        m for m in cls._members if isinstance(m, _Buffer) and m.direction in directions
+    ]
+
+
+def operand_flags(cls, n_operands: int, given: dict[str, Any]) -> dict[str, bool]:
+    """The ``when=`` flags a call with ``n_operands`` operands sets, for the
+    optional inputs whose flag ``given`` leaves open.
+
+    Operands fill the inputs in declaration order before any output, so an
+    optional input is present when the call has an operand to spare for
+    it; a call that passes an output instead gives the flag.
+    """
+    ins = _operands(cls, ("in", "inout"))
+    open_flags = [
+        m.when.name for m in ins if m.when is not None and m.when.name not in given
+    ]
+    spare = n_operands - sum(
+        present(m, given) for m in ins if m.when is None or m.when.name in given
+    )
+    flags: dict[str, bool] = {}
+    for name in dict.fromkeys(open_flags):
+        needs = open_flags.count(name)  # the operands one flag brings
+        flags[name] = spare >= needs
+        spare -= needs if flags[name] else 0
+    return flags
+
+
+def inputs_of(cls, given: dict[str, Any]) -> list[_Buffer]:
+    """The inputs of a ``cls`` constructed with ``given``: every declared one
+    but an optional one whose flag is false.
+    """
+    return [m for m in _operands(cls, ("in", "inout")) if present(m, given)]
 
 
 def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
@@ -28,19 +64,17 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
     Each declared dimension is a field or a literal, so this is a lookup.
     Returns ``{field: value}``; ``given`` pins values and is checked for
     agreement. ``outputs`` are the shapes of caller-supplied ``Out`` buffers,
-    in declaration order, which bind the same way.
+    in declaration order, which bind the same way. An optional operand's
+    flag, left open, is set from the operands given (:func:`operand_flags`).
     """
-    ins = [
-        m
-        for m in cls._members
-        if isinstance(m, _Buffer) and m.direction in ("in", "inout")
-    ]
+    given = {**operand_flags(cls, len(operand_shapes), given), **given}
+    ins = inputs_of(cls, given)
     if len(operand_shapes) != len(ins):
         raise TypeError(
             f"{cls.__name__} takes {len(ins)} operand(s) "
             f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
         )
-    outs = [m for m in cls._members if isinstance(m, _Buffer) and m.direction == "out"]
+    outs = [m for m in _operands(cls, ("out",)) if present(m, given)]
     if outputs and len(outputs) != len(outs):
         raise TypeError(
             f"{cls.__name__} produces {len(outs)} output(s) "
@@ -125,7 +159,6 @@ def infer_kwargs(cls, kwargs) -> dict[str, Any]:
     and the flags that select a buffer's shape.
     """
     names = set(cls._param_fields)
-    for m in cls._members:
-        if isinstance(m, _Buffer):
-            names.update(d.flag.name for d in m.dims if isinstance(d, _Select))
+    for m in _operands(cls, ("in", "inout", "out")):
+        names.update(d.flag.name for d in m.dims if isinstance(d, _Select))
     return {k: v for k, v in kwargs.items() if k in names}
