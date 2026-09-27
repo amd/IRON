@@ -14,6 +14,7 @@ for the halves, so with those weights it must be the halves
 """
 
 import dataclasses
+from collections.abc import Callable
 
 import numpy as np
 from aie.iron import ObjectFifo, Worker, kernels
@@ -222,6 +223,11 @@ class RoPE(Operator):
 # --------------------------------------------------------------------------
 
 
+#: A RoPE frequency scaling: the frequencies (radians per position, float64)
+#: in, scaled out. :class:`Llama3RopeScaling` is Llama 3's.
+RopeScaling = Callable[[np.ndarray], np.ndarray]
+
+
 @dataclasses.dataclass(frozen=True)
 class Llama3RopeScaling:
     """Llama 3's RoPE frequency scaling (``"rope_type": "llama3"``).
@@ -271,7 +277,7 @@ def rope_angles(
     head_dim: int,
     context_length: int,
     rope_base: float = 500000.0,
-    scaling: Llama3RopeScaling | None = None,
+    scaling: RopeScaling | None = None,
 ) -> np.ndarray:
     """The RoPE table, ``(context_length, head_dim)`` float32: cos and sin
     interleaved per frequency, as the kernel reads it.

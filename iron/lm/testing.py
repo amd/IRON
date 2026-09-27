@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an application's device test checks: speed, accuracy against the
+"""What a model's device test checks: speed, accuracy against the
 CPU reference, and determinism, each over a :class:`~.runner.Runner` and
 the model it loaded.
 
 A test module defines a module-scoped ``runner`` fixture; the ``model``
-fixture (``iron/applications/conftest.py``) loads the model from it once
+fixture (``iron/lm/conftest.py``) loads the model from it once
 for the module, and each test calls one of these on the two.
 """
 

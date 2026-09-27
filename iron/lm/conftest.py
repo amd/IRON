@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The model an application's test module runs, loaded once for it."""
+"""The model a model package's test module runs, loaded once for it."""
 
 import aie.utils as aie_utils
 import pytest

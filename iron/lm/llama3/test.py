@@ -9,14 +9,14 @@ loaded once for the module and every test calls it in-process.
 
 import pytest
 
-from iron.applications.common.testing import (
+from iron.lm.llama3.model import Runner
+from iron.lm.testing import (
     check_accuracy,
     check_determinism,
     check_generation,
     requires,
     weights_dir,
 )
-from iron.applications.llama3.model import Runner
 
 WEIGHTS = weights_dir("llama3.2-1b") / "model.safetensors"
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"

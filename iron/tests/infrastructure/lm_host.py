@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """A language model's host side: the checkpoint, the weight tree a layout
-places it in and sampling (``iron.applications.common``'s ``Checkpoint``,
+places it in and sampling (``iron.lm``'s ``Checkpoint``,
 ``load_weights`` and ``Sampler``), at Llama's layout.
 
 The oracle is the safetensors library itself: tier 1 writes small
@@ -23,10 +23,10 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron.applications import common
-from iron.applications.common import Checkpoint, Sampler
-from iron.applications.common.testing import weights_dir
-from iron.applications.llama3.model import LLAMA_3_2_1B, layout
+from iron import lm
+from iron.lm import Checkpoint, Sampler
+from iron.lm.llama3.model import LLAMA_3_2_1B, layout
+from iron.lm.testing import weights_dir
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -53,7 +53,7 @@ TOY = dataclasses.replace(
 
 def load_weights(tensors, config=TOY):
     """``tensors`` in the tree of Llama's layout at ``config``."""
-    return common.load_weights(tensors, layout(config), config.n_layers)
+    return lm.load_weights(tensors, layout(config), config.n_layers)
 
 
 # Each layer field under its Hugging Face name, spelled out here rather

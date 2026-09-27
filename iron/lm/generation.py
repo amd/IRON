@@ -5,7 +5,7 @@
 
 A model is anything with ``logits(tokens)``: the logits after the last of
 ``tokens``, the whole history so far, as ``(vocab_size,)``. A
-:class:`~.model.CausalLM` on the NPU is one, and so is a CPU reference.
+:class:`~.decoder.CausalLM` on the NPU is one, and so is a CPU reference.
 """
 
 import time

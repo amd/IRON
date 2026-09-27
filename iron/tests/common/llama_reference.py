@@ -28,7 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from iron.applications.common import (
+from iron.lm import (
     Config,
     Oracle,
     accuracy,
@@ -36,7 +36,7 @@ from iron.applications.common import (
     greedy,
     prompt_rows,
 )
-from iron.applications.llama3.model import Llama
+from iron.lm.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
 

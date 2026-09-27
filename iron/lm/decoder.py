@@ -42,7 +42,7 @@ from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
-from iron.operators.rope import Llama3RopeScaling, rope_angles
+from iron.operators.rope import RopeScaling, rope_angles
 from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
 
@@ -51,7 +51,7 @@ from iron.operators.transpose import Transpose
 class Config:
     """A decoder's shape. ``max_seq_len`` is the rows the caches hold,
     prompt and generated tokens together; ``rope_scaling`` rescales the RoPE
-    frequencies (``LLAMA_3_2``, say).
+    frequencies (Llama 3.2's is ``LLAMA_3_2``).
     """
 
     vocab_size: int
@@ -63,7 +63,7 @@ class Config:
     hidden_dim: int
     max_seq_len: int
     rope_base: float
-    rope_scaling: Llama3RopeScaling | None = None
+    rope_scaling: RopeScaling | None = None
 
     def angles(self) -> np.ndarray:
         """The RoPE table, ``(max_seq_len, head_dim)`` float32."""

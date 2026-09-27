@@ -3,11 +3,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 over the shared decoder (:mod:`iron.applications.common`): its
+"""Llama 3 over the shared decoder (:mod:`iron.lm`): its
 layer and head on the NPU (:class:`Llama`) and on the CPU in float32
 (:class:`LlamaOracle`, the reference it is judged by), where its
 checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
-Run it with ``python -m iron.applications.llama3.model``.
+Run it with ``python -m iron.lm.llama3.model``.
 
 The operators' knobs are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Llama 3.2 1B's shape and a ``max_seq_len`` of
@@ -21,8 +21,8 @@ import numpy as np
 import tiktoken
 import tiktoken.load
 
-from iron.applications import common
-from iron.applications.common import CausalLM, Config, Layout, Oracle, project
+from iron import lm
+from iron.lm import CausalLM, Config, Layout, Oracle, project
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV
@@ -155,7 +155,7 @@ def tokenizer(path) -> tiktoken.Encoding:
     )
 
 
-class Runner(common.Runner):
+class Runner(lm.Runner):
     """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
 
     config = LLAMA_3_2_1B
@@ -166,4 +166,4 @@ class Runner(common.Runner):
 
 
 if __name__ == "__main__":
-    common.main(Runner, "Llama 3.2 1B on the NPU")
+    lm.main(Runner, "Llama 3.2 1B on the NPU")

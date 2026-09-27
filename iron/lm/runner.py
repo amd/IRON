@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .checkpoint import Checkpoint, Layout, load_weights
+from .decoder import CausalLM, Config, Oracle
 from .generation import (
     SEED,
     Sampler,
@@ -19,7 +20,6 @@ from .generation import (
     generate,
     kl_stats,
 )
-from .model import CausalLM, Config, Oracle
 
 
 class Runner:
@@ -27,7 +27,7 @@ class Runner:
 
     A subclass names the model: its ``config``; ``layout(config)``, where
     each weight is in the checkpoint (:mod:`.checkpoint`); ``model``, the
-    :class:`~.model.CausalLM` on the NPU, whose ``oracle`` is the CPU model
+    :class:`~.decoder.CausalLM` on the NPU, whose ``oracle`` is the CPU model
     it is checked against; ``open_tokenizer(path)``, with ``encode`` and
     ``decode``; and ``bos``, the token every prompt starts with.
 

@@ -13,7 +13,7 @@ and weights, Llama 3.2 1B's here; nothing here needs torch.
 What is Llama's own is short, and all of it is in `model.py`: its layer
 and head on the NPU and in numpy, its shape, where its checkpoint keeps
 each weight and its tokenizer; its knobs are in `profiles/`. The rest is
-`iron.applications.common`, which a new model reuses the same way:
+`iron.lm`, which a new model reuses the same way:
 
 - `CausalLM`: the body over prefill and decode, the key and value caches,
   attention over them (`attend`) and `logits(tokens)`; a model subclasses
@@ -54,12 +54,12 @@ python3 -m pip install -r requirements_examples.txt
 From the repository root:
 
 ```bash
-python -m iron.applications.llama3.model \
+python -m iron.lm.llama3.model \
     /path/to/model.safetensors /path/to/tokenizer.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
-- `--prompt-len`: characters of `common/prompt.txt` to use as the prompt (default 2048)
+- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt (default 2048)
 - `--num-tokens`: tokens to generate (default 40)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with a
@@ -68,6 +68,6 @@ python -m iron.applications.llama3.model \
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
 
-`pytest iron/applications/llama3/` loads the model once and runs
+`pytest iron/lm/llama3/` loads the model once and runs
 all three in-process through `model.Runner`, recording the throughput and
 accuracy figures.

@@ -56,7 +56,7 @@ written to the working directory, and `compile(record="disk")` writes the
 
 ### Environment Variables
 
-- `IRON_EXAMPLE_WEIGHTS_DIR`: Path to model weights for applications (default: `/srv`)
+- `IRON_EXAMPLE_WEIGHTS_DIR`: Path to language model weights (default: `/srv`)
 
 ## Building and Testing
 
@@ -78,10 +78,10 @@ pytest iron/operators/
 pytest iron/operators/axpy/
 ```
 
-### Run Application Tests
+### Run Language Model Tests
 
 ```bash
-pytest iron/applications/
+pytest iron/lm/
 ```
 
 ### Run Specific Test Function
@@ -451,7 +451,7 @@ follows from it later. A profile is a JSON file, `Profile.load(path)` and
 ]}
 ```
 
-`iron/applications/llama3/profiles/<device>.json` is the worked
+`iron/lm/llama3/profiles/<device>.json` is the worked
 example (a test at the small shape loads
 `iron/tests/common/llama_small_profile.json`), and
 `test_llama_names_only_the_knobs_that_matter` checks that each keyword the
@@ -465,8 +465,8 @@ xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/applications/llama3/model.py` is the worked example
-(`Llama`, a `CausalLM` from `iron.applications.common`, called through
+`iron/lm/llama3/model.py` is the worked example
+(`Llama`, a `CausalLM` from `iron.lm`, called through
 `logits(tokens)`, and `LlamaOracle`, its float32 forward pass on the host;
 its `Runner` builds both and checks one against the other);
 `iron/tests/common/graph.py` traces it device-free,
@@ -647,7 +647,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 - **small.yml**: Fast operator tests (non-extensive, runs on every PR)
 - **extensive.yml**: Full test suite (all operators with extensive tests)
-- **test-examples.yml**: Application tests (e.g., Llama inference)
+- **test-examples.yml**: Language model tests (e.g., Llama inference)
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
 
 ### Workflow Requirements
@@ -715,51 +715,55 @@ logging.basicConfig(level=logging.DEBUG)
 - Ensure template parameters match function signature
 - Check for syntax errors in vectorization code
 
-## Applications
+## Language models (`iron/lm/`)
 
-### The shared language-model layer
+### The shared decoder
 
-`iron/applications/common/` is what every language model shares; a new
-model is its own layer and head (on the NPU and in numpy), shape,
-checkpoint layout, tokenizer and profile over it, in one module:
+`iron/lm/` is what every language model shares, and each model is a
+package under it (`iron/lm/llama3/`). A model is five things over the
+shared layer, plus its tokenizer and profiles:
 
-- `CausalLM` (`model.py`): a decoder as one graph, prefill and decode, the
+- `Config` (`decoder.py`): the shape
+- `CausalLM` (`decoder.py`): a decoder as one graph, prefill and decode, the
   key and value caches, attention over them (`attend`) and
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
   x)` and `head(x)`; `project(x, w)` is a weight's projection at either
   row count (GEMV for one row, GEMM for more)
-- `Oracle` (`model.py`): the same decoder's float32 forward pass on the
+- `Oracle` (`decoder.py`): the same decoder's float32 forward pass on the
   host, the reference the model is judged by, as an operator's is its
   `reference()` (not composed from the operators' references, so it catches
   a wiring mistake the graph's own reference repeats). A model subclasses it
   with a numpy `layer(angles, weights, x)` and `head(x)` and names it as
   its `CausalLM`'s `oracle`; the pass, RoPE and attention are shared. Its
   float32 weights are twice the checkpoint, so it is built to check with
-- `Config`, and a checkpoint `Layout` (`checkpoint.py`): each weight's
-  place in the model, its name in the checkpoint and its shape, which
-  `load_weights` checks strictly against the mapped `.safetensors`
+- a checkpoint `Layout` (`checkpoint.py`): each weight's place in the
+  model, its name in the checkpoint and its shape, which `load_weights`
+  checks strictly against the mapped `.safetensors`
 - `Runner` and `main` (`runner.py`): the checkpoint, the tokenizer, the
   model and its oracle, and the command line. A model's runner names
   its `config`, `layout`, `model`, `open_tokenizer` and `bos`
-- `generation.py`: sampling, the generation loop and the accuracy and
-  determinism checks over any model with `logits(tokens)`
-- `testing.py`: what an application's device test checks with them, and
-  where it finds the files (`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`)
+
+Nothing of a model's own is needed by `generation.py` (sampling, the
+generation loop and the accuracy and determinism checks over any model
+with `logits(tokens)`) or `testing.py` (what a model's device test checks
+with them, and where it finds the files,
+`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`). Nothing in the library imports a
+model.
 
 Their dependencies (safetensors, tiktoken, ...) are in
 `requirements_examples.txt`.
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama3/`, on the shared
+Full LLM inference example at `iron/lm/llama3/`, on the shared
 layer: `model.py` (Llama 3's layer and head on the NPU and in numpy,
 Llama 3.2 1B's shape, the layout, the tokenizer), `profiles/` (knobs):
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama3/`, or
-  `python -m iron.applications.llama3.model model.safetensors tokenizer.model`
+- **Run**: `pytest iron/lm/llama3/`, or
+  `python -m iron.lm.llama3.model model.safetensors tokenizer.model`
 
 ### AIE Kernel Reference
 
