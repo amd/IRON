@@ -238,6 +238,8 @@ class MemCopy(Operator):
 
     def reference(self, x):
         """CPU reference: the copy."""
+        # eltwise.passthrough's contract is one line; the operator is the whole
+        # buffer, which is the identity.
         return x.copy()
 
     # -- the runtime sequence --------------------------------------------------

@@ -246,6 +246,7 @@ class Copy(Operator):
         of ``output_buffer_size``. The offsets are the per-call values, in
         elements.
         """
+        # A DMA pattern: no kernel, so no contract to take it from.
         src, dst = self.src, self.dst
         if src_valid is not None:
             src = _at(src, int(src_valid))

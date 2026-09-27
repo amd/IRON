@@ -436,6 +436,8 @@ class GEMV(Operator):
 
     def reference(self, A, B):
         """CPU reference: (optionally batched) matrix-vector product."""
+        # Not linalg.mv's contract: that is one tile's product, and mv_ref's
+        # float64 would double the host copy of the LM head's weight.
         return reference(A, B)
 
 

@@ -696,6 +696,9 @@ class GEMM(Operator):
 
     def reference(self, A, B):
         """CPU reference: ``C = A @ B`` honoring ``b_col_maj`` / ``c_col_maj``."""
+        # Not linalg.mm's contract: that is one tile's product, and the design
+        # accumulates K tiles in f32; mm_ref's float64 would double the host
+        # copy of the largest weight a graph reference multiplies.
         return reference(A, B, self.b_col_maj, self.c_col_maj)
 
 

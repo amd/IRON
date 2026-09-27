@@ -281,6 +281,8 @@ class Transpose(Operator):
 
     def reference(self, x):
         """CPU reference: 2D transpose of each (M, N) matrix stored row-major."""
+        # Not datamovement.transpose's contract: the kernel transposes each
+        # subtile in place, and the DMA places the subtiles.
         if self.num_batches > 1:
             return reference(x.reshape(self.num_batches, self.M, self.N))
         return reference(x.reshape(self.M, self.N))

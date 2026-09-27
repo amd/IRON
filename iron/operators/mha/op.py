@@ -722,6 +722,8 @@ class MHA(Operator):
         interleaved layout the operands are ``(seq, heads, d)`` and so is O.
         ``s_q``/``s_kv`` are the per-call lengths when a graph binds them.
         """
+        # Not the linalg.mha contracts: each is one tile of an online softmax,
+        # and the operator is whole attention.
         kv_heads, seq_len, seq_pad = self._lengths
         if s_q is not None:
             seq_len = int(s_q)

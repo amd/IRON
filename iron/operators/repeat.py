@@ -186,6 +186,7 @@ class Repeat(Operator):
 
     def reference(self, x):
         """CPU reference: repeat-interleave along the leading dimension."""
+        # A DMA pattern: no kernel, so no contract to take it from.
         return reference(x, self.repeat)
 
 
