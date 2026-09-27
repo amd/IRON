@@ -210,16 +210,21 @@ def test_legalize_factors_an_oversize_outer_dim_when_a_slot_is_free():
     assert acc.count == 2048 * 64
 
 
-def test_legalize_unrolls_when_no_slot_is_free():
+def test_legalize_splits_an_iteration_count_past_64():
     from iron.common.tiling import legalize
 
-    # All four slots used and the iteration count past 64: unroll it. (The
-    # outer stride is not the next dimension's extent, or the two would
-    # merge into one slot and the rest fit.)
+    # All four slots used and the iteration count past 64: as few descriptors
+    # as the cap allows, not one per iteration, which would overrun the
+    # stream's task queue. (The outer stride is not the next dimension's
+    # extent, or the two would merge into one slot and the rest fit.)
     accs = legalize(1 << 22, 0, [100, 8, 2, 64], [40000, 4096, 128, 1], bfloat16)
-    assert len(accs) == 100
-    assert [a.offset for a in accs][:3] == [0, 40000, 80000]
-    assert all(a.sizes == (1, 8, 2, 64) for a in accs)
+    assert [(a.offset, a.sizes) for a in accs] == [
+        (0, (64, 8, 2, 64)),
+        (64 * 40000, (36, 8, 2, 64)),
+    ]
+    # MHA's grouped-query K and V: 128 re-reads of a head's rows.
+    accs = legalize(1 << 21, 0, [128, 16384, 64], [0, 64, 1], bfloat16)
+    assert [(a.offset, a.sizes[0]) for a in accs] == [(0, 64), (0, 64)]
 
 
 def test_legalize_drops_unit_dims_and_keeps_legal_patterns():

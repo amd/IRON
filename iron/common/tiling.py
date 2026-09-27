@@ -451,9 +451,18 @@ def _legalize_dims(
             )
     if not dims:
         raise ValueError("cannot legalize an empty pattern")
-    # No room: unroll the outermost dimension.
     n0, s0 = dims[0]
     out: list[Access] = []
+    if n0 > _ITER_MAX:
+        # Past the iteration count: as many descriptors as it takes, each
+        # iterating at most that often, not one per iteration. A stream's
+        # queue holds a handful, and one that stalls on its queue stalls
+        # every stream issued after it.
+        for i in range(0, n0, _ITER_MAX):
+            chunk = [(min(_ITER_MAX, n0 - i), s0)] + dims[1:]
+            out.extend(_legalize_dims(elements, offset + i * s0, chunk, gran))
+        return out
+    # No room: unroll the outermost dimension.
     for i in range(n0):
         out.extend(_legalize_dims(elements, offset + i * s0, dims[1:], gran))
     return out
