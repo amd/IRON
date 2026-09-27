@@ -136,9 +136,6 @@ class Sequence(Transfers):
         self._rt_data = rt_data
         self.target = target
         self._group = None
-        # The shim handles this sequence issued a transfer on; the build
-        # places the declared ones it did not touch (see build_design).
-        self.used: set = set()
 
     # -- transfers ---------------------------------------------------------
 
@@ -194,7 +191,6 @@ class Sequence(Transfers):
         managed=True,
     ):
         handle = self._handle(stream)
-        self.used.add(id(handle))
         buffer, accesses, sliced_by = self._resolve(what, stream)
         offset_by = offset_by or sliced_by
         if offset_by is not None and offset_by.param is None:

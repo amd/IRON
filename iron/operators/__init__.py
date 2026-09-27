@@ -27,7 +27,6 @@ _OPERATOR_MODULES = {
     "LayerNorm": "layer_norm",
     "LeakyReLU": "leaky_relu",
     "MHA": "mha.op",
-    "MemCopy": "mem_copy",
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "WeightedRMSNorm": "rms_norm",

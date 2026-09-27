@@ -19,8 +19,6 @@ from aie.iron import (
     ScratchpadParameter,
     TileDma,
 )
-from aie.iron.device import AnyShimTile
-from aie.iron.runtime.endpoint import RuntimeEndpoint
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
@@ -122,15 +120,6 @@ def build_design(
         if not op.own_preamble:
             seq.preamble()
         seq.run()
-        # A declared stream slot this extent never transfers on (mem_copy's
-        # idle cores at a small size) still needs a shim endpoint, or the
-        # program cannot be resolved. Place it on any shim tile. A flow lane
-        # names its shim end itself.
-        idle = [h for h in handles if id(h) not in seq.used and not isinstance(h, Flow)]
-        if idle:
-            for h in idle:
-                h.endpoint = RuntimeEndpoint(AnyShimTile)
-                rt._fifos.add(h)
 
     rt = Runtime(sequence, fn_args + params)
     # What array() registered on the target: before the program resolves,

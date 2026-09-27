@@ -84,11 +84,6 @@ CASES = [
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
-        "mem_copy",
-        "MemCopy",
-        [dict(size=1024, num_cores=1, num_channels=1, bypass=False, tile_size=256)],
-    ),
-    (
         "mha.op",
         "MHA",
         [

@@ -354,25 +354,6 @@ def flm(monkeypatch):
     return flm
 
 
-class _Recorder:
-    def __init__(self, name, log):
-        self.name, self.log = name, log
-
-    def fill(self, data, tap, wait, group, offset_parameter):
-        self.log.append(("fill", self.name, tap.offset, tap.sizes, wait))
-
-    def drain(self, data, tap, wait, group, offset_parameter):
-        self.log.append(("drain", self.name, tap.offset, tap.sizes, wait))
-
-
-def _record(op):
-    log = []
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(_Recorder(f"{s.name}{i}", log), i)
-    return log
-
-
 def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
@@ -414,49 +395,6 @@ def test_flm_gemm_layout_of_b_follows_the_device(flm):
     with pytest.raises(flm.Incompatible):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
     assert untuned.resolved(_NPU2()).B.shape == (512 * 512 // 8,)
-
-
-def test_mem_copy_sequence_pads_a_remainder_to_a_full_line(monkeypatch):
-    # mem_copy/op.py: whole partitions split evenly; the remainder is padded
-    # to one line per core by re-reading copied data, in awaited groups of
-    # four transfers on the last fifo.
-    from iron.operators.mem_copy import MemCopy
-
-    monkeypatch.setattr(Access, "tap", lambda self: self)
-
-    class Dev:
-        def resolve(self):
-            class R:
-                name = "npu2"
-
-            return R()
-
-    def run(size):
-        op = MemCopy(
-            size=size, num_cores=4, num_channels=1, bypass=False, tile_size=256
-        ).resolved(Dev())
-        log = _record(op)
-        op.sequence(Sequence(op, {"x": "dx", "y": "dy"}))
-
-        def moved(verb):
-            return sum(s[0] * s[3] for v, _, _, s, _ in log if v == verb)
-
-        return log, moved("fill"), moved("drain")
-
-    log, filled, drained = run(1024)
-    assert (filled, drained) == (1024, 1024)
-    assert log[0] == ("fill", "x0", 0, (1, 1, 1, 256), False)
-    assert log[-1] == ("drain", "y3", 768, (1, 1, 1, 256), True)
-    # 1000: one whole partition, then a 232-element tail re-reading 8 from
-    # the copied prefix so the last core still consumes a full line.
-    log, filled, drained = run(1000)
-    assert (filled, drained) == (1024, 1024)
-    assert log[-1] == ("drain", "y3", 768, (1, 1, 1, 232), True)
-    # 100: no whole partition, three idle cores, a 156-element pad.
-    log, filled, drained = run(100)
-    assert (filled, drained) == (256, 256)
-    assert {name for _, name, *_ in log} == {"x3", "y3"}
-    assert log[0] == ("fill", "x3", 0, (32, 1, 1, 4), True)
 
 
 # --------------------------------------------------------------------------
