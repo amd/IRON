@@ -6,22 +6,9 @@ from typing import ClassVar
 
 import numpy as np
 from aie.iron.kernels import datamovement
-from ml_dtypes import bfloat16
 
 from iron.common import In, UnaryElementwise, Unresolvable, auto, param
 from iron.common.testing import Testing, channeled_unary_cases
-
-
-def _packed(op):
-    """Values in [0, 3.75) with scales in [1/3.75, 1) keep every quantized
-    value inside int4's [0, 15]; the input is their packed form.
-    """
-    rng = np.random.default_rng(42)
-    values = (rng.random(op.size) * 3.75).astype(bfloat16)
-    scales = (1 / 3.75 + (1 - 1 / 3.75) * rng.random(op.size // op.group_size)).astype(
-        bfloat16
-    )
-    return dict(x=op.pack(values, scales))
 
 
 class Dequant(UnaryElementwise):
@@ -29,16 +16,25 @@ class Dequant(UnaryElementwise):
     over a packed input.
 
     A core takes ``tile_size`` values as ``in_tile`` packed bytes (two 4-bit
-    values per byte plus a bf16 scale and zero point per ``group_size``) and
+    values per byte plus a bf16 scale per ``group_size``; no zero point) and
     produces ``tile_size`` bf16 values, so its two streams carry different
     tiles.
     """
 
-    test = Testing(channeled_unary_cases(group_size=32), draw=_packed)
+    # The kernel's contract draws what it reads: packed int4 lines, each
+    # followed by its scales.
+    test = Testing(
+        channeled_unary_cases(group_size=32),
+        draw=lambda op: dict(
+            x=datamovement.expand(op.tile_size, op.group_size)
+            .contract.sample(np.random.default_rng(42), op.size // op.tile_size)[0]
+            .reshape(-1)
+        ),
+    )
 
     group_size: int = param(default=32, repr=False, array=True)
     # The packed input's length: two 4-bit values per byte plus a bf16 scale
-    # and zero point per group.
+    # per group.
     packed: int = param(
         default=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
@@ -73,25 +69,3 @@ class Dequant(UnaryElementwise):
 
     def kernel(self, target):
         return datamovement.expand(self.tile_size, self.group_size)
-
-    def pack(self, values, scales):
-        """Quantize ``values`` (bf16, ``size``) by ``scales`` (bf16, one per
-        ``group_size``, zero point 0) into the kernel's packed uint8 layout;
-        the inverse of the kernel's reference. Values are rounded half to even
-        and clipped to the int4 range.
-        """
-        tile, group = self.tile_size, self.group_size
-        if tile is None:
-            raise ValueError("Dequant.pack needs tile_size (resolve first)")
-        n_tiles, groups = self.size // tile, tile // group
-        v = values.reshape(n_tiles, groups, group).astype(np.float32)
-        s = scales.reshape(n_tiles, groups, 1).astype(np.float32)
-        # np.round is round-half-to-even, as torch.round is.
-        q = np.clip(np.round(v / s), 0, 15).astype(np.uint8)
-        nibbles = (q[..., 0::2] | (q[..., 1::2] << 4)).reshape(n_tiles, tile // 2)
-        scale_bytes = np.ascontiguousarray(scales.reshape(n_tiles, groups)).view(
-            np.uint8
-        )
-        return np.concatenate(
-            [nibbles, scale_bytes.reshape(n_tiles, -1)], axis=1
-        ).reshape(-1)
