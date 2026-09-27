@@ -164,17 +164,19 @@ class MHA(Operator):
                 f"num_pipelines ({self.num_pipelines}) above 6 must be even: "
                 f"the pipelines are split over two shims"
             )
-        # QK^T's micro-tile, (B_q, d) by (d, B_kv): the bfp16-emulated bf16
-        # product, the only one supported, on NPU2, the only array MHA fits.
-        r, s, t = kernels.linalg.mm.mac_dims(
-            bfloat16, bfloat16, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
-        )
-        if self.B_q % r:
-            raise ValueError(f"B_q must be divisible by r ({self.B_q} % {r} != 0)")
-        if self.B_kv % t:
-            raise ValueError(f"B_kv must be divisible by t ({self.B_kv} % {t} != 0)")
-        if self.d % s:
-            raise ValueError(f"d must be divisible by s ({self.d} % {s} != 0)")
+        # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
+        # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
+        # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
+        for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
+            mac = kernels.linalg.mha.mac_dims(
+                pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
+            )
+            for name, m in zip(dims, mac):
+                if getattr(self, name) % m:
+                    raise ValueError(
+                        f"{name}={getattr(self, name)} must be a multiple of "
+                        f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
+                    )
         if self.num_heads <= 0:
             raise ValueError("Number of num_heads must be greater than 0")
         if self.num_KV_heads <= 0:
@@ -286,10 +288,10 @@ class MHA(Operator):
         # n_join pipelines and is split between them on a memtile; K and V
         # are forwarded through a memtile to every pipeline.
         # Each stream is blocked as the product that reads or writes it takes
-        # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's,
-        # which matmul_PV computes on mha.cc's native 8x8x8 micro-tile.
+        # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's
+        # (matmul_PV, on the micro-tile mha.cc's P*V product expands).
         qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(B_q, B_kv, d, (8, 8, 8))
+        pv = mm_stream_dims(B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True))
         q_dims = qk.A
         k_dims = qk.B
         a_dims = qk.C
