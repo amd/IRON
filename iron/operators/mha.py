@@ -18,10 +18,14 @@ drains O.
 """
 
 import dataclasses
+import sys
 
 import numpy as np
+from aie.helpers.dialects.scf import else_, if_
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
+from aie.iron.device import Tile
+from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -38,12 +42,7 @@ from iron.common import (
     select,
 )
 from iron.common.testing import Case, Testing
-
-_I32x4 = np.ndarray[(4,), np.dtype[np.int32]]  # type: ignore[misc]
-
-# r, s, t: the dimensions of the microkernel MAC instruction. Only the
-# bfp16-emulated bf16 path is supported.
-MAC_DIMS = (8, 8, 8)
+from iron.common.tiling import legalize
 
 
 class MHA(Operator):
@@ -52,8 +51,8 @@ class MHA(Operator):
 
     More than six pipelines split the Q and O traffic over two shims (each
     memtile split serves at most six pipelines), so the Q and O streams have
-    ``q_shims`` lanes, each carrying ``join_rows = B_q * pipelines_per_shim``
-    rows per block.
+    ``q_shims`` lanes, each carrying ``join_rows`` rows per block, ``B_q``
+    for each of its pipelines.
     """
 
     # Several kernels and no one contract to judge by: 4% or 0.15, with
@@ -165,7 +164,11 @@ class MHA(Operator):
                 f"num_pipelines ({self.num_pipelines}) above 6 must be even: "
                 f"the pipelines are split over two shims"
             )
-        r, s, t = MAC_DIMS
+        # QK^T's micro-tile, (B_q, d) by (d, B_kv): the bfp16-emulated bf16
+        # product, the only one supported, on NPU2, the only array MHA fits.
+        r, s, t = kernels.linalg.mm.mac_dims(
+            bfloat16, bfloat16, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
+        )
         if self.B_q % r:
             raise ValueError(f"B_q must be divisible by r ({self.B_q} % {r} != 0)")
         if self.B_kv % t:
@@ -204,35 +207,19 @@ class MHA(Operator):
 
     # -- derived geometry ------------------------------------------------------
 
-    @property
-    def _lengths(self) -> tuple[int, int, int]:
-        """``(num_KV_heads, seq_len, seq_pad)``."""
-        return self.num_KV_heads, self.seq_len, self.seq_pad
-
-    @property
-    def pipelines_per_shim(self) -> int:
-        return self.num_pipelines // (2 if self.num_pipelines > 6 else 1)
-
     def seq_padding(self, seq_len: int) -> int:
         """``seq_len`` rounded up to a multiple of ``B_q * num_pipelines``."""
         unit = self.B_q * self.num_pipelines
-        return ((seq_len + unit - 1) // unit) * unit
+        return ceildiv(seq_len, unit) * unit
 
     # -- the array -------------------------------------------------------------
 
     def array(self, target) -> list:
-        import sys
-
-        from aie.helpers.dialects.scf import else_, if_
-        from aie.iron.dataflow.objectfifo import StreamDims
-        from aie.iron.device import Tile
-
         of_depth = 2
         dtype = bfloat16
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
-        n_join = self.pipelines_per_shim
-        r, s, t = MAC_DIMS
+        n_join = num_pipelines // self.q_shims  # the pipelines on one shim
 
         inv_scale = (
             1 / np.sqrt(d)
@@ -298,11 +285,16 @@ class MHA(Operator):
         # AIE-array data movement with object fifos. Q arrives joined for
         # n_join pipelines and is split between them on a memtile; K and V
         # are forwarded through a memtile to every pipeline.
-        q_dims: StreamDims = [(B_q // r, r * d), (d // s, s), (r, d), (s, 1)]
-        k_dims: StreamDims = [(B_kv // t, t * d), (d // s, s), (t, d), (s, 1)]
-        v_dims: StreamDims = [(B_kv // s, s * B_kv), (B_kv // t, t), (s, B_kv), (t, 1)]
-        a_dims: StreamDims = [(B_q // r, r * B_kv), (r, t), (B_kv // t, r * t), (t, 1)]
-        o_dims = a_dims
+        # Each stream is blocked as the product that reads or writes it takes
+        # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's,
+        # which matmul_PV computes on mha.cc's native 8x8x8 micro-tile.
+        qk = matmul_QK.stream_dims
+        pv = mm_stream_dims(B_q, B_kv, d, (8, 8, 8))
+        q_dims = qk.A
+        k_dims = qk.B
+        a_dims = qk.C
+        v_dims = pv.B
+        o_dims = pv.C
 
         # The Q splits and O joins, one per shim, on memtiles (6, 1) and (7, 1).
         inQ, memQ, memO, outO = [], [], [], []
@@ -314,7 +306,7 @@ class MHA(Operator):
                 offsets=[B_q * d * i for i in range(n_join)],
                 obj_types=[q_ty] * n_join,
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
-                dims_to_stream=[q_dims] * n_join,
+                dims_to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[of_depth] * n_join,
                 tile=Tile(col=6 + shim, row=1),
             )
@@ -615,7 +607,10 @@ class MHA(Operator):
         # every buffer and sets every barrier.
         mha_rtps_list = [
             [
-                target.rtp(_I32x4, name=f"mha_rtpss_{i}_stage{j}")
+                target.rtp(
+                    np.ndarray[(4,), np.dtype[np.int32]],
+                    name=f"mha_rtpss_{i}_stage{j}",
+                )
                 for i in range(num_pipelines)
             ]
             for j in range(3)
@@ -745,9 +740,8 @@ class MHA(Operator):
         """
         # Not the linalg.mha contracts: each is one tile of an online softmax,
         # and the operator is whole attention.
-        kv_heads, seq_len, seq_pad = self._lengths
-        if s_q is not None:
-            seq_len = int(s_q)
+        kv_heads = self.num_KV_heads
+        seq_len = self.seq_len if s_q is None else int(s_q)
         keys = int(s_kv) if s_kv is not None else None
         if self.heads_interleaved:
             Q, K, V = (np.swapaxes(t, 0, 1) for t in (Q, K, V))
@@ -783,15 +777,14 @@ class MHA(Operator):
         The array consumes, per head and per Q block, the block's Q rows on
         each shim and then all of that head's K and V; O comes back per
         block. Issued as such, that is six descriptors per block, 768 a
-        call at Llama size, and the fused sequence's size follows. Instead
+        call for 32 heads over 2048 rows on 8 pipelines, and the fused
+        sequence's size follows. Instead
         each shim's Q (and O) is one pattern over the group's heads and
         every block, and K and V are one pattern each, the head's rows
         re-read once per (head, block) from the descriptor's iteration
         slot: the same bytes in the same order, six descriptors a group.
         """
-        from iron.common.tiling import legalize
-
-        kv_heads, _, S = self._lengths
+        kv_heads, S = self.num_KV_heads, self.seq_pad
         group = self.num_heads // kv_heads
         rows = self.join_rows  # Q rows each shim carries per block
         blocks = S // (rows * self.q_shims)  # per pipeline
