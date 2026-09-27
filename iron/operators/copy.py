@@ -197,10 +197,12 @@ class Copy(Operator):
 
         Each share is legalized for the shim (an axis past its slot's wrap
         is factored or unrolled, order preserved), so a wide reorder lowers
-        here instead of failing later in the toolchain. A bounded axis must
-        keep its slot, so a bounded walk is one exact descriptor per channel
-        or an error; a bound on the innermost axis, the one the channels
-        split, takes one channel.
+        here instead of failing later in the toolchain. A bounded walk is one
+        exact descriptor per channel or an error, its bounded axis on D2
+        (dimension 1) where the walk allows: D2 has no wrap, since a shim
+        descriptor's length ends it, and it is what a length patch bounds.
+        A bound on the innermost axis, the one the channels split, takes one
+        channel.
         """
         shares = _shares(walk, self.num_channels)
         if walk.bounded is None:
@@ -213,18 +215,31 @@ class Copy(Operator):
                 ]
                 for start, sizes, strides in shares
             ]
-        dim = 4 - len(walk.sizes) + walk.bounded
+        rank, bounded = len(walk.sizes), walk.bounded
+        dim = 4 - rank + bounded
         if dim == 3 and self.num_channels > 1:
             raise Incompatible(
                 f"{walk} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
+        # At most one axis outside the bound (the iteration slot) and one or
+        # two inside it (D1, D0) put the bound on D2.
+        on_d2 = bounded <= 1 and 1 <= rank - bounded - 1 <= 2
         out = []
         for start, sizes, strides in shares:
+            dims = list(zip(sizes, strides))[4 - rank :]
+            if on_d2:
+                lead, inner = dims[:bounded], dims[bounded + 1 :]
+                dims = (
+                    (lead or [(1, 0)])
+                    + [dims[bounded]]
+                    + [(1, 0)] * (2 - len(inner))
+                    + inner
+                )
             acc = _pack_exact(
                 buffer.elements,
                 start + offset,
-                list(zip(sizes, strides)),
+                dims,
                 granule_elements(buffer.dtype),
             )
             if acc is None:
@@ -232,7 +247,7 @@ class Copy(Operator):
                     f"{walk} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            out.append([(acc, dim)])
+            out.append([(acc, 1 if on_d2 else dim)])
         return out
 
     def reference(

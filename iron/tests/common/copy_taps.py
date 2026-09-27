@@ -7,9 +7,11 @@ The descriptors are recorded as (offset, sizes, strides) per channel,
 exactly, and the copies written as views must issue them.
 """
 
+import dataclasses
 from typing import Any
 
 import aie.utils as aie_utils
+import numpy as np
 import pytest
 
 from iron.common import Incompatible
@@ -95,15 +97,12 @@ def test_copy_issues_these_descriptors(name):
     assert _taps(op, op.y, op.dst) == outs
 
 
-def test_a_bounded_axis_keeps_its_slot_and_names_it():
+def test_a_bounded_axis_lands_on_d2_and_names_it():
     """A cache write of n rows, ``Copy(k.transpose(1, 0, 2), keys[:, :n])``:
-    the bounded axis is one exact descriptor dimension per channel, the one
-    a call patches, and the reference moves the bounded rows alone.
+    the bounded axis is one exact descriptor dimension per channel, D2 (the
+    one a length patch bounds, with no wrap), the group axis iterating
+    outside it; and the reference moves the bounded rows alone.
     """
-    import dataclasses
-
-    import numpy as np
-
     N, G, D, L = 16, 4, 8, 32
     src = dataclasses.replace(Walk.permuted((N, G, D), (1, 0, 2)), bounded=1)
     dst = dataclasses.replace(
@@ -114,9 +113,9 @@ def test_a_bounded_axis_keeps_its_slot_and_names_it():
     ).resolved(aie_utils.get_current_device())
     assert [
         [(a.sizes, a.strides, dim) for a, dim in ch] for ch in op._taps(op.x, src)
-    ] == [[((1, G, N, D), (0, D, G * D, 1), 2)]]
+    ] == [[((G, N, 1, D), (D, G * D, 0, 1), 1)]]
     assert [[(a.sizes, dim) for a, dim in ch] for ch in op._taps(op.y, dst)] == [
-        [((1, G, N, D), 2)]
+        [((G, N, 1, D), 1)]
     ]
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
     y = np.zeros((G, L, D), dtype=np.float32)
@@ -129,3 +128,23 @@ def test_a_bounded_axis_keeps_its_slot_and_names_it():
     ).resolved(aie_utils.get_current_device())
     with pytest.raises(Incompatible, match="channels split"):
         flat._taps(flat.x, flat.src)
+
+
+def test_a_bounded_axis_past_the_d1_wrap_still_packs():
+    """Llama's prompt cache write, 2048 rows into a 2048-row cache: past
+    D1's 1023 wrap, so the bounded axis packs only on D2.
+    """
+    N, G, D = 2048, 8, 64
+    src = dataclasses.replace(Walk.permuted((N, G, D), (1, 0, 2)), bounded=1)
+    dst = dataclasses.replace(
+        Walk.slice((G, N, D), (slice(None), slice(0, N))), bounded=1
+    )
+    op = Copy(
+        src=src, dst=dst, input_buffer_size=N * G * D, output_buffer_size=G * N * D
+    ).resolved(aie_utils.get_current_device())
+    assert [[(a.sizes, dim) for a, dim in ch] for ch in op._taps(op.x, src)] == [
+        [((G, N, 1, D), 1)]
+    ]
+    assert [[(a.sizes, dim) for a, dim in ch] for ch in op._taps(op.y, dst)] == [
+        [((G, N, 1, D), 1)]
+    ]
