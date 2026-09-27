@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import Any
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, kernels
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
 from aie.utils.verify import Tolerance
@@ -25,11 +25,7 @@ from iron.common import (
 )
 from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
-
-
-def ceildiv(a, b):
-    return (a + b - 1) // b
-
+from iron.common.tiling import limits
 
 # fmt: off
 # The rounding configuration that tracks the reference most closely (an f32
@@ -164,7 +160,7 @@ class GEMM(Operator):
     # The tiles the bound covers: whole row blocks of it, every column tile.
     n_tiles_valid = Value(
         np.int32,
-        derive=lambda op: -(-op.valid // op.mem_tile_m_c) * (op.N // op.mem_tile_n),
+        derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c) * (op.N // op.mem_tile_n),
         optional=True,  # nothing reads it unbounded
     )
 
@@ -593,15 +589,17 @@ class GEMM(Operator):
         dtype_out = self.dtype_out
 
         # A shim BD's outermost descriptor dimension lands in the ITERATION field,
-        # whose step is 20 bits wide (AIETargetModel::getDmaBdStepBits for
-        # ShimNOCTile). An element stride S is re-expressed as (S - 1) * itemsize
-        # / 4-byte address granularity before the check, so a wide N pushes C's row
+        # whose step is the shim's step field (20 bits on NPU1 and NPU2). An
+        # element stride S is re-expressed as (S - 1) * itemsize / the address
+        # granule before the check, so a wide N pushes C's row
         # stride past it: M=1024 K=2560 N=10240 needs mem_tile_m_C * N = 2621440
         # and aiecc rejects the build with "Stride 3 exceeds the [1:1048576]
         # range". See the C drain below for how that is split, and flm_gemm's
         # design.py for the same fix worked through in more detail.
+        fields = limits()
+
         def _hw_stride_ok(stride_elems, itemsize):
-            return (stride_elems - 1) * itemsize // 4 <= (1 << 20) - 1
+            return (stride_elems - 1) * itemsize // fields.granule_bytes <= fields.step
 
         K_div_k = K // k
         n_c_col_tiles_per_core = N // mem_tile_n

@@ -29,10 +29,10 @@ from ..declare.bound import (
 )
 from ..tiling import (
     Access,
-    _pack_exact,
     encode,
     granule_elements,
     legalize,
+    place,
     split,
     split_run,
     whole,
@@ -507,7 +507,7 @@ def bounded_transfers(
     dim = 4 - len(run_dims) - 1  # where the tile count lands once padded to four
     out = []
     for lane in range(lanes):
-        acc = _pack_exact(buffer.elements, lane * run, dims, gran)
+        acc = place(buffer.elements, lane * run, dims, gran)
         if acc is None:
             raise ValueError(
                 f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "

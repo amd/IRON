@@ -26,7 +26,7 @@ from iron.common import (
 )
 from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
-from iron.common.tiling import DMA_BD_MAX_WRAP, Access, bank_elements
+from iron.common.tiling import Access, bank_elements, granule_elements, limits
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -413,10 +413,11 @@ class GEMV(Operator):
         # full matrix, and the run is split into [run_hi, run_lo] only to fit
         # the shim's wrap field. iron.common.tiling states the general rules;
         # this keeps GEMV's own (both halves <= 1023 elements, run_lo even).
-        GRAN_ELEMS = 2  # 4-byte shim granularity / 2-byte bf16 element
-        MAX_STRIDE = ((1 << 20) - 1) * GRAN_ELEMS
+        fields = limits()
+        GRAN_ELEMS = granule_elements(bfloat16)
+        MAX_STRIDE = fields.step * GRAN_ELEMS
 
-        def factor_run(run, lim=DMA_BD_MAX_WRAP, gran=GRAN_ELEMS):
+        def factor_run(run, lim=fields.wrap, gran=GRAN_ELEMS):
             """``(hi, lo)`` with both at most ``lim`` elements.
 
             Stricter than :func:`iron.common.tiling.split_run`, whose ``lo``

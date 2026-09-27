@@ -9,9 +9,11 @@ dimensions, which is what a shim buffer descriptor encodes. This module
 decides the transfers and encodes them; :mod:`iron.common.design` turns each
 ``Access`` into a ``TensorAccessPattern`` and issues it.
 
-The descriptor rules are applied here and nowhere else. They are read from
-``AIEX::verifyStridesWraps`` and the shim BD field widths in mlir-aie, and
-are stated in tap order (outermost first), ``sizes = [iter, d2, d1, d0]``:
+The descriptor rules are applied here and nowhere else. They are
+``AIEX::verifyStridesWraps``'s, over the field widths the current device's
+target model gives a shim tile (:func:`limits`), and are stated in tap
+order (outermost first), ``sizes = [iter, d2, d1, d0]``; the figures are
+NPU1's and NPU2's:
 
 * ``d0``, the innermost, is at most 1023 *granules* (2046 bf16 elements),
   unless the whole transfer is linear or contiguous, when the 32-bit length
@@ -41,11 +43,39 @@ from dataclasses import dataclass
 from math import prod
 from typing import Iterator, Sequence
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib.tap import TensorAccessPattern
 
-_STRIDE_BITS = 20
-_ADDR_GRANULE_BYTES = 4
+
+@dataclass(frozen=True)
+class Limits:
+    """What a shim buffer descriptor's fields hold."""
+
+    wrap: int  # d0 in granules, d1 in elements
+    step: int  # a stride, in granules
+    iterations: int
+    granule_bytes: int
+
+
+def limits() -> Limits:
+    """The current device's shim descriptor fields, from its target model.
+
+    A mem tile's descriptor has the same wrap and a narrower stride, a core
+    tile's a narrower wrap; every transfer here is a shim's.
+    """
+    device = aie_utils.get_current_device()
+    if device is None:
+        raise RuntimeError(
+            "no device is current; bind one with aie.utils.set_current_device"
+        )
+    return Limits(
+        wrap=(1 << device.get_dma_bd_wrap_bits(0, 0)) - 1,
+        step=(1 << device.get_dma_bd_step_bits(0, 0)) - 1,
+        # The iteration field is biased by one: n bits count to 2**n.
+        iterations=1 << device.get_dma_bd_iter_bits(0, 0),
+        granule_bytes=device.address_gen_granularity // 8,
+    )
 
 
 @dataclass(frozen=True)
@@ -70,15 +100,13 @@ class Access:
 
 
 def granule_elements(dtype) -> int:
-    """Elements per 4-byte address granule for ``dtype`` (2 for bf16, 1 for i32)."""
-    itemsize = np.dtype(dtype).itemsize
-    if _ADDR_GRANULE_BYTES % itemsize:
-        raise ValueError(f"{np.dtype(dtype)} does not divide the 4-byte shim granule")
-    return _ADDR_GRANULE_BYTES // itemsize
-
-
-def max_stride_elements(dtype) -> int:
-    return ((1 << _STRIDE_BITS) - 1) * granule_elements(dtype)
+    """Elements per address granule for ``dtype`` (2 for bf16, 1 for i32)."""
+    itemsize, granule = np.dtype(dtype).itemsize, limits().granule_bytes
+    if granule % itemsize:
+        raise ValueError(
+            f"{np.dtype(dtype)} does not divide the {granule}-byte shim granule"
+        )
+    return granule // itemsize
 
 
 def contiguous(elements: int, offset: int, run: int) -> Access:
@@ -88,21 +116,6 @@ def contiguous(elements: int, offset: int, run: int) -> Access:
             f"transfer of {run} at {offset} runs past a buffer of {elements}"
         )
     return Access(elements, offset, (1, 1, 1, run), (0, 0, 0, 1))
-
-
-# Widest wrap a shim or mem tile DMA buffer descriptor's size field can encode.
-# Not exposed by the Python bindings (AIETargetModel::getDmaBdWrapBits is
-# unbound), so it is written down here rather than in each design; gemv,
-# repeat and mha all hardcoded the same 1023 independently.
-#
-# This is the same 10 bits on every target model this repo builds for --
-# BaseNPU1TargetModel and BaseNPU2TargetModel both inherit it unmodified from
-# AIE2TargetModel::getDmaBdWrapBits, which does not override it per device --
-# so callers do not need to look it up per-device. It is NOT the same for
-# every tile type, though: core tiles get an 8-bit wrap (max 255), not 10-bit.
-# This constant is only valid for shim/mem tile descriptors, which is what
-# every current caller (gemv, repeat, mha, flm.GEMM) uses it for.
-DMA_BD_MAX_WRAP = (1 << 10) - 1
 
 
 # One bank of a core's local memory. AIE2 and AIE2P both have eight 8 KB
@@ -127,35 +140,14 @@ def fifo_depth(elements: int, dtype) -> int:
     return 1 if elements > bank_elements(dtype) else 2
 
 
-def run_dims(run: int, max_wrap: int = DMA_BD_MAX_WRAP) -> list[tuple[int, int]]:
-    """Encode a contiguous run of ``run`` elements as BD (size, stride) dims.
-
-    One dimension suffices while the run fits the BD's size field; a longer run
-    splits into two at the cost of one of the four available dimensions.
-
-        >>> run_dims(512)
-        [(512, 1)]
-        >>> run_dims(2048)
-        [(2, 1024), (1024, 1)]
-    """
-    if run <= max_wrap:
-        return [(run, 1)]
-    if run % 2:
-        raise ValueError(f"cannot split an odd run ({run}) exceeding {max_wrap}")
-    return [(2, run // 2), (run // 2, 1)]
-
-
-_ITER_MAX = 64  # 6-bit iteration wrap, biased by one
-
-
-def split_run(
-    run: int, gran: int, lim: int = DMA_BD_MAX_WRAP
-) -> tuple[int, int] | None:
+def split_run(run: int, gran: int) -> tuple[int, int] | None:
     """Factor a contiguous run into ``(hi, lo)`` for the ``d1``/``d0`` slots.
 
-    ``lo`` is at most ``lim`` granules and a whole number of them; ``hi`` is
-    at most ``lim``. ``None`` if no split fits.
+    ``lo`` is at most a wrap of granules and a whole number of them; ``hi``
+    is at most a wrap. ``None`` if no split fits. A ``gran`` of 1 bounds
+    ``lo`` in elements, as a mem tile's stream dimensions are.
     """
+    lim = limits().wrap
     lo_max = lim * gran
     if run <= lo_max and run % gran == 0:
         return (1, run)
@@ -189,13 +181,40 @@ def _slots(dims: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return pad + list(dims)
 
 
+def place(
+    elements: int, offset: int, dims: Sequence[tuple[int, int]], gran: int
+) -> Access | None:
+    """``dims`` (outermost first, at most four) as one descriptor, each in
+    the slot it is given, or ``None`` where a field cannot hold them.
+    """
+    if len(dims) > 4:
+        return None
+    lim = limits()
+    padded = _slots(list(dims))
+    (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = padded
+    if d0_s != 1 or d0 % gran:
+        return None
+    if d0 // gran > lim.wrap or d1 > lim.wrap or it > lim.iterations:
+        return None
+    for n, st in ((d2, d2_s), (d1, d1_s)):
+        if n > 1 and st < 1:
+            return None
+    if it > 1 and it_s < 0:
+        return None
+    for n, st in ((it, it_s), (d2, d2_s), (d1, d1_s)):
+        if n > 1 and (st % gran or st > lim.step * gran):
+            return None
+    span = offset + sum((n - 1) * st for n, st in padded) + 1
+    if span > elements:
+        raise ValueError(f"access spans {span} elements of a buffer of {elements}")
+    return Access(elements, offset, (it, d2, d1, d0), (it_s, d2_s, d1_s, d0_s))
+
+
 def _pack(
     elements: int, offset: int, dims: list[tuple[int, int]], gran: int
 ) -> Access | None:
-    """Place ``dims`` (outermost first, unit dims removed) into the four slots.
-
-    Returns ``None`` if they do not fit the slot rules; callers then split or
-    unroll. A contiguous pattern packs as one linear transfer.
+    """Like :func:`place`, but a contiguous pattern (unit dims removed) is
+    one linear transfer.
     """
     if not dims:
         dims = [(1, 1)]
@@ -204,27 +223,7 @@ def _pack(
         if total % gran:
             return None
         return contiguous(elements, offset, total)
-    if len(dims) > 4:
-        return None
-    padded = _slots(dims)
-    (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = padded
-    if d0_s != 1 or d0 % gran:
-        return None
-    if d0 // gran > DMA_BD_MAX_WRAP or d1 > DMA_BD_MAX_WRAP or it > _ITER_MAX:
-        return None
-    for n, st in ((d2, d2_s), (d1, d1_s)):
-        if n > 1 and st < 1:
-            return None
-    if it > 1 and it_s < 0:
-        return None
-    max_stride = max_stride_elements(np.int8) // 4 * gran  # 20-bit field in granules
-    for n, st in ((it, it_s), (d2, d2_s), (d1, d1_s)):
-        if n > 1 and (st % gran or st > max_stride):
-            return None
-    span = offset + sum((n - 1) * st for n, st in padded) + 1
-    if span > elements:
-        raise ValueError(f"access spans {span} elements of a buffer of {elements}")
-    return Access(elements, offset, (it, d2, d1, d0), (it_s, d2_s, d1_s, d0_s))
+    return place(elements, offset, dims, gran)
 
 
 def repeated(
@@ -259,32 +258,8 @@ def repeated(
         # A re-read (stride 0) is only legal in the iteration slot; a strided
         # repeat goes in d2, which has no wrap limit.
         dims = [(n, st), (1, 0)] if st == 0 else [(1, 0), (n, st)]
-        return _pack_exact(elements, offset, dims + run_dims, gran)
-    return _pack_exact(elements, offset, outer + run_dims, gran)
-
-
-def _pack_exact(
-    elements: int, offset: int, dims: list[tuple[int, int]], gran: int
-) -> Access | None:
-    """Like ``_pack`` but keeps the caller's slot assignment (no linearising)."""
-    if len(dims) != 4:
-        dims = [(1, 0)] * (4 - len(dims)) + list(dims)
-    (it, it_s), (d2, d2_s), (d1, d1_s), (d0, d0_s) = dims
-    if d0_s != 1 or d0 % gran or d0 // gran > DMA_BD_MAX_WRAP:
-        return None
-    if d1 > DMA_BD_MAX_WRAP or it > _ITER_MAX:
-        return None
-    for n, st in ((d2, d2_s), (d1, d1_s)):
-        if n > 1 and st < 1:
-            return None
-    max_stride = max_stride_elements(np.int8) // 4 * gran
-    for n, st in ((it, it_s), (d2, d2_s), (d1, d1_s)):
-        if n > 1 and (st % gran or st > max_stride):
-            return None
-    span = offset + sum((n - 1) * st for n, st in dims) + 1
-    if span > elements:
-        raise ValueError(f"access spans {span} elements of a buffer of {elements}")
-    return Access(elements, offset, (it, d2, d1, d0), (it_s, d2_s, d1_s, d0_s))
+        return place(elements, offset, dims + run_dims, gran)
+    return place(elements, offset, outer + run_dims, gran)
 
 
 # --------------------------------------------------------------------------
@@ -423,24 +398,26 @@ def _legalize_dims(
     packed = _pack(elements, offset, dims, gran)
     if packed is not None:
         return [packed]
+    fields = limits()
+    iterations = fields.iterations
     # Which slot overflowed? Try factoring it into a free slot, innermost first.
     if len(dims) < 4:
         padded = _slots(dims)
-        limits = (_ITER_MAX, None, DMA_BD_MAX_WRAP, DMA_BD_MAX_WRAP * gran)
+        caps = (iterations, None, fields.wrap, fields.wrap * gran)
         for pos in (3, 2, 0):
             n, st = padded[pos]
-            lim = limits[pos]
-            if lim is None or n <= lim:
+            cap = caps[pos]
+            if cap is None or n <= cap:
                 continue
             b = next(
                 (
                     b
-                    for b in range(lim, 0, -1)
+                    for b in range(cap, 0, -1)
                     if n % b == 0 and (pos != 3 or b % gran == 0)
                 ),
                 None,
             )
-            if b is None or n // b > DMA_BD_MAX_WRAP:
+            if b is None or n // b > fields.wrap:
                 continue
             i = dims.index((n, st))
             return _legalize_dims(
@@ -453,13 +430,13 @@ def _legalize_dims(
         raise ValueError("cannot legalize an empty pattern")
     n0, s0 = dims[0]
     out: list[Access] = []
-    if n0 > _ITER_MAX:
+    if n0 > iterations:
         # Past the iteration count: as many descriptors as it takes, each
         # iterating at most that often, not one per iteration. A stream's
         # queue holds a handful, and one that stalls on its queue stalls
         # every stream issued after it.
-        for i in range(0, n0, _ITER_MAX):
-            chunk = [(min(_ITER_MAX, n0 - i), s0)] + dims[1:]
+        for i in range(0, n0, iterations):
+            chunk = [(min(iterations, n0 - i), s0)] + dims[1:]
             out.extend(_legalize_dims(elements, offset + i * s0, chunk, gran))
         return out
     # No room: unroll the outermost dimension.
@@ -488,32 +465,14 @@ def view(shape: Sequence[int], index) -> tuple[int, list[int], list[int]]:
 
 def _walk(shape: Sequence[int], index) -> tuple[int, list[tuple[int, int]]]:
     """``(offset, [(size, stride), ...])`` of a basic slice, one entry per
-    sliced axis (an integer index drops its axis), nothing merged.
+    sliced axis (an integer index drops its axis), nothing merged: upstream's
+    ``from_slice``, less the steps a view does not take.
     """
-    shape = tuple(int(s) for s in shape)
-    if not isinstance(index, tuple):
-        index = (index,)
-    if len(index) > len(shape):
-        raise IndexError(f"too many indices for shape {shape}")
-    index = index + (slice(None),) * (len(shape) - len(index))
-    row_strides = [prod(shape[i + 1 :]) for i in range(len(shape))]
-    offset = 0
-    dims: list[tuple[int, int]] = []
-    for axis, (idx, n, stride) in enumerate(zip(index, shape, row_strides)):
-        if isinstance(idx, slice):
-            start, stop, step = idx.indices(n)
-            if step != 1:
-                raise ValueError(f"axis {axis}: only unit steps are supported")
-            if stop <= start:
-                raise ValueError(f"axis {axis}: empty slice {idx}")
-            offset += start * stride
-            dims.append((stop - start, stride))
-        else:
-            i = int(idx)
-            if not -n <= i < n:
-                raise IndexError(f"axis {axis}: index {i} out of range for {n}")
-            offset += (i % n) * stride
-    return offset, dims
+    key = index if isinstance(index, tuple) else (index,)
+    if any(isinstance(k, slice) and k.step not in (None, 1) for k in key):
+        raise ValueError(f"{index}: only unit steps are supported")
+    tap = TensorAccessPattern.from_slice([int(n) for n in shape], key)
+    return tap.offset, [(int(n), int(s)) for n, s in tap.transformation_dims]
 
 
 @dataclass(frozen=True)

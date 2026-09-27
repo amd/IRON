@@ -20,6 +20,9 @@ from iron.common import In, Operator, Out, Shim, Value, auto, optional, param
 from iron.common.design import Sequence, transfers
 from iron.common.tiling import Access
 
+# A descriptor's fields are the current device's.
+pytestmark = pytest.mark.usefixtures("npu2")
+
 
 class FakeGroup:
     """Upstream's TaskGroup refuses to exist outside a Runtime function."""

@@ -265,7 +265,7 @@ class _RecordingRuntime:
         self.calls.append(("drain", buffer.name, tap))
 
 
-def test_a_stack_and_its_flat_spelling_move_the_same_descriptors():
+def test_a_stack_and_its_flat_spelling_move_the_same_descriptors(npu2):
     """``Repeat`` on the cache ``(G, L, D)`` is the repeat on ``(G, L * D)``:
     the same rows, the same row length, the same transfers.
     """
@@ -305,7 +305,7 @@ def test_explain_says_what_a_build_compiles_in_and_what_it_takes_per_call():
     ]
 
 
-def test_buffers_carry_the_declared_dtype_and_size():
+def test_buffers_carry_the_declared_dtype_and_size(npu2):
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer.
     """

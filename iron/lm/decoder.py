@@ -32,6 +32,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 
 import numpy as np
+from aie.iron import ceildiv
 from ml_dtypes import bfloat16
 
 import iron
@@ -108,7 +109,7 @@ def prompt_rows(n: int, max_seq_len: int) -> int:
     which the GEMMs' row block divides, at most ``max_seq_len``.
     """
     unit = 64 * min(8, max_seq_len // 64)
-    return min(-(-n // unit) * unit, max_seq_len)
+    return min(ceildiv(n, unit) * unit, max_seq_len)
 
 
 @dataclasses.dataclass

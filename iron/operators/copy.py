@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 
 from iron.common import In, Incompatible, Operator, Out, Scratchpad, auto, param
 from iron.common.testing import Case, Testing
-from iron.common.tiling import Walk, _pack_exact, granule_elements, legalize
+from iron.common.tiling import Walk, granule_elements, legalize, place
 
 # Llama's KV-cache write, shrunk: the cache is (n_kv_groups, seq, head_dim)
 # and one token's keys land in slot t of every group. SEQ is 128 rather than
@@ -262,7 +262,7 @@ class Copy(Operator):
                     + [(1, 0)] * (2 - len(inner))
                     + inner
                 )
-            acc = _pack_exact(
+            acc = place(
                 buffer.elements,
                 start + offset,
                 dims,

@@ -13,18 +13,28 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.common.tiling import (
-    DMA_BD_MAX_WRAP,
     Access,
     Block,
+    Limits,
     contiguous,
     encode,
     granule_elements,
     legalize,
+    limits,
     repeated,
     split,
     split_run,
     whole,
 )
+
+# The descriptor fields are the current device's.
+pytestmark = pytest.mark.usefixtures("npu2")
+
+
+def test_limits_are_the_shim_descriptor_fields():
+    assert limits() == Limits(
+        wrap=1023, step=(1 << 20) - 1, iterations=64, granule_bytes=4
+    )
 
 
 def test_granularity_per_dtype():
@@ -110,12 +120,12 @@ def test_split_run_matches_gemv_rules():
     hi_lo = split_run(4096, gran=2)
     assert hi_lo is not None
     hi, lo = hi_lo
-    assert hi * lo == 4096 and lo <= DMA_BD_MAX_WRAP * 2 and lo % 2 == 0
+    assert hi * lo == 4096 and lo <= limits().wrap * 2 and lo % 2 == 0
     # gemv case (1026, 64, 1, 1, 2, 2): an odd-looking run that needs an even split
     hi_lo = split_run(1026 * 64, gran=2)
     assert hi_lo is not None
     hi, lo = hi_lo
-    assert hi * lo == 1026 * 64 and lo % 2 == 0 and hi <= DMA_BD_MAX_WRAP
+    assert hi * lo == 1026 * 64 and lo % 2 == 0 and hi <= limits().wrap
 
 
 def test_repeated_rejects_what_the_descriptor_cannot_hold():
@@ -271,7 +281,7 @@ def test_view_rejects_steps_and_empty_slices():
 
     with pytest.raises(ValueError, match="unit steps"):
         view((64,), (slice(0, 64, 2),))
-    with pytest.raises(ValueError, match="empty"):
+    with pytest.raises(ValueError, match=">= 1"):
         view((64,), (slice(10, 10),))
     with pytest.raises(IndexError):
         view((64,), (0, 0))

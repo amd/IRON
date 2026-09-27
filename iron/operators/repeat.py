@@ -12,7 +12,7 @@ from ml_dtypes import bfloat16
 
 from iron.common import Extent, In, Operator, Out, auto, optional, param
 from iron.common.testing import Case, Testing
-from iron.common.tiling import DMA_BD_MAX_WRAP, Access, granule_elements, split_run
+from iron.common.tiling import Access, granule_elements, limits, split_run
 
 
 class Repeat(Operator):
@@ -88,16 +88,12 @@ class Repeat(Operator):
         rather than left to the BD verifier.
         """
         cols = self.row
-        granule = granule_elements(self.dtype)
+        granule, wrap = granule_elements(self.dtype), limits().wrap
         for divisor in range(1, cols + 1):
             if cols % divisor:
                 continue
             chunk = cols // divisor
-            if (
-                chunk <= DMA_BD_MAX_WRAP
-                and divisor <= DMA_BD_MAX_WRAP
-                and chunk % granule == 0
-            ):
+            if chunk <= wrap and divisor <= wrap and chunk % granule == 0:
                 return divisor
         elem_bytes = np.dtype(self.dtype).itemsize
         raise ValueError(
@@ -149,10 +145,11 @@ class Repeat(Operator):
         if "valid_seq" in self.bound_extents:
             if "valid_rows" in self.bound_extents:
                 raise ValueError("Repeat takes one bounded axis, not rows and seq")
-            if cols % gran or cols > DMA_BD_MAX_WRAP:
+            wrap = limits().wrap
+            if cols % gran or cols > wrap:
                 raise ValueError(
                     f"cols={cols} must be a whole number of words at most "
-                    f"{DMA_BD_MAX_WRAP} to bound the stack axis"
+                    f"{wrap} to bound the stack axis"
                 )
             row = seq * cols
             sizes = (repeat, rows, seq, cols)

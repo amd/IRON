@@ -3,11 +3,11 @@
 
 
 import dataclasses
-from collections.abc import Sequence
 
 import numpy as np
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
+from aie.iron.dataflow.objectfifo import StreamDims
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -24,13 +24,6 @@ from iron.common import (
 )
 from iron.common.testing import Case, Testing, device_columns
 from iron.common.tiling import Access, fifo_depth
-
-
-def _transformation_dims(sizes, strides) -> list[Sequence[int]]:
-    """What ``TensorAccessPattern.transformation_dims`` returns for these sizes/strides."""
-    from aie.helpers.taplib.tap import TensorAccessPattern
-
-    return list(TensorAccessPattern((1, 1), 0, sizes, strides).transformation_dims)
 
 
 def _cases(cls):
@@ -189,8 +182,8 @@ class Transpose(Operator):
         n_cores = cols * chans
         tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
         depth = fifo_depth(m * n, self.x.dtype)
-        # The memtile reshuffle: sizes/strides only, so it is extent-free.
-        l2l1 = [m // s, s, n // s, s], [s, m, s * m, 1]
+        # The memtile reshuffle, (size, stride) outermost first: extent-free.
+        l2l1: StreamDims = [(m // s, s), (s, m), (n // s, s * m), (s, 1)]
 
         kernel = datamovement.transpose(m, n, s)
         of_l3l2 = [
@@ -200,7 +193,7 @@ class Transpose(Operator):
         ]
         of_l2l1 = [
             of_l3l2[k]
-            .cons(dims_from_stream=_transformation_dims(*l2l1))
+            .cons(dims_from_stream=l2l1)
             .forward(
                 obj_type=tile_ty,
                 name=f"of_in1s_L2L1_{k // chans}_{k % chans}",

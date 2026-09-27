@@ -20,7 +20,7 @@ drains O.
 import dataclasses
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, kernels
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -140,7 +140,7 @@ class MHA(Operator):
         optional=True,  # nothing reads it unbounded
     )
     kv_blocks_valid = Value(
-        np.int32, derive=lambda op: -(-op.valid_tokens // op.B_kv), optional=True
+        np.int32, derive=lambda op: ceildiv(op.valid_tokens, op.B_kv), optional=True
     )
 
     @property
