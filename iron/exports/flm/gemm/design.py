@@ -105,7 +105,8 @@ B_MAX_SLOTS = 8
 
 class _Slab(NamedTuple):
     """A run of row-block units the sequence arms B for at once; see
-    GEMM.sequence()."""
+    GEMM.sequence().
+    """
 
     first: int  # the first unit
     units: int
@@ -194,7 +195,8 @@ BFP16_GROUP, BFP16_GROUP_BYTES = 8, 9
 
 def _b_bytes(elems, bfp16_b):
     """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
-    plus one shared exponent; bf16 is a plain 2 bytes each."""
+    plus one shared exponent; bf16 is a plain 2 bytes each.
+    """
     if not bfp16_b:
         return elems * 2
     assert elems % BFP16_GROUP == 0

@@ -911,7 +911,7 @@ class GEMM(Operator):
             return _Slab(first, units, resident, b_slots, b_uses)
 
         def n_work(c):
-            """Column ``c`` has work in the first n_work(c) column-blocks."""
+            """Count the column-blocks, from the first, that column ``c`` works on."""
             return n_full + (1 if c < rem_blocks else 0)
 
         def b_mt_block_passes(slab):

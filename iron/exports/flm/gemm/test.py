@@ -266,7 +266,8 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N):
     """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
     the compiler cuts (N=10240); in each, B has no fifo, nothing is pinned,
     the memtile locks are armed per dispatch, and one slab awaits one C per
-    column."""
+    column.
+    """
     mlir = str(build_design(NPU2(), kernels_dir(), GEMM(M=M, K=K, N=N)))
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
