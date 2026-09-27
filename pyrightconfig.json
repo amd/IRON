@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 {
   // After mlir-aie's pyrightconfig.json: the whole package, library,
   // operators, language models and tests alike; ruff.toml's "include" mirrors it.
