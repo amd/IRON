@@ -20,12 +20,13 @@ the weights (closed over from ``config.weights``) and the caches
 once, so the caches a prompt writes are the ones the next decode step
 reads, and there is nothing to hand over.
 
-The knobs the operators run with are a :class:`Profile` (:func:`profile`),
-the graph function's own, applied whenever its body runs: the tile choices
-decode and prefill were tuned with, keyed by operator shape, and the GEMMs'
-width and row tile and MHA's pipeline count, which follow the model's shape
-and ``max_seq_len``. A call site gives a knob only where a shape does not
-determine it.
+The knobs the operators run with are a :class:`Profile`, the graph
+function's own, applied whenever its body runs: ``profiles/<device>.json``
+(:func:`device_profile`), keyed by operator shape at Llama 3.2 1B's shape
+and :data:`MAX_SEQ_LEN`. They are the tile choices decode and prefill were
+tuned with, none re-measured since; a tuner rewrites the file. Another
+shape or length needs its own file. A call site gives a knob only where
+two operators of one shape want different ones.
 
 ``config`` is the model's shape (``n_heads``, ``n_kv_groups``, ``head_dim``,
 ``emb_dim``, ``hidden_dim``) with the parameters as ``config.weights``
@@ -42,6 +43,7 @@ numpy.
 
 import math
 from collections.abc import Callable
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -70,42 +72,21 @@ def _device_columns() -> int:
     return dev.cols if dev is not None else 8
 
 
-def profile(config, max_seq_len) -> Profile:
-    """The knobs the graph's operators run with, keyed by their shapes.
+MAX_SEQ_LEN = 2048
 
-    Decode's tiles are the ones it was tuned with: the per-column share of a
-    row on the bound device's width, four input rows per GEMV tile (one for
-    the down projection), thirty-two rows of logits. A prompt spans the
-    device's columns for its norms and elementwise ops, one row per tile,
-    and MHA's pipelines and the GEMMs' row tile fit ``max_seq_len``.
+PROFILES = Path(__file__).with_name("profiles")
 
-    These are the values the graph was tuned with; none has been
-    re-measured. A tuner writing this profile replaces these lines.
+
+def device_profile() -> Profile:
+    """The profile for the bound device, ``profiles/<device>.json``: NPU2's
+    unbound, as the graph's widths are.
     """
-    H, D = config.n_heads, config.head_dim
-    E, F, V = config.emb_dim, config.hidden_dim, config.vocab_size
-    L, cols = max_seq_len, _device_columns()
-    p = Profile()
-    # -- decode: one row --------------------------------------------------
-    p.add(GEMV, tile_size_input=4)
-    p.add(GEMV, M=E, K=H * D, tile_size_output=E // cols)  # o
-    p.add(GEMV, M=F, K=E, tile_size_output=F // cols)  # gate, up
-    p.add(GEMV, M=E, K=F, tile_size_input=1, tile_size_output=E // cols)  # down
-    p.add(GEMV, M=L, K=D, num_batches=H, tile_size_output=L // cols)  # scores
-    p.add(GEMV, M=V, K=E, tile_size_output=32)  # the head
-    p.add(Transpose, M=L, N=D, num_batches=H, num_aie_columns=2, m=min(256, L), n=32)
-    p.add(ElementwiseAdd, size=E, tile_size=E // cols)
-    p.add(ElementwiseMul, size=F, tile_size=F // cols)
-    p.add(SiLU, size=F, tile_size=F // cols)
-    # -- a prompt: many rows ----------------------------------------------
-    p.add(RMSNorm, tile_size=E, num_aie_columns=cols)
-    p.add(RMSNorm, rows=1, tile_size=E, num_aie_columns=1)  # decode: one core
-    p.add(ElementwiseAdd, tile_size=E)
-    p.add(ElementwiseMul, tile_size=min(F, ElementwiseMul.tile_cap))  # the FFN row
-    p.add(SiLU, tile_size=min(F, SiLU.tile_cap))  # exceeds one core's line
-    p.add(GEMM, tile_m=min(64, L // 4))
-    p.add(MHA, num_pipelines=min(8, L // 64))
-    return p
+    dev = aie_utils.get_current_device()
+    name = type(dev).__name__.lower() if dev is not None else "npu2"
+    path = PROFILES / f"{name}.json"
+    if not path.exists():
+        raise ValueError(f"no Llama profile for {name}: {path} does not exist")
+    return Profile.load(path)
 
 
 def prompt_rows(n: int, max_seq_len: int) -> int:
@@ -139,9 +120,12 @@ class LlamaGraph:
     the cache length and array-tier, so the value side cannot shorten, and
     the key side alone would leave the CPU reference nothing faithful to
     compute.
+
+    ``profile`` is the knobs' :class:`Profile`: :func:`device_profile`'s
+    unless given, as a test at another shape gives its own.
     """
 
-    def __init__(self, config, max_seq_len, *, bounded=None):
+    def __init__(self, config, max_seq_len, *, profile=None, bounded=None):
         W = config.weights
         H, G, D = config.n_heads, config.n_kv_groups, config.head_dim
         E = config.emb_dim
@@ -149,7 +133,7 @@ class LlamaGraph:
         self.max_seq_len = L
         self.bounded = has_size_kind() if bounded is None else bounded
         bounded = self.bounded
-        self.profile = profile(config, max_seq_len)
+        self.profile = device_profile() if profile is None else profile
         cols = _device_columns()
         self.keys = [
             iron.state((G, L, D), name=f"keys_cache_{i}") for i in range(len(W.layers))
@@ -291,8 +275,6 @@ class LlamaGraph:
 
 # Running it
 # ##########################################################################
-
-MAX_SEQ_LEN = 2048
 
 
 class AIELlama:

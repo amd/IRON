@@ -3,11 +3,19 @@
 
 """Llama 3.2's shape at a size a host test runs in seconds, as numpy weights."""
 
+from pathlib import Path
+
 import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.applications.llama_3_2_1b.weights import LayerWeights, LlamaWeights
+from iron.common import Profile
 from iron.operators.rope.op import rope_angles
+
+# The knobs the graphs run with at :class:`Config`'s shape on NPU2: decode
+# at 256 and 64 rows of context, the prompt at 64. The application's own
+# profiles are for Llama 1B's shape; :class:`Llama1B` runs under those.
+PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
 
 def _shapes(cfg):

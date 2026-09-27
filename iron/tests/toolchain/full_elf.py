@@ -91,10 +91,11 @@ def _assert_values_in_table(traced, artifacts):
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
-    traced = LlamaGraph(cfg, 256).trace(cfg, 1)
+    traced = LlamaGraph(cfg, 256, profile=PROFILE).trace(cfg, 1)
     artifacts = build_elf(traced, "decode")
     _assert_values_in_table(traced, artifacts)
 
@@ -119,11 +120,12 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
     L = cfg.context_length
-    graph = LlamaGraph(cfg, L)
+    graph = LlamaGraph(cfg, L, profile=PROFILE)
     traced = graph.trace(cfg, L)
     artifacts = build_elf(traced, "prefill")
     _assert_values_in_table(traced, artifacts)

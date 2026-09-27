@@ -28,10 +28,11 @@ def _lower_all(traced, tmp_path):
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
-    traced = LlamaGraph(cfg, 256).trace(cfg, 1)
+    traced = LlamaGraph(cfg, 256, profile=PROFILE).trace(cfg, 1)
     bound = {id(b.op) for b in traced.bindings}
     assert bound, "the decode graph binds values"
     _lower_all(traced, tmp_path)
@@ -39,11 +40,14 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
     L = cfg.context_length
-    graph = LlamaGraph(cfg, L)  # bounded if this toolchain can build it
+    graph = LlamaGraph(
+        cfg, L, profile=PROFILE
+    )  # bounded if this toolchain can build it
     traced = graph.trace(cfg, L)
     # Every block is bound by the rows the call runs and MHA's masks by the
     # true length, when bounded; the last row once.

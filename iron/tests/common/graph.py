@@ -366,11 +366,12 @@ def test_swiglu_prefill_traces_over_a_sequence():
 
 def test_llama_decode_traces_and_tunes():
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
     L = 256
-    t = LlamaGraph(cfg, L).trace(cfg, 1)
+    t = LlamaGraph(cfg, L, profile=PROFILE).trace(cfg, 1)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "WeightedRMSNorm",
@@ -449,11 +450,12 @@ def test_llama_decode_traces_and_tunes():
 
 def test_llama_prompt_traces_over_the_same_caches():
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
     L = cfg.context_length
-    g = LlamaGraph(cfg, L, bounded=True)
+    g = LlamaGraph(cfg, L, profile=PROFILE, bounded=True)
     t = g.trace(cfg, L)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
@@ -520,12 +522,13 @@ def test_an_unbounded_llama_prompt_runs_every_row():
     lengths are read only by a bounded build).
     """
     from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.tests.common.llama_model import PROFILE
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
     L = cfg.context_length
-    bounded = LlamaGraph(cfg, L, bounded=True).trace(cfg, L)
-    t = LlamaGraph(cfg, L, bounded=False).trace(cfg, L)
+    bounded = LlamaGraph(cfg, L, profile=PROFILE, bounded=True).trace(cfg, L)
+    t = LlamaGraph(cfg, L, profile=PROFILE, bounded=False).trace(cfg, L)
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     assert kinds == [type(op).__name__ for op, *_ in bounded.runlist]
     assert {b.value.name for b in t.bindings} == {"last"}
@@ -598,20 +601,20 @@ def test_llama_names_only_the_knobs_that_matter(monkeypatch):
     """
     from aie.iron.device import from_name
 
-    from iron.applications.llama_3_2_1b.npu import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import MAX_SEQ_LEN, LlamaGraph
+    from iron.tests.common.llama_model import PROFILE, Llama1B
     from iron.tests.common.llama_model import Config as _Config
-    from iron.tests.common.llama_model import Llama1B
 
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
     real, small = Llama1B(n_layers=1), _Config()
     L = small.context_length
     settings = [
-        (npu2, lambda: LlamaGraph(real, 512).trace(real, 1)),
-        (npu1, lambda: LlamaGraph(real, 512).trace(real, 1)),
-        (npu2, lambda: LlamaGraph(real, 512).trace(real, 512)),
+        (npu2, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, 1)),
+        (npu1, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, 1)),
+        (npu2, lambda: LlamaGraph(real, MAX_SEQ_LEN).trace(real, MAX_SEQ_LEN)),
         (
             npu2,
-            lambda: LlamaGraph(small, L).trace(small, L),
+            lambda: LlamaGraph(small, L, profile=PROFILE).trace(small, L),
         ),
     ]
     _every_keyword_is_load_bearing(monkeypatch, settings)

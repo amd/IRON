@@ -29,6 +29,7 @@ from iron.applications.llama_3_2_1b import runner
 from iron.applications.llama_3_2_1b.cpu import Reference
 from iron.applications.llama_3_2_1b.npu import AIELlama, LlamaGraph, prompt_rows
 from iron.applications.llama_3_2_1b.runner import LlamaModelState
+from iron.tests.common.llama_model import PROFILE
 from iron.tests.common.llama_model import Config as _Config
 
 
@@ -38,7 +39,7 @@ def _embed(config, tokens):
 
 def llama_graph(config, bounded=None):
     """The graph at the test's context length; its profile fits the scaled model."""
-    return LlamaGraph(config, config.context_length, bounded=bounded)
+    return LlamaGraph(config, config.context_length, profile=PROFILE, bounded=bounded)
 
 
 def graph_prefill(config, graph, prompt):

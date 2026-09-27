@@ -10,14 +10,31 @@ the knobs a call leaves open as the operator is constructed, before
 explicit call-site value, then the profile, then the knob's declared
 default or the value resolution proposes. A tuner writes a profile and a
 graph applies it; operator classes know nothing about profiles.
+
+On disk a profile is JSON, one object per entry holding what :meth:`Profile.add`
+takes: ``"operator"``, the class's name in :mod:`iron.operators`, then its
+dimensions and knobs as keywords::
+
+    {"entries": [
+      {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
+      {"operator": "MHA", "seq_pad": 2048, "num_pipelines": 8}
+    ]}
+
+An entry matches on what the call constructs the operator with: its
+keywords and, in a graph, the extents inferred from its operands. A
+dimension whose default follows from another (MHA's ``seq_len``, from the
+``seq_pad`` its shape gives) is not yet known then, so key by the one given.
 """
 
 from __future__ import annotations
 
 import contextvars
 import dataclasses
+import json
+from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from ... import operators
 from .field import _tier_of
 
 _active: contextvars.ContextVar[Profile | None] = contextvars.ContextVar(
@@ -125,6 +142,35 @@ class Profile:
         return self.knobs_for(
             type(op), {f.name: getattr(op, f.name) for f in dataclasses.fields(op)}
         )
+
+    @classmethod
+    def load(cls, path: str | Path) -> Profile:
+        """The profile :meth:`save` wrote to ``path``; each entry is checked
+        as :meth:`add` checks it.
+        """
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or set(data) != {"entries"}:
+            raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
+        profile = cls()
+        for entry in data["entries"]:
+            fields = dict(entry)
+            name = fields.pop("operator")
+            if name not in operators.__all__:
+                raise ValueError(f"{path}: no operator {name!r} in iron.operators")
+            profile.add(getattr(operators, name), **fields)
+        return profile
+
+    def save(self, path: str | Path) -> None:
+        """Write the profile as JSON, one entry to a line."""
+        lines = []
+        for entry in self._entries:
+            name = entry.cls.__name__
+            if getattr(operators, name, None) is not entry.cls:
+                raise ValueError(f"{name} is not iron.operators.{name}")
+            lines.append(json.dumps({"operator": name, **entry.dims, **entry.knobs}))
+        with open(path, "w") as f:
+            f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
 
     def __iter__(self) -> Iterator[Entry]:
         return iter(self._entries)

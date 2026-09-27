@@ -422,10 +422,25 @@ The knobs a graph's operators run with can be a `Profile` rather than
 keywords at every call: entries keyed by operator class and shape, given to
 `iron.graph(profile=...)` (or applied in a `with profile:` scope). A call
 that leaves a knob open takes the most specific entry's value; a call that
-gives one keeps it. `iron/applications/llama_3_2_1b/npu.py::profile` is
-the worked example, and `test_llama_names_only_the_knobs_that_matter`
-checks that each keyword the graph still passes is one the profile could
-not have given.
+gives one keeps it. An entry matches on the fields the operator is
+constructed with, the call's keywords and the extents inferred from its
+operands: key MHA by `seq_pad`, which its shape gives, not `seq_len`, which
+follows from it later. A profile is a JSON file, `Profile.load(path)` and
+`profile.save(path)`, one entry to a line naming the class in
+`iron.operators`, then its dimensions and knobs:
+
+```json
+{"entries": [
+  {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
+  {"operator": "MHA", "num_heads": 32, "seq_pad": 2048, "num_pipelines": 8}
+]}
+```
+
+`iron/applications/llama_3_2_1b/profiles/<device>.json` is the worked
+example (a test at the small shape loads
+`iron/tests/common/llama_small_profile.json`), and
+`test_llama_names_only_the_knobs_that_matter` checks that each keyword the
+graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
 `design_key()` they are one build; `op.explain()` prints which fields are
