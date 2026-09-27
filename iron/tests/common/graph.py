@@ -681,6 +681,19 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     assert words[f"{op.name}_valid_x"](call) == 16 * 8 // 2  # tiles per lane
 
 
+def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
+    """``x[:n]`` of a (64, 512) handle into a flat elementwise buffer bounds
+    it to ``n * 512`` elements, not ``n``.
+    """
+
+    @iron.graph
+    def g(x, y, *, n: Scratchpad[np.int32]):
+        return ElementwiseAdd(x[:n], y[:n])
+
+    (b,) = g.trace(x=(64, 512), y=(64, 512)).bindings
+    assert (b.member.name, b.value.name, b.scale) == ("valid", "n", 512)
+
+
 def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     """``x[:n]`` reshaped and transposed lands on axis 1 of the copy's source
     walk; ``keys[:, :n]`` on axis 1 of its destination; ``keys[:, :c]`` on the

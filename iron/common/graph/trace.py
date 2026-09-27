@@ -28,6 +28,7 @@ from .handle import (
     Value,
     _HostView,
     _HostViews,
+    _rescale_bounds,
     _tensor_dtype,
     is_operand,
 )
@@ -363,7 +364,12 @@ class Tracer:
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
-            for axis, (value, scale) in h.bounds.items():
+            # Of another rank, the operand is the buffer reshaped: a bound on
+            # its rows is so many more of the buffer's (a flat buffer's elements).
+            bounds = (
+                h.bounds if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
+            )
+            for axis, (value, scale) in bounds.items():
                 extent = next(
                     (
                         m
