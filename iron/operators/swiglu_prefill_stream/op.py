@@ -97,7 +97,7 @@ class SwiGLUPrefillStream(OperatorSequence):
     ``k`` is how many fused groups the block is split into: 1 keeps the whole block
     on the array at once, 2 splits after the elementwise multiply, and 5 runs layer
     by layer, each layer taking the whole array in turn as
-    :mod:`iron.operators.swiglu_prefill` does. The split is decided by the mapping's
+    :class:`iron.operators.SwiGLU` does. The split is decided by the mapping's
     fused groups, and the external buffers are the same either way.
 
     Runtime buffers (``get_callable().get_buffer(name)``) are named by the reference

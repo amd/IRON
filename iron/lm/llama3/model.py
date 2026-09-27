@@ -24,11 +24,10 @@ import tiktoken.load
 from iron import lm
 from iron.lm import CausalLM, Config, Layout, Oracle, project
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import LLAMA_3_2, RoPE
-from iron.operators.silu import SiLU
+from iron.operators.swiglu.op import swiglu
 
 LLAMA_3_2_1B = Config(
     vocab_size=128256,
@@ -97,8 +96,7 @@ class Llama(CausalLM):
         k = RoPE(k.reshape(n * G, D), step.angles)
         x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), w.o))
         h = RMSNorm(x, w.norm2)
-        gate, up = project(h, w.gate), project(h, w.up)
-        return ElementwiseAdd(x, project(ElementwiseMul(SiLU(gate), up), w.down))
+        return ElementwiseAdd(x, swiglu(h, w.gate, w.up, w.down))
 
     def head(self, x):
         return GEMV(self.embedding, RMSNorm(x, self.norm))

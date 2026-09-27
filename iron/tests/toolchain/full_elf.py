@@ -33,8 +33,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare.member import Extent
-from iron.operators.swiglu_prefill.op import SwiGLUPrefill
-from iron.tests.toolchain.tools import DEVICES, requires, swiglu_decode
+from iron.operators.gemm.op import GEMM
+from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
 
@@ -61,8 +61,8 @@ def _params(artifacts):
     return {row.split()[0]: row for row in rows}
 
 
-def test_swiglu_decode_graph_compiles_to_a_full_elf():
-    fn, E = swiglu_decode()
+def test_swiglu_graph_compiles_to_a_full_elf():
+    fn, E = swiglu()
     net = fn.compile(DEVICES["npu2"](), image=iron.ELF, x=(1, E))
     assert net.plan.image == "elf" and net.plan.dispatch == "fused"
     assert net.image is not None
@@ -134,13 +134,18 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
     of their object files with other flags -- GEMM's ``b_col_maj`` changes its
     flags, not its object name -- raised a collision instead of building.
     """
-    M, E, H = 256, 512, 512
+    M, K, N = 256, 512, 512
+
+    class Project(iron.Graph):
+        def __init__(self, b_col_maj):
+            self.b_col_maj = b_col_maj
+            self.w = np.zeros((N, K) if b_col_maj else (K, N), dtype=bfloat16)
+
+        def body(self, x):
+            return GEMM(x, self.w, b_col_maj=self.b_col_maj)
 
     def build(b_col_maj):
-        shape = (H, E) if b_col_maj else (E, H)
-        z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
-        fn = SwiGLUPrefill(z(*shape), z(*shape), z(*shape[::-1]), b_col_maj=b_col_maj)
-        return fn.compile(DEVICES["npu2"](), image=iron.ELF, x=(M, E))
+        return Project(b_col_maj).compile(DEVICES["npu2"](), image=iron.ELF, x=(M, K))
 
     build(False)
     build(False)  # a hit: compile() generates nothing

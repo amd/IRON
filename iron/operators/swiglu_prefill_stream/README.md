@@ -45,7 +45,7 @@ holds. The groups are `stream_design.GROUP_LAYERS`.
 | 5 | one per layer | layer by layer, each taking the whole array in turn |
 
 k=1 and k=2 fuse several layers onto each core, so intermediates stay on chip. k=5 is
-the shape [`swiglu_prefill`](../swiglu_prefill) uses, every layer its own design.
+the shape [`SwiGLU`](../swiglu/op.py) takes, every layer its own design.
 
 A core holds the operands of every layer in its group, so the kernel tile a group can
 afford shrinks as more layers fuse onto it. That is why the tile is chosen per `k`
@@ -63,7 +63,8 @@ up projections are the same design, so the ELF holds four rather than five. Set
 ## Expected performance
 
 Warm dispatch on one callable, 20 dispatches, seq 256 / embedding 512 / hidden 2048, on
-an idle NPU2. `swiglu_prefill` is the hand-written operator at the same shape.
+an idle NPU2. `swiglu_prefill` is the hand-written graph at the same shape (since
+merged into `SwiGLU`, which projects through a column-major weight).
 
 | Design | Median (us) | Relative |
 | --- | --- | --- |

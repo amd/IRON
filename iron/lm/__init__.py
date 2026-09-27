@@ -28,8 +28,10 @@ its profiles. Nothing in the library imports a model, so one can be
 replaced or deleted on its own.
 """
 
+from iron.operators.projection import project
+
 from .checkpoint import Checkpoint, Layout, checkpoint_shapes, load_weights
-from .decoder import CausalLM, Config, Oracle, Step, project, prompt_rows
+from .decoder import CausalLM, Config, Oracle, Step, prompt_rows
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
 from .runner import Runner, main
 

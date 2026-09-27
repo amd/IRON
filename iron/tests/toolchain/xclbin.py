@@ -28,13 +28,13 @@ import aie.utils as aie_utils
 import pytest
 
 import iron
-from iron.tests.toolchain.tools import DEVICES, requires, swiglu_decode
+from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
 pytestmark = requires("xclbinutil", "peano")
 
 
 def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
-    fn, E = swiglu_decode()
+    fn, E = swiglu()
     net = fn.compile(
         device,
         boundaries=iron.each_step,

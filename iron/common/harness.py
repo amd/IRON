@@ -131,7 +131,8 @@ def verify_buffer(
     if judge.kind == "bound":
         if bound is None:
             raise ValueError(f"{buf_name}: a bound tolerance needs its bound=")
-        bound = np.broadcast_to(np.asarray(bound, np.float64), expected.shape)
+        bound = np.broadcast_to(np.asarray(bound, np.float64), np.shape(reference))
+        bound = bound.reshape(-1)
     verdict = compare(got, expected, judge, bound=bound)
     allowed = judge.max_mismatch_frac
     if verdict.n_mismatch and allowed > 0.0:

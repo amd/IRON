@@ -38,7 +38,6 @@ from iron.common import Scratchpad
 from iron.common.graph import Handle
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
@@ -243,17 +242,6 @@ class CausalLM(iron.Graph):
         self._seen = tokens
         # A copy: the image's output buffer is rewritten by the next call.
         return np.array(out.numpy()).reshape(-1)
-
-
-def project(x, weight, **gemv):
-    """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight: a GEMV for
-    one row (a GEMV's output is a vector), else a GEMM reading it
-    column-major. ``gemv`` are the GEMV's tunables, where the profile cannot
-    tell it from another of its shape.
-    """
-    if len(x.shape) == 2 and x.shape[0] > 1:
-        return GEMM(x, weight, b_col_maj=True)
-    return GEMV(weight, x, **gemv)
 
 
 class Oracle:

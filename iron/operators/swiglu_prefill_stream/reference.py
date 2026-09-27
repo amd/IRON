@@ -6,10 +6,9 @@
 Running this module produces the golden output; exporting it produces the
 workload stream-dse generates the design from.
 
-The names below are the block's vocabulary, and they are the ones
-:mod:`iron.operators.swiglu_decode.reference` -- the golden reference this
-operator shares -- gives the same tensors. Everything downstream is named from
-here: the ONNX tensors, the mapping's layers and runtime arguments, the runtime
+The names below are the block's vocabulary, and they are the keys
+:func:`generate_golden_reference` gives the same tensors. Everything
+downstream is named from here: the ONNX tensors, the mapping's layers and runtime arguments, the runtime
 buffers, and the tensor handed between fusion groups.
 """
 
@@ -53,6 +52,59 @@ class SwiGLU(nn.Module):
         gate = input @ self.w_gate
         up = input @ self.w_up
         return (torch.nn.functional.silu(gate) * up) @ self.w_down
+
+
+def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
+    """Golden data for the block: random inputs and every tensor between them.
+
+    SwiGLU computes: W3 @ (SiLU(W1 @ x) * (W2 @ x))
+    where SiLU(x) = x * sigmoid(x)
+
+    Parameters:
+        M: Sequence length
+        K: Embedding dimension
+        N: Hidden dimension (FFN intermediate dimension)
+        seed: Random seed
+
+    Returns:
+        dict: Contains 'input', 'w_gate', 'w_up', 'w_down', 'left', 'left_swished', 'right', 'intermediate', 'output'
+    """
+    torch.manual_seed(seed)
+
+    # Generate golden inputs
+    val_range = 4
+    x = torch.randn(M, K, dtype=torch.bfloat16) * val_range
+    w_gate = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # gate projection
+    # bias1 and bias2 are generated but not used; they are retained to preserve
+    # the random number sequence from the original reference implementation so
+    # that the test weights do not hit the SiLU kernel's tanh saturation region.
+    _bias1 = (
+        torch.randn(K, dtype=torch.bfloat16) * val_range
+    )  # unused; preserves RNG state
+    w_up = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # up projection
+    _bias2 = (
+        torch.randn(K, dtype=torch.bfloat16) * val_range
+    )  # unused; preserves RNG state
+    w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
+
+    # Generate golden outputs
+    left = x @ w_gate
+    left_swished = torch.nn.functional.silu(left)
+    right = x @ w_up
+    intermediate = left_swished * right
+    y = intermediate @ w_down
+
+    return {
+        "input": x,
+        "w_gate": w_gate,
+        "w_up": w_up,
+        "w_down": w_down,
+        "left": left,
+        "left_swished": left_swished,
+        "right": right,
+        "intermediate": intermediate,
+        "output": y,
+    }
 
 
 def swiglu_module(embedding_dim, hidden_dim, golden_reference=None) -> SwiGLU:

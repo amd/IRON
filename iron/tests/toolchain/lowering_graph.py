@@ -12,10 +12,9 @@ import dataclasses
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
 from iron.tests.toolchain.lowering import lower
-from iron.tests.toolchain.tools import requires, swiglu_decode
+from iron.tests.toolchain.tools import requires, swiglu
 
 pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
 
@@ -104,18 +103,11 @@ def test_instructions_compile_alone_against_an_external_image():
 
 
 def test_swiglu_graphs_operators_lower(tmp_path):
-    from iron.operators.swiglu_prefill.op import SwiGLUPrefill
-
-    fn, E = swiglu_decode()
-    H = 8192
-    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
+    fn, E = swiglu()
     (tmp_path / "decode").mkdir()
     _lower_all(fn.trace(x=(1, E)), tmp_path / "decode")
     (tmp_path / "prefill").mkdir()
-    _lower_all(
-        SwiGLUPrefill(z(E, H), z(E, H), z(H, E)).trace(x=(256, E)),
-        tmp_path / "prefill",
-    )
+    _lower_all(fn.trace(x=(256, E)), tmp_path / "prefill")
 
 
 PREFILL = dict(

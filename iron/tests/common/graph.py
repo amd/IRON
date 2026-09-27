@@ -317,14 +317,14 @@ def test_returning_an_input_or_a_slice_is_refused():
 
 
 # --------------------------------------------------------------------------
-# The two swiglu composites, as graphs
+# SwiGLU, as a graph
 # --------------------------------------------------------------------------
 
 
-def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
-    import iron.operators.swiglu_decode.op as m
+def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
+    from iron.operators.swiglu.op import SwiGLU
 
-    ffn = m.SwiGLUDecode(z(H, E), z(H, E), z(E, H))
+    ffn = SwiGLU(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
     assert [type(op).__name__ for op, *_ in t.runlist] == [
         "GEMV",
@@ -336,10 +336,10 @@ def test_swiglu_decode_shares_one_array_and_one_build_for_gate_and_up():
     gate, up, down = (s.op for s in t.steps if type(s.op) is GEMV)
     assert gate.array_key() == up.array_key() and gate.design_key() == up.design_key()
     assert down.design_key() != gate.design_key()
-    assert (gate.num_aie_columns, gate.tile_size_output) == (8, H // 8)
+    assert (gate.M, gate.K, down.M, down.K) == (H, E, E, H)
     assert t.input_args == ["x"] and t.output_args == ["out"]
     with pytest.raises(ValueError, match="do not agree"):
-        m.SwiGLUDecode(z(H, E), z(H, E), z(H, E))
+        SwiGLU(z(H, E), z(H, E), z(H, E))
 
 
 def test_two_spellings_of_one_array_are_one_design():
@@ -369,14 +369,14 @@ def test_two_spellings_of_one_array_are_one_design():
     assert len(seq.unique_designs()[0]) == 6
 
 
-def test_swiglu_prefill_traces_over_a_sequence():
-    import iron.operators.swiglu_prefill.op as m
+def test_swiglu_over_a_sequence_reads_the_weights_column_major():
     from iron.operators.gemm.op import GEMM
+    from iron.operators.swiglu.op import SwiGLU
 
-    ffn = m.SwiGLUPrefill(z(E, H), z(E, H), z(H, E))
-    t = ffn.trace(x=(256, E))
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is GEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
+    assert all(g.b_col_maj for g in gemms)
     assert gemms[0].array_key() == gemms[1].array_key()
     silu = next(s.op for s in t.steps if type(s.op) is SiLU)
     assert silu.size == 256 * H

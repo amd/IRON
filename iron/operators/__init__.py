@@ -37,8 +37,7 @@ _OPERATOR_MODULES = {
     "SiLU": "silu",
     "Softmax": "softmax",
     "Copy": "copy",
-    "SwiGLUDecode": "swiglu_decode.op",
-    "SwiGLUPrefill": "swiglu_prefill.op",
+    "SwiGLU": "swiglu.op",
     "Tanh": "tanh",
     "Transpose": "transpose",
 }

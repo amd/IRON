@@ -15,7 +15,7 @@ import iron
 import iron.operators as ops
 from iron.common import Operator
 
-GRAPHS = {"SwiGLUDecode", "SwiGLUPrefill"}
+GRAPHS = {"SwiGLU"}
 
 
 @pytest.mark.parametrize("name", sorted(ops._OPERATOR_MODULES))

@@ -482,8 +482,8 @@ class SequenceCompareCallable(SequenceXclbinCallable):
     ``raise_on_mismatch`` turns the first mismatch into an error.
     """
 
-    # For a step whose operator states no tolerance, or one compare cannot
-    # judge element by element (a bound, or relative to the output's range).
+    # For a step whose operator states no tolerance, or one relative to the
+    # output's range, which compare cannot judge element by element.
     FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
 
     def __init__(
@@ -502,7 +502,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         if self.tolerance is not None:
             return self.tolerance
         tol = op.reference_tolerance()
-        if tol is None or tol.kind == "bound" or tol.range_frac is not None:
+        if tol is None or tol.range_frac is not None:
             return self.FALLBACK_TOLERANCE
         return tol
 
@@ -554,7 +554,8 @@ class SequenceCompareCallable(SequenceXclbinCallable):
             ref_max=ref_max,
         )
         tol = self.step_tolerance(step_op)
-        verdict = compare(npu_raw, ref_flat, tol)
+        bound = tol.bound(*cpu_inputs) if tol.bound is not None else None
+        verdict = compare(npu_raw, ref_flat, tol, bound=bound)
         fail = not verdict
         stats["mismatch"] = fail
         level = logging.ERROR if fail else logging.INFO

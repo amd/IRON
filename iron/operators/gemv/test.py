@@ -49,7 +49,7 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runt
     data = vectors(operator, normal=("A", "B"))
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
+        operator, data, tolerance=operator.reference_tolerance()
     )
 
     record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
@@ -94,7 +94,7 @@ def test_gemv_batched(
     )
     data = vectors(operator, normal=("A", "B"))
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=1e-3
+        operator, data, tolerance=operator.reference_tolerance()
     )
 
     record_metric("Throughput", (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9)
@@ -127,7 +127,7 @@ def test_gemv_gelu(
     )
     data = vectors(operator, normal=("A", "B"))
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, data.inputs, data.outputs, rel_tol=0.06, abs_tol=2e-2
+        operator, data, tolerance=operator.reference_tolerance()
     )
 
     record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)

@@ -25,17 +25,12 @@ pytest.skip(
 )
 
 from iron.common.harness import record_metric, verify_buffer  # noqa: E402
-
-# The operator's design is generated from this module; the values it is checked
-# against come from swiglu_decode's reference, which it shares.
-from iron.operators.swiglu_decode.reference import (  # noqa: E402
-    generate_golden_reference,
-)
 from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream  # noqa: E402
 from iron.operators.swiglu_prefill_stream.reference import (  # noqa: E402
     INPUT,
     OUTPUT,
     WEIGHTS,
+    generate_golden_reference,
 )
 
 # The MILP-feasible shape on the whole-array Strix (npu2) target.

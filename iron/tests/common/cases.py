@@ -138,7 +138,6 @@ CASES = [
             dict(rows=32, cols=64, angle_rows=8),
         ],
     ),
-    # mlir-aie's LUT activations need a tile of at least 1024.
     (
         "sigmoid",
         "Sigmoid",
@@ -146,8 +145,8 @@ CASES = [
     ),
     ("silu", "SiLU", [dict(size=1024, num_aie_columns=1, tile_size=256)]),
     ("softmax", "Softmax", [dict(rows=16, cols=64)]),
-    # SwiGLUDecode / SwiGLUPrefill are graphs and SwiGLUPrefillStream
-    # an OperatorSequence: none declares buffers of its own. Only the leaf
+    # SwiGLU is a graph and SwiGLUPrefillStream an OperatorSequence:
+    # neither declares buffers of its own. Only the leaf
     # operator of that family does, the per-group stream operator, covered here.
     (
         "copy",

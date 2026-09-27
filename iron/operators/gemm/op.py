@@ -9,6 +9,7 @@ import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -698,10 +699,50 @@ class GEMM(Operator):
         """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
         ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
         """
-        # Not linalg.mm's contract: that is one tile's product, and the design
-        # accumulates K tiles in f32; mm_ref's float64 would double the host
-        # copy of the largest weight a graph reference multiplies. In float32
-        # and rounded once, as the kernel's f32 accumulator does.
+        # Not linalg.mm's contract: that is one tile's product, and mm_ref's
+        # float64 would double the host copy of the largest weight a graph
+        # reference multiplies. The exact product in float32, rounded once:
+        # what the design rounds on the way (bfp16 inputs, a bf16 C between
+        # K tiles) is its error, which tolerance() bounds.
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return C.T if self.c_col_maj else C
+
+    def tolerance(self, target) -> Tolerance:
+        """Each element of C within the roundings the design makes, in
+        units of 2^-8 of what each rounds. A conversion to bf16 is off by
+        less than 2 units even truncating: 2 of ``|A| @ |B|`` for C's own,
+        and 2 of every K tile's partial sum but the last when C accumulates
+        in bf16 between tiles. bfp16 inputs add 2 more of ``|A| @ |B|``,
+        measured at most 0.5.
+
+        A relative tolerance cannot hold this: an element whose products
+        cancel is small against the error of the terms it summed, and the
+        bf16 accumulator's error grows with K. On npu2 over K = 256 to
+        8192, normal and all-positive inputs, no configuration's worst
+        element came above 0.83 of it.
+        """
+        if np.issubdtype(np.dtype(self.dtype_in), np.integer):
+            return Tolerance.exact(note="integer matmul")
+        units = 4.0 if self.emulate_bf16_mmul_with_bfp16 else 2.0
+        per_tile = (
+            np.dtype(self.dtype_out) == np.dtype(bfloat16) and not self.prio_accuracy
+        )
+
+        def bound(A, B):
+            a = A.astype(np.float32)
+            b = (B.T if self.b_col_maj else B).astype(np.float32)
+            err = units * (np.abs(a) @ np.abs(b))
+            if per_tile:
+                partial = np.zeros_like(err)
+                for k0 in range(0, self.K - self.tile_k, self.tile_k):
+                    partial += a[:, k0 : k0 + self.tile_k] @ b[k0 : k0 + self.tile_k]
+                    err += 2 * np.abs(partial)
+            err *= 2.0**-8
+            return err.T if self.c_col_maj else err
+
+        return Tolerance.bounded(
+            bound,
+            note=f"{units:g} units of |A| @ |B|"
+            + (", 2 of each bf16 partial sum" if per_tile else ""),
+        )

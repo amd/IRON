@@ -9,6 +9,7 @@ import numpy as np
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, linalg
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -24,7 +25,7 @@ from iron.common import (
     param,
 )
 from iron.common.kernels import target_arch
-from iron.common.tiling import DMA_BD_MAX_WRAP, Access
+from iron.common.tiling import DMA_BD_MAX_WRAP, Access, bank_elements
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
@@ -49,8 +50,14 @@ class GEMV(Operator):
     # None: every column the device's shim budget allows that leaves each
     # column a whole number of tiles of M.
     num_aie_columns: int = auto()
-    tile_size_input: int = auto(2)
-    tile_size_output: int = auto()  # None: tile_size_input
+    # None: two rows, or one where two would span more than two banks: A is
+    # double-buffered beside the whole of B, and at K = 8192 two rows each
+    # way would be all of a core's memory.
+    tile_size_input: int = auto()
+    # None: tile_size_input, and at least two rows: the shim moves C in
+    # 4-byte granules. Not a column's rows, which M would set: one array
+    # serves every M.
+    tile_size_output: int = auto()
     # None picks the widest legal size for K (see validate).
     kernel_vector_size: int = auto(repr=False, array=True)
     # Optional fused activation applied to each output tile in the producing core.
@@ -99,10 +106,8 @@ class GEMV(Operator):
     _KERNEL_VECTOR_SIZES: ClassVar[tuple[int, ...]] = (64, 32, 16)
 
     def validate(self):
-        tso = self.tile_size_output
-        if tso is not None and not (
-            tso % self.tile_size_input == 0 and tso >= self.tile_size_input
-        ):
+        tso, tsi = self.tile_size_output, self.tile_size_input
+        if tso is not None and tsi is not None and not (tso % tsi == 0 and tso >= tsi):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
         self._legal_kernel_vector_size()
         if self.epilogue not in ("none", "gelu"):
@@ -157,23 +162,25 @@ class GEMV(Operator):
 
     def resolve(self, dev):
         """Columns default to the most the device's shim budget allows that
-        leave each column a whole number of tiles of M; the rest follows
-        from K and from each other, not from the device.
+        leave each column a whole number of tiles of M; the tiles follow
+        from K, not from the device.
         """
         if self.epilogue == "gelu" and dev is not None and target_arch(dev) != "aie2p":
             # gelu_tile_bf16 is exported by gelu_aie2p.h alone.
             raise Unresolvable(
                 f"GEMV's gelu epilogue is aie2p-only; got {target_arch(dev)}"
             )
-        tile = self.tile_size_output or self.tile_size_input
-        unit = tile * self.tile_size_input // math.gcd(tile, self.tile_size_input)
+        rows = self.tile_size_input or (2 if self.K <= bank_elements(bfloat16) else 1)
+        tile = self.tile_size_output or max(rows, 2)
+        unit = math.lcm(tile, rows)
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.M % (c * unit) == 0
         )
         return dataclasses.replace(
             self,
             num_aie_columns=cols,
-            tile_size_output=self.tile_size_output or self.tile_size_input,
+            tile_size_input=rows,
+            tile_size_output=tile,
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
 
@@ -452,3 +459,13 @@ class GEMV(Operator):
         else:
             C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
         return activation.gelu_ref(C) if self.epilogue == "gelu" else C
+
+    def tolerance(self, target) -> Tolerance:
+        """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
+        once, and the GELU epilogue's tanh approximation adds its own.
+        Tighter than linalg.mv's contract, the C++ matmul harness's 0.05
+        and 0.5.
+        """
+        if self.epilogue == "gelu":
+            return Tolerance.relative(0.06, 2e-2, note="f32 accumulation, then GELU")
+        return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
