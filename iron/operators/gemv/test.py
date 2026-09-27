@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 import pytest
-from ml_dtypes import bfloat16
 
 from iron.common.device import bound_device
 from iron.common.harness import record_metric, run_test, vectors
 from iron.common.kernels import target_arch
-from iron.operators.gemv.op import GEMV, gelu_tanh_approx
+from iron.operators.gemv.op import GEMV
 
 
 def get_params():
@@ -127,14 +125,9 @@ def test_gemv_gelu(
         tile_size_output=tile_size_output,
         epilogue="gelu",
     )
-    # The reference is the plain product; the epilogue is applied here.
     data = vectors(operator, normal=("A", "B"))
-    c_gelu = gelu_tanh_approx(data["C"].astype(np.float32)).astype(bfloat16)
-    input_buffers = data.inputs
-    output_buffers = {"C": c_gelu}
-
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=0.06, abs_tol=2e-2
+        operator, data.inputs, data.outputs, rel_tol=0.06, abs_tol=2e-2
     )
 
     record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)

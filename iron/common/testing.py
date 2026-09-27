@@ -34,6 +34,7 @@ __all__ = [
     "binary_elementwise_cases",
     "channeled_unary_cases",
     "device_columns",
+    "row_cases",
 ]
 
 
@@ -157,6 +158,25 @@ def binary_elementwise_cases(
                         extensive=length != regular,
                     )
                 )
+        return out
+
+    return cases
+
+
+def row_cases(input_lengths=LENGTHS, regular: int | None = 2048):
+    """Cases for a :class:`~iron.common.elementwise.Rowwise` operator: each
+    length split into rows over every column and channel count the class's
+    shim budget allows, one row per core at most ``tile_cap`` long, as
+    :func:`channeled_unary_cases` splits a flat buffer.
+    """
+    flat = channeled_unary_cases(input_lengths, regular=regular)
+
+    def cases(cls):
+        out = []
+        for c in flat(cls):
+            kwargs = dict(c.kwargs)
+            rows = kwargs.pop("size") // kwargs["tile_size"]
+            out.append(Case(dict(rows=rows, **kwargs), extensive=c.extensive))
         return out
 
     return cases

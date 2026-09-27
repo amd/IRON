@@ -76,7 +76,7 @@ CASES = [
     (
         "layer_norm",
         "LayerNorm",
-        [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=256)],
+        [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
         "leaky_relu",

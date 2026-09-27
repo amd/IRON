@@ -8,76 +8,21 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import Elementwise, Extent, In, Out, auto, param
-from iron.common.device import bound_device
-from iron.common.testing import Case, Testing
+from iron.common import In, Out, Rowwise, param
 from iron.common.tiling import fifo_depth
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
 
-def _cases(cls):
-    """Every column and channel split that divides each size within the
-    class's shim budget and line cap; the 2048 shape is the default suite.
-    """
-    dev = bound_device()
-    out = []
-    for size in [1024, 2048, 4096, 8192]:
-        for channels in (1, 2):
-            for cols in range(1, cls.shim_columns(dev, channels) + 1):
-                tile_size = min(size // (cols * channels), cls.tile_cap)
-                if tile_size * cols * channels != size:
-                    continue
-                out.append(
-                    Case(
-                        dict(
-                            rows=size // tile_size,
-                            num_aie_columns=cols,
-                            num_channels=channels,
-                            tile_size=tile_size,
-                        ),
-                        extensive=size != 2048,
-                    )
-                )
-    return out
+class RMSNorm(Rowwise):
+    """AIE-accelerated RMS Normalization of each row (unweighted).
 
-
-class RMSNorm(Elementwise):
-    """AIE-accelerated RMS Normalization layer (unweighted).
-
-    ``rows`` rows of ``tile_size`` elements; :class:`WeightedRMSNorm` is the
-    form with a learned weight row, which a graph call with a weight picks.
-    ``tile_size`` is the row length and appears in the host shape (``rows x
-    tile_size``), so it is a ``param()`` here rather than the tunable the base
-    declares.
+    :class:`WeightedRMSNorm` is the form with a learned weight row, which a
+    graph call with a weight picks.
     """
 
-    test = Testing(_cases)
-
-    rows: int = param()
-    valid = Extent(rows)  # rows, or fewer per call
-    # Required here, though the base defaults it: every field is keyword-only.
-    tile_size: int = param()  # pyright: ignore
-    # One core by default: a core normalizes whole rows, and the row count is
-    # the extent. Call sites with many rows spread them over columns.
-    num_aie_columns: int = auto(1)
     # RMSNorm eps; Llama 1e-5 (default), Gemma 1e-6
     epsilon: float = param(default=1e-5, array=True)
-
-    tile_cap: ClassVar[int] = 8192
-
-    x = In(
-        rows,
-        tile_size,
-        tile=(tile_size,),
-        per=(num_aie_columns, Elementwise.num_channels),
-    )
-    y = Out(
-        rows,
-        tile_size,
-        tile=(tile_size,),
-        per=(num_aie_columns, Elementwise.num_channels),
-    )
 
     @classmethod
     def resolve_class(cls, n_operands, kwargs):
@@ -85,14 +30,6 @@ class RMSNorm(Elementwise):
         if cls is RMSNorm and n_operands == 2:
             return WeightedRMSNorm
         return cls
-
-    @property
-    def weighted(self) -> bool:
-        return False
-
-    @property
-    def valid_elements(self) -> int:
-        return self.valid * self.tile_size
 
     def kernel(self, target):
         return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
@@ -130,10 +67,6 @@ class WeightedRMSNorm(RMSNorm):
         tile=(RMSNorm.tile_size,),
         per=(RMSNorm.num_aie_columns, RMSNorm.num_channels),
     )
-
-    @property
-    def weighted(self) -> bool:
-        return True
 
     def reference(self, x, w):
         """The two kernels' references in turn: the normalized row rounded to

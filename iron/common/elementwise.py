@@ -9,9 +9,11 @@ declares a flat buffer per stream with the line as its tile, and its
 runtime sequence is derived: the buffer is split evenly across the cores'
 fifos and drained back the same way.
 
-:class:`UnaryElementwise` and :class:`BinaryElementwise` are the two operand
-shapes. The array reads whatever operands are declared, so an operator with
-a third input needs no new code here.
+:class:`UnaryElementwise` and :class:`BinaryElementwise` are the two flat
+operand shapes, and :class:`Rowwise` a matrix whose rows are the lines, for
+a kernel that reduces over its line (a norm). The array reads whatever
+operands are declared, so an operator with a third input needs no new code
+here.
 
 The core's trip count is a :class:`~iron.common.declare.Value` the sequence
 writes before the first transfer, so the array does not depend on the
@@ -64,7 +66,12 @@ from .declare import (
 )
 from .design.target import Target
 from .kernels import kernels_dir
-from .testing import Testing, binary_elementwise_cases, channeled_unary_cases
+from .testing import (
+    Testing,
+    binary_elementwise_cases,
+    channeled_unary_cases,
+    row_cases,
+)
 from .tiling import fifo_depth
 
 # The line an elementwise core streams when nothing else is asked for: small
@@ -250,7 +257,7 @@ class Elementwise(Operator):
 
 
 # --------------------------------------------------------------------------
-# The two operand shapes
+# The operand shapes
 # --------------------------------------------------------------------------
 
 
@@ -306,3 +313,43 @@ class BinaryElementwise(Elementwise):
     @property
     def valid_elements(self) -> int:
         return self.valid
+
+
+class Rowwise(Elementwise):
+    """``rows`` rows of ``tile_size`` elements in, the same out, one kernel
+    call per row.
+
+    For a kernel that reduces over its line, so the line is the row: it is
+    in the host shape (``rows x tile_size``) and a ``param()`` here rather
+    than the tunable the base declares, since a different line would compute
+    something else.
+    """
+
+    test = Testing(row_cases())
+
+    rows: int = param()
+    valid = Extent(rows)  # rows, or fewer per call
+    # Required here, though the base defaults it: every field is keyword-only.
+    tile_size: int = param()  # pyright: ignore
+    # One core by default: a core takes whole rows, and the row count is the
+    # extent. Call sites with many rows spread them over columns.
+    num_aie_columns: int = auto(1)
+
+    tile_cap: ClassVar[int] = 8192
+
+    x = In(
+        rows,
+        tile_size,
+        tile=(tile_size,),
+        per=(num_aie_columns, Elementwise.num_channels),
+    )
+    y = Out(
+        rows,
+        tile_size,
+        tile=(tile_size,),
+        per=(num_aie_columns, Elementwise.num_channels),
+    )
+
+    @property
+    def valid_elements(self) -> int:
+        return self.valid * self.tile_size

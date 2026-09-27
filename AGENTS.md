@@ -208,7 +208,7 @@ reuse lint
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
      allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
      runtime callables and the record of what a compiled image consists of
-   - `elementwise.py`: the shared elementwise array and its two operand shapes
+   - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `kernels.py`: `kernels_dir()` and `declare_kernel`, for a kernel the
      factories do not cover
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with

@@ -38,7 +38,7 @@ from ..kernels import kernels_dir
 from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
-from .field import DeclarationError, Unresolvable, param
+from .field import DeclarationError, Unresolvable, _tier_of, param
 from .infer import infer, infer_kwargs
 from .member import Extent, Value, _Buffer, _extent_reads, _Member, _Stream, _Value
 from .naming import label_parts
@@ -214,6 +214,9 @@ class Operator(metaclass=_OperatorMeta):
     # build run it first: to issue it behind the first fills, or once per
     # slab of a dispatch.
     own_preamble: ClassVar[bool] = False
+
+    # Bytes of trace buffer this operator's build emits; 0 disables tracing.
+    trace_size: int = dataclasses.field(default=0, repr=False, kw_only=True)
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -711,10 +714,6 @@ class Operator(metaclass=_OperatorMeta):
         """
         return aie_utils.ensure_current_device()
 
-    # Bytes of trace buffer to emit; 0 disables tracing. A plain attribute
-    # rather than a property: OperatorSequence and LayerNorm assign it.
-    trace_size = 0
-
     @property
     def name(self) -> str:
         """This instance's label: the class, every shown field as resolved
@@ -858,7 +857,9 @@ class Operator(metaclass=_OperatorMeta):
         instruction stream; or unused by this instance.
         """
         fields = {
-            f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.compare
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+            if f.compare and _tier_of(f) is not None
         }
 
         def spell(names):
@@ -904,4 +905,6 @@ class Operator(metaclass=_OperatorMeta):
             else:
                 how = "unused here"
             lines.append(f"  {m.name}: {how}")
+        if self.trace_size:
+            lines.append(f"  traced: {self.trace_size} bytes of trace buffer")
         return "\n".join(lines)

@@ -31,7 +31,7 @@ from .declare import (
     select,
 )
 from .design import DesignGenerator
-from .elementwise import BinaryElementwise, Elementwise, UnaryElementwise
+from .elementwise import BinaryElementwise, Elementwise, Rowwise, UnaryElementwise
 
 __all__ = [
     "BinaryElementwise",
@@ -45,6 +45,7 @@ __all__ = [
     "Operator",
     "Out",
     "Profile",
+    "Rowwise",
     "Scratchpad",
     "Shim",
     "UnaryElementwise",

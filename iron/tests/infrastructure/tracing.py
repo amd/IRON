@@ -26,7 +26,7 @@ TRACE_SIZE = 8192
 def _layer_norm_run(name, trace_size):
     """A dispatched one-step fused sequence, and its output."""
     layer_norm = LayerNorm(
-        size=SIZE,
+        rows=1,
         num_aie_columns=1,
         num_channels=1,
         tile_size=SIZE,
@@ -39,7 +39,7 @@ def _layer_norm_run(name, trace_size):
 
     f = F()
 
-    traced = f.trace(x=(SIZE,))
+    traced = f.trace(x=(1, SIZE))
     seq = traced.sequence(name, dispatch="fused", trace_size=trace_size).compile()
     run = seq.get_callable()
     x = run.get_buffer("x")

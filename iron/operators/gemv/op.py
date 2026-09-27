@@ -17,11 +17,13 @@ from iron.common import (
     Incompatible,
     Operator,
     Out,
+    Unresolvable,
     Value,
     auto,
     optional,
     param,
 )
+from iron.common.kernels import target_arch
 from iron.common.tiling import DMA_BD_MAX_WRAP, Access
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
@@ -158,6 +160,11 @@ class GEMV(Operator):
         leave each column a whole number of tiles of M; the rest follows
         from K and from each other, not from the device.
         """
+        if self.epilogue == "gelu" and dev is not None and target_arch(dev) != "aie2p":
+            # gelu_tile_bf16 is exported by gelu_aie2p.h alone.
+            raise Unresolvable(
+                f"GEMV's gelu epilogue is aie2p-only; got {target_arch(dev)}"
+            )
         tile = self.tile_size_output or self.tile_size_input
         unit = tile * self.tile_size_input // math.gcd(tile, self.tile_size_input)
         cols = self.resolve_columns(
@@ -226,11 +233,6 @@ class GEMV(Operator):
         # smaller than the 16-wide activation vector.
         gelu_kernel = None
         if self.epilogue == "gelu":
-            if target.arch != "aie2p":
-                raise NotImplementedError(
-                    "gemv gelu epilogue is only available on NPU2 (aie2p); "
-                    f"current kernel dir is {target.arch!r}"
-                )
             # gelu.cc's in-place gelu_tile_bf16, which only gelu_aie2p.h
             # exports; it rides in the object the gelu factory builds. A second
             # object, not an archive bundled with the first: each func.func
@@ -435,38 +437,18 @@ class GEMV(Operator):
                         rt.drain(self.C.lane(col), c_tap, group=tg_ac, wait=True)
 
     def reference(self, A, B):
-        """CPU reference: (optionally batched) matrix-vector product."""
+        """``C = A @ B``, then the epilogue: one product per batch when ``A``
+        is ``(batches, M, K)`` and ``B`` ``(batches, K)``.
+        """
         # Not linalg.mv's contract: that is one tile's product, and mv_ref's
-        # float64 would double the host copy of the LM head's weight.
-        return reference(A, B)
-
-
-# --------------------------------------------------------------------------
-# The CPU reference this operator is checked against.
-# --------------------------------------------------------------------------
-
-
-def reference(A, B):
-    """CPU reference: matrix-vector product ``C = A @ B`` (ground truth).
-
-    Batched when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``: one
-    product per batch, as the operator's ``num_batches`` runs them.
-    """
-    # In float32 and rounded once: numpy's matmul would otherwise accumulate
-    # in bfloat16, where the AIE kernel's accumulator is f32. einsum has no
-    # bfloat16 loop at all, so the batched case reshapes into a matmul.
-    a, b = A.astype(np.float32), B.astype(np.float32)
-    if A.ndim == 3:
-        b = b.reshape(A.shape[0], A.shape[2], 1)
-        return np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
-    return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
-
-
-def gelu_tanh_approx(x):
-    """Tanh-approximation GELU, matching aie_kernels/activation/gelu_aie2p.h.
-
-    0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))). Computed in float32.
-    """
-    xf = np.asarray(x, dtype=np.float32)
-    inner = 0.79788456 * (xf + 0.044715 * xf**3)
-    return 0.5 * xf * (1.0 + np.tanh(inner))
+        # float64 would double the host copy of the LM head's weight. In
+        # float32 and rounded once: numpy's matmul would otherwise accumulate
+        # in bfloat16, where the AIE kernel's accumulator is f32. einsum has
+        # no bfloat16 loop at all, so the batched case reshapes into a matmul.
+        a, b = A.astype(np.float32), B.astype(np.float32)
+        if A.ndim == 3:
+            b = b.reshape(A.shape[0], A.shape[2], 1)
+            C = np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
+        else:
+            C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
+        return activation.gelu_ref(C) if self.epilogue == "gelu" else C
