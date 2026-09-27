@@ -5,7 +5,7 @@
 import pytest
 
 from iron.common.device import bound_device
-from iron.common.harness import record_metric, run_test, vectors
+from iron.common.harness import run_test, vectors
 from iron.common.kernels import target_arch
 from iron.operators.gemv.op import GEMV
 
@@ -52,8 +52,6 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runt
         operator, data, tolerance=operator.reference_tolerance()
     )
 
-    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
-
     assert not errors, f"Test failed with errors: {errors}"
 
 
@@ -97,8 +95,6 @@ def test_gemv_batched(
         operator, data, tolerance=operator.reference_tolerance()
     )
 
-    record_metric("Throughput", (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9)
-
     assert not errors, f"batched GEMV failed: {errors}"
 
 
@@ -129,7 +125,5 @@ def test_gemv_gelu(
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data, tolerance=operator.reference_tolerance()
     )
-
-    record_metric("Throughput", (2.0 * M * K) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, f"Test failed with errors: {errors}"

@@ -312,6 +312,13 @@ class Operator(metaclass=_OperatorMeta):
         """
         return None
 
+    def ops(self, target) -> int:
+        """The arithmetic operations one call performs, for its throughput:
+        one per output element unless the operator counts its own, and 0
+        for one that only moves data.
+        """
+        return sum(b.elements for b in self.outputs)
+
     def device(self, target):
         """The device the Program is built for; the current device by default."""
         return target.dev
@@ -703,6 +710,12 @@ class Operator(metaclass=_OperatorMeta):
         )  # imports this package: a cycle at module scope
 
         return self.resolved(self.dev).tolerance(Target(self.dev, kernels_dir()))
+
+    def op_count(self) -> int:
+        """The resolved operator's :meth:`ops` for this device."""
+        from ..design.target import Target  # imports this package: see above
+
+        return self.resolved(self.dev).ops(Target(self.dev, kernels_dir()))
 
     # -- the image of one operator on its own -------------------------------
 

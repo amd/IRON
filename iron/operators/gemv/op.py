@@ -443,6 +443,9 @@ class GEMV(Operator):
                         c_tap = C_coalesced[col] if coalesce else C_taps[col][w]
                         rt.drain(self.C.lane(col), c_tap, group=tg_ac, wait=True)
 
+    def ops(self, target) -> int:
+        return 2 * self.M * self.K * self.num_batches
+
     def reference(self, A, B):
         """``C = A @ B``, then the epilogue: one product per batch when ``A``
         is ``(batches, M, K)`` and ``B`` ``(batches, K)``.

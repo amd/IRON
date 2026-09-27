@@ -237,7 +237,8 @@ def run_test(
     ``tolerance`` when given; a bound tolerance's limit is its bound on the
     inputs, which holds for an elementwise kernel's contract whatever shape
     the operator gives its operands. Latency (the NPU's own time) and effective
-    bandwidth are recorded for the CSV and returned.
+    bandwidth are recorded for the CSV and returned, and throughput from
+    :meth:`~iron.common.declare.Operator.ops` for an operator that computes.
     """
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
@@ -303,6 +304,9 @@ def run_test(
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
     record_metric("Latency", latency_us)
     record_metric("Bandwidth", bandwidth_gbps)
+    ops = operator.op_count()
+    if ops:
+        record_metric("Throughput", ops / (latency_us * 1e-6) / 1e9)
     print(
         f"\nLatency (us): {latency_us:.1f}  Effective Bandwidth: {bandwidth_gbps:.6e} GB/s"
     )

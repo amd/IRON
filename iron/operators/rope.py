@@ -213,6 +213,10 @@ class RoPE(Operator):
             self.rows_per_lut.bind(counts, static.index("rows_per_lut"))
         return workers
 
+    def ops(self, target) -> int:
+        kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
+        return kernel.contract.ops_per_call * self.rows
+
     def reference(self, x, angles):
         """CPU reference for RoPE: see :func:`reference`."""
         return reference(x, angles, self.method_type)

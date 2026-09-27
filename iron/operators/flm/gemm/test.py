@@ -12,7 +12,7 @@ from aie.iron.device import from_name
 
 from iron.common.design.build import build_design
 from iron.common.device import device_name
-from iron.common.harness import record_metric, run_test, vectors
+from iron.common.harness import run_test, vectors
 from iron.common.kernels import kernels_dir
 from iron.operators import GEMM as GenericGEMM
 from iron.operators.flm.gemm.design import (
@@ -183,11 +183,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
         rounding=rounding,
     )
 
-    errors, latency_us, bandwidth_gbps = check_on_device(
-        operator, flm_vectors(operator, scale), rounding
-    )
-
-    record_metric("Throughput", (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9)
+    errors, _, _ = check_on_device(operator, flm_vectors(operator, scale), rounding)
 
     assert not errors, "Test failed"
 

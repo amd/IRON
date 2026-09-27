@@ -172,6 +172,14 @@ class Elementwise(Operator):
         contract = self.kernel(target).contract
         return None if contract is None else contract.tolerance
 
+    def ops(self, target: Target) -> int:
+        """The contract's count per call, one per output element unless it
+        states one, over every line.
+        """
+        contract = self.kernel(target).contract
+        per_call = None if contract is None else contract.ops_per_call
+        return super().ops(target) if per_call is None else per_call * self.lines
+
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute."""
         op = self.resolved(self.dev)

@@ -276,6 +276,9 @@ class Copy(Operator):
             out.append([(acc, 1 if on_d2 else dim)])
         return out
 
+    def ops(self, target) -> int:
+        return 0  # a data mover: its figure is bandwidth
+
     def reference(
         self, x, y=None, *, in_offset=0, out_offset=0, src_valid=None, dst_valid=None
     ):

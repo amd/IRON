@@ -695,6 +695,9 @@ class GEMM(Operator):
 
     # -- host-side helpers ---------------------------------------------------
 
+    def ops(self, target) -> int:
+        return 2 * self.M * self.K * self.N
+
     def reference(self, A, B):
         """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
         ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.

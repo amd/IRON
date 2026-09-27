@@ -279,6 +279,9 @@ class Transpose(Operator):
                         )
                         rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
 
+    def ops(self, target) -> int:
+        return 0  # a data mover: its figure is bandwidth
+
     def reference(self, x):
         """Each (M, N) matrix transposed."""
         # Not datamovement.transpose's contract: the kernel transposes each

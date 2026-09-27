@@ -184,6 +184,9 @@ class Repeat(Operator):
                 size_by={dim: self.value(f"{word}_y")},
             )
 
+    def ops(self, target) -> int:
+        return 0  # a data mover: its figure is bandwidth
+
     def reference(self, x):
         """Each row of the leading dimension repeated ``repeat`` times in place."""
         # A DMA pattern: no kernel, so no contract to take it from.

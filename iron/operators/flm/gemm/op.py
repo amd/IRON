@@ -1212,6 +1212,9 @@ class GEMM(Operator):
         """Elements (bf16) or bytes (bfp16ebs8) that ``pack_B`` returns."""
         return packed_b_size(K, N, bool(self._tuned.bfp16_b))
 
+    def ops(self, target) -> int:
+        return 2 * self.M * self.K * self.N
+
     def reference(self, A, B):
         """``C = clamp(epilogue(A @ B))``, in the kernel's order of operations.
 

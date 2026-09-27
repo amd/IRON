@@ -64,6 +64,8 @@ def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime):
     net(x)
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", 2 * x.nbytes / (elapsed_us * 1e-6) / 1e9)
+    ops = sum(s.op.op_count() for s in net.traced.steps)
+    record_metric("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.

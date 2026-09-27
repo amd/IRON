@@ -715,6 +715,10 @@ class MHA(Operator):
 
         return matmul_workers + softmax_workers + matmul_pv_workers
 
+    def ops(self, target) -> int:
+        """Q K^T and its product with V, causal: half of each, per head."""
+        return 2 * self.num_heads * self.seq_len**2 * self.d
+
     def reference(self, Q, K, V, s_q=None, s_kv=None):
         """CPU reference: causal attention per head, K and V repeated over each
         query group. Rows past ``seq_len`` (the padding) come out as zeros;

@@ -376,7 +376,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 5. Give the operator a `reference(*inputs)` only where its kernel's contract
    is not already it (numpy, on the declared shapes: upcast to float32,
    compute, round once; from the contract references of the kernels it
-   runs where it can)
+   runs where it can), and an `ops(target)` where one operation per output
+   element is not its count (`2 * M * K * N` for GEMM, 0 for a data mover):
+   `run_test` records throughput from it
 6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
    operator class, from `iron.common.testing`
    - leave `tolerance` out to be judged by the contract of the kernel the
@@ -392,7 +394,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      with preconditions (a packed quantization, an angle table)
    - `iron/operators/test.py` runs it; a test with a body of its own goes
      beside the operator and calls `run_test(op, vectors(op), ...)`, with
-     `record_metric()` for any figure beyond latency and bandwidth
+     `record_metric()` for any figure beyond latency, bandwidth and
+     throughput
    - a shape the operator must *refuse* goes in
      `iron/tests/operators/rejected_shapes.py`, which needs no device
 7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:

@@ -5,7 +5,7 @@
 import pytest
 
 from iron.common.device import bound_device, device_name
-from iron.common.harness import record_metric, run_test, vectors
+from iron.common.harness import run_test, vectors
 from iron.operators.gemm.op import GEMM
 
 
@@ -120,6 +120,5 @@ def test_gemm(
     errors, latency_us, bandwidth_gbps = run_test(
         operator, data.inputs, data.outputs, rel_tol=0.005, abs_tol=0.005
     )
-    record_metric("Throughput", (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, "Test failed"
