@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""reference() must match the device's angle convention: rope.py's array
+"""RoPE.reference must match the device's angle convention: rope.py's array
 acquires one angle row and applies it to `rows // angle_rows` consecutive input
 rows before moving to the next, so row r uses angle row
 `r // (rows // angle_rows)`.
@@ -16,7 +16,7 @@ the regime the application's prefill RoPE shape sits in
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.operators.rope import reference
+from iron.operators.rope import RoPE
 
 
 def _block_major_expected(x, angles, rows, angle_rows):
@@ -37,7 +37,7 @@ def _block_major_expected(x, angles, rows, angle_rows):
     return out.astype(bfloat16)
 
 
-def _make_inputs(rows, angle_rows, cols=4, seed=0):
+def _make_inputs(rows, angle_rows, cols=32, seed=0):
     rng = np.random.default_rng(seed)
     half = cols // 2
     x = rng.standard_normal((rows, cols)).astype(bfloat16)
@@ -52,7 +52,7 @@ def test_reference_matches_device_convention_for_batched_angle_rows():
     rows, angle_rows = 6, 3
     x, angles = _make_inputs(rows, angle_rows)
     expected = _block_major_expected(x, angles, rows, angle_rows)
-    got = reference(x, angles)
+    got = RoPE(rows=rows, cols=32, angle_rows=angle_rows).reference(x, angles)
     assert np.array_equal(expected, got)
 
 
@@ -60,7 +60,7 @@ def test_reference_matches_device_convention_across_shapes():
     for rows, angle_rows in [(8, 2), (1024, 1), (4, 4), (13, 13), (12, 4)]:
         x, angles = _make_inputs(rows, angle_rows)
         expected = _block_major_expected(x, angles, rows, angle_rows)
-        got = reference(x, angles)
+        got = RoPE(rows=rows, cols=32, angle_rows=angle_rows).reference(x, angles)
         assert np.array_equal(
             expected, got
         ), f"mismatch at rows={rows} angle_rows={angle_rows}"

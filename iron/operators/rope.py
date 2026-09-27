@@ -218,12 +218,35 @@ class RoPE(Operator):
         return kernel.contract.ops_per_call * self.rows
 
     def reference(self, x, angles):
-        """CPU reference for RoPE: see :func:`reference`."""
-        return reference(x, angles, self.method_type)
+        """CPU reference for RoPE from the operator's packed ``angles`` buffer.
+
+        ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the
+        last dim, the bf16 table the device reads. ``method_type`` 0 rotates
+        the two halves of each row (HF transformers); 1 rotates its
+        interleaved even/odd pairs (the Llama paper). It is the rope kernel's
+        contract reference, ``datamovement.rope_ref``: computed in fp32 and
+        rounded once.
+
+        ``angles`` may have fewer rows than ``x``; each angle row then applies
+        to ``rows / angles.shape[0]`` *consecutive* rows of ``x``, matching
+        the device kernel (``core_body`` acquires one angle row and applies it
+        to that many consecutive input rows before moving on).
+        """
+        rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
+        if rows % lut_rows != 0:
+            raise ValueError(f"{rows} rows cannot share {lut_rows} angle rows evenly")
+        # x viewed as (angle row, the rows it serves, cols) and the table
+        # broadcast over the middle axis: no copy of either.
+        y = datamovement.rope_ref(
+            x.reshape(lut_rows, -1, cols, copy=False),
+            angles.reshape(lut_rows, 1, cols, copy=False),
+            two_halves=self.method_type == 0,
+        )
+        return y.reshape(x.shape, copy=False)
 
 
 # --------------------------------------------------------------------------
-# The angle table the kernel reads, and the CPU reference.
+# The angle table the kernel reads.
 # --------------------------------------------------------------------------
 
 
@@ -307,32 +330,3 @@ def rope_angles(
 def angle_table(rows, cols):
     """The ``angles`` buffer for ``rows`` positions, bf16: Llama 3.2's table."""
     return rope_angles(cols, rows, scaling=LLAMA_3_2).astype(bfloat16)
-
-
-def reference(x, angles, method_type=0):
-    """CPU reference for RoPE from the operator's packed ``angles`` buffer.
-
-    ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the last
-    dim, the bf16 table the device reads. ``method_type`` 0 rotates the two
-    halves of each row (HF transformers); 1 rotates its interleaved even/odd
-    pairs (the Llama paper). It is the rope kernel's contract reference,
-    ``datamovement.rope_ref``: computed in fp32 and rounded once.
-
-    ``angles`` may have fewer rows than ``x``; each angle row then applies to
-    ``rows / angles.shape[0]`` *consecutive* rows of ``x``, matching the device
-    kernel (``core_body`` acquires one angle row and applies it to that many
-    consecutive input rows before moving on).
-    """
-    if method_type not in (0, 1):
-        raise ValueError(f"method_type must be 0 or 1, got {method_type}")
-    rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
-    if rows % lut_rows != 0:
-        raise ValueError(f"{rows} rows cannot share {lut_rows} angle rows evenly")
-    # x viewed as (angle row, the rows it serves, cols) and the table
-    # broadcast over the middle axis: no copy of either.
-    y = datamovement.rope_ref(
-        x.reshape(lut_rows, -1, cols, copy=False),
-        angles.reshape(lut_rows, 1, cols, copy=False),
-        two_halves=method_type == 0,
-    )
-    return y.reshape(x.shape, copy=False)
