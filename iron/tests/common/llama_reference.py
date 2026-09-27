@@ -3,8 +3,8 @@
 
 """The graphs' references against the model's plain forward pass.
 
-``Llama.forward`` is a stateless causal pass in torch, the oracle the NPU
-application is judged against. ``LlamaGraph.graph`` is the same
+``cpu.Reference`` is a stateless causal pass in float32 numpy, the oracle
+the NPU application is judged against. ``LlamaGraph.graph`` is the same
 computation as one graph function, called at a prompt's shape and at one
 token's, and ``GraphFunction.reference`` runs it operator by operator
 through each ``reference()`` on host tensors, with the per-call values
@@ -16,36 +16,24 @@ the caches the prompt leaves for decode) against the model, leaving only
 the kernels' arithmetic for hardware.
 
 The oracle needs no cache: the logits at position ``t`` of a causal pass
-over ``t + 1`` tokens are what a cached decode produces at step ``t``. Both
-sides compute in bfloat16 with different operation orders, so the logits
-agree to bf16 tolerance and the argmax exactly.
+over ``t + 1`` tokens are what a cached decode produces at step ``t``. The
+graph computes in bfloat16 and the oracle in float32, so the logits agree
+to bf16 tolerance and the argmax exactly.
 """
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b import harness
-from iron.applications.llama_3_2_1b.graphs import LlamaGraph, prompt_rows
-from iron.applications.llama_3_2_1b.harness import LlamaModelState
-from iron.applications.llama_3_2_1b.npu import AIELlama
+from iron.applications.llama_3_2_1b import runner
+from iron.applications.llama_3_2_1b.cpu import Reference
+from iron.applications.llama_3_2_1b.npu import AIELlama, LlamaGraph, prompt_rows
+from iron.applications.llama_3_2_1b.runner import LlamaModelState
 from iron.tests.common.llama_model import Config as _Config
-
-# The oracle is torch; the graphs and the application are not.
-torch = pytest.importorskip("torch")
-model = pytest.importorskip("iron.applications.llama_3_2_1b.model")
-reference = pytest.importorskip("iron.applications.llama_3_2_1b.reference")
-
-
-def oracle(config, tokens):
-    """The plain forward's logits at every position, in float."""
-    tree = model.Llama.from_weights(config, config.weights)
-    angles = torch.from_numpy(config.angles.view(np.uint16)).view(torch.bfloat16)
-    return tree(tokens, angles).float()
 
 
 def _embed(config, tokens):
-    return config.weights.embed(tokens.numpy())
+    return config.weights.embed(tokens)
 
 
 def llama_graph(config, bounded=None):
@@ -72,7 +60,7 @@ def graph_prefill(config, graph, prompt):
         vector_size=n,
         last=n - 1,
     )
-    return torch.from_numpy(logits.reshape(-1).astype(np.float32))
+    return logits.reshape(-1).astype(np.float32)
 
 
 def graph_decode(config, graph, tokens, pos, *, vector_size=None):
@@ -92,14 +80,14 @@ def graph_decode(config, graph, tokens, pos, *, vector_size=None):
             vector_size=n,
             last=0,
         )
-        out.append(torch.from_numpy(logits.reshape(-1).astype(np.float32)))
+        out.append(logits.reshape(-1).astype(np.float32))
         pos += 1
     return out
 
 
 def greedy(config, graph, first_logits, pos, n_tokens):
     """Generate ``n_tokens`` greedily through the decode reference from ``pos``."""
-    out, token = [], first_logits.argmax()
+    out, token = [], np.array(first_logits.argmax())
     for _ in range(n_tokens):
         (logits,) = graph_decode(config, graph, token.reshape(1), pos)
         out.append(logits)
@@ -111,24 +99,24 @@ def greedy(config, graph, first_logits, pos, n_tokens):
 @pytest.fixture(scope="module")
 def cpu():
     """A prompt, the oracle's logits for it, and six greedy tokens' logits."""
-    torch.manual_seed(1)
     config = _Config()
-    prompt = torch.randint(0, config.vocab_size, (8,))
+    oracle = Reference(config)
+    prompt = np.random.default_rng(1).integers(0, config.vocab_size, 8)
     n_tokens = 6
     tokens, expected = prompt, []
-    first = oracle(config, tokens)[-1]
+    first = oracle(tokens)
     logits = first
     for _ in range(n_tokens):
-        tokens = torch.cat([tokens, logits.argmax().reshape(1)])
-        logits = oracle(config, tokens)[-1]
+        tokens = np.append(tokens, logits.argmax())
+        logits = oracle(tokens)
         expected.append(logits)
     return config, prompt, first, expected
 
 
 def _assert_close(got, expected):
     for step, (a, b) in enumerate(zip(got, expected)):
-        scale = b.abs().max()
-        err = (a - b).abs().max()
+        scale = np.abs(b).max()
+        err = np.abs(a - b).max()
         assert (
             err <= 0.05 * scale
         ), f"step {step}: max |diff| {err:.4f} against |logits| {scale:.3f}"
@@ -178,12 +166,12 @@ def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
         cum["total"] += pos + 1
         return min(cum["total"], config.context_length)
 
-    tokens = torch.stack([first.argmax()] + [e.argmax() for e in expected[:-1]])
+    tokens = np.array([first.argmax()] + [e.argmax() for e in expected[:-1]])
     got = graph_decode(config, graph, tokens, prompt.shape[0], vector_size=cumulative)
     # The first token is right (a sum of one term), later ones are not.
     _assert_close(got[:1], expected[:1])
-    drift = [(a - b).abs().max().item() for a, b in zip(got[1:], expected[1:])]
-    assert max(drift) > 0.05 * expected[1].abs().max(), drift
+    drift = [np.abs(a - b).max() for a, b in zip(got[1:], expected[1:])]
+    assert max(drift) > 0.05 * np.abs(expected[1]).max(), drift
 
 
 class _Output:
@@ -197,7 +185,7 @@ class _Output:
 
 
 def application(config):
-    """npu.py's AIELlama with its graph function stood in by its reference,
+    """npu.AIELlama with its graph function stood in by its reference,
     which runs at whatever shape it is called with.
     """
     graph = llama_graph(config)
@@ -209,7 +197,7 @@ def application(config):
 
 
 def test_the_application_runs_both_phases_through_its_images(cpu):
-    """npu.py's own forward pass, its graph stood in by the reference: the
+    """The application's own forward pass, its graph stood in by the reference: the
     embedding, the prompt's padding and its last-row offset, the angles and
     decode's values are the application's.
     """
@@ -217,45 +205,36 @@ def test_the_application_runs_both_phases_through_its_images(cpu):
     npu = application(config)
 
     state = LlamaModelState(config)
-    state.token_ids = prompt.numpy().reshape(1, -1)
+    state.token_ids = prompt.reshape(1, -1)
     logits, state = npu.forward(config, state)
     assert logits.shape == (1, 1, config.vocab_size)
 
-    # The images return numpy, and so does the forward pass: the harness
+    # The images return numpy, and so does the forward pass: the runner
     # samples and scores in numpy.
     assert isinstance(logits, np.ndarray)
 
-    def as_torch(a):
-        return torch.from_numpy(a[0, -1].astype(np.float32))
+    def last(a):
+        return a[0, -1].astype(np.float32)
 
-    _assert_close([as_torch(logits)], [first])
+    _assert_close([last(logits)], [first])
     got, token = [], int(logits[0, -1].argmax())
     for _ in range(len(expected)):
         state.token_ids = np.array([[token]], dtype=np.int64)
         logits, state = npu.forward(config, state)
-        got.append(as_torch(logits))
+        got.append(last(logits))
         token = int(logits[0, -1].argmax())
     _assert_close(got, expected)
 
 
 def test_the_accuracy_check_scores_the_application_against_the_reference(cpu):
-    """What ``python -m iron.applications.llama_3_2_1b.accuracy`` runs, with
-    the graph references for the images: the numpy harness against the
-    float32 torch reference, teacher-forced.
+    """What ``--check-accuracy`` runs, with the graph references for the
+    images: the application against the float32 reference, teacher-forced.
     """
     config, prompt, _, expected = cpu
     npu = application(config)
     state = LlamaModelState(config)
-    state.token_ids = prompt.numpy().reshape(1, -1)
-    results = harness.check_accuracy(
-        config,
-        state,
-        npu.forward,
-        config,
-        LlamaModelState(config),
-        reference.ReferenceForward(config),
-        len(expected) + 1,
-    )
+    state.token_ids = prompt.reshape(1, -1)
+    results = runner.check_accuracy(config, state, npu.forward, len(expected) + 1)
     assert all(top1 for _, top1 in results), results
     # bf16 graphs against a float32 forward: close, not equal.
     assert all(0 <= kl < 0.05 for kl, _ in results), results
@@ -268,8 +247,8 @@ def test_the_determinism_check_finds_the_references_deterministic(cpu):
     """
     config, prompt, _, _ = cpu
     npu = application(config)
-    prompts = [prompt.numpy().reshape(1, -1), prompt.numpy()[::-1].reshape(1, -1)]
-    assert harness.check_determinism(config, prompts, npu.forward, 3, 3) == 0
+    prompts = [prompt.reshape(1, -1), prompt[::-1].reshape(1, -1)]
+    assert runner.check_determinism(config, prompts, npu.forward, 3, 3) == 0
 
 
 def test_a_short_prompt_runs_at_its_own_rows():
@@ -281,14 +260,14 @@ def test_a_short_prompt_runs_at_its_own_rows():
     class Longer(_Config):
         context_length = 1024
 
-    torch.manual_seed(2)
     config = Longer()
-    prompt = torch.randint(0, config.vocab_size, (8,))
+    oracle = Reference(config)
+    prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
     assert prompt_rows(8, config.context_length) == 512 < config.context_length
     graph = llama_graph(config)
-    first = oracle(config, prompt)[-1]
+    first = oracle(prompt)
     got_first = graph_prefill(config, graph, prompt)
     _assert_close([got_first], [first])
     token = first.argmax().reshape(1)
     (got_next,) = graph_decode(config, graph, token, 8)
-    _assert_close([got_next], [oracle(config, torch.cat([prompt, token]))[-1]])
+    _assert_close([got_next], [oracle(np.append(prompt, token))])

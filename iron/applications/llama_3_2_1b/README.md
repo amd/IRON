@@ -3,47 +3,50 @@ SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Golden Model Inference
+# Llama 3.2 1B on the NPU
 
-## Model and Tokenizer Download Instructions
+Prefill and decode of Llama 3.2 1B as one IRON graph function, compiled to
+one image per input shape (`npu.py`) and run from a numpy host loop
+(`runner.py`). The weights are the safetensors checkpoint mapped into numpy
+(`weights.py`), and the accuracy check compares the NPU's logits with a
+float32 numpy forward pass (`cpu.py`); nothing here needs torch.
 
-To download the necessary files for the model, please follow the links below:
+## Weights and tokenizer
 
-- **Model File**: [model.safetensors](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
-- **Tokenizer File**: [tokenizer.model](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
+From Hugging Face:
 
-The CI tests expect these files to be placed in the directory `/srv/llama3.2-1b`;
-when calling `inference.py`, you will supply the paths to those two files on the command line, so you can place them anywhere.
+- [`model.safetensors`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
+- [`tokenizer.model`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
 
-## Installation Instructions
+The tests look for them in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-1b/`
+(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
+can be anywhere.
 
-Before running `inference.py`, ensure you have the proper environment. To build the environment from scratch, follow the instructions below:
+## Setup
 
-1. Follow the IRON installation instructions in the repository root fist.
-   After this, you should have an `ironenv` environment set up and activated.
+Set up IRON as the repository root describes, then:
 
-2. Install the following additional requirements:
-   ```
-   python3 -m pip install -r requirements_examples.txt
-   ```
-
-## Running Inference
-
-Inference with Llama-3.2-1B can be run by specifying a number of tokens to generate based on a prompt. This is done with `inference.py`:  
-```bash  
-cd golden_model
-python inference.py /path/to/model.safetensors /path/to/tokenizer.model --num_tokens <NUM_TOKENS> --prompt <PROMPT>
-```
-
-`inference.py` has the following command format:  
 ```bash
-python inference.py <weights_file_path> <tokenizer_file_path> [--num_tokens NUM_TOKENS] [--prompt PROMPT] [--use_prompt_template] [--save_outputs]
+python3 -m pip install -r requirements_examples.txt
 ```
 
-### Arguments:
-- `weights_file_path`: Path to the weights file (e.g., `model.safetensors`).
-- `tokenizer_file_path`: Path to the tokenizer file (e.g., `tokenizer.model`).
-- `--num_tokens`: (Optional) Number of tokens to predict. Default is `1`.
-- `--prompt`: (Optional) Prompt for the model to generate text from. Default is the text in `prompts.txt`.
-- `--use_prompt_template`: (Optional) Use a prompt template for the model. Should be passed in when using Instruct weights.
-- `--save_outputs`: (Optional) Enable hooks to save outputs of at each layer of the model.
+## Running
+
+From the repository root:
+
+```bash
+python -m iron.applications.llama_3_2_1b.runner \
+    /path/to/model.safetensors /path/to/tokenizer.model \
+    --prompt-len 2048 --num-tokens 40
+```
+
+- `--prompt-len`: characters of `prompt.txt` to use as the prompt (default 2048)
+- `--num-tokens`: tokens to generate (default 40)
+- `--check-accuracy`: instead of sampling, compare each step's logits with a
+  float32 numpy forward pass (`cpu.Reference`) and print the KL divergence
+  and top-1 agreement
+- `--check-determinism ROUNDS`: instead of sampling, run two prompts
+  `ROUNDS` times each and count the runs whose logits differ bitwise
+
+`pytest iron/applications/llama_3_2_1b/` runs all three and records the
+throughput and accuracy figures.

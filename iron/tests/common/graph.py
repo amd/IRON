@@ -365,7 +365,7 @@ def test_swiglu_prefill_traces_over_a_sequence():
 
 
 def test_llama_decode_traces_and_tunes():
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
@@ -448,7 +448,7 @@ def test_llama_decode_traces_and_tunes():
 
 
 def test_llama_prompt_traces_over_the_same_caches():
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
@@ -519,7 +519,7 @@ def test_an_unbounded_llama_prompt_runs_every_row():
     none bound by the rows, and MHA masked causally alone (its per-call
     lengths are read only by a bounded build).
     """
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
@@ -598,7 +598,7 @@ def test_llama_names_only_the_knobs_that_matter(monkeypatch):
     """
     from aie.iron.device import from_name
 
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
     from iron.tests.common.llama_model import Llama1B
 

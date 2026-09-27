@@ -6,11 +6,8 @@
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.applications.llama_3_2_1b.weights import (
-    LayerWeights,
-    LlamaWeights,
-    rope_angles,
-)
+from iron.applications.llama_3_2_1b.weights import LayerWeights, LlamaWeights
+from iron.operators.rope.op import rope_angles
 
 
 def _shapes(cfg):
@@ -34,10 +31,9 @@ class Config:
     """Llama's shape, small, with the weights drawn at a seed.
 
     ``weights`` is the :class:`LlamaWeights` the graphs close over and the
-    torch forward is built from (``model.Llama.from_weights``); ``angles``
-    is the RoPE table for ``context_length``, in bf16. Drawn as torch
-    initialises the tree: each projection uniform in ``+-1/sqrt(in)``, each
-    norm weight one.
+    float32 reference (``cpu.Reference``) reads; ``angles`` is the RoPE
+    table for ``context_length``, in bf16. Each projection is drawn uniform
+    in ``+-1/sqrt(in)``, each norm weight is one.
     """
 
     n_layers, n_heads, n_kv_groups, head_dim = 2, 16, 4, 64

@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama's host side without torch: checkpoint reader, weight tree, RoPE
-table, embedding and sampling (``weights.py``, ``sampling.py``).
+"""Llama's host side: checkpoint reader, weight tree, RoPE table and
+sampling (``weights.py``, ``rope/op.py``, ``runner.Sampler``).
 
-torch appears only here, as the oracle: the checkpoint files are written by
-``safetensors.torch`` and every value is compared with what torch produces.
-Tier 1 writes small real checkpoints to ``tmp_path``; tier 2 reads the
-actual Llama-3.2-1B file and skips when it is absent. No NPU.
+The oracle is the safetensors library itself: tier 1 writes small
+checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
+view with what ``load_file`` reads; tier 2 reads the actual Llama-3.2-1B
+file and skips when it is absent. No NPU.
 """
 
 import json
@@ -21,25 +21,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
+from safetensors import SafetensorError
+from safetensors.numpy import load_file, save_file
 
-from iron.applications.llama_3_2_1b.sampling import Sampler
-from iron.applications.llama_3_2_1b.weights import (
-    Llama3RopeScaling,
-    LlamaWeights,
-    SafetensorsFile,
-    rope_angles,
-)
-
-torch = pytest.importorskip("torch")
-safetensors_torch = pytest.importorskip("safetensors.torch")
-model = pytest.importorskip("iron.applications.llama_3_2_1b.model")
-
-
-def as_numpy(t):
-    """A torch tensor as numpy, bf16 preserved (the oracle side's converter)."""
-    if t.dtype is torch.bfloat16:
-        return t.view(torch.uint16).numpy().view(bfloat16)
-    return t.numpy()
+from iron.applications.llama_3_2_1b.runner import Sampler
+from iron.applications.llama_3_2_1b.weights import LlamaWeights, SafetensorsFile
+from iron.operators.rope.op import LLAMA_3_2, rope_angles
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -62,36 +49,51 @@ class ToyConfig:
     vocab_size = 32
 
 
+# Each LayerWeights field under its Hugging Face name and its graph name,
+# spelled out here rather than read from weights.py.
+LAYER_NAMES = {
+    "norm1": ("input_layernorm.weight", "norm1.weight"),
+    "q": ("self_attn.q_proj.weight", "attn.q.weight"),
+    "k": ("self_attn.k_proj.weight", "attn.k.weight"),
+    "v": ("self_attn.v_proj.weight", "attn.v.weight"),
+    "o": ("self_attn.o_proj.weight", "attn.o.weight"),
+    "norm2": ("post_attention_layernorm.weight", "norm2.weight"),
+    "gate": ("mlp.gate_proj.weight", "ffn.gate.weight"),
+    "up": ("mlp.up_proj.weight", "ffn.up.weight"),
+    "down": ("mlp.down_proj.weight", "ffn.down.weight"),
+}
+
+
 def toy_checkpoint(cfg=ToyConfig):
     """A Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
     head, kv = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
     E, F = cfg.emb_dim, cfg.hidden_dim
     shapes = {
-        "input_layernorm.weight": (E,),
-        "self_attn.q_proj.weight": (head, E),
-        "self_attn.k_proj.weight": (kv, E),
-        "self_attn.v_proj.weight": (kv, E),
-        "self_attn.o_proj.weight": (E, head),
-        "post_attention_layernorm.weight": (E,),
-        "mlp.gate_proj.weight": (F, E),
-        "mlp.up_proj.weight": (F, E),
-        "mlp.down_proj.weight": (E, F),
+        "norm1": (E,),
+        "q": (head, E),
+        "k": (kv, E),
+        "v": (kv, E),
+        "o": (E, head),
+        "norm2": (E,),
+        "gate": (F, E),
+        "up": (F, E),
+        "down": (E, F),
     }
-    gen = torch.Generator().manual_seed(0)
+    rng = np.random.default_rng(0)
     ckpt = {
-        "model.embed_tokens.weight": torch.randn(cfg.vocab_size, E, generator=gen),
-        "model.norm.weight": torch.randn(E, generator=gen),
+        "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, E)),
+        "model.norm.weight": rng.normal(size=E),
     }
     for i in range(cfg.n_layers):
-        for suffix, shape in shapes.items():
-            ckpt[f"model.layers.{i}.{suffix}"] = torch.randn(*shape, generator=gen)
-    return {k: v.to(torch.bfloat16) for k, v in ckpt.items()}
+        for f, shape in shapes.items():
+            ckpt[f"model.layers.{i}.{LAYER_NAMES[f][0]}"] = rng.normal(size=shape)
+    return {k: v.astype(bfloat16) for k, v in ckpt.items()}
 
 
 @pytest.fixture
 def toy_path(tmp_path):
     path = tmp_path / "toy.safetensors"
-    safetensors_torch.save_file(toy_checkpoint(), path)
+    save_file(toy_checkpoint(), path)
     return path
 
 
@@ -100,30 +102,31 @@ def toy_path(tmp_path):
 
 
 def test_reader_matches_safetensors_for_every_dtype(tmp_path):
-    gen = torch.Generator().manual_seed(1)
+    rng = np.random.default_rng(1)
     tensors = {
-        "bf16": torch.randn(3, 5, generator=gen).to(torch.bfloat16),
-        "f16": torch.randn(7, generator=gen).to(torch.float16),
-        "f32": torch.randn(2, 3, 4, generator=gen),
-        "f64": torch.randn(4, generator=gen).double(),
-        "i64": torch.arange(-5, 6, dtype=torch.int64),
-        "i32": torch.arange(9, dtype=torch.int32).reshape(3, 3),
-        "i16": torch.tensor([-2, 7], dtype=torch.int16),
-        "i8": torch.tensor([-128, 0, 127], dtype=torch.int8),
-        "u8": torch.tensor([0, 255], dtype=torch.uint8),
-        "bool": torch.tensor([True, False, True]),
-        "scalar": torch.tensor(3.5),
-        "empty": torch.empty(0, 4),
+        "bf16": rng.normal(size=(3, 5)).astype(bfloat16),
+        "f16": rng.normal(size=7).astype(np.float16),
+        "f32": rng.normal(size=(2, 3, 4)).astype(np.float32),
+        "f64": rng.normal(size=4),
+        "i64": np.arange(-5, 6, dtype=np.int64),
+        "i32": np.arange(9, dtype=np.int32).reshape(3, 3),
+        "i16": np.array([-2, 7], dtype=np.int16),
+        "i8": np.array([-128, 0, 127], dtype=np.int8),
+        "u8": np.array([0, 255], dtype=np.uint8),
+        "bool": np.array([True, False, True]),
+        "scalar": np.array(3.5, dtype=np.float32),
+        "empty": np.empty((0, 4), dtype=np.float32),
     }
     path = tmp_path / "dtypes.safetensors"
-    safetensors_torch.save_file(tensors, path, metadata={"format": "pt"})
+    save_file(tensors, path, metadata={"format": "np"})
 
     file = SafetensorsFile(path)
-    expected = safetensors_torch.load_file(path)
+    expected = load_file(path)
     assert set(file.keys()) == set(expected)
-    assert file.metadata == {"format": "pt"}
+    assert file.metadata == {"format": "np"}
     for name, t in expected.items():
-        assert bitwise_equal(file[name], as_numpy(t)), name
+        assert bitwise_equal(file[name], t), name
+        assert bitwise_equal(file[name], tensors[name]), name
 
 
 def test_reader_views_the_mapping_without_copying(toy_path):
@@ -176,21 +179,30 @@ def test_release_is_only_for_views_of_the_mapping(toy_path):
     assert not elsewhere.any()
 
 
-def test_reader_rejects_a_range_that_disagrees_with_the_shape(tmp_path):
-    header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": [0, 12]}}
+@pytest.mark.parametrize(
+    "end, data",
+    [(12, 12), (16, 8), (16, 24)],
+    ids=["range-disagrees-with-shape", "range-past-the-end", "trailing-bytes"],
+)
+def test_reader_rejects_a_malformed_file(tmp_path, end, data):
+    """The header is safetensors' to check: a byte range that is not the
+    shape's, or data that is not exactly the tensors, is refused on open.
+    """
+    header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": [0, end]}}
     blob = json.dumps(header).encode()
     path = tmp_path / "bad.safetensors"
-    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(12))
-    with pytest.raises(ValueError, match="claims bytes"):
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(data))
+    with pytest.raises(SafetensorError):
         SafetensorsFile(path)
 
 
-def test_reader_rejects_a_range_past_the_end(tmp_path):
-    header = {"x": {"dtype": "F32", "shape": [4], "data_offsets": [0, 16]}}
+def test_reader_rejects_an_unsupported_dtype(tmp_path):
+    """One safetensors knows and the reader does not map: complex64."""
+    header = {"x": {"dtype": "C64", "shape": [4], "data_offsets": [0, 32]}}
     blob = json.dumps(header).encode()
-    path = tmp_path / "short.safetensors"
-    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(8))
-    with pytest.raises(ValueError, match="8-byte data section"):
+    path = tmp_path / "c64.safetensors"
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(32))
+    with pytest.raises(ValueError, match="unsupported dtype"):
         SafetensorsFile(path)
 
 
@@ -198,51 +210,35 @@ def test_reader_rejects_a_range_past_the_end(tmp_path):
 # ##########################################################################
 
 
-def test_tree_holds_each_checkpoint_tensor_bitwise(toy_path):
+def test_each_checkpoint_tensor_lands_on_its_field_bitwise(toy_path):
+    """Every tensor is distinct, so a mapping that crosses two same-shaped
+    weights over (k and v, gate and up) is caught.
+    """
     weights = LlamaWeights.load(toy_path)
-    ckpt = safetensors_torch.load_file(toy_path)
+    ckpt = load_file(toy_path)
     assert len(weights.layers) == ToyConfig.n_layers
-    assert bitwise_equal(weights.embedding, as_numpy(ckpt["model.embed_tokens.weight"]))
-    assert bitwise_equal(weights.norm, as_numpy(ckpt["model.norm.weight"]))
-    blk = weights.layers[1]
-    assert bitwise_equal(
-        blk.q, as_numpy(ckpt["model.layers.1.self_attn.q_proj.weight"])
-    )
-    assert bitwise_equal(
-        blk.down, as_numpy(ckpt["model.layers.1.mlp.down_proj.weight"])
-    )
-    assert bitwise_equal(
-        blk.norm2, as_numpy(ckpt["model.layers.1.post_attention_layernorm.weight"])
-    )
+    assert bitwise_equal(weights.embedding, ckpt["model.embed_tokens.weight"])
+    assert bitwise_equal(weights.norm, ckpt["model.norm.weight"])
+    for i, layer in enumerate(weights.layers):
+        for f, (hf, _) in LAYER_NAMES.items():
+            expected = ckpt[f"model.layers.{i}.{hf}"]
+            assert bitwise_equal(getattr(layer, f), expected), (i, f)
 
 
-def test_tree_names_are_the_module_trees(toy_path):
-    """named_parameters() is model.Llama's, name for name and value for value:
-    it replaces Weights(module) as the graphs' names_from.
+def test_tree_names_are_the_graphs(toy_path):
+    """named_parameters() is what ``iron.graph(names_from=...)`` reads: each
+    layer's weights in field order, then the norm and the tied head.
     """
     weights = LlamaWeights.load(toy_path)
-    ckpt = safetensors_torch.load_file(toy_path)
-    torch_tree = model.Llama.from_hf(ToyConfig, ckpt)
-    ours = dict(weights.named_parameters())
-    theirs = dict(torch_tree.named_parameters())
-    assert list(ours) == list(theirs)
-    for name, p in theirs.items():
-        assert bitwise_equal(ours[name], as_numpy(p)), name
-
-
-def test_the_reference_tree_is_built_from_the_tree_bitwise(toy_path):
-    """model.Llama.from_weights, the CPU reference's constructor, holds the
-    tree's values exactly as from_hf holds the checkpoint's.
-    """
-    weights = LlamaWeights.load(toy_path)
-    ckpt = safetensors_torch.load_file(toy_path)
-    ours = dict(model.Llama.from_weights(ToyConfig, weights).named_parameters())
-    theirs = dict(model.Llama.from_hf(ToyConfig, ckpt).named_parameters())
-    assert list(ours) == list(theirs)
-    for name, p in theirs.items():
-        assert ours[name].dtype is torch.bfloat16, name
-        assert bitwise_equal(as_numpy(ours[name]), as_numpy(p)), name
-    assert not any(p.requires_grad for p in ours.values())
+    expected = [
+        f"layers.{i}.{graph}"
+        for i in range(ToyConfig.n_layers)
+        for _, graph in LAYER_NAMES.values()
+    ] + ["norm.weight", "out_head.weight"]
+    assert [name for name, _ in weights.named_parameters()] == expected
+    named = dict(weights.named_parameters())
+    assert named["layers.1.attn.v.weight"] is weights.layers[1].v
+    assert named["out_head.weight"] is weights.embedding
 
 
 def test_tree_arrays_keep_their_identity(toy_path):
@@ -259,16 +255,29 @@ def test_tree_rejects_a_missing_key(tmp_path):
     ckpt = toy_checkpoint()
     del ckpt["model.layers.1.mlp.up_proj.weight"]
     path = tmp_path / "missing.safetensors"
-    safetensors_torch.save_file(ckpt, path)
+    save_file(ckpt, path)
     with pytest.raises(ValueError, match=r"model\.layers\.1\.mlp\.up_proj\.weight"):
+        LlamaWeights.load(path)
+
+
+def test_tree_rejects_a_missing_layer(tmp_path):
+    """Layer 0 gone and layer 1 whole: the tree is still two layers, one
+    of them missing, not one layer renumbered.
+    """
+    ckpt = {
+        k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
+    }
+    path = tmp_path / "gap.safetensors"
+    save_file(ckpt, path)
+    with pytest.raises(ValueError, match=r"model\.layers\.0\.input_layernorm\.weight"):
         LlamaWeights.load(path)
 
 
 def test_tree_rejects_an_untied_head(tmp_path):
     ckpt = toy_checkpoint()
-    ckpt["lm_head.weight"] = ckpt["model.embed_tokens.weight"].clone()
+    ckpt["lm_head.weight"] = ckpt["model.embed_tokens.weight"].copy()
     path = tmp_path / "untied.safetensors"
-    safetensors_torch.save_file(ckpt, path)
+    save_file(ckpt, path)
     with pytest.raises(ValueError, match="lm_head.weight"):
         LlamaWeights.load(path)
 
@@ -276,24 +285,23 @@ def test_tree_rejects_an_untied_head(tmp_path):
 def test_tree_rejects_a_misshapen_layer(tmp_path):
     ckpt = toy_checkpoint()
     good = ckpt["model.layers.1.self_attn.k_proj.weight"]
-    ckpt["model.layers.1.self_attn.k_proj.weight"] = torch.zeros(
-        good.shape[0], good.shape[1] + 1, dtype=torch.bfloat16
+    ckpt["model.layers.1.self_attn.k_proj.weight"] = np.zeros(
+        (good.shape[0], good.shape[1] + 1), dtype=bfloat16
     )
     path = tmp_path / "misshapen.safetensors"
-    safetensors_torch.save_file(ckpt, path)
+    save_file(ckpt, path)
     with pytest.raises(ValueError, match="layer 1 k"):
         LlamaWeights.load(path)
 
 
-def test_embed_is_torch_embedding(toy_path):
+def test_embed_gathers_rows(toy_path):
     weights = LlamaWeights.load(toy_path)
-    ckpt = safetensors_torch.load_file(toy_path)
+    table = load_file(toy_path)["model.embed_tokens.weight"]
     ids = [[0, 31, 7, 7, 12]]
-    expected = torch.nn.functional.embedding(
-        torch.tensor(ids), ckpt["model.embed_tokens.weight"]
-    )
     got = weights.embed(ids)
-    assert bitwise_equal(got, as_numpy(expected))
+    assert got.shape == (1, 5, ToyConfig.emb_dim)
+    for j, token in enumerate(ids[0]):
+        assert bitwise_equal(got[0, j], table[token])
     assert got.flags.writeable  # a copy, not a view of the read-only map
 
 
@@ -301,30 +309,27 @@ def test_embed_is_torch_embedding(toy_path):
 # ##########################################################################
 
 
-def test_rope_is_nearer_exact_than_torch_and_agrees_in_bf16():
-    """Not bitwise: torch's pow/cos/sin are not correctly rounded, ours are.
-
-    Against the formula evaluated in float64 throughout, ours is the nearer
-    table, at the worst entry and on average. Over the 2048 positions a
-    prompt can reach, the bf16 tables the device reads differ in 0.28% of
-    entries (365), by at most 2**-8 -- one bf16 step at magnitude 1.
+def test_rope_is_the_formula_rounded_once():
+    """Each entry is cos or sin, in float64, of the float32 frequency times
+    the float32 position, rounded once; and within float32 rounding of the
+    formula evaluated in float64 throughout.
     """
     D, L, base = 64, 2048, 500000.0
-    ours = rope_angles(D, L, base)
-    theirs = model.rope_angles(D, L, base).numpy()
-    assert ours.dtype == np.float32 and ours.shape == (L, D)
+    angles = rope_angles(D, L, base)
+    assert angles.dtype == np.float32 and angles.shape == (L, D)
 
-    freqs = np.outer(np.arange(L), 1.0 / base ** (np.arange(0, D, 2) / D))
+    exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)
+    inv_freq = (1.0 / base ** exponents.astype(np.float64)).astype(np.float32)
+    freqs = np.outer(np.arange(L, dtype=np.float32), inv_freq).astype(np.float64)
+    assert np.array_equal(angles[:, ::2], np.cos(freqs).astype(np.float32))
+    assert np.array_equal(angles[:, 1::2], np.sin(freqs).astype(np.float32))
+
+    exact_freqs = np.outer(np.arange(L), 1.0 / base ** (np.arange(0, D, 2) / D))
     exact = np.empty((L, D))
-    exact[:, ::2], exact[:, 1::2] = np.cos(freqs), np.sin(freqs)
-    ours_err, theirs_err = np.abs(ours - exact), np.abs(theirs - exact)
-    assert ours_err.max() < theirs_err.max()
-    assert ours_err.mean() < theirs_err.mean()
-
-    a = ours.astype(bfloat16).astype(np.float32)
-    b = theirs.astype(bfloat16).astype(np.float32)
-    assert np.abs(a - b).max() <= 2.0**-8
-    assert np.count_nonzero(a != b) / a.size < 0.005
+    exact[:, ::2], exact[:, 1::2] = np.cos(exact_freqs), np.sin(exact_freqs)
+    # float32 frequencies at position 2047 are off by up to 2047 ulps of the
+    # frequency: about 2e-4 at the fastest one.
+    assert np.abs(angles - exact).max() < 5e-4
 
 
 def test_rope_is_correctly_rounded_at_position_zero_and_one():
@@ -339,14 +344,6 @@ def test_rope_is_correctly_rounded_at_position_zero_and_one():
     assert np.array_equal(
         angles[1, ::2], np.cos(inv.astype(np.float64)).astype(np.float32)
     )
-
-
-LLAMA_3_2 = Llama3RopeScaling(
-    factor=32.0,
-    low_freq_factor=1.0,
-    high_freq_factor=4.0,
-    original_max_position_embeddings=8192,
-)
 
 
 def _published_llama3_scaling(freqs, factor, low, high, original):
@@ -448,23 +445,6 @@ def test_top_k_keeps_ties_with_the_kth():
     assert np.all(probs[:4] > 0) and probs[4] == 0
 
 
-def test_probabilities_are_the_harness_pipeline():
-    """Temperature, top-k and softmax as the torch pipeline Sampler replaced
-    computed them, here in float32 on both sides. bf16 logits tie often, so more than k
-    survive: both sides keep every tie with the k-th.
-    """
-    logits = random_logits(128256, seed=4)
-    sampler = Sampler(0.7, 50, np.random.default_rng(0))
-    t = torch.from_numpy(logits.astype(np.float32)) / 0.7
-    kth = torch.topk(t, 50).values[-1]
-    t = torch.where(t < kth, torch.tensor(float("-inf")), t)
-    expected = torch.softmax(t, dim=-1).double().numpy()
-    got = sampler.probabilities(logits)
-    assert np.array_equal(got > 0, expected > 0)
-    assert np.count_nonzero(got) >= 50
-    np.testing.assert_allclose(got, expected, rtol=1e-6, atol=0)
-
-
 def test_draws_follow_the_distribution():
     logits = np.log(np.array([0.5, 0.3, 0.2], dtype=np.float32))
     sampler = Sampler(1.0, None, np.random.default_rng(5))
@@ -496,14 +476,15 @@ class RealConfig:
 @requires_checkpoint
 def test_real_checkpoint_every_tensor_bitwise():
     file = SafetensorsFile(real_checkpoint)
-    expected = safetensors_torch.load_file(real_checkpoint)
+    expected = load_file(real_checkpoint)
     assert set(file.keys()) == set(expected)
     for name, t in expected.items():
-        assert bitwise_equal(file[name], as_numpy(t)), name
+        assert bitwise_equal(file[name], t), name
 
 
 @requires_checkpoint
 def test_real_checkpoint_tree():
+    """The real key spelling fills every field, and nothing is left over."""
     weights = LlamaWeights.load(real_checkpoint)
     c = RealConfig
     head, kv = c.n_heads * c.head_dim, c.n_kv_groups * c.head_dim
@@ -518,16 +499,20 @@ def test_real_checkpoint_tree():
         assert layer.o.shape == (c.emb_dim, head)
         assert layer.gate.shape == layer.up.shape == (c.hidden_dim, c.emb_dim)
         assert layer.down.shape == (c.emb_dim, c.hidden_dim)
-    expected_names = set(
-        model.translate_hf(safetensors_torch.load_file(real_checkpoint), c.n_layers)
-    )
-    assert {n for n, _ in weights.named_parameters()} == expected_names
+    expected = {"model.embed_tokens.weight", "model.norm.weight"} | {
+        f"model.layers.{i}.{hf}"
+        for i in range(c.n_layers)
+        for hf, _ in LAYER_NAMES.values()
+    }
+    assert set(SafetensorsFile(real_checkpoint).keys()) == expected
 
 
 @requires_checkpoint
 def test_real_checkpoint_embedding():
     weights = LlamaWeights.load(real_checkpoint)
-    table = safetensors_torch.load_file(real_checkpoint)["model.embed_tokens.weight"]
-    ids = [[128000, 791, 6864, 315, 9822, 374, 220, 128255, 0]]
-    expected = torch.nn.functional.embedding(torch.tensor(ids), table)
-    assert bitwise_equal(weights.embed(ids), as_numpy(expected))
+    file = SafetensorsFile(real_checkpoint)
+    table = file["model.embed_tokens.weight"]
+    ids = [128000, 791, 6864, 315, 9822, 374, 220, 128255, 0]
+    got = weights.embed([ids])
+    for j, token in enumerate(ids):
+        assert bitwise_equal(got[0, j], table[token])

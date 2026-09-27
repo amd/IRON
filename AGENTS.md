@@ -422,7 +422,7 @@ The knobs a graph's operators run with can be a `Profile` rather than
 keywords at every call: entries keyed by operator class and shape, given to
 `iron.graph(profile=...)` (or applied in a `with profile:` scope). A call
 that leaves a knob open takes the most specific entry's value; a call that
-gives one keeps it. `iron/applications/llama_3_2_1b/graphs.py::profile` is
+gives one keeps it. `iron/applications/llama_3_2_1b/npu.py::profile` is
 the worked example, and `test_llama_names_only_the_knobs_that_matter`
 checks that each keyword the graph still passes is one the profile could
 not have given.
@@ -434,7 +434,7 @@ fused ELF on NPU2, per-step xclbins with `boundaries=iron.each_step`) and
 `verbose=True` prints why. It links the image (`net.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/applications/llama_3_2_1b/graphs.py` is the worked example;
+`iron/applications/llama_3_2_1b/npu.py` is the worked example;
 `iron/tests/common/graph.py` traces it device-free and
 `iron/tests/toolchain/` builds it.
 

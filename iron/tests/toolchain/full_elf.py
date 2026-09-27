@@ -90,7 +90,7 @@ def _assert_values_in_table(traced, artifacts):
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()
@@ -107,7 +107,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     sequence grows with its DMA tasks (about 1,800 per layer against decode's
     430), past this gate's memory at the full depth.
     """
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Llama1B
 
     cfg = Llama1B(n_layers=1)
@@ -118,7 +118,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
 
 def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
-    from iron.applications.llama_3_2_1b.graphs import LlamaGraph
+    from iron.applications.llama_3_2_1b.npu import LlamaGraph
     from iron.tests.common.llama_model import Config as _Config
 
     cfg = _Config()

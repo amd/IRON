@@ -5,5 +5,3 @@ tiktoken
 safetensors
 blobfile
 packaging
-torchtune==0.6.1
-torchao==0.13.0

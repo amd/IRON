@@ -3,18 +3,25 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Inference harness -- all the necessary code _other_ than the actual model (forward pass).
+"""Running Llama 3.2: the config, the tokenizer, sampling, the generation
+loop, the accuracy and determinism checks, and the command line.
+
 ``init`` maps the weights, loads the tokenizer, builds the RoPE table and
 tokenizes the prompt; ``generate`` runs the generation loop, calling the
 given ``forward_pass(config, state)`` for the prompt and then per token, and
-decodes and prints each token.
+draws (:class:`Sampler`), decodes and prints each token.
+:func:`check_accuracy` scores a forward pass against the float32 CPU
+reference (:class:`.cpu.Reference`), :func:`check_determinism` against
+itself.
 
 A forward pass takes the token ids as an ``int64`` array ``(1, n)`` and
-returns the logits as an array ``(1, 1, vocab_size)``: numpy throughout, so
-nothing here needs torch. Only the CPU reference does (:mod:`.reference`).
+returns the logits as an array ``(1, 1, vocab_size)``: numpy throughout.
+
+Run it with ``python -m iron.applications.llama_3_2_1b.runner``.
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -23,8 +30,11 @@ import numpy as np
 import tiktoken
 import tiktoken.load
 
-from .sampling import Sampler
-from .weights import Llama3RopeScaling, LlamaWeights, rope_angles
+from iron.operators.rope.op import LLAMA_3_2, rope_angles
+
+from .cpu import Reference
+from .npu import MAX_SEQ_LEN, AIELlama
+from .weights import LlamaWeights
 
 #: Seeds the sampler, so a run's text is reproducible.
 SEED = 1608560892
@@ -46,12 +56,7 @@ class LlamaConfig:
 
         # RoPE
         self.rope_base = 500000.0
-        self.rope_scaling = Llama3RopeScaling(
-            factor=32.0,
-            low_freq_factor=1.0,
-            high_freq_factor=4.0,
-            original_max_position_embeddings=8192,
-        )
+        self.rope_scaling = LLAMA_3_2
         self.context_length = 131072
 
         # Generation
@@ -88,28 +93,23 @@ class LlamaConfig:
         )
 
     def _check_weights(self):
-        layer = self.weights.layers[0]
-        found = {
-            "n_layers": len(self.weights.layers),
-            "vocab_size": self.weights.vocab_size,
-            "emb_dim": self.weights.emb_dim,
-            "n_heads * head_dim": layer.q.shape[0],
-            "n_kv_groups * head_dim": layer.k.shape[0],
-            "hidden_dim": layer.gate.shape[0],
-        }
+        found = self.weights.dims
         expected = {
             "n_layers": self.n_layers,
-            "vocab_size": self.vocab_size,
-            "emb_dim": self.emb_dim,
-            "n_heads * head_dim": self.n_heads * self.head_dim,
-            "n_kv_groups * head_dim": self.n_kv_groups * self.head_dim,
-            "hidden_dim": self.hidden_dim,
+            "vocab": self.vocab_size,
+            "emb": self.emb_dim,
+            "q": self.n_heads * self.head_dim,
+            "kv": self.n_kv_groups * self.head_dim,
+            "hidden": self.hidden_dim,
         }
-        wrong = {k: (found[k], v) for k, v in expected.items() if found[k] != v}
+        wrong = [
+            f"{k} is {found[k]}, expected {v}"
+            for k, v in expected.items()
+            if found[k] != v
+        ]
         if wrong:
             raise ValueError(
-                "checkpoint disagrees with the config: "
-                + ", ".join(f"{k} is {f}, expected {e}" for k, (f, e) in wrong.items())
+                f"checkpoint disagrees with the config: {', '.join(wrong)}"
             )
 
 
@@ -144,6 +144,59 @@ def get_tokenizer(tokenizer_path, special_tokens):
     )
 
 
+# Sampling
+# ##########################################################################
+
+
+class Sampler:
+    """Temperature, then top-k, then a draw from the softmax.
+
+    Logits are divided by the temperature, every logit below the
+    ``top_k``-th largest is dropped (ties with it are kept), and a token is
+    drawn from the softmax of what is left. The arithmetic is float32 over
+    the (bf16) logits and the draw float64; a temperature of 0 is greedy
+    (the argmax). The draw comes from ``rng``, so a seeded generator makes
+    it reproducible.
+    """
+
+    def __init__(
+        self,
+        temperature: float,
+        top_k: int | None,
+        rng: np.random.Generator,
+    ):
+        if temperature < 0:
+            raise ValueError(f"temperature {temperature} is negative")
+        if top_k is not None and top_k < 1:
+            raise ValueError(f"top_k {top_k} keeps no token")
+        self.temperature = temperature
+        self.top_k = top_k
+        self.rng = rng
+
+    def probabilities(self, logits: np.ndarray) -> np.ndarray:
+        """The distribution a token is drawn from, float64, over ``logits`` (1-D)."""
+        x = np.asarray(logits, dtype=np.float32).reshape(-1)
+        x = x / np.float32(self.temperature)
+        if self.top_k is not None and self.top_k < x.size:
+            kth = np.partition(x, -self.top_k)[-self.top_k]
+            x = np.where(x < kth, -np.inf, x)
+        e = np.exp((x - x.max()).astype(np.float64))
+        return e / e.sum()
+
+    def __call__(self, logits: np.ndarray) -> int:
+        """One token id drawn from a row of logits (any shape of one row)."""
+        if self.temperature == 0:
+            return int(np.argmax(np.asarray(logits, dtype=np.float32).reshape(-1)))
+        probs = self.probabilities(logits)
+        cdf = np.cumsum(probs)
+        # The first token whose cumulative mass exceeds the draw; a zero-mass
+        # token never exceeds its predecessor, so it is never picked.
+        token = int(np.searchsorted(cdf, self.rng.random() * cdf[-1], side="right"))
+        # A draw just under 1 can round up to the total, past every token;
+        # it belongs to the last one with any mass.
+        return token if token < cdf.size else int(np.flatnonzero(probs)[-1])
+
+
 # Generation loop
 # ##########################################################################
 
@@ -160,32 +213,32 @@ def _log_softmax(logits):
     return x - np.log(np.exp(x).sum())
 
 
-def check_accuracy(
-    config, state, forward_pass, ref_config, ref_state, ref_forward_pass, num_tokens
-):
-    """Teacher-forced comparison of forward_pass's logits against a reference.
+def check_accuracy(config, state, forward_pass, num_tokens):
+    """Teacher-forced comparison of forward_pass's logits against the float32
+    reference (:class:`.cpu.Reference`) on the same weights and RoPE table.
 
-    Both models are fed the reference's greedy token at every step, so a
-    divergence at step N is the candidate's own error at step N rather than the
-    consequence of an earlier different choice. Step 0 is prefill.
+    Both are fed the reference's greedy token at every step, so a divergence
+    at step N is the candidate's own error at step N rather than the
+    consequence of an earlier different choice. Step 0 is prefill; the
+    reference, which keeps no cache, runs the whole history each step.
 
     Returns one (kl, top1) pair per step: KL(reference || candidate) of the
     next-token distributions, and whether both rank the same token first.
     """
-    ref_state.token_ids = state.token_ids
+    reference = Reference(config)
+    history = np.asarray(state.token_ids, dtype=np.int64).reshape(-1)
     results = []
     for step in range(num_tokens):
         logits, state = forward_pass(config, state)
-        ref_logits, ref_state = ref_forward_pass(ref_config, ref_state)
         cand = _log_softmax(logits[0, -1])
-        ref = _log_softmax(ref_logits[0, -1])
+        ref = _log_softmax(reference(history))
         kl = float(np.sum(np.exp(ref) * (ref - cand)))
         next_token = int(ref.argmax())
         top1 = int(cand.argmax()) == next_token
         results.append((kl, top1))
         print(f"step {step:3d}  KL {kl:.5f}  top-1 {'match' if top1 else 'MISMATCH'}")
         state.token_ids = np.array([[next_token]], dtype=np.int64)
-        ref_state.token_ids = state.token_ids
+        history = np.append(history, next_token)
     return results
 
 
@@ -312,3 +365,72 @@ def generate(config, state, forward_pass, num_tokens=100, seed=SEED):
     sys.stderr.write(
         f"[Total]   Tokens per second:     {n_tokens_generated / (t_prefill + t_decode):7.3f}\n"
     )
+
+
+# Main
+# ##########################################################################
+
+
+def setup(args):
+    """The config, the prompt's state and the compiled model, from the arguments."""
+    prompt = get_prompt(args.prompt_len)
+    config, state = init(args.weights_path, args.tokenizer_path, prompt=prompt)
+    # --prompt-len counts characters; the rows are tokens, known only now.
+    n_prompt = state.token_ids.shape[1]
+    if n_prompt + args.num_tokens > MAX_SEQ_LEN:
+        raise ValueError(
+            f"a {n_prompt}-token prompt and {args.num_tokens} generated tokens "
+            f"exceed the model's {MAX_SEQ_LEN} rows"
+        )
+    return config, state, prompt, AIELlama.compile(config)
+
+
+def main():
+    logging.basicConfig(level=logging.DEBUG)
+    parser = argument_parser()
+    parser.add_argument(
+        "--check-determinism",
+        type=int,
+        metavar="ROUNDS",
+        help="Instead of sampling, run two prompts ROUNDS times each, alternating, "
+        "and count the runs whose logits differ bitwise from the first run",
+    )
+    parser.add_argument(
+        "--check-accuracy",
+        action="store_true",
+        help="Instead of sampling, compare each step's logits against an fp32 CPU "
+        "reference, feeding both the reference's greedy token",
+    )
+    args = parser.parse_args()
+    config, state, prompt, npu = setup(args)
+
+    if args.check_accuracy:
+        results = check_accuracy(config, state, npu.forward, args.num_tokens)
+        # Over every step, prefill and decode alike: one step's KL depends as
+        # much on how confident the reference is at that position as on the NPU.
+        kl = np.array([k for k, _ in results])
+        print(f"[Accuracy] Mean KL: {kl.mean():.6f}")
+        print(f"[Accuracy] P90 KL: {np.percentile(kl, 90):.6f}")
+        print(f"[Accuracy] Max KL: {kl.max():.6f} (step {kl.argmax()})")
+        print(f"[Accuracy] Top-1 mismatches: {sum(not t for _, t in results)}")
+        return
+
+    if args.check_determinism:
+        # The second prompt is the same amount of the text that follows.
+        other = get_prompt(2 * args.prompt_len)[args.prompt_len :]
+        other_ids = [config.special_tokens["<|begin_of_text|>"]]
+        other_ids += config.tokenizer.encode(other)
+        prompts = [state.token_ids, np.array([other_ids], dtype=np.int64)]
+        n_differ = check_determinism(
+            config, prompts, npu.forward, args.num_tokens, args.check_determinism
+        )
+        n_compared = len(prompts) * (args.check_determinism - 1)
+        print(f"[Determinism] Differing runs: {n_differ}/{n_compared}")
+        return
+
+    print(prompt, end="", flush=True)
+    generate(config, state, npu.forward, num_tokens=args.num_tokens)
+
+
+if __name__ == "__main__":
+    main()
