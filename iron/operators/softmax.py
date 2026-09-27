@@ -11,43 +11,8 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import activation
 from aie.utils.verify import Tolerance
 
-from iron.common import (
-    Extent,
-    In,
-    Incompatible,
-    Operator,
-    Out,
-    Value,
-    auto,
-    param,
-)
-from iron.common.testing import Case, Testing, device_columns
-
-
-def _columns_channels(total_cores):
-    """The (columns, channels) split for a core count: 2x2 from four cores up
-    (a 4x4 has placement issues on Phoenix), 1x2 for two, 1x1 for one.
-    """
-    return {1: (1, 1), 2: (1, 2)}.get(total_cores, (2, 2))
-
-
-def _cases(cls):
-    out = []
-    for size, cols in [(32768, 1024), (32768, 512), (32768, 2048)]:
-        columns, channels = _columns_channels(size // cols)
-        if columns > device_columns():
-            continue
-        out.append(
-            Case(
-                dict(
-                    rows=size // cols,
-                    cols=cols,
-                    num_aie_columns=columns,
-                    num_channels=channels,
-                )
-            )
-        )
-    return out
+from iron.common import Extent, In, Incompatible, Operator, Out, Value, auto, param
+from iron.common.testing import Testing
 
 
 class Softmax(Operator):
@@ -56,11 +21,18 @@ class Softmax(Operator):
 
     Each row is masked to ``vector_size`` valid elements before the softmax:
     the whole row, unless a graph binds a per-call value to it (``Softmax(x,
-    vector_size=n)``, llama's decode mask), which the core then reads per
-    call.
+    vector_size=n)``, attention over a context that grows each call), which
+    the core then reads per call.
     """
 
-    test = Testing(_cases)
+    # Four cores, two columns of two: the fewest that exercise both splits.
+    test = Testing(
+        [
+            dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2),
+            dict(rows=64, cols=512, num_aie_columns=2, num_channels=2),
+            dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2),
+        ]
+    )
 
     rows: int = param()
     cols: int = param()
@@ -103,18 +75,13 @@ class Softmax(Operator):
                 f"rows ({self.rows}) must be a multiple of the {self.cores} cores"
             )
 
-    def _kernels(self, tile_ty):
-        softmax_k = activation.softmax(self.cols)
-        # mask_bf16 is exported by the same softmax.cc translation unit.
-        mask_k = softmax_k.object_file.bind("mask_bf16", [tile_ty, np.int32, np.int32])
-        return softmax_k, mask_k
-
     def array(self, target) -> list:
-
         tile_ty = self.x.tile
         cols, chans = self.num_aie_columns, self.num_channels
         n_cores = cols * chans
-        softmax_k, mask_k = self._kernels(tile_ty)
+        softmax_k = activation.softmax(self.cols)
+        # mask_bf16 is exported by the same softmax.cc translation unit.
+        mask_k = softmax_k.object_file.bind("mask_bf16", [tile_ty, np.int32, np.int32])
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
             for i in range(cols)
