@@ -5,7 +5,9 @@ import dataclasses
 import math
 from typing import Any, ClassVar
 
+import aie.dialects.index as index
 import numpy as np
+from aie.dialects.aie import T
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, linalg
@@ -27,8 +29,6 @@ from iron.common import (
 from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
 from iron.common.tiling import Access, bank_elements, granule_elements, limits
-
-_I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
 
 
 def _cases():
@@ -253,9 +253,6 @@ class GEMV(Operator):
         return f"{base}_epi{self.epilogue}"
 
     def array(self, target):
-        import aie.dialects.index as index
-        from aie.dialects.aie import T
-
         K, cols = self.K, self.num_aie_columns
         tile_size_input, tile_size_output = self.tile_size_input, self.tile_size_output
 
@@ -306,7 +303,10 @@ class GEMV(Operator):
         tiles = (
             [self.tiles.param] * cols
             if dynamic
-            else [target.rtp(_I32, name=f"tiles_{i}") for i in range(cols)]
+            else [
+                target.rtp(np.ndarray[(1,), np.dtype[np.int32]], name=f"tiles_{i}")
+                for i in range(cols)
+            ]
         )
         barriers = [target.barrier() for _ in range(cols)]
 
