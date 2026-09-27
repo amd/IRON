@@ -31,7 +31,6 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
-from iron.common.device import bound_device
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -122,9 +121,7 @@ class Llama3_2_1b(iron.Graph):
         # Every head sees its group's keys and values.
         k_all = Repeat(self.keys[i], repeat=H // G)
         v_all = Repeat(self.values[i], repeat=H // G)
-        # One row of scores per column; its size is the FFN's when H * L == F.
-        tile = self.config.max_seq_len // _columns()
-        scores = ElementwiseMul(GEMV(k_all, q), self.scale, tile_size=tile)
+        scores = ElementwiseMul(GEMV(k_all, q), self.scale)
         # Masked from the context length on: the cache's unwritten tail
         # contributes nothing.
         weights = Softmax(scores, vector_size=vector_size)
@@ -216,8 +213,3 @@ def project(x, weight):
     if len(x.shape) == 2 and x.shape[0] > 1:
         return GEMM(x, weight, b_col_maj=True)
     return GEMV(weight, x)
-
-
-def _columns() -> int:
-    """The bound device's width: eight on NPU2, four on NPU1."""
-    return bound_device().cols
