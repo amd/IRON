@@ -37,7 +37,7 @@ from iron.operators.gemm.op import GEMM
 from iron.operators.gemv.op import GEMV
 from iron.operators.mha.op import MHA
 from iron.operators.repeat import Repeat
-from iron.operators.rope.op import Llama3RopeScaling, rope_angles
+from iron.operators.rope import Llama3RopeScaling, rope_angles
 from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
 

@@ -29,7 +29,7 @@ def test_exported_operator_is_declared(name):
 
 
 def test_flm_declares_one_operator_and_its_shipped_form():
-    module = importlib.import_module("iron.exports.flm")
+    module = importlib.import_module("iron.operators.flm")
     cls, shipped = module.GEMM, module.Shipped
     assert issubclass(cls, Operator)
     assert issubclass(shipped, cls) and shipped._external is not None

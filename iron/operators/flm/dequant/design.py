@@ -8,16 +8,16 @@ See README.md for the layout this describes.
 
 # flm.GEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
-from iron.exports.flm.gemm.design import (
+from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     CT_MAX_K_FOR_N,
     S,
     T,
 )
-from iron.exports.flm.gemm.design import (
+from iron.operators.flm.gemm.design import (
     K_TILE as K_TILE_B,
 )
-from iron.exports.flm.gemm.design import (
+from iron.operators.flm.gemm.design import (
     N_TILE_DEFAULT as N_TILE,
 )
 

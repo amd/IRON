@@ -6,6 +6,9 @@
 Operators are re-exported lazily (PEP 562):
 
     from iron.operators import GEMM  # imports iron.operators.gemm.op, nothing else
+
+The FastFlowLM ports, and the binary they are measured against, are
+:mod:`.flm`'s, a catalog of their own: its GEMM is not this one.
 """
 
 import importlib
@@ -29,7 +32,7 @@ _OPERATOR_MODULES = {
     "RMSNorm": "rms_norm",
     "WeightedRMSNorm": "rms_norm",
     "Repeat": "repeat",
-    "RoPE": "rope.op",
+    "RoPE": "rope",
     "Sigmoid": "sigmoid",
     "SiLU": "silu",
     "Softmax": "softmax",

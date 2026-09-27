@@ -1,6 +1,6 @@
 {
-  // After mlir-aie's pyrightconfig.json: the whole package, library, operators,
-  // exports, applications and tests alike; ruff.toml's "include" mirrors it.
+  // After mlir-aie's pyrightconfig.json: the whole package, library,
+  // operators, applications and tests alike; ruff.toml's "include" mirrors it.
   "include": [
     "iron"
   ],

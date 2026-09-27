@@ -54,7 +54,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     ids=["base", "n10240", "tn128"],
 )
 def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
-    import iron.exports.flm.gemm.op as flm
+    import iron.operators.flm.gemm.op as flm
 
     op = flm.GEMM(M=M, K=K, N=N)
     (tmp_path / "shape").mkdir()
@@ -75,7 +75,7 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
 
 
 def _shipped(**kwargs):
-    from iron.exports.flm.gemm.shipped import Shipped
+    from iron.operators.flm.gemm.shipped import Shipped
 
     return Shipped(**kwargs)
 

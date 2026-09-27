@@ -19,7 +19,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv.op import GEMV
 from iron.operators.rms_norm import RMSNorm
-from iron.operators.rope.op import RoPE
+from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 

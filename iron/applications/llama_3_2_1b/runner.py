@@ -12,7 +12,7 @@ import tiktoken.load
 
 from iron.applications import common
 from iron.applications.common import Config, Layout
-from iron.operators.rope.op import LLAMA_3_2
+from iron.operators.rope import LLAMA_3_2
 
 from .cpu import Reference
 from .npu import Llama

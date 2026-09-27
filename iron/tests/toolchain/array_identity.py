@@ -39,7 +39,7 @@ PAIRS = [
         ("size", 2048),
     ),
     ("softmax", "Softmax", dict(cols=64, num_aie_columns=2), ("rows", 16)),
-    ("rope.op", "RoPE", dict(cols=64, num_aie_columns=2), ("rows", 16)),
+    ("rope", "RoPE", dict(cols=64, num_aie_columns=2), ("rows", 16)),
     (
         "gemv.op",
         "GEMV",

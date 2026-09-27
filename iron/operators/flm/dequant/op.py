@@ -22,7 +22,7 @@ from iron.common.device import bound_device, device_name
 from iron.common.image.artifacts import Artifacts, Design, Step
 from iron.common.image.jit_compile import cache_entry, insts_design, xclbin_design
 from iron.common.tiling import Access
-from iron.exports.flm.dequant.design import (
+from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
     BLOCK_BYTES,
     CORE_BLOCKS,
@@ -351,6 +351,6 @@ class DequantBFP(Operator):
 
     def reference(self, qw):
         """CPU reference, bit-exact against the device."""
-        from iron.exports.flm.dequant.reference import reference
+        from iron.operators.flm.dequant.reference import reference
 
         return reference(qw, self.K, self.N)

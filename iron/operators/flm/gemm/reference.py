@@ -3,7 +3,7 @@
 
 import numpy as np
 
-from iron.exports.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.design import Epilogue
 
 
 def _sigmoid(x):

@@ -127,7 +127,7 @@ CASES = [
         [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
     ),
     (
-        "rope.op",
+        "rope",
         "RoPE",
         [
             dict(rows=16, cols=64),

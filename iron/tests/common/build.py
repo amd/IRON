@@ -340,14 +340,14 @@ class _TargetModel:
 
 @pytest.fixture
 def flm(monkeypatch):
-    import iron.exports.flm.gemm.op as flm
+    import iron.operators.flm.gemm.op as flm
 
     monkeypatch.setattr(flm, "AIEArch", _Arch)
     monkeypatch.setattr(flm, "get_target_model", lambda dev: _TargetModel())
     import iron.common.device as device
 
     monkeypatch.setattr(device.aie_utils, "ensure_current_device", lambda: _NPU2())
-    import iron.exports.flm.gemm.design as design
+    import iron.operators.flm.gemm.design as design
 
     monkeypatch.setattr(design, "get_target_model", lambda dev: _TargetModel())
     monkeypatch.setattr(Access, "tap", lambda self: self)
@@ -482,7 +482,7 @@ class _ForeignRecorder:
 
 def test_a_shipped_image_declares_its_pins_and_parameter_block():
     from iron.common import DeclarationError, Value, Xclbin
-    from iron.exports.flm.gemm.shipped import Shipped
+    from iron.operators.flm.gemm.shipped import Shipped
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
@@ -524,7 +524,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
     from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
-    from iron.exports.flm.gemm.shipped import Shipped
+    from iron.operators.flm.gemm.shipped import Shipped
 
     op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's values are hidden; the image's block is laid out from the
@@ -680,7 +680,7 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles(npu2):
     from aie.iron.device import from_name
 
     from iron.common.design.runtime import bounded_transfers
-    from iron.operators.rope.op import RoPE
+    from iron.operators.rope import RoPE
 
     heads, positions, cols = 4, 16, 64
     op = RoPE(

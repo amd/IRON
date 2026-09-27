@@ -3,7 +3,7 @@
 
 """FastFlowLM's shipped ``mm`` binary, as a second form of :class:`flm.GEMM`.
 
-The port (:class:`iron.exports.flm.gemm.op.GEMM`) is built from source;
+The port (:class:`iron.operators.flm.gemm.op.GEMM`) is built from source;
 this is the binary it was ported from, downloaded and pinned by digest, and
 driven by the same declaration::
 
@@ -37,8 +37,8 @@ from ml_dtypes import bfloat16
 
 from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, select
 from iron.common.tiling import Access
-from iron.exports.flm.gemm.design import K_TILE, M_TILE, Epilogue
-from iron.exports.flm.gemm.op import GEMM, _device_name
+from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
+from iron.operators.flm.gemm.op import GEMM, _device_name
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
 # a branch, so the digest below stays valid.

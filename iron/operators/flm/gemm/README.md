@@ -3,11 +3,11 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `iron.exports.flm.GEMM` — bf16 GEMM with a fused epilogue
+# `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
-from iron.exports.flm import GEMM
-from iron.exports.flm.gemm.design import Epilogue
+from iron.operators.flm import GEMM
+from iron.operators.flm.gemm.design import Epilogue
 
 op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU, context=ctx)
 op.compile()
@@ -183,7 +183,7 @@ op.get_callable()(A, op.pack_B(B), C_out)
 read it, so each fill is one contiguous run. On NPU2 it also quantizes to
 bfp16ebs8 and returns a flat `uint8` tensor rather than bf16; on NPU1 it stays
 bf16. The layout itself lives in
-[`iron/exports/flm/packing.py`](../packing.py).
+[`iron/operators/flm/packing.py`](../packing.py).
 
 Call it on the operator — `op.pack_B(B)` — not on the class: the layout depends
 on the resolved `tile_n` and on the device.
@@ -322,7 +322,7 @@ Three choices account for most of the gap, and none of them helps alone:
 Storing B in bfp16 is numerically free: the NPU2 mmul only multiplies bfp16, so
 quantizing on the host hoists a rounding that already happened on every mac
 call. It does have to reproduce the core's rounding *mode* to be free — see
-`iron/exports/flm/packing.py`.
+`iron/operators/flm/packing.py`.
 
 > **Measuring this.** Dispatch latency on this part is *bimodal*, with modes
 > about 6% apart, and both show up for every configuration. A batch that lands
@@ -485,7 +485,7 @@ fork the xclbin.
 ## The shipped overlay
 
 ```python
-from iron.exports.flm import GEMM, Shipped
+from iron.operators.flm import GEMM, Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, epilogue="silu", context=ctx)
 op.compile()

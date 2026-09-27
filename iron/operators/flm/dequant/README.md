@@ -3,13 +3,13 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `iron.exports.flm.DequantBFP`
+# `iron.operators.flm.DequantBFP`
 
 Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.GEMM`](../gemm) reads
 as B, on the device.
 
 ```python
-from iron.exports.flm import DequantBFP
+from iron.operators.flm import DequantBFP
 
 op = DequantBFP(K=2048, N=2048, context=ctx)
 op.compile()

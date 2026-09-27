@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""reference() must match the device's angle convention: rope/op.py's array
+"""reference() must match the device's angle convention: rope.py's array
 acquires one angle row and applies it to `rows // angle_rows` consecutive input
 rows before moving to the next, so row r uses angle row
 `r // (rows // angle_rows)`.
@@ -16,7 +16,7 @@ the regime the application's prefill RoPE shape sits in
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.operators.rope.op import reference
+from iron.operators.rope import reference
 
 
 def _block_major_expected(x, angles, rows, angle_rows):

@@ -13,7 +13,7 @@ validated against.
 import numpy as np
 import pytest
 
-from iron.exports.flm.dequant.design import (
+from iron.operators.flm.dequant.design import (
     CORE_JOIN_OFFSETS,
     CT_K,
     DRAIN_DIMS,
@@ -26,7 +26,7 @@ from iron.exports.flm.dequant.design import (
     S,
     T,
 )
-from iron.exports.flm.packing import f32_to_bfp16ebs8, pack_b
+from iron.operators.flm.packing import f32_to_bfp16ebs8, pack_b
 
 # Every distinct (K in-features, N out-features) Gemma4 E2B needs, from
 # hidden_size 1536, intermediate_size 6144, DQ/DK/DV 4096/512/512 and the SWA

@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.exports.flm.DequantBFP`, bit-exact against
+"""CPU reference for :class:`iron.operators.flm.DequantBFP`, bit-exact against
 the device. See the operator's README.md for the layout and the rounding.
 """
 
 import numpy as np
 
-from iron.exports.flm.dequant.design import (
+from iron.operators.flm.dequant.design import (
     CT_K,
     GROUP,
     K_TILE,
@@ -18,7 +18,7 @@ from iron.exports.flm.dequant.design import (
     T,
     qw_bytes_for,
 )
-from iron.exports.flm.packing import pack_b
+from iron.operators.flm.packing import pack_b
 
 BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
 # Out-features one run of code bytes spans.

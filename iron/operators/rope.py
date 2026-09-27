@@ -1,6 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""RoPE, rotary position embedding, over the mlir-aie ``datamovement.rope``
+kernel, with its angle table (:func:`rope_angles`) and Llama 3's frequency
+scaling (:data:`LLAMA_3_2`).
+
+The kernel rotates in one of two conventions, ``method_type``: the two
+halves of each row (0, the default) or interleaved pairs (1). Hugging
+Face's ``transformers`` uses the halves and Meta's own repository the
+pairs; Llama weights converted to Hugging Face have some layers re-permuted
+for the halves, so with those weights it must be the halves
+(huggingface/transformers#25199).
+"""
 
 import dataclasses
 

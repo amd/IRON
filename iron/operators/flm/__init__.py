@@ -5,7 +5,7 @@
 
 Operators are re-exported lazily (PEP 562):
 
-    from iron.exports.flm import GEMM, Shipped  # imports iron.exports.flm.gemm.*
+    from iron.operators.flm import GEMM, Shipped  # imports iron.operators.flm.gemm.*
 """
 
 import importlib
