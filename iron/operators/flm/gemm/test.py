@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import from_name
+from aie.utils.verify import Tolerance
 
 from iron.common.design.build import build_design
 from iron.common.device import device_name
@@ -166,8 +167,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
         operator,
         {"A": A.flatten(), "B": operator.pack_B(B)},
         {"C": data["C"].flatten()},
-        rel_tol=0.04,
-        abs_tol=budget * mass,
+        tolerance=Tolerance.relative(0.04, budget * mass),
     )
 
 
@@ -319,8 +319,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
             operator,
             {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
             {"C": data["C"].flatten()},
-            rel_tol=0.04,
-            abs_tol=0.004 * mass,
+            tolerance=Tolerance.relative(0.04, 0.004 * mass),
         )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
@@ -440,8 +439,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
         operator,
         input_buffers,
         output_buffers,
-        rel_tol=0.04,
-        abs_tol=abs_tol,
+        tolerance=Tolerance.relative(0.04, abs_tol),
     )
     assert not errors, "Test failed"
 

@@ -14,6 +14,8 @@ from iron.operators.relu import ReLU
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
+RELATIVE = Tolerance.relative(0.04, 1e-6)
+
 
 def test_vectors_draws_each_input_and_runs_the_reference_on_the_draw():
     op = ElementwiseAdd(size=64, num_aie_columns=1, tile_size=64)
@@ -40,13 +42,16 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
 
 def test_verify_buffer_returns_the_indices_outside_tolerance():
     ref = np.arange(8, dtype=np.float32)
-    assert verify_buffer(ref.copy(), "y", ref) == []
+    assert verify_buffer(ref.copy(), "y", ref, RELATIVE) == []
     out = ref.copy()
     out[3] += 1.0
     out[5] += 0.001
-    assert verify_buffer(out, "y", ref, rel_tol=0.04, abs_tol=1e-6) == [3]
-    assert verify_buffer(out, "y", ref, rel_tol=0.0, abs_tol=0.0) == [3, 5]
-    assert verify_buffer(ref[:6].copy(), "y", ref) == [6, 7]  # short: the rest
+    assert verify_buffer(out, "y", ref, RELATIVE) == [3]
+    assert verify_buffer(out, "y", ref, Tolerance.exact()) == [3, 5]
+    assert verify_buffer(ref[:6].copy(), "y", ref, RELATIVE) == [
+        6,
+        7,
+    ]  # short: the rest
 
 
 def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
@@ -58,6 +63,6 @@ def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
 
     judge = Tolerance.bounded(eighth)
     limit = eighth(ref)  # 0.25 from x = 2 on
-    assert verify_buffer(out, "y", ref, tolerance=judge, bound=limit) == [0, 1]
+    assert verify_buffer(out, "y", ref, judge, bound=limit) == [0, 1]
     with pytest.raises(ValueError, match="needs its bound="):
-        verify_buffer(out, "y", ref, tolerance=judge)
+        verify_buffer(out, "y", ref, judge)

@@ -88,35 +88,22 @@ def verify_buffer(
     output: np.ndarray,
     buf_name: str,
     reference: np.ndarray,
-    rel_tol: float = 0.04,
-    abs_tol: float = 1e-6,
-    max_error_rate: float = 0.0,
-    tolerance: Tolerance | None = None,
+    tolerance: Tolerance,
     bound=None,
 ) -> list[int]:
-    """The indices where ``output`` is outside tolerance of ``reference``.
+    """The indices where ``output`` is outside ``tolerance`` of ``reference``.
 
-    The judge is mlir-aie's ``aie.utils.verify.compare``, by default under a
-    relative ``Tolerance``: an element passes at
-    ``|a - b| < max(abs_tol, rel_tol * (|a| + |b|))``, so
-    ``rel_tol = abs_tol = 0`` is an exact gate, and a NaN or infinity must meet
-    the same value in the reference whatever ``max_error_rate`` allows.
-    ``max_error_rate`` lets that fraction of the elements miss; a shorter
-    output than reference counts the missing elements as errors.
-
-    ``tolerance`` judges by that instead of the three numbers: typically the
-    contract of the kernel the operator runs. It must be judgeable element by
+    The judge is mlir-aie's ``aie.utils.verify.compare``, under the contract
+    of the kernel the operator runs or a ``Tolerance.relative``, say, and a NaN or infinity must meet the same value in the reference whatever
+    ``max_mismatch_frac`` allows. A shorter output than reference counts the
+    missing elements as errors. The tolerance must be judgeable element by
     element, so it has no ``range_frac``; a bound tolerance's limit is
-    ``bound``, evaluated on the inputs as ``compare`` takes it.
+    ``bound``, evaluated on the inputs as ``compare`` takes it, of the
+    output's size or broadcast to its shape.
     """
-    judge = (
-        Tolerance.relative(rel_tol, abs_tol, max_mismatch_frac=max_error_rate)
-        if tolerance is None
-        else tolerance
-    )
-    if judge.range_frac is not None:
+    if tolerance.range_frac is not None:
         raise ValueError(
-            f"{buf_name}: a tolerance with range_frac={judge.range_frac} "
+            f"{buf_name}: a tolerance with range_frac={tolerance.range_frac} "
             f"depends on more than the element it judges"
         )
     expected = np.asarray(reference).reshape(-1)
@@ -128,15 +115,15 @@ def verify_buffer(
         return list(range(len(got), len(expected)))
     got = got[: len(expected)]
 
-    if judge.kind == "bound":
+    if tolerance.kind == "bound":
         if bound is None:
             raise ValueError(f"{buf_name}: a bound tolerance needs its bound=")
         bound = np.asarray(bound, np.float64)
         if bound.size != expected.size:  # a scalar, or one per row
             bound = np.broadcast_to(bound, np.shape(reference))
         bound = bound.reshape(-1)
-    verdict = compare(got, expected, judge, bound=bound)
-    allowed = judge.max_mismatch_frac
+    verdict = compare(got, expected, tolerance, bound=bound)
+    allowed = tolerance.max_mismatch_frac
     if verdict.n_mismatch and allowed > 0.0:
         within = "within" if verdict else "exceeds"
         print(
@@ -150,14 +137,16 @@ def verify_buffer(
     print(f"{buf_name}: {verdict.detail}")
     # compare() judges; it does not list the elements.
     both_nan = np.isnan(got.astype(np.float32)) & np.isnan(expected.astype(np.float32))
-    if judge.kind == "relative":
+    if tolerance.kind == "relative":
         # nearly_equal is the same per-element test, except that it also
         # rejects a NaN that meets a NaN.
-        bad = ~nearly_equal(got, expected, rtol=judge.rtol or 0.0, atol=judge.atol)
-    elif judge.kind == "exact":
+        bad = ~nearly_equal(
+            got, expected, rtol=tolerance.rtol or 0.0, atol=tolerance.atol
+        )
+    elif tolerance.kind == "exact":
         bad = got != expected.astype(got.dtype)
     else:
-        each = dataclasses.replace(judge, max_mismatch_frac=0.0)
+        each = dataclasses.replace(tolerance, max_mismatch_frac=0.0)
         bad = np.array(
             [
                 not compare(
@@ -222,12 +211,9 @@ def run_test(
     inputs,
     outputs=None,
     *,
-    rel_tol: float = 0.04,
-    abs_tol: float = 1e-6,
-    max_error_rate: float = 0.0,
+    tolerance: Tolerance,
     warmup_iters: int = 1,
     timed_iters: int = 1,
-    tolerance: Tolerance | None = None,
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
@@ -236,7 +222,7 @@ def run_test(
     checked); both are consumed in the order of the operator's declared
     buffers. An ``inout`` buffer is given as an input and checked under that
     name. The outputs are judged as :func:`verify_buffer` judges them, by
-    ``tolerance`` when given; a bound tolerance's limit is its bound on the
+    ``tolerance``; a bound tolerance's limit is its bound on the
     inputs, which holds for an elementwise kernel's contract whatever shape
     the operator gives its operands. Latency (the NPU's own time) and effective
     bandwidth are recorded for the CSV and returned, and throughput from
@@ -279,7 +265,7 @@ def run_test(
     latency_us = benchmark.npu.avg_us
 
     bound = None
-    if tolerance is not None and tolerance.kind == "bound":
+    if tolerance.kind == "bound":
         assert tolerance.bound is not None
         bound = tolerance.bound(*inputs.values())
     errors = {}
@@ -293,10 +279,7 @@ def run_test(
             produced[name].numpy(),
             name,
             expected,
-            rel_tol,
-            abs_tol,
-            max_error_rate,
-            tolerance=tolerance,
+            tolerance,
             bound=bound,
         )
         if bad:

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import from_name
+from aie.utils.verify import Tolerance
 
 from iron.common import Incompatible
 from iron.common.harness import run_test
@@ -82,8 +83,7 @@ def _check(op, blob, expected, label):
         op,
         {"in": blob},
         {"out": expected},
-        rel_tol=0.0,
-        abs_tol=0.0,
+        tolerance=Tolerance.exact(),
     )
     assert not errors, f"{label}: {errors}"
 

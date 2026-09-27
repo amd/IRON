@@ -46,7 +46,7 @@ def _errors(net, step):
     bound = tolerance.bound(*inputs) if tolerance.kind == "bound" else None
     name = type(step.op).__name__
     expected = step.op.reference(*inputs)
-    return verify_buffer(output, name, expected, tolerance=tolerance, bound=bound)
+    return verify_buffer(output, name, expected, tolerance, bound=bound)
 
 
 @pytest.mark.parametrize("rows,embedding_dim,hidden_dim", SHAPES, ids=lambda v: str(v))

@@ -36,6 +36,8 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 from iron.operators.tanh import Tanh
 
+RELATIVE = Tolerance.relative(0.04, 1e-6)
+
 
 def _centered(rng, n) -> Any:
     """``n`` bf16 values in [-2, 2), drawn as every test here draws them."""
@@ -122,7 +124,7 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     out = run.get_buffer("out").numpy_view()[:size].copy()
 
     expected = np.maximum(a + b, 0)
-    errors = verify_buffer(out, "out", expected, rel_tol=0.04, abs_tol=1e-6)
+    errors = verify_buffer(out, "out", expected, RELATIVE)
     assert not errors, f"auto-dispatch sequence produced {len(errors)} mismatches"
 
 
@@ -260,7 +262,7 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     packed = run.get_buffer("packed").numpy_view()[: 2 * _SLICE_SIZE].copy()
 
     expected = np.concatenate([a0 + b0, a1 + b1])
-    errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
+    errors = verify_buffer(packed, "packed", expected, RELATIVE)
     assert (
         not errors
     ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
@@ -349,9 +351,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
 
         temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
         out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
-        errors = verify_buffer(temp, "temp", a + b, rel_tol=0.04, abs_tol=1e-6)
+        errors = verify_buffer(temp, "temp", a + b, RELATIVE)
         assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
-        errors = verify_buffer(
-            out, "out", np.maximum(a + b, 0), rel_tol=0.04, abs_tol=1e-6
-        )
+        errors = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
         assert not errors, f"rep {rep}: out has {len(errors)} mismatches"

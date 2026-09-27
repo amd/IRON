@@ -5,6 +5,7 @@
 import pytest
 import torch
 from aie.utils.benchmark import run_iters
+from aie.utils.verify import Tolerance
 
 from iron.common.tracing import dump_traces
 
@@ -84,9 +85,7 @@ def test_swiglu_prefill_stream(k, npu_runtime):
         golden_ref[
             OUTPUT
         ],  # pyright: ignore[reportArgumentType]  # a bf16 torch tensor
-        rel_tol=0.08,
-        abs_tol=0.7,
-        max_error_rate=0.25,
+        Tolerance.relative(0.08, 0.7, max_mismatch_frac=0.25),
     )
     assert not errors, f"Test failed with errors: {errors}"
 
