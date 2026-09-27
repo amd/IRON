@@ -4,7 +4,6 @@
 """The image an operator sequence builds: one fused ELF, or a chain of xclbins."""
 
 import hashlib
-import inspect
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
@@ -13,6 +12,7 @@ from . import fusion
 from .jit_compile import (
     cache_entry,
     design_identity,
+    design_sources,
     dispatch_stream,
     fused_design,
     source_digest,
@@ -60,26 +60,6 @@ def build_fused_mlir(seq, plan=None) -> str:
     )
 
 
-def _design_sources(generator) -> list:
-    """The modules a design is defined in: its function's, and its class's.
-
-    A design's own key hashes the operator's class source; the fused key
-    also takes its modules, since a helper beside the class is as much the
-    design as the class is.
-    """
-    design_fn, _, kwargs = generator.resolve()
-    classes = []
-    if "op" in kwargs:
-        classes = list(type(kwargs["op"]).__mro__)
-    files = set()
-    for obj in (design_fn, *classes):
-        try:
-            files.add(inspect.getsourcefile(obj))
-        except TypeError:
-            pass  # a builtin
-    return sorted(f for f in files if f)
-
-
 def fused_identity(seq, plan) -> str:
     """What the fused text is a function of, without generating it.
 
@@ -95,7 +75,7 @@ def fused_identity(seq, plan) -> str:
     files = set()
     for name, generator in generators.items():
         h.update(f"{name}={design_identity(generator)};".encode())
-        files.update(_design_sources(generator))
+        files.update(design_sources(generator))
     h.update(source_digest(tuple(sorted(files))).encode())
     h.update(
         repr(

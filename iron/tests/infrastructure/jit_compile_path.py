@@ -15,19 +15,26 @@ Needs a device, since the fused path is NPU2-only and the ELF is genuinely
 built here rather than mocked.
 """
 
+import inspect
+from pathlib import Path
+
 import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
+from iron.common import tiling
 from iron.common.image.jit_compile import (
+    _GENERATOR_TREES,
     _bind_device,
-    _design_generator,
     _params_key,
     design_identity,
+    design_sources,
+    keyed_design,
+    source_digest,
 )
-from iron.operators import GEMM, GEMV, ElementwiseAdd
+from iron.operators import GEMM, GEMV, MHA, ElementwiseAdd
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
@@ -125,11 +132,27 @@ def test_a_traced_build_carries_the_lowered_module():
 
 def _add_key():
     add = ElementwiseAdd(size=1024, tile_size=128)
-    fn, _, kwargs = add.generator().resolve()
-    return CompilableDesign(
-        _design_generator(kwargs),
-        compile_kwargs={"design": fn, "params": _params_key(kwargs), "chain": ""},
-    )
+    generate, key = keyed_design(add.generator())
+    return CompilableDesign(generate, compile_kwargs=key)
+
+
+def test_the_compile_key_covers_the_library_a_design_calls():
+    """An edit to IRON's common tree re-keys a standalone build.
+
+    The design's own code identity does not reach a helper imported inside a
+    function (MHA's sequence imports ``legalize`` so): an edit to
+    ``tiling.py`` once left an xclbin build on the image of the code before
+    it, and the device ran the old descriptors with nothing reporting it.
+    """
+    op = MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
+    generator = op.generator()
+    _, key = keyed_design(generator)
+    assert key["source"] == source_digest(design_sources(generator))
+    trees = {p.resolve() for p in _GENERATOR_TREES[0].rglob("*.py")}
+    assert Path(tiling.__file__).resolve() in trees
+    assert Path(inspect.getfile(MHA)).resolve() in {
+        Path(f).resolve() for f in design_sources(generator)
+    }
 
 
 def test_the_compile_key_is_stable_across_identical_operators():

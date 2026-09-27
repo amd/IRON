@@ -169,6 +169,26 @@ def source_digest(files=()) -> str:
     return h.hexdigest()
 
 
+def design_sources(generator) -> list:
+    """The modules a design is defined in: its function's, and its class's.
+
+    A design's own key hashes the operator's class source; this adds its
+    modules, since a helper beside the class is as much the design as the
+    class is.
+    """
+    design_fn, _, kwargs = generator.resolve()
+    classes = []
+    if "op" in kwargs:
+        classes = list(type(kwargs["op"]).__mro__)
+    files = set()
+    for obj in (design_fn, *classes):
+        try:
+            files.add(inspect.getsourcefile(obj))
+        except TypeError:
+            pass  # a builtin
+    return sorted(f for f in files if f)
+
+
 def _design_generator(call_kwargs: dict):
     """Adapt an IRON design function to the generator CompilableDesign wants.
 
@@ -180,8 +200,10 @@ def _design_generator(call_kwargs: dict):
     The signature is only identity, never data: ``compile_kwargs`` keys must
     appear in it and carry ``CompileTime[T]``, so each one exists to reach the
     cache key. The design is hashed by its code, its parameters by their text,
-    and ``chain`` by the predecessor xclbin a separate-dispatch operator links
-    onto. The values the design is actually called with are closed over, which
+    ``source`` by the digest of what generates its text (:func:`source_digest`
+    over its modules: the key hashes the design's code alone, and a helper it
+    imports inside a function is out of that code's reach), and ``chain`` by
+    the predecessor xclbin a separate-dispatch operator links onto. The values the design is actually called with are closed over, which
     is safe only because ``params`` already spells them -- closure contents are
     invisible to the cache key, the trap pinned by
     ``iron/tests/infrastructure/compilable_design_contract.py``.
@@ -226,6 +248,7 @@ def _design_generator(call_kwargs: dict):
     parameters = [
         P("design", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[Any]),
         P("params", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[str]),
+        P("source", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[str]),
         P("chain", P.POSITIONAL_OR_KEYWORD, annotation=CompileTime[str], default=""),
     ] + [
         P(symbol, P.KEYWORD_ONLY, annotation=DispatchTime[dtype])
@@ -322,6 +345,19 @@ def _resolved(generator):
     return design_fn, kwargs
 
 
+def keyed_design(generator, chain: str = "") -> tuple:
+    """A standalone design's generator, and the compile parameters that key
+    it (see :func:`_design_generator`).
+    """
+    design_fn, kwargs = _resolved(generator)
+    return _design_generator(kwargs), {
+        "design": design_fn,
+        "params": _params_key(kwargs),
+        "source": source_digest(design_sources(generator)),
+        "chain": chain,
+    }
+
+
 def insts_design(generator, extra_flags=()) -> CompilableDesign:
     """One design's instruction stream alone, against an image built elsewhere.
 
@@ -329,16 +365,12 @@ def insts_design(generator, extra_flags=()) -> CompilableDesign:
     shape, a shipped image's download) needs only its runtime
     sequence lowered. No core is compiled, so no kernel and no Peano.
     """
-    design_fn, kwargs = _resolved(generator)
+    generate, key = keyed_design(generator)
     design = CompilableDesign(
-        _design_generator(kwargs),
+        generate,
         insts_only=True,
         aiecc_flags=list(extra_flags),
-        compile_kwargs={
-            "design": design_fn,
-            "params": _params_key(kwargs),
-            "chain": "",
-        },
+        compile_kwargs=key,
     )
     _bind_device()
     design.compile()
@@ -372,18 +404,10 @@ def xclbin_design(
     if xclbin_input is not None:
         flags.append(f"--xclbin-input={Path(xclbin_input).resolve()}")
     flags += list(extra_flags)
-    design_fn, kwargs = _resolved(generator)
-    design = CompilableDesign(
-        _design_generator(kwargs),
-        aiecc_flags=flags,
-        compile_kwargs={
-            "design": design_fn,
-            "params": _params_key(kwargs),
-            # The predecessor is part of what this image is: two operators with
-            # identical designs chained onto different xclbins differ.
-            "chain": str(xclbin_input or ""),
-        },
-    )
+    # The predecessor is part of what this image is: two operators with
+    # identical designs chained onto different xclbins differ.
+    generate, key = keyed_design(generator, chain=str(xclbin_input or ""))
+    design = CompilableDesign(generate, aiecc_flags=flags, compile_kwargs=key)
     _bind_device()
     design.compile()
     return design
