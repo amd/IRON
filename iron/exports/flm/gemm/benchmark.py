@@ -46,6 +46,7 @@ import numpy as np
 import pytest
 import torch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from ml_dtypes import bfloat16
 
 from iron.common.device import bound_device, device_name
 from iron.common.harness import record_metric
@@ -139,12 +140,13 @@ class Candidate:
         run = op.get_callable()
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        packed_b = op.pack_B(B) if hasattr(op, "pack_B") else B
-        args = [
-            XRTTensor.from_torch(A.flatten()),
-            XRTTensor.from_torch(packed_b.flatten()),
-            self.c_bo,
-        ]
+        # pack_B takes numpy; torch has no bfloat16 view to hand it.
+        if hasattr(op, "pack_B"):
+            b_np = B.view(torch.int16).numpy().view(bfloat16)
+            b_bo = XRTTensor(op.pack_B(b_np).reshape(-1))
+        else:
+            b_bo = XRTTensor.from_torch(B.flatten())
+        args = [XRTTensor.from_torch(A.flatten()), b_bo, self.c_bo]
         self.run = lambda: run(*args)
 
     def verify(self, M, N, expected, mass):
