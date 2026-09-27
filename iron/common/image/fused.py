@@ -56,6 +56,7 @@ def build_fused_mlir(seq, plan=None) -> str:
         seq.subbuffer_layout,
         seq.buffer_sizes,
         seq.slice_info,
+        seq.shared_words,
     )
 
 
@@ -84,10 +85,10 @@ def fused_identity(seq, plan) -> str:
 
     The designs, each by its identity (:func:`design_identity`: the code
     that generates it and the parameters it is called with); the runlist over
-    them; the buffer layout; and the source of what turns those into text --
-    IRON's common tree, where the fusion and the declaration layer live, the
-    operators' own modules, and mlir-aie's Python frontend
-    (:func:`source_digest`). A hit then costs a hash rather than a fusion.
+    them; the buffer layout; the scratchpad words symbols share; and the
+    source of what turns those into text -- IRON's common tree, where the
+    fusion and the declaration layer live, the operators' own modules, and
+    mlir-aie's Python frontend (:func:`source_digest`). A hit then costs a hash rather than a fusion.
     """
     generators, runlist = plan
     h = hashlib.sha256()
@@ -97,7 +98,15 @@ def fused_identity(seq, plan) -> str:
         files.update(_design_sources(generator))
     h.update(source_digest(tuple(sorted(files))).encode())
     h.update(
-        repr((runlist, seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info)).encode()
+        repr(
+            (
+                runlist,
+                seq.subbuffer_layout,
+                seq.buffer_sizes,
+                seq.slice_info,
+                sorted(seq.shared_words.items()),
+            )
+        ).encode()
     )
     return h.hexdigest()[:24]
 

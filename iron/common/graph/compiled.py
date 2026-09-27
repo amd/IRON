@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable, Mapping
+from fractions import Fraction
 from typing import Any, overload
 
 import aie.utils as aie_utils
@@ -25,6 +26,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare.member import Extent, ValueSpec, _Value
+from ..declare.operator import _ExtentWord
 from ..declare.profile import Profile
 from ..design import device_symbol
 from ..device import device_name
@@ -276,20 +278,25 @@ class CompiledGraph:
         # each bound value (a per-call index on a view scaled to an element
         # offset), and each value derived from a bounded extent, computed by
         # the operator from the call's bound.
-        self.words = _words(traced)
+        # On a full ELF, symbols that always hold one number share a word.
+        self.words, shared = _words(traced, share=plan.dispatch == "fused")
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
         placement = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
-        self.sequence = traced.sequence(dispatch=plan.dispatch, **placement).compile(
-            record=record
-        )
+        self.sequence = traced.sequence(
+            dispatch=plan.dispatch, shared_words=shared, **placement
+        ).compile(record=record)
         self.image = self.sequence.image
         # What the image consists of, by identity: its designs, which step
         # runs which, and where each buffer lands in its plan.
         self.artifacts = self.sequence.artifacts
+        if self.artifacts.kind == "elf":
+            # The image declares only the words its designs read: an extent
+            # read only through its derivations has none.
+            self.words = [w for w in self.words if w[0] in self.artifacts.parameters]
         self._callable = None
         # Weights in this image's buffers, by storage key; an arena's own set
         # when there is one, since then every image's weights are the same.
@@ -420,39 +427,89 @@ class CompiledGraph:
         )
 
 
-def _words(traced: TracedGraph) -> list[tuple[str, Any, Callable[[Mapping], Any]]]:
-    """The scratchpad words a call writes, each from the call's values."""
-    words: list[tuple[str, Any, Callable[[Mapping], Any]]] = []
+def _words(
+    traced: TracedGraph, *, share: bool = False
+) -> tuple[list[tuple[str, Any, Callable[[Mapping], Any]]], dict[str, str]]:
+    """The scratchpad words a call writes, each from the call's values, and
+    with ``share`` the design symbols that share one word.
+
+    A word is a bound value (a per-call index on a view, scaled to an
+    element offset) or a value an operator, resolved for the device, derives
+    from a bounded extent, computed from the call's bound. The full ELF has
+    32 words for its whole image, and a bounded prompt binds its row count
+    to every operator's extents, so symbols that always hold one number
+    share a word: those that are one graph value times one ratio (a bound
+    value's scale, or a bounded extent's over the lanes and rows it is
+    divided into), rounded down, in one dtype. Any other derivation keeps
+    its own word.
+    """
+    dev = aie_utils.get_current_device()
+    # (symbol, dtype, word, (graph value, ratio, dtype) or None)
+    words: list[tuple[str, Any, Callable[[Mapping], Any], Any]] = []
     for b in traced.bindings:
+        key = (b.value.name, Fraction(b.scale), np.dtype(b.member.dtype).name)
         words.append(
-            (b.symbol, b.value.dtype, lambda v, b=b: v[b.value.name] * b.scale)
+            (b.symbol, b.value.dtype, lambda v, b=b: v[b.value.name] * b.scale, key)
         )
     seen: set[int] = set()
+    derived: set[str] = set()
     for b in traced.bindings:
-        op = b.op
-        if id(op) in seen or not isinstance(b.member.member, Extent):
+        if id(b.op) in seen or not isinstance(b.member.member, Extent):
             continue
-        seen.add(id(op))
-        extents = [
-            (e.member.name, e.value.name, e.scale)
+        seen.add(id(b.op))
+        op = b.op.resolved(dev)
+        extents = {
+            e.member.name: (e.value.name, e.scale)
             for e in traced.bindings
-            if e.op is op and isinstance(e.member.member, Extent)
-        ]
+            if e.op is b.op and isinstance(e.member.member, Extent)
+        }
 
         def at(v, extents=extents):
-            return {name: v[graph_name] * scale for name, graph_name, scale in extents}
+            return {name: v[graph] * scale for name, (graph, scale) in extents.items()}
 
         for name in sorted(op._per_call_derived() - op.bound_values.keys()):
             word = op.value(name)  # a value the graph binds itself is above
             symbol = device_symbol(op, word)
+            if symbol in derived:
+                continue  # another instance of the design, bound alike
+            derived.add(symbol)
+            key = None
+            spec = word.member
+            if isinstance(spec, _ExtentWord) and spec.extent.name in extents:
+                graph, scale = extents[spec.extent.name]
+                ratio = Fraction(scale, spec.divisor(op))
+                key = (graph, ratio, np.dtype(word.dtype).name)
             words.append(
                 (
                     symbol,
                     word.dtype,
                     lambda v, op=op, name=name, at=at: op.derived_at(name, **at(v)),
+                    key,
                 )
             )
-    return words
+
+    shared: dict[str, str] = {}
+    if share:
+        keys: dict[str, set] = {}
+        for symbol, _, _, key in words:
+            keys.setdefault(symbol, set()).add(key)
+        groups: dict[Any, list[str]] = {}
+        for symbol, found in keys.items():
+            if len(found) == 1 and None not in found:
+                groups.setdefault(next(iter(found)), []).append(symbol)
+        for (graph, ratio, dtype), symbols in groups.items():
+            if len(symbols) > 1:
+                times = f"{ratio.numerator}" + (
+                    f"d{ratio.denominator}" if ratio.denominator > 1 else ""
+                )
+                shared.update(dict.fromkeys(symbols, f"graph_{graph}_x{times}_{dtype}"))
+    out, written = [], set()
+    for symbol, dtype, word, _ in words:
+        symbol = shared.get(symbol, symbol)
+        if symbol not in written:
+            written.add(symbol)
+            out.append((symbol, dtype, word))
+    return out, shared
 
 
 @overload

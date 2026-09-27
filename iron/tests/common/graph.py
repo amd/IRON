@@ -671,7 +671,7 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
     t = g.trace(x=(64, 8))
     (op,) = t.operators
-    words = {symbol: word for symbol, _, word in _words(t)}
+    words = {symbol: word for symbol, _, word in _words(t)[0]}
     assert set(words) == {
         f"{op.name}_{w}" for w in ("valid_n", "count", "valid_x", "valid_y")
     }
@@ -692,6 +692,30 @@ def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
 
     (b,) = g.trace(x=(64, 512), y=(64, 512)).bindings
     assert (b.member.name, b.value.name, b.scale) == ("valid", "n", 512)
+
+
+def test_words_that_always_hold_one_number_share_it(npu2):
+    """On a full ELF, two designs bound to one graph value write one word
+    for each ratio of it they read (their extents; the tiles per lane of
+    each operand), and every symbol that shares a word reads its own value
+    there. A derivation the library cannot see through (``count``) keeps
+    its own word.
+    """
+    from iron.common.graph.compiled import _words
+
+    @iron.graph
+    def g(x, y, *, n: Scratchpad[np.int32]):
+        return ElementwiseMul(ElementwiseAdd(x[:n], y[:n]), y[:n])
+
+    t = g.trace(x=(64, 512), y=(64, 512))
+    alone, _ = _words(t)
+    words, shared = _words(t, share=True)
+    assert len(alone) == 10 and len(words) == 4
+    assert sorted(set(shared.values())) == ["graph_n_x1d4_int32", "graph_n_x512_int32"]
+    for n in (1, 16, 64):
+        mine = {symbol: word({"n": n}) for symbol, _, word in words}
+        for symbol, _, word in alone:
+            assert mine[shared.get(symbol, symbol)] == word({"n": n})
 
 
 def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):

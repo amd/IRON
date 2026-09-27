@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from typing import Any
 
 import ml_dtypes
@@ -76,6 +78,7 @@ def fuse_mlir(
     subbuffer_layout: dict[str, tuple[str, int, int]],
     buffer_sizes: tuple[int, int, int],
     slice_info: dict[str, tuple[str, int, int]] | None = None,
+    shared_words: Mapping[str, str] | None = None,
 ) -> str:
     """Fuse multiple MLIR modules into one, and return the result as text.
 
@@ -85,8 +88,23 @@ def fuse_mlir(
     graph's file-based caching, since the caller (``FusedImage.link``)
     hands the returned text straight to ``CompilableDesign``, which keys its
     own cache on the text's content.
+
+    ``shared_words`` renames design symbols onto the scratchpad word they
+    share (``iron.common.graph.compiled._words``): each
+    reference in a device is rewritten and the word declared once.
     """
     slice_info = slice_info or {}
+    shared: dict[str, str] = dict(shared_words or {})
+    # A reference is ``@symbol`` ending where the symbol does.
+    shared_ref = (
+        re.compile(
+            "@("
+            + "|".join(re.escape(s) for s in sorted(shared, key=len, reverse=True))
+            + r")(?![\w$.])"
+        )
+        if shared
+        else None
+    )
     input_buffer_size, output_buffer_size, scratch_buffer_size = buffer_sizes
 
     # Extract device operations and module-level parameter decls from each
@@ -111,7 +129,7 @@ def fuse_mlir(
             elif op.operation.name == "aiex.scratchpad_parameter":
                 sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
                 param_type = ir.TypeAttr(op.operation.attributes["type"]).value
-                params_here[sym_name] = param_type
+                params_here[shared.get(sym_name) or sym_name] = param_type
         if len(device_ops) != 1:
             raise ValueError(
                 f"Expected exactly one device operation in MLIR artifact for operator '{op_name}', "
@@ -120,7 +138,10 @@ def fuse_mlir(
         device_op = device_ops[0]
         if device_ty is None:
             device_ty = device_op.device
-        device_mlir_strings[op_name] = str(device_op)
+        device_str = str(device_op)
+        if shared_ref is not None:
+            device_str = shared_ref.sub(lambda m: "@" + shared[m.group(1)], device_str)
+        device_mlir_strings[op_name] = device_str
         operator_param_decls[op_name] = params_here
         sequence_arg_types[op_name] = extract_runtime_sequence_arg_types(device_op)
 

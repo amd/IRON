@@ -170,11 +170,18 @@ class _ExtentWord(Value):
         self.extent, self.buffer, self.axis = extent, buffer, axis
 
     def _tiles(self, op) -> int:
+        extent = getattr(op, self.extent.name)  # read first: it makes this per call
+        return extent // self.divisor(op)
+
+    def divisor(self, op) -> int:
+        """What the extent is divided by on ``op``, resolved: its lanes
+        times the rows one lane takes at a time.
+        """
         from ..design.runtime import extent_unit  # the one definition of the unit
 
         b = op.value_buffer(self.buffer)
         lanes = 1 if b.lanes.replicate else b.lanes.count
-        return getattr(op, self.extent.name) // (lanes * extent_unit(b, self.axis))
+        return lanes * extent_unit(b, self.axis)
 
     def __repr__(self) -> str:
         return f"<tiles per lane of {self.buffer} under {self.extent.name}>"

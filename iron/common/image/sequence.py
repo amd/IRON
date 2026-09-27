@@ -66,6 +66,9 @@ class OperatorSequence:
             nothing.
         residents: With ``arena``, the scratch buffers that are residents
             there, by storage key; every other scratch buffer is a transient.
+        shared_words: On the full ELF, design symbol -> the scratchpad word
+            it shares with others that always hold the same number
+            (``iron.common.graph.compiled._words``).
     """
 
     def __init__(
@@ -83,6 +86,7 @@ class OperatorSequence:
         share_designs=False,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
+        shared_words: Mapping[str, str] | None = None,
         *args,
         **kwargs,
     ):
@@ -131,6 +135,7 @@ class OperatorSequence:
         self.share_designs = share_designs
         self.arena = arena
         self.residents = dict(residents or {})
+        self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
         self.mode = mode  # None until the device is known (prepare)
         self._image = None  # the mode's image builder, once resolved

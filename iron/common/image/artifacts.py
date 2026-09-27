@@ -67,6 +67,16 @@ class Artifacts:
         return getattr(self.entry, "params", None)
 
     @property
+    def parameters(self) -> frozenset[str]:
+        """The scratchpad words the image declares, by name: those its
+        designs read, which the parameter table lists after its count.
+        """
+        if self.params is None:
+            return frozenset()
+        _, *rows = self.params.read_text().splitlines()
+        return frozenset(row.split()[0] for row in rows if row.strip())
+
+    @property
     def lowered_mlir(self) -> Path | None:
         return getattr(self.entry, "lowered_mlir", None)
 
