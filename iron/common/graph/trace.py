@@ -8,7 +8,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -88,8 +88,11 @@ def _take_views(cls, operands, kwargs, values):
     for i, h in enumerate(operands):
         if i < len(accept):
             param, offset_member = accept[i]
+            # A scalar (one element indexed out of a vector) is one element.
             tap = (
-                TensorAccessPattern.from_slice(h.shape, ()) if h.tap is None else h.tap
+                TensorAccessPattern.from_slice(h.shape or (1,), ())
+                if h.tap is None
+                else h.tap
             )
             kwargs.setdefault(param, tap)
             if h.bounds:
@@ -120,17 +123,21 @@ class TracedGraph:
 
     ``weights`` and ``states`` are keyed by the identity of the object the
     function closed over, and hold that object, so the key stays its own.
+    ``carry`` is the next value of each carried value, by name; a handle
+    there is an output buffer too, so the host can read it back.
     """
 
     name: str
     steps: list
     inputs: list  # Handles, in parameter order
-    outputs: list  # Handles returned
+    outputs: list  # Handles returned, then carried handles not returned
     values: list  # Values, in parameter order
     pinned: dict  # buffer name -> nbytes, for weights, states and slice parents
     weights: dict[int, tuple[object, Handle]]  # id(tensor) -> (tensor, Handle)
     states: dict[int, tuple[State, Handle]]  # id(State) -> (State, Handle)
     bindings: list[Binding]
+    returned: list = dataclasses.field(default_factory=list)  # Handles returned
+    carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
 
     @property
     def runlist(self) -> list:
@@ -436,7 +443,22 @@ class Tracer:
 
     # -- the result ----------------------------------------------------------
 
-    def finish(self, inputs, outputs, values) -> TracedGraph:
+    def finish(
+        self,
+        inputs,
+        outputs,
+        values,
+        carry: Mapping[str, Handle | Affine] | None = None,
+    ) -> TracedGraph:
+        """The traced graph; ``carry`` is the next value of each carried
+        value, whose handles are outputs too."""
+        next_values = dict(carry or {})
+        returned = list(outputs)
+        outputs = returned + [
+            h
+            for h in next_values.values()
+            if isinstance(h, Handle) and not any(h is o for o in returned)
+        ]
         pinned = {}
         for _, h in self.weights.values():
             pinned[h.name] = h.nbytes
@@ -457,6 +479,8 @@ class Tracer:
             self.weights,
             self.states,
             self.bindings,
+            returned,
+            next_values,
         )
 
 

@@ -8,8 +8,10 @@ weights and state (an :func:`state`) what the instance holds, named by
 attribute path (a weight the body indexes or reshapes is a
 :func:`weight`), and per-call scalars its keyword-only parameters
 annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. An input defaulting to
-``None`` may be left out; the version traced without it sees ``None``.
-Operators are called on handles:
+``None`` may be left out; the version traced without it sees ``None``. A
+``Carried[T]`` value is one the graph computes for its own next call: the
+body returns the next values last, ``return logits, iron.carry(pos=pos +
+1)``, and a call returns them as numbers. Operators are called on handles:
 ``GEMV(w, h)`` infers its extents from its arguments (operators with one
 ``array_key`` share an array), and an explicit instance ``q(w, h)`` is
 applied the same way.
@@ -37,16 +39,18 @@ tensors compiles for their shapes, prints a note, and dispatches.
 """
 
 from .compiled import CompiledGraph, Graph
-from .handle import Handle, Value, is_operand, state, weight
+from .handle import Carry, Handle, Value, carry, is_operand, state, weight
 from .trace import TracedGraph, Tracer
 
 __all__ = [
+    "Carry",
     "CompiledGraph",
     "Graph",
     "Handle",
     "TracedGraph",
     "Tracer",
     "Value",
+    "carry",
     "is_operand",
     "state",
     "weight",

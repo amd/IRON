@@ -37,7 +37,7 @@ from ..image.allocator import ArenaPlan
 from ..image.callable import ScratchArena
 from ..image.packaging import Plan, plan
 from ..image.sequence import ALIGNMENT
-from .handle import Handle, State, Value, _tensor_dtype, is_operand
+from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
 # One (parameter, shape, dtype name) per input: what picks a version.
@@ -112,6 +112,8 @@ class Graph:
     _values: dict[str, ValueSpec] = {}
     # The inputs defaulting to None, which a version may be traced without.
     _optional: frozenset[str] = frozenset()
+    # The per-call values annotated Carried[T], which body computes the next of.
+    _carried: list[str] = []
 
     def body(self, *inputs: Any, **values: Any) -> Any:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
@@ -140,12 +142,12 @@ class Graph:
             elif p.kind is p.KEYWORD_ONLY:
                 ann = p.annotation
                 if isinstance(ann, type) and issubclass(ann, _Value):
-                    ann = ValueSpec(ann.kind, np.int32)
+                    ann = ValueSpec(ann.kind, np.int32, ann.carried)
                 if not isinstance(ann, ValueSpec):
                     raise TypeError(
                         f"{cls.__name__}.body: keyword-only parameter {p.name!r} "
-                        f"is a per-call value and must be annotated Scratchpad[T] "
-                        f"or DispatchTime[T]"
+                        f"is a per-call value and must be annotated Scratchpad[T], "
+                        f"Carried[T] or DispatchTime[T]"
                     )
                 cls._values[p.name] = ann
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
@@ -153,6 +155,7 @@ class Graph:
                     f"{cls.__name__}.body: *args/**kwargs are not traceable"
                 )
         cls._optional = frozenset(optional)
+        cls._carried = [n for n, spec in cls._values.items() if spec.carried]
 
     @property
     def name(self) -> str:
@@ -238,16 +241,78 @@ class Graph:
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
-        values = [Value(n, spec.kind, spec.dtype) for n, spec in self._values.items()]
+        values = [
+            Value(n, spec.kind, spec.dtype, spec.carried)
+            for n, spec in self._values.items()
+        ]
         with self._scope(), Tracer(self.name, self.names()) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
-        outputs = self._outputs(result, tracer)
-        return tracer.finish(inputs, outputs, values)
+        items, carry = self._split_carry(result)
+        outputs = self._outputs(items, tracer)
+        return tracer.finish(
+            inputs, outputs, values, self._traced_carry(carry, values, tracer)
+        )
 
-    def _outputs(self, result, tracer) -> list:
+    def _split_carry(self, result) -> tuple[list, Carry | None]:
+        """The returned outputs, and the :class:`Carry` returned last, if any.
+
+        A graph with carried values must return their next values, and one
+        without must not.
+        """
         if result is None:
-            return []
-        items = list(result) if isinstance(result, (tuple, list)) else [result]
+            items = []
+        elif isinstance(result, (tuple, list)):
+            items = list(result)
+        else:
+            items = [result]
+        carry = items.pop() if items and isinstance(items[-1], Carry) else None
+        if any(isinstance(item, Carry) for item in items):
+            raise TypeError(f"{self.name}: iron.carry(...) is returned last")
+        names = [] if carry is None else list(carry)
+        missing = [n for n in self._carried if n not in names]
+        unknown = [n for n in names if n not in self._carried]
+        if missing or unknown:
+            raise TypeError(
+                f"{self.name}: carries {names}, but its Carried values are "
+                f"{self._carried}"
+                + (f"; return iron.carry({missing[0]}=...)" if missing else "")
+            )
+        return items, carry
+
+    def _traced_carry(
+        self, carry: Carry | None, values: list[Value], tracer: Tracer
+    ) -> dict[str, Handle | Affine]:
+        """Each traced next value, checked: an expression of the values, or
+        one integer element the graph computed, which becomes an output."""
+        if carry is None:
+            return {}
+        dtypes = {v.name: v.dtype for v in values}
+        traced: dict[str, Handle | Affine] = {}
+        for name, nxt in carry.items():
+            if isinstance(nxt, Affine):
+                traced[name] = nxt
+                continue
+            if not isinstance(nxt, Handle):
+                raise TypeError(
+                    f"{self.name}: the next {name} is {nxt!r}; carry an "
+                    f"expression of the values or a handle the graph computed"
+                )
+            if nxt.parent is not None or nxt.role == "input" or nxt.elements != 1:
+                raise TypeError(
+                    f"{self.name}: the next {name} is {nxt!r}; a carried "
+                    f"handle is one whole element the graph computed"
+                )
+            if bfp.dtype_name(nxt.dtype) != bfp.dtype_name(dtypes[name]):
+                raise TypeError(
+                    f"{self.name}: the next {name} is {nxt!r}, but {name} "
+                    f"is {np.dtype(dtypes[name]).name}"
+                )
+            if nxt.role == "intermediate":
+                _rename(tracer, nxt, f"carry_{name}")
+            traced[name] = nxt
+        return traced
+
+    def _outputs(self, items: list, tracer: Tracer) -> list:
         outputs = []
         for i, item in enumerate(items):
             if not isinstance(item, Handle) or item.parent is not None:
@@ -260,8 +325,7 @@ class Graph:
                     f"{self.name} returns its input {item.name!r} unchanged"
                 )
             if item.role == "intermediate":
-                item.name = f"out{i}" if len(items) > 1 else "out"
-                item.role = "output"
+                _rename(tracer, item, f"out{i}" if len(items) > 1 else "out")
             outputs.append(item)
         return outputs
 
@@ -350,10 +414,17 @@ class Graph:
         """:meth:`body` on host tensors, each operator run through its ``reference()``.
 
         An optional input left out, or passed as None, is None in ``body``.
+        Returns what a call returns: the outputs, then the next values of
+        the carried ones as numbers.
         """
         args = list(tensors) + [None] * (len(self._inputs) - len(tensors))
         with self._scope(), _ReferenceTracer(self.name):
-            return self.body(*args, **{k: values.get(k) for k in self._values})
+            result = self.body(*args, **{k: values.get(k) for k in self._values})
+        items, carry = self._split_carry(result)
+        if carry is None:
+            return result
+        nxt = Carry(**{n: int(np.asarray(v).reshape(-1)[0]) for n, v in carry.items()})
+        return _results(items, nxt)
 
     def _scope(self):
         """The profile applied while :meth:`body` runs, if there is one."""
@@ -524,10 +595,23 @@ class CompiledGraph:
             self._copy_in(handle.name, tensor)
         self._write_values(values)
         self.callable()
-        outputs = [self.callable.get_buffer(h.name) for h in self.traced.outputs]
-        if not outputs:
-            return None
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)
+        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
+        if not self.traced.carry:
+            return _results(outputs, None)
+        return _results(outputs, self._next_values(values))
+
+    def _next_values(self, values: Mapping[str, int]) -> Carry:
+        """The carried values' next values, after a call with ``values``: an
+        expression evaluated here, a computed element read back."""
+        nxt: dict[str, int] = {}
+        for name, expression in self.traced.carry.items():
+            if isinstance(expression, Affine):
+                nxt[name] = expression.evaluate(values)
+            else:
+                buf = self.callable.get_buffer(expression.name)
+                buf.to("cpu")
+                nxt[name] = int(buf.numpy().reshape(-1)[0])
+        return Carry(**nxt)
 
     def _write_values(self, values) -> None:
         expected = {v.name for v in self.traced.values}
@@ -545,6 +629,31 @@ class CompiledGraph:
                 for symbol, dtype, word in self.words
             }
         )
+
+
+def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
+    """Make an intermediate a graph output named ``name``: the handle, and
+    every view of its buffer the steps hold (a reshape is a new handle)."""
+    old = handle.name
+    for step in tracer.steps:
+        for h in step.slots + step.inputs + step.outputs:
+            for view in (h, h.parent):  # a slice names its parent's buffer
+                if (
+                    view is not None
+                    and view.role == "intermediate"
+                    and view.name == old
+                ):
+                    view.name, view.role = name, "output"
+    handle.name, handle.role = name, "output"
+
+
+def _results(outputs: list, carry: Carry | None):
+    """A call's return, shaped as the body's: one output alone, several as
+    a tuple, and the carry last."""
+    items = list(outputs) + ([] if carry is None else [carry])
+    if not items:
+        return None
+    return items[0] if len(items) == 1 else tuple(items)
 
 
 def _words(

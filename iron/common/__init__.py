@@ -10,6 +10,7 @@ that names only its kernel.
 """
 
 from .declare import (
+    Carried,
     DeclarationError,
     DispatchTime,
     Extent,
@@ -33,6 +34,7 @@ from .elementwise import BinaryElementwise, Elementwise, Rowwise, UnaryElementwi
 
 __all__ = [
     "BinaryElementwise",
+    "Carried",
     "DeclarationError",
     "DispatchTime",
     "Elementwise",

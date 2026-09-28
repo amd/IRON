@@ -294,27 +294,33 @@ def present(member: _Member, flags: Mapping[str, Any]) -> bool:
 
 
 class ValueSpec:
-    """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter."""
+    """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter.
 
-    __slots__ = ("kind", "dtype")
+    ``carried`` marks a value the graph computes for its own next call
+    (:class:`Carried`).
+    """
 
-    def __init__(self, kind: str, dtype: Any) -> None:
-        self.kind, self.dtype = kind, dtype
+    __slots__ = ("kind", "dtype", "carried")
+
+    def __init__(self, kind: str, dtype: Any, carried: bool = False) -> None:
+        self.kind, self.dtype, self.carried = kind, dtype, carried
 
     def __repr__(self) -> str:
-        return f"{self.kind}[{np.dtype(self.dtype).name}]"
+        text = f"{self.kind}[{np.dtype(self.dtype).name}]"
+        return f"carried {text}" if self.carried else text
 
 
 class _Value(_Member["BoundValue"]):
     """A per-call scalar. See :class:`Scratchpad` and :class:`DispatchTime`."""
 
     kind: ClassVar[str] = ""
+    carried: ClassVar[bool] = False
 
     def __init__(self, dtype: Any = np.int32) -> None:
         self.dtype = dtype
 
     def __class_getitem__(cls, dtype) -> ValueSpec:
-        return ValueSpec(cls.kind, dtype)
+        return ValueSpec(cls.kind, dtype, cls.carried)
 
     if TYPE_CHECKING:
         # A graph body's parameter annotated ``Scratchpad[T]`` is the graph's
@@ -347,6 +353,19 @@ class Scratchpad(_Value):
                 "encoding zeroes the top two bits of the value"
             )
         super().__init__(dtype)
+
+
+class Carried(Scratchpad):
+    """A scratchpad value a graph computes for its own next call.
+
+    The graph's body returns the next value last, with
+    ``iron.carry(name=...)``: an integer expression of its values
+    (``position + 1``) or a one-element integer handle it computed (a
+    sampled token). The host writes it only to seed the first call; after
+    that each call's carry is the next's.
+    """
+
+    carried = True
 
 
 class DispatchTime(_Value):

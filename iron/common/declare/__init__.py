@@ -58,6 +58,7 @@ from .field import (
     select,
 )
 from .member import (
+    Carried,
     DispatchTime,
     Extent,
     In,
@@ -72,6 +73,7 @@ from .operator import Operator
 from .profile import Profile
 
 __all__ = [
+    "Carried",
     "DeclarationError",
     "DispatchTime",
     "Extent",
