@@ -5,14 +5,24 @@ import dataclasses
 from dataclasses import field
 from typing import Any
 
+import aie.utils as aie_utils
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Extent, In, Operator, Out, auto, optional, param
+from iron.common import (
+    Extent,
+    In,
+    Operator,
+    Out,
+    Unresolvable,
+    auto,
+    optional,
+    param,
+)
 from iron.common.testing import Case, Testing
-from iron.common.tiling import Access, granule_elements, limits, split_run
 
 
 class Repeat(Operator):
@@ -66,17 +76,17 @@ class Repeat(Operator):
 
     def validate(self) -> None:
         self.check_derived("out_rows")
-        # Refused when the shape is asked for: nothing about the device
-        # makes a row without a split legal.
-        row, gran = self.seq * self.cols, granule_elements(self.dtype)
-        if split_run(row, gran) is None:
-            raise ValueError(
-                f"Cannot split cols={row} for one descriptor: a row must "
-                f"factor into at most {limits().wrap} runs of at most "
-                f"{limits().wrap} {gran}-element words each"
-            )
 
     def resolve(self, dev):
+        # A row is one run over the descriptor's two innermost dimensions.
+        shim = dev.bd_limits(0, 0)
+        row, gran = self.seq * self.cols, shim.granule(self.dtype)
+        if shim.factor(row, gran) is None:
+            raise Unresolvable(
+                f"Cannot split cols={row} for one descriptor: a row must "
+                f"factor into at most {shim.wrap} runs of at most "
+                f"{shim.wrap} {gran}-element words each"
+            )
         return dataclasses.replace(self, tile_size=self.tile_size or self.cols)
 
     def array(self, target) -> list:
@@ -89,42 +99,44 @@ class Repeat(Operator):
     def sequence(self, rt):
         """The input re-read ``repeat`` times by the iteration slot's zero
         stride, the output interleaved, one descriptor each way. A row is
-        one run split over the two innermost slots; a bounded axis is a slot
-        of its own, patched per call from its word: the rows' (the split
-        row beneath them), or the stack's, ``(repeat, rows, seq, cols)``.
+        one run split over the two innermost slots; a bounded axis is D2,
+        patched per call from its word: the rows' (the split row beneath
+        them), or the stack's, ``(repeat, seq, rows, cols)``.
         """
         rows, seq, cols, repeat = self.rows, self.seq, self.cols, self.repeat
-        row, gran = seq * cols, granule_elements(self.dtype)
+        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        row, gran = seq * cols, shim.granule(self.dtype)
         bound = self.bound_extents
         if "valid_seq" in bound:
             if "valid_rows" in bound:
                 raise ValueError("Repeat takes one bounded axis, not rows and seq")
-            wrap = limits().wrap
-            if cols % gran or cols > wrap:
-                raise ValueError(
-                    f"cols={cols} must be a whole number of words at most "
-                    f"{wrap} to bound the stack axis"
-                )
-            sizes = (repeat, rows, seq, cols)
-            in_strides, out_strides = (0, row, cols, 1), (row, repeat * row, cols, 1)
-            dim, word = 2, "valid_seq"
+            # A patched length bounds D2 (the dimension inside the
+            # iteration), so the stack axis goes there and the rows inside
+            # it: the same bytes both ways, in (copy, seq, row) order.
+            sizes = [repeat, seq, rows, cols]
+            in_strides, out_strides = [0, cols, row, 1], [row, cols, repeat * row, 1]
+            dim, word = 1, "valid_seq"
         else:
-            halves = split_run(row, gran)
-            assert halves is not None  # validate() refused a row without one
+            halves = shim.factor(row, gran)
+            assert halves is not None  # resolve() refused a row without one
             chunks, chunk = halves
-            sizes = (repeat, rows, chunks, chunk)
-            in_strides, out_strides = (0, row, chunk, 1), (row, repeat * row, chunk, 1)
+            sizes = [repeat, rows, chunks, chunk]
+            in_strides, out_strides = [0, row, chunk, 1], [row, repeat * row, chunk, 1]
             dim, word = 1, "valid_rows"
+        taps = (
+            TensorAccessPattern(self.x.shape, 0, sizes, in_strides),
+            TensorAccessPattern(self.y.shape, 0, sizes, out_strides),
+        )
         with rt.group() as tg:
             rt.fill(
                 self.x,
-                Access(self.x.elements, 0, sizes, in_strides),
+                taps[0],
                 group=tg,
                 size_by={dim: self.value(f"{word}_x")} if bound else None,
             )
             rt.drain(
                 self.y,
-                Access(self.y.elements, 0, sizes, out_strides),
+                taps[1],
                 group=tg,
                 wait=True,
                 size_by={dim: self.value(f"{word}_y")} if bound else None,

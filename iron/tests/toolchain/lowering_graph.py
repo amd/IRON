@@ -12,8 +12,15 @@ import dataclasses
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 
+import iron.operators.flm.gemm.op as flm
 from iron.common.image import OperatorImage
+from iron.operators.copy import Copy
+from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.gemm import GEMM
+from iron.operators.mha import MHA
+from iron.tests.common.llama_model import small
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires, swiglu
 
@@ -27,8 +34,6 @@ def _lower_all(traced, tmp_path):
 
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
-    from iron.tests.common.llama_model import small
-
     model = small(max_seq_len=256)
     traced = model.trace(**model.shapes(1))
     bound = {id(b.op) for b in traced.bindings}
@@ -37,8 +42,6 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
-    from iron.tests.common.llama_model import small
-
     model = small()
     traced = model.trace(**model.shapes(model.config.max_seq_len))
     # Every block is bound by the rows the call runs and MHA's masks by the
@@ -54,8 +57,6 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     ids=["base", "n10240", "tn128"],
 )
 def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
-    import iron.operators.flm.gemm.op as flm
-
     op = flm.GEMM(M=M, K=K, N=N)
     (tmp_path / "shape").mkdir()
     lower(op, tmp_path / "shape")
@@ -75,8 +76,6 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
 
 
 def _shipped(**kwargs):
-    from iron.operators.flm.gemm.shipped import Shipped
-
     return Shipped(**kwargs)
 
 
@@ -116,13 +115,10 @@ PREFILL = dict(
 
 
 def _reorder(sizes, in_strides, out_strides, **kw):
-    from iron.common.tiling import Walk
-    from iron.operators.copy import Copy
-
     n = int(np.prod(sizes))
     return Copy(
-        src=Walk(0, tuple(sizes), tuple(in_strides)),
-        dst=Walk(0, tuple(sizes), tuple(out_strides)),
+        src=TensorAccessPattern((n,), 0, sizes, in_strides),
+        dst=TensorAccessPattern((n,), 0, sizes, out_strides),
         input_buffer_size=n,
         output_buffer_size=n,
         **kw,
@@ -133,7 +129,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
     "make",
     [
         pytest.param(
-            lambda p: __import__("iron.operators.gemm", fromlist=["GEMM"]).GEMM(
+            lambda p: GEMM(
                 M=p["S"],
                 K=p["F"],
                 N=p["E"],
@@ -155,7 +151,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
             id="kv_into_cache",
         ),
         pytest.param(
-            lambda p: __import__("iron.operators.mha", fromlist=["MHA"]).MHA(
+            lambda p: MHA(
                 num_heads=p["H"],
                 seq_len=p["S"],
                 d=p["D"],
@@ -171,7 +167,7 @@ def test_prefill_steps_lower_at_llama_size(make, tmp_path):
     """The steps a prefill graph needs that a small case does not exercise: the
     down projection's column-major weight (its column-block stride is past the
     descriptor's 20-bit step, so B unrolls), the cache write's 2048-wide
-    reorder (legalized), and MHA reading (seq, heads, d).
+    reorder (one descriptor, D1 past its wrap split by the compiler), and MHA reading (seq, heads, d).
     """
     op = make(PREFILL)
     op.resolved(aie_utils.get_current_device())

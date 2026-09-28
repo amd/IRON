@@ -12,7 +12,7 @@ construction. Host-only: what is checked is the refusal, not a dispatch.
 import pytest
 from aie.iron.device import from_name
 
-from iron.common import Incompatible
+from iron.common import Incompatible, Unresolvable
 from iron.operators.copy import Copy
 from iron.operators.repeat import Repeat
 from iron.operators.transpose import Transpose
@@ -32,11 +32,11 @@ def test_repeat_cols_without_a_legal_split_is_rejected(cols, why):
     in 32-bit words, so bounding the chunk length alone lets through taps the
     BD verifier then rejects with a much less legible error.
 
-    Refused when the shape is asked for, not when it is built: nothing about
-    the device can make it legal.
+    Refused when resolved for a device, against its shim's descriptor
+    limits, not when it is built.
     """
-    with pytest.raises(ValueError, match="Cannot split cols"):
-        Repeat(rows=8, cols=cols, repeat=4)
+    with pytest.raises(Unresolvable, match="Cannot split cols"):
+        Repeat(rows=8, cols=cols, repeat=4).resolved(from_name("npu2"))
 
 
 def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 from aie.iron import WorkerRuntimeBarrier
 
 
@@ -18,6 +19,12 @@ class Target:
     ``register`` hands the Runtime.
     """
 
+    # One bank of a core's local memory. AIE2 and AIE2P both have eight 8 KB
+    # banks, and a fifo object spanning more than one cannot be double-
+    # buffered in what is left; the target model gives the total
+    # (Device.core_memory_bytes) but not the banking.
+    L1_BANK_BYTES = 8192
+
     def __init__(self, dev, image: str = "elf"):
         self.dev = dev
         # "elf": per-call values reach the array through the parameter
@@ -27,6 +34,13 @@ class Target:
         self.image = image
         self.barriers: list[Any] = []
         self.registered: list[Any] = []
+
+    @classmethod
+    def fifo_depth(cls, elements: int, dtype) -> int:
+        """The depth a core-side fifo of ``elements``-long objects can have:
+        two, or one when an object spans more than a bank.
+        """
+        return 1 if elements * np.dtype(dtype).itemsize > cls.L1_BANK_BYTES else 2
 
     def barrier(self, initial_value: int = 0):
         """A worker/runtime barrier the preamble sets to 1 after writing residents."""

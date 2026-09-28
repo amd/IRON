@@ -220,7 +220,7 @@ IRON uses a three-layer architecture:
    - Vectorized using AIE API for optimal performance
 
 3. **Common Infrastructure** (`iron/common/`): Compilation, device management, and utilities
-   - The declaration layer (`declare/`), the design and its runtime sequence (`design/`, `tiling.py`), the images (`image/`) and graphs (`graph/`)
+   - The declaration layer (`declare/`), the design and its runtime sequence (`design/`), the images (`image/`) and graphs (`graph/`)
    - MLIR-AIE compilation pipeline
    - XRT runtime integration
 

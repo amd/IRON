@@ -210,14 +210,14 @@ reuse lint
      `fetch()`, inference). An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
-   - `design/`, `tiling.py`: the library-owned build: the `Target` an
+   - `design/`: the library-owned build: the `Target` an
      array is built against (its device, image, barriers and registered
      objects), `build_design(op, image)` (the module for one operator),
      `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
      compiles and caches it), the derived runtime sequence (`Sequence`,
      over `Transfers.split`/`round_robin`), `ExternalSequence` (the
      sequence against a shipped image: `aie.lock`/`aiex.set_lock` releases
-     its parameter block), legal DMA descriptors
+     its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
@@ -268,7 +268,8 @@ operator that needs a different order overrides `sequence(rt)`:
 - `rt.drain(slot, view)`: DMA data from NPU → host
 - `rt.group()`: Coordinate parallel DMA operations
 - views are slices of the declared buffers (`self.A[:, r0:r1, :]`) or
-  explicit `Access` descriptors; `tiling.legalize` makes them legal
+  mlir-aie's `TensorAccessPattern`s over one (`(self.A, tap)`); the
+  compiler splits a constant pattern no one descriptor holds
 
 **Per-call values**: `Scratchpad(T)` members are patched into descriptors
 or read by cores without a rebuild; `DispatchTime(T)` regenerates the
@@ -540,12 +541,14 @@ code before relying on a line here; it is the authority.
   Decode reads the key and value caches in full (the context GEMV's K is
   array-tier). A per-call size needs mlir-aie's size-kind scratchpad
   parameter, `fill/drain(size_parameters=)`, on its iron-next branch.
-- **DMA descriptors** (mlir-aie's `verifyStridesWraps`, enforced by
-  `tiling.legalize`, the fields read from the device's target model by
-  `tiling.limits()`): the innermost dimension holds at most 1023 granules
-  unless the transfer is linear, the next at most 1023 elements, the third
-  has no wrap field, and the outermost is the iteration count (at most 64)
-  and the only one whose stride may be 0.
+- **DMA descriptors** (mlir-aie's `verifyStridesWraps`, restated over a
+  pattern by `BdLimits.fits`, `dev.bd_limits(col, row)`): the innermost
+  dimension holds at most 1023 granules unless the transfer is linear, the
+  next at most 1023 elements, the third has no wrap field, and the
+  outermost is the iteration count (at most 64) and the only one whose
+  stride may be 0. A constant pattern past them is split by the compiler
+  (`aie-decompose-large-dma-bd`); one a per-call value patches (an offset,
+  a bounded size) must fit one descriptor, since the patch lands in it.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
   column `c`; pin it with `via=` where that matters.

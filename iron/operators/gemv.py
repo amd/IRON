@@ -26,8 +26,8 @@ from iron.common import (
     optional,
     param,
 )
+from iron.common.design import Target
 from iron.common.testing import Case, Testing
-from iron.common.tiling import Access, bank_elements, granule_elements, limits
 
 
 def _cases():
@@ -205,7 +205,9 @@ class GEMV(Operator):
         if self.epilogue == "gelu" and dev.arch is not AIEArch.AIE2p:
             # gelu_tile_bf16 is exported by gelu_aie2p.h alone.
             raise Unresolvable(f"GEMV's gelu epilogue is aie2p-only; got {dev.arch}")
-        rows = self.tile_size_input or (2 if self.K <= bank_elements(bfloat16) else 1)
+        # Two rows of A per acquire where two fit a bank's worth of L1.
+        row_bytes = self.K * np.dtype(bfloat16).itemsize
+        rows = self.tile_size_input or (2 if row_bytes <= Target.L1_BANK_BYTES else 1)
         tile = self.tile_size_output or max(rows, 2)
         unit = math.lcm(tile, rows)
         cols = self.resolve_columns(
@@ -343,134 +345,18 @@ class GEMV(Operator):
         return workers
 
     def sequence(self, rt):
-        """The runtime sequence: B once per column in an outer
-        group, then A/C per batch, coalesced into one iterated descriptor per
-        column when the shim can hold it.
+        """The runtime sequence: B, the whole vector, once to every column,
+        then A and C as derived: each column's rows of every batch, or,
+        under a bound, output tiles round-robin over the columns.
         """
-        M, K, nb, cols = self.M, self.K, self.num_batches, self.num_aie_columns
-        A_elems, B_elems, C_elems = self.A.elements, self.B.elements, self.C.elements
-        if self.A.bounded is not None:
-            # M bounded per call: B as below, then A and C round-robin over
-            # the columns in output tiles, each lane's count patched.
-            with rt.group() as tg_b:
-                for col in range(cols):
-                    rt.fill(
-                        self.B.lane(col),
-                        Access(B_elems, 0, (1, 1, 1, nb * K), (0, 0, 0, 1)),
-                        group=tg_b,
-                    )
+        with rt.group():
+            for col in range(self.num_aie_columns):
+                rt.fill(self.B.lane(col), self.B)
             with rt.group() as tg:
-                for slot, acc, size_by in rt.plan(self.A):
-                    rt.fill(slot, (self.A, acc), group=tg, size_by=size_by)
-                for slot, acc, size_by in rt.plan(self.C):
-                    rt.drain(slot, (self.C, acc), group=tg, wait=True, size_by=size_by)
-            return
-
-        # Distribution pattern for the input matrix A: each AIE core gets a
-        # contiguous chunk of rows; the shim puts all data on the stream in
-        # sequence and the ObjectFifo chunks it into tile_size_input x K tiles.
-        A_taps = [
-            [
-                Access(
-                    A_elems,
-                    col * (M // cols) * K + batch * M * K,
-                    (1, 1, 1, (M // cols) * K),
-                    (0, 0, 0, 1),
-                )
-                for batch in range(nb)
-            ]
-            for col in range(cols)
-        ]
-        # Every column gets the entirety of the vector B (all batches in sequence).
-        B_tap = Access(B_elems, 0, (1, 1, 1, nb * K), (0, 0, 0, 1))
-        # Collection pattern for C: each core writes back its contiguous chunk.
-        C_taps = [
-            [
-                Access(
-                    C_elems,
-                    col * (M // cols) + batch * M,
-                    (1, 1, 1, M // cols),
-                    (0, 0, 0, 1),
-                )
-                for batch in range(nb)
-            ]
-            for col in range(cols)
-        ]
-
-        # Batch coalescing replaces the per-batch unroll with a single iterated
-        # BD: within one batch the run is contiguous, the batch stride is the
-        # full matrix, and the run is split into [run_hi, run_lo] only to fit
-        # the shim's wrap field. iron.common.tiling states the general rules;
-        # this keeps GEMV's own (both halves <= 1023 elements, run_lo even).
-        fields = limits()
-        GRAN_ELEMS = granule_elements(bfloat16)
-        MAX_STRIDE = fields.step * GRAN_ELEMS
-
-        def factor_run(run, lim=fields.wrap, gran=GRAN_ELEMS):
-            """``(hi, lo)`` with both at most ``lim`` elements.
-
-            Stricter than :func:`iron.common.tiling.split_run`, whose ``lo``
-            may run to ``lim`` granules rather than ``lim`` elements.
-            """
-            lo_start = (lim // gran) * gran
-            for lo in range(lo_start, 0, -gran):
-                if run % lo == 0 and (run // lo) <= lim:
-                    return (run // lo, lo)
-            return None
-
-        A_run, A_bstride = (M // cols) * K, M * K
-        C_run, C_bstride = (M // cols), M
-        A_split, C_split = factor_run(A_run), factor_run(C_run)
-        coalesce = (
-            nb > 1
-            and A_bstride <= MAX_STRIDE
-            and C_bstride <= MAX_STRIDE
-            and A_bstride % GRAN_ELEMS == 0
-            and C_bstride % GRAN_ELEMS == 0
-            and A_split is not None
-            and C_split is not None
-        )
-
-        def coalesced(elems, col_off, split, bstride):
-            run_hi, run_lo = split
-            return Access(
-                elems, col_off, (1, nb, run_hi, run_lo), (0, bstride, run_lo, 1)
-            )
-
-        A_coalesced: list[Access] = []
-        C_coalesced: list[Access] = []
-        if coalesce:
-            # Dropping the per-batch drain wait lets the single iterated fill BD
-            # run ahead of the core. ObjectFifo lock backpressure keeps that
-            # safe: a producer that gets ahead blocks on the buffer lock (worst
-            # case a stall, never a corrupting overrun). A and C are declared
-            # at depth 2, which only buys overlap of fill with compute.
-            A_coalesced = [
-                coalesced(A_elems, col * (M // cols) * K, A_split, A_bstride)
-                for col in range(cols)
-            ]
-            C_coalesced = [
-                coalesced(C_elems, col * (M // cols), C_split, C_bstride)
-                for col in range(cols)
-            ]
-
-        with rt.group() as tg_b:
-            for col in range(cols):
-                # Simple linear transfer of B, includes all batches in sequence
-                rt.fill(self.B.lane(col), B_tap, group=tg_b)
-            # Coalesced: one iterated BD per column covers all batches (one
-            # drain wait per column). Fallback (incl. num_batches==1): the
-            # per-batch unroll, one wait per batch. Only the tap and the wait
-            # count differ.
-            num_waits = 1 if coalesce else nb
-            for w in range(num_waits):
-                with rt.group() as tg_ac:
-                    for col in range(cols):
-                        a_tap = A_coalesced[col] if coalesce else A_taps[col][w]
-                        rt.fill(self.A.lane(col), a_tap, group=tg_ac)
-                    for col in range(cols):
-                        c_tap = C_coalesced[col] if coalesce else C_taps[col][w]
-                        rt.drain(self.C.lane(col), c_tap, group=tg_ac, wait=True)
+                for slot, tap, size_by in rt.plan(self.A):
+                    rt.fill(slot, (self.A, tap), group=tg, size_by=size_by)
+                for slot, tap, size_by in rt.plan(self.C):
+                    rt.drain(slot, (self.C, tap), group=tg, wait=True, size_by=size_by)
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches

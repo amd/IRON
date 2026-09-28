@@ -10,12 +10,13 @@ lowers each transfer to MLIR tasks. The same base serves
 
 from __future__ import annotations
 
-import inspect
 from contextlib import contextmanager
 from math import prod
 from typing import Any
 
+import aie.utils as aie_utils
 from aie.extras.dialects import arith
+from aie.helpers.taplib import BdLimits, TensorAccessPattern
 from aie.ir import IntegerType
 from aie.iron import TaskGroup, sync_parameters
 
@@ -26,16 +27,6 @@ from ..declare.bound import (
     BoundValue,
     BufferView,
     _StreamSlot,
-)
-from ..tiling import (
-    Access,
-    encode,
-    granule_elements,
-    legalize,
-    place,
-    split,
-    split_run,
-    whole,
 )
 from .target import Target
 
@@ -49,6 +40,11 @@ class Transfers:
     :class:`Sequence` lowers a transfer to MLIR tasks;
     :class:`~.external.ExternalSequence` as shim DMA tasks on a downloaded
     image's pinned channels.
+
+    A transfer is a ``TensorAccessPattern`` over the flat buffer. A constant
+    one is issued as it is: the compiler splits one a buffer descriptor
+    cannot hold (``aie-decompose-large-dma-bd``). One patched per call must
+    fit a descriptor as given, so it is built to (``BdLimits``).
     """
 
     op: Operator
@@ -78,14 +74,16 @@ class Transfers:
     def _derived(self) -> None:
         with self.group() as tg:
             for buf in self.op.inputs:
-                for slot, acc, size_by in self.plan(buf):
-                    self.fill(slot, (buf, acc), group=tg, size_by=size_by)
+                for slot, tap, size_by in self.plan(buf):
+                    self.fill(slot, (buf, tap), group=tg, size_by=size_by)
             for buf in self.op.outputs:
-                for slot, acc, size_by in self.plan(buf):
-                    self.drain(slot, (buf, acc), group=tg, wait=True, size_by=size_by)
+                for slot, tap, size_by in self.plan(buf):
+                    self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
 
-    def plan(self, buf: BoundBuffer) -> list[tuple[Any, Access, dict | None]]:
-        """The derived transfers of one operand, ``(slot, access, size_by)``
+    def plan(
+        self, buf: BoundBuffer
+    ) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
+        """The derived transfers of one operand, ``(slot, tap, size_by)``
         each: the declared split across its lanes, or the round-robin one
         with its patched dimension under a bound. An override that keeps the
         derived movement for some operands issues them from here.
@@ -93,11 +91,7 @@ class Transfers:
         stream = self._stream_of(buf)
         bounded = buf.bounded
         if bounded is None:
-            return [
-                (slot, acc, None)
-                for slot, accesses in self.split(buf, stream)
-                for acc in accesses
-            ]
+            return [(slot, tap, None) for slot, tap in self.split(buf, stream)]
         extent, axis, word = bounded
         if axis != buf.batch_axes:
             raise ValueError(
@@ -106,96 +100,100 @@ class Transfers:
                 f"override sequence(rt) to bound another axis"
             )
         return [
-            (slot, acc, {dim: word})
-            for slot, acc, dim in self.round_robin(buf, stream, axis)
+            (slot, tap, {dim: word})
+            for slot, tap, dim in self.round_robin(buf, stream, axis)
         ]
 
     @staticmethod
     def split(
         buffer: BoundBuffer, stream: BoundStream
-    ) -> list[tuple[Any, list[Access]]]:
-        """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
+    ) -> list[tuple[Any, TensorAccessPattern]]:
+        """How ``buffer`` moves through ``stream``: ``[(slot, tap), ...]``.
 
         A single-slot or broadcast stream takes the whole buffer in one linear
         transfer. A ``per=`` stream splits the buffer's first non-batch axis
-        across its slots; leading batch axes become repeats, coalesced into one
-        iterated descriptor when the slot rules allow and unrolled otherwise.
+        across its slots, slot ``i`` taking the ``i``-th block of rows out of
+        every leading index.
         """
         if stream.count == 1:
-            return [
-                (stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))
-            ]
+            return [(stream, buffer.tap)]
         if stream.replicate:
-            everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
-            return [(stream[i], everything) for i in range(stream.count)]
-        axis = buffer.batch_axes
-        if axis >= len(buffer.shape):
+            return [(stream[i], buffer.tap) for i in range(stream.count)]
+        shape, axis = buffer.shape, buffer.batch_axes
+        if axis >= len(shape):
             raise ValueError(
-                f"{buffer.name} {buffer.shape} has no axis to split across the "
+                f"{buffer.name} {shape} has no axis to split across the "
                 f"{stream.count} slots of stream {stream.name!r}"
             )
-        try:
-            blocks = split(buffer.shape, stream.count, axis)
-        except ValueError as e:
+        share, remainder = divmod(shape[axis], stream.count)
+        if remainder:
             raise ValueError(
-                f"{buffer.name} {buffer.shape} does not divide across stream "
-                f"{stream.name!r}: {e}. Check {type(buffer._op).__name__}.compatible()"
-            ) from None
+                f"{buffer.name} {shape} does not divide across stream "
+                f"{stream.name!r}: {shape[axis]} rows (axis {axis}) over "
+                f"{stream.count} slots. Check {type(buffer._op).__name__}.compatible()"
+            )
+        leading = (slice(None),) * axis
         return [
-            (stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks
+            (
+                stream[i],
+                TensorAccessPattern.from_slice(
+                    shape, leading + (slice(i * share, (i + 1) * share),)
+                ),
+            )
+            for i in range(stream.count)
         ]
 
     @staticmethod
     def round_robin(
         buffer: BoundBuffer, stream: BoundStream, axis: int
-    ) -> list[tuple[Any, Access, int]]:
+    ) -> list[tuple[Any, TensorAccessPattern, int]]:
         """How ``buffer`` moves through ``stream`` when ``axis`` is bounded per
-        call: ``[(slot, access, dim), ...]``, ``dim`` the descriptor dimension a
+        call: ``[(slot, tap, dim), ...]``, ``dim`` the descriptor dimension a
         call patches with the tiles per lane.
 
         The tiles along ``axis`` go round-robin over the lanes: lane ``k`` takes
         tiles ``k, k + lanes, k + 2*lanes, ...``, so every lane has one fixed
-        offset, one fixed stride and the one patched count. Axes before it are
-        repeats. The descriptor is built for the full extent; a call shortens it.
+        offset, one fixed stride and the one patched count, on D2. An axis
+        before it iterates; a tile is a run split over D1 and D0. The
+        descriptor is built for the full extent; a call shortens it.
         """
         shape, dtype = buffer.shape, buffer.dtype
         lanes = 1 if stream.replicate else stream.count
-        inner = prod(shape[axis + 1 :]) if axis + 1 < len(shape) else 1
+        inner = prod(shape[axis + 1 :])
         tile_rows = buffer.extent_unit(axis)
         if shape[axis] % (lanes * tile_rows):
             raise ValueError(
                 f"{buffer.name} {shape}: axis {axis} does not divide into {tile_rows}-row "
                 f"tiles over {lanes} lanes"
             )
+        if axis > 1:
+            raise ValueError(
+                f"{buffer.name} {shape}: bounding axis {axis} needs {axis + 3} "
+                f"descriptor dimensions; a descriptor has four"
+            )
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
-        leading = [(shape[i], prod(shape[i + 1 :])) for i in range(axis)]
-        gran = granule_elements(dtype)
-        halves = split_run(run, gran)
+        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        halves = shim.factor(run, shim.granule(dtype))
         if halves is None:
             raise ValueError(
                 f"{buffer.name}: a {run}-element tile does not fit one descriptor"
             )
         hi, lo = halves
-        run_dims = ([(hi, lo)] if hi != 1 else [(1, 0)]) + [(lo, 1)]
-        dims = leading + [(tiles, lanes * run)] + run_dims
-        if len(dims) > 4:
-            raise ValueError(
-                f"{buffer.name} {shape}: bounding axis {axis} needs {len(dims)} "
-                f"descriptor dimensions; a descriptor has four"
-            )
-        dim = 4 - len(run_dims) - 1  # where the tile count lands once padded to four
+        iterations, step = (shape[0], prod(shape[1:])) if axis else (1, 0)
+        sizes = [iterations, tiles, hi, lo]
+        strides = [step, lanes * run, lo, 1]
         out = []
         for lane in range(lanes):
-            acc = place(buffer.elements, lane * run, dims, gran)
-            if acc is None:
+            tap = TensorAccessPattern((buffer.elements,), lane * run, sizes, strides)
+            if not shim.fits(tap, dtype):
                 raise ValueError(
                     f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "
                     f"does not fit one descriptor per lane"
                 )
             slots = range(stream.count) if stream.replicate else [lane]
             for s in slots:
-                out.append((stream[s] if stream.count > 1 else stream, acc, dim))
+                out.append((stream[s] if stream.count > 1 else stream, tap, 1))
         return out
 
     def _stream_of(self, buf: BoundBuffer) -> BoundStream:
@@ -211,10 +209,10 @@ class Sequence(Transfers):
     """The runtime sequence of one operator, opened by the library.
 
     ``fill``/``drain`` take a stream (or one slot of a ``per=`` stream) and
-    a buffer or a slice of one (``op.A``, ``op.A[:, r0:r1, :]``), turn the
-    slice into legal descriptors, and issue them in order. Transfers are
-    enrolled in the current group; ``group()`` opens one and finishes it on
-    exit.
+    a buffer, a slice of one (``op.A``, ``op.A[:, r0:r1, :]``) or a
+    ``TensorAccessPattern`` over it, and issue it as one transfer. Transfers
+    are enrolled in the current group; ``group()`` opens one and finishes it
+    on exit.
     """
 
     def __init__(
@@ -278,8 +276,8 @@ class Sequence(Transfers):
         size_by=None,
         managed=True,
     ):
-        handle = self._handle(stream)
-        buffer, accesses, sliced_by = self._resolve(what, stream)
+        fn = getattr(self._handle(stream), verb)
+        buffer, tap, sliced_by = self._resolve(what, stream)
         offset_by = offset_by or sliced_by
         if offset_by is not None and offset_by.param is None:
             raise ValueError(
@@ -288,76 +286,57 @@ class Sequence(Transfers):
             )
         sizes_by = self._sizes_by(size_by)
         data = self._rt_data[buffer.name]
+        if managed:
+            common = dict(wait=wait, group=group if group is not None else self._group)
+        else:
+            if group is not None:
+                raise ValueError("an unmanaged transfer joins no group")
+            common = dict(wait=wait, managed=False)
         dynamic = offset_by is not None and offset_by.ssa is not None
         dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())
-        offset_parameter = (
-            offset_by.param if offset_by is not None and not dynamic else None
+        if not dynamic:
+            return fn(
+                data,
+                tap=tap,
+                offset_parameter=offset_by.param if offset_by is not None else None,
+                size_parameters=(
+                    {dim: value.param for dim, value in sizes_by.items()}
+                    if sizes_by
+                    else None
+                ),
+                **common,
+            )
+        # The dispatch-time form: the same pattern with the per-call scalars
+        # in place of the constants, regenerated per call. The compiler cannot
+        # split a descriptor it cannot read, so the pattern must fit one.
+        if (
+            not aie_utils.ensure_current_device(required=True)
+            .bd_limits(0, 0)
+            .fits(tap, buffer.dtype)
+        ):
+            raise ValueError(
+                f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
+                f"offset or size, so it must fit one buffer descriptor, and does not"
+            )
+        sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
+        transfer_len = prod(sizes[-3:])
+        for dim, value in sizes_by.items():
+            sizes[dim] = value.ssa
+        offset: Any = tap.offset
+        if offset_by is not None and offset_by.ssa is not None:
+            offset = offset_by.ssa
+            if tap.offset:
+                offset = offset + arith.constant(
+                    int(tap.offset), IntegerType.get_signless(32)
+                )
+        return fn(
+            data,
+            sizes=sizes,
+            strides=strides,
+            offset=offset,
+            transfer_len=transfer_len,
+            **common,
         )
-        tasks = []
-        for i, acc in enumerate(accesses):
-            last = i == len(accesses) - 1
-            fn = getattr(handle, verb)
-            if managed:
-                common = dict(
-                    wait=wait and last,
-                    group=group if group is not None else self._group,
-                )
-            else:
-                if group is not None:
-                    raise ValueError("an unmanaged transfer joins no group")
-                common = dict(wait=wait and last, managed=False)
-            if dynamic:
-                # The dispatch-time form: the same pattern with the per-call
-                # scalars in place of the constants, regenerated per call.
-                if not isinstance(acc, Access):
-                    raise TypeError(
-                        f"a dispatch-time offset or size needs an Access, got {acc!r}"
-                    )
-                sizes: list[Any] = list(acc.sizes)
-                for dim, value in sizes_by.items():
-                    sizes[dim] = value.ssa
-                offset = acc.offset
-                if offset_by is not None and offset_by.ssa is not None:
-                    offset = offset_by.ssa
-                    if acc.offset:
-                        offset = offset + arith.constant(
-                            int(acc.offset), IntegerType.get_signless(32)
-                        )
-                tasks.append(
-                    fn(
-                        data,
-                        sizes=sizes,
-                        strides=list(acc.strides),
-                        offset=offset,
-                        transfer_len=acc.count,
-                        **common,
-                    )
-                )
-            else:
-                patched = {}
-                if sizes_by:
-                    if not isinstance(acc, Access):
-                        raise TypeError(f"a per-call size needs an Access, got {acc!r}")
-                    if "size_parameters" not in inspect.signature(fn).parameters:
-                        raise NotImplementedError(
-                            f"{type(self.op).__name__}: a per-call size on a full ELF "
-                            f"needs mlir-aie's size-kind scratchpad parameter "
-                            f"(fill/drain(size_parameters={{dim: param}})), which this "
-                            f"toolchain does not have; build mlir-aie's iron-next"
-                        )
-                    patched["size_parameters"] = {
-                        dim: value.param for dim, value in sizes_by.items()
-                    }
-                tasks.append(
-                    fn(
-                        data,
-                        tap=acc.tap() if isinstance(acc, Access) else acc,
-                        offset_parameter=offset_parameter,
-                        **patched,
-                        **common,
-                    )
-                )
-        return tasks[-1] if len(tasks) == 1 else tasks
 
     def _sizes_by(self, size_by) -> dict[int, BoundValue]:
         """The checked ``{dim: value}`` of a per-call size."""
@@ -397,46 +376,35 @@ class Sequence(Transfers):
 
     def _resolve(
         self, what, stream
-    ) -> tuple[BoundBuffer, list[Access], BoundValue | None]:
-        if not isinstance(what, (BoundBuffer, BufferView, tuple)):
-            # A descriptor alone: the buffer is the one the stream belongs to.
+    ) -> tuple[BoundBuffer, TensorAccessPattern, BoundValue | None]:
+        """``(buffer, tap, offset_by)`` of what a transfer moves: a buffer, a
+        slice of one, ``(buffer, tap)``, or a tap alone on an operand's own
+        stream.
+        """
+        if isinstance(what, TensorAccessPattern):
             buffer = stream.stream if isinstance(stream, _StreamSlot) else stream
             if isinstance(buffer, BoundStream):
                 buffer = buffer.buffer
             if not isinstance(buffer, BoundBuffer):
                 raise TypeError(
                     f"{what!r} alone names no buffer; {stream!r} is not an "
-                    f"operand's own stream, so give (buffer, descriptor)"
+                    f"operand's own stream, so give (buffer, tap)"
                 )
-            what = (buffer, what)
+            return buffer, what, None
         if isinstance(what, BoundBuffer):
-            return (
-                what,
-                [Access(what.elements, 0, (1, 1, 1, what.elements), (0, 0, 0, 1))],
-                None,
-            )
+            return what, what.tap, None
         if isinstance(what, BufferView):
-            offset, sizes, strides = what.pattern()
-            accesses = legalize(
-                what.buffer.elements, offset, sizes, strides, what.buffer.dtype
-            )
-            return what.buffer, accesses, what.offset_by
+            return what.buffer, what.tap, what.offset_by
         if (
             isinstance(what, tuple)
             and len(what) == 2
             and isinstance(what[0], BoundBuffer)
+            and isinstance(what[1], TensorAccessPattern)
         ):
-            buffer, acc = what
-            if isinstance(acc, Access):
-                return buffer, [acc], None
-            if hasattr(acc, "sizes") and hasattr(acc, "strides"):
-                # an upstream TensorAccessPattern (or a TensorTiler2D entry): pass it through
-                return buffer, [acc], None
-            raise TypeError(
-                "(buffer, Access) or (buffer, TensorAccessPattern) expected"
-            )
+            return what[0], what[1], None
         raise TypeError(
-            f"fill/drain take a buffer, a slice of one, or (buffer, Access); got {what!r}"
+            f"fill/drain take a buffer, a slice of one, a TensorAccessPattern or "
+            f"(buffer, TensorAccessPattern); got {what!r}"
         )
 
     # -- structure ---------------------------------------------------------

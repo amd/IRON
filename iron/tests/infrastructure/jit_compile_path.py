@@ -25,8 +25,8 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.trace import TraceConfig
 
 import iron
-from iron.common import In, Operator, Out, param, tiling
-from iron.common.design import OperatorDesign
+from iron.common import In, Operator, Out, param
+from iron.common.design import OperatorDesign, runtime
 from iron.common.image import OperatorImage
 from iron.operators import GEMM, MHA, ElementwiseAdd
 
@@ -135,10 +135,10 @@ def _add_key():
 def test_the_compile_key_covers_the_library_a_design_calls():
     """An edit to IRON's common tree re-keys a standalone build.
 
-    The design's own code identity does not reach a helper imported inside a
-    function (MHA's sequence imports ``legalize`` so): an edit to
-    ``tiling.py`` once left an xclbin build on the image of the code before
-    it, and the device ran the old descriptors with nothing reporting it.
+    The design's own code identity does not reach the library its sequence
+    calls (MHA's sequence runs on ``design/runtime.py``): an edit to the
+    library once left an xclbin build on the image of the code before it,
+    and the device ran the old descriptors with nothing reporting it.
     """
     design = OperatorDesign(
         MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
@@ -146,7 +146,7 @@ def test_the_compile_key_covers_the_library_a_design_calls():
     digest = OperatorDesign.source_digest(tuple(design.sources))
     assert design.key == f"{design.identity}:{digest}"
     trees = {p.resolve() for p in OperatorDesign.TREES[0].rglob("*.py")}
-    assert Path(tiling.__file__).resolve() in trees
+    assert Path(runtime.__file__).resolve() in trees
     assert Path(inspect.getfile(MHA)).resolve() in {
         Path(f).resolve() for f in design.sources
     }

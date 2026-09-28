@@ -10,9 +10,8 @@ runs the same table through the real lowering, to an instruction stream.
 """
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
-
-from iron.common.tiling import Walk
 
 # (module, class name, [kwargs, ...])
 CASES = [
@@ -157,15 +156,15 @@ CASES = [
             # element count both ways; the operator checks that at
             # construction.)
             dict(
-                src=Walk(0, (128, 2), (8, 1)),
+                src=TensorAccessPattern((1024,), 0, [128, 2], [8, 1]),
                 input_buffer_size=1024,
                 output_buffer_size=256,
             ),
             # A reorder of (seq, groups, d) into (groups, seq, d), the KV-cache
-            # write of a prefill: a 3-D walk the copy legalizes for the shim.
+            # write of a prefill: a 3-D pattern, one descriptor on the shim.
             dict(
-                src=Walk.permuted((128, 4, 64), (1, 0, 2)),
-                dst=Walk.slice((4, 128, 64), (slice(None), slice(0, 128))),
+                src=TensorAccessPattern((128, 4, 64), 0, [4, 128, 64], [64, 256, 1]),
+                dst=TensorAccessPattern.from_slice((4, 128, 64), np.s_[:, 0:128]),
                 input_buffer_size=4 * 128 * 64,
                 output_buffer_size=4 * 128 * 64,
                 tile_size=1024,

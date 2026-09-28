@@ -3,24 +3,26 @@
 
 """A copy between two views: ``Copy(k, keys[i][:, pos])``.
 
-Each side is a walk over its buffer (offset, sizes, strides), the form a DMA
-takes; the shim channels split the walk's innermost axis and each share
-is legalized for the shim. A per-call value indexing a view
-reaches the copy as ``in_offset``/``out_offset``, an element offset.
+Each side is an access pattern over its buffer (offset, sizes, strides), the
+form a DMA takes; the shim channels split its innermost axis, and the
+compiler splits a share no one descriptor holds. A per-call value indexing a
+view reaches the copy as ``in_offset``/``out_offset``, an element offset.
 """
 
 import dataclasses
 from dataclasses import field
+from math import prod
 from typing import Any
 
+import aie.utils as aie_utils
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import In, Incompatible, Operator, Out, Scratchpad, auto, param
 from iron.common.testing import Case, Testing
-from iron.common.tiling import Walk, granule_elements, legalize, place
 
 
 def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
@@ -28,8 +30,8 @@ def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
     buffer: each of its rows lands ``seq * 64`` elements after the last.
     """
     return dict(
-        src=Walk.of((8, 64)),
-        dst=Walk.slice((8, seq, 64), (slice(None), slot)),
+        src=TensorAccessPattern.from_slice((8, 64), ()),
+        dst=TensorAccessPattern.from_slice((8, seq, 64), np.s_[:, slot]),
         input_buffer_size=8 * 64,
         output_buffer_size=8 * seq * 64,
         num_channels=num_channels,
@@ -41,12 +43,13 @@ class Copy(Operator):
 
     Gathers by ``src`` and scatters by ``dst``, split across
     ``num_channels`` memtile pass-throughs (no cores) on the innermost
-    axis. In a graph the walks come from the operands: ``Copy(k,
+    axis. In a graph the patterns come from the operands: ``Copy(k,
     keys[i][:, pos])``, ``Copy(x.transpose(1, 0, 2), y[:, :n])``; a per-call
-    index on a view binds ``in_offset`` or ``out_offset``. Standalone,
+    index on a view binds ``in_offset`` or ``out_offset``, and a per-call
+    bound ``src_bound``/``dst_bound`` with its size. Standalone,
     ``src``/``dst`` are given, or default to the whole of each buffer.
 
-    Each channel's descriptor carries 1/num_channels of the walk, so the
+    Each channel's descriptor carries 1/num_channels of the pattern, so the
     fifo object is sized against the per-channel share (``tile_size``). A
     descriptor shorter than the object starves the memtile's S2MM: it never
     completes an object, never releases the lock, and the drain never returns
@@ -81,10 +84,18 @@ class Copy(Operator):
     )
 
     input_buffer_size: int = param(repr=False)
-    src: Walk = param(default=lambda op: Walk.of((op.input_buffer_size,)))
-    output_buffer_size: int = param(default=lambda op: op.src.elements, repr=False)
-    dst: Walk = param(default=lambda op: Walk.of((op.output_buffer_size,)))
-    tile_size: int = auto()  # None: the per-channel share of the walk
+    src: TensorAccessPattern = param(
+        default=lambda op: TensorAccessPattern.from_slice((op.input_buffer_size,), ())
+    )
+    output_buffer_size: int = param(default=lambda op: prod(op.src.sizes), repr=False)
+    dst: TensorAccessPattern = param(
+        default=lambda op: TensorAccessPattern.from_slice((op.output_buffer_size,), ())
+    )
+    # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
+    # its size is the full extent in the pattern and patched to the call's.
+    src_bound: int | None = param(default=None)
+    dst_bound: int | None = param(default=None)
+    tile_size: int = auto()  # None: the per-channel share of the pattern
     num_channels: int = auto(1)
     dtype: Any = field(default=bfloat16, repr=False)
 
@@ -105,23 +116,21 @@ class Copy(Operator):
     # Per-call addends on the two base addresses, in elements.
     in_offset = Scratchpad(np.int32)
     out_offset = Scratchpad(np.int32)
-    # Per-call sizes of the bounded axis of each walk (``x[:n]`` on a view),
-    # in that axis's units.
+    # Per-call sizes of the bounded axis of each pattern, in that axis's units.
     src_valid = Scratchpad(np.int32)
     dst_valid = Scratchpad(np.int32)
 
     def validate(self) -> None:
-        if self.src.elements != self.dst.elements:
+        if prod(self.src.sizes) != prod(self.dst.sizes):
             raise ValueError(
                 f"a copy moves the same element count both ways: src {self.src} "
-                f"has {self.src.elements} elements, dst {self.dst} has "
-                f"{self.dst.elements}"
+                f"has {prod(self.src.sizes)} elements, dst {self.dst} has "
+                f"{prod(self.dst.sizes)}"
             )
 
     def resolve(self, dev):
         """The transfer size is the per-channel share of the copy unless given."""
-        assert self.src is not None  # validate() filled it
-        tile_size = self.tile_size or self.src.elements // self.num_channels
+        tile_size = self.tile_size or prod(self.src.sizes) // self.num_channels
         return dataclasses.replace(self, tile_size=tile_size)
 
     def uses_value(self, name: str) -> bool:
@@ -139,80 +148,81 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        for walk in (self.src, self.dst):
-            if walk.sizes[-1] % channels:
+        for tap in (self.src, self.dst):
+            if tap.sizes[-1] % channels:
                 raise Incompatible(
-                    f"the innermost axis of {walk} ({walk.sizes[-1]}) must be "
+                    f"the innermost axis of {tap} ({tap.sizes[-1]}) must be "
                     f"divisible by num_channels ({channels})"
                 )
-        per_channel = self.src.elements // channels
+        per_channel = prod(self.src.sizes) // channels
         if per_channel % self.tile_size:
             raise Incompatible(
                 f"tile_size {self.tile_size} must divide the per-channel "
-                f"transfer {per_channel} (= {self.src.elements} / {channels} channels)"
+                f"transfer {per_channel} (= {prod(self.src.sizes)} / {channels} "
+                f"channels)"
             )
 
-    def _taps(self, buffer, walk: Walk, offset: int = 0):
-        """Per channel, the descriptors of its share of the walk, each with
-        the dimension a bound patches (``None`` when none does).
+    def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
+        """``tap`` with its innermost axis split among the channels, in order."""
+        share = tap.sizes[-1] // self.num_channels
+        return [
+            TensorAccessPattern(
+                tap.tensor_dims,
+                tap.offset + c * share * tap.strides[-1],
+                [*tap.sizes[:-1], share],
+                tap.strides,
+            )
+            for c in range(self.num_channels)
+        ]
 
-        Each share is legalized for the shim (an axis past its slot's wrap
-        is factored or unrolled, order preserved), so a wide reorder lowers
-        here instead of failing later in the toolchain. A bounded walk is one
-        exact descriptor per channel or an error, its bounded axis on D2
-        (dimension 1) where the walk allows: D2 has no wrap, since a shim
-        descriptor's length ends it, and it is what a length patch bounds.
-        A bound on the innermost axis, the one the channels split, takes one
-        channel.
+    def _taps(
+        self, tap: TensorAccessPattern, bound: int | None, dtype
+    ) -> list[tuple[TensorAccessPattern, int | None]]:
+        """Per channel, its share of ``tap`` and the dimension a bound patches.
+
+        An unbounded share is issued as it is: the compiler splits one no
+        descriptor holds. A bounded one must be one descriptor, since its
+        size is patched in place, so it is placed exactly, its bounded axis
+        on D2 (dimension 1) where the pattern allows: D2 has no wrap, since a
+        shim descriptor's length ends it. A bound on the innermost axis, the
+        one the channels split, takes one channel.
         """
-        shares = walk.shares(self.num_channels)
-        if walk.bounded is None:
-            return [
-                [
-                    (acc, None)
-                    for acc in legalize(
-                        buffer.elements,
-                        share.offset + offset,
-                        share.sizes,
-                        share.strides,
-                        buffer.dtype,
-                    )
-                ]
-                for share in shares
-            ]
-        rank, bounded = len(walk.sizes), walk.bounded
-        dim = 4 - rank + bounded
+        if bound is None:
+            return [(share, None) for share in self._shares(tap)]
+        rank = len(tap.sizes)
+        dim = 4 - rank + bound
         if dim == 3 and self.num_channels > 1:
             raise Incompatible(
-                f"{walk} is bounded on the axis the {self.num_channels} channels "
+                f"{tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
         # At most one axis outside the bound (the iteration slot) and one or
         # two inside it (D1, D0) put the bound on D2.
-        on_d2 = bounded <= 1 and 1 <= rank - bounded - 1 <= 2
+        on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
+        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
         out = []
-        for share in shares:
-            dims = list(zip(share.sizes, share.strides))
+        for share in self._shares(tap):
+            dims = list(share.transformation_dims)
             if on_d2:
-                lead, inner = dims[:bounded], dims[bounded + 1 :]
+                lead, inner = dims[:bound], dims[bound + 1 :]
                 dims = (
                     (lead or [(1, 0)])
-                    + [dims[bounded]]
+                    + [dims[bound]]
                     + [(1, 0)] * (2 - len(inner))
                     + inner
                 )
-            acc = place(
-                buffer.elements,
-                share.offset + offset,
-                dims,
-                granule_elements(buffer.dtype),
+            placed = TensorAccessPattern(
+                share.tensor_dims,
+                share.offset,
+                [n for n, _ in dims],
+                [s for _, s in dims],
             )
-            if acc is None:
+            if not shim.fits(placed, dtype):
                 raise Incompatible(
-                    f"{walk} does not fit one descriptor per channel, which a "
+                    f"{tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            out.append([(acc, 1 if on_d2 else dim)])
+            out.append((placed, 1 if on_d2 else dim))
         return out
 
     def ops(self) -> int:
@@ -233,14 +243,19 @@ class Copy(Operator):
         # offsets are element counts, not bytes: the firmware multiplies the
         # scratchpad word by the element size before adding it into the BD
         # address register.
-        src, dst = self.src, self.dst
-        if src_valid is not None:
-            src = src.at(int(src_valid))
-        if dst_valid is not None:
-            dst = dst.at(int(dst_valid))
-        # Channel by channel, as the design splits the walks.
-        gather = [c.offsets() + int(in_offset) for c in src.shares(self.num_channels)]
-        scatter = [c.offsets() + int(out_offset) for c in dst.shares(self.num_channels)]
+
+        def at(tap, bound, valid):
+            if valid is None:
+                return tap
+            sizes = list(tap.sizes)
+            sizes[bound] = int(valid)
+            return TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, tap.strides)
+
+        src = at(self.src, self.src_bound, src_valid)
+        dst = at(self.dst, self.dst_bound, dst_valid)
+        # Channel by channel, as the design splits the patterns.
+        gather = [c.access_indices() + int(in_offset) for c in self._shares(src)]
+        scatter = [c.access_indices() + int(out_offset) for c in self._shares(dst)]
         out = (
             np.zeros(self.output_buffer_size, dtype=x.dtype)
             if y is None
@@ -250,35 +265,34 @@ class Copy(Operator):
         for src_c, dst_c in zip(gather, scatter):
             if len(src_c) != len(dst_c):
                 raise ValueError(
-                    f"walk element counts differ ({len(src_c)} vs {len(dst_c)}); "
+                    f"pattern element counts differ ({len(src_c)} vs {len(dst_c)}); "
                     "src and dst must move the same number of elements"
                 )
             out[dst_c] = flat[src_c]
         return out if y is None else y
 
     def sequence(self, rt):
-        src, dst = self.src, self.dst
-        ins = self._taps(self.x, src)
-        outs = self._taps(self.y, dst)
+        ins = self._taps(self.src, self.src_bound, self.x.dtype)
+        outs = self._taps(self.dst, self.dst_bound, self.y.dtype)
         in_off = self.in_offset if self.uses_value("in_offset") else None
         out_off = self.out_offset if self.uses_value("out_offset") else None
 
         with rt.group() as tg:
             for c in range(self.num_channels):
-                for acc, dim in ins[c]:
-                    rt.fill(
-                        self.x.lane(c),
-                        acc,
-                        group=tg,
-                        offset_by=in_off,
-                        size_by=None if dim is None else {dim: self.value("src_valid")},
-                    )
-                for acc, dim in outs[c]:
-                    rt.drain(
-                        self.y.lane(c),
-                        acc,
-                        group=tg,
-                        wait=acc is outs[c][-1][0],
-                        offset_by=out_off,
-                        size_by=None if dim is None else {dim: self.value("dst_valid")},
-                    )
+                tap, dim = ins[c]
+                rt.fill(
+                    self.x.lane(c),
+                    tap,
+                    group=tg,
+                    offset_by=in_off,
+                    size_by=None if dim is None else {dim: self.value("src_valid")},
+                )
+                tap, dim = outs[c]
+                rt.drain(
+                    self.y.lane(c),
+                    tap,
+                    group=tg,
+                    wait=True,
+                    offset_by=out_off,
+                    size_by=None if dim is None else {dim: self.value("dst_valid")},
+                )

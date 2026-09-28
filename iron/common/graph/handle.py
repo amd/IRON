@@ -8,12 +8,12 @@ from __future__ import annotations
 from math import prod
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare import Operator
 from ..declare.operator import graph_tracer
-from ..tiling import Walk
 
 
 class Handle:
@@ -23,8 +23,8 @@ class Handle:
     unit-step slices, an ellipsis) and, on one axis, a per-call
     :class:`Value`: ``keys[:, pos]``. A contiguous static region is a slice:
     part of the parent's buffer, which any operator takes. Any other view
-    (a strided region, a transpose, a per-call index) is a walk over the
-    parent's buffer, which only a copy takes, since a DMA walks it.
+    (a strided region, a transpose, a per-call index) is an access pattern
+    over the parent's buffer, which only a copy takes, since a DMA walks it.
     """
 
     __slots__ = (
@@ -34,7 +34,7 @@ class Handle:
         "role",
         "parent",
         "start",
-        "walk",
+        "tap",
         "index_by",
         "bounds",
     )
@@ -47,7 +47,7 @@ class Handle:
         role,
         parent=None,
         start=0,
-        walk=None,
+        tap=None,
         index_by=None,
         bounds=None,
     ):
@@ -58,7 +58,8 @@ class Handle:
         self.role = role
         self.parent = parent
         self.start = start  # element offset into the parent, for a slice
-        self.walk: Walk | None = walk  # over the parent's buffer, for a view
+        # over the parent's buffer, for a view
+        self.tap: TensorAccessPattern | None = tap
         self.index_by: tuple[Value, int] | None = index_by  # (value, axis stride)
         # axis -> (value, scale): the first value * scale entries of that axis
         # are the valid ones this call (``x[:n]``); the rest are padding.
@@ -75,11 +76,11 @@ class Handle:
     @property
     def buffer_name(self) -> str:
         """The name the runlist uses: a slice is ``parent[start:stop]`` in bytes;
-        a view is walked over its parent's buffer, so it is the parent's.
+        a view is a pattern over its parent's buffer, so it is the parent's.
         """
         if self.parent is None:
             return self.name
-        if self.walk is not None:
+        if self.tap is not None:
             return self.parent.buffer_name
         item = bfp.itemsize(self.dtype)
         return f"{self.parent.buffer_name}[{self.start * item}:{(self.start + self.elements) * item}]"
@@ -90,7 +91,7 @@ class Handle:
             shape = tuple(shape[0])
         if prod(shape) != self.elements:
             raise ValueError(f"cannot reshape {self!r} to {list(shape)}")
-        if self.walk is not None:
+        if self.tap is not None:
             raise ValueError(f"cannot reshape a view {self!r}; reshape what it views")
         bounds = _rescale_bounds(self, shape)
         return Handle(
@@ -107,19 +108,24 @@ class Handle:
         """The same buffer walked with its axes permuted (no data moves)."""
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
-        if self.walk is not None:
+        if self.tap is not None:
             raise ValueError(
                 f"cannot transpose a view {self!r}; transpose what it views"
             )
-        walk = Walk.permuted(self.shape, axes)
+        if sorted(axes) != list(range(len(self.shape))):
+            raise ValueError(
+                f"axes {axes} do not permute a shape of rank {len(self.shape)}"
+            )
+        whole = TensorAccessPattern.from_slice(self.shape, ())
         shape = tuple(self.shape[a] for a in axes)
-        bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
-        return Handle(
-            shape, self.dtype, self.name, "view", self, 0, walk, bounds=bounds
+        tap = TensorAccessPattern(
+            self.shape, 0, shape, [whole.strides[a] for a in axes]
         )
+        bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
+        return Handle(shape, self.dtype, self.name, "view", self, 0, tap, bounds=bounds)
 
     def __getitem__(self, key) -> "Handle":
-        if self.walk is not None or self.parent is not None:
+        if self.tap is not None or self.parent is not None:
             raise TypeError("slicing a slice is not supported; slice the parent")
         entries = list(key) if isinstance(key, tuple) else [key]
         rank = len(self.shape)
@@ -174,7 +180,9 @@ class Handle:
                 shape.append(len(range(*entry.indices(n))))
             else:
                 static.append(int(entry))
-        walk = Walk.slice(self.shape, tuple(static))  # checks ranges, empties
+        tap = TensorAccessPattern.from_slice(
+            self.shape, tuple(static)
+        )  # checks ranges, empties
         if bounds and tuple(shape) == self.shape:
             # The whole buffer, bounded: the same handle with the bound on it.
             return Handle(
@@ -186,12 +194,12 @@ class Handle:
                 self.start,
                 bounds=bounds,
             )
-        if index_by is None and walk.contiguous:
+        if index_by is None and tap.contiguous:
             return Handle(
-                shape, self.dtype, self.name, "slice", self, walk.offset, bounds=bounds
+                shape, self.dtype, self.name, "slice", self, tap.offset, bounds=bounds
             )
         return Handle(
-            shape, self.dtype, self.name, "view", self, 0, walk, index_by, bounds=bounds
+            shape, self.dtype, self.name, "view", self, 0, tap, index_by, bounds=bounds
         )
 
     def __repr__(self) -> str:

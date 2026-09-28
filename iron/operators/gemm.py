@@ -29,7 +29,6 @@ from iron.common import (
     select,
 )
 from iron.common.testing import Case, Testing
-from iron.common.tiling import legalize, limits
 
 # fmt: off
 # The rounding configuration that tracks the reference most closely (an f32
@@ -562,15 +561,6 @@ class GEMM(Operator):
     # -- the runtime sequence --------------------------------------------------
 
     def sequence(self, rt):
-        def legal(buffer, tap):
-            """The tiler's pattern as descriptors the shim holds: one when it
-            fits, else the outermost dimension unrolled (a column-major B
-            whose column-block stride is past the 20-bit step).
-            """
-            return legalize(
-                buffer.elements, tap.offset, tap.sizes, tap.strides, buffer.dtype
-            )
-
         M, K, N = self.M, self.K, self.N
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols, n_aie_rows = self.num_aie_columns, self.n_aie_rows
@@ -583,18 +573,10 @@ class GEMM(Operator):
         c_col_maj, b_col_maj = self.c_col_maj, self.b_col_maj
         dtype_out = self.dtype_out
 
-        # A shim BD's outermost descriptor dimension lands in the ITERATION field,
-        # whose step is the shim's step field (20 bits on NPU1 and NPU2). An
-        # element stride S is re-expressed as (S - 1) * itemsize / the address
-        # granule before the check, so a wide N pushes C's row
-        # stride past it: M=1024 K=2560 N=10240 needs mem_tile_m_C * N = 2621440
-        # and aiecc rejects the build with "Stride 3 exceeds the [1:1048576]
-        # range". See the C drain below for how that is split, and flm_gemm's
-        # design.py for the same fix worked through in more detail.
-        fields = limits()
-
-        def _hw_stride_ok(stride_elems, itemsize):
-            return (stride_elems - 1) * itemsize // fields.granule_bytes <= fields.step
+        # What one shim descriptor holds. The compiler splits a constant
+        # pattern that does not fit, but the transfer blocks below count
+        # descriptors, so B and C are checked here and shaped to fit.
+        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
 
         K_div_k = K // k
         n_c_col_tiles_per_core = N // mem_tile_n
@@ -636,13 +618,13 @@ class GEMM(Operator):
                 prune_step=False,
             )
 
-        A_fills = [legal(self.A, tap) for tap in A_tiles]
-        B_fills = [legal(self.B, tap) for tap in B_tiles]
-        # An unrolled B fill costs one descriptor per column block. The BD
-        # accounting below (12 of 16 with two transfer blocks in flight)
-        # assumes one; when B unrolls, the transfer blocks are not overlapped
-        # so that a shim never holds more than one block's descriptors.
-        b_unrolled = any(len(f) > 1 for f in B_fills)
+        # A B fill that does not fit one descriptor (a column-major B whose
+        # column-block stride is past the step field) is split by the
+        # compiler, one descriptor per column block. The BD accounting below
+        # (12 of 16 with two transfer blocks in flight) assumes one; when B
+        # unrolls, the transfer blocks are not overlapped so that a shim
+        # never holds more than one block's descriptors.
+        b_unrolled = not all(shim.fits(tap, self.B.dtype) for tap in B_tiles)
 
         def fill(col, c_row, tg):
             # A input transfer: the smallest unit is a
@@ -652,13 +634,28 @@ class GEMM(Operator):
             tile_offset = (c_row * n_shim_mem_A + col) % len(A_tiles)
             # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
             if col < n_aie_rows:
-                for acc in A_fills[tile_offset]:
-                    rt.fill(self.A.lane(col), acc, group=tg)
+                rt.fill(self.A.lane(col), A_tiles[tile_offset], group=tg)
             # B input transfer: the first (n)-wide block of columns
             # of B, then the (n_aie_columns)-th such block, and so
             # on; each shim starts at a different column offset.
-            for acc in B_fills[col]:
-                rt.fill(self.B.lane(col), acc, group=tg)
+            rt.fill(self.B.lane(col), B_tiles[col], group=tg)
+
+        # C: (n_aie_rows * m)-by-n tiles, every n_aie_cols-th column block, for
+        # c_n_rows row-blocks from c_row_base.
+        def c_tile(col, c_row_base, c_n_rows):
+            if c_col_maj:
+                return TensorAccessPattern(
+                    (N, M),
+                    col * n * M + c_row_base * mem_tile_m_C,
+                    [N // mem_tile_n, n_aie_rows, n, m],
+                    [M * mem_tile_n, m, M, 1],
+                )
+            return TensorAccessPattern(
+                (M, N),
+                col * n + c_row_base * mem_tile_m_C * N,
+                [c_n_rows, N // mem_tile_n, mem_tile_m_C, n],
+                [mem_tile_m_C * N if c_n_rows > 1 else 0, mem_tile_n, N, 1],
+            )
 
         # Task groups determine when to sync, await and free DMA runtime ops.
         tg = rt.new_group()
@@ -680,13 +677,13 @@ class GEMM(Operator):
                     # columns.
                     #
                     # Normally one descriptor walks all current_tb_n_rows
-                    # row-blocks. When that outermost stride overflows the
-                    # shim's 20-bit iteration step (see _hw_stride_ok
-                    # above), issue one descriptor per row-block instead,
-                    # carrying the row jump in the OFFSET (which has no such
-                    # limit) and leaving the outer dimension degenerate.
-                    # Same bytes, same order, same number of objects; only
-                    # the descriptor is reshaped.
+                    # row-blocks. When it does not fit one (a wide N puts the
+                    # row-block stride, mem_tile_m_C * N, past the shim's
+                    # 20-bit iteration step: M=1024 K=2560 N=10240), issue one
+                    # descriptor per row-block instead, carrying the row jump
+                    # in the OFFSET (which has no such limit). Same bytes,
+                    # same order, same number of objects; only the
+                    # descriptor is reshaped.
                     #
                     # These extra tasks are safe against the two shim
                     # limits neither the toolchain nor the verifier models.
@@ -696,39 +693,13 @@ class GEMM(Operator):
                     # task queue: the C channel goes from 2 outstanding to
                     # current_tb_n_rows x 2 = 4, which is where A and B
                     # already sit.
-                    C_rows = [(row_base, current_tb_n_rows)]
-                    if not c_col_maj:
-                        row_stride = mem_tile_m_C * N
-                        if current_tb_n_rows > 1 and not _hw_stride_ok(
-                            row_stride, np.dtype(dtype_out).itemsize
-                        ):
-                            C_rows = [
-                                (row_base + r, 1) for r in range(current_tb_n_rows)
-                            ]
-                    for c_row_base, c_n_rows in C_rows:
-                        if not c_col_maj:
-                            C_row_offset = c_row_base * mem_tile_m_C * N
-                            C_col_offset = col * n
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [c_n_rows, N // mem_tile_n, mem_tile_m_C, n]
-                            C_strides = [
-                                mem_tile_m_C * N if c_n_rows > 1 else 0,
-                                mem_tile_n,
-                                N,
-                                1,
-                            ]
-                        else:
-                            C_row_offset = c_row_base * mem_tile_m_C
-                            C_col_offset = col * n * M
-                            C_offset = C_col_offset + C_row_offset
-                            C_sizes = [N // mem_tile_n, n_aie_rows, n, m]
-                            C_strides = [M * mem_tile_n, m, M, 1]
-                        C_tile = TensorAccessPattern(
-                            (N, M) if c_col_maj else (M, N),
-                            offset=C_offset,
-                            sizes=C_sizes,
-                            strides=C_strides,
-                        )
+                    C_tiles = [c_tile(col, row_base, current_tb_n_rows)]
+                    if not c_col_maj and not shim.fits(C_tiles[0], dtype_out):
+                        C_tiles = [
+                            c_tile(col, row_base + r, 1)
+                            for r in range(current_tb_n_rows)
+                        ]
+                    for C_tile in C_tiles:
                         rt.drain(self.C.lane(col), C_tile, group=tg, wait=True)
                     if not b_unrolled:
                         for tile_row in range(current_tb_n_rows):

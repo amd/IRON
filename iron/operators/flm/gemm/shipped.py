@@ -35,10 +35,10 @@ from typing import ClassVar
 import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
+from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, select
-from iron.common.tiling import Access
 from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
 from iron.operators.flm.gemm.op import GEMM
 
@@ -192,8 +192,8 @@ class Shipped(
                         r = A_SOURCE_COL.index(c)
                         rt.fill(
                             self.A.lane(r),
-                            Access(
-                                a_n,
+                            TensorAccessPattern(
+                                (a_n,),
                                 mega_row * ROWS * M_TILE * K + r * M_TILE * K,
                                 (1, k_iters, M_TILE, K_TILE),
                                 (0, K_TILE, K, 1),
@@ -205,8 +205,8 @@ class Shipped(
                     # column's k-blocks in the order the memtile writes them.
                     rt.fill(
                         self.B.lane(c),
-                        Access(
-                            b_n,
+                        TensorAccessPattern(
+                            (b_n,),
                             (mega_col * COLS + c) * N_TILE * K,
                             (1, 1, 1, k_iters * K_TILE * N_TILE),
                             (0, 0, 0, 1),
@@ -214,8 +214,8 @@ class Shipped(
                     )
                     rt.drain(
                         self.C.lane(c),
-                        Access(
-                            c_n,
+                        TensorAccessPattern(
+                            (c_n,),
                             mega_col * COLS * N_TILE
                             + mega_row * ROWS * M_TILE * N
                             + c * N_TILE,

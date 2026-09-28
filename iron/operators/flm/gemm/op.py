@@ -60,7 +60,6 @@ from iron.common import (
     param,
     select,
 )
-from iron.common.tiling import split_run
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
     A_DEPTH,
@@ -518,7 +517,7 @@ class GEMM(Operator):
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        a_split = split_run(R * CT_MAX_K, gran=1)
+        a_split = target.dev.bd_limits(0, 1).factor(R * CT_MAX_K)
         assert a_split is not None
         a_hi, a_lo = a_split
         a_send_dims: StreamDims = [

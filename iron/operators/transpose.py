@@ -6,6 +6,7 @@ import dataclasses
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
@@ -24,7 +25,6 @@ from iron.common import (
     param,
 )
 from iron.common.testing import Case, Testing
-from iron.common.tiling import Access, fifo_depth
 
 
 def _cases(cls):
@@ -184,7 +184,7 @@ class Transpose(Operator):
         cols, chans = self.num_aie_columns, self.num_channels
         n_cores = cols * chans
         tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
-        depth = fifo_depth(m * n, self.x.dtype)
+        depth = target.fifo_depth(m * n, self.x.dtype)
         # The memtile reshuffle, (size, stride) outermost first: extent-free.
         l2l1: StreamDims = [(m // s, s), (s, m), (n // s, s * m), (s, 1)]
 
@@ -260,21 +260,21 @@ class Transpose(Operator):
                         k = i * chans + j
                         # Partially transposes the input on the way in so the
                         # kernel only transposes s x s sub-tiles.
-                        tap_in = Access(
-                            self.x.elements,
+                        tap_in = TensorAccessPattern(
+                            self.x.shape,
                             batch * elems + (M // chans) * j * N + (N // cols) * i,
-                            (M // chans // m, N // cols // n, m, n),
-                            (m * N, n, N, 1),
+                            [M // chans // m, N // cols // n, m, n],
+                            [m * N, n, N, 1],
                         )
                         rt.fill(self.x.lane(k), tap_in, group=tg)
                 for i in range(cols):
                     for j in range(chans):
                         k = i * chans + j
-                        tap_out = Access(
-                            self.y.elements,
+                        tap_out = TensorAccessPattern(
+                            self.y.shape,
                             batch * elems + (N // cols) * i * M + (M // chans) * j,
-                            (M // chans // m, N // cols // n, n, m),
-                            (m, n * M, M, 1),
+                            [M // chans // m, N // cols // n, n, m],
+                            [m, n * M, M, 1],
                         )
                         rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
 

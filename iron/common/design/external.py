@@ -29,12 +29,12 @@ from aie.dialects.aie import (
     DMAChannelDir,
     get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
 )
+from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.ir import Context, InsertionPoint, Location, Module
 
 from ..declare import Operator
 from ..declare.bound import BoundBuffer, BoundStream, _StreamSlot
-from ..tiling import Access
 from .runtime import Transfers
 
 
@@ -166,22 +166,18 @@ class ExternalSequence(Transfers):
             )
         key = self._key(stream)
         depth = self._depth(stream)
-        buffer, accesses = self._resolve(what, stream)
-        data = self._rt_data[buffer.name]
+        buffer, tap = self._resolve(what, stream)
         queue = self._queues.setdefault(key, [])
-        for acc in accesses:
-            if len(queue) == depth:
-                aiex.dma_await_task(queue.pop(0))
-            task = aiex.shim_dma_single_bd_task(
-                self._allocations[key],
-                data,
-                offset=acc.offset,
-                sizes=list(acc.sizes),
-                strides=list(acc.strides),
-                issue_token=True,
-            )
-            aiex.dma_start_task(task)
-            queue.append(task)
+        if len(queue) == depth:
+            aiex.dma_await_task(queue.pop(0))
+        task = aiex.shim_dma_single_bd_task(
+            self._allocations[key],
+            self._rt_data[buffer.name],
+            tap=tap,
+            issue_token=True,
+        )
+        aiex.dma_start_task(task)
+        queue.append(task)
 
     @staticmethod
     def _lane(stream) -> _StreamSlot | BoundStream:
@@ -205,24 +201,27 @@ class ExternalSequence(Transfers):
         s = lane.stream if isinstance(lane, _StreamSlot) else lane
         return s.member.depth
 
-    def _resolve(self, what, stream) -> tuple[BoundBuffer, list[Access]]:
-        if isinstance(what, Access):
+    def _resolve(self, what, stream) -> tuple[BoundBuffer, TensorAccessPattern]:
+        if isinstance(what, TensorAccessPattern):
             lane = self._lane(stream)
             s = lane.stream if isinstance(lane, _StreamSlot) else lane
             if s.buffer is None:
                 raise TypeError(
-                    f"an Access alone names no buffer; {stream!r} is not an "
-                    f"operand's own stream, so give (buffer, Access)"
+                    f"a TensorAccessPattern alone names no buffer; {stream!r} is not "
+                    f"an operand's own stream, so give (buffer, tap)"
                 )
-            return s.buffer, [what]
+            return s.buffer, what
         if isinstance(what, BoundBuffer):
-            n = what.elements
-            return what, [Access(n, 0, (1, 1, 1, n), (0, 0, 0, 1))]
-        if isinstance(what, tuple) and len(what) == 2 and isinstance(what[1], Access):
-            return what[0], [what[1]]
+            return what, what.tap
+        if (
+            isinstance(what, tuple)
+            and len(what) == 2
+            and isinstance(what[1], TensorAccessPattern)
+        ):
+            return what[0], what[1]
         raise TypeError(
-            f"an external sequence takes a buffer, an Access on an operand's own "
-            f"stream, or (buffer, Access); got {what!r}"
+            f"an external sequence takes a buffer, a TensorAccessPattern on an "
+            f"operand's own stream, or (buffer, tap); got {what!r}"
         )
 
     def finish(self) -> None:

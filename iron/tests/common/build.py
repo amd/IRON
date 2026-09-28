@@ -1,23 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The derived sequence, device-free.
+"""The runtime sequence, device-free.
 
-Streams are bound to fake fifo handles that record what is issued, so the
-order and access patterns of the fills and drains the library derives can be
-checked without generating MLIR. What cannot be checked here is that the
-recorded calls are what upstream's ObjectFifoHandle.fill/drain accept; that
-is the toolchain's job and the operator tests' job.
+What the library derives (the split of a buffer over its lanes, and the
+round-robin one under a bound) is checked as access patterns; what a
+sequence issues is checked in the module a real build generates: each shim
+task's lane, buffer argument, offset, sizes, strides, patched size and
+whether it is waited on.
 """
 
 import dataclasses
 import re
-from typing import Any, cast
+from typing import NamedTuple
 
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron.device import from_name
+from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron.operators.flm.gemm.op as flm_gemm
 from iron.common import (
@@ -32,43 +34,24 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.design import Sequence, Target, Transfers, build_design, runtime
-from iron.common.tiling import Access
+from iron.common.design import (
+    OperatorDesign,
+    Sequence,
+    Target,
+    Transfers,
+    build_design,
+)
+from iron.operators import ElementwiseAdd
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
+from iron.operators.relu import ReLU
 from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
 from iron.tests.common.declare import Rows
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")
-
-
-class FakeGroup:
-    """Upstream's TaskGroup refuses to exist outside a Runtime function."""
-
-    def finish(self):
-        pass
-
-
-@pytest.fixture(autouse=True)
-def fake_task_group(monkeypatch):
-    # Patched where it is looked up, not where it is defined: runtime.py
-    # imports the name, so rebinding aie.iron's attribute would not reach it.
-    monkeypatch.setattr(runtime, "TaskGroup", FakeGroup)
-
-
-class FakeHandle:
-    def __init__(self, name, log):
-        self.name, self.log = name, log
-
-    def fill(self, data, tap, wait, group, offset_parameter):
-        self.log.append(("fill", self.name, data, wait))
-
-    def drain(self, data, tap, wait, group, offset_parameter):
-        self.log.append(("drain", self.name, data, wait))
-
 
 NPU2_4COL = from_name("npu2", n_cols=4)
 
@@ -97,86 +80,182 @@ class MV(Operator):
     C = Out(optional(num_batches), M, tile=(tile_out,), per=(cols,))
 
 
-def _bind_all(op, log):
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(FakeHandle(f"{s.name}{i}", log), i)
+class Task(NamedTuple):
+    """One shim task of a generated sequence, as its text gives it."""
+
+    ssa: int
+    lane: str
+    arg: int
+    offset: int
+    sizes: str
+    strides: str
+    size_parameter: str  # the patched size's symbol, or ""
+    attributes: str
+
+    @property
+    def waited(self) -> bool:
+        return "issue_token = true" in self.attributes
 
 
-def test_plan_reproduces_the_channeled_unary_split():
+_TASK = re.compile(
+    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
+    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) len = \d+ "
+    r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
+    r"(?: \{size_parameter = @(\w+)\})?\s*aie\.end\s*\}(?: \{([^}]*)\})?"
+)
+_WRITE = re.compile(
+    r"npu\.write32\(%c(-?\d+)_i32\S*, %c(-?\d+)_i32\S*\) "
+    r"\{column = (\d+) : i32, row = (\d+) : i32\}"
+)
+
+
+def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
+    """The runtime sequence ``op`` builds to, and its shim tasks in order.
+
+    An xclbin's per-call values are its dispatch parameters, which only the
+    design's generator declares, so it is generated as it would be compiled.
+    """
+    if image == "elf":
+        module = build_design(op)
+    else:
+        design = OperatorDesign(op, image)
+        module = CompilableDesign(design.generator, key=design.key).generate_mlir()
+    text = str(module)
+    text = text[text.index("aie.runtime_sequence") :]
+    tasks = [
+        Task(int(ssa), lane, int(arg), int(offset), *rest)
+        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
+    ]
+    return text, tasks
+
+
+def _awaited(text) -> list[int]:
+    return [int(t) for t in re.findall(r"aiex\.dma_await_task\(%(\d+)\)", text)]
+
+
+# --------------------------------------------------------------------------
+# What the library derives: the split and the round-robin
+# --------------------------------------------------------------------------
+
+
+def test_split_gives_each_lane_its_block():
     op = Unary(size=8192).resolved(NPU2_4COL)
     p = Transfers.split(op.A, op.streams["A"])
     assert len(p) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
-    for i, (slot, accesses) in enumerate(p):
+    for i, (slot, tap) in enumerate(p):
         assert slot.index == i
-        assert accesses == [Access(8192, chunk * i, (1, 1, 1, chunk), (0, 0, 0, 1))]
+        assert tap == TensorAccessPattern((8192,), chunk * i, [chunk], [1])
 
 
-def test_plan_batched_gemv_coalesces_and_broadcasts():
+def test_split_takes_every_batch_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
     a_transfers = Transfers.split(op.A, op.streams["A"])
     assert [slot.index for slot, _ in a_transfers] == [0, 1]
-    (acc,) = a_transfers[1][1]
-    run = (256 // 2) * 128
-    assert acc.offset == run and acc.sizes[1] == 100 and acc.strides[1] == 256 * 128
-    b_slot, b_accesses = Transfers.split(op.B, op.streams["B"])[0]
-    assert b_slot is op.streams["B"] and b_accesses == [
-        Access(100 * 128, 0, (1, 1, 1, 100 * 128), (0, 0, 0, 1))
-    ]
+    # Each lane's rows out of every batch: one pattern, however many batches.
+    assert a_transfers[1][1] == TensorAccessPattern(
+        (100, 256, 128), 128 * 128, [100, 128, 128], [256 * 128, 128, 1]
+    )
+    ((b_slot, b_tap),) = Transfers.split(op.B, op.streams["B"])
+    assert b_slot is op.streams["B"]
+    assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
 
-def test_derived_sequence_issues_fills_then_waited_drains():
-    log = []
-    op = MV(M=256, K=128)
-    _bind_all(op, log)
-    rt = Sequence(op, {"A": "dA", "B": "dB", "C": "dC"})
-    rt._derived()
-    assert log == [
-        ("fill", "A0", "dA", False),
-        ("fill", "A1", "dA", False),
-        ("fill", "B0", "dB", False),
-        ("drain", "C0", "dC", True),
-        ("drain", "C1", "dC", True),
-    ]
-
-
-def test_derived_sequence_names_a_buffer_without_a_stream():
+def test_a_buffer_without_a_stream_has_no_derived_transfers():
     class NoStream(Operator):
         M: int = param()
         K: int = param()
         A = In(M, K)
         C = Out(M, tile=(64,))
 
-    log = []
     op = NoStream(M=256, K=128)
-    _bind_all(op, log)
     with pytest.raises(ValueError, match="NoStream.A has no tile="):
-        Sequence(op, {"A": "dA", "C": "dC"})._derived()
+        Sequence(op, {}).plan(op.A)
 
 
-def test_override_slices_and_issues_through_the_same_sequence():
-    class Custom(MV):
-        def sequence(self, rt):
-            rows = self.M // self.cols
-            rt.fill(self.B, self.B)
-            with rt.group():
-                for col in range(self.cols):
-                    rt.fill(self.A.lane(col), self.A[col * rows : (col + 1) * rows, :])
-                    rt.drain(self.C.lane(col), self.C[col * rows : (col + 1) * rows])
-
-    log = []
-    op = Custom(M=256, K=128)
-    _bind_all(op, log)
-    assert Custom.has_sequence_override() and not MV.has_sequence_override()
-    op.sequence(Sequence(op, {"A": "dA", "B": "dB", "C": "dC"}))
-    assert [(v, h) for v, h, _, _ in log] == [
-        ("fill", "B0"),
-        ("fill", "A0"),
-        ("drain", "C0"),
-        ("fill", "A1"),
-        ("drain", "C1"),
+def test_a_bounded_operand_goes_round_robin_over_the_lanes():
+    """Under a bound each lane reads every ``lanes``-th tile from a fixed
+    offset, so one patched count serves every lane; the pattern is built
+    for the full extent.
+    """
+    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
+    plan = Transfers.round_robin(op.x, op.streams["x"], 0)
+    assert [(slot.index, tap, dim) for slot, tap, dim in plan] == [
+        (0, TensorAccessPattern((512,), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
+        (1, TensorAccessPattern((512,), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
     ]
+    # A leading batch axis is the outer repeat; the tile count keeps its slot.
+    batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
+    (slot, tap, dim), *_ = Transfers.round_robin(batched.A, batched.streams["A"], 1)
+    # The 64 x 128 tile is a run past one wrap, so it takes the two inner
+    # slots as 8 x 1024; the tile count sits above them.
+    assert tap == TensorAccessPattern(
+        (3 * 256 * 128,),
+        0,
+        [3, 2, 8, 1024],
+        [256 * 128, 2 * 64 * 128, 1024, 1],
+    )
+    assert dim == 1 and (batched.M // (2 * 64)) == 2
+
+
+def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
+    """Under a bound RoPE's input goes round-robin a position at a time (the
+    rows one angle row serves), so the lane that rotates a position's heads
+    is the one that reads its angle row, and in the same order.
+    """
+    heads, positions, cols = 4, 16, 64
+    op = RoPE(
+        rows=heads * positions, cols=cols, angle_rows=positions, num_aie_columns=4
+    )
+    op = op.resolved(from_name("npu2", n_cols=8))
+    lanes = op.num_aie_columns
+    x = Transfers.round_robin(op.x, op.streams["x"], 0)
+    angles = Transfers.round_robin(op.angles, op.streams["angles"], 0)
+    for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
+        assert xs.index == as_.index
+        rows = xa.access_indices()[::cols] // cols
+        angle_rows = aa.access_indices()[::cols] // cols
+        assert list(angle_rows) == list(range(xs.index, positions, lanes))
+        assert list(rows // heads) == list(np.repeat(angle_rows, heads))
+
+
+# --------------------------------------------------------------------------
+# What a sequence issues, in the generated module
+# --------------------------------------------------------------------------
+
+
+def test_derived_sequence_issues_fills_then_waited_drains():
+    op = ElementwiseAdd(size=8192, num_aie_columns=2, tile_size=1024)
+    assert not ElementwiseAdd.has_sequence_override()
+    text, tasks = generated_sequence(op)
+    whole = ("1, 1, 1, 4096", "0, 0, 0, 1")
+    assert [
+        (t.lane, t.arg, t.offset, (t.sizes, t.strides), t.waited) for t in tasks
+    ] == [
+        ("in0_0", 0, 0, whole, False),
+        ("in0_1", 0, 4096, whole, False),
+        ("in1_0", 1, 0, whole, False),
+        ("in1_1", 1, 4096, whole, False),
+        ("out_0", 2, 0, whole, True),
+        ("out_1", 2, 4096, whole, True),
+    ]
+    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
+
+
+def test_an_override_issues_through_the_same_sequence():
+    # GEMV's sequence sends the vector to every column before any rows.
+    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
+    assert GEMV.has_sequence_override()
+    text, tasks = generated_sequence(op)
+    assert [(t.lane, t.offset, t.waited) for t in tasks] == [
+        ("B_L3L1_0", 0, False),
+        ("B_L3L1_1", 0, False),
+        ("A_L3L1_0", 0, False),
+        ("A_L3L1_1", 128 * 64, False),
+        ("C_L1L3_0", 0, True),
+        ("C_L1L3_1", 128, True),
+    ]
+    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
 
 
 def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
@@ -190,25 +269,12 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
         Sequence(Op(n=64), {}).preamble(Target(npu2))
 
 
-def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
-    # mha.py with eight pipelines: Q and O go through two shims, each
-    # carrying four pipelines' (256-row) block. Per KV group, each shim's Q
-    # is one pattern over the group's heads and every block, K and V are the
-    # head's slab re-read once per (head, block) from the iteration slot, and
-    # the O drains mirror the Q fills and wait.
-
-    monkeypatch.setattr(Access, "tap", lambda self: self)
-
-    class Handle:
-        def __init__(self, name, log):
-            self.name, self.log = name, log
-
-        def fill(self, data, tap, wait, group, offset_parameter):
-            self.log.append(("fill", self.name, data, tap, wait))
-
-        def drain(self, data, tap, wait, group, offset_parameter):
-            self.log.append(("drain", self.name, data, tap, wait))
-
+def test_mha_sequence_is_one_descriptor_set_per_kv_group():
+    # Eight pipelines: Q and O go through two shims, each carrying four
+    # pipelines' (256-row) block. Per KV group, each shim's Q is one pattern
+    # over the group's heads and every block, K and V are the head's rows
+    # re-read once per (head, block) from the iteration slot, and the O
+    # drains mirror the Q fills and are waited on.
     op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_pipelines=8)
     op = op.resolved(from_name("npu2", n_cols=8))
     assert op.seq_pad == 1024 and op.q_shims == 2 and op.join_rows == 256
@@ -221,46 +287,29 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
         "q_blocks_valid": 2,
         "kv_blocks_valid": 16,
     }
-    log = []
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(Handle(f"{s.name}{i}", log), i)
-    op.sequence(Sequence(op, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
-
+    text, tasks = generated_sequence(op)
     head, block = 1024 * 64, 256 * 64
-    # Q: (heads, blocks, rows, d), one per slot. K and V: the re-read in the
-    # iteration slot, the head's 1024 rows factored for the d1 wrap.
-    q = {
-        s: Access(2 * head, s * block, (2, 2, 256, 64), (head, 2 * block, 64, 1))
-        for s in range(2)
-    }
-    kv = Access(head, 0, (4, 2, 512, 64), (0, 512 * 64, 64, 1))
-    assert log == [
-        ("fill", "Q0", "dQ", q[0], False),
-        ("fill", "Q1", "dQ", q[1], False),
-        ("fill", "K0", "dK", kv, False),
-        ("fill", "V0", "dV", kv, False),
-        ("drain", "O0", "dO", q[0], True),
-        ("drain", "O1", "dO", q[1], True),
+    # Q: (heads, blocks, rows, d). K and V: the head's 1024 rows, one
+    # contiguous run, re-read four times.
+    q = ("2, 2, 256, 64", f"{head}, {2 * block}, 64, 1")
+    kv = ("4, 1, 1024, 64", "0, 0, 64, 1")
+    assert [
+        (t.lane, t.arg, t.offset, (t.sizes, t.strides), t.waited) for t in tasks
+    ] == [
+        ("inQ", 0, 0, q, False),
+        ("inQ2", 0, block, q, False),
+        ("inK", 1, 0, kv, False),
+        ("inV", 2, 0, kv, False),
+        ("memO", 3, 0, q, True),
+        ("memO2", 3, block, q, True),
     ]
+    assert "repeat_count = 3" in tasks[2].attributes  # the re-read, as repeats
+    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
 
 
-def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch):
+def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
     # The (seq, heads, d) layout: a head's rows are strided by every head's
     # d, and the group's heads are d apart; the descriptor count is the same.
-
-    monkeypatch.setattr(Access, "tap", lambda self: self)
-
-    class Handle:
-        def __init__(self, name, log):
-            self.name, self.log = name, log
-
-        def fill(self, data, tap, wait, group, offset_parameter):
-            self.log.append((self.name, tap))
-
-        def drain(self, data, tap, wait, group, offset_parameter):
-            self.log.append((self.name, tap))
-
     op = MHA(
         num_heads=4,
         seq_len=1024,
@@ -269,20 +318,16 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch
         num_pipelines=8,
         heads_interleaved=True,
     ).resolved(from_name("npu2", n_cols=8))
-    log = []
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(Handle(f"{s.name}{i}", log), i)
-    op.sequence(Sequence(op, {"Q": "dQ", "K": "dK", "V": "dV", "O": "dO"}))
-    assert [name for name, _ in log] == ["Q0", "Q1", "K0", "V0", "O0", "O1"] * 2
-    q0, q1, k0, *_ = [tap for _, tap in log[:6]]
+    _, tasks = generated_sequence(op)
+    assert [t.lane for t in tasks] == ["inQ", "inQ2", "inK", "inV", "memO", "memO2"] * 2
+    q0, q1, k0, *_ = tasks
     # Q: (heads 2 at stride d, blocks 2, rows 256 at stride 4d, d)
-    assert q0.sizes == (2, 2, 256, 64) and q0.strides == (64, 2 * 256 * 256, 256, 1)
+    assert (q0.sizes, q0.strides) == ("2, 2, 256, 64", f"64, {2 * 256 * 256}, 256, 1")
     assert q1.offset == q0.offset + 256 * 256
-    # K: the head's 1024 rows at stride 2d, re-read 4 times, rows factored for d1.
-    assert k0.sizes == (4, 2, 512, 64) and k0.strides == (0, 512 * 128, 128, 1)
+    # K: the head's 1024 rows at stride 2d, re-read 4 times.
+    assert (k0.sizes, k0.strides) == ("4, 1, 1024, 64", "0, 0, 128, 1")
     # The second group starts at its heads.
-    assert log[6][1].offset == 2 * 64 and log[8][1].offset == 64
+    assert tasks[6].offset == 2 * 64 and tasks[8].offset == 64
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
@@ -291,6 +336,114 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
     with pytest.raises(ValueError, match="seq_pad=100"):
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
+
+
+# --------------------------------------------------------------------------
+# A per-call size in a transfer
+# --------------------------------------------------------------------------
+
+
+def _bounded_gemv():
+    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
+    op.use_value("valid", "n")  # what a graph does for A[:n]
+    return op
+
+
+def test_the_derived_sequence_patches_a_bounded_operand():
+    op = ReLU(size=8192, num_aie_columns=2, num_channels=1, tile_size=1024)
+    op.use_value("valid", "n")
+    assert op.derived_at("valid_x", valid=2048) == 1  # 2048 over 2 lanes of 1024
+    _, tasks = generated_sequence(op)
+    # Each lane every other tile, its count patched on D2.
+    assert [(t.arg, t.offset, t.sizes, t.strides, t.waited) for t in tasks] == [
+        (0, 0, "1, 4, 1, 1024", "0, 2048, 1024, 1", False),
+        (0, 1024, "1, 4, 1, 1024", "0, 2048, 1024, 1", False),
+        (1, 0, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
+        (1, 1024, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
+    ]
+    patched = [t.size_parameter.rsplit("_", 2)[-2:] for t in tasks]
+    assert patched == [["valid", "x"]] * 2 + [["valid", "y"]] * 2
+
+
+def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
+    """Under a bound on M, B goes whole as ever, then each column takes A in
+    output tiles (two input tiles each here) and C in the same tiles, both
+    patched by the tile count the core also reads.
+    """
+    op = _bounded_gemv().resolved(from_name("npu2", n_cols=8))
+    assert [v.name for v in op.values] == ["valid", "tiles", "valid_A", "valid_C"]
+    assert op.derived_at("tiles", valid=64) == 64 // (2 * 4)
+    assert op.derived_at("valid_A", valid=64) == 64 // (2 * 4)  # unit: output tiles
+    text, tasks = generated_sequence(op)
+    assert [
+        (t.lane, t.offset, t.sizes, t.strides, t.size_parameter.endswith(("_A", "_C")))
+        for t in tasks
+    ] == [
+        ("B_L3L1_0", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
+        ("B_L3L1_1", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
+        ("A_L3L1_0", 0, "1, 32, 1, 256", "0, 512, 256, 1", True),
+        ("A_L3L1_1", 256, "1, 32, 1, 256", "0, 512, 256, 1", True),
+        ("C_L1L3_0", 0, "1, 32, 1, 4", "0, 8, 4, 1", True),
+        ("C_L1L3_1", 4, "1, 32, 1, 4", "0, 8, 4, 1", True),
+    ]
+    assert {t.size_parameter[-7:] for t in tasks[2:]} == {"valid_A", "valid_C"}
+    assert text.count("aiex.scratchpad_parameter @") == 2
+
+
+def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
+    # No scratchpad to patch: the sequence is regenerated per call, the
+    # per-call scalar standing in for the size itself.
+    text, tasks = generated_sequence(_bounded_gemv(), "xclbin")
+    assert "scratchpad_parameter" not in text
+    assert [(t.lane, t.offset, t.size_parameter) for t in tasks[2:]] == [
+        ("A_L3L1_0", 0, ""),
+        ("A_L3L1_1", 256, ""),
+        ("C_L1L3_0", 0, ""),
+        ("C_L1L3_1", 4, ""),
+    ]
+    for t, run in zip(tasks[2:], (256, 256, 4, 4)):
+        assert re.fullmatch(rf"1, %\w+, 1, {run}", t.sizes), t.sizes
+
+
+def test_a_stack_and_its_flat_spelling_move_the_same_descriptors():
+    """``Repeat`` on the cache ``(G, L, D)`` is the repeat on ``(G, L * D)``:
+    the same rows, the same row length, the same transfers.
+    """
+    flat = Repeat(rows=8, cols=2048 * 64, repeat=4, tile_size=64)
+    stack = Repeat(rows=8, seq=2048, cols=64, repeat=4)
+    assert stack.x.shape == (8, 2048, 64) and stack.y.shape == (32, 2048, 64)
+    assert generated_sequence(flat) == generated_sequence(stack)
+    assert stack.resolved().tile_size == 64  # the row's last axis
+
+
+@pytest.mark.parametrize(
+    "size_by, error, match",
+    [
+        (lambda op: {4: op.value("valid_A")}, ValueError, "dimensions 0..3"),
+        (lambda op: {1: 32}, TypeError, "value member's word"),  # not a word
+    ],
+    ids=["past_the_dimensions", "not_a_word"],
+)
+def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
+    class Patched(GEMV):
+        def sequence(self, rt):
+            rt.fill(self.A.lane(0), self.A, size_by=size_by(self))
+
+    op = Patched(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
+    op.use_value("valid", "n")
+    with pytest.raises(error, match=match):
+        build_design(op)
+
+
+def test_a_bounded_repeat_patches_the_stack_axis():
+    # The stack axis is on D2 with its patched count, rows and repeats around it.
+    op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
+    op.use_value("valid_seq", "c")
+    _, tasks = generated_sequence(op)
+    assert [(t.lane, t.sizes, t.strides, t.size_parameter[-11:]) for t in tasks] == [
+        ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
+        ("fifo_out", "2, 32, 4, 8", "256, 8, 512, 1", "valid_seq_y"),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -391,25 +544,14 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
                 return []
 
 
-_WRITE = re.compile(
-    r"npu\.write32\(%c(-?\d+)_i32\S*, %c(-?\d+)_i32\S*\) "
-    r"\{column = (\d+) : i32, row = (\d+) : i32\}"
-)
-_TASK = re.compile(
-    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
-    r"aie\.dma_bd\(%arg(\d) : \S+ offset = (\d+) len = \d+ "
-    r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
-)
-
-
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
 
     op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's values are hidden; the image's block is laid out from the
     # operator's fields.
     assert op.residents == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
+    sequence, tasks = generated_sequence(op)
     text = str(build_design(op))
-    sequence = text[text.index("aie.runtime_sequence") :]
 
     writes = [tuple(map(int, w)) for w in _WRITE.findall(sequence)]
     # 8 words on 32 cores, then one lock release per core, before any DMA.
@@ -421,205 +563,21 @@ def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
     assert text.count("aie.lock(") == 32 and "aie.lock(%tile_0_2, 10)" in text
     assert sequence.rindex("aiex.set_lock") < sequence.index("aiex.dma_start_task")
 
-    tasks = [
-        (int(ssa), lane, int(arg), int(offset), sizes, strides)
-        for ssa, lane, arg, offset, sizes, strides in _TASK.findall(sequence)
-    ]
     # N = 9 column-blocks: one full sweep (4 A + 8 B + 8 C) and a trailing
     # block on column 0 alone, which still receives A on every row.
     assert len(tasks) == 20 + 6
-    assert [t[1:] for t in tasks[:3]] == [
+    assert [(t.lane, t.arg, t.offset, t.sizes, t.strides) for t in tasks[:3]] == [
         ("A_0", 0, 0, "1, 2, 64, 512", "0, 512, 1024, 1"),
         ("B_0", 1, 0, "1, 1, 1, 131072", "0, 0, 0, 1"),
         ("C_0", 2, 0, "1, 1, 256, 128", "0, 0, 1152, 1"),
     ]
-    assert tasks[5][1:] == ("A_1", 0, 64 * 1024, "1, 2, 64, 512", "0, 512, 1024, 1")
+    a1 = tasks[5]
+    assert (a1.lane, a1.offset, a1.sizes) == ("A_1", 64 * 1024, "1, 2, 64, 512")
     # Every task is started and awaited exactly once, the last ones by the
     # trailing finish.
     started = re.findall(r"aiex\.dma_start_task\(%(\d+)\)", sequence)
-    awaited = re.findall(r"aiex\.dma_await_task\(%(\d+)\)", sequence)
     assert (
         sorted(map(int, started))
-        == sorted(map(int, awaited))
-        == sorted(t[0] for t in tasks)
+        == sorted(_awaited(sequence))
+        == sorted(t.ssa for t in tasks)
     )
-
-
-# --------------------------------------------------------------------------
-# A per-call size in a transfer
-# --------------------------------------------------------------------------
-
-
-class _SizedHandle:
-    """A fifo handle whose fill takes the assumed size-kind parameter."""
-
-    def __init__(self, log):
-        self.log = log
-
-    def fill(self, data, tap, wait, group, offset_parameter, size_parameters=None):
-        self.log.append(("fill", data, offset_parameter, size_parameters))
-
-    def drain(self, data, tap, wait, group, offset_parameter, size_parameters=None):
-        self.log.append(("drain", data, offset_parameter, size_parameters))
-
-
-class _DynamicHandle:
-    """A fifo handle on the dispatch path: sizes and offsets are scalars."""
-
-    def __init__(self, log):
-        self.log = log
-
-    def fill(self, data, *, sizes, strides, offset, transfer_len, wait, group):
-        self.log.append(("fill", data, sizes, offset))
-
-
-def _bounded_unary():
-
-    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    op.use_value("valid", "n")  # what a graph does for x[:n]
-    for name in ("valid", "count"):
-        op.value(name).param = f"<{name}>"
-    return op
-
-
-def test_a_size_patch_names_the_dimension_and_the_word():
-    log = []
-    op = _bounded_unary()
-    op.streams["x"].bind(_SizedHandle(log), 0)
-    rt = Sequence(op, {"x": "dx", "y": "dy"})
-    acc = Access(64 * 8, 0, (1, 1, 32, 8), (0, 0, 16, 1))
-    rt.fill(op.x.lane(0), acc, size_by={2: op.value("count")})
-    assert log == [("fill", "dx", None, {2: "<count>"})]
-    with pytest.raises(ValueError, match="dimensions 0..3"):
-        rt.fill(op.x.lane(0), acc, size_by={4: op.value("count")})
-    with pytest.raises(TypeError, match="value member's word"):
-        rt.fill(op.x.lane(0), acc, size_by={2: 32})  # a number, not a word
-
-
-def test_a_size_patch_needs_the_toolchain_kind_or_the_dispatch_path():
-    log = []
-    op = _bounded_unary()
-    op.streams["x"].bind(FakeHandle("x0", log), 0)  # no size_parameters= upstream
-    rt = Sequence(op, {"x": "dx", "y": "dy"})
-    acc = Access(64 * 8, 0, (1, 1, 32, 8), (0, 0, 16, 1))
-    with pytest.raises(NotImplementedError, match="size-kind scratchpad parameter"):
-        rt.fill(op.x.lane(0), acc, size_by={2: op.value("count")})
-    # On the dispatch path the scalar stands in for the size itself.
-    op = _bounded_unary()
-    op.streams["x"].bind(_DynamicHandle(log), 0)
-    op.value("count").ssa = cast(Any, "<n>")
-    rt = Sequence(op, {"x": "dx", "y": "dy"})
-    rt.fill(op.x.lane(0), acc, size_by={2: op.value("count")})
-    assert log == [("fill", "dx", [1, 1, "<n>", 8], 0)]
-
-
-def test_a_bounded_operand_goes_round_robin_over_the_lanes():
-    """Under a bound each lane reads every ``lanes``-th tile from a fixed
-    offset, so one patched count serves every lane; the descriptor is built
-    for the full extent.
-    """
-    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    plan = Transfers.round_robin(op.x, op.streams["x"], 0)
-    assert [(slot.index, acc, dim) for slot, acc, dim in plan] == [
-        (0, Access(512, 0, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
-        (1, Access(512, 8, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
-    ]
-    # A leading batch axis is the outer repeat; the tile count keeps its slot.
-    batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
-    (slot, acc, dim), *_ = Transfers.round_robin(batched.A, batched.streams["A"], 1)
-    # The 64 x 128 tile is a run past one wrap, so it takes the two inner
-    # slots as 8 x 1024; the tile count sits above them.
-    assert acc == Access(
-        3 * 256 * 128, 0, (3, 2, 8, 1024), (256 * 128, 2 * 64 * 128, 1024, 1)
-    )
-    assert dim == 1 and (batched.M // (2 * 64)) == 2
-
-
-def _elements(acc: Access) -> np.ndarray:
-    """The flat offsets an access reads, in the order it reads them."""
-    idx = np.indices(acc.sizes).reshape(4, -1).T
-    return acc.offset + idx @ np.array(acc.strides)
-
-
-def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles(npu2):
-    """Under a bound RoPE's input goes round-robin a position at a time (the
-    rows one angle row serves), so the lane that rotates a position's heads
-    is the one that reads its angle row, and in the same order.
-    """
-    heads, positions, cols = 4, 16, 64
-    op = RoPE(
-        rows=heads * positions, cols=cols, angle_rows=positions, num_aie_columns=4
-    )
-    op = op.resolved(from_name("npu2", n_cols=8))
-    lanes = op.num_aie_columns
-    x = Transfers.round_robin(op.x, op.streams["x"], 0)
-    angles = Transfers.round_robin(op.angles, op.streams["angles"], 0)
-    for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
-        assert xs.index == as_.index
-        rows = _elements(xa)[::cols] // cols
-        angle_rows = _elements(aa)[::cols] // cols
-        assert list(angle_rows) == list(range(xs.index, positions, lanes))
-        assert list(rows // heads) == list(np.repeat(angle_rows, heads))
-
-
-def test_the_derived_sequence_patches_a_bounded_operand():
-    log = []
-    op = _bounded_unary()
-    for name in ("valid_x", "valid_y"):
-        op.value(name).param = f"<{name}>"
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(_SizedHandle(log), i)
-    rt = Sequence(op, {"x": "dx", "y": "dy"})
-    rt._derived()
-    assert log == [
-        ("fill", "dx", None, {1: "<valid_x>"}),
-        ("fill", "dx", None, {1: "<valid_x>"}),
-        ("drain", "dy", None, {1: "<valid_y>"}),
-        ("drain", "dy", None, {1: "<valid_y>"}),
-    ]
-    assert op.derived_at("valid_x", valid=16) == 8  # the word: 16 rows over 2 lanes
-
-
-def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin(npu2):
-    """Under a bound on M, B goes whole as ever, then each column takes A in
-    output tiles (two input tiles each here) and C in the same tiles, both
-    patched by the tile count the core also reads.
-    """
-    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
-    op.use_value("valid", "n")
-    op = op.resolved(from_name("npu2", n_cols=8))
-    assert [v.name for v in op.values] == ["valid", "tiles", "valid_A", "valid_C"]
-    assert op.derived_at("tiles", valid=64) == 64 // (2 * 4)
-    assert op.derived_at("valid_A", valid=64) == 64 // (2 * 4)  # unit: output tiles
-    log = []
-    for name in ("valid_A", "valid_C"):
-        op.value(name).param = f"<{name}>"
-    for s in op.streams.values():
-        for i in range(s.count):
-            s.bind(_SizedHandle(log), i)
-    Sequence(op, {"A": "dA", "B": "dB", "C": "dC"}).run()
-    assert log == [
-        ("fill", "dB", None, None),
-        ("fill", "dB", None, None),
-        ("fill", "dA", None, {1: "<valid_A>"}),
-        ("fill", "dA", None, {1: "<valid_A>"}),
-        ("drain", "dC", None, {1: "<valid_C>"}),
-        ("drain", "dC", None, {1: "<valid_C>"}),
-    ]
-
-
-def test_a_bounded_repeat_patches_the_stack_axis():
-
-    op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
-    op.use_value("valid_seq", "c")
-    log = []
-    for name in ("valid_seq_x", "valid_seq_y"):
-        op.value(name).param = f"<{name}>"
-    for s in op.streams.values():
-        s.bind(_SizedHandle(log))
-    Sequence(op, {"x": "dx", "y": "dy"}).run()
-    assert log == [
-        ("fill", "dx", None, {2: "<valid_seq_x>"}),
-        ("drain", "dy", None, {2: "<valid_seq_y>"}),
-    ]

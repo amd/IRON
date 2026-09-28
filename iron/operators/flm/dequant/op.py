@@ -6,6 +6,7 @@ import dataclasses
 import aie.utils as aie_utils
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import ObjectFifo, Worker
 from aie.iron.kernels import quant
@@ -19,7 +20,6 @@ from iron.common import (
     auto,
     param,
 )
-from iron.common.tiling import Access
 from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
     BLOCK_BYTES,
@@ -313,7 +313,7 @@ class DequantBFP(Operator):
                 ) * cb_bytes
                 rt.fill(
                     self.qw.lane(c),
-                    Access(qw_bytes, offset, qw_sizes, qw_strides),
+                    TensorAccessPattern((qw_bytes,), offset, qw_sizes, qw_strides),
                     group=tg_fill,
                 )
 
@@ -324,8 +324,8 @@ class DequantBFP(Operator):
                     for h in range(HALVES):
                         rt.drain(
                             self.out.lane(c * HALVES + h),
-                            Access(
-                                out_blocks,
+                            TensorAccessPattern(
+                                (out_blocks,),
                                 (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
                                 DRAIN_SIZES,
                                 DRAIN_STRIDES,

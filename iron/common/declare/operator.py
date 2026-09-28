@@ -32,6 +32,7 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
@@ -775,6 +776,11 @@ class Operator(metaclass=_OperatorMeta):
                 v = repr(v).replace(".", "p").replace("-", "n").replace("+", "")
             elif isinstance(v, (list, tuple)):
                 v = "x".join(str(x) for x in v)
+            elif isinstance(v, TensorAccessPattern):
+                v = (
+                    f"o{v.offset}s{'x'.join(map(str, v.sizes))}"
+                    f"t{'x'.join(map(str, v.strides))}"
+                )
             own.append(f"{f.name}{v}")
         return "_".join([type(self).__name__, *own, dev.name])
 

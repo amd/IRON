@@ -65,7 +65,6 @@ from .declare import (
     param,
 )
 from .testing import Sweep, Testing
-from .tiling import fifo_depth
 
 # The line an elementwise core streams when nothing else is asked for: small
 # enough to divide any extent a model has, at some cost in DMA efficiency.
@@ -207,7 +206,7 @@ class Elementwise(Operator):
         def fifos(stream, name):
             # A line spanning more than one bank cannot be double-buffered in
             # what is left of local memory.
-            depth = fifo_depth(stream.elements, stream.dtype)
+            depth = target.fifo_depth(stream.elements, stream.dtype)
             return [
                 ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
                 for k in range(cores)

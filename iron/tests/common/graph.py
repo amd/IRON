@@ -640,7 +640,7 @@ def test_a_bound_travels_through_reshape_and_transpose():
     n = Value("n", "scratchpad", np.int32)
     x = Handle((64, 8, 4), bfloat16, "x", "input")
     b = x[:n]
-    assert b.shape == x.shape and b.bounds == {0: (n, 1)} and b.walk is None
+    assert b.shape == x.shape and b.bounds == {0: (n, 1)} and b.tap is None
     assert b.reshape(512, 4).bounds == {0: (n, 8)}  # merged with the axis after it
     assert b.reshape(64 * 8 * 4).bounds == {0: (n, 32)}
     assert b.reshape(512, 4).reshape(64, 8, 4).bounds == {0: (n, 1)}  # split back
@@ -735,7 +735,7 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
 
     t = g.trace(x=(L, G * D))
     copy, rep = t.operators
-    assert copy.src.bounded == 1 and copy.dst.bounded == 1
+    assert copy.src_bound == 1 and copy.dst_bound == 1
     assert copy.bound_values == {"src_valid": "n", "dst_valid": "n"}
     assert rep.bound_extents == {"valid_seq": "c"}
     assert [(b.member.name, b.value.name, b.scale) for b in t.bindings] == [

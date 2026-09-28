@@ -14,9 +14,9 @@ from dataclasses import Field
 from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
-from ..tiling import view
 from .field import DeclarationError, DimRef, Incompatible, _Optional, _Select
 from .member import Extent, Shim, _Buffer, _Stream, _Value
 
@@ -189,6 +189,11 @@ class BoundBuffer:
         return int(np.prod(self.shape)) if self.shape else 1
 
     @property
+    def tap(self) -> TensorAccessPattern:
+        """The whole buffer, one linear run."""
+        return TensorAccessPattern((self.elements,), 0, [self.elements], [1])
+
+    @property
     def nbytes(self) -> int:
         # bfp.itemsize covers ordinary dtypes too, and is the only thing that
         # reports the 9 bytes a block-float block occupies: the marker class
@@ -340,9 +345,10 @@ class BufferView:
                 static.append(idx)
         self.static_index = tuple(static)
 
-    def pattern(self) -> tuple[int, list[int], list[int]]:
-        """``(offset, sizes, strides)`` of the static part of the slice."""
-        return view(self.buffer.shape, self.static_index)
+    @property
+    def tap(self) -> TensorAccessPattern:
+        """The static part of the slice, over the buffer's shape."""
+        return TensorAccessPattern.from_slice(self.buffer.shape, self.static_index)
 
     def __repr__(self) -> str:
         return f"{self.buffer.name}[{self.index}]"

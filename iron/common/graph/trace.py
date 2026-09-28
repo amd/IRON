@@ -11,6 +11,7 @@ import math
 from collections.abc import Hashable
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
@@ -21,7 +22,6 @@ from ..declare.member import Extent, _Value
 from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
-from ..tiling import Walk
 from .handle import (
     Handle,
     State,
@@ -70,15 +70,15 @@ def _unbounded(h: Handle) -> Handle:
     if not h.bounds:
         return h
     return Handle(
-        h.shape, h.dtype, h.name, h.role, h.parent, h.start, h.walk, h.index_by
+        h.shape, h.dtype, h.name, h.role, h.parent, h.start, h.tap, h.index_by
     )
 
 
 def _take_views(cls, operands, kwargs, values, scales):
-    """Hand each view operand's walk to the operator and stand its parent in.
+    """Hand each view operand's pattern to the operator and stand its parent in.
 
     A class that takes views names, in operand order, the param that holds
-    each operand's walk and the per-call value a dynamic index binds
+    each operand's pattern and the per-call value a dynamic index binds
     (``Copy.accept_views``). Any other operator takes contiguous operands.
     """
     accept = getattr(cls, "accept_views", ())
@@ -86,24 +86,26 @@ def _take_views(cls, operands, kwargs, values, scales):
     for i, h in enumerate(operands):
         if i < len(accept):
             param, offset_member = accept[i]
-            walk = Walk.of(h.shape) if h.walk is None else h.walk
+            tap = (
+                TensorAccessPattern.from_slice(h.shape, ()) if h.tap is None else h.tap
+            )
+            kwargs.setdefault(param, tap)
             if h.bounds:
-                # A bound on one axis of the view: the walk keeps that axis
-                # and the copy patches its size from the value.
+                # A bound on one axis of the view: the pattern keeps that
+                # axis and the copy patches its size from the value.
                 (axis, (value, scale)), *more = h.bounds.items()
                 if more:
                     raise ValueError(f"{h!r}: a copy takes one bounded axis")
-                walk = dataclasses.replace(walk, bounded=axis)
+                kwargs.setdefault(f"{param}_bound", axis)
                 values[f"{param}_valid"] = value
                 scales[f"{param}_valid"] = scale
-            kwargs.setdefault(param, walk)
             if h.index_by is not None:
                 value, stride = h.index_by
                 values[offset_member] = value
                 scales[offset_member] = stride
-            # The bound is the walk's now: the buffer stands in, plain.
-            out.append(_unbounded(h.parent if h.walk is not None else h))
-        elif h.walk is not None:
+            # The bound is the pattern's now: the buffer stands in, plain.
+            out.append(_unbounded(h.parent if h.tap is not None else h))
+        elif h.tap is not None:
             raise TypeError(
                 f"{cls.__name__} takes a contiguous operand at position {i}, not "
                 f"the view {h!r}; Copy takes views"
@@ -468,7 +470,7 @@ class _ReferenceTracer(Tracer):
     def state_as(self, state: State):
         """A state viewed in the reference: a view of its host tensor that
         remembers the key, so the operator gets the whole tensor and its
-        walk, as the device does, and writes it in place.
+        pattern, as the device does, and writes it in place.
         """
         if state.host is None:
             state.host = np.zeros(state.shape, dtype=bfloat16)

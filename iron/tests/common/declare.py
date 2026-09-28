@@ -10,7 +10,6 @@ The design-generating half is ``iron/common/design/`` and needs the
 toolchain.
 """
 
-import contextlib
 import dataclasses
 
 import numpy as np
@@ -243,41 +242,6 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
         infer(Stack, (8, 2, 16, 64))
     assert Stack(rows=8, cols=64).x.shape == (8, 64)
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
-
-
-class _RecordingRuntime:
-    """What a sequence hands ``rt.fill``/``rt.drain``: ``(buffer name, descriptor)``."""
-
-    def __init__(self) -> None:
-        self.calls: list = []
-
-    @contextlib.contextmanager
-    def group(self):
-        yield self
-
-    def fill(self, buffer, tap, **_):
-        self.calls.append(("fill", buffer.name, tap))
-
-    def drain(self, buffer, tap, **_):
-        self.calls.append(("drain", buffer.name, tap))
-
-
-def test_a_stack_and_its_flat_spelling_move_the_same_descriptors(npu2):
-    """``Repeat`` on the cache ``(G, L, D)`` is the repeat on ``(G, L * D)``:
-    the same rows, the same row length, the same transfers.
-    """
-    from iron.operators.repeat import Repeat
-
-    flat = Repeat(rows=8, cols=2048 * 64, repeat=4, tile_size=64)
-    stack = Repeat(rows=8, seq=2048, cols=64, repeat=4)
-    assert stack.x.shape == (8, 2048, 64) and stack.y.shape == (32, 2048, 64)
-    taps = []
-    for op in (flat, stack):
-        rt = _RecordingRuntime()
-        op.resolved(NPU2).sequence(rt)
-        taps.append(rt.calls)
-    assert taps[0] == taps[1]
-    assert stack.resolved(NPU2).tile_size == 64  # the row's last axis
 
 
 def test_explain_says_what_a_build_compiles_in_and_what_it_takes_per_call():

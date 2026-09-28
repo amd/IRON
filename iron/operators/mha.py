@@ -23,6 +23,7 @@ import sys
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.dialects.scf import else_, if_
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
@@ -43,7 +44,6 @@ from iron.common import (
     select,
 )
 from iron.common.testing import Case, Testing
-from iron.common.tiling import legalize
 
 
 class MHA(Operator):
@@ -803,36 +803,26 @@ class MHA(Operator):
         def q_rows(buffer, head0, shim):
             # The group's heads, each block's `rows` rows for this shim.
             head_s, row_s = strides_of(buffer)
-            return legalize(
-                buffer.elements,
+            return TensorAccessPattern(
+                buffer.shape,
                 head0 * head_s + shim * rows * row_s,
-                (group, blocks, rows, d),
-                (head_s, self.q_shims * rows * row_s, row_s, 1),
-                buffer.dtype,
+                [group, blocks, rows, d],
+                [head_s, self.q_shims * rows * row_s, row_s, 1],
             )
 
         def kv_rows(buffer, kv_head):
             # The head's rows, re-read once per (head, block) of the group.
             head_s, row_s = strides_of(buffer)
-            return legalize(
-                buffer.elements,
-                kv_head * head_s,
-                (group * blocks, S, d),
-                (0, row_s, 1),
-                buffer.dtype,
+            return TensorAccessPattern(
+                buffer.shape, kv_head * head_s, [group * blocks, S, d], [0, row_s, 1]
             )
 
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             with rt.group():
                 for shim in range(self.q_shims):
-                    for acc in q_rows(self.Q, head0, shim):
-                        rt.fill(self.Q.lane(shim), acc)
-                for acc in kv_rows(self.K, kv_head):
-                    rt.fill(self.K, acc)
-                for acc in kv_rows(self.V, kv_head):
-                    rt.fill(self.V, acc)
+                    rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim))
+                rt.fill(self.K, kv_rows(self.K, kv_head))
+                rt.fill(self.V, kv_rows(self.V, kv_head))
                 for shim in range(self.q_shims):
-                    accs = q_rows(self.O, head0, shim)
-                    for acc in accs:
-                        rt.drain(self.O.lane(shim), acc, wait=acc is accs[-1])
+                    rt.drain(self.O.lane(shim), q_rows(self.O, head0, shim))

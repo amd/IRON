@@ -8,7 +8,6 @@ from aie.utils.verify import Tolerance
 
 from iron.common import In, Out, Rowwise, param
 from iron.common.testing import Sweep, Testing
-from iron.common.tiling import fifo_depth
 
 # The longest weighted row: the multiplying core holds the weight row beside
 # each line, which halves the line a core holds.
@@ -96,7 +95,7 @@ class RMSNorm(Rowwise):
         tile_ty = self.x.tile
         weights_ty = self.weight.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = fifo_depth(self.tile_size, self.x.dtype)
+        depth = target.fifo_depth(self.tile_size, self.x.dtype)
         rms_norm = self.kernel()
         eltwise_mul = eltwise.mul_sized(self.tile_size)
         of_ins = [
