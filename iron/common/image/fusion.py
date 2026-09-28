@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from aie import ir
@@ -23,6 +23,27 @@ from ..design import OperatorDesign
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
 SHIM_ADDRESS_ALIGNMENT = 4
+
+
+class ArgumentSizes(NamedTuple):
+    """Bytes of each runtime-sequence argument of a fused image, in argument order.
+
+    ``feedback`` is ``None`` for an image that declares no feedback buffer; the
+    argument then does not exist, and the image takes the first three alone.
+    """
+
+    input: int
+    output: int
+    scratch: int
+    feedback: int | None = None
+
+    def arguments(self) -> dict[str, int]:
+        """The arguments the runtime sequence takes: size by kind, in order, so
+        a kind's argument index is its position."""
+        sizes = self._asdict()
+        if self.feedback is None:
+            del sizes["feedback"]
+        return sizes
 
 
 def _memref_bytes(memref_type: ir.MemRefType) -> int:
@@ -124,7 +145,7 @@ class Fusion:
             if shared
             else None
         )
-        input_buffer_size, output_buffer_size, scratch_buffer_size = self.buffer_sizes
+        arguments = self.buffer_sizes.arguments()
 
         # Extract device operations and module-level parameter decls from each
         # operator's MLIR generator.  Note: in the current MLIR-AIE pipeline,
@@ -233,20 +254,12 @@ class Fusion:
                 # numpy array types, which runtime_sequence converts to memrefs.
                 arg_types: list[Any] = [
                     np.ndarray[(nbytes,), np.dtype[np.int8]]
-                    for nbytes in (
-                        input_buffer_size,
-                        output_buffer_size,
-                        scratch_buffer_size,
-                    )
+                    for nbytes in arguments.values()
                 ]
 
                 @aiex.runtime_sequence(*arg_types)
-                def sequence(input_buf, output_buf, scratch_buf):
-                    consolidated_buffers = {
-                        "input": input_buf,
-                        "output": output_buf,
-                        "scratch": scratch_buf,
-                    }
+                def sequence(*buffers):
+                    consolidated_buffers = dict(zip(arguments, buffers))
 
                     # Execute operations in runlist order
                     configure_op = None

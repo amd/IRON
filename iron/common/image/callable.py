@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aie.utils as aie_utils
@@ -22,9 +23,18 @@ from ..declare import Operator
 from .allocator import ALIGNMENT, ArenaPlan, Pool
 
 if TYPE_CHECKING:
+    import pyxrt
+    from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
+    from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+        ParameterScratchpad,
+    )
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 else:
     try:
+        import pyxrt
+        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
+            ParameterScratchpad,
+        )
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
     except ImportError:
         # Host stacks without XRT (e.g. the HRX/amdxdna runtime). The on-device
@@ -106,7 +116,8 @@ class SequenceCallable:
     Buffers are one per name, a slice a view into its parent; inputs sync to
     the device before the run and everything else back to the host after.
     Subclasses give the buffer (``_make_buffer``) and the run (``_run``); the
-    full-ELF callable replaces the buffer model with its three arenas.
+    full-ELF callable replaces the buffer model with its consolidated
+    arguments, and the run with run handles of its own.
     """
 
     def __init__(self, seq):
@@ -185,21 +196,134 @@ class SequenceCallable:
         self._sync_outputs()
 
 
+class FullELFRun:
+    """One run of a full ELF: the buffers bound to its arguments, and its own
+    ctrl scratchpad.
+
+    Runs of one image are separate dispatches: each has its own scratchpad,
+    so its own per-call values, and several can be started before any is
+    waited on. Binding one run's feedback argument to another's scratchpad
+    (:meth:`bind_feedback`, :meth:`scratchpad_alias`) makes what the first
+    drains there the second's per-call values, with no host step between.
+    A run is valid while the image stays loaded; the runtime evicting it
+    ends every run made on it.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        handle: XRTKernelHandle,
+        run: pyxrt.run,
+        arguments: Mapping[int, XRTTensor],
+        feedback_arg: int | None,
+        params_path: Path | None,
+    ):
+        self.name = name
+        self._handle = handle
+        self.handle = run
+        for index, tensor in arguments.items():
+            self.bind(index, tensor.buffer_object())
+        self._feedback_arg = feedback_arg
+        self._params_path = params_path
+        self._params: ParameterScratchpad | None = None
+
+    def bind(self, index: int, bo: pyxrt.bo) -> None:
+        """Run with ``bo`` as argument ``index``."""
+        self.handle.set_arg(index, bo)
+
+    def bind_feedback(self, bo: pyxrt.bo) -> None:
+        """Run with ``bo`` as the feedback argument -- the callable's own
+        buffer until then. Typically another run's :meth:`scratchpad_alias`."""
+        if self._feedback_arg is None:
+            raise ValueError(f"{self.name} declares no feedback argument")
+        self.bind(self._feedback_arg, bo)
+
+    @property
+    def params(self) -> ParameterScratchpad | None:
+        """The run's parameter scratchpad, made on first use.
+
+        The ``params.txt`` describing the runtime parameters is requested
+        from aiecc via ``--get-scratchpad-parameters`` and lands in the
+        build's cache entry, which :attr:`Artifacts.params` names. Returns
+        ``None`` if the sequence declared no runtime parameters: the file
+        still exists, but holds a count of zero and there is no ctrl
+        scratchpad buffer object to bind to.
+        """
+        if self._params is not None:
+            return self._params
+        if self._params_path is None:
+            return None
+        if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
+            return None
+        self._params = ParameterScratchpad(self.handle, self._params_path)
+        return self._params
+
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        """Write each value into the ctrl scratchpad and sync it."""
+        params = self.params
+        if params is None:
+            raise ValueError(
+                f"{self.name} was built without per-call values; got "
+                f"{sorted(values)}"
+            )
+        for symbol, value in values.items():
+            params.write(symbol, value)
+        params.sync()
+
+    def read_value(self, symbol: str) -> int:
+        """The value ``symbol`` holds in the scratchpad now, as the device
+        left it (a feedback transfer into :meth:`scratchpad_alias`)."""
+        params = self.params
+        if params is None:
+            raise ValueError(f"{self.name} was built without per-call values")
+        params.sync_from_device()
+        return params.read(symbol)
+
+    def scratchpad_alias(self) -> pyxrt.bo:
+        """A buffer object over this run's ctrl scratchpad, for another run to
+        drain its feedback into (:meth:`ParameterScratchpad.alias`). The host
+        must not write this run's values while a device writes them.
+        """
+        params = self.params
+        if params is None:
+            raise ValueError(f"{self.name} has no per-call values to feed back into")
+        return params.alias(aie_utils.DefaultNPURuntime.xrt_device)
+
+    def start(self) -> None:
+        if not self._handle.is_loaded:
+            raise RuntimeError(
+                f"{self.name}: the runtime evicted the image this run was made on"
+            )
+        self.handle.start()
+
+    def wait(self) -> None:
+        # run.wait() returns the ert_cmd_state; run.wait2() returns None.
+        state = self.handle.wait()
+        if state != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
+            raise RuntimeError(f"{self.name}: the run ended in {state}")
+
+
 class SequenceFullELFCallable(SequenceCallable):
-    """The full ELF (NPU2): every operator shares three consolidated
-    input/output/scratch buffers addressed by offset. ``get_buffer`` returns a
-    sub-view of the named argument's dtype into whichever consolidated buffer
-    holds it.
+    """The full ELF (NPU2): every operator shares consolidated
+    input/output/scratch buffers (and a feedback one, if the sequence declares
+    feedback arguments) addressed by offset. ``get_buffer`` returns a sub-view
+    of the named argument's dtype into whichever consolidated buffer holds it.
 
     A sequence placed in a shared arena (``OperatorSequence(arena=...)``) runs
     its scratch in the ``arena`` buffer given here, which every other image
     placed in the same plan runs in too; otherwise it allocates its own.
+
+    A call dispatches :attr:`run`; :meth:`new_run` makes more, over the same
+    buffers, for callers that queue several or chain them through feedback
+    (see :class:`FullELFRun`).
     """
 
     # The buffer trace lowering appends, and the kernel argument it binds to;
     # both None on an untraced build.
     trace_buffer: XRTTensor | None
     _trace_arg: int | None
+    # The callable's own feedback buffer; None without feedback arguments.
+    feedback_buffer: XRTTensor | None
 
     def __init__(
         self,
@@ -224,67 +348,81 @@ class SequenceFullELFCallable(SequenceCallable):
             elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
         self._handle = None
-        self._params = None
+        self._run: FullELFRun | None = None
+        self._runs: list[FullELFRun] = []
         self._storage_cache = {}
+        # Argument index by kind: the order ArgumentSizes gives them in.
+        self._argument_index = {
+            kind: index for index, kind in enumerate(seq.buffer_sizes.arguments())
+        }
         super().__init__(seq)
 
     @property
-    def handle(self):
+    def handle(self) -> XRTKernelHandle:
         """The ELF loaded in the shared runtime; loaded again if the runtime
-        has evicted it since, which drops the parameter scratchpad with it.
+        has evicted it since, which ends every run made on it.
         """
         if self._handle is None or not self._handle.is_loaded:
             self._handle = aie_utils.DefaultNPURuntime.load(self.kernel)
-            self._params = None
+            self._run = None
+            self._runs = []
         return self._handle
 
     @property
-    def params(self):
-        """The ELF's parameter scratchpad, bound to the handle's one run.
-
-        The ``params.txt`` describing the runtime parameters is requested
-        from aiecc via ``--get-scratchpad-parameters`` and lands in the
-        build's cache entry, which :attr:`Artifacts.params` names. Returns
-        ``None`` if the sequence declared no runtime parameters: the file
-        still exists, but holds a count of zero and there is no ctrl
-        scratchpad buffer object to bind to.
-        """
+    def run(self) -> FullELFRun:
+        """The run a call dispatches: the handle's own, so what is written to
+        its scratchpad stays there from call to call."""
         handle = self.handle
-        if self._params is not None:
-            return self._params
-        params_path = self.op.artifacts.params
-        if params_path is None:
-            return None
-        if params_path.read_text().split("\n", 1)[0].strip() == "0":
-            return None
-        self._params = handle.parameter_scratchpad(params_path)
-        return self._params
+        if self._run is None:
+            self._run = self._make_run(handle.run)
+        return self._run
+
+    def new_run(self) -> FullELFRun:
+        """Another run of this image, bound to this callable's buffers."""
+        return self._make_run(self.handle.new_run())
+
+    def _make_run(self, run: pyxrt.run) -> FullELFRun:
+        arguments = {
+            index: self._arguments()[kind]
+            for kind, index in self._argument_index.items()
+        }
+        if self.trace_buffer is not None:
+            assert self._trace_arg is not None
+            arguments[self._trace_arg] = self.trace_buffer
+        made = FullELFRun(
+            self.op.name,
+            self.handle,
+            run,
+            arguments,
+            self._argument_index.get("feedback"),
+            self.op.artifacts.params,
+        )
+        self._runs.append(made)
+        return made
+
+    @property
+    def params(self) -> ParameterScratchpad | None:
+        """:attr:`run`'s per-call values (:attr:`FullELFRun.params`)."""
+        return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Write each value into the ctrl scratchpad and sync it."""
-        params = self.params
-        if params is None:
-            raise ValueError(
-                f"{self.op.name} was built without per-call values; got "
-                f"{sorted(values)}"
-            )
-        for symbol, value in values.items():
-            params.write(symbol, value)
-        params.sync()
+        """Write each value into :attr:`run`'s ctrl scratchpad and sync it."""
+        self.run.write_values(values)
 
     def _allocate_buffers(self):
-        in_sz, out_sz, scratch_sz = self.op.buffer_sizes
-        self.input_buffer = XRTTensor((_n_elements(in_sz),), dtype=ml_dtypes.bfloat16)
-        self.output_buffer = XRTTensor((_n_elements(out_sz),), dtype=ml_dtypes.bfloat16)
+        sizes = self.op.buffer_sizes
+        self.input_buffer = XRTTensor((_n_elements(sizes.input),), dtype=BF16)
+        self.output_buffer = XRTTensor((_n_elements(sizes.output),), dtype=BF16)
         if self.arena is None:
-            self.scratch_buffer = XRTTensor(
-                (_n_elements(scratch_sz),), dtype=ml_dtypes.bfloat16
-            )
+            self.scratch_buffer = XRTTensor((_n_elements(sizes.scratch),), dtype=BF16)
         else:
             self.scratch_buffer = self.arena.tensor
             self._arena_generation = self.arena.generation
+        self.feedback_buffer = None
+        if sizes.feedback is not None:
+            self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
         # Trace lowering appends one buffer covering every configured design, after
-        # the consolidated three. Its argument and size depend on how many channels
+        # the consolidated ones. Its argument and size depend on how many channels
         # and sub-designs claim a share, so read them from the lowered module.
         self.trace_buffer = None
         self._trace_arg = None
@@ -296,6 +434,16 @@ class SequenceFullELFCallable(SequenceCallable):
             if layout:
                 self._trace_arg = layout["arg_index"]
                 self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
+
+    def _arguments(self) -> dict[str, XRTTensor]:
+        """The consolidated buffer of each kind the image takes."""
+        buffers = {
+            "input": self.input_buffer,
+            "output": self.output_buffer,
+            "scratch": self.scratch_buffer,
+            "feedback": self.feedback_buffer,
+        }
+        return {kind: buffers[kind] for kind in self._argument_index}
 
     @property
     def lowered_mlir_path(self):
@@ -315,11 +463,7 @@ class SequenceFullELFCallable(SequenceCallable):
         if buffer_name in self._buffer_cache:
             return self._buffer_cache[buffer_name]
         buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-        parent = {
-            "input": self.input_buffer,
-            "output": self.output_buffer,
-            "scratch": self.scratch_buffer,
-        }[buf_type]
+        parent = self._arguments()[buf_type]
         dtype = self.op.buffer_dtype(buffer_name)
         sub = parent.subview(offset, (length // dtype.itemsize,), dtype)
         self._buffer_cache[buffer_name] = sub
@@ -339,11 +483,7 @@ class SequenceFullELFCallable(SequenceCallable):
         if buffer_name not in self._storage_cache:
             buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
             dtype = self.op.buffer_dtype(buffer_name)
-            parent = {
-                "input": self.input_buffer,
-                "output": self.output_buffer,
-                "scratch": self.scratch_buffer,
-            }[buf_type]
+            parent = self._arguments()[buf_type]
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
             self._storage_cache[buffer_name] = parent.subview(
                 offset, ((stop - offset) // dtype.itemsize,), dtype
@@ -356,6 +496,10 @@ class SequenceFullELFCallable(SequenceCallable):
             return
         self.scratch_buffer = self.arena.tensor
         self._arena_generation = self.arena.generation
+        for run in self._runs:
+            run.bind(
+                self._argument_index["scratch"], self.scratch_buffer.buffer_object()
+            )
         self._buffer_cache.clear()
         self._storage_cache.clear()
 
@@ -364,29 +508,37 @@ class SequenceFullELFCallable(SequenceCallable):
         return self._get_buffer(buffer_name)
 
     def _sync_inputs(self):
-        # The runtime syncs each arena to the device as it runs: sub-views
-        # handed out by get_buffer() share their parent's coherence map, so a
-        # write through one (weights, KV caches) is flushed with it.
+        # Each argument syncs to the device as a whole: sub-views handed out by
+        # get_buffer() share their parent's coherence map, so a write through
+        # one (weights, KV caches) is flushed with it.
         self._follow_arena()
+        for tensor in self._arguments().values():
+            tensor.to("npu")
+        if self.trace_buffer is not None:
+            self.trace_buffer.to("npu")
 
     def _sync_outputs(self):
-        # _run just rewrote the output arena on the device, so the device holds the
+        # The run just rewrote the output arena on the device, so the device holds the
         # authoritative copy. Force the device->host sync: assert device residency first
         # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
         # range "cpu" (otherwise a looped dispatch would read stale output).
-        self.output_buffer.device = "npu"
-        self.output_buffer.to("cpu")
-        if self.trace_buffer is not None:
-            self.trace_buffer.device = "npu"
-            self.trace_buffer.to("cpu")
+        for buffer in (self.output_buffer, self.feedback_buffer, self.trace_buffer):
+            if buffer is not None:
+                buffer.device = "npu"
+                buffer.to("cpu")
 
-    def _run(self):
-        args = [self.input_buffer, self.output_buffer, self.scratch_buffer]
-        if self.trace_buffer is not None:
-            # Trace lowering appends its buffer after the consolidated three.
-            assert self._trace_arg == len(args), self._trace_arg
-            args.append(self.trace_buffer)
-        aie_utils.DefaultNPURuntime.run(self.handle, args)
+    def __call__(self, *runs: FullELFRun):
+        """Dispatch :attr:`run`, or ``runs`` in order. Every run is started
+        before any is waited on, so they queue back to back on the device."""
+        runs = runs or (self.run,)
+        self._sync_inputs()
+        t0 = time.perf_counter()
+        for run in runs:
+            run.start()
+        for run in runs:
+            run.wait()
+        self.last_elapsed = time.perf_counter() - t0
+        self._sync_outputs()
 
 
 class SequenceXclbinCallable(SequenceCallable):
