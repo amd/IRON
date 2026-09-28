@@ -40,7 +40,7 @@ from aie.utils.verify import Tolerance
 from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
-from .field import DeclarationError, Unresolvable, _tier_of, param
+from .field import DeclarationError, DimRef, Unresolvable, _tier_of, param
 from .infer import call_operands, infer, infer_kwargs, operand_flags
 from .member import (
     Extent,
@@ -532,6 +532,39 @@ class Operator(metaclass=_OperatorMeta):
             # copy records it again.
             new.compatible()
         return new
+
+    def with_tunables(self, **tunables: Any) -> Self:
+        """This operator, unresolved, with the given ``auto()`` fields set:
+        another build of the same host ABI (a narrower array, say). The
+        per-call values a graph bound are kept.
+        """
+        unknown = [n for n in tunables if n not in self._auto_fields]
+        if unknown:
+            raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
+        new = dataclasses.replace(self, **tunables)
+        if self.bound_values:
+            vars(new)["_bound_values"] = self.bound_values
+        return new
+
+    @property
+    def widths(self) -> dict[str, int | None]:
+        """The settable tunables a ``per=`` stream's count is a product of,
+        and their values (``None`` until resolved): how many shim channels,
+        and cores behind them, the array takes. A narrower array leaves the
+        rest of the device to another design. A tunable the class fixes
+        (``init=False``) is not one.
+        """
+        settable = {
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+            if f.init and f.name in self._auto_fields
+        }
+        found: dict[str, int | None] = {}
+        for stream in self.streams.values():
+            for ref in stream.member.per or ():
+                if isinstance(ref, DimRef) and ref.name in settable:
+                    found.setdefault(ref.name, settable[ref.name])
+        return found
 
     @property
     def buffers(self) -> list[BoundBuffer]:

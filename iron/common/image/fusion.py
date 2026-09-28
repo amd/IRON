@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -55,6 +56,62 @@ def _memref_bytes(memref_type: ir.MemRefType) -> int:
     if dtype is None:
         raise TypeError(f"no host dtype for the elements of {memref_type}")
     return int(np.prod(memref_type.shape)) * bfp.itemsize(dtype)
+
+
+class GeneratedDesign(NamedTuple):
+    """A design's module as a fusion takes it apart: its one device, and the
+    scratchpad parameters it declares at module scope (symbol -> type). The
+    module is held so that the ops taken from it stay alive."""
+
+    module: ir.Module
+    device: Any  # aie.DeviceOp
+    parameters: dict[str, ir.Type]
+
+
+def generate(design: OperatorDesign) -> GeneratedDesign:
+    """``design``'s module, generated as a child of a fusion, taken apart.
+
+    ``_iron_full_elf`` makes a design's runtime sequence load its own PDI,
+    because on that path no xclbin configures the device. Exactly one
+    program in a fused build needs that, and it is not the children: the
+    fusion inlines each child's device and drives PDI switching itself
+    (:meth:`Fusion.needs_reset`). Generated inside ``compile()`` without
+    this, every child also emits a ``load_pdi`` and the two schemes fight:
+    the build succeeds, the ELF links, and the device hangs at dispatch with
+    ERT_CMD_STATE_TIMEOUT.
+
+    ``aiex.scratchpad_parameter`` ops are emitted at module scope, above
+    the device: the scratchpad is one hardware resource shared by every PDI
+    in a runlist, and the verifier on ``aiex.read_scratchpad_parameter``
+    requires the declaration visible there.
+    """
+    with compile_context(_iron_full_elf=False):
+        module = design.generator()
+    if isinstance(module, str):
+        module = ir.Module.parse(module, ir.Context())
+    devices = []
+    parameters: dict[str, ir.Type] = {}
+    for op in module.body.operations:
+        if isinstance(op, aie.DeviceOp):
+            devices.append(op)
+        elif op.operation.name == "aiex.scratchpad_parameter":
+            sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
+            parameters[sym_name] = ir.TypeAttr(op.operation.attributes["type"]).value
+    if len(devices) != 1:
+        raise ValueError(
+            f"expected exactly one device operation in the module of "
+            f"'{design.name}', got {len(devices)}"
+        )
+    return GeneratedDesign(module, devices[0], parameters)
+
+
+def parameters_preamble(parameters: Mapping[str, ir.Type]) -> str:
+    """Module-scope declarations of ``parameters``, as text a device's text
+    is parsed after."""
+    return "\n".join(
+        f"  aiex.scratchpad_parameter @{name} : {param_type}"
+        for name, param_type in parameters.items()
+    )
 
 
 class Fusion:
@@ -167,34 +224,17 @@ class Fusion:
         )
         arguments = self.buffer_sizes.arguments()
 
-        # Extract device operations and module-level parameter decls from each
-        # operator's MLIR generator.  Note: in the current MLIR-AIE pipeline,
-        # ``aiex.scratchpad_parameter`` ops are emitted at *module* scope (above the
-        # ``aie.device``), because the scratchpad is a single hardware resource
-        # shared across all PDIs in a runlist and the verifier on
-        # ``aiex.read_scratchpad_parameter`` requires the decl to be visible at module
-        # scope.  We collect those module-level decls per-operator so we can
-        # re-declare them once at the top of the fused module.
         device_mlir_strings = {}
         operator_param_decls: dict[str, dict[str, ir.Type]] = {}
         device_ty = None
         sequence_arg_types = {}
-        for op_name, mlir_module in self._children():
-            device_ops = []
-            params_here: dict[str, ir.Type] = {}
-            for op in mlir_module.body.operations:
-                if isinstance(op, aie.DeviceOp):
-                    device_ops.append(op)
-                elif op.operation.name == "aiex.scratchpad_parameter":
-                    sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
-                    param_type = ir.TypeAttr(op.operation.attributes["type"]).value
-                    params_here[shared.get(sym_name) or sym_name] = param_type
-            if len(device_ops) != 1:
-                raise ValueError(
-                    f"Expected exactly one device operation in MLIR artifact for operator '{op_name}', "
-                    f"got {len(device_ops)}"
-                )
-            device_op = device_ops[0]
+        for op_name, design in self.designs.items():
+            generated = generate(design)
+            device_op = generated.device
+            params_here = {
+                shared.get(sym_name) or sym_name: param_type
+                for sym_name, param_type in generated.parameters.items()
+            }
             if device_ty is None:
                 device_ty = device_op.device
             device_str = str(device_op)
@@ -229,10 +269,7 @@ class Fusion:
                     aiex.scratchpad_parameter(sym_name, param_type)
 
             # Concatenate aie.device ops, merging each pack's into one.
-            params_preamble = "\n".join(
-                f"  aiex.scratchpad_parameter @{name} : {param_type}"
-                for name, param_type in hoisted_params.items()
-            )
+            params_preamble = parameters_preamble(hoisted_params)
             packing = self.packing
             if isinstance(packing, AdjacentPacking):
                 packing, _ = packing.pack(
@@ -377,25 +414,6 @@ class Fusion:
                         reset_op.body.blocks.append()
 
             return str(module)
-
-    def _children(self):
-        """Each design's module, generated as a child of the fusion.
-
-        ``_iron_full_elf`` makes a design's runtime sequence load its own PDI,
-        because on that path no xclbin configures the device. Exactly one
-        program in a fused build needs that, and it is not the children: the
-        fusion inlines each child's device and drives PDI switching itself
-        (:attr:`needs_reset`). Generated inside ``compile()`` without this,
-        every child also emits a ``load_pdi`` and the two schemes fight: the
-        build succeeds, the ELF links, and the device hangs at dispatch with
-        ERT_CMD_STATE_TIMEOUT.
-        """
-        with compile_context(_iron_full_elf=False):
-            for name, design in self.designs.items():
-                module = design.generator()
-                if isinstance(module, str):
-                    module = ir.Module.parse(module, ir.Context())
-                yield name, module
 
     @staticmethod
     def _sequence_arg_types(dev_op: Any) -> list[Any]:
