@@ -6,13 +6,18 @@ import dataclasses
 
 import ml_dtypes
 import numpy as np
+from aie.extras.dialects import arith
 from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
-from aie.iron.kernels import activation
+from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
 from iron.common import Extent, In, Incompatible, Operator, Out, Value, auto, param
 from iron.common.testing import Testing
+
+# softmax_bf16's vector step on both targets (activation.softmax holds a row
+# to a multiple of it). Its loops cover only whole steps.
+_VECTOR_STEP = 32
 
 
 class Softmax(Operator):
@@ -22,7 +27,12 @@ class Softmax(Operator):
     Each row is masked to ``vector_size`` valid elements before the softmax:
     the whole row, unless a graph binds a per-call value to it (``Softmax(x,
     vector_size=n)``, attention over a context that grows each call), which
-    the core then reads per call.
+    the core then reads per call. ``vector_size`` must be at least 1.
+
+    The kernels only run over the span: ``vector_size`` rounded up to the
+    softmax's 32-element vector step. Past it the masked elements' exponents
+    are exact zeros, so leaving them out of the lanes' sums changes no bit;
+    the output past the span is zero-filled instead of computed.
     """
 
     # Four cores, two columns of two: the fewest that exercise both splits.
@@ -82,6 +92,7 @@ class Softmax(Operator):
         softmax_k = activation.softmax(self.cols)
         # mask_bf16 is exported by the same softmax.cc translation unit.
         mask_k = softmax_k.object_file.bind("mask_bf16", [tile_ty, np.int32, np.int32])
+        zero_k = zero(self.cols, ml_dtypes.bfloat16)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}")
             for i in range(cols)
@@ -118,7 +129,16 @@ class Softmax(Operator):
             if d
         ]
 
-        def core_body(of_in, of_out, softmax_kernel, mask_kernel, rtp, barrier, *words):
+        def core_body(
+            of_in,
+            of_out,
+            softmax_kernel,
+            mask_kernel,
+            zero_kernel,
+            rtp,
+            barrier,
+            *words,
+        ):
             barrier.wait_for_value(1)
             # dyn_count/dyn_vs are compile-time constants, so each value is
             # emitted once: a scratchpad parameter read or an RTP load.
@@ -127,11 +147,20 @@ class Softmax(Operator):
             vector_size = (
                 words.pop(0).read() if dyn_vs else rtp[static.index("vector_size")]
             )
+            i32 = vector_size.type
+            span = arith.minsi(
+                arith.andi(
+                    arith.addi(vector_size, arith.constant(_VECTOR_STEP - 1, i32)),
+                    arith.constant(-_VECTOR_STEP, i32),
+                ),
+                arith.constant(per_tile, i32),
+            )
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                mask_kernel(elem_in, vector_size, per_tile)
-                softmax_kernel(elem_in, elem_out)
+                zero_kernel(elem_out)
+                mask_kernel(elem_in, vector_size, span)
+                softmax_kernel(elem_in, elem_out, span)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -143,6 +172,7 @@ class Softmax(Operator):
                     of_outs[k].prod(),
                     softmax_k,
                     mask_k,
+                    zero_k,
                     rtps[k],
                     barriers[k],
                 ]
