@@ -6,8 +6,10 @@ import math
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
+import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch, T
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, linalg
@@ -53,6 +55,13 @@ def _cases():
         (1024, 1024, 1, 1, 64, 2),  # batch stride > 2**20: per-batch fallback
         (512, 64, 8, 4, 64, 32),  # attention's: several rows, a batch per head
     ]
+    # ... and repeat: several batches per matrix of A.
+    repeated = [
+        (256, 128, 2, 1, 64, 8, 4),  # coalesced: A re-read in the iteration slot
+        (256, 128, 2, 1, 64, 4, 4),  # one matrix for every batch
+        (1024, 1024, 1, 1, 64, 4, 2),  # A's run does not factor: one per batch
+        (2048, 64, 8, 4, 256, 32, 4),  # Llama decode's scores: 32 heads, 8 groups
+    ]
 
     def case(M, K, cols, tsi, tso, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
@@ -61,6 +70,7 @@ def _cases():
     return (
         [case(*p) for p in plain]
         + [case(*p, num_batches=batches) for *p, batches in batched]
+        + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
         # The fused GELU epilogue, aie2p's alone.
         + [case(*p, epilogue="gelu") for p in plain[:3]]
     )
@@ -85,6 +95,12 @@ class GEMV(Operator):
     M: int = param()
     K: int = param()
     num_batches: int = param(default=1)
+    # Batches per matrix of A: batch ``b`` is multiplied by matrix
+    # ``b // repeat``. Grouped-query attention's scores, where each group's
+    # keys serve ``n_heads // n_kv_groups`` query heads: the matrix is read
+    # once per batch it serves, so no repeated copy is ever materialized.
+    repeat: int = param(default=1)
+    num_matrices: int = param(default=lambda op: op.num_batches // op.repeat)
     # None: every column the device's shim budget allows that leaves each
     # column a whole number of tiles of M.
     num_aie_columns: int = auto()
@@ -107,7 +123,7 @@ class GEMV(Operator):
     # for each of A, B and C; B is the whole vector, sent to every column's
     # own fifo (see sequence).
     A = In(
-        optional(num_batches),
+        optional(num_matrices),
         M,
         K,
         tile=(tile_size_input, K),
@@ -143,6 +159,11 @@ class GEMV(Operator):
     _KERNEL_VECTOR_SIZES: ClassVar[tuple[int, ...]] = (64, 32, 16)
 
     def validate(self):
+        if self.repeat < 1 or self.num_batches % self.repeat:
+            raise ValueError(
+                f"repeat={self.repeat} does not divide num_batches={self.num_batches}"
+            )
+        self.check_derived("num_matrices")
         tso, tsi = self.tile_size_output, self.tile_size_input
         if tso is not None and tsi is not None and not (tso % tsi == 0 and tso >= tsi):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
@@ -347,8 +368,12 @@ class GEMV(Operator):
     def sequence(self, rt):
         """The runtime sequence: B, the whole vector, once to every column,
         then A and C as derived: each column's rows of every batch, or,
-        under a bound, output tiles round-robin over the columns.
+        under a bound, output tiles round-robin over the columns. A repeated
+        GEMV walks the batches in :meth:`_batch_order` instead.
         """
+        if self.repeat > 1:
+            self._repeated_sequence(rt)
+            return
         with rt.group():
             for col in range(self.num_aie_columns):
                 rt.fill(self.B.lane(col), self.B)
@@ -358,13 +383,90 @@ class GEMV(Operator):
                 for slot, tap, size_by in rt.plan(self.C):
                     rt.drain(slot, (self.C, tap), group=tg, wait=True, size_by=size_by)
 
+    def _batch_order(self) -> list[int]:
+        """The batches in the order a repeated GEMV computes them.
+
+        A matrix is re-read, and the shim can re-read only in its outermost
+        (iteration) dimension, whose stride alone may be 0: it cannot re-read
+        one matrix for consecutive batches inside a walk over the matrices.
+        So the walk over every matrix repeats, and pass ``r`` computes batch
+        ``m * repeat + r`` of each matrix ``m``. B and C visit the batches in
+        the same order; each batch's product is its own, so the order
+        changes no output.
+        """
+        rep, nm = self.repeat, self.num_matrices
+        return [m * rep + r for r in range(rep) for m in range(nm)]
+
+    def _walks(self, lane: int) -> dict[str, list[TensorAccessPattern]]:
+        """Each of A, B and C's transfers to or from ``lane`` in
+        :meth:`_batch_order`: one descriptor that walks every matrix once per
+        pass, or, where a run does not factor into one, one per batch.
+        """
+        M, K, rep, nm = self.M, self.K, self.repeat, self.num_matrices
+        rows = M // self.num_aie_columns
+        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        # (buffer, offset, run, (pass stride, matrix stride), batch stride):
+        # A's rows come from the batch's matrix, re-read each pass (stride
+        # 0); B's and C's go to the batch itself.
+        walks = {
+            "A": (self.A, lane * rows * K, rows * K, (0, M * K), None),
+            "B": (self.B, 0, K, (K, rep * K), K),
+            "C": (self.C, lane * rows, rows, (M, rep * M), M),
+        }
+        out = {}
+        for name, (buf, offset, run, (pass_s, matrix_s), batch_s) in walks.items():
+            halves = shim.factor(run, shim.granule(buf.dtype))
+            if halves is not None:
+                hi, lo = halves
+                tap = TensorAccessPattern(
+                    (buf.elements,),
+                    offset,
+                    [rep, nm, hi, lo],
+                    [pass_s, matrix_s, lo, 1],
+                )
+                if shim.fits(tap, buf.dtype):
+                    out[name] = [tap]
+                    continue
+            out[name] = [
+                TensorAccessPattern(
+                    (buf.elements,),
+                    offset + (b // rep * M * K if batch_s is None else b * batch_s),
+                    [1, 1, 1, run],
+                    [0, 0, 0, 1],
+                )
+                for b in self._batch_order()
+            ]
+        return out
+
+    def _repeated_sequence(self, rt):
+        for buf in (self.A, self.C):
+            if buf.bounded is not None:
+                raise ValueError(
+                    f"GEMV.{buf.name}: a repeated GEMV takes no per-call bound"
+                )
+        walks = [self._walks(col) for col in range(self.num_aie_columns)]
+        with rt.group():
+            for col, w in enumerate(walks):
+                for tap in w["B"]:
+                    rt.fill(self.B.lane(col), (self.B, tap))
+            with rt.group() as tg:
+                for col, w in enumerate(walks):
+                    for tap in w["A"]:
+                        rt.fill(self.A.lane(col), (self.A, tap), group=tg)
+                for col, w in enumerate(walks):
+                    for tap in w["C"]:
+                        rt.drain(self.C.lane(col), (self.C, tap), group=tg, wait=True)
+
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches
 
     def reference(self, A, B):
         """``C = A @ B``, then the epilogue: one product per batch when ``A``
-        is ``(batches, M, K)`` and ``B`` ``(batches, K)``.
+        is ``(batches, M, K)`` and ``B`` ``(batches, K)``, each matrix of
+        ``A`` serving ``repeat`` consecutive batches.
         """
+        if self.repeat > 1:
+            A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
         # Not linalg.mv's contract: that is one tile's product, and mv_ref's
         # float64 would double the host copy of the LM head's weight. In
         # float32 and rounded once: numpy's matmul would otherwise accumulate
