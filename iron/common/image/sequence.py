@@ -8,7 +8,6 @@ from collections.abc import Hashable, Mapping, Sequence
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.dialects.aie import AIEArch
 from aie.utils import bfp
 
 from ..declare import Operator
@@ -25,6 +24,7 @@ from .callable import (
 from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
+from .packaging import full_elf
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +444,7 @@ class OperatorSequence:
         if self.mode is None:
             # The platform default for a hand-written sequence; a graph goes
             # through packaging.plan, which also weighs its values and boundaries.
-            elf = dev is not None and dev.arch is AIEArch.AIE2p
+            elf = dev is not None and full_elf(dev)
             self.mode = "fused" if elf else "separate"
             if (self.arena is not None or self.feedback_args) and not elf:
                 raise ValueError(

@@ -5,10 +5,10 @@
 
 import numpy as np
 import pytest
-from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
+from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
 from iron.common.graph import TracedGraph, Value
-from iron.common.image.packaging import ELF, XCLBIN, each_step, plan
+from iron.common.image.packaging import ELF, XCLBIN, each_step, full_elf, plan
 
 
 def _traced(*values):
@@ -51,6 +51,12 @@ def test_the_architecture_decides_not_the_name():
     assert plan(from_name("npu2", n_cols=4), _traced()).image == ELF
     with pytest.raises(ValueError, match=r"npu1_1col \(AIE2\) has no full-ELF"):
         plan(NPU1Col1(), _traced(), image=ELF)
+
+
+def test_full_elf_goes_by_architecture():
+    # NPU2Col1 is no NPU2 subclass, and NPU1Col1 is named "npu1_1col".
+    assert full_elf(NPU2()) and full_elf(NPU2Col1())
+    assert not full_elf(NPU1()) and not full_elf(NPU1Col1())
 
 
 def test_a_forced_xclbin_defaults_to_each_step():

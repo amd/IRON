@@ -12,11 +12,11 @@ import hashlib
 from pathlib import Path
 
 import aie.utils as aie_utils
-from aie.dialects.aie import AIEArch
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..design import OperatorDesign
 from .fusion import Fusion
+from .packaging import full_elf
 
 
 class FusedImage:
@@ -41,7 +41,7 @@ class FusedImage:
         designs are fused, inside ``compile()``, only on a miss.
         """
         dev = aie_utils.ensure_current_device(required=True)
-        if dev.arch is not AIEArch.AIE2p:
+        if not full_elf(dev):
             raise RuntimeError(
                 f"dispatch='fused' needs a full ELF, which {dev.name} "
                 f"({dev.arch}) does not dispatch"

@@ -57,6 +57,20 @@ class Plan:
         return "\n".join(lines)
 
 
+def full_elf(dev) -> bool:
+    """Whether ``dev`` dispatches a full ELF: by its architecture, so every
+    column variant of a device generation answers as the whole one does.
+    """
+    # NPU1's lack of full-ELF dispatch is inferred from source, not tested on
+    # hardware. IRON's ELF carries .pdi sections, and XRT sends any such ELF
+    # as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031-1041); the
+    # amdxdna driver refuses that opcode unless the firmware has AIE2_PREEMPT
+    # (2.25 aie2_message.c:1006-1009), which npu1's feature table never lists
+    # (npu1_regs.c:68-72; npu4_regs.c:96 does). To verify: let AIE2 through
+    # here and run a full-ELF test on an npu1 machine.
+    return dev.arch is AIEArch.AIE2p
+
+
 def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
     """Derive the image and the dispatch policy for ``traced`` on the device."""
     if image not in (None, ELF, XCLBIN):
@@ -71,14 +85,7 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    # NPU1's lack of full-ELF dispatch is inferred from source, not tested on
-    # hardware. IRON's ELF carries .pdi sections, and XRT sends any such ELF
-    # as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031-1041); the
-    # amdxdna driver refuses that opcode unless the firmware has AIE2_PREEMPT
-    # (2.25 aie2_message.c:1006-1009), which npu1's feature table never lists
-    # (npu1_regs.c:68-72; npu4_regs.c:96 does). To verify: let AIE2 through
-    # here and run a full-ELF test on an npu1 machine.
-    if dev.arch is not AIEArch.AIE2p:
+    if not full_elf(dev):
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if boundaries is not None:
         forced.append(f"boundaries={boundaries}: more than one dispatch")

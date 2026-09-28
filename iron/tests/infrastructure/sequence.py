@@ -26,12 +26,12 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron.device import NPU2
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
+from iron.common.image.packaging import full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 from iron.operators.tanh import Tanh
@@ -109,9 +109,7 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     seq = _build_add_relu_sequence("auto", "infra_auto_add_relu")
     seq.compile()
 
-    expected_mode = (
-        "fused" if isinstance(aie_utils.get_current_device(), NPU2) else "separate"
-    )
+    expected_mode = "fused" if full_elf(aie_utils.get_current_device()) else "separate"
     assert seq.mode == expected_mode, (
         f"auto dispatch resolved to {seq.mode!r}, expected {expected_mode!r} "
         "on this device"
@@ -191,8 +189,8 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform).
     """
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     rng = np.random.default_rng(0)
     a = _centered(rng, _ADD_RELU_SIZE)
@@ -331,8 +329,8 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
     seq = _build_add_relu_sequence(
