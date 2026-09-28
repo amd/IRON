@@ -247,11 +247,15 @@ class Operator(metaclass=_OperatorMeta):
     def __post_init__(self) -> None:
         self._resolved = False
         self._derive_params()
-        self.validate()
+        # A graph's reference constructs at a bounded call's valid rows, a
+        # shape no device runs, for reference() alone: it is not checked.
+        checked = getattr(graph_tracer.get(), "checks", True)
+        if checked:
+            self.validate()
         self._bind()
         # Once every tunable is known the extents can be checked, so the check
         # runs at construction rather than at resolution.
-        if not any(getattr(self, n) is None for n in self._auto_fields):
+        if checked and not any(getattr(self, n) is None for n in self._auto_fields):
             self.compatible()
 
     def _derive_params(self) -> None:

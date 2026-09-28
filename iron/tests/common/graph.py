@@ -426,28 +426,28 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "ElementwiseAdd",
     ]
-    assert kinds == per_block * cfg.n_layers + ["RMSNorm", "GEMV"]
-    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    # One function, so every version takes every value; one token binds two.
-    assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]
-    assert {b.expression.value.name for b in t.bindings} == {
-        "cache_offset",
-        "vector_size",
-    }
+    # The position's RoPE row first, copied out of the table on the device.
+    assert kinds == ["Copy"] + per_block * cfg.n_layers + ["RMSNorm", "GEMV"]
+    assert t.input_args == ["x"] and t.output_args == ["out"]
+    # One function, so every version takes every value; a token binds one.
+    assert [v.name for v in t.values] == ["chunk", "rows", "position"]
+    assert {b.expression.value.name for b in t.bindings} == {"position"}
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
-    # One strided copy instance per layer is bound to cache_offset on both of
-    # its call sites; every softmax binds vector_size.
-    copies = [
-        (b.op, b.member.name)
-        for b in t.bindings
-        if b.expression.value.name == "cache_offset"
-    ]
-    assert len(copies) == cfg.n_layers * 2 and all(n == "out_offset" for _, n in copies)
-    softmaxes = [b.op for b in t.bindings if b.expression.value.name == "vector_size"]
+    # The table's row and each cache's row are the position's; every softmax
+    # runs over the keys up to it.
+    offsets = sorted(
+        (b.member.name, str(b.expression)) for b in t.bindings if type(b.op) is Copy
+    )
+    D = cfg.head_dim
+    assert offsets == [("in_offset", f"position * {D}")] + [
+        ("out_offset", f"position * {D}")
+    ] * (2 * cfg.n_layers)
+    softmaxes = [b for b in t.bindings if b.member.name == "vector_size"]
     assert len(softmaxes) == cfg.n_layers
-    assert all(s.uses_value("vector_size") for s in softmaxes)
+    assert all(str(b.expression) == "position + 1" for b in softmaxes)
+    assert all(b.op.uses_value("vector_size") for b in softmaxes)
     # The same array serves every layer's like projections.
     q_arrays = {
         s.op.array_key()
@@ -486,8 +486,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 
     g = small()
     cfg = g.config
-    L = cfg.max_seq_len
-    t = g.trace(**g.shapes(L))
+    t = g.trace(**g.shapes(cfg.prefill_chunk))
     kinds = [type(op).__name__ for op, *_ in t.runlist]
     per_block = [
         "RMSNorm",
@@ -510,22 +509,19 @@ def test_llama_prompt_traces_over_the_same_caches():
         "ElementwiseAdd",
     ]
     tail = ["Copy", "RMSNorm", "GEMV"]
-    assert kinds == per_block * cfg.n_layers + tail
-    assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
-    assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]
+    # The chunk's RoPE rows first, copied out of the table on the device.
+    assert kinds == ["Copy"] + per_block * cfg.n_layers + tail
+    assert t.input_args == ["x"] and t.output_args == ["out"]
+    assert [v.name for v in t.values] == ["chunk", "rows", "position"]
     # One slice at the top bounds every operator of every block by the rows
-    # the call runs; the tail (the last row's copy, the norm and the head)
-    # runs one row and is not.
+    # the call runs, and the last row's copy reads the last of them; the
+    # table's copy, the norm and the head are not.
     rows = {id(b.op) for b in t.bindings if b.expression.value.name == "rows"}
     by_rows = [op for op, *_ in t.runlist if id(op) in rows]
-    assert len(by_rows) == len(per_block) * cfg.n_layers
+    assert len(by_rows) == len(per_block) * cfg.n_layers + 1
+    # MHA attends over the caches up to the chunk's last token.
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
-    assert mha.bound_values == {
-        "valid": "rows",
-        "kv_valid": "rows",
-        "s_q": "vector_size",
-        "s_kv": "vector_size",
-    }
+    assert mha.bound_values == {"valid": "rows", "kv_valid": "position_p1"}
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
     token = g.trace(**g.shapes(1))
@@ -538,15 +534,55 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
-    # The last-row copy is the one operator bound to the per-call offset.
+    # The per-call offsets: the chunk's rows of the table and of each cache,
+    # and the last row.
+    C, D = cfg.prefill_chunk, cfg.head_dim
     offsets = [
-        (type(b.op).__name__, b.member.name)
+        (b.member.name, str(b.expression))
         for b in t.bindings
         if b.member.name.endswith("_offset")
     ]
-    assert offsets == [("Copy", "in_offset")]
+    assert offsets == [
+        ("in_offset", f"chunk * {C * D}"),
+        *[("out_offset", f"chunk * {C * D}")] * (2 * cfg.n_layers),
+        ("in_offset", f"rows * {cfg.emb_dim} - {cfg.emb_dim}"),
+    ]
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
+
+
+def test_a_prompt_chunk_does_not_grow_with_the_context():
+    """``max_seq_len`` sizes the caches and the RoPE table and nothing else a
+    prompt chunk runs: its one input is the chunk's embedded tokens, every
+    activation and every array is the same at a four times longer context,
+    and attention is the caches' two writes and MHA, the reshapes and
+    transposes between them views the DMA walks.
+    """
+
+    def trace(max_seq_len):
+        g = small(max_seq_len=max_seq_len)
+        return g.trace(**g.shapes(g.config.prefill_chunk))
+
+    short, long = trace(64), trace(256)
+    assert short.input_args == long.input_args == ["x"]
+    grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
+    assert grown == {"rope", "keys.0", "keys.1", "values.0", "values.1"}
+
+    def activations(t):
+        return {
+            h.buffer_name: h.nbytes
+            for s in t.steps
+            for h in s.inputs + s.outputs
+            if h.role not in ("weight", "state")
+        }
+
+    assert activations(short) == activations(long)
+    assert [op.array_key() for op in short.operators] == [
+        op.array_key() for op in long.operators
+    ]
+    kinds = [type(op).__name__ for op, *_ in long.runlist]
+    rope = kinds.index("RoPE", kinds.index("RoPE") + 1)
+    assert kinds[rope + 1 : kinds.index("MHA") + 1] == ["Copy", "Copy", "MHA"]
 
 
 def _resolved_fields(settings):

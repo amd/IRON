@@ -113,8 +113,8 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     from iron.tests.common.llama_model import llama_1b
 
     model = llama_1b(n_layers=1)
-    version = build_elf(model, **model.shapes(model.config.max_seq_len))
-    assert len(version.traced.runlist) == 18 + 3
+    version = build_elf(model, **model.shapes(model.config.prefill_chunk))
+    assert len(version.traced.runlist) == 1 + 18 + 3
     _assert_values_in_table(version)
 
 
@@ -122,7 +122,9 @@ def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     from iron.tests.common.llama_model import small
 
     model = small()
-    _assert_values_in_table(build_elf(model, **model.shapes(model.config.max_seq_len)))
+    _assert_values_in_table(
+        build_elf(model, **model.shapes(model.config.prefill_chunk))
+    )
 
 
 def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():

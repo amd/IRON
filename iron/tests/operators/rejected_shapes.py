@@ -9,7 +9,11 @@ answer, with no diagnostic worth reading -- so the operator rejects it at
 construction. Host-only: what is checked is the refusal, not a dispatch.
 """
 
+import functools
+
+import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 
 from iron.common import Incompatible, Unresolvable
@@ -52,6 +56,26 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
         Copy(
             input_buffer_size=1024, num_channels=4, tile_size=512
         )  # every tunable given
+
+
+def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
+    """A bounded copy moves any whole number of rows, so its object divides
+    one row: a prompt's 513 rows of (8, 64) keys into a cache are 256.5
+    objects of 1024 elements, and the last half-object hangs the device.
+    Left to itself the copy takes one row's 512.
+    """
+    rows, G, D = 2048, 8, 64
+    copy = functools.partial(
+        Copy,
+        src=TensorAccessPattern((rows, G, D), 0, [G, rows, D], [D, G * D, 1]),
+        dst=TensorAccessPattern.from_slice((G, rows, D), np.s_[:, :rows]),
+        src_bound=1,
+        dst_bound=1,
+        input_buffer_size=rows * G * D,
+    )
+    with pytest.raises(Incompatible, match="one row of the bounded axis"):
+        copy(tile_size=1024)  # every tunable given
+    assert copy().resolved(from_name("npu2")).tile_size == G * D
 
 
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not

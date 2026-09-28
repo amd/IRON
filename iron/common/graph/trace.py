@@ -27,8 +27,8 @@ from .handle import (
     Handle,
     State,
     Value,
+    Weight,
     _HostView,
-    _HostViews,
     _rescale_bounds,
     _tensor_dtype,
     is_operand,
@@ -189,6 +189,10 @@ class TracedGraph:
 class Tracer:
     """Records operator calls on handles while a graph's body runs."""
 
+    # Whether an operator constructed under it checks its shape (validate(),
+    # compatible()).
+    checks = True
+
     def __init__(self, name: str, names: dict[int, str] | None = None):
         self.name = name
         self.steps: list[TracedStep] = []
@@ -213,9 +217,11 @@ class Tracer:
 
     # -- operands ---------------------------------------------------------
 
-    def state_as(self, state: State):
-        """What stands for a state viewed inside the graph's body: its handle."""
-        return self.operand(state)
+    def viewed(self, x: State | Weight):
+        """What stands for a state or weight viewed inside the graph's body:
+        its handle.
+        """
+        return self.operand(x)
 
     def operand(self, x) -> Handle:
         if isinstance(x, Handle):
@@ -465,40 +471,54 @@ class _ReferenceTracer(Tracer):
     a vector size masks the softmax.
     """
 
+    # Operators are constructed at the valid rows of a bounded call, which
+    # only their reference() runs at.
+    checks = False
+
     def operand(self, x):
         return x
 
-    def state_as(self, state: State):
+    def viewed(self, x: State | Weight):
         """A state viewed in the reference: a view of its host tensor that
-        remembers the key, so the operator gets the whole tensor and its
-        pattern, as the device does, and writes it in place.
+        remembers its shape and key (:class:`_HostView`). A weight's is
+        numpy's own view, since nothing writes it.
         """
-        if state.host is None:
-            state.host = np.zeros(state.shape, dtype=bfloat16)
-        return _HostViews(state)
+        if isinstance(x, Weight):
+            return x.array
+        if x.host is None:
+            x.host = np.zeros(x.shape, dtype=bfloat16)
+        return _HostView(x, x.shape)
 
     def call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = call_operands(cls, args, kwargs)
-        tensors, states, keys = [], [], []
-        for a in [*inputs.values(), *outputs]:
-            state, key = None, None
+        n_views = len(getattr(cls, "accept_views", ()))
+        tensors, patterns = [], []
+        for i, a in enumerate([*inputs.values(), *outputs]):
+            pattern = None
             if isinstance(a, _HostView):
-                state, key, a = a.state, a.key, a.state.host
+                pattern = a.pattern()
+                if pattern.tap is not None and i < n_views:
+                    a = a.state.host  # the whole tensor, walked by the pattern
+                else:
+                    pattern, a = None, a.tensor()
             elif isinstance(a, State):
                 if a.host is None:
                     a.host = np.zeros(a.shape, dtype=bfloat16)
-                state, a = a, a.host
+                a = a.host
+            elif isinstance(a, Weight):
+                a = a.array
             tensors.append(a)
-            states.append(state)
-            keys.append(key)
+            patterns.append(pattern)
         n_in = len(inputs)
         if isinstance(target, type):
             # A per-call value's number goes to the reference, not to
             # construction.
             values = self._split_values(cls, kwargs)
-            shapes = [Handle(t.shape, _tensor_dtype(t), "", "input") for t in tensors]
-            shapes = [h if k is None else h[k] for h, k in zip(shapes, keys)]
+            shapes = [
+                Handle(t.shape, _tensor_dtype(t), "", "input") if p is None else p
+                for t, p in zip(tensors, patterns)
+            ]
             shapes = _take_views(cls, shapes, kwargs, {})
             op = self._construct(cls, dict(zip(inputs, shapes)), shapes[n_in:], kwargs)
         else:
@@ -519,7 +539,7 @@ class _ReferenceTracer(Tracer):
                 result = result.reshape(like.shape, copy=False)
         # A state written in place keeps its host tensor; a result returned
         # for a given output lands in it.
-        for state, given in zip(states[n_in:], tensors[n_in:]):
-            if state is not None and result is not None and result is not given:
-                given.copy_(result.reshape(given.shape).to(given.dtype))
+        for given in tensors[n_in:]:
+            if result is not None and result is not given:
+                given[...] = np.asarray(result).reshape(given.shape)
         return result

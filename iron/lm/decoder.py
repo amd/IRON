@@ -5,16 +5,19 @@
 
 :class:`CausalLM` is the part every such model shares: the body over
 ``x``, the embedded tokens, ``(rows, emb_dim)``, which branches on that
-static shape; the key and value caches; attention over them
-(:meth:`CausalLM.attend`); and ``logits(tokens)``. A model subclasses it
-with its ``layer`` and its ``head``.
+static shape; the key and value caches and the RoPE table, on the device;
+attention over the caches (:meth:`CausalLM.attend`); and
+``logits(tokens)``. A model subclasses it with its ``layer`` and its
+``head``.
 
-One row is a decode step: attention against the caches, the row written
-into them at ``cache_offset``, the softmax masked to ``vector_size`` keys.
-``max_seq_len`` rows are a prompt, of which a call runs the first ``rows``
-(:func:`prompt_rows`): causal MHA masked to the ``vector_size`` tokens of
-the prompt, the caches written from row zero, and the head for row
-``last`` alone.
+One row is a decode step at ``position``: attention against the caches,
+the row written into them there, the softmax masked to the ``position +
+1`` keys before it. ``prefill_chunk`` rows are a chunk of a prompt, of
+which a call runs the first ``rows``: the chunk's rows written into the
+caches at chunk ``chunk``, causal MHA of them over the caches up to
+``position``, its last token, and the head for that token alone. A prompt
+is its chunks in turn, so what a call costs follows the tokens it runs,
+not ``max_seq_len``, which sizes the caches and the RoPE table alone.
 
 Each shape compiles its own version, and every version runs in the graph's
 one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
@@ -30,9 +33,9 @@ import dataclasses
 import math
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
-from aie.iron import ceildiv
 from ml_dtypes import bfloat16
 
 import iron
@@ -81,8 +84,9 @@ def rope_angles(
 @dataclasses.dataclass(frozen=True)
 class Config:
     """A decoder's shape. ``max_seq_len`` is the rows the caches hold,
-    prompt and generated tokens together; ``rope_scaling`` rescales the RoPE
-    frequencies (:data:`RopeScaling`).
+    prompt and generated tokens together, and ``prefill_chunk``, which
+    divides it, the rows a prompt runs at once; ``rope_scaling`` rescales
+    the RoPE frequencies (:data:`RopeScaling`).
     """
 
     vocab_size: int
@@ -95,6 +99,14 @@ class Config:
     max_seq_len: int
     rope_base: float
     rope_scaling: RopeScaling | None = None
+    prefill_chunk: int = 2048
+
+    def __post_init__(self):
+        if self.max_seq_len % self.prefill_chunk:
+            raise ValueError(
+                f"prefill_chunk ({self.prefill_chunk}) must divide max_seq_len "
+                f"({self.max_seq_len})"
+            )
 
     def angles(self) -> np.ndarray:
         """The RoPE table, ``(max_seq_len, head_dim)`` float32."""
@@ -103,26 +115,18 @@ class Config:
         )
 
 
-def prompt_rows(n: int, max_seq_len: int) -> int:
-    """The rows a prompt of ``n`` tokens runs: ``n`` rounded up to what MHA's
-    pipelines take at once (64 rows each, eight of them at full length),
-    which the GEMMs' row block divides, at most ``max_seq_len``.
-    """
-    unit = 64 * min(8, max_seq_len // 64)
-    return min(ceildiv(n, unit) * unit, max_seq_len)
-
-
 @dataclasses.dataclass
 class Step:
-    """What one call runs: a ``prompt`` or a decode step, the RoPE rows of
-    its positions (``angles``), and its per-call values.
+    """What one call runs: a chunk of a ``prompt`` or a decode step, the
+    RoPE rows of its positions (``angles``), and its per-call values.
     """
 
     prompt: bool
     angles: Handle
-    rows: Scratchpad
-    cache_offset: Scratchpad
-    vector_size: Scratchpad
+    # Each the graph's per-call value in a trace, its number in the reference.
+    chunk: Any
+    rows: Any
+    position: Any
 
 
 class CausalLM(iron.Graph):
@@ -130,7 +134,8 @@ class CausalLM(iron.Graph):
     fields become the model's (named as they are: ``layers.3.q``). It needs
     ``embedding``, the rows the host looks tokens up in, and ``layers``;
     ``keys[i]`` and ``values[i]`` are each layer's cache, ``(n_kv_groups,
-    max_seq_len, head_dim)``.
+    max_seq_len, head_dim)``, and ``rope`` the RoPE table the device reads
+    each call's rows of.
 
     A subclass gives :meth:`layer` and :meth:`head`, its ``profile``, and
     its ``oracle``, the :class:`Oracle` it is checked against.
@@ -148,8 +153,7 @@ class CausalLM(iron.Graph):
         self.values = [iron.state((G, L, D)) for _ in self.layers]
         # 1/sqrt(head_dim) over every score, as the elementwise multiply takes it.
         self.scale = np.full((config.n_heads, L), 1 / math.sqrt(D), dtype=bfloat16)
-        # A float32 table would be another input signature, another compile.
-        self.angles = config.angles().astype(bfloat16)
+        self.rope = iron.weight(config.angles().astype(bfloat16))
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
 
     def layer(self, step: Step, i: int, weights, x):
@@ -163,22 +167,26 @@ class CausalLM(iron.Graph):
     def body(
         self,
         x,
-        angles,
         *,
+        chunk: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
-        cache_offset: Scratchpad[np.int32],
-        vector_size: Scratchpad[np.int32],
-        last: Scratchpad[np.int32],
+        position: Scratchpad[np.int32],
     ):
+        c = self.config
+        L, C, D = c.max_seq_len, c.prefill_chunk, c.head_dim
         prompt = x.shape[0] > 1
         if prompt:
             # Every operator below runs the rows of this call alone.
-            x, angles = x[:rows], angles[:rows]
-        step = Step(prompt, angles, rows, cache_offset, vector_size)
+            x = x[:rows]
+            angles = Copy(self.rope.reshape(L // C, C, D)[chunk], tile_size=1024)
+            angles = angles.reshape(C, D)[:rows]
+        else:
+            angles = Copy(self.rope[position]).reshape(1, D)
+        step = Step(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:
-            x = Copy(x[last]).reshape(1, self.config.emb_dim)  # all the host reads
+            x = Copy(x[rows - 1]).reshape(1, c.emb_dim)  # all the host reads
         return self.head(x)
 
     def attend(self, step: Step, i: int, q, k, v):
@@ -188,44 +196,46 @@ class CausalLM(iron.Graph):
         head_dim)``, ``v`` as projected. Returns ``(rows, n_heads *
         head_dim)``.
         """
-        H, G, D = self.config.n_heads, self.config.n_kv_groups, self.config.head_dim
+        c = self.config
+        H, G, D, L, C = (
+            c.n_heads,
+            c.n_kv_groups,
+            c.head_dim,
+            c.max_seq_len,
+            c.prefill_chunk,
+        )
         keys, values = self.keys[i], self.values[i]
         n = q.shape[0] // H
         if step.prompt:
             # The heads interleaved per token as the projection wrote them,
-            # into the first rows of the cache's (G, L, D).
+            # into the chunk's rows of the cache's (G, L, D).
             for x, cache in ((k, keys), (v, values)):
                 Copy(
                     x.reshape(n, G, D).transpose(1, 0, 2),
-                    cache[:, : step.rows],
-                    tile_size=1024,
+                    cache.reshape(G, L // C, C, D)[:, step.chunk, : step.rows],
                 )
+            # The chunk's queries are the last rows of the keys so far.
+            span = np.s_[:, : step.position + 1]
             o = MHA(
-                q.reshape(n, H, D),
-                k.reshape(n, G, D),
-                v.reshape(n, G, D),
-                heads_interleaved=True,
-                kv_interleaved=True,
-                s_q=step.vector_size,
-                s_kv=step.vector_size,
+                q.reshape(n, H, D), keys[span], values[span], heads_interleaved=True
             )
             return o.reshape(n, H * D)
-        Copy(k, keys[:, step.cache_offset])
-        Copy(v.reshape(G, D), values[:, step.cache_offset])
+        Copy(k, keys[:, step.position])
+        Copy(v.reshape(G, D), values[:, step.position])
         # Every head sees its group's keys and values.
         k_all = Repeat(keys, repeat=H // G)
         v_all = Repeat(values, repeat=H // G)
         scores = ElementwiseMul(GEMV(k_all, q), self.scale)
         # Masked from the context length on: the cache's unwritten tail
         # contributes nothing.
-        weights = Softmax(scores, vector_size=step.vector_size)
+        weights = Softmax(scores, vector_size=step.position + 1)
         return GEMV(Transpose(v_all), weights).reshape(1, H * D)
 
     # -- on the host -----------------------------------------------------------
 
     def shapes(self, rows: int) -> dict:
         """The input shapes of the version that runs ``rows`` tokens."""
-        return dict(x=(rows, self.config.emb_dim), angles=(rows, self.config.head_dim))
+        return dict(x=(rows, self.config.emb_dim))
 
     def load(self, release=None) -> "CausalLM":
         """Compile and load the decode and prompt versions, weights uploaded.
@@ -234,7 +244,7 @@ class CausalLM(iron.Graph):
         size. ``release`` is given each piece of each weight once it is on
         the device, to drop the host's pages of it.
         """
-        for rows in (1, self.config.max_seq_len):
+        for rows in (1, self.config.prefill_chunk):
             self.compile(**self.shapes(rows))
         for version in self.versions.values():
             version.load(release=release)
@@ -244,37 +254,30 @@ class CausalLM(iron.Graph):
         """The logits after the last of ``tokens``, ``(vocab_size,)``.
 
         ``tokens`` is the whole history. One more token than the last call's
-        is a decode step on the caches; anything else is a prompt.
+        is a decode step on the caches; anything else is a prompt, run in
+        chunks from the one holding the first token the caches do not.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        n, seen, L = tokens.size, self._seen.size, self.config.max_seq_len
+        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
-        # Every call passes every per-call value; a version reads the ones
-        # its operators bind.
-        if n == seen + 1 and np.array_equal(tokens[:seen], self._seen):
-            out = self(
-                self.embedding[tokens[seen:]],
-                self.angles[seen:n],
-                rows=1,
-                cache_offset=seen,
-                vector_size=n,
-                last=0,
-            )
-        else:
-            x = np.zeros((L, self.config.emb_dim), dtype=bfloat16)
-            x[:n] = self.embedding[tokens]
-            out = self(
-                x,
-                self.angles,
-                rows=prompt_rows(n, L),
-                cache_offset=0,
-                vector_size=n,
-                last=n - 1,
-            )
+        # The tokens the caches hold, of these; the last is always run.
+        held = min(n - 1, self._seen.size)
+        same = np.append(tokens[:held] == self._seen[:held], False)
+        held = int(np.argmin(same))
+        # A decode step is a chunk of one row. Every call passes every
+        # per-call value; a version reads the ones its operators bind.
+        rows = 1 if held == n - 1 == self._seen.size else C
+        x = np.zeros((rows, self.config.emb_dim), dtype=bfloat16)
+        for begin in range(held // rows * rows, n, rows):
+            end = min(begin + rows, n)
+            x[: end - begin] = self.embedding[tokens[begin:end]]
+            out = self(x, chunk=begin // C, rows=end - begin, position=end - 1)
         self._seen = tokens
-        # A copy: the image's output buffer is rewritten by the next call.
-        return np.array(out.numpy()).reshape(-1)
+        # The range holds the last token, so it runs at least once; a copy,
+        # since the image's output buffer is rewritten by the next call.
+        logits = out.numpy()  # pyright: ignore[reportPossiblyUnboundVariable]
+        return np.array(logits).reshape(-1)
 
 
 class Oracle:

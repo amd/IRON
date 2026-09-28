@@ -325,6 +325,7 @@ class MHA(Operator):
                 np.int32,
                 np.int32,
                 np.ndarray[(2,), np.dtype[np.int32]],
+                np.int32,
             ],
         )
         rescale_O = mha_object.bind(
@@ -539,7 +540,9 @@ class MHA(Operator):
             *words,
         ):
             barrier.wait_for_value(1)
-            heads, q_blocks, q_valid, loop_idx_kv, _, _, q_start = read(mha_rtps, words)
+            heads, q_blocks, q_valid, loop_idx_kv, _, s_kv, q_start = read(
+                mha_rtps, words
+            )
             barrier.release_with_value(1)
             for _ in range_(heads):
                 idx_buffer[0] = 0
@@ -562,6 +565,7 @@ class MHA(Operator):
                         B_q,
                         0,
                         idx_buffer,
+                        s_kv,
                     )
 
                     of_p.release(1)
@@ -584,6 +588,7 @@ class MHA(Operator):
                                 B_q,
                                 1,
                                 idx_buffer,
+                                s_kv,
                             )
 
                             of_p.release(1)
@@ -606,6 +611,7 @@ class MHA(Operator):
                             B_q,
                             1,
                             idx_buffer,
+                            s_kv,
                         )
                         rescale_O(elem_o_out, elt_of_out_scale3, B_q, idx_buffer)
 

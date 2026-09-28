@@ -210,7 +210,31 @@ class Handle:
         return f"Handle({self.buffer_name!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
 
 
-class State:
+class _Viewed:
+    """A tensor the graph holds, viewed inside its body like a handle
+    (``keys[:, pos]``): the tracer decides what stands for it, a handle when
+    tracing, its host tensor when the reference runs.
+    """
+
+    __slots__ = ()
+
+    def _as_operand(self):
+        tracer = graph_tracer.get()
+        if tracer is None:
+            raise TypeError(f"{self!r} is viewed inside a graph's body")
+        return tracer.viewed(self)
+
+    def __getitem__(self, key):
+        return self._as_operand()[key]
+
+    def reshape(self, *shape):
+        return self._as_operand().reshape(*shape)
+
+    def transpose(self, *axes):
+        return self._as_operand().transpose(*axes)
+
+
+class State(_Viewed):
     """A tensor that persists on the device across calls (a KV cache).
 
     Created with :func:`state` and held by the graph.
@@ -230,28 +254,41 @@ class State:
     def __repr__(self) -> str:
         return f"State({self.name or ''}{list(self.shape)})"
 
-    # Inside a graph's body a state is viewed like a handle: the tracer
-    # decides what stands for it (a handle when tracing, its host tensor
-    # when the reference runs).
-    def _as_operand(self):
-        tracer = graph_tracer.get()
-        if tracer is None:
-            raise TypeError(f"{self!r} is viewed inside a graph's body")
-        return tracer.state_as(self)
-
-    def __getitem__(self, key):
-        return self._as_operand()[key]
-
-    def reshape(self, *shape):
-        return self._as_operand().reshape(*shape)
-
-    def transpose(self, *axes):
-        return self._as_operand().transpose(*axes)
-
 
 def state(shape, dtype=bfloat16, name=None) -> State:
     """Declare device-resident state a graph holds."""
     return State(shape, dtype, name)
+
+
+class Weight(_Viewed):
+    """A weight the graph's body views, ``rope[position]``: uploaded once,
+    as any tensor the graph holds is, and viewed as a state is. Created with
+    :func:`weight`.
+    """
+
+    __slots__ = ("array",)
+
+    def __init__(self, array):
+        self.array = np.asarray(array)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.array.shape
+
+    @property
+    def dtype(self):
+        return self.array.dtype
+
+    def __array__(self, dtype=None, copy=None):
+        return self.array if dtype is None else self.array.astype(dtype)
+
+    def __repr__(self) -> str:
+        return f"Weight({list(self.shape)}, {bfp.dtype_name(self.dtype)})"
+
+
+def weight(array) -> Weight:
+    """Declare a weight a graph's body views, not only passes whole."""
+    return Weight(array)
 
 
 def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
@@ -390,26 +427,39 @@ def _tensor_dtype(t):
     }.get(name, dt)
 
 
-class _HostViews:
-    """A state as the reference views it: ``[key]`` keeps the key for the
-    operator; a reshape or transpose is numpy's own view of the host tensor.
+class _HostView:
+    """A state as the reference views it: reshaped, then indexed, both kept,
+    so an operator that takes views gets the whole host tensor and the
+    pattern (:meth:`pattern`) and writes it in place, as the device does. A
+    transpose is numpy's own view of the host tensor.
     """
 
-    def __init__(self, state: State) -> None:
-        self.state = state
+    def __init__(self, state: State, shape, key=None) -> None:
+        self.state, self.shape, self.key = state, tuple(shape), key
 
     def __getitem__(self, key):
-        return _HostView(self.state, key)
+        if self.key is not None:
+            raise TypeError(f"a view of {self.state!r} is indexed once")
+        return _HostView(self.state, self.shape, key)
 
     def reshape(self, *shape):
-        assert self.state.host is not None
-        return self.state.host.reshape(*shape)
+        if self.key is not None:
+            raise ValueError(f"cannot reshape a view of {self.state!r}")
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        return _HostView(self.state, shape)
 
     def transpose(self, *axes):
+        return self.tensor().transpose(*axes)
+
+    def pattern(self) -> Handle:
+        """The view as the traced graph has it, over the state's buffer."""
+        s = self.state
+        whole = Handle(s.shape, s.dtype, s.name, "state").reshape(self.shape)
+        return whole if self.key is None else whole[self.key]
+
+    def tensor(self) -> np.ndarray:
+        """The host tensor, viewed by numpy."""
         assert self.state.host is not None
-        return self.state.host.transpose(*axes)
-
-
-class _HostView:
-    def __init__(self, state: State, key) -> None:
-        self.state, self.key = state, key
+        view = self.state.host.reshape(self.shape)
+        return view if self.key is None else view[self.key]

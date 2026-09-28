@@ -11,7 +11,7 @@ view reaches the copy as ``in_offset``/``out_offset``, an element offset.
 
 import dataclasses
 from dataclasses import field
-from math import prod
+from math import gcd, prod
 from typing import Any
 
 import aie.utils as aie_utils
@@ -54,6 +54,8 @@ class Copy(Operator):
     descriptor shorter than the object starves the memtile's S2MM: it never
     completes an object, never releases the lock, and the drain never returns
     (ERT_CMD_STATE_TIMEOUT). An integer multiple is fine; it cycles the buffer.
+    Under a bound a call moves any whole number of the bounded axis's rows,
+    so the object divides one row's share.
     """
 
     # The params that take an operand's view, and the value its per-call
@@ -129,8 +131,11 @@ class Copy(Operator):
             )
 
     def resolve(self, dev):
-        """The transfer size is the per-channel share of the copy unless given."""
-        tile_size = self.tile_size or prod(self.src.sizes) // self.num_channels
+        """The transfer size is the per-channel share of the copy unless
+        given, or under a bound the share of one bounded row.
+        """
+        share = prod(self.src.sizes) // self.num_channels
+        tile_size = self.tile_size or gcd(share, *self._row_shares())
         return dataclasses.replace(self, tile_size=tile_size)
 
     def uses_value(self, name: str) -> bool:
@@ -161,6 +166,23 @@ class Copy(Operator):
                 f"transfer {per_channel} (= {prod(self.src.sizes)} / {channels} "
                 f"channels)"
             )
+        for row in self._row_shares():
+            if row % self.tile_size:
+                raise Incompatible(
+                    f"tile_size {self.tile_size} must divide the {row} elements "
+                    f"per channel one row of the bounded axis moves: a call "
+                    f"moves any number of rows"
+                )
+
+    def _row_shares(self) -> list[int]:
+        """Per bounded pattern, the elements per channel one row of its
+        bounded axis moves.
+        """
+        return [
+            prod(tap.sizes) // tap.sizes[bound] // self.num_channels
+            for tap, bound in ((self.src, self.src_bound), (self.dst, self.dst_bound))
+            if bound is not None
+        ]
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
         """``tap`` with its innermost axis split among the channels, in order."""

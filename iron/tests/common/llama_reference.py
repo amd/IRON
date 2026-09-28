@@ -8,8 +8,8 @@ numpy, the oracle the NPU application is judged against. ``Llama`` is the same
 computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
-last prompt row selects the logits, the cache offset moves the copy, the
-vector size masks the softmax) and the caches as state. :class:`OnHost` is
+chunk and the position move the cache writes and bound the attention, the
+last prompt row selects the logits) and the caches as state. :class:`OnHost` is
 the model with its images stood in by that reference, so the two can be
 compared without a device, through the application's own ``logits``:
 that checks the graph's wiring (layouts, reshapes, the scale, the repeat,
@@ -28,14 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from iron.lm import (
-    Config,
-    Oracle,
-    accuracy,
-    determinism,
-    greedy,
-    prompt_rows,
-)
+from iron.lm import Config, Oracle, accuracy, determinism, greedy
 from iron.lm.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
@@ -138,31 +131,21 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     _assert_close(got, cpu.expected)
 
 
-def test_the_cumulative_vector_size_is_not_the_context_length(cpu):
-    """A softmax valid length written as a running sum of context lengths
-    makes the softmax treat stale zero columns beyond the context as real
-    keys from the second token on. Modelled here: it drifts from the forward
-    where the correct context length does not.
+def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
+    """A prompt of several chunks, each attending over the caches the ones
+    before it wrote, then a decode step, then a turn of several tokens,
+    which reruns only the chunk holding its first token onwards.
     """
-    model = OnHost(cpu.config, cpu.weights)
-    model.logits(cpu.prompt)
-    tokens = [greedy(cpu.first)] + [greedy(e) for e in cpu.expected]
-    got, total = [], 0
-    for pos, token in enumerate(tokens[:-1], start=len(cpu.prompt)):
-        total += pos + 1
-        out = model(
-            model.embedding[[token]],
-            model.angles[pos : pos + 1],
-            rows=1,
-            cache_offset=pos,
-            vector_size=min(total, cpu.config.max_seq_len),
-            last=0,
-        )
-        got.append(out.numpy().reshape(-1))
-    # The first token is right (a sum of one term), later ones are not.
-    _assert_close(got[:1], cpu.expected[:1])
-    drift = [np.abs(a - b).max() for a, b in zip(got[1:], cpu.expected[1:])]
-    assert max(drift) > 0.05 * np.abs(cpu.expected[1]).max(), drift
+    config = dataclasses.replace(cpu.config, max_seq_len=4 * cpu.config.prefill_chunk)
+    model = OnHost(config, cpu.weights)
+    oracle = Llama.oracle(config, cpu.weights)
+    tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
+    first = oracle.logits(tokens)
+    _assert_close([model.logits(tokens)], [first])
+    tokens = np.append(tokens, first.argmax())
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
 
 
 def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
@@ -188,15 +171,14 @@ def test_the_determinism_check_finds_the_reference_deterministic(cpu):
 
 
 def test_a_short_prompt_runs_at_its_own_rows():
-    """A context longer than a prompt's row block: the prompt runs at its
-    rows (``prompt_rows``), not the context, and its logits are the oracle's;
-    decode continues from the caches it wrote.
+    """A context longer than a chunk: the prompt runs its own rows of one
+    chunk, not the context, and its logits are the oracle's; decode
+    continues from the caches it wrote.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     weights = random_weights(config)
     model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
-    assert prompt_rows(8, config.max_seq_len) == 512 < config.max_seq_len
     first = oracle.logits(prompt)
     _assert_close([model.logits(prompt)], [first])
     tokens = np.append(prompt, first.argmax())

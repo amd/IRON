@@ -43,12 +43,11 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     model = small()
-    traced = model.trace(**model.shapes(model.config.max_seq_len))
-    # Every block is bound by the rows the call runs and MHA's masks by the
-    # true length; the last row once.
-    named = [b.expression.value.name for b in traced.bindings]
-    assert set(named) == {"rows", "vector_size", "last"}
-    assert named.count("last") == 1
+    traced = model.trace(**model.shapes(model.config.prefill_chunk))
+    # Every block is bound by the rows the call runs, the cache writes and the
+    # RoPE rows by the chunk, and MHA's keys by the position.
+    named = {b.expression.value.name for b in traced.bindings}
+    assert named == {"chunk", "rows", "position"}
     _lower_all(traced, tmp_path)
 
 

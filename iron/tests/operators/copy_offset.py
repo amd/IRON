@@ -54,3 +54,36 @@ def test_the_cache_offset_is_applied_per_call(npu_runtime):
         assert not len(
             wrong
         ), f"slot {slot}: {len(wrong)} elements differ, first {wrong[:4]}"
+
+
+# A prompt chunk's keys, heads interleaved per token as the projection
+# writes them, into the chunk's rows of a four-chunk cache.
+CHUNK, CHUNKS = 64, 4
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
+    cache = iron.state((N_KV, CHUNKS * CHUNK, HEAD_DIM), name="cache")
+
+    class Write(iron.Graph):
+        def body(self, x, *, chunk: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
+            x = x[:rows].reshape(CHUNK, N_KV, HEAD_DIM).transpose(1, 0, 2)
+            Copy(x, cache.reshape(N_KV, CHUNKS, CHUNK, HEAD_DIM)[:, chunk, :rows])
+
+    write = Write()
+    net = write.compile(x=(CHUNK, N_KV * HEAD_DIM))
+
+    expected = np.zeros((N_KV, CHUNKS * CHUNK, HEAD_DIM), dtype=np.float32)
+    net.write(cache, expected)
+    rng = np.random.default_rng(0)
+    for chunk, rows in ((0, CHUNK), (1, 13), (2, 1), (3, 37), (1, 50)):
+        x = rng.standard_normal((CHUNK, N_KV * HEAD_DIM)).astype(bfloat16)
+        start = chunk * CHUNK
+        rotated = x[:rows].reshape(rows, N_KV, HEAD_DIM).transpose(1, 0, 2)
+        expected[:, start : start + rows] = rotated.astype(np.float32)
+        write(x, chunk=chunk, rows=rows)
+        got = np.asarray(net.read(cache), dtype=np.float32).reshape(expected.shape)
+        wrong = np.argwhere(got != expected)
+        assert not len(
+            wrong
+        ), f"{chunk=} {rows=}: {len(wrong)} elements differ, first {wrong[:4]}"

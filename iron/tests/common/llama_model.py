@@ -29,6 +29,7 @@ SMALL = dataclasses.replace(
     head_dim=64,
     hidden_dim=512,
     max_seq_len=64,
+    prefill_chunk=64,
     rope_scaling=None,
 )
 

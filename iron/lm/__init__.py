@@ -36,7 +36,6 @@ from .decoder import (
     Oracle,
     RopeScaling,
     Step,
-    prompt_rows,
     rope_angles,
 )
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
@@ -63,7 +62,6 @@ __all__ = [
     "load_weights",
     "main",
     "project",
-    "prompt_rows",
     "rope_angles",
     "swiglu",
 ]

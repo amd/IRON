@@ -84,29 +84,30 @@ def test_rows_past_the_valid_length_are_zero(npu_runtime):
 CHUNK, CACHE = 512, 2048
 
 
+class Chunk(iron.Graph):
+    def body(
+        self,
+        q,
+        k,
+        v,
+        *,
+        rows: Scratchpad[np.int32],
+        position: Scratchpad[np.int32],
+    ):
+        return MHA(
+            q[:rows],
+            k[:, : position + 1],
+            v[:, : position + 1],
+            heads_interleaved=True,
+            num_pipelines=PIPELINES,
+        )
+
+
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
 def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
-    class Chunk(iron.Graph):
-        def body(
-            self,
-            q,
-            k,
-            v,
-            *,
-            rows: Scratchpad[np.int32],
-            position: Scratchpad[np.int32],
-        ):
-            return MHA(
-                q[:rows],
-                k[:, : position + 1],
-                v[:, : position + 1],
-                heads_interleaved=True,
-                num_pipelines=PIPELINES,
-            )
-
     chunk = Chunk()
 
     rng = np.random.default_rng(0)
@@ -134,3 +135,31 @@ def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
             tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
         )
         assert not errors, f"{c=} {rows=}: {len(errors)} valid elements differ"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_what_lies_past_the_bound_does_not_reach_the_output(npu_runtime):
+    """Q past a chunk's rows holds whatever the step before left there, and
+    the cache past its last position whatever an earlier prompt did; the
+    last block's DMA reads both. The valid rows are bit for bit the same
+    whatever they hold, even NaN: P·V reads V's rows past the bound, and
+    through bfp16 a row shares its exponent with the seven beside it.
+    """
+    net = Chunk().compile(
+        q=(CHUNK, HEADS, D), k=(KV_HEADS, CACHE, D), v=(KV_HEADS, CACHE, D)
+    )
+    rng = np.random.default_rng(0)
+    q = rng.standard_normal((CHUNK, HEADS, D)).astype(bfloat16)
+    k = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
+    v = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
+    rows = 101  # ends mid-block and mid-group of eight
+    runs = {}
+    for fill in (0, 1000, np.nan):
+        stale = [t.copy() for t in (q, k, v)]
+        for t in (stale[0][rows:], stale[1][:, rows:], stale[2][:, rows:]):
+            t[...] = t.astype(np.float32) * fill if fill == 1000 else fill
+        o = net(*stale, rows=rows, position=rows - 1)
+        runs[fill] = np.asarray(o).view(np.uint16).reshape(CHUNK, -1)[:rows].copy()
+    for fill in (1000, np.nan):
+        differ = np.flatnonzero((runs[fill] != runs[0]).any(axis=1))
+        assert not differ.size, f"{fill=}: valid rows {differ} differ"

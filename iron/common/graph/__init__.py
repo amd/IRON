@@ -5,8 +5,9 @@
 
 Inputs are ``body``'s positional parameters, outputs its return values,
 weights and state (an :func:`state`) what the instance holds, named by
-attribute path, and per-call scalars its keyword-only parameters annotated
-``Scratchpad[T]`` or ``DispatchTime[T]``. Operators are called on handles:
+attribute path (a weight the body indexes or reshapes is a
+:func:`weight`), and per-call scalars its keyword-only parameters
+annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. Operators are called on handles:
 ``GEMV(w, h)`` infers its extents from its arguments (operators with one
 ``array_key`` share an array), and an explicit instance ``q(w, h)`` is
 applied the same way.
@@ -34,7 +35,7 @@ tensors compiles for their shapes, prints a note, and dispatches.
 """
 
 from .compiled import CompiledGraph, Graph
-from .handle import Handle, Value, is_operand, state
+from .handle import Handle, Value, is_operand, state, weight
 from .trace import TracedGraph, Tracer
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "Value",
     "is_operand",
     "state",
+    "weight",
 ]
