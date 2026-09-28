@@ -17,7 +17,7 @@ def get_params():
     shim_dma_limit = get_shim_dma_limit(dev)
     input_lengths = [1024, 2048, 4096, 8192]
 
-    params = []
+    candidates = []
     for weighted in [False, True]:
         for input_length in input_lengths:
             for num_aie_columns in range(1, max_aie_columns + 1):
@@ -48,18 +48,33 @@ def get_params():
                         is_regular = input_length == 2048
                         marks = [] if is_regular else [pytest.mark.extensive]
 
-                        params.append(
-                            pytest.param(
-                                input_length,
-                                num_aie_columns,
-                                num_channels_rms,
-                                tile_size,
-                                weighted,
-                                marks=marks,
-                            )
+                        candidates.append(
+                            {
+                                "values": (
+                                    input_length,
+                                    num_aie_columns,
+                                    num_channels_rms,
+                                    tile_size,
+                                    weighted,
+                                ),
+                                "marks": marks,
+                                "total_cores": total_cores,
+                                "regular": is_regular,
+                                "weighted": weighted,
+                            }
                         )
 
-    return params
+    # Bench the widest shape the default suite runs, per weighted mode.
+    for weighted in [False, True]:
+        benchable = [
+            c for c in candidates if c["regular"] and c["weighted"] == weighted
+        ]
+        if benchable:
+            max(benchable, key=lambda c: c["total_cores"])["marks"].append(
+                pytest.mark.bench
+            )
+
+    return [pytest.param(*c["values"], marks=c["marks"]) for c in candidates]
 
 
 @pytest.mark.metrics(

@@ -6,13 +6,13 @@ import pytest
 
 from iron.operators.layer_norm.op import LayerNorm
 from iron.operators.layer_norm.reference import generate_golden_reference
-from iron.common.test_utils import run_test, make_channeled_unary_params
+from iron.common.test_utils import run_test, make_channeled_unary_params, suite_marks
 
 
 def get_params():
     return [
-        pytest.param(il, nac, nc, ts, marks=[] if not ext else [pytest.mark.extensive])
-        for il, nac, nc, ts, ext in make_channeled_unary_params(
+        pytest.param(il, nac, nc, ts, marks=suite_marks(ext, bench))
+        for il, nac, nc, ts, ext, bench in make_channeled_unary_params(
             [1024, 2048, 4096, 8192], 8192, [1, 2]
         )
     ]

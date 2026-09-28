@@ -38,6 +38,12 @@ def get_params():
                             continue
 
                         marks = [] if is_regular else [pytest.mark.extensive]
+                        if (
+                            is_regular
+                            and num_aie_columns == max_cols
+                            and n_angle_rows == 8
+                        ):
+                            marks.append(pytest.mark.bench)
 
                         params.append(
                             pytest.param(

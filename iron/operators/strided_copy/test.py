@@ -65,7 +65,9 @@ def get_params():
         pytest.param(_kv_slot(SEQ, 5, num_aie_channels=2), id="kv_slot5_two_channels"),
         pytest.param(_kv_slot(SEQ, 5, num_aie_channels=4), id="kv_slot5_four_channels"),
         pytest.param(
-            _kv_slot(2048, 1000), id="kv_llama_full", marks=[pytest.mark.extensive]
+            _kv_slot(2048, 1000),
+            id="kv_llama_full",
+            marks=[pytest.mark.extensive, pytest.mark.bench],
         ),
     ]
 

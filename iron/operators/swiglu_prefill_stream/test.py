@@ -59,6 +59,7 @@ def _staged(operator, golden_ref):
 
 
 @pytest.mark.supported_devices("npu2")
+@pytest.mark.bench
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",

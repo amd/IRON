@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 import aie.utils as aie_utils
 from aie.utils.benchmark import run_iters
@@ -249,10 +250,13 @@ def run_test(
 def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choices):
     """Generate parameter tuples for channeled unary operator tests.
 
+    The benched tuple is the widest shape the default suite runs.
+
     Yields:
-        (input_length, num_aie_columns, num_channels, tile_size, is_extensive)
+        (input_length, num_aie_columns, num_channels, tile_size, is_extensive, is_bench)
     """
     max_aie_columns = aie_utils.get_current_device().cols
+    max_num_channels = max(num_channels_choices)
     for input_length in input_lengths:
         for num_aie_columns in range(1, max_aie_columns + 1):
             for num_channels in num_channels_choices:
@@ -263,12 +267,18 @@ def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choic
                 if tile_size * total_cores != input_length:
                     continue
                 is_extensive = input_length != 2048
+                is_bench = (
+                    not is_extensive
+                    and num_aie_columns == max_aie_columns
+                    and num_channels == max_num_channels
+                )
                 yield (
                     input_length,
                     num_aie_columns,
                     num_channels,
                     tile_size,
                     is_extensive,
+                    is_bench,
                 )
 
 
@@ -276,7 +286,7 @@ def make_binary_elementwise_params(input_lengths, tile_size_cap=None):
     """Generate parameter tuples for binary elementwise operator tests.
 
     Yields:
-        (input_length, num_aie_columns, tile_size, is_extensive)
+        (input_length, num_aie_columns, tile_size, is_extensive, is_bench)
     """
     max_aie_columns = aie_utils.get_current_device().cols
     for input_length in input_lengths:
@@ -287,4 +297,15 @@ def make_binary_elementwise_params(input_lengths, tile_size_cap=None):
             if tile_size * num_aie_columns != input_length:
                 continue
             is_extensive = input_length != 2048
-            yield (input_length, num_aie_columns, tile_size, is_extensive)
+            is_bench = not is_extensive and num_aie_columns == max_aie_columns
+            yield (input_length, num_aie_columns, tile_size, is_extensive, is_bench)
+
+
+def suite_marks(is_extensive, is_bench):
+    """Translate the flags the parameter generators yield into pytest marks."""
+    marks = []
+    if is_extensive:
+        marks.append(pytest.mark.extensive)
+    if is_bench:
+        marks.append(pytest.mark.bench)
+    return marks

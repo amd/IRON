@@ -25,6 +25,8 @@ def get_params():
                 # Determine if this is a regular test case
                 is_regular = input_length == 2048 and scalar == 3.0
                 marks = [] if is_regular else [pytest.mark.extensive]
+                if is_regular and num_aie_columns == max_aie_columns:
+                    marks.append(pytest.mark.bench)
 
                 params.append(
                     pytest.param(

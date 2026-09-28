@@ -6,16 +6,13 @@ import pytest
 
 from iron.operators.gelu.op import GELU
 from iron.operators.gelu.reference import generate_golden_reference
-from iron.common.test_utils import run_test, make_channeled_unary_params
+from iron.common.test_utils import run_test, make_channeled_unary_params, suite_marks
 
 
 def get_params():
-    def _marks(ext):
-        return [pytest.mark.extensive] if ext else []
-
     return [
-        pytest.param(il, nac, nc, ts, marks=_marks(ext))
-        for il, nac, nc, ts, ext in make_channeled_unary_params(
+        pytest.param(il, nac, nc, ts, marks=suite_marks(ext, bench))
+        for il, nac, nc, ts, ext, bench in make_channeled_unary_params(
             [1024, 2048, 4096, 8192], 8192, [1, 2]
         )
     ]

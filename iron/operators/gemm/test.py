@@ -86,6 +86,8 @@ def get_params():
                 continue
 
             marks = [pytest.mark.extensive] if is_extensive else []
+            if not is_extensive and (M, K, N) == (2048, 2048, 2048):
+                marks.append(pytest.mark.bench)
             params.append(pytest.param(*p, marks=marks))
 
     add_params(regular_params, is_extensive=False)

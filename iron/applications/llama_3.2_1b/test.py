@@ -20,7 +20,12 @@ def generate_test_params():
     names = []
     for prompt_len in prompt_lengths:
         for num_tokens in num_tokens_list:
-            params.append((prompt_len, num_tokens))
+            bench = prompt_len == 1024 and num_tokens == 40
+            params.append(
+                pytest.param(
+                    prompt_len, num_tokens, marks=[pytest.mark.bench] if bench else []
+                )
+            )
             names.append(f"llama_3.2_1b_prompt_{prompt_len}_tokens_{num_tokens}")
     return params, names
 

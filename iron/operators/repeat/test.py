@@ -22,7 +22,13 @@ def get_params():
         pytest.param(8, 512, 4, 64),
         pytest.param(4, 1024, 2, None),
         pytest.param(4, 2048, 2, None, marks=[pytest.mark.extensive]),
-        pytest.param(8, 2048 * 64, 4, 64, marks=[pytest.mark.extensive]),
+        pytest.param(
+            8,
+            2048 * 64,
+            4,
+            64,
+            marks=[pytest.mark.extensive, pytest.mark.bench],
+        ),
     ]
 
 

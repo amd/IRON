@@ -66,12 +66,14 @@ class CSVReporter:
         self.commit = get_git_commit()
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
+        self.bench = {}  # test_name -> bool
 
     def add_result(
-        self, test_path, test_name, passed, captured_output, metric_patterns
+        self, test_path, test_name, passed, captured_output, metric_patterns, bench
     ):
         key = (test_path, test_name)
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
+        self.bench[key] = bench
 
         for metric_name, pattern in metric_patterns.items():
             match = re.search(pattern, captured_output)
@@ -89,6 +91,7 @@ class CSVReporter:
                 "Test Path": test_path,
                 "Test": test_name,
                 "Checks": f"{sum(data['passed'])}/{len(data['passed'])}",
+                "Bench": "yes" if self.bench.get((test_path, test_name)) else "no",
             }
             for metric_name, values in data.items():
                 if metric_name == "passed":
@@ -162,7 +165,12 @@ def pytest_runtest_makereport(item, call):
                 break
 
             csv_reporter.add_result(
-                test_path, test_name, passed, captured, metric_patterns
+                test_path,
+                test_name,
+                passed,
+                captured,
+                metric_patterns,
+                item.get_closest_marker("bench") is not None,
             )
 
 

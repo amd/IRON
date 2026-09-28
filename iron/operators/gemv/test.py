@@ -38,7 +38,8 @@ def get_params():
         # Skip tests that require more columns than available on the device
         if num_aie_columns > max_aie_columns:
             continue
-        params.append(pytest.param(*p))
+        bench = num_aie_columns == max_aie_columns and M * K >= 2048 * 8192
+        params.append(pytest.param(*p, marks=[pytest.mark.bench] if bench else []))
     return params
 
 

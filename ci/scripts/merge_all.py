@@ -4,7 +4,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse, csv, os
-from datetime import datetime
+from datetime import datetime, timedelta
+
+
+def drop_rows_older_than(rows, max_age_days, date_fmt="%Y-%m-%d %H:%M:%S"):
+    """Drop rows whose date is more than `max_age_days` behind the newest date.
+
+    A skewed clock on one runner can then not empty the file.
+    """
+    if not max_age_days or not rows:
+        return rows
+
+    def parse(row):
+        try:
+            return datetime.strptime(row.get("Date", ""), date_fmt)
+        except (ValueError, TypeError):
+            return None
+
+    dated = [(parse(row), row) for row in rows]
+    newest = max((d for d, _ in dated if d is not None), default=None)
+    if newest is None:
+        return rows
+
+    cutoff = newest - timedelta(days=max_age_days)
+    return [row for date, row in dated if date is None or date >= cutoff]
 
 
 def limit_rows_by_date(rows, limit, date_fmt="%Y-%m-%d %H:%M:%S"):
@@ -12,17 +35,15 @@ def limit_rows_by_date(rows, limit, date_fmt="%Y-%m-%d %H:%M:%S"):
     if not limit or not rows:
         return rows
 
-    # Group rows by test name and sort by date
+    # Operators share parametrization names, so the key carries the test path.
     test_groups = {}
     for row in rows:
-        test_name = row.get("Test", "")
-        if test_name not in test_groups:
-            test_groups[test_name] = []
-        test_groups[test_name].append(row)
+        key = (row.get("Test Path", ""), row.get("Test", ""))
+        test_groups.setdefault(key, []).append(row)
 
     # For each test, sort by date and keep only the latest N entries
     limited_rows = []
-    for test_name, test_rows in test_groups.items():
+    for test_rows in test_groups.values():
         # Sort by date (assuming date format is sortable as string, e.g., YYYY-MM-DD)
         try:
             test_rows.sort(
@@ -88,6 +109,12 @@ def main():
         type=int,
         help="Limit to only the N latest results by date for each test. If not specified, all results are kept.",
     )
+    parser.add_argument(
+        "--max-age-days",
+        type=int,
+        default=365,
+        help="Drop results older than this many days. Pass 0 to keep every result.",
+    )
     args = parser.parse_args()
 
     all_rows = (
@@ -98,6 +125,8 @@ def main():
     with open(args.all, "w", newline="") as f:
         output_rows = all_rows + latest_rows
         add_empty_columns(output_rows)
+
+        output_rows = drop_rows_older_than(output_rows, args.max_age_days)
 
         # Apply limit if specified
         if args.limit:

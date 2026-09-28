@@ -46,7 +46,13 @@ def get_params():
                 continue
 
             params.append(
-                pytest.param(input_length, optimal_columns, optimal_channels, tile_size)
+                pytest.param(
+                    input_length,
+                    optimal_columns,
+                    optimal_channels,
+                    tile_size,
+                    marks=[pytest.mark.bench] if tile_size == 512 else [],
+                )
             )
     return params
 

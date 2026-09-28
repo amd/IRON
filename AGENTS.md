@@ -260,6 +260,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 5. Implement `reference.py` with CPU reference
 6. Implement `test.py` with pytest tests
    - Use `@pytest.mark.extensive` for slower/larger tests
+   - Use `@pytest.mark.bench` on exactly the parametrizations CI should track
+     over time. Every operator needs at least one. Pick an input large enough
+     that dispatch overhead (~160 us) does not dominate the measurement; a
+     parametrization that finishes near that floor measures nothing
    - Use `verify_buffer()` from `iron.common.test_utils`
 7. Register operator in `iron/operators/__init__.py`
 
@@ -427,6 +431,22 @@ logging.basicConfig(level=logging.DEBUG)
 - **extensive.yml**: Full test suite (all operators with extensive tests)
 - **test-examples.yml**: Application tests (e.g., Llama inference)
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
+- **pr-comment.yml**: Posts the performance trends of a PR as a comment
+- **publish-pages.yml**: Rebuilds the benchmark history site on GitHub Pages
+
+### Benchmark Results
+
+Each run writes `tests_latest.csv`, which `.github/actions/commit_results`
+merges into `{arch}/{suite}/all.csv` on the `ci` branch. The scripts under
+`ci/scripts/` consume those CSVs:
+
+- `merge_all.py`: appends a run and drops results older than a year
+- `pretty_trends.py`: the performance changes of one run, as markdown
+- `pr_comment.py`: assembles those reports into the PR comment
+- `build_pages.py`: the per-operator charts published to GitHub Pages
+
+The trend report and the charts cover only parametrizations marked
+`@pytest.mark.bench`.
 
 ### Workflow Requirements
 

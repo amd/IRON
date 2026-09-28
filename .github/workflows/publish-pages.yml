@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Publishes the benchmark history site to GitHub Pages. The benchmark workflows
+# push their results to the `ci` branch. This workflow runs after they finish
+# and rebuilds the site from that branch.
+#
+# The repository must have Pages enabled with "GitHub Actions" as its source.
+
+name: Publish Benchmark History
+
+on:
+  workflow_run:
+    workflows:
+      - Krackan - Small Benchmark/Test Suite
+      - Krackan - Extensive Benchmark/Test Suite
+      - Krackan - Test Example Applications
+      - Phoenix - Small Benchmark/Test Suite
+      - Phoenix - Extensive Benchmark/Test Suite
+      - Phoenix - Test Example Applications
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Each build reads the whole history, so only the last queued one matters.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # Only a push to a trunk branch reaches the `ci` branch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       contains(fromJSON('["main", "devel"]'), github.event.workflow_run.head_branch))
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out the scripts
+        uses: actions/checkout@v4
+
+      - name: Check out the results
+        uses: actions/checkout@v4
+        with:
+          ref: ci
+          path: results
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build the site
+        run: python ci/scripts/build_pages.py --results-root results -o site
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

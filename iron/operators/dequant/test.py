@@ -31,6 +31,12 @@ def get_params():
                 if tile_size * total_cores == input_length:
                     is_regular = input_length == 2048
                     marks = [] if is_regular else [pytest.mark.extensive]
+                    if (
+                        is_regular
+                        and num_columns == max_aie_columns
+                        and num_channels == 2
+                    ):
+                        marks.append(pytest.mark.bench)
 
                     params.append(
                         pytest.param(

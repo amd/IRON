@@ -37,6 +37,8 @@ def get_params():
 
                         is_regular = M == 2048 and N == 64
                         marks = [] if is_regular else [pytest.mark.extensive]
+                        if is_regular and num_channels == 1:
+                            marks.append(pytest.mark.bench)
 
                         params.append(
                             pytest.param(

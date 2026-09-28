@@ -22,7 +22,7 @@ def get_params():
 
     params = []
     for p in params_list:
-        params.append(pytest.param(*p))
+        params.append(pytest.param(*p, marks=pytest.mark.bench))
     return params
 
 
