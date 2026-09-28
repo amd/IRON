@@ -38,12 +38,6 @@ def get_params():
                             continue
 
                         marks = [] if is_regular else [pytest.mark.extensive]
-                        if (
-                            is_regular
-                            and num_aie_columns == max_cols
-                            and n_angle_rows == 8
-                        ):
-                            marks.append(pytest.mark.bench)
 
                         params.append(
                             pytest.param(
@@ -55,6 +49,10 @@ def get_params():
                                 marks=marks,
                             )
                         )
+
+    # 2M elements, which runs well past the dispatch cost. angle_rows divides
+    # rows and the column count divides both.
+    params.append(pytest.param(4096, 512, 8, max_cols, 0, marks=[pytest.mark.bench]))
     return params
 
 

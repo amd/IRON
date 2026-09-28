@@ -247,10 +247,17 @@ def run_test(
     return errors, latency_us, bandwidth_gbps
 
 
+# A dispatch costs about 160 us, so a shape that runs inside that measures the
+# runtime and not the operator. At 2**23 bf16 elements an elementwise operator
+# runs for about 640 us on NPU2, where the run-to-run spread is 9% rather than
+# the 30% the 2048-element shapes carry. Benchmarks use this size; the
+# correctness sweep keeps the small shapes.
+BENCH_ELEMENTS = 1 << 23
+BENCH_TILE = 4096
+
+
 def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choices):
     """Generate parameter tuples for channeled unary operator tests.
-
-    The benched tuple is the widest shape the default suite runs.
 
     Yields:
         (input_length, num_aie_columns, num_channels, tile_size, is_extensive, is_bench)
@@ -267,19 +274,22 @@ def make_channeled_unary_params(input_lengths, tile_size_cap, num_channels_choic
                 if tile_size * total_cores != input_length:
                     continue
                 is_extensive = input_length != 2048
-                is_bench = (
-                    not is_extensive
-                    and num_aie_columns == max_aie_columns
-                    and num_channels == max_num_channels
-                )
                 yield (
                     input_length,
                     num_aie_columns,
                     num_channels,
                     tile_size,
                     is_extensive,
-                    is_bench,
+                    False,
                 )
+    yield (
+        BENCH_ELEMENTS,
+        max_aie_columns,
+        max_num_channels,
+        min(tile_size_cap, BENCH_TILE),
+        False,
+        True,
+    )
 
 
 def make_binary_elementwise_params(input_lengths, tile_size_cap=None):
@@ -297,8 +307,14 @@ def make_binary_elementwise_params(input_lengths, tile_size_cap=None):
             if tile_size * num_aie_columns != input_length:
                 continue
             is_extensive = input_length != 2048
-            is_bench = not is_extensive and num_aie_columns == max_aie_columns
-            yield (input_length, num_aie_columns, tile_size, is_extensive, is_bench)
+            yield (input_length, num_aie_columns, tile_size, is_extensive, False)
+    yield (
+        BENCH_ELEMENTS,
+        max_aie_columns,
+        BENCH_TILE if tile_size_cap is None else min(tile_size_cap, BENCH_TILE),
+        False,
+        True,
+    )
 
 
 def suite_marks(is_extensive, is_bench):

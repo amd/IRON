@@ -46,14 +46,11 @@ def get_params():
                 continue
 
             params.append(
-                pytest.param(
-                    input_length,
-                    optimal_columns,
-                    optimal_channels,
-                    tile_size,
-                    marks=[pytest.mark.bench] if tile_size == 512 else [],
-                )
+                pytest.param(input_length, optimal_columns, optimal_channels, tile_size)
             )
+
+    # 2M elements as 4096 rows of 512, which runs well past the dispatch cost.
+    params.append(pytest.param(2097152, 2, 2, 512, marks=[pytest.mark.bench]))
     return params
 
 

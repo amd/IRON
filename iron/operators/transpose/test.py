@@ -37,8 +37,6 @@ def get_params():
 
                         is_regular = M == 2048 and N == 64
                         marks = [] if is_regular else [pytest.mark.extensive]
-                        if is_regular and num_channels == 1:
-                            marks.append(pytest.mark.bench)
 
                         params.append(
                             pytest.param(
@@ -71,6 +69,14 @@ def get_params():
                 marks=[] if nb == 2 else [pytest.mark.extensive],
             )
         )
+
+    # 4M elements, which runs well past the dispatch cost. Each column takes a
+    # 64-wide slice of N and each channel a 64-row-aligned slice of M.
+    params.append(
+        pytest.param(
+            8192, 512, max_aie_columns, 2, m, n, 8, 1, marks=[pytest.mark.bench]
+        )
+    )
 
     return params
 

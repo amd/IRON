@@ -114,11 +114,12 @@ def get_params():
         ]
     # fmt: on
 
-    # Shapes large enough to run well past the dispatch overhead.
+    # Shapes that run for milliseconds. The default suite's shapes finish near
+    # the dispatch cost, where the measurement carries no trend.
     bench_shapes = (
-        {(512, 1024, 2048), (1024, 2560, 10240), (2048, 2560, 10240)}
+        {(1024, 2560, 10240), (2048, 2560, 10240)}
         if dev_name == "npu2"
-        else {(512, 1024, 512), (1024, 2560, 2560)}
+        else {(1024, 2560, 2560), (2048, 2048, 1024)}
     )
 
     def marks_for(p, extensive):

@@ -7,7 +7,7 @@ import aie.utils as aie_utils
 
 from iron.operators.dequant.op import Dequant
 from iron.operators.dequant.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, BENCH_ELEMENTS, BENCH_TILE
 
 
 def get_params():
@@ -31,12 +31,6 @@ def get_params():
                 if tile_size * total_cores == input_length:
                     is_regular = input_length == 2048
                     marks = [] if is_regular else [pytest.mark.extensive]
-                    if (
-                        is_regular
-                        and num_columns == max_aie_columns
-                        and num_channels == 2
-                    ):
-                        marks.append(pytest.mark.bench)
 
                     params.append(
                         pytest.param(
@@ -48,6 +42,16 @@ def get_params():
                             marks=marks,
                         )
                     )
+    params.append(
+        pytest.param(
+            BENCH_ELEMENTS,
+            max_aie_columns,
+            2,
+            BENCH_TILE,
+            group_size,
+            marks=[pytest.mark.bench],
+        )
+    )
     return params
 
 

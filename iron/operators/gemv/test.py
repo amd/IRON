@@ -70,7 +70,7 @@ def test_gemv(M, K, num_aie_columns, tile_size_input, tile_size_output, aie_cont
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
+    print(f"\nLatency (us): {latency_us:.1f}")
 
     gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s")
@@ -130,7 +130,7 @@ def test_gemv_batched(
         operator, input_buffers, output_buffers, rel_tol=0.04, abs_tol=1e-3
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
+    print(f"\nLatency (us): {latency_us:.1f}")
     gflops = (2.0 * M * K * num_batches) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
@@ -181,7 +181,7 @@ def test_gemv_gelu(
         operator, input_buffers, output_buffers, rel_tol=0.06, abs_tol=2e-2
     )
 
-    print(f"\nLatency: {latency_us:.1f} us")
+    print(f"\nLatency (us): {latency_us:.1f}")
     gflops = (2.0 * M * K) / (latency_us * 1e-6) / 1e9
     print(f"Throughput: {gflops:.6e} GFLOP/s")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")

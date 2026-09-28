@@ -67,6 +67,7 @@ class CSVReporter:
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
         self.bench = {}  # test_name -> bool
+        self.unmatched = set()  # (test_path, test_name, metric) a pass never printed
 
     def add_result(
         self, test_path, test_name, passed, captured_output, metric_patterns, bench
@@ -78,6 +79,8 @@ class CSVReporter:
         for metric_name, pattern in metric_patterns.items():
             match = re.search(pattern, captured_output)
             if not match:
+                if passed:
+                    self.unmatched.add((test_path, test_name, metric_name))
                 continue
             value = float(match.group("value"))
             self.test_metrics[key].setdefault(metric_name, []).append(value)
@@ -105,6 +108,18 @@ class CSVReporter:
                         statistics.stdev(values) if len(values) > 1 else 0.0
                     )
             self.results.append(row)
+
+    def report_unmatched_metrics(self):
+        """Name the benched metrics that a passing test declared but never printed.
+
+        A pattern that matches nothing leaves the column empty, and an empty
+        column drops out of the charts without any test failing.
+        """
+        return sorted(
+            f"{path}[{name}]: {metric}"
+            for path, name, metric in self.unmatched
+            if self.bench.get((path, name))
+        )
 
     def write_csv(self):
         self.results.sort(key=lambda x: (x.get("Test Path", ""), x["Test"], x["Date"]))
@@ -205,8 +220,18 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_sessionfinish(session, exitstatus):
     if hasattr(session.config, "_csv_reporter"):
-        session.config._csv_reporter.finalize_results()
-        session.config._csv_reporter.write_csv()
+        reporter = session.config._csv_reporter
+        reporter.finalize_results()
+        reporter.write_csv()
+        unmatched = reporter.report_unmatched_metrics()
+        if unmatched:
+            reporter.csv_path.with_suffix(".unmatched").write_text(
+                "\n".join(unmatched) + "\n"
+            )
+            print(
+                "\nBenched tests passed without printing a metric they declare:\n  "
+                + "\n  ".join(unmatched)
+            )
 
 
 # Generate multiple iterations of each test

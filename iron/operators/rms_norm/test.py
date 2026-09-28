@@ -7,7 +7,7 @@ import aie.utils as aie_utils
 
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, BENCH_ELEMENTS, BENCH_TILE
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -64,15 +64,21 @@ def get_params():
                             }
                         )
 
-    # Bench the widest shape the default suite runs, per weighted mode.
+    # A shape large enough that the measurement is not the dispatch overhead.
+    # The widest column and channel count the sweep accepted is legal here too.
+    sweep = list(candidates)
     for weighted in [False, True]:
-        benchable = [
-            c for c in candidates if c["regular"] and c["weighted"] == weighted
-        ]
-        if benchable:
-            max(benchable, key=lambda c: c["total_cores"])["marks"].append(
-                pytest.mark.bench
-            )
+        legal = [c for c in sweep if c["weighted"] == weighted]
+        if not legal:
+            continue
+        widest = max(legal, key=lambda c: c["total_cores"])
+        _, cols, channels, _, _ = widest["values"]
+        candidates.append(
+            {
+                "values": (BENCH_ELEMENTS, cols, channels, BENCH_TILE, weighted),
+                "marks": [pytest.mark.bench],
+            }
+        )
 
     return [pytest.param(*c["values"], marks=c["marks"]) for c in candidates]
 

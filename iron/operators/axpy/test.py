@@ -7,7 +7,7 @@ import aie.utils as aie_utils
 
 from iron.operators.axpy.op import AXPY
 from iron.operators.axpy.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, BENCH_ELEMENTS, BENCH_TILE
 
 
 def get_params():
@@ -25,8 +25,6 @@ def get_params():
                 # Determine if this is a regular test case
                 is_regular = input_length == 2048 and scalar == 3.0
                 marks = [] if is_regular else [pytest.mark.extensive]
-                if is_regular and num_aie_columns == max_aie_columns:
-                    marks.append(pytest.mark.bench)
 
                 params.append(
                     pytest.param(
@@ -37,6 +35,15 @@ def get_params():
                         marks=marks,
                     )
                 )
+    params.append(
+        pytest.param(
+            BENCH_ELEMENTS,
+            max_aie_columns,
+            BENCH_TILE,
+            3.0,
+            marks=[pytest.mark.bench],
+        )
+    )
     return params
 
 

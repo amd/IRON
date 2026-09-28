@@ -7,7 +7,7 @@ import aie.utils as aie_utils
 
 from iron.operators.mem_copy.op import MemCopy
 from iron.operators.mem_copy.reference import generate_golden_reference
-from iron.common.test_utils import run_test
+from iron.common.test_utils import run_test, BENCH_ELEMENTS, BENCH_TILE
 
 
 def get_params():
@@ -36,8 +36,6 @@ def get_params():
                         if tile_size * num_cores == input_length:
                             is_regular = input_length == 2048 and bypass == False
                             marks = [] if is_regular else [pytest.mark.extensive]
-                            if is_regular and num_cores == max_columns * 2:
-                                marks.append(pytest.mark.bench)
 
                             params.append(
                                 pytest.param(
@@ -50,6 +48,16 @@ def get_params():
                                 )
                             )
 
+    params.append(
+        pytest.param(
+            BENCH_ELEMENTS,
+            max_columns * 2,
+            2,
+            False,
+            BENCH_TILE,
+            marks=[pytest.mark.bench],
+        )
+    )
     return params
 
 
