@@ -14,11 +14,15 @@ change that quietly aliased two live buffers shows up here and nowhere
 else, because it produces wrong values rather than an error.
 """
 
+import re
+
+import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
 import iron
-from iron.common.image import OperatorSequence
-from iron.operators import ElementwiseAdd
+from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 
 SIZE = 1024
 TILE = 128
@@ -119,3 +123,40 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
         "a graph must compute exactly what the hand-written runlist computes; "
         "a difference here means the traced wiring or the planned layout is wrong"
     )
+
+
+class NarrowChain(iron.Graph):
+    """Five steps over three designs, each on two columns: small enough that
+    all three share the array."""
+
+    def __init__(self):
+        super().__init__()
+        narrow = dict(size=SIZE, tile_size=TILE, num_aie_columns=2)
+        self.add = ElementwiseAdd(**narrow)
+        self.silu = SiLU(**narrow)
+        self.mul = ElementwiseMul(**narrow)
+
+    def body(self, a, b):
+        x = self.mul(self.silu(self.add(a, b)), b)
+        return self.silu(self.add(x, b))
+
+
+def test_a_packed_graph_computes_what_the_temporal_one_does():
+    """compile(coresident=...) changes which device each step runs in, and
+    nothing it computes."""
+    rng = np.random.default_rng(0)
+    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    outputs, configures = [], []
+    for coresident in (None, AdjacentPacking()):
+        version = NarrowChain().compile(
+            image=iron.ELF, coresident=coresident, a=(SIZE,), b=(SIZE,)
+        )
+        text = Fusion(version.sequence).text()
+        configures.append(len(re.findall(r"aiex\.configure", text)))
+        outputs.append(np.array(version(a, b).numpy()[:SIZE]))
+    # A configure per change of design and the reset, against one pack and
+    # the reset: the policy must have packed, or this compares two temporals.
+    assert configures == [6, 2]
+    temporal, packed = outputs
+    assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()

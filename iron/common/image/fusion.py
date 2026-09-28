@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Temporal fusion: a sequence's designs as one module, one device per design
-and a main runtime sequence that configures and runs them in turn.
+(or per pack of designs, :mod:`.coresidence`) and a main runtime sequence
+that configures and runs them in turn.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import OperatorDesign
+from .coresidence import AdjacentPacking, Packing, merge_devices
 
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
@@ -64,6 +66,12 @@ class Fusion:
     whatever step: aiecc's device cache keys on that text. Designs whose
     names agree generate the same device and are fused as one.
 
+    ``seq.coresident`` packs designs into one device each
+    (:mod:`.coresidence`): consecutive steps in one pack then share its
+    configure point. Groups of operators name the packs; an
+    :class:`AdjacentPacking` is resolved by :meth:`text`, against the
+    designs' text.
+
     ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
     ``slice_info``) must already be set. :meth:`text` is the generator
     ``CompilableDesign`` runs, :attr:`identity` what it is keyed on.
@@ -84,13 +92,25 @@ class Fusion:
         self.buffer_sizes = seq.buffer_sizes
         self.slice_info = seq.slice_info or {}
         self.shared_words = dict(seq.shared_words or {})
+        self.packing: Packing | AdjacentPacking = (
+            seq.coresident
+            if isinstance(seq.coresident, AdjacentPacking)
+            else Packing(
+                tuple(
+                    tuple(dict.fromkeys(own[design_of[id(op)]].name for op in group))
+                    for group in seq.coresident
+                )
+            )
+        )
 
     @property
     def identity(self) -> str:
         """What the fused text is a function of, without generating it: each
         design's key (its identity and its sources), the runlist over them,
-        the buffer layout and the scratchpad words symbols share. A hit then
-        costs a hash rather than a fusion.
+        the buffer layout, the scratchpad words symbols share and the
+        packing (a policy is its own identity: what it packs is a function
+        of the designs and the runlist). A hit then costs a hash rather than
+        a fusion.
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
@@ -101,12 +121,12 @@ class Fusion:
             self.buffer_sizes,
             self.slice_info,
             sorted(self.shared_words.items()),
+            self.packing,
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]
 
-    @property
-    def needs_reset(self) -> bool:
+    def needs_reset(self, packing: Packing) -> bool:
         """Whether the sequence must configure one more device than the runlist asks for.
 
         ``aiecc --expand-load-pdis`` marks each configure point by loading one of two
@@ -114,10 +134,10 @@ class Fusion:
         PDI already loaded has no effect, so a sequence with an odd number of configure
         points ends on the one the next dispatch starts with, and that dispatch
         reconfigures over the state the last design left. Configuring one more device
-        makes the count even. Consecutive entries running the same operator share a
-        configure point.
+        makes the count even. Consecutive entries running in one device (one design,
+        or one pack) share a configure point.
         """
-        names = [name for name, *_ in self.runlist]
+        names = [packing.device_of(name) for name, *_ in self.runlist]
         points = sum(
             1 for i, name in enumerate(names) if i == 0 or name != names[i - 1]
         )
@@ -208,27 +228,39 @@ class Fusion:
                 for sym_name, param_type in hoisted_params.items():
                     aiex.scratchpad_parameter(sym_name, param_type)
 
-            # Concatenate aie.device ops.
+            # Concatenate aie.device ops, merging each pack's into one.
             params_preamble = "\n".join(
                 f"  aiex.scratchpad_parameter @{name} : {param_type}"
                 for name, param_type in hoisted_params.items()
             )
-            for op_name, device_str in device_mlir_strings.items():
-                wrapped = f"module {{\n{params_preamble}\n{device_str}\n}}"
-                wrapper_module = ir.Module.parse(wrapped)
-                # Find the (sole) DeviceOp in the wrapper module.
-                dev_op = None
-                for op in wrapper_module.body.operations:
-                    if isinstance(op, aie.DeviceOp):
-                        dev_op = op
-                        break
-                assert (
-                    dev_op is not None
-                ), f"DeviceOp missing after re-parse for operator '{op_name}'"
-                dev_op.sym_name = ir.StringAttr.get(op_name)
-                module.body.append(dev_op)
+            packing = self.packing
+            if isinstance(packing, AdjacentPacking):
+                packing, _ = packing.pack(
+                    [op_name for op_name, *_ in runlist],
+                    device_mlir_strings,
+                    params_preamble,
+                )
+            for device_name, members in packing.devices(device_mlir_strings).items():
+                member_ops = {}
+                for op_name in members:
+                    wrapped = f"module {{\n{params_preamble}\n{device_mlir_strings[op_name]}\n}}"
+                    wrapper_module = ir.Module.parse(wrapped)
+                    # Find the (sole) DeviceOp in the wrapper module.
+                    dev_op = None
+                    for op in wrapper_module.body.operations:
+                        if isinstance(op, aie.DeviceOp):
+                            dev_op = op
+                            break
+                    assert (
+                        dev_op is not None
+                    ), f"DeviceOp missing after re-parse for operator '{op_name}'"
+                    dev_op.sym_name = ir.StringAttr.get(op_name)
+                    module.body.append(dev_op)
+                    member_ops[op_name] = dev_op
+                if len(member_ops) > 1:
+                    merge_devices(device_name, member_ops)
 
-            needs_reset = self.needs_reset
+            needs_reset = self.needs_reset(packing)
             if needs_reset:
 
                 @aie.device(device_ty)  # pyright: ignore[reportCallIssue]  # see main()
@@ -264,19 +296,18 @@ class Fusion:
                     # Execute operations in runlist order
                     configure_op = None
                     configure_body = None
-                    last_op_name = None
+                    last_device = None
                     for op_name, *buffer_names in runlist:
                         expected_arg_types = sequence_arg_types[op_name]
+                        device_name = packing.device_of(op_name)
 
-                        # Avoid reconfiguring altogether if the same op is called multiple times consecutively
-                        if configure_op is None or op_name != last_op_name:
-                            # Configure Op
-                            configure_sym_ref_attr = ir.FlatSymbolRefAttr.get(op_name)
+                        # Consecutive steps in one device share its configure point
+                        if configure_op is None or device_name != last_device:
                             configure_op = aiex.ConfigureOp(
-                                configure_sym_ref_attr
-                            )  # TODO: optimization -- if previous op was in the same device, skip reconfiguration
+                                ir.FlatSymbolRefAttr.get(device_name)
+                            )
                             configure_body = configure_op.body.blocks.append()
-                            last_op_name = op_name
+                            last_device = device_name
 
                         assert configure_body is not None
                         with ir.InsertionPoint(configure_body):
@@ -334,7 +365,9 @@ class Fusion:
                                 )
 
                             # Run Op
-                            sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get("sequence")
+                            sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get(
+                                packing.sequence_of(op_name)
+                            )
                             aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
 
                     if needs_reset:

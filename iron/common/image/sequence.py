@@ -22,6 +22,7 @@ from .callable import (
     SequenceReferenceCallable,
     SequenceXclbinCallable,
 )
+from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
 
@@ -68,6 +69,11 @@ class OperatorSequence:
             scratchpad, so a value the device computes becomes that run's
             per-call value. Laid out back to back from the argument's start,
             in order; a sequence without any takes no such argument.
+        coresident: Groups of operators whose designs share one device
+            configuration in the full ELF (:mod:`.coresidence`), so steps
+            moving between them do not reconfigure the array; each must be
+            in the runlist. An :class:`AdjacentPacking` packs them itself,
+            asking the placer.
     """
 
     def __init__(
@@ -86,6 +92,7 @@ class OperatorSequence:
         residents: Mapping[str, Hashable] | None = None,
         shared_words: Mapping[str, str] | None = None,
         feedback_args: Sequence[str] = (),
+        coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
     ):
         mode = self._coerce_dispatch(dispatch)
         if arena is not None and mode not in (None, "fused", "reference"):
@@ -100,6 +107,11 @@ class OperatorSequence:
                 f"feedback arguments are an argument of the full ELF; "
                 f"dispatch={dispatch!r} has none"
             )
+        if coresident and mode not in (None, "fused", "reference"):
+            raise ValueError(
+                f"co-residence packs designs into one full-ELF device; "
+                f"dispatch={dispatch!r} builds none"
+            )
         if not all(
             isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
             for op, *bufs in runlist
@@ -109,6 +121,23 @@ class OperatorSequence:
                 "each operator must be an Operator and each buffer name must be a str"
             )
         self.runlist = runlist
+        if isinstance(coresident, AdjacentPacking):
+            self.coresident: tuple[tuple[Operator, ...], ...] | AdjacentPacking = (
+                coresident
+            )
+        else:
+            in_runlist = {id(op) for op, *_ in runlist}
+            strays = [
+                type(op).__name__
+                for group in coresident
+                for op in group
+                if id(op) not in in_runlist
+            ]
+            if strays:
+                raise ValueError(
+                    f"coresident names operators not in the runlist: {strays}"
+                )
+            self.coresident = tuple(tuple(group) for group in coresident)
         # Sharing changes which designs are built, so it belongs in the label
         # the chain's kernel instances are named from.
         self.name = name + "_shared" if share_designs else name
@@ -422,6 +451,11 @@ class OperatorSequence:
                     f"{self.name}: a shared arena and feedback arguments need the "
                     f"full ELF, which this device does not dispatch"
                 )
+            if self.coresident and not elf:
+                raise ValueError(
+                    f"{self.name}: co-residence packs designs into one full-ELF "
+                    f"device, which this device does not dispatch"
+                )
         # Every operator resolved for the device, once, before anything takes
         # its identity: unique_designs() then sees the tunables as they will be
         # built, so two operators that describe one array are one design.
@@ -430,6 +464,10 @@ class OperatorSequence:
             if id(op) not in resolved:
                 resolved[id(op)] = op.resolved(dev)
         self.runlist = [(resolved[id(op)], *bufs) for op, *bufs in self.runlist]
+        if not isinstance(self.coresident, AdjacentPacking):
+            self.coresident = tuple(
+                tuple(resolved[id(op)] for op in group) for group in self.coresident
+            )
         # After the mode: a sequence that cannot run in its arena must not
         # have placed anything there.
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (

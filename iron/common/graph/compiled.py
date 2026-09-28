@@ -36,6 +36,7 @@ from ..design import device_symbol
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
+from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
@@ -350,6 +351,7 @@ class Graph:
         verbose=False,
         record="memory",
         feeds: CompiledGraph | None = None,
+        coresident: AdjacentPacking | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -358,6 +360,8 @@ class Graph:
         (:mod:`iron.common.image.packaging`); everything else is derived and, under
         ``verbose``, printed. ``record="disk"`` writes the image's
         :class:`~iron.common.image.artifacts.Artifacts` record beside it.
+        ``coresident`` packs designs into shared device configurations
+        (:mod:`iron.common.image.coresidence`); a full ELF only.
 
         A full-ELF version is placed in :attr:`arena`, with the weights and
         states of every other version. Compile every version before the
@@ -420,6 +424,7 @@ class Graph:
             record=record,
             arena=self._arena if shared else None,
             emit=emit,
+            coresident=coresident,
         )
         if emit is not None and feeds is None and len(version.parameters) != slots:
             raise NotImplementedError(
@@ -502,6 +507,7 @@ class CompiledGraph:
         record="memory",
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
+        coresident: AdjacentPacking | None = None,
     ):
         self.traced = traced
         self.plan = plan
@@ -521,6 +527,8 @@ class CompiledGraph:
         placement = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
+        if coresident is not None:
+            placement["coresident"] = coresident
         self.sequence = traced.sequence(
             dispatch=plan.dispatch, shared_words=self.shared, **placement
         ).compile(record=record)
