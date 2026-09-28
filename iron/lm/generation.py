@@ -92,24 +92,31 @@ def _log_softmax(logits):
     return x - np.log(np.exp(x).sum())
 
 
+def divergence(reference, logits) -> tuple[float, bool]:
+    """KL(reference || model) of two rows of logits, and whether both rank
+    the same token first.
+    """
+    ref, got = _log_softmax(reference), _log_softmax(logits)
+    kl = float(np.sum(np.exp(ref) * (ref - got)))
+    return kl, int(got.argmax()) == int(ref.argmax())
+
+
 def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
     """``model``'s next-token distributions against ``reference``'s, over
     ``num_tokens`` steps from ``tokens``.
 
     Teacher-forced: both are fed the reference's greedy token, so a
     divergence at a step is the model's own error there rather than the
-    consequence of an earlier different choice. One ``(kl, top1)`` per step:
-    KL(reference || model), and whether both rank the same token first.
+    consequence of an earlier different choice. One :func:`divergence` per
+    step.
     """
     history, results = [int(t) for t in tokens], []
     for step in range(num_tokens):
-        got = _log_softmax(model.logits(history))
-        ref = _log_softmax(reference.logits(history))
-        kl = float(np.sum(np.exp(ref) * (ref - got)))
-        top1 = int(got.argmax()) == int(ref.argmax())
+        ref = reference.logits(history)
+        kl, top1 = divergence(ref, model.logits(history))
         results.append((kl, top1))
         print(f"step {step:3d}  KL {kl:.5f}  top-1 {'match' if top1 else 'MISMATCH'}")
-        history.append(int(ref.argmax()))
+        history.append(greedy(ref))
     return results
 
 
@@ -121,6 +128,25 @@ def kl_stats(results) -> dict[str, float]:
     """
     kl = np.array([k for k, _ in results])
     return {"Mean": kl.mean(), "P90": np.percentile(kl, 90), "Max": kl.max()}
+
+
+def greedy_logits(model, tokens, num_tokens) -> np.ndarray:
+    """The logits of ``num_tokens`` greedy steps from ``tokens``, one row
+    each, the first the prompt's.
+    """
+    history, rows = [int(t) for t in tokens], []
+    for _ in range(num_tokens):
+        rows.append(model.logits(history))
+        history.append(greedy(rows[-1]))
+    return np.stack(rows)
+
+
+def differing_steps(run, first) -> list[int]:
+    """The steps at which two :func:`greedy_logits` runs differ bitwise,
+    NaNs and signed zeros included.
+    """
+    run, first = (np.ascontiguousarray(r).view(np.uint8) for r in (run, first))
+    return np.flatnonzero((run != first).any(axis=1)).tolist()
 
 
 def determinism(model, prompts, num_tokens, rounds) -> int:
@@ -135,16 +161,11 @@ def determinism(model, prompts, num_tokens, rounds) -> int:
     differ = 0
     for r in range(rounds * len(prompts)):
         p = r % len(prompts)
-        history, rows = [int(t) for t in prompts[p]], []
-        for _ in range(num_tokens):
-            logits = model.logits(history)
-            rows.append(logits.view(np.uint8))  # NaNs and signed zeros too
-            history.append(greedy(logits))
-        run = np.stack(rows)
+        run = greedy_logits(model, prompts[p], num_tokens)
         if first[p] is None:
             first[p] = run
             continue
-        steps = np.flatnonzero((run != first[p]).any(axis=1)).tolist()
+        steps = differing_steps(run, first[p])
         if steps:
             differ += 1
             print(f"round {r} (prompt {p}): logits differ at steps {steps}")

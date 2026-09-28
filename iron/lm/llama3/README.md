@@ -69,7 +69,10 @@ python -m iron.lm.llama3.model \
   and the caches: about 3.7 GB at 32768 and 7 GB at 131072 (a
   `memlock unlimited` line in `/etc/security/limits.d/`). A prompt past
   about 48k tokens runs chunks longer than the amdxdna driver's watchdog
-  allows (`tdr_timeout_ms`, 4 to 6 s a dispatch by default)
+  allows (`tdr_timeout_ms`, 4 to 6 s a dispatch by default); with
+  `options amdxdna tdr_timeout_ms=10000` in `/etc/modprobe.d/` a
+  131008-token prompt runs (315 s to the first token, then 5 tokens a
+  second)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with a
   float32 numpy forward pass (`LlamaOracle`) and print the KL divergence

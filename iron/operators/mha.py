@@ -880,15 +880,16 @@ class MHA(Operator):
         if self.kv_interleaved:
             K, V = (np.swapaxes(t, 0, 1) for t in (K, V))
         groups = self.num_heads // self.num_KV_heads
-        K = np.repeat(K, groups, axis=0)
-        V = np.repeat(V, groups, axis=0)
+        start = K.shape[1] - Q.shape[1]
+        s_q = start + self.seq_len if s_q is None else int(s_q)
+        s_kv = K.shape[1] if s_kv is None else int(s_kv)
+        # Keys from s_kv on are masked, so a cache is widened only as far as
+        # it is read.
+        K, V = K[:, :s_kv], V[:, :s_kv]
         # Causal scaled-dot-product attention, in float32 and rounded once.
         # Against torch's FLASH backend this differs by under 1e-6, which is
         # less than torch's own FLASH and MATH backends differ from each other.
         q, k, v = (t.astype(np.float32) for t in (Q, K, V))
-        start = k.shape[1] - q.shape[1]
-        s_q = start + self.seq_len if s_q is None else int(s_q)
-        s_kv = k.shape[1] if s_kv is None else int(s_kv)
         position = start + np.arange(q.shape[1])[:, None]
         key = np.arange(k.shape[1])
         mask = np.where((key > position) | (key >= s_kv), -np.inf, 0)
@@ -897,10 +898,11 @@ class MHA(Operator):
         out = np.empty(Q.shape, dtype=Q.dtype)
         # A head at a time: at 16K rows one head's scores are 1 GiB of
         # float32, and all of them at once more than a test host has.
+        # Each K and V head serves ``groups`` consecutive query heads.
         for h in range(q.shape[0]):
-            scores = q[h] @ k[h].T / scale + mask
+            scores = q[h] @ k[h // groups].T / scale + mask
             e = np.exp(scores - scores.max(axis=-1, keepdims=True))
-            out[h] = (e / e.sum(axis=-1, keepdims=True)) @ v[h]
+            out[h] = (e / e.sum(axis=-1, keepdims=True)) @ v[h // groups]
         out[:, max(s_q - start, 0) :] = 0
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))

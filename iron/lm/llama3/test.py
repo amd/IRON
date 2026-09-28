@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Llama 3.2 1B on the NPU, from the real checkpoint: speed, accuracy
-against the float32 reference, and determinism. The model is compiled and
-loaded once for the module and every test calls it in-process.
+against the float32 reference, determinism, and past one chunk: a prompt of
+two, a chat turn, and a step at the end of the caches. The model is
+compiled and loaded once for the module and every test calls it
+in-process.
 """
 
 import pytest
@@ -12,6 +14,8 @@ import pytest
 from iron.lm.llama3.model import Runner
 from iron.lm.testing import (
     check_accuracy,
+    check_chat_turn,
+    check_deep_decode,
     check_determinism,
     check_generation,
     requires,
@@ -52,3 +56,34 @@ def test_llama_3_2_1b_accuracy(runner, model, record_property):
 
 def test_llama_3_2_1b_determinism(runner, model, record_property):
     check_determinism(runner, model, record=record_property)
+
+
+# 12000 characters of prompt.txt are 3262 tokens: a full chunk and most of a
+# second, which attends over the first's caches.
+LONG = 12000
+
+
+def test_llama_3_2_1b_accuracy_across_chunks(runner, model, record_property):
+    """The prompt's two chunks and two decode steps after them, against the
+    float32 reference over the whole prompt (each step a forward over 3k
+    tokens on the host, so only a few).
+    """
+    assert len(runner.prompt(LONG)) > runner.config.prefill_chunk
+    check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
+
+
+def test_llama_3_2_1b_chat_turn(runner, model, record_property):
+    """A turn of 1000 tokens reruns the second chunk alone."""
+    check_chat_turn(runner, model, LONG, 1000, record=record_property)
+
+
+# KL(graph reference || NPU) of one decode step, three tokens at each depth:
+# 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at 16k and 0.030 to
+# 0.038 at 32k: it grows with the keys the step sums over.
+DEEP_KL = 0.1
+
+
+def test_llama_3_2_1b_decode_deep_in_the_cache(runner, model, record_property):
+    """The deepest step the caches hold, at ``max_seq_len - 1``."""
+    position = runner.config.max_seq_len - 1
+    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)

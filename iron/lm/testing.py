@@ -12,12 +12,24 @@ for the module, and each test calls one of these on the two, with its
 """
 
 import os
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from .generation import SEED, Sampler, accuracy, determinism, generate, kl_stats
+from .generation import (
+    SEED,
+    Sampler,
+    accuracy,
+    determinism,
+    differing_steps,
+    divergence,
+    generate,
+    greedy,
+    greedy_logits,
+    kl_stats,
+)
 
 
 def weights_dir(name: str) -> Path:
@@ -56,14 +68,20 @@ def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record)
 
 
 def check_accuracy(
-    runner, model, bounds: dict[str, float], num_tokens: int = 40, *, record
+    runner,
+    model,
+    bounds: dict[str, float],
+    num_tokens: int = 40,
+    chars: int = 1024,
+    *,
+    record,
 ):
     """KL(reference || model) of the next-token distribution, teacher-forced
-    over ``num_tokens`` steps from a 1024-character prompt, within
+    over ``num_tokens`` steps from a ``chars``-character prompt, within
     ``bounds`` (``{"Mean": .., "P90": .., "Max": ..}``). The mean and p90
     bound a drift across many steps, the max a single broken step.
     """
-    tokens = prompt(runner, 1024, num_tokens)
+    tokens = prompt(runner, chars, num_tokens)
     # Built here alone: a float32 oracle is twice the weights.
     results = accuracy(model, runner.cpu(), tokens, num_tokens)
     stats = kl_stats(results)
@@ -90,3 +108,66 @@ def check_determinism(runner, model, num_tokens: int = 4, rounds: int = 5, *, re
     record("DifferingRuns", differing)
     total = len(prompts) * (rounds - 1)
     assert differing == 0, f"{differing}/{total} runs' logits differ bitwise"
+
+
+def check_chat_turn(
+    runner, model, chars: int, turn: int, num_tokens: int = 2, *, record
+):
+    """A prompt extended by a turn, as a chat's next message extends it:
+    the model reruns the chunks from the one holding the turn's first token
+    over the caches the prompt left, and its logits, and those of the greedy
+    steps after, are bit for bit those of the whole run from scratch.
+
+    The prompt is ``chars`` characters, the turn its last ``turn`` tokens.
+    Before the run from scratch a prompt of other text overwrites the
+    caches, so it reuses nothing of the turn's. Records both runs' seconds.
+    """
+    whole = prompt(runner, chars, num_tokens)
+    C = runner.config.prefill_chunk
+    assert (len(whole) - turn) // C, "the turn reuses no chunk"
+    other = prompt(runner, chars, 0, skip=1)
+    runs = []
+    for name, before in (("Turn", whole[:-turn]), ("Scratch", other)):
+        model.logits(before)
+        start = time.perf_counter()
+        runs.append(greedy_logits(model, whole, num_tokens))
+        record(f"{name}Seconds", time.perf_counter() - start)
+    steps = differing_steps(*runs)
+    assert not steps, f"the turn's logits differ from scratch's at steps {steps}"
+
+
+def check_deep_decode(runner, model, position: int, bound: float, *, record):
+    """A decode step at ``position``, deep in the caches, against the
+    graph's own reference (``Graph.reference``: each operator's
+    ``reference()`` on host tensors, the caches as state), for a context
+    the float32 oracle would take too long over, within ``bound`` of its
+    KL. Whether both rank the same token first is recorded, not required:
+    at a near-tie a step can differ in it at a KL of 0.014.
+
+    The caches hold a real prompt repeated up to ``position``, so the step
+    attends over a real prompt's scale of keys and values, the same ones on
+    the device and in the reference. The prompt's own rows are left as it
+    wrote them, so the model's record of what its caches hold stays true.
+    """
+    tokens = prompt(runner, 1024, 1)
+    n = len(tokens)
+    token = greedy(model.logits(tokens))
+    version = next(iter(model.versions.values()))
+    caches = [*model.keys, *model.values]
+    for cache in caches:
+        rows = np.array(version.read(cache))
+        rows[n:position] = np.resize(rows[:n], (position - n, *rows.shape[1:]))
+        version.write(cache, rows)
+        cache.host = rows  # the reference's, written in place as the device's
+    x = model.embedding[[token]]
+    values = dict(chunk=position // runner.config.prefill_chunk, rows=1)
+    try:
+        got = model(x, **values, position=position).numpy()
+        expected = model.reference(x, **values, position=position)
+    finally:
+        for cache in caches:
+            cache.host = None
+    kl, top1 = divergence(expected, got)
+    record("DeepKL", kl)
+    record("DeepTop1", top1)
+    assert kl <= bound, f"at {position}: KL {kl} > {bound}"

@@ -339,13 +339,14 @@ class Oracle:
         k, v = (np.repeat(a, H // self.config.n_kv_groups, axis=1) for a in (k, v))
         # The softmax in place: the scores are (H, n, n), and a temporary
         # freed per layer is paid for again in page faults by the next.
-        p = np.einsum("qhd,khd->hqk", q, k)
+        # Batched matmuls, not einsum's own loops: BLAS is 10x faster at 3k.
+        p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
         p *= np.float32(1 / np.sqrt(D))
         p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
         p -= p.max(axis=-1, keepdims=True)
         np.exp(p, out=p)
         p /= p.sum(axis=-1, keepdims=True)
-        return np.einsum("hqk,khd->qhd", p, v).reshape(n, H * D)
+        return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
 
 
 def _widen(value):

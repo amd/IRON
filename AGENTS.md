@@ -582,8 +582,10 @@ code before relying on a line here; it is the authority.
   every K and V block for each Q block, valid or not). amdxdna's watchdog
   (`tdr_timeout_ms`, 2000 by default; a stall is two ticks with no job
   run or completed) stops a dispatch between 4 and 6 s, so past about
-  48k tokens a prompt needs `tdr_timeout_ms` raised. Decode steps run to
-  131072 (195 ms).
+  48k tokens a prompt needs `tdr_timeout_ms` raised (`options amdxdna
+  tdr_timeout_ms=10000` in `/etc/modprobe.d/`, read at module load). At
+  10000 a 131008-token prompt runs, in 315 s, and decodes at 5.0 tok/s
+  (198 ms a step).
 - Tuning: `auto(choices=, legal=)` is recorded but nothing reads it, and
   there is no per-kernel L1 budget.
 - Open upstream asks in mlir-aie: a builder for `aiex.configure` /
