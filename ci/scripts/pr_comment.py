@@ -3,15 +3,26 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Assemble the pull request comment from the per-suite trend reports.
+"""Build the pull request comment from this run's results.
 
-Takes the artifact tree the CI workflows produce, one ``{arch}/{suite}``
-directory per job, and emits the markdown body to post. A run that moves no
-benchmark posts a one-line comment.
+A pull request from a fork controls everything its own jobs produce, and the
+job that posts the comment holds a write token. So this reads one file per
+suite, ``latest.csv``, treats it as data alone, and renders the report with the
+code in this checkout. It compares against ``all.csv`` on the results branch,
+which only a push to a trunk branch can write.
+
+A suite that reported nothing is named in the comment. Without that, a suite
+that crashed reads the same as a suite that moved no benchmark.
 """
 
 import argparse
+import csv
+import json
 import os
+from typing import Dict, List, Tuple
+
+from merge_all import limit_rows_by_date
+from pretty_trends import build_report
 
 # The posting step matches this to update its own comment.
 MARKER = "<!-- iron-ci-aggregate -->"
@@ -23,32 +34,80 @@ SUITES = [
     ("phoenix/examples", "Phoenix - Applications"),
 ]
 
+# A run reports a few hundred rows. A fork could upload millions.
+MAX_ROWS = 20000
 
-def read_trends(path):
-    """Return a suite's trend report without its title, or '' if it says nothing."""
+
+def read_csv(path: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    if not os.path.exists(path):
+        return [], []
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = []
+        for row in reader:
+            if len(rows) >= MAX_ROWS:
+                break
+            # csv puts the overflow of a ragged row under None. Drop it: every
+            # consumer addresses columns by name.
+            row.pop(None, None)
+            rows.append({k: v for k, v in row.items() if k is not None})
+        return rows, [c for c in (reader.fieldnames or []) if c]
+
+
+def read_status(path: str) -> Dict[str, str]:
+    """Read what the collecting step found for each suite."""
     try:
         with open(path) as f:
-            text = f.read()
-    except OSError:
-        return ""
-    body = "\n".join(
-        line for line in text.splitlines() if not line.startswith("# ")
-    ).strip()
-    # pretty_trends.py opens its report with this when it found nothing.
-    if body.startswith("No benchmark moved"):
-        return ""
-    return body
+            status = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return (
+        {str(k): str(v) for k, v in status.items()} if isinstance(status, dict) else {}
+    )
+
+
+def suite_report(artifacts: str, history: str, directory: str, args) -> List[str]:
+    """Render one suite, comparing its run against the results branch."""
+    latest, latest_columns = read_csv(os.path.join(artifacts, directory, "latest.csv"))
+    if not latest:
+        return []
+    previous, previous_columns = read_csv(os.path.join(history, directory, "all.csv"))
+
+    columns = list(dict.fromkeys(previous_columns + latest_columns))
+    rows = limit_rows_by_date(previous + latest, 2)
+    return build_report(
+        rows, columns, threshold=args.threshold, sigma=args.sigma, ndigits=args.ndigits
+    )
+
+
+def strip_title(lines: List[str]) -> str:
+    """Drop the report's own heading, and report whether anything is left."""
+    body = "\n".join(l for l in lines if not l.startswith("# ")).strip()
+    return "" if body.startswith("No benchmark moved") else body
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results-root", default=".")
+    parser.add_argument(
+        "--artifacts", required=True, help="Root of this run's downloaded artifacts"
+    )
+    parser.add_argument(
+        "--history", required=True, help="Checkout of the results branch"
+    )
+    parser.add_argument(
+        "--status", default="", help="JSON of suite -> workflow conclusion"
+    )
     parser.add_argument("--commit", default="")
     parser.add_argument("--date", default="")
     parser.add_argument("--commit-url", default="")
     parser.add_argument("--pages-url", default="")
+    parser.add_argument("--threshold", type=float, default=5.0)
+    parser.add_argument("--sigma", type=float, default=2.0)
+    parser.add_argument("--round", type=int, default=2, dest="ndigits")
     parser.add_argument("-o", "--output", default="comment.md")
     args = parser.parse_args()
+
+    status = read_status(args.status) if args.status else {}
 
     commit = (
         f"[`{args.commit}`]({args.commit_url})"
@@ -58,11 +117,20 @@ def main():
     lines = [MARKER, "## CI performance trends", "", f"{commit} ({args.date})", ""]
 
     sections = []
+    reported = []
+    missing = []
     for directory, label in SUITES:
-        body = read_trends(os.path.join(args.results_root, directory, "trends.md"))
+        body = strip_title(suite_report(args.artifacts, args.history, directory, args))
+        conclusion = status.get(directory, "missing")
+        if conclusion != "success" or not os.path.exists(
+            os.path.join(args.artifacts, directory, "latest.csv")
+        ):
+            missing.append(f"{label} ({conclusion})")
+            continue
+        reported.append(label)
         if body:
             sections += [
-                f"<details open>",
+                "<details open>",
                 f"<summary><b>{label}</b></summary>",
                 "",
                 body,
@@ -73,8 +141,15 @@ def main():
 
     if sections:
         lines += sections
-    else:
+    elif reported:
         lines += ["No benchmark moved past the reporting threshold.", ""]
+
+    if missing:
+        lines += [
+            f"⚠️ No results from: {', '.join(missing)}. "
+            "This comment covers the remaining suites only.",
+            "",
+        ]
 
     if args.pages_url:
         lines += [f"[Full benchmark history]({args.pages_url})", ""]

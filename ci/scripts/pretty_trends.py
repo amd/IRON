@@ -18,6 +18,7 @@ therefore has to clear both gates.
 
 import argparse
 import csv
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +34,21 @@ from pretty_common import (
 
 # Metrics that measure work per unit time; every other metric measures time.
 HIGHER_IS_BETTER = ("Bandwidth", "Throughput", "TPS")
+
+DATE_FMT = "%Y-%m-%d %H:%M:%S"
+
+# Test names reach a pull request comment. A pull request from a fork chooses
+# them, so they are cut to length and stripped of the characters that would end
+# the code span or the table cell holding them.
+CELL_LIMIT = 160
+
+
+def cell(value: str) -> str:
+    """Render an untrusted value as a markdown table cell."""
+    text = re.sub(r"[`|\r\n]", " ", str(value)).strip()
+    if len(text) > CELL_LIMIT:
+        text = text[: CELL_LIMIT - 1] + "\u2026"
+    return f"`{text}`" if text else "`?`"
 
 
 def parse_args():
@@ -62,7 +78,7 @@ def parse_args():
         dest="ndigits",
         help="Decimal places for values and percentages (default: 2)",
     )
-    p.add_argument("--date-fmt", default="%Y-%m-%d %H:%M:%S")
+    p.add_argument("--date-fmt", default=DATE_FMT)
     return p.parse_args()
 
 
@@ -111,27 +127,29 @@ def write(path: str, lines: List[str]):
         f.write("\n".join(lines) + "\n")
 
 
-def gate(args) -> str:
+def gate(sigma: float) -> str:
     """Name the second gate, for the sentence that introduces the table."""
-    if not args.sigma:
+    if not sigma:
         return ""
-    return f" and by more than {args.sigma:g}x the spread the runs measured"
+    return f" and by more than {sigma:g}x the spread the runs measured"
 
 
-def main():
-    args = parse_args()
+def build_report(
+    all_rows: List[Dict[str, str]],
+    field_order: List[str],
+    threshold: float = 5.0,
+    sigma: float = 2.0,
+    ndigits: int = 2,
+    date_fmt: str = DATE_FMT,
+) -> List[str]:
+    """Render the markdown lines for one suite's results.
 
-    with open(args.csv, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        all_rows = list(reader)
-        field_order = reader.fieldnames or []
-
-    dates = [
-        d for d in (parse_date(r, args.date_fmt) for r in all_rows) if d is not None
-    ]
+    `all_rows` holds the last two runs of each test. Their values reach a pull
+    request comment, so every cell passes through `cell`.
+    """
+    dates = [d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None]
     if not dates:
-        write(args.output, ["# Performance trends", "", "_No results._"])
-        return
+        return ["# Performance trends", "", "_No results._"]
     run_date = max(dates)
 
     # Every row counts here, benched or not. An operator arrives with its whole
@@ -140,7 +158,7 @@ def main():
     operators_now = set()
     operators_before = set()
     for row in all_rows:
-        date = parse_date(row, args.date_fmt)
+        date = parse_date(row, date_fmt)
         operator = operator_name((row.get("Test Path") or "").strip())
         if date == run_date:
             operators_now.add(operator)
@@ -153,7 +171,7 @@ def main():
         by_test.setdefault(row_key(row), []).append(row)
     for test_rows in by_test.values():
         test_rows.sort(
-            key=lambda r: parse_date(r, args.date_fmt) or datetime.min, reverse=True
+            key=lambda r: parse_date(r, date_fmt) or datetime.min, reverse=True
         )
 
     changes = []
@@ -161,7 +179,7 @@ def main():
         if len(test_rows) < 2:
             continue
         curr, prev = test_rows[0], test_rows[1]
-        if parse_date(curr, args.date_fmt) != run_date:
+        if parse_date(curr, date_fmt) != run_date:
             continue
 
         operator = operator_name(test_path)
@@ -169,9 +187,9 @@ def main():
             prev_v = try_parse_float(prev.get(column))
             curr_v = try_parse_float(curr.get(column))
             pct = delta_pct(curr_v, prev_v)
-            if pct is None or abs(pct) < args.threshold:
+            if pct is None or abs(pct) < threshold:
                 continue
-            if within_spread(curr, prev, metric, args.sigma):
+            if within_spread(curr, prev, metric, sigma):
                 continue
             changes.append((operator, params, metric, prev_v, curr_v, pct))
 
@@ -180,32 +198,50 @@ def main():
 
     out = ["# Performance trends", ""]
     if added:
-        out += [f"**Operators added:** {', '.join(f'`{o}`' for o in added)}", ""]
+        out += [f"**Operators added:** {', '.join(cell(o) for o in added)}", ""]
     if dropped:
-        out += [f"**Operators dropped:** {', '.join(f'`{o}`' for o in dropped)}", ""]
+        out += [f"**Operators dropped:** {', '.join(cell(o) for o in dropped)}", ""]
 
     if changes:
-        fmt = f"{{:.{args.ndigits}f}}"
+        fmt = f"{{:.{ndigits}f}}"
         out += [
-            f"Benchmarks that moved by at least {args.threshold:g}%{gate(args)}:",
+            f"Benchmarks that moved by at least {threshold:g}%{gate(sigma)}:",
             "",
             "| Operator | Parametrization | Metric | Previous | Current | Change |",
             "|---|---|---|---|---|---|",
         ]
         for operator, params, metric, prev_v, curr_v, pct in sorted(changes):
             out.append(
-                f"| `{operator}` | `{params}` | {metric} | {fmt.format(prev_v)} "
-                f"| {fmt.format(curr_v)} "
-                f"| {verdict(metric, pct)} {pct:+.{args.ndigits}f}% |"
+                f"| {cell(operator)} | {cell(params)} | {cell(metric)} "
+                f"| {fmt.format(prev_v)} | {fmt.format(curr_v)} "
+                f"| {verdict(metric, pct)} {pct:+.{ndigits}f}% |"
             )
         out.append("")
     elif not added and not dropped:
-        out += [
-            f"No benchmark moved by {args.threshold:g}%{gate(args)}.",
-            "",
-        ]
+        out += [f"No benchmark moved by {threshold:g}%{gate(sigma)}.", ""]
 
-    write(args.output, out)
+    return out
+
+
+def main():
+    args = parse_args()
+
+    with open(args.csv, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        all_rows = list(reader)
+        field_order = reader.fieldnames or []
+
+    write(
+        args.output,
+        build_report(
+            all_rows,
+            field_order,
+            threshold=args.threshold,
+            sigma=args.sigma,
+            ndigits=args.ndigits,
+            date_fmt=args.date_fmt,
+        ),
+    )
 
 
 if __name__ == "__main__":
