@@ -46,7 +46,8 @@ from iron.common.utils import split_run
 from iron.operators._trace import maybe_enable_trace
 
 # --- Fixed geometry -------------------------------------------------------
-# GEMM tiling per compute tile, and the register tiling inside it.
+# GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
+# the default for GEMM's k_tile field.
 M_TILE, K_TILE = 64, 512
 # Default n tile. 64 doubles A fetches but gives the mmul colA=8 instead of 4,
 # which wins when compute is the critical path. op.py picks per shape.
@@ -178,7 +179,6 @@ EPILOGUE_SYMBOL = "mm_fused_epilogue_chunk"
 
 # Minimum problem size in K. The minimum in M is M_TILE * compute_rows(dev) and
 # in N is the chosen n tile, both of which depend on the device or the config.
-MIN_K = K_TILE  # 512
 
 
 # B values per element of the MLIR type, and the bytes they occupy: v8bfp16ebs8
@@ -268,6 +268,7 @@ def gemm(
     epilogue=Epilogue.NONE,
     clamp=None,
     tile_n=N_TILE_DEFAULT,
+    k_tile=K_TILE,
     m_chunk=None,
     tile_ma=None,
     kernel_object="mm_fused.o",
@@ -326,12 +327,12 @@ def gemm(
         )
     RHO = M_TILE // T_MA
     OVERLAP = OVERLAP_DEFAULT
-    K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
+    K_DIV_CT_K_MAX = k_tile // CT_MAX_K
     CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
     CT_A_OBJ = CT_A_LEN * (T_MA // R // 2)  # every z slice of one mmul
     C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
     O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
-    B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
+    B_ITERS = k_tile // CT_MAX_K  # B chunks consumed per k step
     MIN_N = N_TILE * COLS
 
     epilogue = Epilogue(epilogue)
@@ -347,7 +348,7 @@ def gemm(
     # exactly. N need only be a multiple of N_TILE: a short trailing group is
     # handled by per-column trip counts, which matters because o and down
     # have N = model dim.
-    for name, value, unit in (("M", M, MIN_M), ("K", K, MIN_K), ("N", N, N_TILE)):
+    for name, value, unit in (("M", M, MIN_M), ("K", K, k_tile), ("N", N, N_TILE)):
         if value % unit != 0:
             raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
 
@@ -355,7 +356,7 @@ def gemm(
     f32 = np.dtype[np.float32]
 
     m_row_blocks = M // MIN_M
-    k_iters = K // K_TILE
+    k_iters = K // k_tile
     # A "unit" is one group of M_CHUNK row-blocks. Every leg is issued per
     # unit, so A, B and C stay aligned with each other and the core's nest.
     n_chunks, n_rem = divmod(m_row_blocks, M_CHUNK)
@@ -421,8 +422,8 @@ def gemm(
     ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
     # L2 (per memtile). M_CHUNK stacked row-block tiles, so the forward below
     # can interleave them on the way out; see a_send_dims.
-    mt_a_ty = np.ndarray[(M_CHUNK * M_TILE * K_TILE,), bf16_ty]
-    mt_b_ty = np.ndarray[(K_TILE * N_TILE // B_GROUP,), b_elem_ty]
+    mt_a_ty = np.ndarray[(M_CHUNK * M_TILE * k_tile,), bf16_ty]
+    mt_b_ty = np.ndarray[(k_tile * N_TILE // B_GROUP,), b_elem_ty]
     mt_out_ty = np.ndarray[(C_SLICE_LEN * ROWS,), bf16_ty]
     # L3 (DDR), flat; the taps below index them linearly.
     a_l3_ty = np.ndarray[(M * K,), bf16_ty]
@@ -463,16 +464,16 @@ def gemm(
     # M_CHUNK tiles. mc's stride is exactly this dimension's size*stride, so
     # the two merge and the walk stays within the memtile BD's four dims.
     a_recv_dims = [
-        (M_CHUNK * M_TILE // R, R * K_TILE),
+        (M_CHUNK * M_TILE // R, R * k_tile),
         (R, S),
-        (K_TILE // S, R * S),
+        (k_tile // S, R * S),
         (S, 1),
     ]
     # Emits (b_iter, mc, band): the order the core acquires A in while holding
     # a B chunk across the group.
     a_send_dims = [
         (K_DIV_CT_K_MAX, R * CT_MAX_K),
-        (M_CHUNK * M_TILE // R, R * K_TILE),
+        (M_CHUNK * M_TILE // R, R * k_tile),
     ] + split_run(R * CT_MAX_K)
 
     # C: one join per column. Each of the ROWS cores in the column drops its
@@ -693,8 +694,8 @@ def gemm(
                 TensorAccessPattern(
                     tensor_dims=(M * K,),
                     offset=r * M_TILE * K,
-                    sizes=[m_row_blocks, k_iters, M_TILE, K_TILE],
-                    strides=[ROWS * M_TILE * K, K_TILE, K, 1],
+                    sizes=[m_row_blocks, k_iters, M_TILE, k_tile],
+                    strides=[ROWS * M_TILE * K, k_tile, K, 1],
                 )
             ]
         taps = []
@@ -704,8 +705,8 @@ def gemm(
                 TensorAccessPattern(
                     tensor_dims=(M * K,),
                     offset=first * ROWS * M_TILE * K + r * M_TILE * K,
-                    sizes=[k_iters, M_CHUNK, M_TILE, K_TILE],
-                    strides=[K_TILE, ROWS * M_TILE * K, K, 1],
+                    sizes=[k_iters, M_CHUNK, M_TILE, k_tile],
+                    strides=[k_tile, ROWS * M_TILE * K, K, 1],
                 )
             )
         return taps
@@ -720,8 +721,8 @@ def gemm(
             offset=(mega_col * COLS + c) * N_TILE * K // B_GROUP,
             # One k sweep per unit, not per row-block: the cores hold each B
             # chunk across a group. The unit dimension keeps stride 0.
-            sizes=[n_units, k_iters, 1, K_TILE * N_TILE // B_GROUP],
-            strides=[0, K_TILE * N_TILE // B_GROUP, 0, 1],
+            sizes=[n_units, k_iters, 1, k_tile * N_TILE // B_GROUP],
+            strides=[0, k_tile * N_TILE // B_GROUP, 0, 1],
         )
 
     def c_taps(mega_col, c, units):
@@ -906,7 +907,7 @@ def main():
     )
     argparser.add_argument("--dev", type=str, choices=["npu1", "npu2"], default="npu2")
     argparser.add_argument("-M", type=int, default=MIN_M)
-    argparser.add_argument("-K", type=int, default=MIN_K)
+    argparser.add_argument("-K", type=int, default=K_TILE)
     argparser.add_argument("-N", type=int, default=1024)
     argparser.add_argument(
         "--tile-n",
