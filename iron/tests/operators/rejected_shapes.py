@@ -14,6 +14,7 @@ from aie.iron.device import from_name
 
 from iron.common import Incompatible, Unresolvable
 from iron.operators.copy import Copy
+from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.transpose import Transpose
 
@@ -108,3 +109,27 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     # Nothing fits: one column, and compatible() names the rule.
     with pytest.raises(Incompatible, match=r"rows \(16\) must be a multiple of the 3"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(B_q=64, B_kv=128), "B_q"),
+        (dict(kv_len=1000), "kv_len"),
+        (dict(kv_len=512), "kv_len"),
+    ],
+    ids=[
+        "q_and_kv_blocks_differ",
+        "kv_len_not_whole_blocks",
+        "kv_len_short_of_queries",
+    ],
+)
+def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
+    """mha.cc skips a KV block past a Q block by comparing their indices, so
+    the two block sizes must match; and the queries are the keys' last rows,
+    whole blocks of them, so the cache must hold them.
+    """
+    with pytest.raises(Incompatible, match=why):
+        MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
+            from_name("npu2", n_cols=8)
+        )

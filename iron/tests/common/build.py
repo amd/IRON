@@ -99,7 +99,7 @@ class Task(NamedTuple):
 
 _TASK = re.compile(
     r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
-    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) len = \d+ "
+    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) len = %?\w+ "
     r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
     r"(?: \{size_parameter = @(\w+)\})?\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
@@ -272,27 +272,28 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
 def test_mha_sequence_is_one_descriptor_set_per_kv_group():
     # Eight pipelines: Q and O go through two shims, each carrying four
     # pipelines' (256-row) block. Per KV group, each shim's Q is one pattern
-    # over the group's heads and every block, K and V are the head's rows
-    # re-read once per (head, block) from the iteration slot, and the O
-    # drains mirror the Q fills and are waited on.
+    # over the group's heads and every block, K and V are the head's blocks
+    # of rows re-read once per (head, block) from the iteration slot (the
+    # block count the dimension a bound patches), and the O drains mirror
+    # the Q fills and are waited on.
     op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_pipelines=8)
     op = op.resolved(from_name("npu2", n_cols=8))
     assert op.seq_pad == 1024 and op.q_shims == 2 and op.join_rows == 256
     assert op.residents == {
+        "heads": 2,
         "q_blocks_per_pipeline": 2,
+        "q_blocks_valid": 2,
         "kv_blocks": 16,
         "s_q": 1000,
         "s_kv": 1000,
-        # Read only under a bound; the preamble skips them unbound.
-        "q_blocks_valid": 2,
-        "kv_blocks_valid": 16,
+        "q_start": 0,
     }
     text, tasks = generated_sequence(op)
     head, block = 1024 * 64, 256 * 64
-    # Q: (heads, blocks, rows, d). K and V: the head's 1024 rows, one
-    # contiguous run, re-read four times.
+    # Q: (heads, blocks, rows, d). K and V: the head's 16 blocks of 64 rows,
+    # re-read four times.
     q = ("2, 2, 256, 64", f"{head}, {2 * block}, 64, 1")
-    kv = ("4, 1, 1024, 64", "0, 0, 64, 1")
+    kv = ("4, 16, 64, 64", "0, 4096, 64, 1")
     assert [
         (t.lane, t.arg, t.offset, (t.sizes, t.strides), t.waited) for t in tasks
     ] == [
@@ -308,8 +309,9 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group():
 
 
 def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
-    # The (seq, heads, d) layout: a head's rows are strided by every head's
-    # d, and the group's heads are d apart; the descriptor count is the same.
+    # The (seq, heads, d) layout, for the queries and the keys: a head's rows
+    # are strided by every head's d, and the group's heads are d apart; the
+    # descriptor count is the same.
     op = MHA(
         num_heads=4,
         seq_len=1024,
@@ -317,6 +319,7 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
         num_KV_heads=2,
         num_pipelines=8,
         heads_interleaved=True,
+        kv_interleaved=True,
     ).resolved(from_name("npu2", n_cols=8))
     _, tasks = generated_sequence(op)
     assert [t.lane for t in tasks] == ["inQ", "inQ2", "inK", "inV", "memO", "memO2"] * 2
@@ -324,8 +327,8 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
     # Q: (heads 2 at stride d, blocks 2, rows 256 at stride 4d, d)
     assert (q0.sizes, q0.strides) == ("2, 2, 256, 64", f"64, {2 * 256 * 256}, 256, 1")
     assert q1.offset == q0.offset + 256 * 256
-    # K: the head's 1024 rows at stride 2d, re-read 4 times.
-    assert (k0.sizes, k0.strides) == ("4, 1, 1024, 64", "0, 0, 128, 1")
+    # K: the head's 16 blocks of 64 rows at stride 2d, re-read 4 times.
+    assert (k0.sizes, k0.strides) == ("4, 16, 64, 64", "0, 8192, 128, 1")
     # The second group starts at its heads.
     assert tasks[6].offset == 2 * 64 and tasks[8].offset == 64
 

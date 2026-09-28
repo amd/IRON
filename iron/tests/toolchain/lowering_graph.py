@@ -159,6 +159,7 @@ def _reorder(sizes, in_strides, out_strides, **kw):
                 num_KV_heads=p["G"],
                 num_pipelines=8,
                 heads_interleaved=True,
+                kv_interleaved=True,
             ),
             id="mha_in_the_projections_layout",
         ),

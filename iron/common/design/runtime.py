@@ -292,6 +292,15 @@ class Sequence(Transfers):
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
+        # A per-call offset or size lands in one descriptor, so the pattern
+        # must fit one: the compiler cannot split a descriptor a call patches.
+        if (offset_by is not None or sizes_by) and not aie_utils.ensure_current_device(
+            required=True
+        ).bd_limits(0, 0).fits(tap, buffer.dtype):
+            raise ValueError(
+                f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
+                f"offset or size, so it must fit one buffer descriptor, and does not"
+            )
         dynamic = offset_by is not None and offset_by.ssa is not None
         dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())
         if not dynamic:
@@ -307,19 +316,9 @@ class Sequence(Transfers):
                 **common,
             )
         # The dispatch-time form: the same pattern with the per-call scalars
-        # in place of the constants, regenerated per call. The compiler cannot
-        # split a descriptor it cannot read, so the pattern must fit one.
-        if (
-            not aie_utils.ensure_current_device(required=True)
-            .bd_limits(0, 0)
-            .fits(tap, buffer.dtype)
-        ):
-            raise ValueError(
-                f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
-                f"offset or size, so it must fit one buffer descriptor, and does not"
-            )
+        # in place of the constants, regenerated per call; the descriptor's
+        # length is the product mlir-aie takes of them.
         sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
-        transfer_len = prod(sizes[-3:])
         for dim, value in sizes_by.items():
             sizes[dim] = value.ssa
         offset: Any = tap.offset
@@ -334,7 +333,6 @@ class Sequence(Transfers):
             sizes=sizes,
             strides=strides,
             offset=offset,
-            transfer_len=transfer_len,
             **common,
         )
 

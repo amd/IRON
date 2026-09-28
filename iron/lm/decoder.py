@@ -205,6 +205,7 @@ class CausalLM(iron.Graph):
                 k.reshape(n, G, D),
                 v.reshape(n, G, D),
                 heads_interleaved=True,
+                kv_interleaved=True,
                 s_q=step.vector_size,
                 s_kv=step.vector_size,
             )

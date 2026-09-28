@@ -7,18 +7,18 @@ The array is ``num_pipelines`` three-stage pipelines (QK matmul, partial
 softmax, PV matmul), one per column, fed by a Q stream split across the
 pipelines on a memtile and by K and V streams every pipeline consumes. The
 block sizes, the head dimension and the pipeline count configure it; the
-sequence length and the head counts do not. The cores loop forever and
-read their trip counts from four values the sequence writes.
+sequence length and the head counts do not. The cores run one call at a
+time, reading their trip counts from seven values the sequence writes.
 
 The host ABI is Q and O as ``(num_heads, seq_pad, d)``, K and V as
-``(num_KV_heads, seq_pad, d)`` with the sequence padded to a multiple of
-``B_q * num_pipelines``. The sequence is an override: one task group per
-KV group that fills Q for every shim, fills that group's K and V, and
-drains O.
+``(num_KV_heads, kv_len, d)`` with the sequence padded to a multiple of
+``B_q * num_pipelines``. The queries are the last rows of the keys: a
+prompt's chunk attends over the cache it extends. The sequence is an
+override: one task group per KV group that fills Q for every shim, fills
+that group's K and V, and drains O.
 """
 
 import dataclasses
-import sys
 
 import numpy as np
 from aie.dialects.aie import AIEArch
@@ -34,6 +34,7 @@ from ml_dtypes import bfloat16
 from iron.common import (
     Extent,
     In,
+    Incompatible,
     Operator,
     Out,
     Shim,
@@ -67,6 +68,16 @@ class MHA(Operator):
                 extensive=True,
             ),
             Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
+            # A chunk over a cache: 2048 queries, the last rows of 8192 keys.
+            Case(
+                dict(
+                    num_heads=8,
+                    num_KV_heads=2,
+                    seq_len=2048,
+                    kv_len=8192,
+                    num_pipelines=8,
+                )
+            ),
         ],
         tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005),
     )
@@ -79,10 +90,15 @@ class MHA(Operator):
     # a shape gives seq_pad, from which seq_len follows when it is not given.
     seq_len: int = param(default=lambda op: op.seq_pad)
     seq_pad: int = param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
+    # The rows of K and V: a cache longer than the queries, whose last
+    # rows the queries are; left out, as many as Q's.
+    kv_len: int = param(default=lambda op: op.seq_pad)
     # The layout a projection GEMM produces, ``(seq, heads, d)`` with the
     # heads interleaved per token, read and written as it is: a head's block
     # is then a strided slice, and no copy reorders the heads to the front.
+    # One flag for Q and O, one for K and V, which may come from a cache.
     heads_interleaved: bool = param(default=False)
+    kv_interleaved: bool = param(default=False)
     # The head dimension: the width of every tile and the kernel's DIM_K.
     d: int = param(default=64)
     B_q: int = auto(64, array=True)
@@ -100,16 +116,12 @@ class MHA(Operator):
         via=Shim(4),
     )
     K = In(
-        select(
-            heads_interleaved, (seq_pad, num_KV_heads, d), (num_KV_heads, seq_pad, d)
-        ),
+        select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         via=Shim(5),
     )
     V = In(
-        select(
-            heads_interleaved, (seq_pad, num_KV_heads, d), (num_KV_heads, seq_pad, d)
-        ),
+        select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         via=Shim(6),
     )
@@ -119,37 +131,62 @@ class MHA(Operator):
         per=(q_shims,),
         via=Shim(7),
     )
-    # The padded length, or fewer rows per call (``Q[:n]`` in a graph). The
-    # DMAs stream every row either way; the cores attend over the blocks the
-    # bound covers and pass the rest through, so the quadratic work follows
-    # the call.
+    # The query rows, or fewer per call (``Q[:n]`` in a graph): Q and O
+    # stream every row; the cores compute the blocks the bound covers and
+    # pass the rest through.
     valid = Extent(seq_pad)
-    # The cores' trip counts, and the unpadded lengths for masking.
+    # The keys, or fewer per call (``K[:, :n]``): K and V stream only the
+    # blocks the bound covers, so the work follows the context.
+    kv_valid = Extent(kv_len)
+    # The cores' trip counts, in the order of their runtime-parameter words:
+    # the heads, the Q blocks per pipeline of each streamed and computed,
+    # the KV blocks per Q block, the unpadded lengths for masking (positions,
+    # so the queries' end is the keys'), and the block index of the first
+    # query.
+    heads = Value(np.int32, derive=lambda op: op.num_heads)
     q_blocks_per_pipeline = Value(
         np.int32, derive=lambda op: op.seq_pad // (op.B_q * op.num_pipelines)
     )
-    kv_blocks = Value(np.int32, derive=lambda op: op.seq_pad // op.B_kv)
-    s_q = Value(np.int32, derive=lambda op: op.valid_tokens)
-    s_kv = Value(np.int32, derive=lambda op: op.valid_tokens)
-    # Under a bound: the Q blocks per pipeline and the KV blocks per Q block
-    # the cores compute; the totals above are what they pass through.
     q_blocks_valid = Value(
         np.int32,
-        derive=lambda op: op.seq_padding(op.valid_tokens)
-        // (op.B_q * op.num_pipelines),
-        optional=True,  # nothing reads it unbounded
+        derive=lambda op: op.seq_padding(op.q_tokens) // (op.B_q * op.num_pipelines),
     )
-    kv_blocks_valid = Value(
-        np.int32, derive=lambda op: ceildiv(op.valid_tokens, op.B_kv), optional=True
-    )
+    kv_blocks = Value(np.int32, derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
+    s_q = Value(np.int32, derive=lambda op: op.kv_tokens)
+    s_kv = Value(np.int32, derive=lambda op: op.kv_tokens)
+    q_start = Value(np.int32, derive=lambda op: op.first_query_block)
 
     @property
-    def valid_tokens(self) -> int:
-        """The rows attended over: the call's bound, else ``seq_len``."""
-        return self.valid if "valid" in self.bound_extents else self.seq_len
+    def q_tokens(self) -> int:
+        """The query rows attended from: the call's bound, else ``seq_len``."""
+        valid = self.valid  # read first: it makes a derivation per call
+        return valid if "valid" in self.bound_extents else self.seq_len
+
+    @property
+    def kv_tokens(self) -> int:
+        """The keys attended over: the call's bound, else ``kv_len`` less the
+        padding Q has past its valid rows.
+        """
+        kv_valid, q_tokens = self.kv_valid, self.q_tokens  # extents first
+        if "kv_valid" in self.bound_extents:
+            return kv_valid
+        return self.kv_len - self.seq_pad + q_tokens
+
+    @property
+    def first_query_block(self) -> int:
+        """The position of Q's first row, in blocks: the queries are the
+        keys' last rows, and a block's position is what mha.cc masks by.
+        """
+        start = self.kv_tokens - self.q_tokens
+        if start < 0 or start % self.B_q:
+            raise ValueError(
+                f"MHA's queries start at key {start}, which is not a whole number "
+                f"of {self.B_q}-row blocks into the keys"
+            )
+        return start // self.B_q
 
     def extent_unit(self, buffer: str) -> int:
-        return 0  # nothing is shortened: the cores bound their compute
+        return 0  # no tiles-per-lane word: the sequence patches K and V itself
 
     # -- checks ----------------------------------------------------------------
 
@@ -194,6 +231,16 @@ class MHA(Operator):
         if self.seq_len <= 0:
             raise ValueError("seq_len must be greater than 0")
         self.check_derived("seq_pad")
+
+    def compatible(self) -> None:
+        # mha.cc's causal skip compares a KV block's index with a Q block's.
+        if self.B_q != self.B_kv:
+            raise Incompatible(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
+        if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
+            raise Incompatible(
+                f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
+                f"at least seq_pad ({self.seq_pad}): the queries are its last rows"
+            )
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
@@ -350,21 +397,34 @@ class MHA(Operator):
             )
             scaleOF.append(ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}"))
 
-        # Under a bound each core computes the Q blocks and, per Q block,
-        # the KV blocks the bound covers, then passes the rest of what the
-        # DMAs stream through untouched: the same acquires and releases,
-        # no kernel call. The unbounded bodies are as they were.
-        bounded = "valid" in self.bound_extents and target.image == "elf"
-        words = (
-            [
-                self.q_blocks_valid.param,
-                self.kv_blocks_valid.param,
-                self.s_q.param,
-                self.s_kv.param,
-            ]
-            if bounded
-            else []
+        # Each core computes, per head, the Q blocks the call's rows cover,
+        # over the KV blocks its keys cover, and passes the Q blocks past
+        # them through: the same acquires and releases, no kernel call, since
+        # Q and O stream every block. Its counts are the seven values below;
+        # a count the call sets is read from its scratchpad word on a full
+        # ELF, and else written into the core's runtime-parameter buffer.
+        # A worker's body is one call: it waits for the sequence to write
+        # the counts, reads them, and re-arms the barrier, which a wait does
+        # not consume; an xclbin's cores outlive the call, and would else
+        # start the next on these counts. The sequence cannot set it again
+        # before this call's O drains.
+        counts = (
+            "heads",
+            "q_blocks_per_pipeline",
+            "q_blocks_valid",
+            "kv_blocks",
+            "s_q",
+            "s_kv",
+            "q_start",
         )
+        per_call = [n for n in counts if target.image == "elf" and self.uses_value(n)]
+        params = [getattr(self, n).param for n in per_call]
+
+        def read(rtps, words):
+            return [
+                words[per_call.index(n)].read() if n in per_call else rtps[i]
+                for i, n in enumerate(counts)
+            ]
 
         def batched_matmul_qk(
             of_q,
@@ -376,45 +436,35 @@ class MHA(Operator):
             mha_rtps,
             barrier,
             idx_buffer,
-            *valid,
+            *words,
         ):
-            barrier.wait_for_value(1)
-            loop_idx_q = mha_rtps[0]
-            loop_idx_kv = mha_rtps[1]
-            q_valid = valid[0].read() if bounded else loop_idx_q
-            kv_valid = valid[1].read() if bounded else loop_idx_kv
-
-            def kv_block(elem_in_q, compute: bool):
-                elem_in_k = of_k.acquire(1)
-                elem_a_out = of_a_out.acquire(1)
-                if compute:
-                    zero(elem_a_out)
-                    matmul_QK(elem_in_q, elem_in_k, elem_a_out, idx_buffer)
-                of_k.release(1)
-                of_a_out.release(1)
-                if compute:
-                    idx_buffer[0] += 1
-
-            def q_block(compute: bool):
+            def q_block(compute: bool, kv_blocks):
                 elem_in_q = of_q.acquire(1)
-                for _ in range_(kv_valid if compute else loop_idx_kv):
-                    kv_block(elem_in_q, compute)
-                if bounded and compute:
-                    for _ in range_(loop_idx_kv - kv_valid):
-                        kv_block(elem_in_q, False)
+                for _ in range_(kv_blocks):
+                    elem_in_k = of_k.acquire(1)
+                    elem_a_out = of_a_out.acquire(1)
+                    if compute:
+                        zero(elem_a_out)
+                        matmul_QK(elem_in_q, elem_in_k, elem_a_out, idx_buffer)
+                    of_k.release(1)
+                    of_a_out.release(1)
+                    if compute:
+                        idx_buffer[0] += 1
                 if compute:
                     idx_buffer[0] = 0
                     idx_buffer[1] += num_pipelines
                 of_q.release(1)
 
-            for _ in range_(sys.maxsize):
+            barrier.wait_for_value(1)
+            heads, q_blocks, q_valid, kv_blocks, _, _, q_start = read(mha_rtps, words)
+            barrier.release_with_value(1)
+            for _ in range_(heads):
                 idx_buffer[0] = 0
-                idx_buffer[1] = q_block_bias
+                idx_buffer[1] = q_start + q_block_bias
                 for _ in range_(q_valid):
-                    q_block(True)
-                if bounded:
-                    for _ in range_(loop_idx_q - q_valid):
-                        q_block(False)
+                    q_block(True, kv_blocks)
+                for _ in range_(q_blocks - q_valid):
+                    q_block(False, kv_blocks)
 
         def softmax(
             of_in_a,
@@ -428,62 +478,51 @@ class MHA(Operator):
             barrier,
             idx_buffer,
             scale_buffer,
-            *valid,
+            *words,
         ):
             # The index buffer counts how many Q and KV blocks this worker has
             # processed; from it the kernel infers its position in A and P.
-            barrier.wait_for_value(1)
-            loop_idx_q = mha_rtps[0]
-            loop_idx_kv = mha_rtps[1]
-            S_q_effective = valid[2].read() if bounded else mha_rtps[2]
-            S_kv_effective = valid[3].read() if bounded else mha_rtps[3]
-            q_valid = valid[0].read() if bounded else loop_idx_q
-            kv_valid = valid[1].read() if bounded else loop_idx_kv
-
-            def kv_block(compute: bool):
-                elt_of_out_p = of_out_p.acquire(1)
-                elt_of_in_a = of_in_a.acquire(1)
-                elt_of_out_scale = of_out_scale.acquire(1)
-                if compute:
-                    partial_softmax(
-                        elt_of_in_a,
-                        elt_of_out_p,
-                        scale_buffer,
-                        idx_buffer,
-                        inv_scale,
-                        B_q,
-                        B_kv,
-                        S_q_effective,
-                        S_kv_effective,
-                    )
-                    memcopy_kernel_scale(scale_buffer, elt_of_out_scale, 4 * B_q)
-                of_in_a.release(1)
-                of_out_p.release(1)
-                of_out_scale.release(1)
-                if compute:
-                    idx_buffer[0] += 1
-
-            def q_block(compute: bool):
+            def q_block(compute: bool, kv_blocks, s_q, s_kv):
                 if compute:
                     init_scale_buffer(scale_buffer, B_q)
-                for _ in range_(kv_valid if compute else loop_idx_kv):
-                    kv_block(compute)
-                if bounded and compute:
-                    for _ in range_(loop_idx_kv - kv_valid):
-                        kv_block(False)
+                for _ in range_(kv_blocks):
+                    elt_of_out_p = of_out_p.acquire(1)
+                    elt_of_in_a = of_in_a.acquire(1)
+                    elt_of_out_scale = of_out_scale.acquire(1)
+                    if compute:
+                        partial_softmax(
+                            elt_of_in_a,
+                            elt_of_out_p,
+                            scale_buffer,
+                            idx_buffer,
+                            inv_scale,
+                            B_q,
+                            B_kv,
+                            s_q,
+                            s_kv,
+                        )
+                        memcopy_kernel_scale(scale_buffer, elt_of_out_scale, 4 * B_q)
+                    of_in_a.release(1)
+                    of_out_p.release(1)
+                    of_out_scale.release(1)
+                    if compute:
+                        idx_buffer[0] += 1
                 if compute:
                     idx_buffer[0] = 0
                     idx_buffer[1] += num_pipelines
 
-            for _ in range_(sys.maxsize):
-                # Required, otherwise the buffer is kept across warmup.
+            barrier.wait_for_value(1)
+            heads, q_blocks, q_valid, kv_blocks, s_q, s_kv, q_start = read(
+                mha_rtps, words
+            )
+            barrier.release_with_value(1)
+            for _ in range_(heads):
                 idx_buffer[0] = 0
-                idx_buffer[1] = q_block_bias
+                idx_buffer[1] = q_start + q_block_bias
                 for _ in range_(q_valid):
-                    q_block(True)
-                if bounded:
-                    for _ in range_(loop_idx_q - q_valid):
-                        q_block(False)
+                    q_block(True, kv_blocks, s_q, s_kv)
+                for _ in range_(q_blocks - q_valid):
+                    q_block(False, kv_blocks, s_q, s_kv)
 
         def batched_matmul_pv(
             of_p,
@@ -497,27 +536,14 @@ class MHA(Operator):
             mha_rtps,
             barrier,
             idx_buffer,
-            *valid,
+            *words,
         ):
             barrier.wait_for_value(1)
-            loop_idx_q = mha_rtps[0]
-            loop_idx_kv_total = mha_rtps[1]
-            q_valid = valid[0].read() if bounded else loop_idx_q
-            loop_idx_kv = valid[1].read() if bounded else loop_idx_kv_total
-
-            def pass_through(n):
-                # KV blocks past the bound: consumed, not attended over.
-                for _ in range_(n):
-                    of_p.acquire(1)
-                    of_v.acquire(1)
-                    of_scale.acquire(1)
-                    of_p.release(1)
-                    of_v.release(1)
-                    of_scale.release(1)
-
-            for _ in range_(sys.maxsize):
+            heads, q_blocks, q_valid, loop_idx_kv, _, _, q_start = read(mha_rtps, words)
+            barrier.release_with_value(1)
+            for _ in range_(heads):
                 idx_buffer[0] = 0
-                idx_buffer[1] = q_block_bias
+                idx_buffer[1] = q_start + q_block_bias
 
                 for _ in range_(q_valid):
                     elem_o_out = of_o_out.acquire(1)
@@ -592,26 +618,29 @@ class MHA(Operator):
                         rescale_O(elem_o_out, elt_of_out_scale, B_q, idx_buffer)
                         idx_buffer[0] += 1
 
-                    if bounded:
-                        pass_through(loop_idx_kv_total - loop_idx_kv)
                     idx_buffer[0] = 0
                     idx_buffer[1] += num_pipelines
 
                     of_o_out.release(1)
 
-                if bounded:
-                    for _ in range_(loop_idx_q - q_valid):
-                        of_o_out.acquire(1)  # a padding block of O: left as is
-                        pass_through(loop_idx_kv_total)
-                        of_o_out.release(1)
+                for _ in range_(q_blocks - q_valid):
+                    of_o_out.acquire(1)  # a padding block of O: left as is
+                    for _ in range_(loop_idx_kv):
+                        of_p.acquire(1)
+                        of_v.acquire(1)
+                        of_scale.acquire(1)
+                        of_p.release(1)
+                        of_v.release(1)
+                        of_scale.release(1)
+                    of_o_out.release(1)
 
         # One runtime-parameter buffer and one barrier per worker, since each
-        # is placed with its core. The preamble writes the four residents into
-        # every buffer and sets every barrier.
+        # is placed with its core. The preamble writes the counts no call sets
+        # into every buffer and sets every barrier.
         mha_rtps_list = [
             [
                 Buffer(
-                    np.ndarray[(4,), np.dtype[np.int32]],
+                    np.ndarray[(len(counts),), np.dtype[np.int32]],
                     name=f"mha_rtpss_{i}_stage{j}",
                     use_write_rtp=True,
                 )
@@ -643,10 +672,9 @@ class MHA(Operator):
                         worker_barrier_list[0][i],
                         idx_buffer_qk,
                     ]
-                    + words,
+                    + params,
                     stack_size=0xD00,
                     tile=Tile(col=i, row=2),
-                    while_true=False,
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -673,10 +701,9 @@ class MHA(Operator):
                         idx_buffer_softmax,
                         scale_buffer_softmax,
                     ]
-                    + words,
+                    + params,
                     stack_size=0xD00,
                     tile=Tile(col=i, row=3),
-                    while_true=False,
                 )
             )
             idx_buffer_pv = Buffer(
@@ -699,10 +726,9 @@ class MHA(Operator):
                         worker_barrier_list[2][i],
                         idx_buffer_pv,
                     ]
-                    + words,
+                    + params,
                     stack_size=0xD00,
                     tile=Tile(col=i, row=4),
-                    while_true=False,
                 )
             )
 
@@ -723,43 +749,48 @@ class MHA(Operator):
         self.V.bind(inV.prod(tile=shim_of(self.V)))
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
-        self.q_blocks_per_pipeline.bind(flat_rtps, 0)
-        self.kv_blocks.bind(flat_rtps, 1)
-        if not bounded:  # else the cores read the lengths per call
-            self.s_q.bind(flat_rtps, 2)
-            self.s_kv.bind(flat_rtps, 3)
+        for i, name in enumerate(counts):
+            if name not in per_call:
+                getattr(self, name).bind(flat_rtps, i)
 
         return matmul_workers + softmax_workers + matmul_pv_workers
 
     def ops(self) -> int:
-        """Q K^T and its product with V, causal: half of each, per head."""
-        return 2 * self.num_heads * self.seq_len**2 * self.d
+        """Q K^T and its product with V, causal, per head: a query attends
+        over the keys up to its own, ``kv_len - seq_pad`` before Q's first.
+        """
+        start = self.kv_len - self.seq_pad
+        return 2 * self.num_heads * self.d * self.seq_len * (self.seq_len + 2 * start)
 
     def reference(self, Q, K, V, s_q=None, s_kv=None):
         """CPU reference: causal attention per head, K and V repeated over each
-        query group. Rows past ``seq_len`` (the padding) come out as zeros;
-        the real rows never attend to them, causality masks them. In the
-        interleaved layout the operands are ``(seq, heads, d)`` and so is O.
-        ``s_q``/``s_kv`` are the per-call lengths when a graph binds them.
+        query group, the queries the keys' last rows: query row ``r`` is at
+        position ``len(K) - len(Q) + r`` and attends over the keys up to it.
+        ``s_q`` and ``s_kv`` are positions, the per-call lengths when a graph
+        binds them: query rows from ``s_q`` on (by default Q's padding past
+        ``seq_len``) come out as zeros, and keys from ``s_kv`` on are masked.
+        In an interleaved layout the operands are ``(seq, heads, d)``.
         """
         # Not the linalg.mha contracts: each is one tile of an online softmax,
         # and the operator is whole attention.
-        kv_heads = self.num_KV_heads
-        seq_len = self.seq_len if s_q is None else int(s_q)
-        keys = int(s_kv) if s_kv is not None else None
         if self.heads_interleaved:
-            Q, K, V = (np.swapaxes(t, 0, 1) for t in (Q, K, V))
-        groups = self.num_heads // kv_heads
+            Q = np.swapaxes(Q, 0, 1)
+        if self.kv_interleaved:
+            K, V = (np.swapaxes(t, 0, 1) for t in (K, V))
+        groups = self.num_heads // self.num_KV_heads
         K = np.repeat(K, groups, axis=0)
         V = np.repeat(V, groups, axis=0)
         # Causal scaled-dot-product attention, in float32 and rounded once.
         # Against torch's FLASH backend this differs by under 1e-6, which is
         # less than torch's own FLASH and MATH backends differ from each other.
         q, k, v = (t.astype(np.float32) for t in (Q, K, V))
-        seq = k.shape[1]
-        mask = np.triu(np.full((seq, seq), -np.inf, dtype=np.float32), 1)
-        if keys is not None and keys < seq:
-            mask[:, keys:] = -np.inf  # keys past the call's length
+        start = k.shape[1] - q.shape[1]
+        s_q = start + self.seq_len if s_q is None else int(s_q)
+        s_kv = k.shape[1] if s_kv is None else int(s_kv)
+        position = start + np.arange(q.shape[1])[:, None]
+        key = np.arange(k.shape[1])
+        mask = np.where((key > position) | (key >= s_kv), -np.inf, 0)
+        mask = mask.astype(np.float32)
         scale = np.sqrt(np.float32(self.d))
         out = np.empty(Q.shape, dtype=Q.dtype)
         # A head at a time: at 16K rows one head's scores are 1 GiB of
@@ -768,7 +799,7 @@ class MHA(Operator):
             scores = q[h] @ k[h].T / scale + mask
             e = np.exp(scores - scores.max(axis=-1, keepdims=True))
             out[h] = (e / e.sum(axis=-1, keepdims=True)) @ v[h]
-        out[:, seq_len:] = 0
+        out[:, max(s_q - start, 0) :] = 0
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))
         return out
@@ -788,21 +819,25 @@ class MHA(Operator):
         re-read once per (head, block) from the descriptor's iteration
         slot: the same bytes in the same order, six descriptors a group.
         """
-        kv_heads, S = self.num_KV_heads, self.seq_pad
+        kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
         rows = self.join_rows  # Q rows each shim carries per block
-        blocks = S // (rows * self.q_shims)  # per pipeline
-        d = self.d
+        blocks = self.seq_pad // (rows * self.q_shims)  # per pipeline
+        B_kv, d = self.B_kv, self.d
+        # K and V stream the blocks the keys cover, a call's by its bound.
+        kv_blocks = ceildiv(self.kv_tokens, B_kv)
+        kv_by = {1: self.value("kv_blocks")} if self.uses_value("kv_blocks") else None
 
-        def strides_of(buffer):
+        def strides_of(buffer, interleaved):
             # (head, row) element strides of a (heads, seq, d) or, interleaved
             # per token, (seq, heads, d) buffer.
-            n_heads = buffer.shape[1] if self.heads_interleaved else buffer.shape[0]
-            return (d, n_heads * d) if self.heads_interleaved else (S * d, d)
+            if interleaved:
+                return d, buffer.shape[1] * d
+            return buffer.shape[1] * d, d
 
         def q_rows(buffer, head0, shim):
             # The group's heads, each block's `rows` rows for this shim.
-            head_s, row_s = strides_of(buffer)
+            head_s, row_s = strides_of(buffer, self.heads_interleaved)
             return TensorAccessPattern(
                 buffer.shape,
                 head0 * head_s + shim * rows * row_s,
@@ -811,10 +846,14 @@ class MHA(Operator):
             )
 
         def kv_rows(buffer, kv_head):
-            # The head's rows, re-read once per (head, block) of the group.
-            head_s, row_s = strides_of(buffer)
+            # The head's blocks, re-read once per (head, block) of the group;
+            # a call patches their count.
+            head_s, row_s = strides_of(buffer, self.kv_interleaved)
             return TensorAccessPattern(
-                buffer.shape, kv_head * head_s, [group * blocks, S, d], [0, row_s, 1]
+                buffer.shape,
+                kv_head * head_s,
+                [group * blocks, kv_blocks, B_kv, d],
+                [0, B_kv * row_s, row_s, 1],
             )
 
         for kv_head in range(kv_heads):
@@ -822,7 +861,7 @@ class MHA(Operator):
             with rt.group():
                 for shim in range(self.q_shims):
                     rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim))
-                rt.fill(self.K, kv_rows(self.K, kv_head))
-                rt.fill(self.V, kv_rows(self.V, kv_head))
+                rt.fill(self.K, kv_rows(self.K, kv_head), size_by=kv_by)
+                rt.fill(self.V, kv_rows(self.V, kv_head), size_by=kv_by)
                 for shim in range(self.q_shims):
                     rt.drain(self.O.lane(shim), q_rows(self.O, head0, shim))

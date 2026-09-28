@@ -522,6 +522,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
     assert mha.bound_values == {
         "valid": "rows",
+        "kv_valid": "rows",
         "s_q": "vector_size",
         "s_kv": "vector_size",
     }
@@ -873,10 +874,12 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     assert rep.derived_at("valid_seq_x", valid_seq=12) == 12  # the stack axis itself
 
 
-def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
+def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     """A bound reaches GEMM through A's rows and MHA through Q's padded
-    length (a select shape): each derives the counts its cores compute per
-    call, makes no word of tiles per lane, and keeps every descriptor.
+    length and K's and V's (select shapes): GEMM derives the counts its
+    cores compute per call and keeps every descriptor; MHA derives its
+    counts and the first query block, and patches its K and V descriptors'
+    block count.
     """
 
     class G(iron.Graph):
@@ -887,6 +890,7 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
                 h.reshape(512, 4, 64),
                 h.reshape(512, 4, 64),
                 heads_interleaved=True,
+                kv_interleaved=True,
                 num_pipelines=2,
             )
 
@@ -894,19 +898,16 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
 
     t = g.trace(x=(512, 64), w=(256, 64))
     gemm, mha = t.operators
-    assert gemm.bound_extents == {"valid": "n"} and mha.bound_extents == {"valid": "n"}
+    assert gemm.bound_extents == {"valid": "n"}
+    assert mha.bound_extents == {"valid": "n", "kv_valid": "n"}
     gemm, mha = (op.resolved(aie_utils.get_current_device()) for op in (gemm, mha))
     assert [v.name for v in gemm.values] == ["valid", "n_tiles_valid"]
     assert gemm.derived_at("n_tiles_valid", valid=100) == 1 * (256 // gemm.mem_tile_n)
-    assert [v.name for v in mha.values] == [
-        "valid",
-        "s_q",
-        "s_kv",
-        "q_blocks_valid",
-        "kv_blocks_valid",
-    ]
-    assert mha.derived_at("s_q", valid=100) == 100
-    assert mha.derived_at("q_blocks_valid", valid=100) == 1  # 128 padded / (64 x 2)
-    assert mha.derived_at("kv_blocks_valid", valid=100) == 2  # ceil(100 / 64)
+    at = dict(valid=100, kv_valid=100)
+    assert mha.derived_at("s_q", **at) == mha.derived_at("s_kv", **at) == 100
+    assert mha.derived_at("q_blocks_valid", **at) == 1  # 128 padded / (64 x 2)
+    assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
+    assert mha.derived_at("q_start", **at) == 0
+    assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
     (out,) = t.outputs
     assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
