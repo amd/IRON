@@ -16,9 +16,9 @@ stream-dse needs two inputs, and IRON writes both from one source.
 
 | | Source | Built by |
 | --- | --- | --- |
-| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`iron/common/stream/workload.py`](../../common/stream/workload.py) |
-| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`iron/common/stream/mapping.py`](../../common/stream/mapping.py) |
-| Kernels (`.cc`) | the [mlir-aie `aie_kernels` library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) | the registry in [`iron/common/stream/ops.py`](../../common/stream/ops.py) |
+| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`stream/workload.py`](./stream/workload.py) |
+| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`stream/mapping.py`](./stream/mapping.py) |
+| Kernels (`.cc`) | the [mlir-aie `aie_kernels` library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) | the registry in [`stream/ops.py`](./stream/ops.py) |
 
 `reference.py` is the single source of truth. Running it produces the golden output the
 test compares against; exporting it produces the workload the design is generated from.
@@ -27,7 +27,7 @@ them, so workload and mapping cannot disagree. Both files are written into the
 experiment's output directory at build time; nothing is committed.
 
 stream-dse returns one MLIR design per fusion group. IRON takes it from there:
-`iron/common/sequence.py` fuses the designs into a single module and compiles it with
+`iron/common/image/` fuses the designs into a single module and compiles it with
 `aiecc` into one full ELF.
 
 Nothing crosses the boundary except those files, which is why stream-dse can be an
@@ -45,7 +45,7 @@ holds. The groups are `stream_design.GROUP_LAYERS`.
 | 5 | one per layer | layer by layer, each taking the whole array in turn |
 
 k=1 and k=2 fuse several layers onto each core, so intermediates stay on chip. k=5 is
-the shape [`swiglu_prefill`](../swiglu_prefill) uses, every layer its own design.
+the shape [`SwiGLU`](../../lm/layers.py) takes, every layer its own design.
 
 A core holds the operands of every layer in its group, so the kernel tile a group can
 afford shrinks as more layers fuse onto it. That is why the tile is chosen per `k`
@@ -63,7 +63,8 @@ up projections are the same design, so the ELF holds four rather than five. Set
 ## Expected performance
 
 Warm dispatch on one callable, 20 dispatches, seq 256 / embedding 512 / hidden 2048, on
-an idle NPU2. `swiglu_prefill` is the hand-written operator at the same shape.
+an idle NPU2. `swiglu_prefill` is the hand-written graph at the same shape (since
+merged into `SwiGLU`, which projects through a column-major weight).
 
 | Design | Median (us) | Relative |
 | --- | --- | --- |
@@ -115,8 +116,8 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 
 ## Adding another operator
 
-One `StreamKernel` plus one `TORCH_OPS` entry in `iron/common/stream/ops.py`, pointing
-at mlir-aie's `aie_kernels/<dir>/<name>.cc`, plus that operator's own placement. The
+One `StreamKernel` plus one `TORCH_OPS` entry in `stream/ops.py`, pointing
+at mlir-aie's `aie_kernels/<family>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.
 

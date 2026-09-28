@@ -3,7 +3,7 @@
 
 """Weight packing shared by the FastFlowLM-derived operators.
 
-Both ``flm.GEMM`` and ``flm.MMPrebuilt`` consume B pre-packed into the order
+Both flm.GEMM overlays, the port and the shipped image, consume B pre-packed into the order
 the compute tiles read it, so their B transfers are plain linear descriptors.
 The reorder is deliberately the caller's job: expressing it as a strided
 descriptor over an unpacked B leaves an innermost run of ``t`` bf16 values, so
@@ -13,55 +13,8 @@ belongs here.
 """
 
 import numpy as np
-import torch
-
-
-def f32_to_bfp16ebs8(a, round_conv_even=True):
-    """float32 -> bfp16ebs8, matching the hardware's to_v64bfp16ebs8.
-
-    Blocks of 8 share the max f32 exponent in the block; each mantissa is the
-    24-bit magnitude with the implicit bit made explicit, shifted right by
-    17 + (maxExp - exp) to land on the shared exponent.
-
-    That shift OBEYS THE CORE'S ROUNDING MODE. mlir-aie's reference
-    ``floatToBfp16`` (``programming_examples/ml/block_datatypes/helper.h``)
-    hardcodes truncation and says AIE2P always truncates -- true only of the
-    power-up ``floor`` mode. The operators here call ``set_rounding(conv_even)``,
-    so the kernel's own conversion rounds to nearest with ties to even, and
-    matching it here is what makes packing B on the host numerically free.
-    Measured on hardware: 14.9375 -> 15 (rounds up) while 106.5 -> 106 and
-    94.5 -> 94 (ties to even), which truncation cannot produce.
-
-    Layout per block: one shared-exponent byte then the 8 mantissa bytes.
-    """
-    flat = np.ascontiguousarray(a, dtype=np.float32).reshape(-1, 8)
-    u = flat.view(np.uint32)
-    sign = (u & 0x80000000) != 0
-    exp = ((u >> 23) & 0xFF).astype(np.int32)
-    man = (u & 0x007FFFFF).astype(np.uint32)
-    man = np.where(exp != 0, man | 0x00800000, man).astype(np.uint32)
-    max_exp = exp.max(axis=1, keepdims=True)
-    # signed magnitude; rounding below must see the sign to tie correctly
-    mag = np.where(sign, -man.astype(np.int64), man.astype(np.int64))
-    # The two shifts compose: 17 to keep 7 mantissa bits plus the sign, then
-    # (maxExp - exp) to bring the value onto the block's shared exponent.
-    shift = (max_exp - exp).astype(np.int64)
-    total = np.clip(17 + shift, 0, 62)
-    if round_conv_even:
-        # np.rint is round-half-to-even. man < 2**24 and the divisor is a power
-        # of two, so the quotient is exact in float64 and the only rounding is
-        # the intended one.
-        v8 = np.rint(mag.astype(np.float64) / np.exp2(total.astype(np.float64)))
-    else:
-        v8 = mag >> total
-    v8 = np.where(shift >= 32, np.where(sign, -1, 0), v8)
-    # Rounding can carry the block's largest magnitude from 127 to 128, which
-    # does not fit the signed 8-bit mantissa; saturate rather than wrap.
-    v8 = np.clip(v8, -128, 127)
-    out = np.empty((flat.shape[0], 9), dtype=np.uint8)
-    out[:, 0] = max_exp[:, 0].astype(np.uint8)
-    out[:, 1:] = v8.astype(np.int8).view(np.uint8)
-    return torch.from_numpy(out.reshape(-1))
+from aie.utils import bfp
+from ml_dtypes import bfloat16
 
 
 def pack_b(
@@ -89,7 +42,7 @@ def pack_b(
     already happened, and makes B 9 bytes per 8 values instead of 16.
 
     ``overlay_order`` swaps the two within-block k axes (``i`` and ``s_in``
-    below). It exists solely for :class:`iron.operators.flm.MMPrebuilt`, whose
+    below). It exists solely for the shipped image (:mod:`iron.operators.flm.gemm.shipped`), whose
     B stream is read by FastFlowLM's shipped ``mm.xclbin``, not by a kernel
     built here: that overlay's own loop nest sweeps ``s_in`` outer and ``i``
     inner, the reverse of ``mm_fused_mmul_2x2``'s ``i``-outer loop. The
@@ -110,17 +63,21 @@ def pack_b(
     if not bfp16:
         if overlay_order:
             #   -> (cb, kb, kslice, tb, s_in, i, t_in)
-            out = blocked.permute(4, 0, 1, 5, 3, 2, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 3, 2, 6)).reshape(
+                -1
+            )
         else:
             #   -> (cb, kb, kslice, tb, i, s_in, t_in)
             # Row-major s x t within the block, which is what the plain mmul
             # loads.
-            out = blocked.permute(4, 0, 1, 5, 2, 3, 6).reshape(-1).contiguous()
+            out = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 3, 6)).reshape(
+                -1
+            )
         # Callers may pass B in whatever dtype they have it in (e.g. a model's
-        # native f32 weight); the kernels and get_arg_spec() assume the result
+        # native f32 weight); the kernels and the declared buffers assume the result
         # is bf16, so guarantee that here rather than silently returning
         # whatever B.dtype was.
-        return out.to(torch.bfloat16)
+        return out.astype(bfloat16)
     #   -> (cb, kb, kslice, tb, i, t_in, s_in)
     # t-major within the block: the mixed mmul hands B straight to
     # mac_8x8_8x8T without the transpose the bf16 form applies, so the transpose
@@ -128,8 +85,13 @@ def pack_b(
     # exponent (8 consecutive k for one n) adjacent, which is what makes the
     # block grouping match the kernel's. Grouping over n instead measures
     # 1.95e-02 against this layout's 2.69e-04.
-    blocked = blocked.permute(4, 0, 1, 5, 2, 6, 3).reshape(-1, 8).contiguous()
-    return f32_to_bfp16ebs8(blocked.float().numpy(), round_conv_even=round_conv_even)
+    #
+    # The kernels call set_rounding(conv_even), so their own conversion rounds
+    # to nearest, ties to even (on hardware 14.9375 -> 15, 106.5 -> 106, 94.5
+    # -> 94); packing B in that mode is what makes it numerically free.
+    blocked = np.ascontiguousarray(blocked.transpose(4, 0, 1, 5, 2, 6, 3))
+    rounding = "conv_even" if round_conv_even else "floor"
+    return bfp.encode(blocked.reshape(-1).astype(np.float32), rounding=rounding)
 
 
 def packed_b_size(K, N, bfp16):

@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format
-          pip install reuse black
+          pip install reuse black ruff==0.15.8 pyright==1.1.414
 
       - name: Check Licenses
         if: success() || failure()
@@ -43,3 +43,11 @@ jobs:
         run: |
           python scripts/clang-format-wrapper.py --diff 
           python scripts/clang-format-wrapper.py --check
+
+      - name: Lint Python
+        if: success() || failure()
+        run: ruff check
+
+      - name: Type-check Python
+        if: success() || failure()
+        run: pyright

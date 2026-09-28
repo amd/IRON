@@ -4,7 +4,19 @@ SPDX-PackageSupplier = "Advanced Micro Devices, Inc."
 SPDX-PackageDownloadLocation = "https://github.com/amd/IRON"
 
 [[annotations]]
-path = "iron/applications/llama_3.2_1b/prompt.txt"
+path = "iron/lm/prompt.txt"
 precedence = "closest"
 SPDX-FileCopyrightText = "Public Domain"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ["iron/lm/llama3/profiles/*.json", "iron/tests/common/*.json"]
+precedence = "closest"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "iron/tests/toolchain/patches/*.patch"
+precedence = "closest"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
+SPDX-License-Identifier = "Apache-2.0"

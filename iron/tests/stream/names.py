@@ -5,15 +5,14 @@
 """The names the design is built from must be the golden reference's names.
 
 Every tensor the operator exports, maps and wires is named once, in
-:mod:`iron.operators.swiglu_prefill_stream.reference`, using the vocabulary the
-shared golden reference uses for the same tensors. These tests pin that
+:mod:`iron.operators.swiglu_prefill_stream.reference`, using the vocabulary its
+golden reference uses for the same tensors. These tests pin that
 correspondence, and pin that the mapping and the fused-group wiring take their
 names from the exported graph rather than restating them.
 """
 
 import pytest
 
-from iron.operators.swiglu_decode.reference import generate_golden_reference
 from iron.operators.swiglu_prefill_stream import reference
 
 SHAPE = dict(M=8, K=8, N=16)
@@ -21,7 +20,7 @@ SHAPE = dict(M=8, K=8, N=16)
 
 @pytest.fixture(scope="module")
 def golden_keys():
-    return set(generate_golden_reference(**SHAPE))
+    return set(reference.generate_golden_reference(**SHAPE))
 
 
 @pytest.mark.parametrize("name", reference.TENSOR_NAMES)
@@ -35,7 +34,7 @@ def test_module_parameters_cover_the_golden_weights():
 
 
 def test_golden_weights_load_into_the_module():
-    golden = generate_golden_reference(**SHAPE)
+    golden = reference.generate_golden_reference(**SHAPE)
     module = reference.swiglu_module(SHAPE["K"], SHAPE["N"], golden)
     for name in reference.WEIGHTS:
         assert getattr(module, name).equal(golden[name])
@@ -43,8 +42,9 @@ def test_golden_weights_load_into_the_module():
 
 def test_module_computes_the_golden_reference():
     """The design is generated from this module and the result is checked against
-    the golden reference, so the two have to be the same computation."""
-    golden = generate_golden_reference(**SHAPE)
+    the golden reference, so the two have to be the same computation.
+    """
+    golden = reference.generate_golden_reference(**SHAPE)
     module = reference.swiglu_module(SHAPE["K"], SHAPE["N"], golden)
     assert module(golden[reference.INPUT]).equal(golden[reference.OUTPUT])
 

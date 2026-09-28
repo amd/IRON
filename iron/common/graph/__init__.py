@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Graphs: a :class:`Graph` subclass's ``body`` traced on handles.
+
+Inputs are ``body``'s positional parameters, outputs its return values,
+weights and state (an :func:`state`) what the instance holds, named by
+attribute path (a weight the body indexes or reshapes is a
+:func:`weight`), and per-call scalars its keyword-only parameters
+annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. Operators are called on handles:
+``GEMV(w, h)`` infers its extents from its arguments (operators with one
+``array_key`` share an array), and an explicit instance ``q(w, h)`` is
+applied the same way.
+
+    class Decode(iron.Graph):
+        def __init__(self, w):
+            self.w = w
+            self.kv = iron.state((n_kv, MAX, head_dim))
+
+        def body(self, x, angles, *, pos: Scratchpad[np.int32]):
+            h = RMSNorm(x, weight=self.w.norm)
+            k = RoPE(GEMV(self.w.k, h), angles)
+            Copy(k, self.kv[:, pos])
+            return GEMV(self.w.o, h)
+
+    net = Decode(w).compile(dev, x=(1, emb), angles=(1, head_dim))
+    logits = net(x_tok, ang_tok, pos=n)
+
+Tracing produces a :class:`TracedGraph`: the runlist, the buffer names and
+sizes, the value bindings. It is pure bookkeeping and needs no toolchain.
+:meth:`Graph.compile` hands that to :class:`OperatorSequence` for
+the image (a fused ELF on NPU2, per-step xclbins on NPU1) and returns a
+:class:`CompiledGraph` to call. Calling an uncompiled graph with real
+tensors compiles for their shapes, prints a note, and dispatches.
+"""
+
+from .compiled import CompiledGraph, Graph
+from .handle import Handle, Value, is_operand, state, weight
+from .trace import TracedGraph, Tracer
+
+__all__ = [
+    "CompiledGraph",
+    "Graph",
+    "Handle",
+    "TracedGraph",
+    "Tracer",
+    "Value",
+    "is_operand",
+    "state",
+    "weight",
+]

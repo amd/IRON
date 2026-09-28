@@ -4,7 +4,7 @@
 """FLM's tile selection must leave room for the linked activation LUTs."""
 
 import pytest
-from aie.iron.device import NPU1, NPU2
+from aie.iron.device import from_name
 
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
@@ -25,24 +25,24 @@ from iron.operators.flm.gemm.design import (
 @pytest.mark.parametrize(
     "device,b_bytes,tile_n,expected",
     [
-        (NPU1(), 2, 64, (32, 1)),
-        (NPU1(), 2, 128, (32, 2)),
-        (NPU2(), BFP16_GROUP_BYTES / BFP16_GROUP, 64, (32, 2)),
-        (NPU2(), BFP16_GROUP_BYTES / BFP16_GROUP, 128, (64, 2)),
+        ("npu1", 2, 64, (32, 1)),
+        ("npu1", 2, 128, (32, 2)),
+        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 64, (32, 2)),
+        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 128, (64, 2)),
     ],
 )
 def test_default_tiles_account_for_static_memory(device, b_bytes, tile_n, expected):
     ct_k = CT_MAX_K_FOR_N[tile_n]
-    budget = l1_budget(device)
+    budget = l1_budget(from_name(device, n_cols={"npu1": 4, "npu2": 8}[device]))
     assert _default_l1(tile_n, ct_k, b_bytes, budget) == expected
     tile_ma, b_depth = expected
     assert _b_depth_for(tile_ma, tile_n, ct_k, b_bytes, budget) == b_depth
 
 
 def test_explicit_aie2_tile_falls_back_to_single_buffered_b():
-    assert _b_depth_for(16, 64, 128, 2, l1_budget(NPU1())) == 1
+    assert _b_depth_for(16, 64, 128, 2, l1_budget(from_name("npu1", n_cols=4))) == 1
     with pytest.raises(ValueError, match="does not fit L1"):
-        _b_depth_for(64, 64, 128, 2, l1_budget(NPU1()))
+        _b_depth_for(64, 64, 128, 2, l1_budget(from_name("npu1", n_cols=4)))
 
 
 @pytest.mark.parametrize("tile_n", CT_MAX_K_FOR_N)
@@ -62,9 +62,23 @@ def test_aie2_tile_validation_includes_lut_data(tile_n, tile_ma, m_chunk):
     ]
     if fitting_depths:
         assert (
-            _b_depth_for(tile_ma, tile_n, ct_k, 2, l1_budget(NPU1()), m_chunk)
+            _b_depth_for(
+                tile_ma,
+                tile_n,
+                ct_k,
+                2,
+                l1_budget(from_name("npu1", n_cols=4)),
+                m_chunk,
+            )
             == fitting_depths[0]
         )
     else:
         with pytest.raises(ValueError, match="does not fit L1"):
-            _b_depth_for(tile_ma, tile_n, ct_k, 2, l1_budget(NPU1()), m_chunk)
+            _b_depth_for(
+                tile_ma,
+                tile_n,
+                ct_k,
+                2,
+                l1_budget(from_name("npu1", n_cols=4)),
+                m_chunk,
+            )

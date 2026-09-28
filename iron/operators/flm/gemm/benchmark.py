@@ -10,7 +10,7 @@ Up to three implementations run per shape, on identical inputs:
   gemm     :class:`iron.operators.GEMM` at its defaults, which are the same
            emulated-bfp16 mmul and conv_even rounding, so the comparison is
            like-for-like rather than against a more accurate, slower build
-  prebuilt :class:`iron.operators.flm.MMPrebuilt`, FastFlowLM's shipped
+  prebuilt ``Shipped(...)`` (:mod:`iron.operators.flm.gemm.shipped`), FastFlowLM's shipped
            ``mm.xclbin``, pinned by digest. NPU2 only, since that binary is a
            fixed 8-column overlay; elsewhere it is dropped and the flm-vs-gemm
            comparison still runs.
@@ -21,7 +21,7 @@ needs an external install or a host-specific path.
 
 pytest never collects this: ``pytest.ini`` sets ``python_files = test.py``. It
 is a timing comparison meant to be invoked directly, not a correctness gate;
-the correctness half lives in ``iron/operators/flm/mm_prebuilt/test.py``.
+the correctness half lives in ``iron/operators/flm/gemm/test.py``.
 
 Timing is the runtime's device-side ``npu_time`` rather than a host wall clock,
 so it compares the designs rather than the driver.
@@ -42,32 +42,34 @@ captured stdout, so disabling capture yields a CSV with no metric columns.
 import statistics
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 import torch
-
-import aie.utils as aie_utils
+from aie.dialects.aie import AIEArch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+from ml_dtypes import bfloat16
 
+from iron.common.image import OperatorImage
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
-from iron.operators.flm import MMPrebuilt
+from iron.operators.flm import Shipped
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
 # run. See the note in the module docstring.
 pytestmark = pytest.mark.extensive
 
-_dev = aie_utils.get_current_device()
+_dev = aie_utils.ensure_current_device(required=True)
 # The shipped overlay is a fixed 8-column NPU2 binary. Where that does not
 # match the device, drop that one candidate rather than skipping the module,
 # since flm vs iron.operators.GEMM is measurable on every supported device.
-HAVE_PREBUILT = _dev is not None and _dev.resolve().name == "npu2" and _dev.cols >= 8
+HAVE_PREBUILT = _dev.arch is AIEArch.AIE2p and _dev.cols >= 8
 
 # Every projection of both Gemma4 variants FastFlowLM ships, at three prefill
 # lengths. E2B is dim 1536 / ffn 6144; E4B is dim 2560 / ffn 10240. Both ship
 # the same mm.xclbin blob (checked at FastFlowLM f81eba71), so between them
 # they cover it. Gemma4-12B ships no mm.xclbin at all -- its projections go
-# through a quantized matmul -- so it cannot be compared against MMPrebuilt.
+# through a quantized matmul -- so it cannot be compared against the shipped image.
 #             proj,      K,      N
 E2B_PROJ = [
     ("q", 1536, 4096),
@@ -101,8 +103,8 @@ BUDGET_FLOOR = 2e-2
 def get_params():
     # No shape is skipped. The four E4B projections with a 10240-wide dimension
     # at M > 256 once overflowed the shim BD's 20-bit mega_row iteration step,
-    # but flm.GEMM and IRON's GEMM both split that leg into per-mega_row
-    # transfers now (design.py's a_split/c_split, test_gemm_split_leg_bounds).
+    # but IRON's GEMM splits that leg into per-mega_row transfers now, and for
+    # flm.GEMM the compiler does (test_gemm_split_leg_bounds_runs).
     params = []
     for model, projections in (("E2B", E2B_PROJ), ("E4B", E4B_PROJ)):
         for M in PREFILL_LENGTHS:
@@ -125,26 +127,27 @@ def make_inputs(M, K, N):
 
 class Candidate:
     """One implementation under test, with its buffers already bound so the
-    timed section contains nothing but the dispatch."""
+    timed section contains nothing but the dispatch.
+    """
 
     def __init__(self, name, op, A, B, M, N, budget, ctx):
         self.name = name
         self.budget = budget
         self.round_medians = []
 
-        op.compile()
-        self.xclbin = Path(op.xclbin_artifact.filename)
+        image = OperatorImage(op).compile()
+        self.xclbin = Path(image.artifacts.image)
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
-        run = op.get_callable()
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        packed_b = op.pack_B(B) if hasattr(op, "pack_B") else B
-        args = [
-            XRTTensor.from_torch(A.flatten()),
-            XRTTensor.from_torch(packed_b.flatten()),
-            self.c_bo,
-        ]
-        self.run = lambda: run(*args)
+        # pack_B takes numpy; torch has no bfloat16 view to hand it.
+        if hasattr(op, "pack_B"):
+            b_np = B.view(torch.int16).numpy().view(bfloat16)
+            b_bo = XRTTensor(op.pack_B(b_np).reshape(-1))
+        else:
+            b_bo = XRTTensor.from_torch(B.flatten())
+        args = [XRTTensor.from_torch(A.flatten()), b_bo, self.c_bo]
+        self.run = lambda: image(*args)
 
     def verify(self, M, N, expected, mass):
         self.run()
@@ -169,24 +172,8 @@ class Candidate:
         return (max(self.round_medians) - self.us) / self.us * 100.0
 
 
-@pytest.mark.metrics(
-    FLMLatency=r"flm latency \(us\): (?P<value>[\d\.]+)",
-    PrebuiltLatency=r"prebuilt latency \(us\): (?P<value>[\d\.]+)",
-    GEMMLatency=r"gemm latency \(us\): (?P<value>[\d\.]+)",
-    SpeedupVsPrebuilt=r"speedup vs prebuilt: (?P<value>[\d\.]+)",
-    SpeedupVsGEMM=r"speedup vs gemm: (?P<value>[\d\.]+)",
-    # The budget below is loose enough that a toolchain change could move the
-    # error a long way inside it unnoticed, so record the numbers too.
-    FLMErr=r"flm err/mass: (?P<value>[\d\.e\+-]+)",
-    PrebuiltErr=r"prebuilt err/mass: (?P<value>[\d\.e\+-]+)",
-    GEMMErr=r"gemm err/mass: (?P<value>[\d\.e\+-]+)",
-    FLMThroughput=r"flm throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-    FLMJitterPct=r"flm jitter \(%\): (?P<value>[\d\.]+)",
-    FLMXclbinKB=r"flm xclbin \(KB\): (?P<value>[\d\.]+)",
-    GEMMXclbinKB=r"gemm xclbin \(KB\): (?P<value>[\d\.]+)",
-)
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
-def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
+def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
     A, B, expected, mass = make_inputs(M, K, N)
 
     # Build everything before timing anything. Comparing frozen binaries is the
@@ -194,36 +181,36 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
     candidates = [
         Candidate(
             "flm",
-            FLMGEMM(M=M, K=K, N=N, context=aie_context),
+            FLMGEMM(M=M, K=K, N=N),
             A,
             B,
             M,
             N,
             BUDGET_CONV_EVEN,
-            aie_context,
+            npu_runtime,
         ),
         Candidate(
             "gemm",
-            IronGEMM(M=M, K=K, N=N, context=aie_context),
+            IronGEMM(M=M, K=K, N=N),
             A,
             B,
             M,
             N,
             BUDGET_CONV_EVEN,
-            aie_context,
+            npu_runtime,
         ),
     ]
     if HAVE_PREBUILT:
         candidates.append(
             Candidate(
                 "prebuilt",
-                MMPrebuilt(M=M, K=K, N=N, context=aie_context),
+                Shipped(M=M, K=K, N=N),
                 A,
                 B,
                 M,
                 N,
                 BUDGET_FLOOR,
-                aie_context,
+                npu_runtime,
             )
         )
 
@@ -246,14 +233,27 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, aie_context):
     by_name = {c.name: c for c in candidates}
     flm = by_name["flm"]
 
+    # Recorded for the CSV as well as printed: the error budget below is loose
+    # enough that a toolchain change could move the error a long way inside it
+    # unnoticed, so the numbers are kept too.
     print()
+    label = {"flm": "FLM", "prebuilt": "Prebuilt", "gemm": "GEMM"}
     for c in candidates:
+        kb = c.xclbin.stat().st_size / 1024
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
-        print(f"{c.name} xclbin (KB): {c.xclbin.stat().st_size / 1024:.1f}")
+        print(f"{c.name} xclbin (KB): {kb:.1f}")
+        record_property(f"{label[c.name]}Latency", c.us)
+        record_property(f"{label[c.name]}Err", c.err)
+        record_property(f"{label[c.name]}XclbinKB", kb)
     if "prebuilt" in by_name:
         print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
+        record_property("SpeedupVsPrebuilt", by_name["prebuilt"].us / flm.us)
     print(f"speedup vs gemm: {by_name['gemm'].us / flm.us:.3f}")
-    print(f"flm throughput: {2.0 * M * K * N / (flm.us * 1e-6) / 1e9:.6e} GFLOP/s")
+    record_property("SpeedupVsGEMM", by_name["gemm"].us / flm.us)
+    throughput = 2.0 * M * K * N / (flm.us * 1e-6) / 1e9
+    print(f"flm throughput: {throughput:.6e} GFLOP/s")
     print(f"flm jitter (%): {flm.jitter_pct:.2f}")
+    record_property("FLMThroughput", throughput)
+    record_property("FLMJitterPct", flm.jitter_pct)
     print()

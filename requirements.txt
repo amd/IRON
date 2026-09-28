@@ -1,20 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The MLIR-AIE and LLVM-AIE (Peano) packages are not on the official PyPI, so
-# we add them as additional indices here. Furthermore, we want the CPU-only
+# The LLVM-AIE (Peano) package is not on the official PyPI, so we add it as an
+# additional index here. Furthermore, we want the CPU-only
 # version of torch (don't need CUDA). Note that pip does NOT respect index
 # ordering when resolving versions: it gathers candidates from every index and
 # picks the highest, so listing the CPU index first is not enough to avoid the
 # CUDA build served from PyPI. We therefore also pin torch to the "+cpu" local
 # version below, which is only available from the PyTorch CPU index.
 --index-url https://download.pytorch.org/whl/cpu
---find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-mlir_aie==1.4.4.dev43+g1d7b9ea
-llvm-aie==22.0.0.2026091701+773413fb
+# No mlir_aie wheel: this branch builds against mlir-aie's iron-next branch,
+# built from source (see README.md). Peano is that branch's pin, from its
+# utils/peano-requirements.txt.
+llvm-aie==22.0.0.2026092101+0006955e
 
 black
 reuse

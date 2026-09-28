@@ -3,25 +3,71 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-
-import numpy as np
-import pytest
-import torch
+from typing import Any
 
 import aie.utils as aie_utils
+import numpy as np
+import pytest
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron.device import from_name
+from aie.utils.verify import Tolerance
 
-from iron.common.test_utils import run_test
-from iron.operators.flm.dequant.op import DequantBFP
-from iron.operators.flm.dequant.reference import (
-    random_q4nx,
-    reference,
-    scatter_runs,
+from iron.common import Incompatible
+from iron.common.harness import run_test
+from iron.common.image import OperatorImage
+from iron.operators.flm.dequant.design import (
+    GROUP,
+    K_TILE,
+    M_TILE,
+    N_TILE,
+    qw_bytes_for,
 )
+from iron.operators.flm.dequant.op import DequantBFP, dequantize, f32_to_bf16_floor
+from iron.operators.flm.gemm.op import GEMM
 
-# K = 512 is excluded: flm.GEMM picks tile_n = 128 there, which this operator
-# refuses. test_rejects_unservable_shapes covers it.
-SHAPES = [(1024, 128), (1024, 512), (1536, 640), (2048, 256)]
+# K = 512 is one k-tile, where flm.GEMM at tile_n = 128 wins on NPU2. It
+# defaults to 64 regardless, which is the order this operator emits.
+SHAPES = [(512, 128), (1024, 128), (1024, 512), (1536, 640), (2048, 256)]
+
+
+def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
+    """Place a matrix's column blocks at their offsets in an interleaved
+    buffer. The gaps hold noise, so an operator that reads them fails.
+    """
+    cb_bytes = N_TILE * K * 5 // 8
+    run_blocks = run_out_features // N_TILE
+    period_blocks = run_period_out_features // N_TILE
+
+    total = qw_bytes_for(K, N, run_out_features, run_period_out_features)
+    out = np.random.default_rng(seed + 1).integers(0, 256, total, dtype=np.uint8)
+    src = np.asarray(qw, dtype=np.uint8).reshape(-1, cb_bytes)
+    for cb in range(N // N_TILE):
+        at = ((cb // run_blocks) * period_blocks + cb % run_blocks) * cb_bytes
+        out[at : at + cb_bytes] = src[cb]
+    return out
+
+
+def random_q4nx(K, N, seed=0):
+    """A random q4nx blob. Scales and mins are bf16 in the file, so they are
+    generated there and widened.
+    """
+    rng = np.random.default_rng(seed)
+    n_blocks = (K // K_TILE) * (N // M_TILE)
+    sm = (K_TILE // GROUP) * M_TILE
+
+    scales = f32_to_bf16_floor(
+        rng.uniform(0.002, 0.05, (n_blocks, sm)).astype(np.float32)
+    )
+    mins = f32_to_bf16_floor(rng.uniform(-0.4, 0.4, (n_blocks, sm)).astype(np.float32))
+    codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
+    return np.concatenate(
+        [
+            scales.view(np.uint8).reshape(n_blocks, -1),
+            mins.view(np.uint8).reshape(n_blocks, -1),
+            codes,
+        ],
+        axis=1,
+    ).ravel()
 
 
 def _on_aie2p():
@@ -34,48 +80,47 @@ requires_aie2p = pytest.mark.skipif(
 )
 
 
-def _check(op, blob, expected, label):
+def _check(op, blob, expected, label, record=None):
     errors, _, _ = run_test(
         op,
-        {"in": torch.from_numpy(blob)},
-        {"out": torch.from_numpy(expected)},
-        rel_tol=0.0,
-        abs_tol=0.0,
+        {"in": blob},
+        {"out": expected},
+        tolerance=Tolerance.exact(),
+        record=record,
     )
     assert not errors, f"{label}: {errors}"
 
 
 @requires_aie2p
 @pytest.mark.parametrize("K, N", SHAPES)
-def test_matches_reference(K, N, aie_context):
+def test_matches_reference(K, N, npu_runtime, record_property):
     """Byte-exact. Every rounding on the device is reproducible on the host, so
-    a tolerance would hide a value landing in the wrong block."""
+    a tolerance would hide a value landing in the wrong block.
+    """
     qw = random_q4nx(K, N, seed=0)
-    op = DequantBFP(K=K, N=N, context=aie_context)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    op = DequantBFP(K=K, N=N)
+    _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
 
 
 @requires_aie2p
-def test_output_feeds_gemm_unchanged(aie_context):
+def test_output_feeds_gemm_unchanged(npu_runtime):
     """The output must equal what GEMM.pack_B produces, which is the contract
     that makes it a drop-in. Comparing against pack_B catches a drift in either
-    operator's tiling that a self-consistent reference would not."""
-    from iron.operators.flm.gemm.op import GEMM
-    from iron.operators.flm.dequant.reference import dequantize, f32_to_bf16_floor
-
+    operator's tiling that a self-consistent reference would not.
+    """
     K, N = 1024, 128
     qw = random_q4nx(K, N, seed=3)
     w = dequantize(qw, K, N)
     w = (f32_to_bf16_floor(w).astype(np.uint32) << 16).view(np.float32)
-    gemm = GEMM(M=256, K=K, N=N, tile_n=64, rounding="floor", context=aie_context)
-    packed = gemm.pack_B(torch.from_numpy(np.ascontiguousarray(w.T))).numpy()
+    gemm = GEMM(M=256, K=K, N=N, tile_n=64, rounding="floor")
+    packed = gemm.pack_B(np.ascontiguousarray(w.T))
 
-    _check(DequantBFP(K=K, N=N, context=aie_context), qw, packed, "vs pack_B")
+    _check(DequantBFP(K=K, N=N), qw, packed, "vs pack_B")
 
 
 @requires_aie2p
-def test_gate_up_interleaved_blob(aie_context):
-    """gate and up share one blob at 512 out-features in a 1024 period."""
+def test_gate_up_interleaved_blob(npu_runtime):
+    """Gate and up share one blob at 512 out-features in a 1024 period."""
     K, N, run, period = 1024, 1024, 512, 1024
     qw = random_q4nx(K, N, seed=12)
     blob = scatter_runs(qw, K, N, run, period, seed=12)
@@ -85,10 +130,9 @@ def test_gate_up_interleaved_blob(aie_context):
         N=N,
         run_out_features=run,
         run_period_out_features=period,
-        context=aie_context,
     )
     assert op.quantized_size() == blob.size
-    _check(op, blob, reference(qw, K, N), "gate/up interleave")
+    _check(op, blob, op.reference(qw), "gate/up interleave")
 
 
 @requires_aie2p
@@ -100,12 +144,13 @@ def test_gate_up_interleaved_blob(aie_context):
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
     ],
 )
-def test_large_k_shapes(K, N, aie_context):
+def test_large_k_shapes(K, N, npu_runtime):
     """E2B's tall projections, whose k-tiles outnumber a shim tile's buffer
-    descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches."""
+    descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
+    """
     qw = random_q4nx(K, N, seed=21)
-    op = DequantBFP(K=K, N=N, context=aie_context)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    op = DequantBFP(K=K, N=N)
+    _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
 @requires_aie2p
@@ -118,17 +163,18 @@ def test_large_k_shapes(K, N, aie_context):
         (2560, 10240),  # gate/up
     ],
 )
-def test_e4b_shapes(K, N, aie_context):
+def test_e4b_shapes(K, N, npu_runtime):
     """E4B's projections, as B is (K, N). These are the shapes flm.GEMM's own
-    extensive set covers, so the two operators are exercised on the same model."""
+    extensive set covers, so the two operators are exercised on the same model.
+    """
     qw = random_q4nx(K, N, seed=33)
-    op = DequantBFP(K=K, N=N, context=aie_context)
-    _check(op, qw, reference(qw, K, N), f"K={K} N={N}")
+    op = DequantBFP(K=K, N=N)
+    _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
 @requires_aie2p
 @pytest.mark.extensive
-def test_e4b_gate_up_interleaved(aie_context):
+def test_e4b_gate_up_interleaved(npu_runtime):
     """E4B's gate/up blob: 5120 out-features each in a 10240 period."""
     K, N, run, period = 2560, 10240, 5120, 10240
     qw = random_q4nx(K, N, seed=34)
@@ -139,14 +185,13 @@ def test_e4b_gate_up_interleaved(aie_context):
         N=N,
         run_out_features=run,
         run_period_out_features=period,
-        context=aie_context,
     )
     assert op.quantized_size() == blob.size
-    _check(op, blob, reference(qw, K, N), "E4B gate/up interleave")
+    _check(op, blob, op.reference(qw), "E4B gate/up interleave")
 
 
 @requires_aie2p
-def test_one_xclbin_serves_every_shape(aie_context):
+def test_one_xclbin_serves_every_shape(npu_runtime):
     """Several shapes and parameter sets back to back on one loaded xclbin.
 
     A model dispatches ten weight shapes against a budget of 16 hardware
@@ -154,7 +199,7 @@ def test_one_xclbin_serves_every_shape(aie_context):
     a fresh context, so the array is reconfigured between cases anyway. One
     case leaves three of the eight columns without work.
     """
-    cases = [
+    cases: list[dict[str, Any]] = [
         dict(K=1536, N=2048),
         dict(K=1024, N=320),
         dict(K=2048, N=1536),
@@ -169,39 +214,34 @@ def test_one_xclbin_serves_every_shape(aie_context):
     xclbin = None
     for case in cases:
         K, N = case["K"], case["N"]
-        op = DequantBFP(context=aie_context, **case)
+        op = DequantBFP(**case)
         qw = random_q4nx(K, N, seed=7)
         blob = qw
         if case.get("run_out_features"):
             blob = scatter_runs(
                 blob, K, N, case["run_out_features"], case["run_period_out_features"], 7
             )
-        _check(op, blob, reference(qw, K, N), str(case))
+        _check(op, blob, op.reference(qw), str(case))
 
-        stamp = (
-            op.xclbin_artifact.filename,
-            os.path.getmtime(op.xclbin_artifact.filename),
-        )
+        # A cache hit: the image _check built and ran.
+        image = OperatorImage(op).compile().artifacts.image
+        stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"{case} rebuilt the xclbin"
 
 
 @pytest.mark.parametrize(
-    "K, N, exc, match",
+    "K, N, extra, exc, match",
     [
-        # Only AIE2P's flm.GEMM picks tile_n=128 for a single-k-iteration shape.
-        # AIE2 always picks 64, which is the order this operator emits, so there
-        # is nothing to refuse there. The shape checks below are arch-independent.
-        pytest.param(512, 128, NotImplementedError, "tile_n", marks=requires_aie2p),
-        (1000, 128, ValueError, "multiple of"),
-        (1024, 100, ValueError, "multiple of"),
+        # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
+        # this operator does not emit that order and must say so.
+        (512, 128, dict(tile_n=128), NotImplementedError, "tile_n"),
+        # Extents the grid does not divide: refused once the grid is known.
+        (1000, 128, {}, Incompatible, "multiple of"),
+        (1024, 100, {}, Incompatible, "multiple of"),
     ],
 )
-def test_rejects_unservable_shapes(K, N, exc, match, aie_context):
+def test_rejects_unservable_shapes(K, N, extra, exc, match):
     with pytest.raises(exc, match=match):
-        DequantBFP(K=K, N=N, context=aie_context)
-
-
-if __name__ == "__main__":
-    run_test(__file__)
+        DequantBFP(K=K, N=N, **extra).resolved(from_name("npu2", n_cols=8))
